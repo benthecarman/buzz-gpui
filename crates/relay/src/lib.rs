@@ -4,7 +4,9 @@ pub mod discovery;
 pub mod event;
 pub mod fold;
 pub mod http;
+pub mod links;
 pub mod live;
+pub mod media;
 pub mod messages;
 pub mod origin;
 pub mod outbox;
@@ -25,7 +27,9 @@ pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Vis
 pub use event::{Verified, Verifier, kinds};
 pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
+pub use links::{BuzzLink, message_link, parse_buzz_link, profile_key};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
+pub use media::{Media, MediaError};
 pub use messages::{Draft, EventTemplate, MessageError};
 pub use origin::RelayOrigin;
 pub use outbox::{

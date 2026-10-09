@@ -29,6 +29,7 @@ use crate::event::{Verified, Verifier, kinds};
 use crate::fold::{LocalDelivery, MessageClock};
 use crate::http::RelayHttp;
 use crate::live::{Live, LiveOptions, LiveUpdate};
+use crate::media::Media;
 use crate::messages::{self, Author, Compose, EmojiCatalog, Mentions};
 use crate::origin::RelayOrigin;
 use crate::outbox::{HttpPublisher, Outbox, OutboxOptions, SendOptions};
@@ -113,6 +114,7 @@ pub struct Session {
     viewer: String,
     origin: RelayOrigin,
     next_thread: std::sync::atomic::AtomicU64,
+    media: Media,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -187,6 +189,7 @@ impl Session {
             ReaderOptions::default(),
         );
         let viewer = identity.pubkey_hex();
+        let media = Media::new(runtime.clone(), origin.clone(), identity.clone());
         let actor = Actor {
             runtime: runtime.clone(),
             origin: origin.clone(),
@@ -228,6 +231,7 @@ impl Session {
             viewer,
             origin,
             next_thread: std::sync::atomic::AtomicU64::new(1),
+            media,
             task,
         }
     }
@@ -238,6 +242,11 @@ impl Session {
 
     pub fn viewer(&self) -> &str {
         &self.viewer
+    }
+
+    /// Downloads for this community's media and other image URLs.
+    pub fn media(&self) -> &Media {
+        &self.media
     }
 
     pub fn origin(&self) -> &RelayOrigin {
