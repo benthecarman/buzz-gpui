@@ -13,12 +13,14 @@
 //! presence and typing in [`presence`], notification candidates in
 //! [`incoming`].
 
+mod actions;
 mod incoming;
 mod presence;
 mod threads;
 mod timeline;
 mod unread;
 
+pub use actions::{MessageSearch, PeoplePage, SearchOutcome};
 pub use incoming::IncomingMessage;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
@@ -105,10 +107,14 @@ pub struct SessionSnapshot {
     pub typing: Arc<HashMap<String, Vec<String>>>,
     /// Thread root id → people typing in that thread.
     pub thread_typing: Arc<HashMap<String, Vec<String>>>,
+    /// DMs the viewer hid (relay-signed 30622). The sidebar leaves them
+    /// out; opening one still works.
+    pub hidden_dms: Arc<[String]>,
 }
 
 pub struct Session {
     commands: mpsc::UnboundedSender<Message>,
+    runtime: tokio::runtime::Handle,
     snapshot: watch::Receiver<Arc<SessionSnapshot>>,
     incoming: broadcast::Sender<IncomingMessage>,
     viewer: String,
@@ -177,6 +183,7 @@ impl Session {
             presence: Arc::default(),
             typing: Arc::default(),
             thread_typing: Arc::default(),
+            hidden_dms: Arc::new([]),
         }));
         let (incoming, _) = broadcast::channel(64);
         let receiver = snapshot.subscribe();
@@ -222,10 +229,12 @@ impl Session {
             typing: Typing::new(viewer.clone()),
             incoming: incoming::Incoming::default(),
             incoming_sender: incoming.clone(),
+            hidden_dms: Arc::new([]),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
             commands,
+            runtime: runtime.clone(),
             snapshot: receiver,
             incoming,
             viewer,
@@ -536,6 +545,9 @@ enum Message {
         publication: Publication,
         outcome: PublishOutcome,
     },
+    /// Runs on the actor between messages: how session operations read and
+    /// change its state.
+    With(Box<dyn FnOnce(&mut Actor) + Send>),
 }
 
 struct Actor {
@@ -576,6 +588,7 @@ struct Actor {
     typing: Typing,
     incoming: incoming::Incoming,
     incoming_sender: broadcast::Sender<IncomingMessage>,
+    hidden_dms: Arc<[String]>,
 }
 
 impl Actor {
@@ -759,6 +772,7 @@ impl Actor {
                 publication,
                 outcome,
             } => self.presence_published(publication, outcome),
+            Message::With(run) => run(self),
         }
     }
 
@@ -925,6 +939,7 @@ impl Actor {
         self.update_interests();
         self.reads_channels(true);
         self.ensure_profiles(self.channel_people());
+        self.refresh_visibility();
         self.publish();
         if let Some(options) = self.rescan.take() {
             self.start_scan(options);
@@ -1312,6 +1327,13 @@ impl Actor {
                 {
                     return Err("You can't post in this channel".into());
                 }
+                if let Some(discovery) = &self.discovery {
+                    crate::members::validate_mentions(
+                        discovery.get(&channel).as_ref(),
+                        discovery.can_participate(&channel),
+                        &mentions.recipients,
+                    )?;
+                }
                 let compose = Compose {
                     channel_id: &channel,
                     content: &content,
@@ -1453,6 +1475,7 @@ impl Actor {
             presence: self.presence.snapshot(),
             typing: self.typing.snapshot().channels.clone(),
             thread_typing: self.typing.snapshot().threads.clone(),
+            hidden_dms: self.hidden_dms.clone(),
         };
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
@@ -1464,6 +1487,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.presence, &next.presence)
                 && Arc::ptr_eq(&current.typing, &next.typing)
                 && Arc::ptr_eq(&current.thread_typing, &next.thread_typing)
+                && Arc::ptr_eq(&current.hidden_dms, &next.hidden_dms)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);
