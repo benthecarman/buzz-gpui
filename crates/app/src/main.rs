@@ -76,9 +76,10 @@ fn main() {
         )
         .init();
     let config = config::Config::load();
-    let app = gpui_kit::application();
+    let app = gpui_kit::application().with_assets(buzz_ui::Assets);
     app.run(move |cx| {
         gpui_kit::init(cx);
+        buzz_ui::init(cx);
         runtime::Runtime::init(cx);
         Hosts::init(&config, cx);
         community::AppState::init(cx);
