@@ -27,6 +27,14 @@
           dbus
           sqlite
         ];
+        # Audio and video playback. GStreamer's setup hook puts each plugin
+        # set on GST_PLUGIN_SYSTEM_PATH_1_0 inside the shell.
+        playback = with pkgs.gst_all_1; [
+          gstreamer
+          gst-plugins-base
+          gst-plugins-good
+          gst-libav
+        ];
       in
       {
         packages.buzzd = pkgs.rustPlatform.buildRustPackage {
@@ -70,7 +78,7 @@
 
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [ pkg-config cmake perl ];
-          buildInputs = runtimeLibs ++ (with pkgs; [ vulkan-headers alsa-lib zstd ]);
+          buildInputs = runtimeLibs ++ playback ++ (with pkgs; [ vulkan-headers alsa-lib zstd ]);
           env = {
             RUST_BACKTRACE = "1";
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;

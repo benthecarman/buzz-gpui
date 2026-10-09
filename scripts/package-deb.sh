@@ -25,7 +25,7 @@ docker run --rm \
       ca-certificates curl build-essential pkg-config cmake clang \
       libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-dev \
       libx11-xcb-dev libvulkan-dev libfontconfig-dev libfreetype-dev libdbus-1-dev \
-      libssl-dev libzstd-dev >/dev/null
+      libssl-dev libzstd-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev >/dev/null
     # Toolchains live in the mounted rustup cache; install one if it is empty.
     if [ ! -x /root/.cargo/bin/rustup ]; then
       curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path
