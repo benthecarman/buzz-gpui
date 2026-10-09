@@ -1,0 +1,274 @@
+//! Dialog, AlertDialog and the modal scrim (6.6).
+
+use super::ClickHandler;
+use crate::{
+    ActiveTheme, IconButton, IconButtonSize, IconName, Surface, TypeStyled,
+    tokens::{radius, shadow},
+};
+use gpui_kit::{
+    AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, SharedString, Styled, Window, div, prelude::FluentBuilder, rems,
+};
+use std::rc::Rc;
+
+/// The full-window modal backdrop. Its children are centered.
+#[derive(IntoElement, Default)]
+pub struct Scrim {
+    children: Vec<AnyElement>,
+}
+
+impl Scrim {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ParentElement for Scrim {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl RenderOnce for Scrim {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(cx.colors().bg_scrim)
+            .children(self.children)
+    }
+}
+
+/// Dialog widths.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DialogSize {
+    /// `min(496px, 100vw - 32px)`.
+    #[default]
+    Default,
+    /// `min(896px, 100vw - 32px)`.
+    Wide,
+}
+
+fn popup(width: f32, cx: &App) -> gpui_kit::Div {
+    let c = cx.colors();
+    div()
+        .flex()
+        .flex_col()
+        .w(rems(width / 16.))
+        .max_w_full()
+        .p(rems(1.5))
+        .bg(c.surface_popover)
+        .border_1()
+        .border_color(c.border_standard)
+        .rounded(radius::PANEL)
+        .shadow(shadow::sm())
+        .text_color(c.text_standard)
+        .text_body()
+}
+
+/// A modal dialog: header (title, description, close), body, footer.
+#[derive(IntoElement)]
+pub struct Dialog {
+    id: ElementId,
+    title: SharedString,
+    description: Option<SharedString>,
+    size: DialogSize,
+    body: Vec<AnyElement>,
+    footer: Vec<AnyElement>,
+    footer_leading: Vec<AnyElement>,
+    compact_header_gap: bool,
+    compact_footer_gap: bool,
+    on_close: Option<ClickHandler>,
+}
+
+impl Dialog {
+    pub fn new(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            description: None,
+            size: DialogSize::default(),
+            body: Vec::new(),
+            footer: Vec::new(),
+            footer_leading: Vec::new(),
+            compact_header_gap: false,
+            compact_footer_gap: false,
+            on_close: None,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn size(mut self, size: DialogSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Footer action, in order (Cancel before the primary action).
+    pub fn footer(mut self, element: impl IntoElement) -> Self {
+        self.footer.push(element.into_any_element());
+        self
+    }
+
+    /// Footer action pinned to the start (`margin-right: auto`).
+    pub fn footer_leading(mut self, element: impl IntoElement) -> Self {
+        self.footer_leading.push(element.into_any_element());
+        self
+    }
+
+    /// `headerGap="compact"`: 12px above the body instead of 24.
+    pub fn compact_header_gap(mut self) -> Self {
+        self.compact_header_gap = true;
+        self
+    }
+
+    /// `footerGap="compact"`: 8px below the body instead of 24.
+    pub fn compact_footer_gap(mut self) -> Self {
+        self.compact_footer_gap = true;
+        self
+    }
+
+    /// Shows the close button.
+    pub fn on_close(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(f));
+        self
+    }
+}
+
+impl ParentElement for Dialog {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.body.extend(elements);
+    }
+}
+
+impl RenderOnce for Dialog {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let c = cx.colors();
+        let width = match self.size {
+            DialogSize::Default => 496.,
+            DialogSize::Wide => 896.,
+        };
+        let has_footer = !self.footer.is_empty() || !self.footer_leading.is_empty();
+        popup(width, cx)
+            .id(self.id.clone())
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap(rems(1.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(rems(0.5))
+                            .min_w_0()
+                            .child(div().text_label().child(self.title))
+                            .when_some(self.description, |this, text| {
+                                this.child(
+                                    div().text_body_sm().text_color(c.text_subtle).child(text),
+                                )
+                            }),
+                    )
+                    .when_some(self.on_close, |this, f| {
+                        this.child(
+                            IconButton::new("dialog-close", IconName::X)
+                                .size(IconButtonSize::Sm)
+                                .surface(Surface::Floating)
+                                .on_click(move |e, w, cx| f(e, w, cx)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .pt(rems(if self.compact_header_gap { 0.75 } else { 1.5 }))
+                    .pb(rems(if !has_footer {
+                        0.
+                    } else if self.compact_footer_gap {
+                        0.5
+                    } else {
+                        1.5
+                    }))
+                    .children(self.body),
+            )
+            .when(has_footer, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_end()
+                        .gap(rems(0.75))
+                        .children(self.footer_leading)
+                        .child(div().flex_1())
+                        .children(self.footer),
+                )
+            })
+    }
+}
+
+/// A confirmation dialog: heading-sized title, 16px gaps, no close button.
+#[derive(IntoElement)]
+pub struct AlertDialog {
+    title: SharedString,
+    description: Option<SharedString>,
+    body: Vec<AnyElement>,
+    actions: Vec<AnyElement>,
+}
+
+impl AlertDialog {
+    pub fn new(title: impl Into<SharedString>) -> Self {
+        Self {
+            title: title.into(),
+            description: None,
+            body: Vec::new(),
+            actions: Vec::new(),
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// An action, in order (Cancel before the destructive action).
+    pub fn action(mut self, element: impl IntoElement) -> Self {
+        self.actions.push(element.into_any_element());
+        self
+    }
+}
+
+impl ParentElement for AlertDialog {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.body.extend(elements);
+    }
+}
+
+impl RenderOnce for AlertDialog {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let c = cx.colors();
+        popup(496., cx)
+            .gap(rems(1.))
+            .child(div().text_heading().child(self.title))
+            .when_some(self.description, |this, text| {
+                this.child(div().text_body_sm().text_color(c.text_subtle).child(text))
+            })
+            .children(self.body)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap(rems(0.75))
+                    .children(self.actions),
+            )
+    }
+}

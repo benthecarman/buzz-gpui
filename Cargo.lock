@@ -1009,6 +1009,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "image",
+ "rust-embed",
+ "serde_json",
+ "smallvec",
+]
+
+[[package]]
 name = "buzzd"
 version = "0.1.0"
 dependencies = [
