@@ -3,7 +3,7 @@
 
 use super::Workspace;
 use crate::ui::add_community::AddCommunity;
-use crate::ui::modal::{Callback, Dismissed, OpenChannel};
+use crate::ui::modal::{Callback, Dismissed, OpenChannel, OpenConversation};
 use crate::ui::new_channel::NewChannelDialog;
 use crate::ui::new_message::NewMessageDialog;
 use crate::ui::overlay::{self, Dismiss};
@@ -96,13 +96,23 @@ impl Workspace {
         let Some(community) = self.community.clone() else {
             return;
         };
-        let on_open = Self::opener(cx);
+        let weak = cx.entity().downgrade();
+        let on_open: OpenConversation = Rc::new(move |id, window, cx| {
+            let _ = weak.update(cx, |this, cx| this.open_conversation(id, window, cx));
+        });
         let dialog = cx.new(|cx| NewMessageDialog::new(community, on_open, window, cx));
         self.show(dialog, false, cx);
     }
 
     pub(super) fn open_add_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| AddCommunity::new(false, window, cx));
+        self.show(dialog, false, cx);
+    }
+
+    /// An invite link: the add-community dialog, already checking it.
+    pub(super) fn open_invite(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| AddCommunity::new(false, window, cx));
+        dialog.update(cx, |dialog, cx| dialog.submit(link, window, cx));
         self.show(dialog, false, cx);
     }
 

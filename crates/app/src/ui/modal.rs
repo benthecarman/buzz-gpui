@@ -15,6 +15,8 @@ pub type Callback = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Opens a channel, optionally revealing a message in it.
 pub type OpenChannel = Rc<dyn Fn(&ChannelSummary, Option<EventId>, &mut Window, &mut App)>;
+/// Opens a conversation by ID once the channel list has it.
+pub type OpenConversation = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
 /// Leading visual of a [`row`].
 pub enum Leading {

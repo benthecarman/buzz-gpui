@@ -3,10 +3,10 @@
 //! reuses the conversation for the same people and unhides it.
 
 use super::message::display_name;
-use super::modal::{Dismissed, Leading, OpenChannel, error, group_label, note, row};
+use super::modal::{Dismissed, Leading, OpenConversation, error, group_label, note, row};
 use crate::community::Community;
+use buzz_relay_client::PeoplePage;
 use buzz_relay_client::members::Person;
-use buzz_relay_client::{ChannelType, PeoplePage};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, Dialog, Icon, IconName, SearchField, Surface,
     TypeStyled,
@@ -29,7 +29,7 @@ pub struct NewMessageDialog {
     highlighted: usize,
     opening: bool,
     error: Option<SharedString>,
-    on_open: OpenChannel,
+    on_open: OpenConversation,
     _subscription: Subscription,
 }
 
@@ -38,7 +38,7 @@ impl EventEmitter<Dismissed> for NewMessageDialog {}
 impl NewMessageDialog {
     pub fn new(
         community: Entity<Community>,
-        on_open: OpenChannel,
+        on_open: OpenConversation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -136,17 +136,7 @@ impl NewMessageDialog {
                 this.opening = false;
                 match result {
                     Ok(id) => {
-                        let channel = this
-                            .community
-                            .read(cx)
-                            .snapshot
-                            .channels
-                            .iter()
-                            .find(|c| c.id == id && c.channel_type == Some(ChannelType::Dm))
-                            .cloned();
-                        if let Some(channel) = channel {
-                            (this.on_open)(&channel, None, window, cx);
-                        }
+                        (this.on_open)(id, window, cx);
                         cx.emit(Dismissed);
                     }
                     Err(error) => this.error = Some(error.into()),

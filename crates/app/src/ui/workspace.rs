@@ -12,7 +12,7 @@ use super::sidebar::{self, Page, SidebarProps};
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
-use buzz_relay_client::{ChannelSummary, ChannelType, RelayOrigin, RosterStatus};
+use buzz_relay_client::{ChannelSummary, ChannelType, RosterStatus};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonShape, IconButtonSize,
     IconName, MaterialStyled, ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
@@ -35,6 +35,9 @@ pub struct Workspace {
     history: History,
     /// A place waiting for its community's channel list.
     pending: Option<Target>,
+    /// The pending place is a conversation just opened, so it waits for
+    /// the channel to be listed even once the roster has loaded.
+    pending_listing: bool,
     /// The thread panel reveals a message rather than showing a thread.
     thread_exact: bool,
     /// Waits for the channel's first page to reveal a message in it.
@@ -60,6 +63,7 @@ impl Workspace {
             _community_observer: None,
             history: History::default(),
             pending: None,
+            pending_listing: false,
             thread_exact: false,
             _revealing: None,
             profile: None,
@@ -543,6 +547,7 @@ impl Workspace {
     /// Shows `target` without recording it.
     fn apply(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.pending = None;
+        self.pending_listing = false;
         self._revealing = None;
         self.profile = None;
         if let Some(origin) = &target.community {
@@ -621,12 +626,48 @@ impl Workspace {
             return false;
         };
         let known = snapshot.channels.iter().any(|c| c.id == *channel);
-        if !known && snapshot.roster != RosterStatus::Ready {
+        if !known && (snapshot.roster != RosterStatus::Ready || self.pending_listing) {
             return true;
         }
         // Either opens it or gives up on it.
         self.apply(target, window, cx);
         known
+    }
+
+    /// Opens a conversation the session has just made or joined, once the
+    /// community's channel list includes it.
+    pub fn open_conversation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(community) = &self.community else {
+            return;
+        };
+        let community = community.read(cx);
+        let listed = community.snapshot.channels.iter().any(|c| c.id == id);
+        let target = Target::channel(Some(community.origin.to_string()), id);
+        if listed {
+            self.navigate(target, window, cx);
+        } else {
+            self.pending = Some(target);
+            self.pending_listing = true;
+        }
+    }
+
+    /// Opens, or reopens, the direct message with one person.
+    fn message_person(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(community) = &self.community else {
+            return;
+        };
+        let session = community.read(cx).session.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            match session.open_dm(vec![pubkey]).await {
+                Ok(id) => {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.open_conversation(id, window, cx)
+                    });
+                }
+                Err(error) => tracing::warn!(%error, "could not open the direct message"),
+            }
+        })
+        .detach();
     }
 
     /// Reveals a message in the open channel: in the timeline when it is a
@@ -685,19 +726,9 @@ impl Workspace {
                 };
                 self.navigate(target, window, cx);
             }
-            Some(Link::Join { relay, .. }) => self.join(&relay, cx),
+            Some(Link::Join { .. }) => self.open_invite(url, window, cx),
             None if url.starts_with("https://") || url.starts_with("http://") => cx.open_url(url),
             None => tracing::warn!("ignored a link this app cannot open"),
-        }
-    }
-
-    /// Adds an invitation's community. There is no invite claim flow yet,
-    /// so the code goes unused: the relay admits only members it already
-    /// knows.
-    fn join(&mut self, relay: &RelayOrigin, cx: &mut Context<Self>) {
-        tracing::info!(%relay, "adding the community from an invitation");
-        if let Err(error) = AppState::add_community(&relay.to_string(), cx) {
-            tracing::warn!(%error, "could not add the invited community");
         }
     }
 
@@ -743,12 +774,23 @@ impl Workspace {
             })
             .map(|channel| channel.id.clone());
         let weak = cx.entity().downgrade();
-        let on_message = dm.map(|dm| -> profile_card::OnMessage {
-            Rc::new(move |window, cx| {
+        let on_message: Option<profile_card::OnMessage> = match dm {
+            Some(dm) => Some(Rc::new(move |window, cx| {
                 let target = Target::channel(Some(origin.clone()), dm.clone());
                 let _ = weak.update(cx, |this, cx| this.navigate(target, window, cx));
-            })
-        });
+            })),
+            // Notes to self are not opened on request.
+            None if pubkey == viewer => None,
+            None => {
+                let pubkey = pubkey.clone();
+                Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.profile = None;
+                        this.message_person(pubkey.clone(), window, cx);
+                    });
+                }))
+            }
+        };
         let card = ProfileCard {
             pubkey: &pubkey,
             profile: snapshot.profiles.get(&pubkey).map(|p| &**p),

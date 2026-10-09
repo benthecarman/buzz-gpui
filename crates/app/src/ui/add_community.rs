@@ -61,6 +61,13 @@ impl AddCommunity {
         }
     }
 
+    /// Fills in `link` and checks it, as Continue would.
+    pub fn submit(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.field
+            .update(cx, |state, cx| state.set_value(link.to_owned(), window, cx));
+        self.next(window, cx);
+    }
+
     fn http(origin: &RelayOrigin, cx: &App) -> Result<RelayHttp, String> {
         match &cx.global::<AppState>().identity {
             IdentityState::Ready(identity) => Ok(RelayHttp::new(origin.clone(), identity.clone())),
