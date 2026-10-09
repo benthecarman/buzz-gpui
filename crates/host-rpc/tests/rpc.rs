@@ -1,0 +1,383 @@
+use buzz_host_rpc::transport::{self, Connector, TcpConnector, TcpListener};
+use buzz_host_rpc::*;
+use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::sync::{broadcast, watch};
+
+struct Test;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum Request {
+    Echo(String),
+    AskClient(String),
+}
+
+impl Protocol for Test {
+    type ClientRequest = Request;
+    type ClientResponse = String;
+    type HostRequest = String;
+    type HostResponse = String;
+    type Event = String;
+}
+
+struct Host {
+    events: broadcast::Sender<(u64, String)>,
+    seq: AtomicU64,
+}
+
+impl Host {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            events: broadcast::channel(capacity).0,
+            seq: AtomicU64::new(0),
+        })
+    }
+
+    fn emit(&self, body: &str) {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.events.send((seq, body.to_string()));
+    }
+}
+
+impl HostHandler<Test> for Host {
+    fn info(&self) -> HostInfo {
+        HostInfo {
+            id: "test-host".into(),
+            name: "Test".into(),
+            platform: "test".into(),
+            version: "0".into(),
+        }
+    }
+
+    fn events(&self) -> EventSource<Test> {
+        self.events.subscribe()
+    }
+
+    fn handle(
+        &self,
+        peer: Peer<Test>,
+        request: Request,
+    ) -> BoxFuture<'static, Result<String, RpcError>> {
+        Box::pin(async move {
+            match request {
+                Request::Echo(text) => Ok(text),
+                Request::AskClient(text) => peer.request(text).await,
+            }
+        })
+    }
+}
+
+struct Signer;
+
+impl ClientHandler<Test> for Signer {
+    fn handle(&self, request: String) -> BoxFuture<'static, Result<String, RpcError>> {
+        Box::pin(async move { Ok(format!("signed:{request}")) })
+    }
+}
+
+fn options(token: Option<&str>) -> HostClientOptions {
+    HostClientOptions {
+        token: token.map(Into::into),
+        ping_interval: Duration::from_millis(50),
+        dead_after: Duration::from_millis(300),
+        min_backoff: Duration::from_millis(20),
+        max_backoff: Duration::from_millis(100),
+        request_timeout: Duration::from_secs(5),
+        ..Default::default()
+    }
+}
+
+fn client(connector: Arc<dyn Connector>, token: Option<&str>) -> HostClient<Test> {
+    HostClient::spawn(
+        &tokio::runtime::Handle::current(),
+        connector,
+        Arc::new(Signer),
+        options(token),
+    )
+}
+
+async fn wait_for(
+    state: &mut watch::Receiver<ConnectionState>,
+    predicate: impl Fn(&ConnectionState) -> bool,
+) -> ConnectionState {
+    tokio::time::timeout(Duration::from_secs(5), state.wait_for(|s| predicate(s)))
+        .await
+        .expect("state change timed out")
+        .expect("client dropped")
+        .clone()
+}
+
+/// Waits for the next connect or disconnect, skipping host events. Unlike the
+/// state watch, the event stream never coalesces transitions.
+async fn next_session_change(
+    events: &mut broadcast::Receiver<ClientEvent<String>>,
+) -> ClientEvent<String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event, ClientEvent::Connected(_) | ClientEvent::Disconnected) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("no session change")
+}
+
+fn connected(state: &ConnectionState) -> bool {
+    matches!(state, ConnectionState::Connected { .. })
+}
+
+#[tokio::test]
+async fn memory_request_events_and_host_requests() {
+    let host = Host::new(64);
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        host.clone(),
+        ServerOptions::default(),
+    ));
+    let client = client(Arc::new(connector), None);
+    let mut events = client.events();
+    let mut state = client.state();
+    let ConnectionState::Connected { host: info } = wait_for(&mut state, connected).await else {
+        unreachable!()
+    };
+    assert_eq!(info.id, "test-host");
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        ClientEvent::Connected(_)
+    ));
+
+    assert_eq!(
+        client.request(Request::Echo("hi".into())).await.unwrap(),
+        "hi"
+    );
+    assert_eq!(
+        client
+            .request(Request::AskClient("event".into()))
+            .await
+            .unwrap(),
+        "signed:event"
+    );
+
+    host.emit("one");
+    host.emit("two");
+    for (expected_seq, expected) in [(1, "one"), (2, "two")] {
+        match events.recv().await.unwrap() {
+            ClientEvent::Event { seq, body } => {
+                assert_eq!((seq, body.as_str()), (expected_seq, expected));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn wrong_token_is_rejected_without_retry_loop() {
+    let host = Host::new(64);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server_options = ServerOptions {
+        token: Some("secret".into()),
+        ..Default::default()
+    };
+    tokio::spawn(serve::<Test, _>(listener, host, server_options));
+
+    let bad = client(
+        Arc::new(TcpConnector {
+            address: address.clone(),
+        }),
+        Some("wrong"),
+    );
+    let mut state = bad.state();
+    let rejected = wait_for(&mut state, |s| {
+        matches!(s, ConnectionState::Rejected { .. })
+    })
+    .await;
+    assert_eq!(
+        rejected,
+        ConnectionState::Rejected {
+            reason: "invalid token".into()
+        }
+    );
+    assert_eq!(
+        bad.request(Request::Echo("x".into())).await,
+        Err(RpcError::NotConnected)
+    );
+
+    let missing = client(
+        Arc::new(TcpConnector {
+            address: address.clone(),
+        }),
+        None,
+    );
+    let mut state = missing.state();
+    wait_for(&mut state, |s| {
+        matches!(s, ConnectionState::Rejected { .. })
+    })
+    .await;
+
+    let good = client(Arc::new(TcpConnector { address }), Some("secret"));
+    let mut state = good.state();
+    wait_for(&mut state, connected).await;
+    assert_eq!(
+        good.request(Request::Echo("ok".into())).await.unwrap(),
+        "ok"
+    );
+}
+
+#[tokio::test]
+async fn reconnects_after_host_restart() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(serve::<Test, _>(
+        listener,
+        Host::new(64),
+        ServerOptions::default(),
+    ));
+
+    let client = client(
+        Arc::new(TcpConnector {
+            address: address.clone(),
+        }),
+        None,
+    );
+    let mut state = client.state();
+    let mut events = client.events();
+    wait_for(&mut state, connected).await;
+
+    server.abort();
+    let _ = server.await;
+    wait_for(&mut state, |s| !connected(s)).await;
+
+    let listener = TcpListener::bind(&address).await.unwrap();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        Host::new(64),
+        ServerOptions::default(),
+    ));
+    wait_for(&mut state, connected).await;
+    assert_eq!(
+        client.request(Request::Echo("back".into())).await.unwrap(),
+        "back"
+    );
+
+    let mut saw = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        saw.push(match event {
+            ClientEvent::Connected(_) => "connected",
+            ClientEvent::Disconnected => "disconnected",
+            _ => "other",
+        });
+    }
+    assert_eq!(saw, ["connected", "disconnected", "connected"]);
+}
+
+#[tokio::test]
+async fn silent_host_is_detected() {
+    // A proxy that forwards the handshake to a real host, then stops
+    // forwarding while keeping both sockets open.
+    let real = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let real_address = real.local_addr().unwrap().to_string();
+    tokio::spawn(serve::<Test, _>(
+        real,
+        Host::new(64),
+        ServerOptions::default(),
+    ));
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = proxy.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (mut inbound, _) = proxy.accept().await.unwrap();
+        let mut outbound = tokio::net::TcpStream::connect(real_address).await.unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::io::copy_bidirectional(&mut inbound, &mut outbound),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        drop((inbound, outbound, proxy));
+    });
+
+    let client = client(Arc::new(TcpConnector { address }), None);
+    let mut events = client.events();
+    assert!(matches!(
+        next_session_change(&mut events).await,
+        ClientEvent::Connected(_)
+    ));
+    let started = tokio::time::Instant::now();
+    assert!(matches!(
+        next_session_change(&mut events).await,
+        ClientEvent::Disconnected
+    ));
+    // Detected by the dead timer, not by a closed socket.
+    assert!(started.elapsed() >= Duration::from_millis(250));
+}
+
+#[tokio::test]
+async fn pending_request_fails_when_connection_drops() {
+    struct Hang(Arc<Host>);
+    impl HostHandler<Test> for Hang {
+        fn info(&self) -> HostInfo {
+            self.0.info()
+        }
+        fn events(&self) -> EventSource<Test> {
+            self.0.events()
+        }
+        fn handle(
+            &self,
+            _: Peer<Test>,
+            _: Request,
+        ) -> BoxFuture<'static, Result<String, RpcError>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(serve::<Test, _>(
+        listener,
+        Arc::new(Hang(Host::new(1))),
+        ServerOptions::default(),
+    ));
+    let client = client(Arc::new(TcpConnector { address }), None);
+    let mut state = client.state();
+    wait_for(&mut state, connected).await;
+
+    let request = client.request(Request::Echo("never".into()));
+    let abort = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        server.abort();
+    };
+    let (result, _) = tokio::join!(request, abort);
+    assert_eq!(result, Err(RpcError::Disconnected));
+}
+
+#[tokio::test]
+async fn lagging_client_is_told_to_resync() {
+    let host = Host::new(2);
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        host.clone(),
+        ServerOptions::default(),
+    ));
+    let client = client(Arc::new(connector), None);
+    let mut events = client.events();
+    let mut state = client.state();
+    wait_for(&mut state, connected).await;
+    for i in 0..50 {
+        host.emit(&i.to_string());
+    }
+    let resync = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ClientEvent::Resync = events.recv().await.unwrap() {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(resync.is_ok());
+}
