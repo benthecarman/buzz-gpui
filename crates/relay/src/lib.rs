@@ -8,6 +8,7 @@ pub mod live;
 pub mod origin;
 pub mod profiles;
 pub mod reader;
+pub mod session;
 pub mod sidebar;
 pub mod socket;
 pub mod store;
@@ -20,7 +21,11 @@ pub use http::{HttpError, RelayHttp};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use origin::RelayOrigin;
 pub use profiles::{Profile, ProfileDirectory, Profiles};
-pub use reader::{Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
+pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
+pub use session::{
+    ChannelView, RelayInfo, RosterStatus, Session, SessionSnapshot, SessionStatus,
+    TimelineSnapshot, TimelineStatus,
+};
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
     sidebar_sections,
