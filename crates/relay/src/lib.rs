@@ -5,7 +5,9 @@ pub mod event;
 pub mod fold;
 pub mod http;
 pub mod live;
+pub mod messages;
 pub mod origin;
+pub mod outbox;
 pub mod profiles;
 pub mod reader;
 pub mod session;
@@ -19,7 +21,12 @@ pub use event::{Verified, Verifier, kinds};
 pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
+pub use messages::{Draft, EventTemplate, MessageClock, MessageError};
 pub use origin::RelayOrigin;
+pub use outbox::{
+    Delivery, HttpPublisher, Journal, MemoryJournal, Operation, Outbox, OutboxError, OutboxOptions,
+    Publisher, Recovery, SendOptions,
+};
 pub use profiles::{Profile, ProfileDirectory, Profiles};
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{

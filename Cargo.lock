@@ -987,6 +987,7 @@ dependencies = [
  "futures",
  "markdown",
  "nostr",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -998,6 +999,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
