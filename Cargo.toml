@@ -13,6 +13,6 @@ publish = false
 anyhow = "1"
 # buzz-app fork carrying one patch on `installed-runtime-tools`: the agent
 # controller can use tools installed on PATH instead of a packaged bundle.
-buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "395f6e3d19674de0b91deb8bcf147aab9e8cd654" }
-buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "395f6e3d19674de0b91deb8bcf147aab9e8cd654" }
+buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "6958ff1fc2bf1dc682a9e445acdaaa020fb17a58" }
+buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "6958ff1fc2bf1dc682a9e445acdaaa020fb17a58" }
 gpui-kit = "=0.7.1"
