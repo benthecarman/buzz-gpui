@@ -10,6 +10,7 @@ pub mod reader;
 pub mod sidebar;
 pub mod socket;
 pub mod store;
+pub mod window;
 
 pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
 pub use event::{Verified, Verifier, kinds};
