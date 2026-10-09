@@ -929,6 +929,7 @@ dependencies = [
  "markdown",
  "nostr",
  "notify-rust",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

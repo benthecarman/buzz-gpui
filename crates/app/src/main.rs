@@ -1,6 +1,7 @@
 mod community;
 mod config;
 mod hosts;
+mod http;
 mod idle;
 mod mirror;
 mod notifications;
@@ -23,6 +24,9 @@ fn main() {
         gpui_kit::init(cx);
         buzz_ui::init(cx);
         runtime::Runtime::init(cx);
+        cx.set_http_client(std::sync::Arc::new(http::Http::new(
+            runtime::Runtime::handle(cx),
+        )));
         Hosts::init(&config, cx);
         community::AppState::init(cx);
         idle::Idle::init(cx);

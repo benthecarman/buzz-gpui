@@ -42,7 +42,7 @@ fn active(channel: &ChannelSummary) -> bool {
 }
 
 pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyElement {
-    let c = cx.colors().clone();
+    let c = *cx.colors();
     let profiles = &snapshot.profiles;
     let mut streams: Vec<&ChannelSummary> = Vec::new();
     let mut forums: Vec<&ChannelSummary> = Vec::new();
@@ -150,6 +150,9 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
                 ),
             );
     }
+    // Pictures load through the community's media client (relay.md §5n.6).
+    let media = crate::community::AppState::current(cx)
+        .map(|community| community.read(cx).session.media().clone());
     list = list
         .child(div().h(rems(1.)))
         .child(section("Direct messages"))
@@ -175,9 +178,10 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
             if let Some(picture) = first
                 .as_ref()
                 .and_then(|p| profiles.get(p))
-                .and_then(|profile| profile.picture.clone())
+                .and_then(|profile| profile.picture.as_deref())
+                && let Some(media) = &media
             {
-                avatar = avatar.image(picture);
+                avatar = avatar.image(super::media::avatar(picture, media));
             }
             channel_row(channel, label.clone(), Some(avatar.into_any_element()))
         })));
