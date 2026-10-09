@@ -432,6 +432,30 @@ pub(super) fn project_markdown(content: &str, attachment_urls: &HashSet<String>)
     }
 }
 
+/// Longest body rendered as Markdown (`MAX_MARKDOWN_LENGTH`, counted in
+/// UTF-16 units there and in characters here).
+const MAX_MARKDOWN_LENGTH: usize = 100_000;
+
+/// The GFM tree a message body renders from (`prepareMarkdown`), or `None`
+/// when the body must render as plain text: longer than
+/// [`MAX_MARKDOWN_LENGTH`] or nested deeper than [`MAX_MARKDOWN_DEPTH`].
+pub fn message_markdown(content: &str) -> Option<Node> {
+    if content.chars().count() > MAX_MARKDOWN_LENGTH || depth_bound(content) > PARSE_DEPTH_BUDGET {
+        return None;
+    }
+    let tree = markdown::to_mdast(content, &markdown::ParseOptions::gfm()).ok()?;
+    let mut pending = vec![(&tree, 0)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > MAX_MARKDOWN_DEPTH {
+            return None;
+        }
+        if let Some(children) = node.children() {
+            pending.extend(children.iter().map(|child| (child, depth + 1)));
+        }
+    }
+    Some(tree)
+}
+
 /// An upper bound on the mdast depth, from a linear scan.
 ///
 /// A leaf block sits inside containers that its first line opens or
@@ -633,6 +657,7 @@ mod tests {
         for body in hostile {
             let body = body + image;
             assert_eq!(project_markdown(&body, &urls).content, body);
+            assert!(message_markdown(&body).is_none());
         }
         // Under the parse budget, deep but bounded nesting parses safely and
         // the reference's depth limit still applies.
@@ -649,6 +674,12 @@ mod tests {
         assert_eq!(project_markdown(&shallow, &urls).content, "> - *quoted*");
     }
 
+    #[test]
+    fn renders_ordinary_bodies_as_gfm() {
+        let tree = message_markdown("| a | b |\n|---|---|\n| 1 | ~~2~~ |").unwrap();
+        assert!(matches!(tree.children().unwrap()[0], Node::Table(_)));
+        assert!(message_markdown(&"a".repeat(MAX_MARKDOWN_LENGTH + 1)).is_none());
+    }
     #[test]
     fn matches_extensions_before_a_query_or_the_end() {
         assert!(has_extension("https://x.test/a.MP4?x=1", &["mp4"]));

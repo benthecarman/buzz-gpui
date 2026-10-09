@@ -31,6 +31,7 @@ pub use links::{BuzzLink, message_link, parse_buzz_link, profile_key};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use media::{Media, MediaError};
 pub use messages::{Draft, EventTemplate, MessageError};
+pub use nostr::prelude::{EventId, PublicKey};
 pub use origin::RelayOrigin;
 pub use outbox::{
     Delivery, HttpPublisher, Journal, MemoryJournal, Operation, Outbox, OutboxError, OutboxOptions,

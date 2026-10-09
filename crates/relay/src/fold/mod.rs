@@ -16,7 +16,9 @@ mod thread;
 #[cfg(test)]
 mod tests;
 
-pub use attachments::{Attachment, AttachmentKind, Dimensions, parse_attachments};
+pub use attachments::{
+    Attachment, AttachmentKind, Dimensions, message_markdown, parse_attachments,
+};
 pub use membership::{MembershipChange, MembershipKind, membership_change};
 pub use order::{MessageClock, compare_messages, event_ms};
 pub use projection::MessageProjection;
