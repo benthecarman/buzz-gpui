@@ -15,9 +15,9 @@
           vulkan-loader
           libxcb
           libxkbcommon
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
+          libx11
+          libxcursor
+          libxi
           fontconfig
           freetype
           openssl

@@ -1,0 +1,25 @@
+[package]
+name = "buzz-host"
+description = "Agent host: runs Buzz agents on this machine and serves them over host-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+buzz-agent-controller.workspace = true
+buzz-credential-store.workspace = true
+buzz-host-rpc = { path = "../host-rpc" }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+secp256k1 = { version = "0.31", features = ["rand", "global-context"] }
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
