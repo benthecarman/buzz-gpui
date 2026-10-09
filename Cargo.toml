@@ -12,8 +12,8 @@ publish = false
 [workspace.dependencies]
 anyhow = "1"
 # Local checkout of the buzz-app fork branch `installed-runtime-tools`, which
-# lets the controller use tools from PATH. Switch to the fork's git URL once
-# it is published.
-buzz-agent-controller = { path = "../buzz-app/crates/agent-controller" }
-buzz-credential-store = { path = "../buzz-app/crates/credential-store" }
+# lets the controller use tools from PATH. Absolute so worktrees resolve it
+# too. Switch to the fork's git URL once it is published.
+buzz-agent-controller = { path = "/home/ben/projects/buzz-app/crates/agent-controller" }
+buzz-credential-store = { path = "/home/ben/projects/buzz-app/crates/credential-store" }
 gpui-kit = "=0.7.1"

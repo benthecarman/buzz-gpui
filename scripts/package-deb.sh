@@ -7,17 +7,19 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 projects="$(dirname "$here")"
-name="$(basename "$here")"
 [ -d "$projects/buzz-app" ] || { echo "missing $projects/buzz-app" >&2; exit 1; }
 mkdir -p "$here/dist" "$HOME/.cache/buzz-gpui-deb/cargo" "$HOME/.cache/buzz-gpui-deb/target"
 
+# The workspace refers to the buzz-app checkout by absolute path, so mount
+# both repositories at their host paths.
 docker run --rm \
-  -v "$projects:/src" \
+  -v "$here:$here" \
+  -v "$projects/buzz-app:$projects/buzz-app:ro" \
   -v "$HOME/.cache/buzz-gpui-deb/cargo:/root/.cargo" \
-  -v "$HOME/.cache/buzz-gpui-deb/target:/src/$name/target-deb" \
-  -e CARGO_TARGET_DIR="/src/$name/target-deb" \
+  -v "$HOME/.cache/buzz-gpui-deb/target:$here/target-deb" \
+  -e CARGO_TARGET_DIR="$here/target-deb" \
   -e OWNER="$(id -u):$(id -g)" \
-  -w "/src/$name" \
+  -w "$here" \
   ubuntu:26.04 bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
