@@ -736,3 +736,210 @@ mod journal_tests {
         assert!(other.load().await.unwrap().is_empty());
     }
 }
+
+/// The NIP-RS read-state journal for one partition (spec §5i.4): one JSON
+/// record in `read_state`. The record is returned exactly as saved;
+/// [`crate::read_state::ReadStateSync`] validates it, so a corrupt record
+/// is an error and is never replaced by an empty journal (§9.2 #25).
+#[derive(Clone)]
+pub struct SqliteReadJournal {
+    store: Store,
+    partition: Partition,
+}
+
+impl SqliteReadJournal {
+    pub fn new(store: Store, partition: Partition) -> Self {
+        Self { store, partition }
+    }
+}
+
+fn read_state_error(error: StoreError) -> crate::read_state::ReadStateError {
+    crate::read_state::ReadStateError::Storage(error.to_string())
+}
+
+impl crate::read_state::ReadStateJournal for SqliteReadJournal {
+    fn load(&mut self) -> Result<Option<String>, crate::read_state::ReadStateError> {
+        self.store
+            .with(|c| {
+                Ok(c.query_row(
+                    "SELECT journal_json FROM read_state WHERE origin = ?1 AND viewer = ?2",
+                    params![self.partition.origin, self.partition.viewer],
+                    |row| row.get(0),
+                )
+                .optional()?)
+            })
+            .map_err(read_state_error)
+    }
+
+    fn store(&mut self, record: &str) -> Result<(), crate::read_state::ReadStateError> {
+        self.store
+            .with(|c| {
+                c.execute(
+                    "INSERT INTO read_state (origin, viewer, journal_json) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (origin, viewer) DO UPDATE SET journal_json = excluded.journal_json",
+                    params![self.partition.origin, self.partition.viewer, record],
+                )?;
+                Ok(())
+            })
+            .map_err(read_state_error)
+    }
+
+    fn purge(&mut self) -> Result<(), crate::read_state::ReadStateError> {
+        self.store
+            .with(|c| {
+                c.execute(
+                    "DELETE FROM read_state WHERE origin = ?1 AND viewer = ?2",
+                    params![self.partition.origin, self.partition.viewer],
+                )?;
+                Ok(())
+            })
+            .map_err(read_state_error)
+    }
+}
+
+/// Device-local thread follows for one partition (spec §5i.9), saved as
+/// the reference's JSON array in `partition_prefs`. As with the
+/// reference's local storage, unreadable data reads as no choices.
+#[derive(Clone)]
+pub struct SqliteThreadFollows {
+    store: Store,
+    partition: Partition,
+}
+
+impl SqliteThreadFollows {
+    pub const NAME: &'static str = "thread-follows";
+
+    pub fn new(store: Store, partition: Partition) -> Self {
+        Self { store, partition }
+    }
+}
+
+impl crate::unread::ThreadFollowStore for SqliteThreadFollows {
+    fn read(&mut self) -> Vec<(String, bool)> {
+        self.store
+            .partition_pref(&self.partition, Self::NAME)
+            .ok()
+            .flatten()
+            .map(|text| crate::unread::parse_thread_follows(&text))
+            .unwrap_or_default()
+    }
+
+    fn write(&mut self, choices: &[(String, bool)]) -> Result<(), String> {
+        self.store
+            .set_partition_pref(
+                &self.partition,
+                Self::NAME,
+                &crate::unread::encode_thread_follows(choices),
+            )
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod read_state_tests {
+    use super::*;
+    use crate::read_state::{
+        ReadCapability, ReadStateJournal, ReadStateSync, ReadSyncStatus, ReadUpdate,
+    };
+    use crate::unread::ThreadFollowStore;
+
+    fn partition(origin: &str) -> Partition {
+        Partition {
+            origin: origin.into(),
+            viewer: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn read_journals_persist_per_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("buzz.sqlite3");
+        let a = partition("https://a.example");
+        let viewer = a.viewer.clone();
+        let store = Store::open(&path).unwrap();
+        let mut sync = ReadStateSync::open(
+            &viewer,
+            ReadCapability::FrontierSync,
+            SqliteReadJournal::new(store.clone(), a.clone()),
+        );
+        sync.apply(ReadUpdate::observe("general", 42), None, 1_000)
+            .unwrap();
+        let slot = sync.journal().unwrap().slot.clone();
+        drop((sync, store));
+
+        let store = Store::open(&path).unwrap();
+        let sync = ReadStateSync::open(
+            &viewer,
+            ReadCapability::FrontierSync,
+            SqliteReadJournal::new(store.clone(), a.clone()),
+        );
+        let journal = sync.journal().unwrap();
+        assert_eq!(journal.slot, slot);
+        assert_eq!(journal.state.frontier("general"), Some(42));
+
+        // Another community starts its own journal.
+        let mut other = SqliteReadJournal::new(store.clone(), partition("https://b.example"));
+        assert_eq!(other.load().unwrap(), None);
+
+        store.purge(&a).unwrap();
+        assert_eq!(
+            SqliteReadJournal::new(store, a).load().unwrap(),
+            None,
+            "leaving the community deletes its journal"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_read_journal_is_an_error_and_kept() {
+        let store = Store::in_memory().unwrap();
+        let a = partition("https://a.example");
+        let mut journal = SqliteReadJournal::new(store.clone(), a.clone());
+        journal.store("{\"version\":1}").unwrap();
+        let mut sync = ReadStateSync::open(&a.viewer, ReadCapability::FrontierSync, journal);
+        assert_eq!(sync.snapshot().status, ReadSyncStatus::Error);
+        assert!(sync.journal().is_none());
+        assert!(
+            sync.apply(ReadUpdate::observe("general", 1), None, 1_000)
+                .is_err()
+        );
+        assert_eq!(
+            sync.into_store().load().unwrap().as_deref(),
+            Some("{\"version\":1}")
+        );
+        let mut purge = SqliteReadJournal::new(store, a);
+        purge.purge().unwrap();
+        assert_eq!(purge.load().unwrap(), None);
+    }
+
+    #[test]
+    fn thread_follows_round_trip_per_partition() {
+        let store = Store::in_memory().unwrap();
+        let a = partition("https://a.example");
+        let mut follows = SqliteThreadFollows::new(store.clone(), a.clone());
+        assert!(follows.read().is_empty());
+        let choices = vec![
+            (format!("general:{}", "1".repeat(64)), true),
+            (format!("general:{}", "2".repeat(64)), false),
+        ];
+        follows.write(&choices).unwrap();
+        assert_eq!(
+            SqliteThreadFollows::new(store.clone(), a.clone()).read(),
+            choices
+        );
+        assert!(
+            SqliteThreadFollows::new(store.clone(), partition("https://b.example"))
+                .read()
+                .is_empty()
+        );
+
+        // Unreadable data is no choices, like the reference's storage.
+        store
+            .set_partition_pref(&a, SqliteThreadFollows::NAME, "not json")
+            .unwrap();
+        assert!(follows.read().is_empty());
+
+        follows.write(&choices[..1]).unwrap();
+        store.purge(&a).unwrap();
+        assert!(follows.read().is_empty());
+    }
+}
