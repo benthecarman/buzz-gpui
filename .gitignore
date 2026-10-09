@@ -2,3 +2,5 @@
 /result
 .direnv
 /.test-relay
+/dist
+/target-deb

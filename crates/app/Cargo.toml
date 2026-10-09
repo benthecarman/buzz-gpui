@@ -1,5 +1,6 @@
 [package]
 name = "buzz-gpui"
+description = "Native Buzz client with local and remote agent management"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,3 +23,20 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package.metadata.deb]
+name = "buzz-gpui"
+maintainer = "Ben Carman <benthecarman@live.com>"
+copyright = "2026, Buzz GPUI contributors; portions © Block, Inc."
+license-file = ["../../LICENSE", "0"]
+extended-description = "Native Buzz client: chat with your communities and manage agents on this computer and on remote buzzd hosts."
+section = "net"
+priority = "optional"
+depends = "$auto, libvulkan1, libxkbcommon-x11-0, libwayland-client0, libfontconfig1, libdbus-1-3, gnome-keyring | kwalletmanager | keepassxc"
+assets = [
+    ["target/release/buzz-gpui", "usr/bin/", "755"],
+    ["../../packaging/linux/buzz-gpui.desktop", "usr/share/applications/", "644"],
+    ["../../assets/icons/buzz-128.png", "usr/share/icons/hicolor/128x128/apps/buzz-gpui.png", "644"],
+    ["../../assets/icons/buzz-256.png", "usr/share/icons/hicolor/256x256/apps/buzz-gpui.png", "644"],
+    ["../../assets/icons/buzz-512.png", "usr/share/icons/hicolor/512x512/apps/buzz-gpui.png", "644"],
+]
