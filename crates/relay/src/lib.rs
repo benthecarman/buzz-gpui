@@ -7,6 +7,7 @@ pub mod http;
 pub mod live;
 pub mod origin;
 pub mod reader;
+pub mod sidebar;
 pub mod socket;
 pub mod store;
 
@@ -17,6 +18,10 @@ pub use http::{HttpError, RelayHttp};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use origin::RelayOrigin;
 pub use reader::{Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
+pub use sidebar::{
+    ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
+    sidebar_sections,
+};
 pub use socket::{
     Filter, PublishError, RelaySocket, SocketOptions, SocketState, Subscription, SubscriptionEvent,
 };
