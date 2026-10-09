@@ -33,14 +33,12 @@ toml_edit = "0.25"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 
 # Both already come with GPUI on Linux.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 notify-rust = "4"
 zbus = "5"
-
-[dev-dependencies]
-nostr = { version = "=0.45.5", default-features = false, features = ["std"] }
 
 [package.metadata.deb]
 name = "buzz-gpui"

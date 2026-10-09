@@ -2,6 +2,7 @@
 
 mod agents;
 mod channel;
+mod markdown;
 mod media;
 mod message;
 mod onboarding;
