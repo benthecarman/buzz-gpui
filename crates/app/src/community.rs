@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 /// Viewer preference holding the saved communities.
 const SAVED: &str = "communities";
+/// View state key for the channel last open in a community.
+const SELECTED_CHANNEL: &str = "selected-channel";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Saved {
@@ -66,6 +68,24 @@ impl AppState {
                 .or((!state.communities.is_empty()).then_some(0));
         }
         cx.set_global(state);
+    }
+
+    /// Adopts a newly created or imported identity and opens its saved
+    /// communities.
+    pub fn set_identity(identity: buzz_identity::Identity, cx: &mut App) {
+        let identity = Arc::new(identity);
+        let store = cx.global::<Self>().store.clone();
+        let saved = cx.global::<Self>().saved(&identity.pubkey_hex());
+        let communities: Vec<Entity<Community>> = saved
+            .origins
+            .iter()
+            .filter_map(|origin| RelayOrigin::parse(origin).ok())
+            .map(|origin| Community::new(origin, identity.clone(), store.clone(), cx))
+            .collect();
+        let state = cx.global_mut::<Self>();
+        state.selected = (!communities.is_empty()).then_some(0);
+        state.communities = communities;
+        state.identity = IdentityState::Ready(identity);
     }
 
     fn saved(&self, viewer: &str) -> Saved {
@@ -194,6 +214,32 @@ impl Community {
             ),
             view,
             snapshot: current,
+        }
+    }
+
+    fn partition(&self) -> buzz_relay_client::Partition {
+        buzz_relay_client::Partition::new(&self.origin, self.session.viewer())
+    }
+
+    /// The channel the user last had open here.
+    pub fn remembered_channel(&self, cx: &App) -> Option<String> {
+        let json = cx
+            .global::<AppState>()
+            .store
+            .view_state(&self.partition(), SELECTED_CHANNEL)
+            .ok()??;
+        serde_json::from_str(&json).ok()
+    }
+
+    pub fn remember_channel(&self, channel: &str, cx: &App) {
+        let json = serde_json::to_string(channel).expect("strings serialize");
+        let saved = cx.global::<AppState>().store.set_view_state(
+            &self.partition(),
+            SELECTED_CHANNEL,
+            Some(&json),
+        );
+        if let Err(error) = saved {
+            tracing::warn!(%error, "could not remember the selected channel");
         }
     }
 

@@ -100,6 +100,8 @@ fn start_embedded(
             FileCredentials::new(data.join("agent-keys")).map_err(|error| error.to_string())?,
         ),
     };
+    // The host starts background work on the I/O runtime.
+    let _runtime = runtime.enter();
     let host = AgentHost::start(HostConfig {
         info: HostInfo {
             id: "local".into(),
