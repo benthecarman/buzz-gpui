@@ -319,6 +319,7 @@ impl Owner {
         let mut snapshot: AgentsSnapshot =
             serde_json::from_value(json).map_err(|_| "Could not read agents")?;
         snapshot.seq = self.seq;
+        snapshot.default_workspace = self.workspace.to_string_lossy().into_owned();
         Ok(snapshot)
     }
 

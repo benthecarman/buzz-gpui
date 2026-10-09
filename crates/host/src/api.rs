@@ -101,6 +101,9 @@ pub struct AgentsSnapshot {
     pub agents: Vec<Agent>,
     pub runtime_available: bool,
     pub runtime_message: Option<String>,
+    /// Where new agents work when the create request leaves the workspace
+    /// empty.
+    pub default_workspace: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
