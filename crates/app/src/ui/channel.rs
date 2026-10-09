@@ -305,7 +305,7 @@ impl ChannelPage {
                 Some(row) => session.edit(&channel, row.id, &content).await,
                 None => {
                     session
-                        .send(&channel, &content, Default::default(), None)
+                        .send(&channel, &content, Default::default(), Vec::new(), None)
                         .await
                 }
             };

@@ -104,6 +104,23 @@ impl Media {
         Some(thumb.to_string())
     }
 
+    pub(crate) fn origin(&self) -> &RelayOrigin {
+        &self.0.origin
+    }
+
+    pub(crate) fn identity(&self) -> &Arc<Identity> {
+        &self.0.identity
+    }
+
+    /// The client for this relay: no redirects, a 600 s timeout.
+    pub(crate) fn relay_client(&self) -> &reqwest::Client {
+        &self.0.relay
+    }
+
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.0.runtime
+    }
+
     /// The whole body of `url`: signed for this relay's media, plain for
     /// other `https://` URLs, refused for anything else.
     pub async fn fetch(&self, url: &str) -> Result<Arc<[u8]>, MediaError> {
@@ -195,7 +212,7 @@ impl Inner {
 }
 
 /// `host[:port]` as the relay checks the Blossom `server` tag (`URL.host`).
-fn server(url: &Url) -> String {
+pub(crate) fn server(url: &Url) -> String {
     let host = url.host_str().unwrap_or_default();
     match url.port() {
         Some(port) => format!("{host}:{port}"),

@@ -269,6 +269,7 @@ impl ThreadPanel {
                     &channel,
                     &content,
                     Default::default(),
+                    Vec::new(),
                     Some((root, parent.unwrap_or(root))),
                 )
                 .await;

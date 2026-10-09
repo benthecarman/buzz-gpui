@@ -142,7 +142,7 @@ async fn sends_reacts_and_deletes_through_the_outbox() {
 
     let content = format!("outbox test {}", std::process::id());
     session
-        .send(&random, &content, Default::default(), None)
+        .send(&random, &content, Default::default(), Vec::new(), None)
         .await
         .unwrap();
     let seen = until(&mut timeline, "the echo of our message", |t| {
@@ -371,4 +371,89 @@ async fn opens_a_thread_with_its_replies() {
     for name in ["thread_reply_bob", "thread_reply_carol"] {
         assert!(replies.contains(&seed["events"][name].as_str().unwrap().to_string()));
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uploads_an_image_and_sends_it_with_a_mention() {
+    let Some((origin, identities, seed)) = fixture() else {
+        return;
+    };
+    let alice = Arc::new(
+        Identity::from_nsec(identities["identities"]["alice"]["nsec"].as_str().unwrap()).unwrap(),
+    );
+    let bob = identities["identities"]["bob"]["pk_hex"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session = Session::open(
+        &tokio::runtime::Handle::current(),
+        origin,
+        alice,
+        Store::in_memory().unwrap(),
+    );
+    let mut snapshot = session.snapshot();
+    let ready = until(&mut snapshot, "the roster and emoji", |s| {
+        s.roster == RosterStatus::Ready && s.live && s.emoji.status == CatalogStatus::Ready
+    })
+    .await;
+    let random = seed["channels"]["random"].as_str().unwrap().to_string();
+    assert!(
+        ready
+            .channels
+            .iter()
+            .any(|c| c.id == random && c.members.contains(&bob))
+    );
+    let view = session.open_channel(&random);
+    let mut timeline = view.snapshot.clone();
+    until(&mut timeline, "#random", |t| {
+        t.status == TimelineStatus::Ready
+    })
+    .await;
+
+    // A unique image each run, so the relay stores a new blob.
+    let shade = (std::process::id() % 250) as u8;
+    let image = image::RgbImage::from_pixel(8, 8, image::Rgb([shade, 120, 40]));
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+        .encode_image(&image)
+        .unwrap();
+    let attachment = upload::upload(
+        session.media(),
+        UploadFile {
+            name: "square.jpg".into(),
+            mime: "image/jpeg".into(),
+            bytes,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(attachment.mime, "image/jpeg");
+    assert!(session.media().is_relay_media(&attachment.url));
+
+    let content = format!("@Bob attachment test {}", std::process::id());
+    let mentions = Mentions {
+        recipients: vec![bob.clone()],
+        references: Vec::new(),
+    };
+    session
+        .send(&random, &content, mentions, vec![attachment.clone()], None)
+        .await
+        .unwrap();
+    // The relay checks each `imeta` against the stored blob, so an accepted
+    // send proves the descriptor. Attachments only render over HTTPS, which
+    // the plain test relay is not.
+    let seen = until(&mut timeline, "the accepted echo", |t| {
+        t.rows.iter().any(|r| {
+            r.content == content
+                && r.delivery
+                    .as_ref()
+                    .is_some_and(|d| d.status == fold::Delivery::Seen)
+        })
+    })
+    .await;
+    let row = seen.rows.iter().find(|r| r.content == content).unwrap();
+    assert_eq!(
+        row.mentions.iter().map(|k| k.to_hex()).collect::<Vec<_>>(),
+        [bob]
+    );
 }

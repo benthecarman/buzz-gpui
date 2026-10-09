@@ -154,6 +154,7 @@ async fn creates_edits_and_administers_a_channel() {
                 recipients: vec![bob.clone()],
                 references: Vec::new(),
             },
+            Vec::new(),
             None,
         )
         .await
@@ -167,6 +168,7 @@ async fn creates_edits_and_administers_a_channel() {
                 recipients: vec![stranger],
                 references: Vec::new(),
             },
+            Vec::new(),
             None,
         )
         .await;
@@ -296,6 +298,7 @@ async fn searches_people_and_messages() {
             &random,
             &format!("search {token} here"),
             Default::default(),
+            Vec::new(),
             None,
         )
         .await

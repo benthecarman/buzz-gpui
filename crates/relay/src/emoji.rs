@@ -1,0 +1,368 @@
+//! The community's custom emoji catalog (`emoji-directory.ts`,
+//! `docs/port/relay.md` §5k.1-5k.2).
+//!
+//! Every member publishes one kind 30030 set with `d = buzz:custom-emoji`;
+//! the palette is the union of the newest set from each member. For each
+//! shortcode the newest set wins, and on a tie the smaller URL. Sets are
+//! never evicted: forgetting a replacement could bring back a code its
+//! author removed. A catalog over budget shows an error and no entries
+//! until the next full read.
+
+use crate::event::{Verified, is_newer, kinds};
+use crate::messages::{CustomEmoji, EmojiCatalog, normalize_shortcode};
+use crate::socket::Filter;
+use nostr::prelude::Event;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// The `d` tag of every member's set.
+pub const EMOJI_SET: &str = "buzz:custom-emoji";
+/// At most this many member sets, and the read's limit.
+const LIMIT: usize = 500;
+/// Total bytes of the retained sets.
+const MAX_BYTES: usize = 2 * 1024 * 1024;
+
+const OVER_BUDGET: &str =
+    "Community emoji exceeds the catalog budget. Retry after reducing the catalog.";
+const INCOMPLETE: &str = "Community emoji catalog may be incomplete (500-set read limit). Retry after reducing the catalog.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogStatus {
+    /// Not read yet.
+    Idle,
+    Loading,
+    Ready,
+    Error(String),
+}
+
+/// What the UI and the message builders see.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmojiSnapshot {
+    pub status: CatalogStatus,
+    /// The merged palette, sorted by shortcode.
+    pub entries: Arc<[CustomEmoji]>,
+    /// The viewer's own latest set.
+    pub mine: Arc<[CustomEmoji]>,
+}
+
+impl Default for EmojiSnapshot {
+    fn default() -> Self {
+        Self {
+            status: CatalogStatus::Idle,
+            entries: Arc::new([]),
+            mine: Arc::new([]),
+        }
+    }
+}
+
+impl EmojiSnapshot {
+    /// The catalog as a send needs it: `:code:` text can only be resolved
+    /// once the whole palette is known.
+    pub fn catalog(&self) -> EmojiCatalog<'_> {
+        match &self.status {
+            CatalogStatus::Ready => EmojiCatalog::Ready(&self.entries),
+            CatalogStatus::Error(error) => EmojiCatalog::Unavailable(error),
+            CatalogStatus::Idle | CatalogStatus::Loading => EmojiCatalog::Loading,
+        }
+    }
+
+    pub fn get(&self, shortcode: &str) -> Option<&CustomEmoji> {
+        self.entries
+            .binary_search_by(|entry| entry.shortcode.as_str().cmp(shortcode))
+            .ok()
+            .map(|index| &self.entries[index])
+    }
+}
+
+/// The full catalog read (`emoji-directory.ts:111-150`).
+pub fn catalog_filter() -> Filter {
+    match json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": [EMOJI_SET], "limit": LIMIT}) {
+        serde_json::Value::Object(map) => map,
+        _ => unreachable!("filters are objects"),
+    }
+}
+
+/// `emojiTags`: the set's `["emoji", code, url]` entries, codes normalized,
+/// first per code wins.
+pub fn set_entries(event: &Event) -> Vec<CustomEmoji> {
+    let mut entries: Vec<CustomEmoji> = Vec::new();
+    for tag in event.tags.iter().map(|tag| tag.as_slice()) {
+        let [name, code, url, ..] = tag else {
+            continue;
+        };
+        if name != "emoji" || url.trim().is_empty() {
+            continue;
+        }
+        let Some(shortcode) = normalize_shortcode(code) else {
+            continue;
+        };
+        if !entries.iter().any(|entry| entry.shortcode == shortcode) {
+            entries.push(CustomEmoji {
+                shortcode,
+                url: url.trim().to_owned(),
+            });
+        }
+    }
+    entries
+}
+
+fn is_set(event: &Event) -> bool {
+    event.kind.as_u16() == kinds::CUSTOM_EMOJI
+        && event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .find(|tag| tag.first().map(String::as_str) == Some("d"))
+            .and_then(|tag| tag.get(1))
+            .is_some_and(|d| d == EMOJI_SET)
+}
+
+/// Each member's newest set and the merged palette.
+pub struct EmojiDirectory {
+    viewer: String,
+    sets: HashMap<String, (Verified, usize)>,
+    bytes: usize,
+    /// Over budget: entries stay empty until a full read starts again.
+    limited: bool,
+    snapshot: Arc<EmojiSnapshot>,
+}
+
+impl EmojiDirectory {
+    pub fn new(viewer: String) -> Self {
+        Self {
+            viewer,
+            sets: HashMap::new(),
+            bytes: 0,
+            limited: false,
+            snapshot: Arc::default(),
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<EmojiSnapshot> {
+        self.snapshot.clone()
+    }
+
+    /// A full read is starting. An over-budget catalog starts over, and is
+    /// never shown as ready while partly retained.
+    pub fn loading(&mut self) -> bool {
+        if self.limited {
+            self.sets.clear();
+            self.bytes = 0;
+            self.limited = false;
+        }
+        self.set_status(CatalogStatus::Loading)
+    }
+
+    /// The full read's outcome. Events go through [`Self::accept`] too.
+    pub fn finished(&mut self, result: Result<&[Verified], String>) -> bool {
+        match result {
+            Ok(events) => {
+                let mut changed = self.accept(events);
+                if self.limited {
+                    return changed;
+                }
+                changed |= if events.len() >= LIMIT {
+                    self.set_status(CatalogStatus::Error(INCOMPLETE.into()))
+                } else {
+                    self.set_status(CatalogStatus::Ready)
+                };
+                changed
+            }
+            Err(error) => self.set_status(CatalogStatus::Error(error)),
+        }
+    }
+
+    /// Takes newer member sets from any source. Returns whether the
+    /// snapshot changed.
+    pub fn accept(&mut self, events: &[Verified]) -> bool {
+        if self.limited {
+            return false;
+        }
+        let mut changed = false;
+        for event in events.iter().filter(|event| is_set(event)) {
+            let author = event.pubkey_hex();
+            let old = self.sets.get(&author);
+            if old.is_some_and(|(current, _)| !is_newer(event, current)) {
+                continue;
+            }
+            let size = event.byte_size();
+            let old_size = old.map_or(0, |(_, size)| *size);
+            if (old.is_none() && self.sets.len() >= LIMIT)
+                || self.bytes - old_size + size > MAX_BYTES
+            {
+                self.limited = true;
+                self.snapshot = Arc::new(EmojiSnapshot {
+                    status: CatalogStatus::Error(OVER_BUDGET.into()),
+                    entries: Arc::new([]),
+                    mine: Arc::new([]),
+                });
+                return true;
+            }
+            self.bytes = self.bytes - old_size + size;
+            self.sets.insert(author, (event.clone(), size));
+            changed = true;
+        }
+        if changed {
+            self.merge();
+        }
+        changed
+    }
+
+    fn merge(&mut self) {
+        let mut winners: HashMap<String, (CustomEmoji, u64)> = HashMap::new();
+        for (event, _) in self.sets.values() {
+            let time = event.created_at_secs();
+            for emoji in set_entries(event) {
+                let replace = winners
+                    .get(&emoji.shortcode)
+                    .is_none_or(|(old, at)| time > *at || (time == *at && emoji.url < old.url));
+                if replace {
+                    winners.insert(emoji.shortcode.clone(), (emoji, time));
+                }
+            }
+        }
+        let mut entries: Vec<CustomEmoji> = winners.into_values().map(|(emoji, _)| emoji).collect();
+        entries.sort_by(|a, b| a.shortcode.cmp(&b.shortcode));
+        let mine = self
+            .sets
+            .get(&self.viewer)
+            .map(|(event, _)| set_entries(event))
+            .unwrap_or_default();
+        self.snapshot = Arc::new(EmojiSnapshot {
+            status: self.snapshot.status.clone(),
+            entries: entries.into(),
+            mine: mine.into(),
+        });
+    }
+
+    fn set_status(&mut self, status: CatalogStatus) -> bool {
+        if self.snapshot.status == status {
+            return false;
+        }
+        self.snapshot = Arc::new(EmojiSnapshot {
+            status,
+            ..(*self.snapshot).clone()
+        });
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Verifier;
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind, Tag, Timestamp};
+
+    fn set(keys: &Keys, at: u64, entries: &[(&str, &str)]) -> Verified {
+        let mut tags = vec![Tag::parse(["d", EMOJI_SET]).unwrap()];
+        tags.extend(
+            entries
+                .iter()
+                .map(|(code, url)| Tag::parse(["emoji", code, url]).unwrap()),
+        );
+        let event = EventBuilder::new(Kind::from_u16(kinds::CUSTOM_EMOJI), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(at))
+            .finalize(keys)
+            .unwrap();
+        Verifier::default().verify(event).unwrap()
+    }
+
+    fn codes(snapshot: &EmojiSnapshot) -> Vec<(String, String)> {
+        snapshot
+            .entries
+            .iter()
+            .map(|e| (e.shortcode.clone(), e.url.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn merges_member_sets_newest_first_then_smaller_url() {
+        let (alice, bob) = (Keys::generate(), Keys::generate());
+        let mut directory = EmojiDirectory::new(alice.public_key().to_hex());
+        assert!(matches!(
+            directory.snapshot().catalog(),
+            EmojiCatalog::Loading
+        ));
+        directory.loading();
+        let events = [
+            set(
+                &alice,
+                10,
+                &[("party", "https://a/p.png"), ("Ship", "https://a/s.png")],
+            ),
+            set(&bob, 20, &[("party", "https://b/p.png")]),
+        ];
+        assert!(directory.finished(Ok(&events)));
+        let snapshot = directory.snapshot();
+        assert_eq!(snapshot.status, CatalogStatus::Ready);
+        assert_eq!(
+            codes(&snapshot),
+            [
+                ("party".into(), "https://b/p.png".into()),
+                ("ship".into(), "https://a/s.png".into())
+            ]
+        );
+        assert_eq!(snapshot.mine.len(), 2);
+        assert_eq!(snapshot.get("ship").unwrap().url, "https://a/s.png");
+
+        // An older set from the same author changes nothing; a tie on time
+        // goes to the smaller URL.
+        assert!(!directory.accept(&[set(&bob, 5, &[])]));
+        let carol = Keys::generate();
+        assert!(directory.accept(&[set(&carol, 20, &[("party", "https://a/0.png")])]));
+        assert_eq!(
+            directory.snapshot().get("party").unwrap().url,
+            "https://a/0.png"
+        );
+
+        // Bob's newer, empty set removes nothing that others still have.
+        assert!(directory.accept(&[set(&bob, 30, &[])]));
+        assert_eq!(directory.snapshot().entries.len(), 2);
+    }
+
+    #[test]
+    fn over_budget_catalogs_show_an_error_until_reread() {
+        let mut directory = EmojiDirectory::new(String::new());
+        directory.loading();
+        let big = "x".repeat(4000);
+        let entries: Vec<(String, String)> = (0..600)
+            .map(|i| (format!("e{i}"), format!("https://a/{big}{i}")))
+            .collect();
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let huge = set(&Keys::generate(), 1, &refs);
+        directory.finished(Ok(&[huge]));
+        let snapshot = directory.snapshot();
+        assert!(matches!(snapshot.status, CatalogStatus::Error(_)));
+        assert!(snapshot.entries.is_empty());
+        assert!(!directory.accept(&[set(&Keys::generate(), 2, &[("a", "https://a")])]));
+        directory.loading();
+        assert_eq!(directory.snapshot().status, CatalogStatus::Loading);
+    }
+
+    #[test]
+    fn reads_set_entries_like_the_reference() {
+        let keys = Keys::generate();
+        let event = set(
+            &keys,
+            1,
+            &[
+                ("Party", " https://a "),
+                ("party", "https://b"),
+                ("bad code", "https://c"),
+                ("x", " "),
+            ],
+        );
+        assert_eq!(
+            set_entries(&event),
+            [CustomEmoji {
+                shortcode: "party".into(),
+                url: "https://a".into()
+            }]
+        );
+    }
+}

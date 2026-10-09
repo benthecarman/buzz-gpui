@@ -3,6 +3,7 @@
 pub mod community;
 pub mod discovery;
 pub mod dm;
+pub mod emoji;
 pub mod event;
 pub mod fold;
 pub mod http;
@@ -26,19 +27,21 @@ pub mod store;
 pub mod threads;
 pub mod typing;
 pub mod unread;
+pub mod upload;
 pub mod window;
 
 #[cfg(test)]
 mod testing;
 
 pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
+pub use emoji::{CatalogStatus, EmojiSnapshot};
 pub use event::{Verified, Verifier, kinds};
 pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
 pub use links::{BuzzLink, message_link, parse_buzz_link, profile_key};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use media::{Media, MediaError};
-pub use messages::{Draft, EventTemplate, MessageError};
+pub use messages::{Attachment, CustomEmoji, Draft, EventTemplate, Mentions, MessageError};
 pub use nostr::prelude::{EventId, PublicKey};
 pub use origin::RelayOrigin;
 pub use outbox::{
@@ -77,3 +80,4 @@ pub use unread::{
     AttentionStatus, Category, ChannelInfo, InboxItem, InboxSnapshot, MessageAttention,
     ThreadActivitySnapshot, ThreadFollowStore, Unread, UnreadError, UnreadOptions, UnreadSnapshot,
 };
+pub use upload::{UploadError, UploadFile};

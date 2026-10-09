@@ -292,7 +292,7 @@ const INVALID_UPLOAD: MessageError =
 /// Re-checks an upload descriptor against the community origin: a MIME
 /// token, a hex digest, a size within the type's cap and a same-origin
 /// `/media/<sha256>[.ext]` URL. Returns the resolved URL and lowercase type.
-fn validate_upload(
+pub(crate) fn validate_upload(
     item: &Attachment,
     origin: &RelayOrigin,
 ) -> Result<(String, String), MessageError> {

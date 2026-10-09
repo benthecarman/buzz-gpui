@@ -27,12 +27,13 @@ pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{ChannelUnread, READING_DWELL_MS, UnreadCounts};
 
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
+use crate::emoji::{EmojiDirectory, EmojiSnapshot, catalog_filter};
 use crate::event::{Verified, Verifier, kinds};
 use crate::fold::{LocalDelivery, MessageClock};
 use crate::http::RelayHttp;
 use crate::live::{Live, LiveOptions, LiveUpdate};
 use crate::media::Media;
-use crate::messages::{self, Author, Compose, EmojiCatalog, Mentions};
+use crate::messages::{self, Attachment, Author, Compose, Mentions};
 use crate::origin::RelayOrigin;
 use crate::outbox::{HttpPublisher, Outbox, OutboxOptions, SendOptions};
 use crate::presence::{
@@ -110,6 +111,8 @@ pub struct SessionSnapshot {
     /// DMs the viewer hid (relay-signed 30622). The sidebar leaves them
     /// out; opening one still works.
     pub hidden_dms: Arc<[String]>,
+    /// The community's custom emoji. Replaced only when it changes.
+    pub emoji: Arc<EmojiSnapshot>,
 }
 
 pub struct Session {
@@ -184,6 +187,7 @@ impl Session {
             typing: Arc::default(),
             thread_typing: Arc::default(),
             hidden_dms: Arc::new([]),
+            emoji: Arc::default(),
         }));
         let (incoming, _) = broadcast::channel(64);
         let receiver = snapshot.subscribe();
@@ -227,6 +231,8 @@ impl Session {
             presence: PresenceDirectory::new(viewer.clone()),
             publisher: PresencePublisher::default(),
             typing: Typing::new(viewer.clone()),
+            emoji: EmojiDirectory::new(viewer.clone()),
+            emoji_reading: false,
             incoming: incoming::Incoming::default(),
             incoming_sender: incoming.clone(),
             hidden_dms: Arc::new([]),
@@ -345,22 +351,29 @@ impl Session {
     }
 
     /// Sends a message, or a thread reply when `thread` names
-    /// `(root, parent)`. Resolves once the intent is safely queued; the
-    /// timeline shows its delivery.
+    /// `(root, parent)`, with uploaded `attachments`. Resolves once the
+    /// intent is safely queued; the timeline shows its delivery.
     pub async fn send(
         &self,
         channel: &str,
         content: &str,
         mentions: Mentions,
+        attachments: Vec<Attachment>,
         thread: Option<(EventId, EventId)>,
     ) -> Result<(), String> {
         self.write(Write::Send {
             channel: channel.to_string(),
             content: content.to_string(),
             mentions,
+            attachments,
             thread,
         })
         .await
+    }
+
+    /// Reads the custom emoji catalog again, e.g. after an error.
+    pub fn refresh_emoji(&self) {
+        let _ = self.commands.send(Message::RefreshEmoji);
     }
 
     pub async fn edit(&self, channel: &str, id: EventId, content: &str) -> Result<(), String> {
@@ -441,6 +454,7 @@ enum Write {
         channel: String,
         content: String,
         mentions: Mentions,
+        attachments: Vec<Attachment>,
         thread: Option<(EventId, EventId)>,
     },
     Edit {
@@ -548,6 +562,8 @@ enum Message {
     /// Runs on the actor between messages: how session operations read and
     /// change its state.
     With(Box<dyn FnOnce(&mut Actor) + Send>),
+    RefreshEmoji,
+    EmojiRead(Result<Events, ReadError>),
 }
 
 struct Actor {
@@ -586,6 +602,9 @@ struct Actor {
     presence: PresenceDirectory,
     publisher: PresencePublisher,
     typing: Typing,
+    emoji: EmojiDirectory,
+    /// The catalog read is in flight.
+    emoji_reading: bool,
     incoming: incoming::Incoming,
     incoming_sender: broadcast::Sender<IncomingMessage>,
     hidden_dms: Arc<[String]>,
@@ -773,6 +792,14 @@ impl Actor {
                 outcome,
             } => self.presence_published(publication, outcome),
             Message::With(run) => run(self),
+            Message::RefreshEmoji => self.read_emoji(),
+            Message::EmojiRead(result) => {
+                self.emoji_reading = false;
+                let result = result.as_deref().map_err(|error| error.message.clone());
+                if self.emoji.finished(result) {
+                    self.publish();
+                }
+            }
         }
     }
 
@@ -841,6 +868,7 @@ impl Actor {
         self.open_reads();
         self.set_status(SessionStatus::Ready);
         self.start_scan(ScanOptions::default());
+        self.read_emoji();
     }
 
     fn set_status(&mut self, status: SessionStatus) {
@@ -1038,6 +1066,9 @@ impl Actor {
                     for (ids, filter) in self.profiles.refresh() {
                         self.read_profiles(ids, filter);
                     }
+                    // Sets replaced while we were away arrive with the
+                    // whole catalog.
+                    self.read_emoji();
                 }
                 self.threads_established(&channels);
                 for channel in channels {
@@ -1135,6 +1166,7 @@ impl Actor {
             outbox.observe(events);
         }
         publish |= self.profiles.accept(events);
+        publish |= self.emoji.accept(events);
         let mut people = Vec::new();
         for timeline in self.timelines.values_mut() {
             if timeline.accept(events) {
@@ -1313,11 +1345,13 @@ impl Actor {
                 .and_then(|timeline| timeline.find(id))
                 .ok_or_else(|| "Load the message first".to_string())
         };
+        let emoji = self.emoji.snapshot();
         let drafts = match write {
             Write::Send {
                 channel,
                 content,
                 mentions,
+                attachments,
                 thread,
             } => {
                 if !self
@@ -1338,8 +1372,8 @@ impl Actor {
                     channel_id: &channel,
                     content: &content,
                     mentions: &mentions,
-                    attachments: &[],
-                    emoji: EmojiCatalog::Ready(&[]),
+                    attachments: &attachments,
+                    emoji: emoji.catalog(),
                     origin: &self.origin,
                 };
                 let draft = match thread {
@@ -1357,14 +1391,8 @@ impl Actor {
             } => {
                 let original = find(&channel, &id)?;
                 vec![
-                    messages::edit(
-                        &author,
-                        &original,
-                        &original,
-                        &content,
-                        EmojiCatalog::Ready(&[]),
-                    )
-                    .map_err(|error| error.to_string())?,
+                    messages::edit(&author, &original, &original, &content, emoji.catalog())
+                        .map_err(|error| error.to_string())?,
                 ]
             }
             Write::React {
@@ -1373,8 +1401,13 @@ impl Actor {
                 content,
             } => {
                 let original = find(&channel, &id)?;
+                // A palette emoji needs no ready catalog to react with.
+                let custom = content
+                    .strip_prefix(':')
+                    .and_then(|code| code.strip_suffix(':'))
+                    .and_then(|code| emoji.get(&code.to_ascii_lowercase()));
                 vec![
-                    messages::react(&original, &content, None, EmojiCatalog::Ready(&[]))
+                    messages::react(&original, &content, custom, emoji.catalog())
                         .map_err(|error| error.to_string())?,
                 ]
             }
@@ -1455,6 +1488,27 @@ impl Actor {
         });
     }
 
+    // ----- custom emoji -----
+
+    /// Reads every member's emoji set at background priority.
+    fn read_emoji(&mut self) {
+        if self.relay.is_none() || self.emoji_reading {
+            return;
+        }
+        self.emoji_reading = true;
+        if self.emoji.loading() {
+            self.publish();
+        }
+        let reader = self.reader.clone();
+        let commands = self.commands.clone();
+        self.runtime.spawn(async move {
+            let result = reader
+                .read(vec![catalog_filter()], ReadOptions::background())
+                .await;
+            let _ = commands.send(Message::EmojiRead(result));
+        });
+    }
+
     // ----- output -----
 
     fn publish(&mut self) {
@@ -1476,6 +1530,7 @@ impl Actor {
             typing: self.typing.snapshot().channels.clone(),
             thread_typing: self.typing.snapshot().threads.clone(),
             hidden_dms: self.hidden_dms.clone(),
+            emoji: self.emoji.snapshot(),
         };
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
@@ -1488,6 +1543,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.typing, &next.typing)
                 && Arc::ptr_eq(&current.thread_typing, &next.thread_typing)
                 && Arc::ptr_eq(&current.hidden_dms, &next.hidden_dms)
+                && Arc::ptr_eq(&current.emoji, &next.emoji)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);
