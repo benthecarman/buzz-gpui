@@ -1,7 +1,7 @@
 //! Every agent host the GUI manages: the one embedded in this process and any
 //! remote `buzzd` instances from the config file.
 
-use crate::config::{Config, CredentialsBackend, RemoteHost};
+use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
 use crate::runtime::Runtime;
 use buzz_host::api::{
     AgentsSnapshot, Harness, HostAnswer, HostAsk, HostEvent, HostProtocol, Request, Response,
@@ -34,7 +34,7 @@ impl Global for Hosts {}
 pub struct HostConnection {
     pub label: SharedString,
     /// `None` for the host inside this process.
-    pub address: Option<SharedString>,
+    pub remote: Option<RemoteHost>,
     pub state: ConnectionState,
     pub agents: AgentsSnapshot,
     pub harnesses: Option<Vec<Harness>>,
@@ -64,13 +64,16 @@ impl Hosts {
         };
         for remote in &config.hosts {
             match remote_connector(remote) {
-                Ok(connector) => hosts.push(HostConnection::new(
-                    remote.name.clone().into(),
-                    Some(remote.address.clone().into()),
-                    connector,
-                    remote_token(remote),
-                    cx,
-                )),
+                Ok(connector) => {
+                    let token = remote_token(remote);
+                    hosts.push(HostConnection::new(
+                        remote.name.clone().into(),
+                        Some(remote.clone()),
+                        connector,
+                        token,
+                        cx,
+                    ))
+                }
                 Err(error) => tracing::error!(host = %remote.name, %error, "invalid host"),
             }
         }
@@ -79,6 +82,93 @@ impl Hosts {
             _embedded: embedded,
         });
     }
+
+    fn remotes(&self, cx: &App) -> Vec<RemoteHost> {
+        self.hosts
+            .iter()
+            .filter_map(|host| host.read(cx).remote.clone())
+            .collect()
+    }
+
+    /// Saves a new remote host and connects to it. The token goes to the OS
+    /// keyring; without one it is kept in the config file instead, which
+    /// the returned host records in its `token` field.
+    pub fn add(name: &str, address: &str, token: &str, cx: &mut App) -> Result<RemoteHost, String> {
+        let (name, address, token) = (name.trim(), address.trim(), token.trim());
+        if name.is_empty() {
+            return Err("Enter a name for this host.".into());
+        }
+        if token.is_empty() {
+            return Err("Enter the host's token. Run `buzzd token` on that machine.".into());
+        }
+        let mut remote = RemoteHost {
+            name: name.into(),
+            address: address.into(),
+            token: None,
+        };
+        let connector = remote_connector(&remote)?;
+        let mut remotes = cx.global::<Self>().remotes(cx);
+        if remotes.iter().any(|other| other.address == address) {
+            return Err("That host is already added.".into());
+        }
+        let keyring = store_token(address, token);
+        if let Err(error) = &keyring {
+            tracing::warn!(
+                ?error,
+                "keyring unavailable; keeping the host token in the config file"
+            );
+            remote.token = Some(token.into());
+        }
+        remotes.push(remote.clone());
+        if let Err(error) = crate::config::save_hosts(&remotes) {
+            if keyring.is_ok() {
+                let _ = buzz_credential_store::delete(HOST_TOKEN_SERVICE, address);
+            }
+            return Err(error);
+        }
+        let connection = HostConnection::new(
+            name.to_string().into(),
+            Some(remote.clone()),
+            connector,
+            Some(token.into()),
+            cx,
+        );
+        cx.global_mut::<Self>().hosts.push(connection);
+        Ok(remote)
+    }
+
+    /// Disconnects from a remote host and forgets it and its token. Its
+    /// agents keep running on that machine.
+    pub fn remove(host: &Entity<HostConnection>, cx: &mut App) -> Result<(), String> {
+        let Some(remote) = host.read(cx).remote.clone() else {
+            return Err("This computer's host cannot be removed.".into());
+        };
+        let remotes: Vec<RemoteHost> = cx
+            .global::<Self>()
+            .remotes(cx)
+            .into_iter()
+            .filter(|other| other.address != remote.address)
+            .collect();
+        crate::config::save_hosts(&remotes)?;
+        match buzz_credential_store::delete(HOST_TOKEN_SERVICE, &remote.address) {
+            Ok(()) | Err(buzz_credential_store::Error::Absent) => {}
+            Err(error) => tracing::warn!(?error, "could not delete the host token"),
+        }
+        let id = host.entity_id();
+        cx.global_mut::<Self>()
+            .hosts
+            .retain(|host| host.entity_id() != id);
+        Ok(())
+    }
+}
+
+/// Replaces any token saved for this address.
+fn store_token(address: &str, token: &str) -> Result<(), buzz_credential_store::Error> {
+    match buzz_credential_store::delete(HOST_TOKEN_SERVICE, address) {
+        Ok(()) | Err(buzz_credential_store::Error::Absent) => {}
+        Err(error) => return Err(error),
+    }
+    buzz_credential_store::add(HOST_TOKEN_SERVICE, address, token.as_bytes())
 }
 
 fn start_embedded(
@@ -130,17 +220,18 @@ fn start_embedded(
 }
 
 fn remote_connector(host: &RemoteHost) -> Result<Arc<dyn Connector>, String> {
-    if let Some(address) = host.address.strip_prefix("tcp://") {
+    if let Some(address) = host.address.strip_prefix("tcp://")
+        && !address.is_empty()
+    {
         Ok(Arc::new(TcpConnector {
             address: address.into(),
         }))
-    } else if let Some(path) = host.address.strip_prefix("unix://") {
+    } else if let Some(path) = host.address.strip_prefix("unix://")
+        && !path.is_empty()
+    {
         Ok(Arc::new(UnixConnector { path: path.into() }))
     } else {
-        Err(format!(
-            "address {:?} must start with tcp:// or unix://",
-            host.address
-        ))
+        Err("Enter an address that starts with tcp:// or unix://.".into())
     }
 }
 
@@ -150,7 +241,7 @@ fn remote_token(host: &RemoteHost) -> Option<String> {
     if let Some(token) = &host.token {
         return Some(token.clone());
     }
-    buzz_credential_store::read(crate::config::HOST_TOKEN_SERVICE, &host.address)
+    buzz_credential_store::read(HOST_TOKEN_SERVICE, &host.address)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }
@@ -167,7 +258,7 @@ impl ClientHandler<HostProtocol> for Answers {
 impl HostConnection {
     fn new(
         label: SharedString,
-        address: Option<SharedString>,
+        remote: Option<RemoteHost>,
         connector: Arc<dyn Connector>,
         token: Option<String>,
         cx: &mut App,
@@ -186,7 +277,7 @@ impl HostConnection {
             let watch = Self::watch(&client, &runtime, cx);
             Self {
                 label,
-                address,
+                remote,
                 state: client.state().borrow().clone(),
                 agents: AgentsSnapshot::default(),
                 harnesses: None,
