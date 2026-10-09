@@ -291,6 +291,7 @@ impl Composer {
         !self.sending
             && self.can_send
             && self.uploads_ready()
+            && self.input.read(cx).value().chars().count() <= MAX_CHARS
             && (self.has_text(cx) || (!self.attachments.is_empty() && self.editing.is_none()))
     }
 
