@@ -941,6 +941,8 @@ dependencies = [
  "buzz-agent-controller",
  "buzz-credential-store",
  "buzz-host-rpc",
+ "buzz-identity",
+ "buzz-relay-client",
  "futures",
  "reqwest",
  "secp256k1 0.31.1",

@@ -132,7 +132,7 @@ private channel; `hidden` marks a DM.
 - **Disabled features.** The git object-store probe
   (`BUZZ_GIT_CONFORMANCE_PROBE=false`) and push are off.
 
-## TLS relay
+## TLS relay and the agent end-to-end test
 
 The agent controller accepts only `wss://` relays, so agents need a TLS relay.
 `up-tls` runs one next to the plain relay and does not change it:
@@ -167,6 +167,41 @@ curl --cacert .test-relay/tls/ca.pem https://localhost:53443/_readiness
 SSL_CERT_FILE=.test-relay/tls/ca-bundle.pem BUZZ_RELAY_URL=https://localhost:53443 \
   BUZZ_PRIVATE_KEY=$(jq -r .identities.alice.sk_hex .test-relay/identities.json) \
   .test-relay/buzz/target/debug/buzz channels list
+```
+
+`crates/host/tests/agent_e2e.rs` uses the TLS relay. It starts an
+`AgentHost`, creates an agent as alice's, waits for the host to publish the
+agent's profile, adds the agent to `#general`, and starts it. The agent's
+harness is `crates/host/tests/fixtures/fake_acp_agent.py`, a fake ACP agent
+with no model. The test mentions the agent in `#general` and waits for the
+reply `echo: <mention>`, which the fake agent posts with the `buzz` CLI.
+Then it stops and deletes the agent, and removes it from `#general`. The test
+sets `HOME` to a temporary directory with `.local/bin/buzz-acp`, so the
+controller launches the `buzz-acp` built by `up-tls`, not an installed one.
+It also sets `SSL_CERT_FILE` itself.
+
+```sh
+scripts/test-relay.sh up-tls
+BUZZ_TEST_RELAY_TLS=$PWD/.test-relay nix develop --command \
+  cargo test -p buzz-host --test agent_e2e
+```
+
+Without `BUZZ_TEST_RELAY_TLS` the test is skipped. The test target has no
+libtest harness (`harness = false`), because the controller starts the test
+binary again as the agent supervisor.
+
+**NixOS has no `/bin/ps`.** The agent controller lists an agent's processes
+with `/bin/ps` to confirm that the agent stopped. Without it, Stop fails and
+the supervisor stays parked, so the test refuses to run. Until the controller
+is fixed, run the test binary in a user and mount namespace that provides
+`/bin/ps`:
+
+```sh
+BIN=$(nix develop --command cargo test -p buzz-host --test agent_e2e --no-run \
+  --message-format=json 2>/dev/null | jq -r 'select(.target.name == "agent_e2e") | .executable // empty')
+BUZZ_TEST_RELAY_TLS=$PWD/.test-relay unshare -rm sh -c \
+  'mount -t tmpfs tmpfs /bin && ln -s "$1" /bin/sh && ln -s "$2" /bin/ps && shift 2 && exec "$@"' \
+  sh "$(readlink -f /bin/sh)" "$(command -v ps)" "$BIN"
 ```
 
 ## Using the upstream tools directly
