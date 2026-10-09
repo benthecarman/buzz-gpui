@@ -23,3 +23,58 @@ Project Authors. Licensed under the SIL Open Font License 1.1; see
 ([JetBrains/JetBrainsMono](https://github.com/JetBrains/JetBrainsMono)),
 unchanged. Copyright 2020 The JetBrains Mono Project Authors. Licensed under
 the SIL Open Font License 1.1; see `assets/fonts/jetbrains-mono/OFL.txt`.
+
+## Icons
+
+`assets/icons/tabler/` holds unchanged SVGs from Tabler Icons 3.46.0
+([tabler/tabler-icons](https://github.com/tabler/tabler-icons)), the set
+buzz-app's icon gateway exports. MIT License, Copyright (c) 2020-2026 Paweł
+Kuna; see `assets/icons/tabler/LICENSE`.
+
+`assets/icons/custom/` holds artwork from buzz-app's design system
+(Apache-2.0, © Block, Inc.): the "Send to channel" and filled notification
+glyphs from `src/shared/design-system/icons/`, and the avatar squircle and
+presence-cutout shapes from `src/shared/design-system/styles/`, redrawn with
+`currentColor` fills.
+
+## Harness brand marks
+
+The marks in `assets/icons/brand/` identify agent harnesses on the Agents
+page. They are reused from buzz-app's
+`src/shared/design-system/icons/HarnessLogos.tsx`, which documents their
+origins in its `NOTICE.md`:
+
+- `goose.svg`: Block Goose mark from
+  [block/goose](https://github.com/block/goose),
+  `documentation/static/img/goose.svg`. Apache-2.0 © Block, Inc. The fill is
+  `currentColor`.
+- `pi.svg`: Pi favicon from
+  [earendil-works/pi-website](https://github.com/earendil-works/pi-website),
+  `src/favicon.svg`, unchanged. MIT License, Copyright (c) 2026 Earendil Inc.
+  and contributors.
+- `claude.png`: Claude Code mark, reused unchanged from Block Buzz. Claude is
+  a trademark of Anthropic.
+- `hermes.png`: Hermes Agent mark from
+  [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent),
+  as cropped and resized by Block Buzz. MIT License, Copyright (c) 2025 Nous
+  Research.
+
+The MIT License terms for Pi and Hermes:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
