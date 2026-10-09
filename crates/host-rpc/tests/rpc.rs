@@ -381,3 +381,137 @@ async fn lagging_client_is_told_to_resync() {
     .await;
     assert!(resync.is_ok());
 }
+
+/// The same protocol a release later: one more request, host request and
+/// event.
+struct Newer;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum NewerRequest {
+    Echo(String),
+    AskClient(String),
+    Shiny(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum NewerAsk {
+    Attest(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum NewerEvent {
+    Known(String),
+    Shiny { shiny: u32 },
+}
+
+impl Protocol for Newer {
+    type ClientRequest = NewerRequest;
+    type ClientResponse = String;
+    type HostRequest = NewerAsk;
+    type HostResponse = String;
+    type Event = NewerEvent;
+}
+
+struct NewerHost {
+    events: broadcast::Sender<(u64, NewerEvent)>,
+}
+
+impl HostHandler<Newer> for NewerHost {
+    fn info(&self) -> HostInfo {
+        Host::new(1).info()
+    }
+
+    fn events(&self) -> EventSource<Newer> {
+        self.events.subscribe()
+    }
+
+    fn handle(
+        &self,
+        peer: Peer<Newer>,
+        request: NewerRequest,
+    ) -> BoxFuture<'static, Result<String, RpcError>> {
+        Box::pin(async move {
+            match request {
+                NewerRequest::AskClient(text) => peer.request(NewerAsk::Attest(text)).await,
+                NewerRequest::Echo(text) | NewerRequest::Shiny(text) => Ok(text),
+            }
+        })
+    }
+}
+
+struct NewerSigner;
+
+impl ClientHandler<Newer> for NewerSigner {
+    fn handle(&self, _: NewerAsk) -> BoxFuture<'static, Result<String, RpcError>> {
+        Box::pin(async move { Ok(String::new()) })
+    }
+}
+
+#[tokio::test]
+async fn newer_client_requests_fail_without_disconnecting() {
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        Host::new(64),
+        ServerOptions::default(),
+    ));
+    let client: HostClient<Newer> = HostClient::spawn(
+        &tokio::runtime::Handle::current(),
+        Arc::new(connector),
+        Arc::new(NewerSigner),
+        options(None),
+    );
+    let mut events = client.events();
+    wait_for(&mut client.state(), connected).await;
+    assert!(matches!(
+        client.request(NewerRequest::Shiny("x".into())).await,
+        Err(RpcError::Failed(_))
+    ));
+    assert_eq!(
+        client
+            .request(NewerRequest::Echo("hi".into()))
+            .await
+            .unwrap(),
+        "hi"
+    );
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, ClientEvent::Disconnected), "{event:?}");
+    }
+}
+
+#[tokio::test]
+async fn newer_host_requests_and_events_do_not_disconnect() {
+    let host = Arc::new(NewerHost {
+        events: broadcast::channel(64).0,
+    });
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Newer, _>(
+        listener,
+        host.clone(),
+        ServerOptions::default(),
+    ));
+    let client = client(Arc::new(connector), None);
+    let mut events = client.events();
+    wait_for(&mut client.state(), connected).await;
+    assert!(matches!(
+        client.request(Request::AskClient("key".into())).await,
+        Err(RpcError::Failed(_))
+    ));
+    let _ = host.events.send((1, NewerEvent::Shiny { shiny: 1 }));
+    let _ = host.events.send((2, NewerEvent::Known("known".into())));
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await.unwrap() {
+                ClientEvent::Connected(_) => {}
+                other => return other,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    match event {
+        ClientEvent::Event { seq, body } => assert_eq!((seq, body.as_str()), (2, "known")),
+        other => panic!("unexpected {other:?}"),
+    }
+}

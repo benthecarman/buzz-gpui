@@ -1,4 +1,4 @@
-use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION};
+use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION, Unknown};
 use crate::transport::Connector;
 use crate::{Protocol, RpcError};
 use futures::future::BoxFuture;
@@ -296,7 +296,17 @@ async fn session<P: Protocol>(
                 dead.as_mut().reset(tokio::time::Instant::now() + options.dead_after);
                 let frame = match frame::decode::<Frame<P>>(&bytes) {
                     Ok(frame) => frame,
-                    Err(error) => return SessionEnd::Lost(error.to_string()),
+                    Err(error) => match frame::peek(&bytes) {
+                        Some(Unknown::Request(id)) => {
+                            let body = Err(frame::unsupported());
+                            if outgoing.send(Frame::HostResponse { id, body }).await.is_err() {
+                                return SessionEnd::Lost("the connection closed".into());
+                            }
+                            continue;
+                        }
+                        Some(Unknown::Event) => continue,
+                        None => return SessionEnd::Lost(error.to_string()),
+                    },
                 };
                 match frame {
                     Frame::ClientResponse { id, body } => {

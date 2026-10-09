@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-/// Bumped on any change the other side cannot ignore. Adding optional fields
-/// or new enum variants that old peers never receive does not need a bump.
+/// Bumped on any change the other side cannot ignore. Adding optional fields,
+/// requests or events does not need a bump: a peer answers a request it
+/// cannot read with an error and skips an event it cannot read.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 const MAX_FRAME: usize = 16 << 20;
@@ -91,6 +92,48 @@ pub(crate) fn encode<T: Message>(value: &T) -> io::Result<Bytes> {
 
 pub(crate) fn decode<T: Message>(bytes: &[u8]) -> io::Result<T> {
     rmp_serde::from_slice(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// What can still be read from a frame that did not decode, typically
+/// because a newer peer sent a request or event this side does not know.
+pub(crate) enum Unknown {
+    /// A request; answered with an error so the connection stays up.
+    Request(u64),
+    /// An event; skipped.
+    Event,
+}
+
+/// Frames are maps keyed by their variant, so the envelope of a request or
+/// event decodes whatever its body is.
+pub(crate) fn peek(bytes: &[u8]) -> Option<Unknown> {
+    #[derive(Deserialize)]
+    struct Id {
+        id: u64,
+    }
+    #[derive(Deserialize)]
+    #[allow(non_snake_case)]
+    struct Envelope {
+        ClientRequest: Option<Id>,
+        HostRequest: Option<Id>,
+        Event: Option<serde::de::IgnoredAny>,
+    }
+    let envelope: Envelope = rmp_serde::from_slice(bytes).ok()?;
+    match envelope {
+        Envelope {
+            ClientRequest: Some(Id { id }),
+            ..
+        }
+        | Envelope {
+            HostRequest: Some(Id { id }),
+            ..
+        } => Some(Unknown::Request(id)),
+        Envelope { Event: Some(_), .. } => Some(Unknown::Event),
+        _ => None,
+    }
+}
+
+pub(crate) fn unsupported() -> RpcError {
+    RpcError::Failed("The other side does not support this request; update it.".into())
 }
 
 pub(crate) async fn send<P: Protocol>(wire: &mut Wire, frame: &Frame<P>) -> io::Result<()> {

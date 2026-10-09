@@ -1,4 +1,4 @@
-use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION, Welcome, Wire};
+use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION, Unknown, Welcome, Wire};
 use crate::transport::{BoxConnection, Listener};
 use crate::{Protocol, RpcError};
 use futures::future::BoxFuture;
@@ -184,7 +184,23 @@ async fn run_connection<P: Protocol>(
                     None => return Ok(()),
                 };
                 idle.as_mut().reset(tokio::time::Instant::now() + options.idle_timeout);
-                match frame::decode::<Frame<P>>(&bytes)? {
+                let frame = match frame::decode::<Frame<P>>(&bytes) {
+                    Ok(frame) => frame,
+                    Err(error) => match frame::peek(&bytes) {
+                        Some(Unknown::Request(id)) => Frame::ClientResponse {
+                            id,
+                            body: Err(frame::unsupported()),
+                        },
+                        _ => return Err(error),
+                    },
+                };
+                match frame {
+                    // Only made above, for a request this host cannot read.
+                    Frame::ClientResponse { id, body } => {
+                        if outgoing.send(Frame::ClientResponse { id, body }).await.is_err() {
+                            return Ok(());
+                        }
+                    }
                     Frame::ClientRequest { id, body } => {
                         let response = handler.handle(peer.clone(), body);
                         let outgoing = outgoing.clone();
