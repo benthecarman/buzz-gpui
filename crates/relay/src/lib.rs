@@ -40,4 +40,4 @@ pub use sidebar::{
 pub use socket::{
     Filter, PublishError, RelaySocket, SocketOptions, SocketState, Subscription, SubscriptionEvent,
 };
-pub use store::{Partition, Store, StoreError};
+pub use store::{Partition, SqliteJournal, Store, StoreError};

@@ -508,3 +508,231 @@ mod tests {
         assert!(store.load_head(&a, "three", 60_000).unwrap().is_some());
     }
 }
+
+/// The outbox journal for one partition (spec §6.5, §7.5). Every commit
+/// replaces the partition's rows with the whole journal in one
+/// transaction, so a crash leaves either the old journal or the new one.
+#[derive(Clone)]
+pub struct SqliteJournal {
+    store: Store,
+    partition: Partition,
+}
+
+impl SqliteJournal {
+    pub fn new(store: Store, partition: Partition) -> Self {
+        Self { store, partition }
+    }
+}
+
+impl crate::outbox::Journal for SqliteJournal {
+    fn load(
+        &self,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<crate::outbox::Operation>, String>> {
+        let this = self.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || this.load_blocking())
+                .await
+                .map_err(|_| "Outbox load was interrupted".to_string())?
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn commit(
+        &self,
+        operations: Vec<crate::outbox::Operation>,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let this = self.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || this.commit_blocking(&operations))
+                .await
+                .map_err(|_| "Outbox commit was interrupted".to_string())?
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl SqliteJournal {
+    fn load_blocking(&self) -> Result<Vec<crate::outbox::Operation>, StoreError> {
+        use crate::outbox::{Delivery, Operation, Recovery};
+        self.store.with(|c| {
+            let mut query = c.prepare(
+                "SELECT template_json, signed_json, delivery, error, recovery_key, recovery_value,
+                        acknowledged, guarded
+                 FROM outbox_ops WHERE origin = ?1 AND viewer = ?2 ORDER BY enqueued_seq",
+            )?;
+            let rows = query
+                .query_map(
+                    params![self.partition.origin, self.partition.viewer],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, bool>(6)?,
+                            row.get::<_, bool>(7)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(
+                    |(template, signed, delivery, error, key, value, acknowledged, guarded)| {
+                        let corrupt = |what: &str| StoreError::Corrupt(format!("outbox {what}"));
+                        let delivery: Delivery =
+                            serde_json::from_value(serde_json::Value::String(delivery))
+                                .map_err(|_| corrupt("delivery"))?;
+                        Ok(Operation {
+                            event: serde_json::from_str(&template)
+                                .map_err(|_| corrupt("template"))?,
+                            signed: signed
+                                .map(|json| serde_json::from_str(&json))
+                                .transpose()
+                                .map_err(|_| corrupt("signed event"))?,
+                            recovery: match (key, value) {
+                                (Some(key), Some(value)) => Some(Recovery { key, value }),
+                                (None, None) => None,
+                                _ => return Err(corrupt("recovery")),
+                            },
+                            acknowledged,
+                            guarded,
+                            delivery,
+                            error,
+                        })
+                    },
+                )
+                .collect()
+        })
+    }
+
+    fn commit_blocking(&self, operations: &[crate::outbox::Operation]) -> Result<(), StoreError> {
+        self.store.with(|c| {
+            let tx = c.transaction()?;
+            tx.execute(
+                "DELETE FROM outbox_ops WHERE origin = ?1 AND viewer = ?2",
+                params![self.partition.origin, self.partition.viewer],
+            )?;
+            {
+                let mut insert = tx.prepare(
+                    "INSERT INTO outbox_ops (origin, viewer, event_id, kind, created_at, channel_id,
+                       template_json, signed_json, delivery, error, recovery_key, recovery_value,
+                       acknowledged, guarded, confirmed, enqueued_seq, bytes, updated_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                )?;
+                let now = now_ms();
+                for (seq, op) in operations.iter().enumerate() {
+                    let template = serde_json::to_string(&op.event)
+                        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                    let signed = op
+                        .signed
+                        .as_ref()
+                        .map(|event| event.as_json());
+                    let delivery = serde_json::to_value(op.delivery)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    let bytes = template.len() + signed.as_ref().map_or(0, String::len);
+                    let confirmed = matches!(op.delivery, crate::outbox::Delivery::Seen)
+                        && op.recovery.is_none();
+                    insert.execute(params![
+                        self.partition.origin,
+                        self.partition.viewer,
+                        op.id().to_hex(),
+                        i64::from(op.kind()),
+                        op.created_at() as i64,
+                        op.channel(),
+                        template,
+                        signed,
+                        delivery,
+                        op.error,
+                        op.recovery.as_ref().map(|r| r.key.as_str()),
+                        op.recovery.as_ref().map(|r| r.value.as_str()),
+                        op.acknowledged,
+                        op.guarded,
+                        confirmed,
+                        seq as i64,
+                        bytes as i64,
+                        now,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+    use crate::outbox::{Delivery, Journal, Operation, Recovery};
+    use buzz_identity::{Identity, Purpose};
+
+    fn operation(identity: &Identity, content: &str, delivery: Delivery, sign: bool) -> Operation {
+        let unsigned = identity
+            .template(
+                Purpose::Content,
+                9,
+                1_700_000_000,
+                vec![vec!["h".into(), "general".into()]],
+                content.into(),
+            )
+            .unwrap();
+        Operation {
+            signed: sign.then(|| identity.sign(Purpose::Content, unsigned.clone()).unwrap()),
+            event: unsigned,
+            recovery: None,
+            acknowledged: false,
+            guarded: false,
+            delivery,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn commits_replace_the_whole_journal_in_order() {
+        let store = Store::in_memory().unwrap();
+        let partition = Partition {
+            origin: "https://a.example".into(),
+            viewer: "ab".repeat(32),
+        };
+        let journal = SqliteJournal::new(store.clone(), partition.clone());
+        let identity = Identity::ephemeral();
+        let mut first = operation(&identity, "one", Delivery::Unknown, true);
+        first.recovery = Some(Recovery {
+            key: "draft:general".into(),
+            value: "{}".into(),
+        });
+        let second = operation(&identity, "two", Delivery::Sending, false);
+        journal
+            .commit(vec![first.clone(), second.clone()])
+            .await
+            .unwrap();
+
+        let loaded = journal.load().await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id(), first.id());
+        assert_eq!(
+            loaded[0].signed.as_ref().unwrap().sig,
+            first.signed.as_ref().unwrap().sig
+        );
+        assert_eq!(loaded[0].recovery, first.recovery);
+        assert_eq!(loaded[1].delivery, Delivery::Sending);
+        assert!(loaded[1].signed.is_none());
+
+        journal.commit(vec![second]).await.unwrap();
+        assert_eq!(journal.load().await.unwrap().len(), 1);
+
+        // Another partition is untouched by this one's commits.
+        let other = SqliteJournal::new(
+            store,
+            Partition {
+                origin: "https://b.example".into(),
+                ..partition
+            },
+        );
+        assert!(other.load().await.unwrap().is_empty());
+    }
+}
