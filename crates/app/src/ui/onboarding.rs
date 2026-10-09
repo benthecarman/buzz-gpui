@@ -25,10 +25,17 @@ impl Onboarding {
             Step::Community => "wss://relay.example.com",
         };
         let field = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        // Why the saved identity could not be read, e.g. a locked keyring.
+        let error = match (&cx.global::<AppState>().identity, step) {
+            (crate::community::IdentityState::Error(error), Step::Identity) => {
+                Some(error.clone().into())
+            }
+            _ => None,
+        };
         Self {
             step,
             field,
-            error: None,
+            error,
             busy: false,
         }
     }
@@ -63,7 +70,7 @@ impl Onboarding {
 
 impl Render for Onboarding {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = cx.colors().clone();
+        let c = *cx.colors();
         let (title, detail) = match self.step {
             Step::Identity => (
                 "Set up your Buzz identity",

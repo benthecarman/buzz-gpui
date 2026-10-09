@@ -17,9 +17,12 @@ pub enum Page {
 pub struct SidebarProps {
     pub page: Page,
     pub selected: Option<String>,
-    pub on_select_channel: Arc<dyn Fn(&ChannelSummary, &mut Window, &mut App)>,
-    pub on_select_page: Arc<dyn Fn(Page, &mut Window, &mut App)>,
+    pub on_select_channel: ChannelHandler,
+    pub on_select_page: PageHandler,
 }
+
+pub type ChannelHandler = Arc<dyn Fn(&ChannelSummary, &mut Window, &mut App)>;
+pub type PageHandler = Arc<dyn Fn(Page, &mut Window, &mut App)>;
 
 /// DM label: the other participants' names, or "Notes to self".
 pub fn channel_label(channel: &ChannelSummary, profiles: &Profiles) -> SharedString {

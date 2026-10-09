@@ -8,7 +8,6 @@ use super::sidebar::{self, Page, SidebarProps};
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use buzz_relay_client::ChannelSummary;
-use buzz_relay_client::fold::MessageRow;
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonShape, IconButtonSize,
     IconName, MaterialStyled, ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
@@ -119,10 +118,9 @@ impl Workspace {
         community.read(cx).remember_channel(&channel.id, cx);
         self.thread = None;
         let weak = cx.entity().downgrade();
-        let open_thread: Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)> =
-            Arc::new(move |row, window, cx| {
-                let _ = weak.update(cx, |this, cx| this.open_thread(row.id, window, cx));
-            });
+        let open_thread: super::channel::OpenThread = Arc::new(move |row, window, cx| {
+            let _ = weak.update(cx, |this, cx| this.open_thread(row.id, window, cx));
+        });
         let page =
             cx.new(|cx| ChannelPage::new(community, channel.clone(), open_thread, window, cx));
         let composer = page.read(cx).composer();
@@ -283,7 +281,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = cx.colors().clone();
+        let c = *cx.colors();
         let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding {
             onboarding.clone().into_any_element()
         } else {
