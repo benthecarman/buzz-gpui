@@ -61,6 +61,36 @@ pub enum Request {
     PublishProfile {
         id: String,
     },
+    /// Lists the models the draft's harness and provider offer. With `id`,
+    /// the draft is resolved against that saved agent at `revision`, so its
+    /// saved (write-only) environment applies; without, against the host's
+    /// agent defaults.
+    Models {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        revision: u64,
+        edit: AgentEdit,
+    },
+    /// The host's agent defaults: what agents use for choices they leave
+    /// empty.
+    Defaults,
+    SaveDefaults {
+        edit: DefaultsEdit,
+    },
+    /// Lists the agents an earlier Buzz install on the host could import
+    /// into `destination` (a relay URL). The returned token names this
+    /// preview in [`Request::ImportCommit`].
+    ImportPreview {
+        source: ImportSource,
+        destination: String,
+    },
+    /// Imports the chosen candidates, stopped. Candidates without an owner
+    /// attestation are attested by the GUI through [`HostAsk::AttestAgent`].
+    ImportCommit {
+        token: String,
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,15 +98,24 @@ pub enum Response {
     Agents(AgentsSnapshot),
     Harnesses(Vec<Harness>),
     Prepared { id: String, pubkey: String },
+    Models(ModelCatalog),
+    Defaults(AgentDefaults),
+    ImportPreview(ImportPreview),
 }
 
-/// Requests the host makes of the GUI. None yet; signing requests for
-/// import and log access will go here.
+/// Requests the host makes of the GUI, which holds the human key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum HostAsk {}
+pub enum HostAsk {
+    /// Sign the NIP-OA owner attestation for an agent key being imported.
+    /// The GUI only answers for keys it asked to import.
+    AttestAgent { agent_pubkey: String },
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum HostAnswer {}
+pub enum HostAnswer {
+    /// The `auth` tag, JSON encoded.
+    Attestation(String),
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HostEvent {
@@ -217,4 +256,82 @@ pub enum HarnessKind {
     Claude,
     Pi,
     Hermes,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelCatalog {
+    pub models: Vec<ModelOption>,
+    /// An environment override picks the model, so a choice here is ignored.
+    pub model_overridden: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelOption {
+    /// For Pi, `provider/model`.
+    pub id: String,
+    pub name: String,
+}
+
+/// Mirrors the controller's `AgentDefaultsView`: environment keys only.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentDefaults {
+    /// `buzz-agent`, `goose` or `pi`.
+    pub harness: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    pub session_policy: Option<SessionPolicy>,
+    pub environment_keys: Vec<String>,
+}
+
+/// Mirrors the controller's `AgentDefaultsEdit`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultsEdit {
+    pub harness: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    /// `None` keeps the saved choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_policy: Option<SessionPolicy>,
+    /// `None` values remove a saved variable. Values are write-only.
+    pub environment: BTreeMap<String, Option<String>>,
+}
+
+/// Which earlier Buzz install to import from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportSource {
+    Installed,
+    Development,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImportPreview {
+    /// Empty when nothing can be imported from this preview.
+    pub token: String,
+    pub source_path: String,
+    pub candidates: Vec<ImportCandidate>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImportCandidate {
+    pub id: String,
+    pub pubkey: String,
+    pub relay_url: String,
+    pub name: String,
+    /// The imported prompt drops a team section old Buzz baked into it.
+    pub strips_team_instructions: bool,
+    /// The key is already saved on this host, so it cannot be imported.
+    pub imported: bool,
+    /// The old record has no owner attestation; importing asks the GUI to
+    /// sign one.
+    pub needs_attestation: bool,
 }

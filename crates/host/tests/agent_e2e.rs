@@ -92,6 +92,7 @@ async fn lifecycle(f: Fixture, scratch: &Path) {
         workspace: state.join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.join("keys")).unwrap()),
         watch_interval: Duration::from_millis(200),
+        legacy_dir: None,
     })
     .unwrap();
     let log = |id: &str| state.join(format!("state/agent-controller/logs/{id}.log"));

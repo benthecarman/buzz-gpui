@@ -208,6 +208,7 @@ fn start_embedded(
             .ok_or("No home directory")?,
         credentials,
         watch_interval: Duration::from_secs(1),
+        legacy_dir: dirs::data_dir(),
     })?;
     let (connector, listener) = transport::memory();
     let server = runtime.spawn(buzz_host_rpc::serve(
@@ -246,12 +247,12 @@ fn remote_token(host: &RemoteHost) -> Option<String> {
         .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }
 
-/// The host never asks the GUI anything yet.
+/// Nothing is signed for a host yet.
 struct Answers;
 
 impl ClientHandler<HostProtocol> for Answers {
-    fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        match ask {}
+    fn handle(&self, _: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
+        Box::pin(async { Err(RpcError::Failed("This app did not ask to sign that".into())) })
     }
 }
 

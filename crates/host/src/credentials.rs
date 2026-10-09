@@ -20,8 +20,21 @@ impl KeyringCredentials {
 }
 
 impl Credentials for KeyringCredentials {
-    fn read_legacy(&self, _: LegacySource, _: &str) -> Result<Secret, String> {
-        Err(LEGACY_UNSUPPORTED.into())
+    /// Old Buzz keeps every agent key in one JSON map, `{"agent:<pubkey>":
+    /// nsec}`, under the account `secrets` of its own service.
+    fn read_legacy(&self, source: LegacySource, pubkey: &str) -> Result<Secret, String> {
+        let bytes = buzz_credential_store::read(source.keyring_service(), "secrets")
+            .map_err(store_message)?;
+        let mut map: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&bytes).map_err(|_| "Saved agent key is corrupt")?;
+        let key = map
+            .get(&format!("agent:{pubkey}"))
+            .ok_or_else(|| "The old Buzz install has no key for this agent".to_string())
+            .and_then(|value| Secret::parse(value, pubkey));
+        for value in map.values_mut() {
+            zeroize::Zeroize::zeroize(value);
+        }
+        key
     }
 
     fn read(&self, id: &str, pubkey: &str) -> Result<Option<Secret>, String> {

@@ -105,6 +105,7 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
         },
         credentials,
         watch_interval: Duration::from_secs(1),
+        legacy_dir: dirs::data_dir(),
     })
     .map_err(anyhow::Error::msg)?;
     let handler = Arc::new(RpcHandler(host));

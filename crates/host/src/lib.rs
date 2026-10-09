@@ -8,13 +8,20 @@
 pub mod api;
 pub mod credentials;
 pub mod harness;
+mod import;
+mod models;
 mod profile;
 
-use api::{AgentAction, AgentsSnapshot, HostEvent, HostProtocol, Request, Response};
+use api::{
+    AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
+    ImportCandidate, ImportPreview, Request, Response,
+};
 pub use buzz_agent_controller::Credentials;
-use buzz_agent_controller::{Action, Controller, NewAgent, RuntimeBundle, Store};
+use buzz_agent_controller::{Action, Controller, Imports, NewAgent, RuntimeBundle, Store};
 use buzz_host_rpc::{EventSource, HostHandler, HostInfo, Peer, RpcError};
 use futures::future::BoxFuture;
+pub use import::Asker;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -36,6 +43,9 @@ pub struct HostConfig {
     pub credentials: Arc<dyn Credentials>,
     /// How often process status is checked for changes nobody requested.
     pub watch_interval: Duration,
+    /// The platform data directory an earlier Buzz install keeps its agent
+    /// library in (`~/.local/share` on Linux). `None` disables import.
+    pub legacy_dir: Option<PathBuf>,
 }
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
@@ -56,6 +66,11 @@ struct Owner {
     workspace: PathBuf,
     /// The pending create: request ID and its generated key.
     creating: Option<(String, Arc<NewAgent>)>,
+    imports: Imports,
+    /// The import preview a commit must match.
+    previewed: Option<import::Previewed>,
+    legacy_dir: Option<PathBuf>,
+    state_dir: PathBuf,
     last: Option<AgentsSnapshot>,
     seq: u64,
     events: broadcast::Sender<(u64, HostEvent)>,
@@ -85,6 +100,10 @@ impl AgentHost {
             credentials: config.credentials,
             workspace: config.workspace,
             creating: None,
+            imports: Imports::default(),
+            previewed: None,
+            legacy_dir: config.legacy_dir,
+            state_dir: config.state_dir,
             last: None,
             seq: 0,
             events: events.clone(),
@@ -138,8 +157,45 @@ impl AgentHost {
             .map_err(RpcError::Failed)
     }
 
+    /// Serves a request that needs nothing from the GUI. Imports that need
+    /// an owner attestation fail; use [`Self::request_with`].
     pub async fn request(&self, request: Request) -> Result<Response, RpcError> {
+        self.request_with(request, None).await
+    }
+
+    /// Serves a request; `asker` reaches the GUI that sent it.
+    pub async fn request_with(
+        &self,
+        request: Request,
+        asker: Option<Arc<dyn Asker>>,
+    ) -> Result<Response, RpcError> {
         match request {
+            Request::Models { id, revision, edit } => {
+                self.models(id, revision, edit).await.map(Response::Models)
+            }
+            Request::Defaults => {
+                self.run(|owner| owner.defaults().map(Response::Defaults))
+                    .await
+            }
+            Request::SaveDefaults { edit } => {
+                self.run(move |owner| {
+                    let json = serde_json::to_value(&edit).map_err(|_| "Invalid agent defaults")?;
+                    let edit: buzz_agent_controller::AgentDefaultsEdit =
+                        serde_json::from_value(json)
+                            .map_err(|error| format!("Invalid agent defaults: {error}"))?;
+                    owner.controller.save_defaults(edit)?;
+                    owner.defaults().map(Response::Defaults)
+                })
+                .await
+            }
+            Request::ImportPreview {
+                source,
+                destination,
+            } => {
+                self.run(move |owner| owner.import_preview(source, destination))
+                    .await
+            }
+            Request::ImportCommit { token, ids } => self.import_commit(token, ids, asker).await,
             Request::Agents => {
                 self.run(|owner| owner.snapshot().map(Response::Agents))
                     .await
@@ -301,6 +357,171 @@ impl AgentHost {
     }
 }
 
+fn failed(message: impl Into<String>) -> RpcError {
+    RpcError::Failed(message.into())
+}
+
+impl AgentHost {
+    /// Model contexts come from the controller on its thread; the harness
+    /// then runs on tokio, so a slow lookup never blocks other requests.
+    async fn models(
+        &self,
+        id: Option<String>,
+        revision: u64,
+        edit: api::AgentEdit,
+    ) -> Result<api::ModelCatalog, RpcError> {
+        let lookup = models::lookup(&edit.harness.command);
+        match lookup {
+            models::Lookup::Databricks => {
+                return Err(failed(
+                    "Buzz Agent lists models only for Databricks, which needs a sign-in this \
+                     host cannot run yet. Enter a model ID.",
+                ));
+            }
+            models::Lookup::None => {
+                return Err(failed(
+                    "This harness does not list its models. Enter a model ID.",
+                ));
+            }
+            models::Lookup::Goose | models::Lookup::Pi => {}
+        }
+        // Login-shell PATH discovery blocks for up to ~15 s, once.
+        tokio::task::spawn_blocking(buzz_agent_controller::prepare_tools_path)
+            .await
+            .map_err(|_| failed("Could not find installed tools"))?;
+        match lookup {
+            models::Lookup::Goose => {
+                let context = self
+                    .run(move |owner| {
+                        let edit = owner.draft(&edit)?;
+                        match id {
+                            Some(id) => owner.controller.goose_model_context(&id, revision, edit),
+                            None => {
+                                let edit = owner.controller.effective_draft(edit)?;
+                                owner.controller.draft_goose_model_context(edit)
+                            }
+                        }
+                    })
+                    .await?;
+                models::goose(context).await.map_err(RpcError::Failed)
+            }
+            _ => {
+                let context = self
+                    .run(move |owner| {
+                        let edit = owner.draft(&edit)?;
+                        match id {
+                            Some(id) => owner.controller.pi_model_context(&id, revision, edit),
+                            None => Controller::draft_pi_model_context(
+                                owner.controller.effective_draft(edit)?,
+                            ),
+                        }
+                    })
+                    .await?;
+                models::pi(context).await.map_err(RpcError::Failed)
+            }
+        }
+    }
+
+    /// Imports from the previewed source. Candidates without an owner
+    /// attestation get one signed by the GUI, then import from a staged copy
+    /// of the source that carries it.
+    async fn import_commit(
+        &self,
+        token: String,
+        ids: Vec<String>,
+        asker: Option<Arc<dyn Asker>>,
+    ) -> Result<Response, RpcError> {
+        let selected = ids.clone();
+        let pending = self
+            .run(move |owner| {
+                let previewed = owner
+                    .previewed
+                    .as_ref()
+                    .filter(|previewed| previewed.token == token && !token.is_empty())
+                    .ok_or("Import preview expired; choose the source again")?;
+                Ok(selected
+                    .iter()
+                    .filter_map(|id| previewed.unattested.get(id).cloned())
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        let mut attestations = BTreeMap::new();
+        if !pending.is_empty() {
+            let asker = asker.ok_or_else(|| {
+                failed("Importing these agents needs your owner attestation; import from the app")
+            })?;
+            for pubkey in pending {
+                let answer = asker
+                    .ask(HostAsk::AttestAgent {
+                        agent_pubkey: pubkey.clone(),
+                    })
+                    .await?;
+                let HostAnswer::Attestation(tag) = answer;
+                import::verify_attestation(&tag, &pubkey).map_err(RpcError::Failed)?;
+                attestations.insert(pubkey, tag);
+            }
+        }
+        let (prepared, credentials, staging) = self
+            .run(move |owner| {
+                let previewed = owner
+                    .previewed
+                    .take()
+                    .ok_or("Import preview expired; choose the source again")?;
+                let staging = if attestations.is_empty() {
+                    let prepared = owner.controller.prepare_import(
+                        &mut owner.imports,
+                        &previewed.token,
+                        &ids,
+                    )?;
+                    owner.imports.discard();
+                    return Ok((prepared, owner.credentials.clone(), None));
+                } else {
+                    let root = owner.state_dir.join("import");
+                    std::fs::create_dir_all(&root).map_err(|_| "Could not stage the import")?;
+                    tempfile::TempDir::new_in(&root).map_err(|_| "Could not stage the import")?
+                };
+                let source = import::legacy(previewed.source);
+                import::stage(
+                    &previewed.parent.join(source.app_directory()),
+                    &staging.path().join(source.app_directory()),
+                    &previewed.digest,
+                    &attestations,
+                )?;
+                owner.imports.discard();
+                let mut staged = Imports::default();
+                let preview = staged.preview(
+                    source,
+                    staging.path().to_path_buf(),
+                    owner.workspace.clone(),
+                    &previewed.destination,
+                )?;
+                let prepared =
+                    owner
+                        .controller
+                        .prepare_import(&mut staged, &preview.token, &ids)?;
+                Ok((prepared, owner.credentials.clone(), Some(staging)))
+            })
+            .await?;
+        // Key reads and writes may wait on the OS keyring.
+        let imported = tokio::task::spawn_blocking(move || {
+            credentials.retry();
+            prepared.acquire(credentials.as_ref())
+        })
+        .await
+        .map_err(|_| failed("Import key handling failed"))?
+        .map_err(RpcError::Failed)?;
+        let response = self
+            .run(move |owner| {
+                owner.controller.commit_import(imported)?;
+                owner.snapshot().map(Response::Agents)
+            })
+            .await;
+        // The commit re-reads the staged copy; remove it only afterwards.
+        drop(staging);
+        response
+    }
+}
+
 impl Drop for AgentHost {
     /// Stops every agent this host started.
     fn drop(&mut self) {
@@ -313,6 +534,68 @@ impl Drop for AgentHost {
 }
 
 impl Owner {
+    /// A form draft as the controller takes it; an empty workspace means
+    /// the host's default, as on create.
+    fn draft(&self, edit: &api::AgentEdit) -> Result<buzz_agent_controller::AgentEdit, String> {
+        let mut edit = controller_edit(edit)?;
+        if edit.workspace.is_empty() {
+            edit.workspace = self.workspace.to_string_lossy().into_owned();
+        }
+        Ok(edit)
+    }
+
+    fn defaults(&mut self) -> Result<AgentDefaults, String> {
+        let snapshot = self.controller.snapshot()?;
+        let json = serde_json::to_value(&snapshot.default_settings)
+            .map_err(|_| "Could not read agent defaults")?;
+        serde_json::from_value(json).map_err(|_| "Could not read agent defaults".into())
+    }
+
+    fn import_preview(
+        &mut self,
+        source: api::ImportSource,
+        destination: String,
+    ) -> Result<Response, String> {
+        self.previewed = None;
+        let parent = self
+            .legacy_dir
+            .clone()
+            .ok_or("This host has no data directory to import from")?;
+        let legacy = import::legacy(source);
+        let preview =
+            self.imports
+                .preview(legacy, parent.clone(), self.workspace.clone(), &destination)?;
+        let (digest, unattested) = import::scan(&parent.join(legacy.app_directory()))?;
+        let saved: std::collections::HashSet<String> = self
+            .controller
+            .snapshot()?
+            .agents
+            .into_iter()
+            .map(|agent| agent.pubkey)
+            .collect();
+        let json = serde_json::to_value(&preview).map_err(|_| "Could not read the import")?;
+        let mut view: ImportPreview =
+            serde_json::from_value(json).map_err(|_| "Could not read the import")?;
+        for candidate in &mut view.candidates {
+            candidate.imported = saved.contains(&candidate.pubkey);
+            candidate.needs_attestation = unattested.contains(&candidate.pubkey);
+        }
+        self.previewed = Some(import::Previewed {
+            token: view.token.clone(),
+            source,
+            destination,
+            parent,
+            digest,
+            unattested: view
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.needs_attestation)
+                .map(|candidate: &ImportCandidate| (candidate.id.clone(), candidate.pubkey.clone()))
+                .collect(),
+        });
+        Ok(Response::ImportPreview(view))
+    }
+
     fn snapshot(&mut self) -> Result<AgentsSnapshot, String> {
         let snapshot = self.controller.snapshot()?;
         let json = serde_json::to_value(&snapshot).map_err(|_| "Could not read agents")?;
@@ -373,10 +656,10 @@ impl HostHandler<HostProtocol> for RpcHandler {
 
     fn handle(
         &self,
-        _: Peer<HostProtocol>,
+        peer: Peer<HostProtocol>,
         request: Request,
     ) -> BoxFuture<'static, Result<Response, RpcError>> {
         let host = self.0.clone();
-        Box::pin(async move { host.request(request).await })
+        Box::pin(async move { host.request_with(request, Some(Arc::new(peer))).await })
     }
 }

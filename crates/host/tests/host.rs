@@ -14,8 +14,8 @@ use std::time::Duration;
 struct NoAsks;
 
 impl ClientHandler<HostProtocol> for NoAsks {
-    fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        match ask {}
+    fn handle(&self, _: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
+        Box::pin(async { Err(RpcError::Failed("unexpected ask".into())) })
     }
 }
 
@@ -78,6 +78,7 @@ async fn create_save_and_delete_over_rpc() {
         workspace: state.path().join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
         watch_interval: Duration::from_millis(100),
+        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
