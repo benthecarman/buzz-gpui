@@ -1,13 +1,13 @@
 //! One timeline row (ui.md §4.4–4.5, §4.7).
 
+use super::emoji_picker::{self, EmojiPicker, QuickReaction};
 use super::markdown::{self, Directory};
 use super::{media, time};
 use buzz_relay_client::fold::{Attachment, AttachmentKind, Delivery, MessageRow};
 use buzz_relay_client::{EventId, Profile, Profiles};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
-    MaterialStyled, Menu, MenuItem, Popover, PopoverPadding, PopoverWidth, Surface, Tooltip,
-    TypeStyled,
+    MaterialStyled, Menu, MenuItem, Surface, Tooltip, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -84,18 +84,6 @@ pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
         .into()
 }
 
-/// The default quick reactions (`quick-reactions.ts`).
-pub const QUICK_REACTIONS: [&str; 3] = ["👍", "❤️", "😂"];
-
-/// The reaction picker's built-in set.
-const PICKER: &[&str] = &[
-    "👍", "👎", "❤️", "😂", "🎉", "🙏", "👀", "🔥", "✅", "❌", "💯", "🚀", "😀", "😃", "😄", "😁",
-    "😅", "🤣", "😊", "😇", "🙂", "😉", "😍", "🥰", "😘", "😋", "😎", "🤩", "🥳", "🤔", "🤨", "😐",
-    "😑", "🙄", "😏", "😬", "😌", "😴", "🤯", "😱", "😢", "😭", "😤", "😡", "🤗", "🤝", "👏", "🙌",
-    "👋", "💪", "✌️", "🤞", "👌", "🫡", "💡", "📌", "📎", "📝", "⏰", "⚠️", "❓", "❗", "💬", "👑",
-    "⭐", "✨", "🌟", "☕", "🍕", "🎂", "🐛", "🛠️", "📦", "🧪", "🤖", "👻", "💀", "🙈", "🎯", "🏁",
-];
-
 /// Something a row asks its page to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -161,6 +149,10 @@ pub struct Rows {
     pub directory: Directory,
     pub actions: Actions,
     pub interaction: Interaction,
+    /// The hover bar's three reactions (`quick-reactions.ts`).
+    pub quick_reactions: Vec<QuickReaction>,
+    /// The page's reaction picker; it reports picks to the page.
+    pub picker: Option<Entity<EmojiPicker>>,
 }
 
 impl Rows {
@@ -385,8 +377,19 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
         });
     }
     if delivered && let Some(react) = rows.actions.on_react.clone() {
-        for (index, emoji) in QUICK_REACTIONS.iter().enumerate() {
+        for (index, quick) in rows.quick_reactions.iter().enumerate() {
             let (react, target) = (react.clone(), row.clone());
+            let content = quick.content.clone();
+            let glyph = match &quick.image {
+                Some(url) => img(media::image(url, &rows.directory.media))
+                    .size(px(16.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => div()
+                    .text_size(px(14.))
+                    .child(content.clone())
+                    .into_any_element(),
+            };
             bar = bar.child(
                 IconButton::new(
                     SharedString::from(format!("quick-{index}-{id}")),
@@ -394,9 +397,9 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
                 )
                 .size(IconButtonSize::Sm)
                 .surface(Surface::Floating)
-                .child(div().text_size(px(14.)).child(*emoji))
-                .tooltip(format!("React with {emoji}"))
-                .on_click(move |_, window, cx| react(&target, emoji, window, cx)),
+                .child(glyph)
+                .tooltip(format!("React with {content}"))
+                .on_click(move |_, window, cx| react(&target, &content, window, cx)),
             );
         }
         let (rows, target) = (rows.clone(), row.id);
@@ -438,7 +441,7 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
     }
     let popup = match open {
         Some(Popup::More) => Some(more_menu(row, rows).into_any_element()),
-        Some(Popup::Picker { from_bar: true }) => Some(picker(row, rows).into_any_element()),
+        Some(Popup::Picker { from_bar: true }) => Some(picker(rows)),
         _ => None,
     };
     bar.children(popup.map(|popup| {
@@ -510,38 +513,15 @@ fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>) -> impl IntoElement {
         .child(menu)
 }
 
-/// A small built-in reaction picker.
-fn picker(row: &Arc<MessageRow>, rows: &Rc<Rows>) -> impl IntoElement {
-    let id = row.id.to_hex();
+/// The page's emoji picker as the reaction picker. The page reacts with
+/// what it picks to the row whose picker is open.
+fn picker(rows: &Rc<Rows>) -> AnyElement {
+    let Some(picker) = &rows.picker else {
+        return div().into_any_element();
+    };
     let close = rows.clone();
-    let mut grid = div().flex().flex_wrap().gap(px(2.));
-    if let Some(react) = rows.actions.on_react.clone() {
-        for (index, emoji) in PICKER.iter().enumerate() {
-            let (react, rows, target) = (react.clone(), rows.clone(), row.clone());
-            grid = grid.child(
-                IconButton::new(
-                    SharedString::from(format!("pick-{index}-{id}")),
-                    IconName::Smiley,
-                )
-                .size(IconButtonSize::Sm)
-                .surface(Surface::Floating)
-                .child(div().text_size(px(18.)).child(*emoji))
-                .on_click(move |_, window, cx| {
-                    rows.popup(None, window, cx);
-                    react(&target, emoji, window, cx);
-                }),
-            );
-        }
-    }
-    div()
-        .occlude()
-        .on_mouse_down_out(move |_, window, cx| close.popup(None, window, cx))
-        .child(
-            Popover::new()
-                .width(PopoverWidth::Default)
-                .padding(PopoverPadding::List)
-                .child(grid),
-        )
+    emoji_picker::emoji_picker(picker, move |_, window, cx| close.popup(None, window, cx))
+        .into_any_element()
 }
 
 fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
@@ -676,7 +656,7 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEleme
                         .anchor(Anchor::TopLeft)
                         .offset(point(px(0.), px(4.)))
                         .snap_to_window_with_margin(px(8.))
-                        .child(picker(row, rows)),
+                        .child(picker(rows)),
                 )),
             )
         }));

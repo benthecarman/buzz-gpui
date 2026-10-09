@@ -2,16 +2,18 @@
 //! §4.12).
 
 use super::channel_menu::{ChannelActions, JoinNotice};
+use super::composer::{self, Composer, ComposerEvent, Submission};
+use super::emoji_picker::{self, EmojiPicker, Picked};
 use super::markdown::Directory;
-use super::message::{self, Actions, Command, Hover, Interaction, Item, Rows};
+use super::message::{self, Actions, Command, Hover, Interaction, Item, Popup, Rows};
 use crate::community::{ChannelModel, Community};
-use buzz_relay_client::fold::MessageRow;
+use buzz_relay_client::fold::{Delivery, MessageRow};
 use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus, message_link};
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Button, ButtonSize, ButtonVariant, Icon, IconButton, IconButtonSize,
-    IconName, PanelHeader, Scrim, Toast, ToastTone, TypeStyled, tokens::shadow,
+    ActiveTheme, AlertDialog, Button, ButtonSize, ButtonVariant, Icon, IconName, PanelHeader,
+    Scrim, Toast, ToastTone, TypeStyled, tokens::shadow,
 };
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -48,14 +50,13 @@ pub struct ChannelPage {
     items: Vec<Item>,
     /// Row 0 is the top edge (load older); messages follow.
     list: ListState,
-    composer: Entity<TextareaState>,
-    placeholder: SharedString,
-    sending: bool,
+    composer: Entity<Composer>,
+    input: Entity<TextareaState>,
+    /// Reacts to the row whose reaction picker is open.
+    reaction_picker: Entity<EmojiPicker>,
     error: Option<SharedString>,
     on_open_thread: OpenThread,
     interaction: Interaction,
-    /// The composer is editing this message (§4.8 edit mode).
-    editing: Option<Arc<MessageRow>>,
     /// The delete confirmation is open for this message.
     deleting: Option<Arc<MessageRow>>,
     toast: Option<(SharedString, usize)>,
@@ -92,13 +93,21 @@ impl ChannelPage {
         }
         .into();
         let composer = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(placeholder.clone())
-                .submit_on_enter(true)
-                .auto_grow(1, 9)
+            Composer::new(
+                community.clone(),
+                channel.id.clone(),
+                None,
+                placeholder,
+                window,
+                cx,
+            )
         });
+        let input = composer.read(cx).input();
+        let reaction_picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx));
         let subscriptions = vec![
-            cx.observe(&model, |this, _, cx| this.sync_items(cx)),
+            cx.observe_in(&model, window, |this, _, window, cx| {
+                this.sync_items(window, cx)
+            }),
             cx.observe(&community, |this, community, cx| {
                 // Joining, leaving or editing changes the summary.
                 if let Some(current) = community
@@ -115,12 +124,27 @@ impl ChannelPage {
             cx.subscribe_in(
                 &composer,
                 window,
-                |this, _, event: &InputEvent, window, cx| match event {
-                    InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
-                    InputEvent::Change => cx.notify(),
-                    _ => {}
+                |this, _, event: &ComposerEvent, window, cx| match event {
+                    ComposerEvent::Submit(submission) => this.send(submission.clone(), window, cx),
+                    ComposerEvent::EditLast => this.edit_last(window, cx),
+                    ComposerEvent::CancelReply => {}
                 },
             ),
+            cx.subscribe_in(&reaction_picker, window, |this, _, Picked(pick), _, cx| {
+                if let Some((id, Popup::Picker { .. })) = this.interaction.open.take()
+                    && let Some(item) = this.items.iter().find(|item| item.row.id == id)
+                {
+                    let row = item.row.clone();
+                    emoji_picker::toggle_reaction(
+                        &this.community,
+                        &this.channel.id,
+                        &row,
+                        &pick.text(),
+                        cx,
+                    );
+                }
+                cx.notify();
+            }),
         ];
         let weak = cx.entity().downgrade();
         let model_for_scroll = model.clone();
@@ -160,12 +184,11 @@ impl ChannelPage {
             items: Vec::new(),
             list,
             composer,
-            placeholder,
-            sending: false,
+            input,
+            reaction_picker,
             error: None,
             on_open_thread,
             interaction: Interaction::default(),
-            editing: None,
             deleting: None,
             toast: None,
             toasts: 0,
@@ -174,7 +197,7 @@ impl ChannelPage {
             highlight: None,
             _subscriptions: subscriptions,
         };
-        page.sync_items(cx);
+        page.sync_items(window, cx);
         page
     }
 
@@ -187,7 +210,7 @@ impl ChannelPage {
     }
 
     pub fn composer(&self) -> Entity<TextareaState> {
-        self.composer.clone()
+        self.input.clone()
     }
 
     /// Scrolls a top-level message into view and tints it briefly, paging in
@@ -239,7 +262,7 @@ impl ChannelPage {
 
     /// Rebuilds the rows, telling the list exactly what was added at either
     /// end so the reading position stays put while history loads above.
-    fn sync_items(&mut self, cx: &mut Context<Self>) {
+    fn sync_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.model.read(cx).snapshot.rows.clone();
         let next = message::items(&rows);
         let old: Vec<_> = self.items.iter().map(|item| item.row.id).collect();
@@ -268,10 +291,14 @@ impl ChannelPage {
         }
         // The edge's state may have changed.
         self.list.splice(0..1, 1);
-        if let Some(editing) = &self.editing
-            && !new.contains(&editing.id)
+        if self
+            .composer
+            .read(cx)
+            .editing()
+            .is_some_and(|editing| !new.contains(&editing.id))
         {
-            self.editing = None;
+            self.composer
+                .update(cx, |composer, cx| composer.cancel_edit(window, cx));
         }
         self.items = next;
         cx.notify();
@@ -281,47 +308,40 @@ impl ChannelPage {
         self.community.read(cx).session.clone()
     }
 
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.composer.read(cx).value().trim().to_string();
-        if content.is_empty() || self.sending {
-            return;
-        }
+    fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.session(cx);
         let channel = self.channel.id.clone();
-        let editing = self.editing.clone();
-        if let Some(row) = &editing
-            && content == edit_text(row).trim()
-        {
-            self.cancel_edit(window, cx);
-            return;
-        }
-        self.sending = true;
-        if editing.is_none() {
+        if submission.editing.is_none() {
             self.list.set_follow_mode(FollowMode::Tail);
             self.unseen = 0;
         }
+        let mentions = composer::mentions(self.community.read(cx), &channel, &submission.mentioned);
         cx.spawn_in(window, async move |this, cx| {
-            let result = match &editing {
-                Some(row) => session.edit(&channel, row.id, &content).await,
+            let result = match &submission.editing {
+                Some(row) => session.edit(&channel, row.id, &submission.content).await,
                 None => {
                     session
-                        .send(&channel, &content, Default::default(), Vec::new(), None)
+                        .send(
+                            &channel,
+                            &submission.content,
+                            mentions,
+                            submission.attachments.clone(),
+                            None,
+                        )
                         .await
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.sending = false;
                 match result {
                     Ok(()) => {
                         this.error = None;
-                        if this.editing.is_some() {
-                            this.cancel_edit(window, cx);
-                        } else {
-                            this.composer
-                                .update(cx, |state, cx| state.set_value("", window, cx));
-                        }
+                        this.composer
+                            .update(cx, |composer, cx| composer.sent(window, cx));
                     }
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => {
+                        this.error = Some(error.into());
+                        this.composer.update(cx, |composer, cx| composer.failed(cx));
+                    }
                 }
                 cx.notify();
             });
@@ -330,24 +350,33 @@ impl ChannelPage {
     }
 
     fn start_edit(&mut self, row: Arc<MessageRow>, window: &mut Window, cx: &mut Context<Self>) {
-        let text = edit_text(&row);
-        self.editing = Some(row);
-        self.composer.update(cx, |state, cx| {
-            state.set_value(text, window, cx);
-            state.set_placeholder("Edit message", window, cx);
-            state.focus(window, cx);
-        });
-        cx.notify();
+        self.composer
+            .update(cx, |composer, cx| composer.start_edit(row, window, cx));
     }
 
-    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing = None;
-        let placeholder = self.placeholder.clone();
-        self.composer.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-            state.set_placeholder(placeholder, window, cx);
-        });
-        cx.notify();
+    /// Up in an empty composer edits the viewer's newest editable message
+    /// (`lastEditableMessage`).
+    fn edit_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let viewer = self.session(cx).viewer().to_string();
+        let row = self
+            .items
+            .iter()
+            .rev()
+            .map(|item| &item.row)
+            .find(|row| {
+                row.author.to_hex() == viewer
+                    && row.membership.is_none()
+                    && !row.is_agent_envelope()
+                    && row.diff.is_none()
+                    && row
+                        .delivery
+                        .as_ref()
+                        .is_none_or(|d| matches!(d.status, Delivery::Accepted | Delivery::Seen))
+            })
+            .cloned();
+        if let Some(row) = row {
+            self.start_edit(row, window, cx);
+        }
     }
 
     fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -448,42 +477,16 @@ impl ChannelPage {
 
     fn actions(&self, cx: &mut Context<Self>) -> Actions {
         let session = self.session(cx);
-        let channel = self.channel.id.clone();
-        let viewer = session.viewer().to_string();
-        let react_session = session.clone();
-        let react_channel = channel.clone();
         let open = self.on_open_thread.clone();
         let this = cx.entity().downgrade();
         let (hover, popup, command) = (this.clone(), this.clone(), this);
+        let (community, channel) = (self.community.clone(), self.channel.id.clone());
         Actions {
             on_open_thread: Some(Rc::new(move |row, window, cx| {
                 open(row.clone(), window, cx)
             })),
             on_react: Some(Rc::new(move |row, content, _, cx| {
-                // Clicking your own reaction removes it; anyone else's adds yours.
-                let own = row
-                    .reactions
-                    .iter()
-                    .find(|group| group.content == content)
-                    .and_then(|group| group.events.iter().find(|r| r.author.to_hex() == viewer))
-                    .map(|reaction| reaction.id);
-                let (session, channel, id, content) = (
-                    react_session.clone(),
-                    react_channel.clone(),
-                    row.id,
-                    content.to_string(),
-                );
-                cx.foreground_executor()
-                    .spawn(async move {
-                        let result = match own {
-                            Some(reaction) => session.remove(&channel, reaction).await,
-                            None => session.react(&channel, id, &content).await,
-                        };
-                        if let Err(error) = result {
-                            tracing::warn!(%error, "reaction failed");
-                        }
-                    })
-                    .detach();
+                emoji_picker::toggle_reaction(&community, &channel, row, content, cx)
             })),
             on_retry: Some(Rc::new(move |row, _, cx| {
                 let (session, id) = (session.clone(), row.id);
@@ -496,9 +499,15 @@ impl ChannelPage {
             on_hover: Some(Rc::new(move |id, target, hovered, _, cx| {
                 let _ = hover.update(cx, |this, cx| this.hover(id, target, hovered, cx));
             })),
-            on_popup: Some(Rc::new(move |open, _, cx| {
+            on_popup: Some(Rc::new(move |open, window, cx| {
                 let _ = popup.update(cx, |this, cx| {
                     if this.interaction.open != open {
+                        if matches!(open, Some((_, Popup::Picker { .. }))) {
+                            this.reaction_picker.update(cx, |picker, cx| {
+                                picker.reset(window, cx);
+                                picker.focus(window, cx);
+                            });
+                        }
                         this.interaction.open = open;
                         cx.notify();
                     }
@@ -555,105 +564,11 @@ impl ChannelPage {
             .into_any_element()
     }
 
-    fn composer_shell(&self, cx: &mut Context<Self>) -> AnyElement {
-        let c = *cx.colors();
+    fn composer_shell(&self) -> AnyElement {
         if self.channel.read_only {
             return self.join.clone().into_any_element();
         }
-        let has_text = !self.composer.read(cx).value().trim().is_empty();
-        let editing = self.editing.is_some();
-        let header = editing.then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .mt(px(-12.))
-                .mx(px(-6.))
-                .mb(px(-12.))
-                .px(px(12.))
-                .py(px(8.))
-                .rounded_t(px(19.))
-                .bg(c.surface_inset)
-                .text_label_sm()
-                .text_color(c.text_subtle)
-                .child(Icon::new(IconName::PencilSimple).size(18.))
-                .child(div().flex_1().child("Editing message"))
-                .child(
-                    IconButton::new("cancel-edit", IconName::X)
-                        .size(IconButtonSize::Sm)
-                        .icon_size(18.)
-                        .tooltip("Cancel edit")
-                        .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
-                )
-        });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .mx(px(16.))
-            .mb(px(16.))
-            .pt(px(12.))
-            .px(px(6.))
-            .pb(px(6.))
-            .rounded(px(20.))
-            .border_1()
-            .border_color(c.border_standard)
-            .bg(c.surface_panel)
-            .shadow_xs()
-            .overflow_hidden()
-            .text_body()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && this.editing.is_some() {
-                    this.cancel_edit(window, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .children(header)
-            .child(
-                div()
-                    .pl(px(4.))
-                    .pt(px(4.))
-                    .child(Textarea::new(&self.composer).appearance(false)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(4.))
-                            .child(
-                                IconButton::new("mention", IconName::At)
-                                    .size(IconButtonSize::Sm)
-                                    .tooltip("Mention a member"),
-                            )
-                            .child(
-                                IconButton::new("emoji", IconName::Smiley)
-                                    .size(IconButtonSize::Sm)
-                                    .tooltip("Insert emoji"),
-                            )
-                            .child(
-                                IconButton::new("format", IconName::TextAa)
-                                    .size(IconButtonSize::Sm)
-                                    .tooltip("Toggle formatting"),
-                            ),
-                    )
-                    .child(
-                        IconButton::new("send", IconName::ArrowUp)
-                            .size(IconButtonSize::Sm)
-                            .when(has_text, |b| b.variant(ButtonVariant::Prominent))
-                            .disabled(!has_text || self.sending)
-                            .tooltip(if editing {
-                                "Save changes"
-                            } else {
-                                "Send message"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-                    ),
-            )
-            .into_any_element()
+        self.composer.clone().into_any_element()
     }
 
     fn jump_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -719,14 +634,6 @@ impl ChannelPage {
     }
 }
 
-/// What "Edit message" puts in the composer: the body with its attachment
-/// Markdown (`messageEditText`).
-fn edit_text(row: &MessageRow) -> String {
-    row.source_content
-        .clone()
-        .unwrap_or_else(|| row.content.clone())
-}
-
 /// `messageCopyText`: the body, then each attachment's URL.
 fn copy_text(row: &MessageRow) -> String {
     std::iter::once(row.content.as_str())
@@ -771,6 +678,8 @@ impl Render for ChannelPage {
             directory,
             actions: self.actions(cx),
             interaction: self.interaction.clone(),
+            quick_reactions: emoji_picker::quick_bar(&self.community, cx),
+            picker: Some(self.reaction_picker.clone()),
         });
         let items = self.items.clone();
         let timeline = if self.items.is_empty() {
@@ -829,7 +738,7 @@ impl Render for ChannelPage {
                 .into_any_element()
         };
 
-        let composer = self.composer_shell(cx);
+        let composer = self.composer_shell();
 
         let toast = self.toast.as_ref().map(|(text, generation)| {
             let right = window.viewport_size().width - px(16.) - px(384.);

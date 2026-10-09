@@ -937,6 +937,7 @@ dependencies = [
  "buzz-ui",
  "chrono",
  "dirs 6.0.0",
+ "emojis",
  "futures",
  "gpui-kit",
  "gstreamer",
@@ -2038,6 +2039,15 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "vswhom",
  "winreg",
+]
+
+[[package]]
+name = "emojis"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b1514ced566c94991ed9563258ecf61e311fd773bf0a3f20606830386bf66e3"
+dependencies = [
+ "phf 0.13.1",
 ]
 
 [[package]]

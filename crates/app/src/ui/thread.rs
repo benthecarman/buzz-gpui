@@ -1,5 +1,7 @@
 //! The thread panel in the Messages board's right dock (ui.md §4.11).
 
+use super::composer::{self, Composer, ComposerEvent, ReplyContext, Submission};
+use super::emoji_picker;
 use super::markdown::Directory;
 use super::message::{self, Actions, Interaction, Item, Layout, Rows};
 use super::time;
@@ -13,7 +15,7 @@ use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconButton, IconButtonSize, IconName,
     PanelHeader, Tab, TabVariant, Tabs, TypeStyled,
 };
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use nostr::prelude::EventId;
@@ -45,9 +47,8 @@ pub struct ThreadPanel {
     expanded: HashSet<EventId>,
     /// The reply the composer answers, when not the root.
     reply_parent: Option<EventId>,
-    composer: Entity<TextareaState>,
-    placeholder: SharedString,
-    sending: bool,
+    composer: Entity<Composer>,
+    input: Entity<TextareaState>,
     error: Option<SharedString>,
     on_close: OnClose,
     /// Exact mode: the message to reveal once its thread has loaded.
@@ -103,19 +104,25 @@ impl ThreadPanel {
         let list = ListState::new(0, ListAlignment::Top, px(1000.));
         list.set_follow_mode(FollowMode::Tail);
         let composer = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .submit_on_enter(true)
-                .auto_grow(1, 9)
+            Composer::new(
+                community.clone(),
+                channel.clone(),
+                Some(root_id),
+                SharedString::default(),
+                window,
+                cx,
+            )
         });
+        let input = composer.read(cx).input();
         let mut subscriptions = vec![
             cx.observe(&community, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &composer,
                 window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { shift: false, .. } = event {
-                        this.send(window, cx);
-                    }
+                |this, _, event: &ComposerEvent, window, cx| match event {
+                    ComposerEvent::Submit(submission) => this.send(submission.clone(), window, cx),
+                    ComposerEvent::CancelReply => this.reply_to(None, window, cx),
+                    ComposerEvent::EditLast => {}
                 },
             ),
         ];
@@ -149,8 +156,7 @@ impl ThreadPanel {
             expanded: HashSet::new(),
             reply_parent: None,
             composer,
-            placeholder: SharedString::default(),
-            sending: false,
+            input,
             error: None,
             on_close,
             revealing: exact.then_some(root_id),
@@ -167,8 +173,8 @@ impl ThreadPanel {
     }
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
-        let composer = this.read(cx).composer.clone();
-        composer.update(cx, |state, cx| state.focus(window, cx));
+        let input = this.read(cx).input.clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
     }
 
     /// Rebuilds the flattened rows, splicing only what changed so the
@@ -242,8 +248,7 @@ impl ThreadPanel {
 
     fn reply_to(&mut self, id: Option<EventId>, window: &mut Window, cx: &mut Context<Self>) {
         self.reply_parent = id;
-        self.composer
-            .update(cx, |state, cx| state.focus(window, cx));
+        self.input.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -251,30 +256,26 @@ impl ThreadPanel {
         (self.on_close)(window, cx);
     }
 
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let content = self.composer.read(cx).value().trim().to_string();
+    fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) else {
+            self.composer.update(cx, |composer, cx| composer.failed(cx));
             return;
         };
-        if content.is_empty() || self.sending || !self.can_send() {
-            return;
-        }
-        self.sending = true;
         let parent = self.reply_parent;
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.clone();
+        let mentions = composer::mentions(self.community.read(cx), &channel, &submission.mentioned);
         cx.spawn_in(window, async move |this, cx| {
             let result = session
                 .send(
                     &channel,
-                    &content,
-                    Default::default(),
-                    Vec::new(),
+                    &submission.content,
+                    mentions,
+                    submission.attachments.clone(),
                     Some((root, parent.unwrap_or(root))),
                 )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.sending = false;
                 match result {
                     Ok(()) => {
                         this.error = None;
@@ -292,9 +293,12 @@ impl ThreadPanel {
                             None => this.list.set_follow_mode(FollowMode::Tail),
                         }
                         this.composer
-                            .update(cx, |state, cx| state.set_value("", window, cx));
+                            .update(cx, |composer, cx| composer.sent(window, cx));
                     }
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => {
+                        this.error = Some(error.into());
+                        this.composer.update(cx, |composer, cx| composer.failed(cx));
+                    }
                 }
                 cx.notify();
             });
@@ -314,36 +318,11 @@ impl ThreadPanel {
 
     fn actions(&self, cx: &mut Context<Self>) -> Actions {
         let session = self.community.read(cx).session.clone();
-        let viewer = session.viewer().to_string();
-        let react_session = session.clone();
-        let channel = self.channel.clone();
+        let (community, channel) = (self.community.clone(), self.channel.clone());
         Actions {
             on_open_thread: None,
             on_react: Some(Rc::new(move |row, content, _, cx| {
-                // Clicking your own reaction removes it; anyone else's adds yours.
-                let own = row
-                    .reactions
-                    .iter()
-                    .find(|group| group.content == content)
-                    .and_then(|group| group.events.iter().find(|r| r.author.to_hex() == viewer))
-                    .map(|reaction| reaction.id);
-                let (session, channel, id, content) = (
-                    react_session.clone(),
-                    channel.clone(),
-                    row.id,
-                    content.to_string(),
-                );
-                cx.foreground_executor()
-                    .spawn(async move {
-                        let result = match own {
-                            Some(reaction) => session.remove(&channel, reaction).await,
-                            None => session.react(&channel, id, &content).await,
-                        };
-                        if let Err(error) = result {
-                            tracing::warn!(%error, "reaction failed");
-                        }
-                    })
-                    .detach();
+                emoji_picker::toggle_reaction(&community, &channel, row, content, cx)
             })),
             on_retry: Some(Rc::new(move |row, _, cx| {
                 let (session, id) = (session.clone(), row.id);
@@ -385,141 +364,41 @@ impl ThreadPanel {
                 .child("Join this channel to send messages.")
                 .into_any_element();
         }
-        let profiles = &self.community.read(cx).snapshot.profiles;
-        let context = self.reply_parent.map(|_| match self.selected_parent() {
-            Some(parent) => {
-                let name = message::display_name(profiles, &parent.author.to_hex());
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(12.))
-                    .bg(c.surface_inset)
-                    .text_caption()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_color(c.text_subtle)
-                                    .child(format!("Replying to {name}")),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_color(c.text_standard)
-                                    .child(parent.content.clone()),
-                            ),
-                    )
-                    .child(
-                        IconButton::new("cancel-reply", IconName::X)
-                            .size(IconButtonSize::Sm)
-                            .tooltip("Cancel reply target")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.reply_to(None, window, cx)),
-                            ),
-                    )
-                    .into_any_element()
-            }
-            None => div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(12.))
-                .py(px(8.))
-                .text_caption()
-                .text_color(c.text_subtle)
-                .child("Reply target is no longer available.")
-                .child(
-                    Button::new("cancel-missing-reply", "Cancel reply target")
-                        .size(ButtonSize::Sm)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.reply_to(None, window, cx)),
-                        ),
-                )
-                .into_any_element(),
-        });
-        let send_enabled = !self.composer.read(cx).value().trim().is_empty() && self.can_send();
         div()
-            .flex()
-            .flex_col()
             .flex_none()
-            .gap(px(16.))
-            .mx(px(16.))
-            .mb(px(16.))
-            .pt(px(12.))
-            .px(px(6.))
-            .pb(px(6.))
-            .rounded(px(20.))
-            .border_1()
-            .border_color(c.border_standard)
-            .bg(c.surface_panel)
-            .shadow_xs()
-            .text_body()
-            .child(
-                div()
-                    .pl(px(4.))
-                    .pt(px(4.))
-                    .child(Textarea::new(&self.composer).appearance(false)),
-            )
-            .children(context)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(4.))
-                            .child(
-                                IconButton::new("thread-mention", IconName::At)
-                                    .size(IconButtonSize::Sm),
-                            )
-                            .child(
-                                IconButton::new("thread-emoji", IconName::Smiley)
-                                    .size(IconButtonSize::Sm),
-                            )
-                            .child(
-                                IconButton::new("thread-format", IconName::TextAa)
-                                    .size(IconButtonSize::Sm),
-                            ),
-                    )
-                    .child(
-                        IconButton::new("thread-send", IconName::ArrowUp)
-                            .size(IconButtonSize::Sm)
-                            .disabled(!send_enabled)
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-                    ),
-            )
+            .child(self.composer.clone())
             .into_any_element()
     }
 
-    /// Follows the root author's name into the placeholder.
-    fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = &self.snapshot.root else {
-            return;
-        };
-        let profiles = &self.community.read(cx).snapshot.profiles;
-        let name = message::display_name(profiles, &root.author.to_hex());
-        let placeholder: SharedString = format!("Reply in thread to {name}").into();
-        if placeholder != self.placeholder {
-            self.placeholder = placeholder.clone();
-            self.composer.update(cx, |state, cx| {
-                state.set_placeholder(placeholder, window, cx)
-            });
-        }
+    /// Follows the root author's name into the placeholder, and the reply
+    /// target into the composer's context box.
+    fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let profiles = self.community.read(cx).snapshot.profiles.clone();
+        let context = self.reply_parent.map(|_| match self.selected_parent() {
+            Some(parent) => ReplyContext::Parent {
+                name: message::display_name(&profiles, &parent.author.to_hex()),
+                excerpt: parent.content.clone().into(),
+            },
+            None => ReplyContext::Missing,
+        });
+        let can_send = self.can_send();
+        let placeholder = self.snapshot.root.as_ref().map(|root| {
+            let name = message::display_name(&profiles, &root.author.to_hex());
+            SharedString::from(format!("Reply in thread to {name}"))
+        });
+        self.composer.update(cx, |composer, cx| {
+            composer.set_context(context, cx);
+            composer.set_can_send(can_send, cx);
+            if let Some(placeholder) = placeholder {
+                composer.set_placeholder(placeholder, window, cx);
+            }
+        });
     }
 }
 
 impl Render for ThreadPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_placeholder(window, cx);
+        self.sync_composer(window, cx);
         let actions = self.actions(cx);
         let c = *cx.colors();
         let snapshot = self.snapshot.clone();
@@ -566,6 +445,8 @@ impl Render for ThreadPanel {
                 },
                 actions,
                 interaction: Interaction::default(),
+                quick_reactions: Vec::new(),
+                picker: None,
             });
             let entries = self.entries.clone();
             let weak = cx.entity().downgrade();

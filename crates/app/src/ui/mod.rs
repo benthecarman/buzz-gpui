@@ -4,6 +4,8 @@ mod add_community;
 mod agents;
 mod channel;
 mod channel_menu;
+mod composer;
+mod emoji_picker;
 mod markdown;
 mod media;
 mod members;
