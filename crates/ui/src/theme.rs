@@ -2,7 +2,7 @@
 //! size, plus the projection onto gpui-kit's theme.
 
 use crate::colors::Colors;
-use gpui_kit::{App, Global, Hsla, Pixels, Window, WindowAppearance, px};
+use gpui_kit::{App, Global, Hsla, Pixels, Subscription, Window, WindowAppearance, px};
 
 /// Light or dark, after resolving the preference against the system.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -140,6 +140,12 @@ pub(crate) struct ThemeStack(pub(crate) Vec<Theme>);
 
 impl Global for ThemeStack {}
 
+/// Replaced on every edit of the app theme, so observers hear about real
+/// changes only (scopes also touch [`ThemeStack`] while laying out).
+struct ThemeEdited;
+
+impl Global for ThemeEdited {}
+
 impl Default for Theme {
     fn default() -> Self {
         Self {
@@ -236,6 +242,12 @@ impl Theme {
         Self::set_interface_scale(1., cx);
     }
 
+    /// Calls `f` after every change to the app theme's preference, system
+    /// appearance or interface size, e.g. to save the settings.
+    pub fn observe(cx: &mut App, mut f: impl FnMut(&mut App) + 'static) -> Subscription {
+        cx.observe_global::<ThemeEdited>(move |cx| f(cx))
+    }
+
     /// Records the system appearance reported by a window. While the
     /// preference is `System` this switches the palette.
     pub fn sync_system_appearance(window: &Window, cx: &mut App) {
@@ -259,6 +271,7 @@ impl Theme {
         if before != after {
             crate::kit::sync(cx);
         }
+        cx.set_global(ThemeEdited);
         cx.refresh_windows();
     }
 

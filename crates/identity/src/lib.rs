@@ -100,6 +100,20 @@ pub fn import(nsec: &str) -> Result<Identity, IdentityError> {
     save(Identity::from_nsec(nsec)?)
 }
 
+/// Deletes the saved identity (sign out), then confirms a fresh read finds
+/// nothing. buzz-app shares this entry, so it is signed out too.
+pub fn forget() -> Result<(), IdentityError> {
+    match buzz_credential_store::delete(SERVICE, ACCOUNT) {
+        Ok(()) | Err(StoreError::Absent) => {}
+        Err(error) => return Err(store_error(error)),
+    }
+    match buzz_credential_store::read(SERVICE, ACCOUNT) {
+        Err(StoreError::Absent) => Ok(()),
+        Ok(_) => Err(IdentityError::Unavailable),
+        Err(error) => Err(store_error(error)),
+    }
+}
+
 fn save(identity: Identity) -> Result<Identity, IdentityError> {
     let nsec = identity.nsec();
     buzz_credential_store::add(SERVICE, ACCOUNT, nsec.as_bytes()).map_err(store_error)?;

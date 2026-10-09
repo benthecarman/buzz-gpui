@@ -96,5 +96,12 @@ async fn saves_status_and_profile() {
         .await
     );
 
+    // The availability choice reaches the viewer's own presence.
+    session.watch_presence(vec![viewer.clone()]);
+    session.set_presence_mode(PresenceMode::Away);
+    assert!(
+        wait_for(|| snapshot.borrow().presence.get(&viewer) == Some(&PresenceState::Away)).await
+    );
+
     session.dispose().await;
 }
