@@ -42,7 +42,12 @@ async fn lists_channels_and_folds_a_timeline() {
     let alice = Arc::new(
         Identity::from_nsec(identities["identities"]["alice"]["nsec"].as_str().unwrap()).unwrap(),
     );
-    let session = Session::open(&tokio::runtime::Handle::current(), origin, alice);
+    let session = Session::open(
+        &tokio::runtime::Handle::current(),
+        origin,
+        alice,
+        Store::in_memory().unwrap(),
+    );
     let mut snapshot = session.snapshot();
     let channel = |name: &str| seed["channels"][name].as_str().unwrap().to_string();
 
@@ -106,4 +111,62 @@ async fn lists_channels_and_folds_a_timeline() {
     })
     .await;
     assert!(!profiles.profiles[&bob].name_is_fallback);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sends_reacts_and_deletes_through_the_outbox() {
+    let Some((origin, identities, seed)) = fixture() else {
+        return;
+    };
+    let alice = Arc::new(
+        Identity::from_nsec(identities["identities"]["alice"]["nsec"].as_str().unwrap()).unwrap(),
+    );
+    let session = Session::open(
+        &tokio::runtime::Handle::current(),
+        origin,
+        alice,
+        Store::in_memory().unwrap(),
+    );
+    let mut snapshot = session.snapshot();
+    until(&mut snapshot, "the roster", |s| {
+        s.roster == RosterStatus::Ready && s.live
+    })
+    .await;
+    let random = seed["channels"]["random"].as_str().unwrap().to_string();
+    let view = session.open_channel(&random);
+    let mut timeline = view.snapshot.clone();
+    until(&mut timeline, "#random", |t| {
+        t.status == TimelineStatus::Ready
+    })
+    .await;
+
+    let content = format!("outbox test {}", std::process::id());
+    session
+        .send(&random, &content, Default::default(), None)
+        .await
+        .unwrap();
+    let seen = until(&mut timeline, "the echo of our message", |t| {
+        t.rows.iter().any(|r| {
+            r.content == content
+                && r.delivery
+                    .as_ref()
+                    .is_none_or(|d| d.status == fold::Delivery::Seen)
+        })
+    })
+    .await;
+    let id = seen.rows.iter().find(|r| r.content == content).unwrap().id;
+
+    session.react(&random, id, "👍").await.unwrap();
+    until(&mut timeline, "our reaction", |t| {
+        t.rows
+            .iter()
+            .any(|r| r.id == id && r.reactions.iter().any(|g| g.content == "👍"))
+    })
+    .await;
+
+    session.remove(&random, id).await.unwrap();
+    until(&mut timeline, "the deletion", |t| {
+        t.rows.iter().all(|r| r.id != id)
+    })
+    .await;
 }

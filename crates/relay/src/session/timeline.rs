@@ -1,7 +1,7 @@
 //! One channel's retained history plus its live traffic, folded into rows.
 
 use crate::event::{Verified, kinds};
-use crate::fold::{FoldOptions, MessageProjection, MessageRow};
+use crate::fold::{FoldOptions, LocalDelivery, MessageClock, MessageProjection, MessageRow};
 use crate::window::Cursor;
 use nostr::prelude::{EventId, PublicKey};
 use std::collections::{HashMap, HashSet};
@@ -72,6 +72,8 @@ pub(super) struct Timeline {
     pub generation: u64,
     pages: HashMap<EventId, Verified>,
     traffic: HashMap<EventId, Verified>,
+    /// Our own outbox operations for this channel, signed, with their state.
+    local: Vec<(Verified, LocalDelivery)>,
     projection: MessageProjection,
     pub cursor: Option<Cursor>,
     pub has_more: bool,
@@ -89,7 +91,7 @@ pub(super) struct Timeline {
 }
 
 impl Timeline {
-    pub fn new(id: String, relay_author: PublicKey) -> Self {
+    pub fn new(id: String, relay_author: PublicKey, clock: Arc<MessageClock>) -> Self {
         let projection = MessageProjection::new(
             id.clone(),
             relay_author,
@@ -97,7 +99,8 @@ impl Timeline {
                 signing_authority: Some(relay_author),
                 ..Default::default()
             },
-        );
+        )
+        .with_clock(clock);
         let snapshot = Arc::new(TimelineSnapshot::loading(&id));
         Self {
             id,
@@ -105,6 +108,7 @@ impl Timeline {
             generation: 0,
             pages: HashMap::new(),
             traffic: HashMap::new(),
+            local: Vec::new(),
             projection,
             cursor: None,
             has_more: false,
@@ -220,6 +224,47 @@ impl Timeline {
         }
     }
 
+    /// Replaces the local operations shown here. Content stays visible when
+    /// it failed so it can be retried; a failed edit or reaction does not.
+    pub fn set_local(&mut self, operations: &[(Verified, LocalDelivery)]) {
+        let known: HashSet<EventId> = self
+            .pages
+            .keys()
+            .chain(self.traffic.keys())
+            .copied()
+            .collect();
+        let mut local: Vec<(Verified, LocalDelivery)> = operations
+            .iter()
+            .filter(|(event, delivery)| {
+                let content = kinds::CHANNEL_ROW_KINDS.contains(&event.kind_u16());
+                let here = event.channel() == Some(self.id.as_str())
+                    || event.tags_named("e").any(|tag| {
+                        tag.get(1)
+                            .and_then(|id| EventId::from_hex(id).ok())
+                            .is_some_and(|id| known.contains(&id))
+                    });
+                here && (content || delivery.status != crate::fold::Delivery::Failed)
+            })
+            .cloned()
+            .collect();
+        local.sort_by_key(|(event, _)| event.id);
+        self.local = local;
+    }
+
+    /// An event shown in this channel, for edits, reactions and removals.
+    pub fn find(&self, id: &EventId) -> Option<Verified> {
+        self.pages
+            .get(id)
+            .or_else(|| self.traffic.get(id))
+            .or_else(|| {
+                self.local
+                    .iter()
+                    .find(|(event, _)| event.id == *id)
+                    .map(|(event, _)| event)
+            })
+            .cloned()
+    }
+
     pub fn mark_stale(&mut self) {
         self.stale = true;
     }
@@ -245,8 +290,16 @@ impl Timeline {
 
     /// Refolds and publishes if anything visible changed.
     pub fn publish(&mut self) {
-        let combined = self.pages.values().chain(self.traffic.values());
-        let (rows, _) = self.projection.reconcile(combined);
+        let combined = self
+            .pages
+            .values()
+            .chain(self.traffic.values())
+            .chain(self.local.iter().map(|(event, _)| event));
+        let deliveries = self
+            .local
+            .iter()
+            .map(|(event, delivery)| (event.id, delivery.clone()));
+        let (rows, _) = self.projection.reconcile_local(combined, deliveries);
         let status = match (&self.error, self.loaded_at) {
             (Some(error), None) => TimelineStatus::Error(error.clone()),
             (_, None) => TimelineStatus::Loading,

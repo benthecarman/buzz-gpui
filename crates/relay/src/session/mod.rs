@@ -16,21 +16,25 @@ pub use timeline::{TimelineSnapshot, TimelineStatus};
 
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
 use crate::event::{Verified, Verifier, kinds};
+use crate::fold::{LocalDelivery, MessageClock};
 use crate::http::RelayHttp;
 use crate::live::{Live, LiveOptions, LiveUpdate};
+use crate::messages::{self, Author, Compose, EmojiCatalog, Mentions};
 use crate::origin::RelayOrigin;
+use crate::outbox::{HttpPublisher, Outbox, OutboxOptions, SendOptions};
 use crate::profiles::{ProfileDirectory, Profiles};
 use crate::reader::{ReadError, ReadErrorKind, ReadOptions, Reader, ReaderOptions};
 use crate::socket::Filter;
+use crate::store::{Partition, SqliteJournal, Store};
 use crate::window::{Cursor, page_filter, parse_page};
 use crate::{ChannelSummary, Events};
 use buzz_identity::Identity;
-use nostr::prelude::PublicKey;
+use nostr::prelude::{EventId, PublicKey};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use timeline::Timeline;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Closed channels kept warm for a quick return.
 const RETAINED_CLOSED: usize = 3;
@@ -105,10 +109,12 @@ impl Drop for ChannelView {
 }
 
 impl Session {
+    /// `store` holds the outbox journal and other local state.
     pub fn open(
         runtime: &tokio::runtime::Handle,
         origin: RelayOrigin,
         identity: Arc<Identity>,
+        store: Store,
     ) -> Self {
         let (commands, inbox) = mpsc::unbounded_channel();
         let snapshot = watch::Sender::new(Arc::new(SessionSnapshot {
@@ -150,6 +156,10 @@ impl Session {
             profiles: ProfileDirectory::default(),
             selected: None,
             connect_attempt: 0,
+            store,
+            clock: Arc::new(MessageClock::new()),
+            outbox: None,
+            outbox_changes: None,
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -196,6 +206,97 @@ impl Session {
     pub fn retry(&self) {
         let _ = self.commands.send(Message::Retry);
     }
+
+    async fn write(&self, write: Write) -> Result<(), String> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Message::Write { write, reply })
+            .map_err(|_| "The session has closed".to_string())?;
+        answer
+            .await
+            .unwrap_or_else(|_| Err("The session has closed".to_string()))
+    }
+
+    /// Sends a message, or a thread reply when `thread` names
+    /// `(root, parent)`. Resolves once the intent is safely queued; the
+    /// timeline shows its delivery.
+    pub async fn send(
+        &self,
+        channel: &str,
+        content: &str,
+        mentions: Mentions,
+        thread: Option<(EventId, EventId)>,
+    ) -> Result<(), String> {
+        self.write(Write::Send {
+            channel: channel.to_string(),
+            content: content.to_string(),
+            mentions,
+            thread,
+        })
+        .await
+    }
+
+    pub async fn edit(&self, channel: &str, id: EventId, content: &str) -> Result<(), String> {
+        self.write(Write::Edit {
+            channel: channel.to_string(),
+            id,
+            content: content.to_string(),
+        })
+        .await
+    }
+
+    pub async fn react(&self, channel: &str, id: EventId, emoji: &str) -> Result<(), String> {
+        self.write(Write::React {
+            channel: channel.to_string(),
+            id,
+            content: emoji.to_string(),
+        })
+        .await
+    }
+
+    /// Deletes our own message or reaction.
+    pub async fn remove(&self, channel: &str, id: EventId) -> Result<(), String> {
+        self.write(Write::Remove {
+            channel: channel.to_string(),
+            id,
+        })
+        .await
+    }
+
+    /// Republishes the exact signed bytes of a failed or unknown send.
+    pub async fn retry_send(&self, id: EventId) -> Result<(), String> {
+        self.write(Write::Retry(id)).await
+    }
+
+    /// Discards a failed send.
+    pub async fn dismiss(&self, id: EventId) -> Result<(), String> {
+        self.write(Write::Dismiss(id)).await
+    }
+}
+
+enum Write {
+    Send {
+        channel: String,
+        content: String,
+        mentions: Mentions,
+        thread: Option<(EventId, EventId)>,
+    },
+    Edit {
+        channel: String,
+        id: EventId,
+        content: String,
+    },
+    React {
+        channel: String,
+        id: EventId,
+        content: String,
+    },
+    Remove {
+        channel: String,
+        id: EventId,
+    },
+    Retry(EventId),
+    Dismiss(EventId),
 }
 
 impl Drop for Session {
@@ -213,6 +314,10 @@ enum Message {
     LoadOlder(String),
     Select(Option<String>),
     Retry,
+    Write {
+        write: Write,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Connected(Result<RelayInfo, String>),
     ScanRead {
         epoch: u64,
@@ -256,21 +361,44 @@ struct Actor {
     profiles: ProfileDirectory,
     selected: Option<String>,
     connect_attempt: u32,
+    store: Store,
+    /// Shared by the outbox and every timeline, so sends sort after what
+    /// is shown.
+    clock: Arc<MessageClock>,
+    outbox: Option<Outbox>,
+    outbox_changes: Option<watch::Receiver<u64>>,
 }
 
 impl Actor {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
         self.connect();
         loop {
-            let message = match &mut self.live {
-                Some(live) => tokio::select! {
-                    message = inbox.recv() => message,
-                    update = live.next() => {
-                        self.live_update(update);
-                        continue;
+            let outbox_changed = async {
+                match &mut self.outbox_changes {
+                    Some(changes) => changes.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            };
+            let live_update = async {
+                match &mut self.live {
+                    Some(live) => Some(live.next().await),
+                    None => std::future::pending().await,
+                }
+            };
+            let message = tokio::select! {
+                message = inbox.recv() => message,
+                Some(update) = live_update => {
+                    self.live_update(update);
+                    continue;
+                }
+                changed = outbox_changed => {
+                    if changed {
+                        self.local_changed();
+                    } else {
+                        self.outbox_changes = None;
                     }
-                },
-                None => inbox.recv().await,
+                    continue;
+                }
             };
             let Some(message) = message else {
                 return;
@@ -307,6 +435,23 @@ impl Actor {
                 }
             }
             Message::Connected(result) => self.connected(result),
+            Message::Write {
+                write: Write::Dismiss(id),
+                reply,
+            } => match &self.outbox {
+                Some(outbox) => {
+                    let dismissed = outbox.dismiss(&id);
+                    self.runtime.spawn(async move {
+                        let _ = reply.send(dismissed.await.map_err(|error| error.to_string()));
+                    });
+                }
+                None => {
+                    let _ = reply.send(Err("Not connected to the relay yet".into()));
+                }
+            },
+            Message::Write { write, reply } => {
+                let _ = reply.send(self.write(write));
+            }
             Message::ScanRead { epoch, result } => {
                 if epoch == self.epoch {
                     self.scan_read(result);
@@ -383,6 +528,21 @@ impl Actor {
             self.verifier.clone(),
             LiveOptions::default(),
         ));
+        let journal = SqliteJournal::new(
+            self.store.clone(),
+            Partition::new(&self.origin, &self.identity.pubkey_hex()),
+        );
+        let outbox = Outbox::new(
+            self.identity.clone(),
+            Arc::new(HttpPublisher::new(self.http.clone(), self.reader.clone())),
+            Arc::new(journal),
+            OutboxOptions {
+                message_clock: self.clock.clone(),
+                ..Default::default()
+            },
+        );
+        self.outbox_changes = Some(outbox.changes());
+        self.outbox = Some(outbox);
         self.set_status(SessionStatus::Ready);
         self.start_scan(ScanOptions::default());
     }
@@ -643,6 +803,9 @@ impl Actor {
                 ..Default::default()
             });
         }
+        if let Some(outbox) = &self.outbox {
+            outbox.observe(events);
+        }
         publish |= self.profiles.accept(events);
         let mut people = Vec::new();
         for timeline in self.timelines.values_mut() {
@@ -667,7 +830,7 @@ impl Actor {
         let timeline = self
             .timelines
             .entry(channel.to_string())
-            .or_insert_with(|| Timeline::new(channel.to_string(), author));
+            .or_insert_with(|| Timeline::new(channel.to_string(), author, self.clock.clone()));
         timeline.viewers += 1;
         timeline.attach(view);
         if timeline.needs_head() {
@@ -796,6 +959,133 @@ impl Actor {
         timeline.publish();
         let people = timeline.people();
         self.ensure_profiles(people);
+    }
+
+    // ----- writes -----
+
+    fn write(&mut self, write: Write) -> Result<(), String> {
+        let outbox = self
+            .outbox
+            .clone()
+            .ok_or("Not connected to the relay yet")?;
+        let viewer = self.identity.pubkey_hex();
+        let authority = self.relay.as_ref().map(|relay| relay.authority.clone());
+        let author = Author {
+            viewer: &viewer,
+            signing_authority: authority.as_deref(),
+        };
+        let find = |channel: &str, id: &EventId| {
+            self.timelines
+                .get(channel)
+                .and_then(|timeline| timeline.find(id))
+                .ok_or_else(|| "Load the message first".to_string())
+        };
+        let drafts = match write {
+            Write::Send {
+                channel,
+                content,
+                mentions,
+                thread,
+            } => {
+                if !self
+                    .discovery
+                    .as_ref()
+                    .is_some_and(|d| d.can_participate(&channel))
+                {
+                    return Err("You can't post in this channel".into());
+                }
+                let compose = Compose {
+                    channel_id: &channel,
+                    content: &content,
+                    mentions: &mentions,
+                    attachments: &[],
+                    emoji: EmojiCatalog::Ready(&[]),
+                    origin: &self.origin,
+                };
+                let draft = match thread {
+                    Some((root, parent)) => {
+                        messages::reply(&compose, &root.to_hex(), &parent.to_hex())
+                    }
+                    None => messages::message(&compose),
+                };
+                vec![draft.map_err(|error| error.to_string())?]
+            }
+            Write::Edit {
+                channel,
+                id,
+                content,
+            } => {
+                let original = find(&channel, &id)?;
+                vec![
+                    messages::edit(
+                        &author,
+                        &original,
+                        &original,
+                        &content,
+                        EmojiCatalog::Ready(&[]),
+                    )
+                    .map_err(|error| error.to_string())?,
+                ]
+            }
+            Write::React {
+                channel,
+                id,
+                content,
+            } => {
+                let original = find(&channel, &id)?;
+                vec![
+                    messages::react(&original, &content, None, EmojiCatalog::Ready(&[]))
+                        .map_err(|error| error.to_string())?,
+                ]
+            }
+            Write::Remove { channel, id } => {
+                let target = find(&channel, &id)?;
+                let ids = vec![id.to_hex()];
+                messages::remove(&author, &ids, |_| Some(target.event().as_ref()), None)
+                    .map_err(|error| error.to_string())?
+            }
+            Write::Retry(id) => return outbox.retry(&id, None).map_err(|error| error.to_string()),
+            Write::Dismiss(_) => unreachable!("dismissals finish asynchronously"),
+        };
+        for draft in drafts {
+            outbox
+                .send(draft, SendOptions::default())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Shows the outbox's signed operations in their timelines.
+    fn local_changed(&mut self) {
+        let Some(outbox) = &self.outbox else {
+            return;
+        };
+        let local: Vec<(Verified, LocalDelivery)> = outbox
+            .visible()
+            .iter()
+            .filter_map(|op| {
+                let signed = op.signed.clone()?;
+                let event = self.verifier.verify(signed).ok()?;
+                let status = match op.delivery {
+                    crate::outbox::Delivery::Sending => crate::fold::Delivery::Sending,
+                    crate::outbox::Delivery::Accepted => crate::fold::Delivery::Accepted,
+                    crate::outbox::Delivery::Unknown => crate::fold::Delivery::Unknown,
+                    crate::outbox::Delivery::Failed => crate::fold::Delivery::Failed,
+                    crate::outbox::Delivery::Seen => crate::fold::Delivery::Seen,
+                };
+                Some((
+                    event,
+                    LocalDelivery {
+                        status,
+                        error: op.error.clone(),
+                    },
+                ))
+            })
+            .collect();
+        for timeline in self.timelines.values_mut() {
+            timeline.set_local(&local);
+            timeline.publish();
+        }
     }
 
     // ----- profiles -----
