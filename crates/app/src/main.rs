@@ -1,5 +1,7 @@
+mod community;
 mod config;
 mod hosts;
+mod mirror;
 mod runtime;
 
 use gpui_kit::*;
@@ -79,6 +81,7 @@ fn main() {
         gpui_kit::init(cx);
         runtime::Runtime::init(cx);
         Hosts::init(&config, cx);
+        community::AppState::init(cx);
         gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(Shell::new))
             .expect("open main window");
     });
