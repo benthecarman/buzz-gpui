@@ -670,6 +670,7 @@ impl Workspace {
     /// Something from outside the window, which is already in front.
     pub fn handle(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
         match request {
+            Request::Focus => {}
             Request::Url(url) => self.open_url(&url, window, cx),
             Request::Open(target) => self.navigate(target, window, cx),
         }

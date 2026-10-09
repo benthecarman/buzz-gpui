@@ -315,7 +315,7 @@ impl ChannelModel {
     }
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("buzz-gpui")

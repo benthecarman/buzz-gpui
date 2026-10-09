@@ -134,6 +134,7 @@ impl History {
 /// notification click. Each brings the window to the front.
 #[derive(Debug)]
 pub enum Request {
+    Focus,
     Url(String),
     Open(Target),
 }

@@ -7,6 +7,8 @@ mod idle;
 mod mirror;
 mod notifications;
 mod runtime;
+#[cfg(unix)]
+mod single_instance;
 mod ui;
 
 use gpui_kit::*;
@@ -22,6 +24,21 @@ fn main() {
         .init();
     // A `buzz://` link the OS launched us with (`Exec=buzz-gpui %U`).
     let link = deep_links::from_args(std::env::args().skip(1));
+    #[cfg(unix)]
+    let instance = {
+        let path = single_instance::socket_path(&community::data_dir());
+        match single_instance::claim(&path, link.as_deref().unwrap_or_default()) {
+            Ok(single_instance::Claim::Forwarded) => {
+                tracing::info!("handed off to the running Buzz");
+                return;
+            }
+            Ok(single_instance::Claim::Primary(listener)) => Some(listener),
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "running without single-instance handoff");
+                None
+            }
+        }
+    };
     let config = config::Config::load();
     let app = gpui_kit::application().with_assets(buzz_ui::Assets);
     app.run(move |cx| {
@@ -37,6 +54,16 @@ fn main() {
         let requests = navigation::init(cx);
         if let Some(link) = link {
             let _ = requests.unbounded_send(Request::Url(link));
+        }
+        #[cfg(unix)]
+        if let Some(listener) = instance {
+            single_instance::serve(listener, move |message| {
+                let request = match message.is_empty() {
+                    true => Request::Focus,
+                    false => Request::Url(message),
+                };
+                let _ = requests.unbounded_send(request);
+            });
         }
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let (window, workspace) = gpui_kit::open_window(
