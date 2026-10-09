@@ -5,6 +5,7 @@ use super::agents::AgentsPage;
 use super::channel::ChannelPage;
 use super::onboarding::{Onboarding, Step};
 use super::sidebar::{self, Page, SidebarProps};
+use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use buzz_relay_client::ChannelSummary;
 use buzz_relay_client::fold::MessageRow;
@@ -13,6 +14,7 @@ use buzz_ui::{
     IconName, MaterialStyled, ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
 };
 use gpui_kit::*;
+use nostr::prelude::EventId;
 use std::sync::Arc;
 
 pub struct Workspace {
@@ -20,6 +22,7 @@ pub struct Workspace {
     sidebar_open: bool,
     community: Option<Entity<Community>>,
     channel: Option<Entity<ChannelPage>>,
+    thread: Option<Entity<ThreadPanel>>,
     agents: Option<Entity<AgentsPage>>,
     onboarding: Option<(Step, Entity<Onboarding>)>,
     _community_observer: Option<Subscription>,
@@ -34,6 +37,7 @@ impl Workspace {
             sidebar_open: true,
             community: None,
             channel: None,
+            thread: None,
             agents: None,
             onboarding: None,
             _community_observer: None,
@@ -58,6 +62,7 @@ impl Workspace {
         if current.as_ref().map(Entity::entity_id) != self.community.as_ref().map(Entity::entity_id)
         {
             self.channel = None;
+            self.thread = None;
             self._community_observer = current.as_ref().map(|community| {
                 cx.observe_in(community, window, |this, _, window, cx| {
                     this.restore_selection(window, cx);
@@ -112,13 +117,48 @@ impl Workspace {
             return;
         };
         community.read(cx).remember_channel(&channel.id, cx);
+        self.thread = None;
+        let weak = cx.entity().downgrade();
         let open_thread: Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)> =
-            Arc::new(|_, _, _| {});
+            Arc::new(move |row, window, cx| {
+                let _ = weak.update(cx, |this, cx| this.open_thread(row.id, window, cx));
+            });
         let page =
             cx.new(|cx| ChannelPage::new(community, channel.clone(), open_thread, window, cx));
         let composer = page.read(cx).composer();
         composer.update(cx, |state, cx| state.focus(window, cx));
         self.channel = Some(page);
+        if let Some(root) = thread::dev_open_thread() {
+            self.open_thread(root, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_thread(&mut self, root: EventId, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(community), Some(channel)) = (self.community.clone(), &self.channel) else {
+            return;
+        };
+        if let Some(thread) = &self.thread
+            && thread.read(cx).root_id() == root
+        {
+            ThreadPanel::focus(thread, window, cx);
+            return;
+        }
+        let channel = channel.read(cx).channel_id().to_string();
+        let weak = cx.entity().downgrade();
+        let on_close: thread::OnClose = Arc::new(move |window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.thread = None;
+                if let Some(channel) = &this.channel {
+                    let composer = channel.read(cx).composer();
+                    composer.update(cx, |state, cx| state.focus(window, cx));
+                }
+                cx.notify();
+            });
+        });
+        let panel = cx.new(|cx| ThreadPanel::new(community, channel, root, on_close, window, cx));
+        ThreadPanel::focus(&panel, window, cx);
+        self.thread = Some(panel);
         cx.notify();
     }
 
@@ -254,7 +294,9 @@ impl Render for Workspace {
                     .map(IntoElement::into_any_element)
                     .unwrap_or_else(|| div().into_any_element()),
                 Page::Messages => match &self.channel {
-                    Some(channel) => channel.clone().into_any_element(),
+                    Some(channel) => {
+                        thread::board(channel.clone().into_any_element(), self.thread.clone(), cx)
+                    }
                     None => div()
                         .flex_1()
                         .flex()

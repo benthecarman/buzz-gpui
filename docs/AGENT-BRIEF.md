@@ -37,6 +37,9 @@ Create your own scratch directory, e.g. `T=/tmp/<your-task>`. Then:
    screenshots in /home/ben/projects/buzz-gpui/docs/port/screenshots/.
    Mouse clicks can be scripted with `xdotool` (nixpkgs#xdotool) inside the
    same xvfb-run shell.
+5. Development only: set `BUZZ_DEV_OPEN_THREAD=<event id>` to open that
+   thread panel beside the first channel the app selects, e.g. the
+   `events.welcome` root from `seed.json` in #general.
 
 ## Commits
 - Commit on your worktree branch in small, logical commits.
