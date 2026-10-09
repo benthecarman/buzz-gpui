@@ -1,8 +1,10 @@
 //! The window: header, community rail and the joined panel holding the
 //! sidebar and the current page (ui.md §2).
 
+mod dialogs;
+
 use super::agents::AgentsPage;
-use super::channel::{ChannelPage, Reveal};
+use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::navigation::{History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::profile_card::{self, ProfileCard};
@@ -39,6 +41,8 @@ pub struct Workspace {
     _revealing: Option<Subscription>,
     /// The person whose card a mention opened, and where.
     profile: Option<(String, Point<Pixels>)>,
+    dialog: Option<dialogs::OpenDialog>,
+    _page_events: Option<Subscription>,
 }
 
 impl Workspace {
@@ -59,6 +63,8 @@ impl Workspace {
             thread_exact: false,
             _revealing: None,
             profile: None,
+            dialog: None,
+            _page_events: None,
         };
         workspace.sync(window, cx);
         workspace
@@ -159,6 +165,9 @@ impl Workspace {
             cx.new(|cx| ChannelPage::new(community, channel.clone(), open_thread, window, cx));
         let composer = page.read(cx).composer();
         composer.update(cx, |state, cx| state.focus(window, cx));
+        self._page_events = Some(cx.subscribe(&page, |this, _, _: &ChannelClosed, cx| {
+            this.close_channel(cx)
+        }));
         self.channel = Some(page);
         if let Some(root) = thread::dev_open_thread() {
             self.open_thread(root, window, cx);
@@ -309,7 +318,13 @@ impl Workspace {
                 div()
                     .flex()
                     .gap(rems(0.5))
-                    .child(header_button("search", IconName::MagnifyingGlass))
+                    .child(
+                        header_button("search", IconName::MagnifyingGlass)
+                            .tooltip("Search Buzz (Ctrl+K)")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_search(window, cx)),
+                            ),
+                    )
                     .child(
                         IconButton::new("me", IconName::User)
                             .size(IconButtonSize::Sm)
@@ -343,15 +358,9 @@ impl Workspace {
             );
         }
         rail.child(
-            IconButton::new("add-community", IconName::Plus).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.onboarding = Some((
-                        Step::Community,
-                        cx.new(|cx| Onboarding::new(Step::Community, window, cx)),
-                    ));
-                    cx.notify();
-                },
-            )),
+            IconButton::new("add-community", IconName::Plus)
+                .tooltip("Add a community")
+                .on_click(cx.listener(|this, _, window, cx| this.open_add_community(window, cx))),
         )
     }
 }
@@ -359,6 +368,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        let dialog = self.dialog(window, cx);
         let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding {
             onboarding.clone().into_any_element()
         } else {
@@ -391,6 +401,11 @@ impl Render for Workspace {
                 let snapshot = community.read(cx).snapshot.clone();
                 let weak = cx.entity().downgrade();
                 let weak_page = weak.clone();
+                let (weak_create, weak_message) = (weak.clone(), weak.clone());
+                let can_create = snapshot
+                    .relay
+                    .as_ref()
+                    .is_some_and(|relay| relay.supports_channel_creation);
                 sidebar::render(
                     &snapshot,
                     SidebarProps {
@@ -405,6 +420,16 @@ impl Render for Workspace {
                         }),
                         on_select_page: Arc::new(move |page, _, cx| {
                             let _ = weak_page.update(cx, |this, cx| this.select_page(page, cx));
+                        }),
+                        on_create_channel: can_create.then(|| {
+                            Arc::new(move |window: &mut Window, cx: &mut App| {
+                                let _ = weak_create
+                                    .update(cx, |this, cx| this.open_new_channel(window, cx));
+                            }) as sidebar::ActionHandler
+                        }),
+                        on_new_message: Arc::new(move |window, cx| {
+                            let _ = weak_message
+                                .update(cx, |this, cx| this.open_new_message(window, cx));
                         }),
                     },
                     cx,
@@ -427,6 +452,13 @@ impl Render for Workspace {
                 .children(profile)
                 .font_family("Inter")
                 .text_color(c.text_standard)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    let keys = &event.keystroke;
+                    if keys.key == "k" && keys.modifiers.secondary() && this.dialog.is_none() {
+                        cx.stop_propagation();
+                        this.open_search(window, cx);
+                    }
+                }))
                 .child(self.header(cx))
                 .child(
                     div().flex().flex_1().min_h_0().child(self.rail(cx)).child(
@@ -441,6 +473,7 @@ impl Render for Workspace {
                         ),
                     ),
                 )
+                .children(dialog)
                 .children(super::media::review_overlay(cx)),
         )
     }

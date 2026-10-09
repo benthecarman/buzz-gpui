@@ -1,6 +1,7 @@
 //! The channel page: header, timeline and composer (ui.md §4.1–4.8,
 //! §4.12).
 
+use super::channel_menu::{ChannelActions, JoinNotice};
 use super::markdown::Directory;
 use super::message::{self, Actions, Command, Hover, Interaction, Item, Rows};
 use crate::community::{ChannelModel, Community};
@@ -37,6 +38,9 @@ pub enum Reveal {
 /// Asks the workspace to open a thread panel.
 pub type OpenThread = Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)>;
 
+/// The viewer left or hid this channel; the workspace closes the page.
+pub struct ChannelClosed;
+
 pub struct ChannelPage {
     community: Entity<Community>,
     channel: ChannelSummary,
@@ -63,7 +67,13 @@ pub struct ChannelPage {
     /// A message just revealed by navigation, tinted for a moment.
     highlight: Option<EventId>,
     _subscriptions: Vec<Subscription>,
+    /// The header's members button and actions menu.
+    actions: Entity<ChannelActions>,
+    /// Join for a read-only preview (§4.12).
+    join: Entity<JoinNotice>,
 }
+
+impl EventEmitter<ChannelClosed> for ChannelPage {}
 
 impl ChannelPage {
     pub fn new(
@@ -89,7 +99,19 @@ impl ChannelPage {
         });
         let subscriptions = vec![
             cx.observe(&model, |this, _, cx| this.sync_items(cx)),
-            cx.observe(&community, |_, _, cx| cx.notify()),
+            cx.observe(&community, |this, community, cx| {
+                // Joining, leaving or editing changes the summary.
+                if let Some(current) = community
+                    .read(cx)
+                    .snapshot
+                    .channels
+                    .iter()
+                    .find(|c| c.id == this.channel.id)
+                {
+                    this.channel = current.clone();
+                }
+                cx.notify()
+            }),
             cx.subscribe_in(
                 &composer,
                 window,
@@ -122,7 +144,16 @@ impl ChannelPage {
                 model.load_older();
             }
         });
+        let page_handle = cx.entity().downgrade();
+        let on_removed: super::channel_menu::OnRemoved = std::rc::Rc::new(move |_, cx| {
+            let _ = page_handle.update(cx, |_, cx| cx.emit(ChannelClosed));
+        });
+        let actions =
+            cx.new(|_| ChannelActions::new(community.clone(), channel.clone(), on_removed));
+        let join = cx.new(|_| JoinNotice::new(community.clone(), channel.clone()));
         let mut page = Self {
+            actions,
+            join,
             community,
             channel,
             model,
@@ -151,24 +182,36 @@ impl ChannelPage {
         &self.channel.id
     }
 
+    pub fn channel(&self) -> &ChannelSummary {
+        &self.channel
+    }
+
     pub fn composer(&self) -> Entity<TextareaState> {
         self.composer.clone()
     }
 
-    /// Scrolls a top-level message into view and tints it briefly. A reply,
-    /// or a message outside the loaded window, is not revealed here; there
-    /// is no "around message" query (relay.md §5c.5).
+    /// Scrolls a top-level message into view and tints it briefly, paging in
+    /// older history while it may still be there. A reply is not revealed
+    /// here; there is no "around message" query (relay.md §5c.5).
     pub fn reveal(&mut self, id: EventId, cx: &mut Context<Self>) -> Reveal {
         let index = self
             .items
             .iter()
             .position(|item| item.row.id == id && item.row.thread_root_id.is_none());
         let Some(index) = index else {
-            // A cached window may be missing what the relay now has.
-            let snapshot = &self.model.read(cx).snapshot;
+            // A cached window may be missing what the relay now has; older
+            // history is paged in until the message turns up or runs out.
+            let model = self.model.read(cx);
+            let snapshot = &model.snapshot;
             return match snapshot.status {
                 TimelineStatus::Loading => Reveal::Loading,
-                TimelineStatus::Ready if snapshot.stale => Reveal::Loading,
+                TimelineStatus::Ready if snapshot.stale || snapshot.loading_older => {
+                    Reveal::Loading
+                }
+                TimelineStatus::Ready if snapshot.has_more && !snapshot.history_limited => {
+                    model.load_older();
+                    Reveal::Loading
+                }
                 _ => Reveal::Absent,
             };
         };
@@ -515,17 +558,7 @@ impl ChannelPage {
     fn composer_shell(&self, cx: &mut Context<Self>) -> AnyElement {
         let c = *cx.colors();
         if self.channel.read_only {
-            return div()
-                .flex()
-                .flex_wrap()
-                .gap(px(12.))
-                .px(px(16.))
-                .py(px(8.))
-                .mb(px(8.))
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child("Read-only preview · You haven’t joined this conversation.")
-                .into_any_element();
+            return self.join.clone().into_any_element();
         }
         let has_text = !self.composer.read(cx).value().trim().is_empty();
         let editing = self.editing.is_some();
@@ -730,16 +763,7 @@ impl Render for ChannelPage {
                 Some(message::channel_icon(&self.channel)),
                 self.channel.name.clone(),
             )
-            .action(
-                IconButton::new("members", IconName::Users)
-                    .size(IconButtonSize::Sm)
-                    .tooltip("Channel members"),
-            )
-            .action(
-                IconButton::new("more", IconName::DotsThree)
-                    .size(IconButtonSize::Sm)
-                    .tooltip("Channel actions"),
-            );
+            .action(self.actions.clone());
 
         let typing_profiles = community.snapshot.profiles.clone();
         let rows = Rc::new(Rows {

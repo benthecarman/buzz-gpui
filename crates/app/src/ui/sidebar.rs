@@ -3,7 +3,8 @@
 use super::message::{channel_icon, display_name};
 use buzz_relay_client::{ChannelSummary, ChannelType, PresenceState, Profiles, SessionSnapshot};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, Icon, IconName, NavigationItem, Presence, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonSize, IconName, NavigationItem,
+    Presence, Surface, TypeStyled,
 };
 use gpui_kit::*;
 use std::sync::Arc;
@@ -19,7 +20,13 @@ pub struct SidebarProps {
     pub selected: Option<String>,
     pub on_select_channel: ChannelHandler,
     pub on_select_page: PageHandler,
+    /// Section "+" actions (§3.5). Channel creation is `None` when the relay
+    /// does not support it.
+    pub on_create_channel: Option<ActionHandler>,
+    pub on_new_message: ActionHandler,
 }
+
+pub type ActionHandler = Arc<dyn Fn(&mut Window, &mut App)>;
 
 pub type ChannelHandler = Arc<dyn Fn(&ChannelSummary, &mut Window, &mut App)>;
 pub type PageHandler = Arc<dyn Fn(Page, &mut Window, &mut App)>;
@@ -50,7 +57,8 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
     let mut streams: Vec<&ChannelSummary> = Vec::new();
     let mut forums: Vec<&ChannelSummary> = Vec::new();
     let mut dms: Vec<(SharedString, &ChannelSummary)> = Vec::new();
-    for channel in snapshot.channels.iter().filter(|c| active(c)) {
+    let hidden = |channel: &ChannelSummary| snapshot.hidden_dms.contains(&channel.id);
+    for channel in snapshot.channels.iter().filter(|c| active(c) && !hidden(c)) {
         match channel.channel_type {
             Some(ChannelType::Dm) => dms.push((channel_label(channel, profiles), channel)),
             Some(ChannelType::Forum) => forums.push(channel),
@@ -73,6 +81,47 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
             .text_color(c.text_unavailable)
             .child(label)
             .child(Icon::new(IconName::CaretDown).size(15.).stroke_width(2.5))
+    };
+    // A section header whose "+" shows on hover (§3.5).
+    let section_with = |label: &'static str,
+                        id: &'static str,
+                        tooltip: &'static str,
+                        action: Option<ActionHandler>| {
+        let group = SharedString::from(format!("section-{id}"));
+        let button = IconButton::new(id, IconName::Plus)
+            .size(IconButtonSize::Sm)
+            .surface(Surface::Navigation)
+            .icon_size(15.)
+            .stroke_width(2.5)
+            .icon_color(c.text_unavailable)
+            .tooltip(if action.is_some() {
+                tooltip
+            } else {
+                "Channel creation unavailable"
+            })
+            .disabled(action.is_none())
+            .on_click(move |_, window, cx| {
+                if let Some(action) = &action {
+                    action(window, cx);
+                }
+            });
+        div()
+            .id(group.clone())
+            .group(group.clone())
+            .relative()
+            .child(section(label).pr(rems(4.5)))
+            .child(
+                div()
+                    .absolute()
+                    .right(rems(0.25))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .opacity(0.)
+                    .group_hover(group, |s| s.opacity(1.))
+                    .child(button),
+            )
     };
     let rows = || {
         div()
@@ -133,7 +182,12 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
                     .on_click(move |_, window, cx| select_page(Page::Agents, window, cx)),
             ),
         )
-        .child(section("Channels"))
+        .child(section_with(
+            "Channels",
+            "create-channel",
+            "Create channel",
+            props.on_create_channel.clone(),
+        ))
         .child(
             rows().children(
                 streams
@@ -158,7 +212,12 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
         .map(|community| community.read(cx).session.media().clone());
     list = list
         .child(div().h(rems(1.)))
-        .child(section("Direct messages"))
+        .child(section_with(
+            "Direct messages",
+            "new-message",
+            "New message",
+            Some(props.on_new_message.clone()),
+        ))
         .child(rows().children(dms.iter().map(|(label, channel)| {
             let first = channel
                 .participants

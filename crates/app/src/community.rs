@@ -171,6 +171,8 @@ pub struct Community {
     pub reading: Option<String>,
     /// Whose presence the session follows.
     presence_demand: Vec<String>,
+    /// People an open view (the members dialog) also follows.
+    presence_extra: Vec<String>,
     _watch: Task<()>,
     _notifications: Option<Task<()>>,
 }
@@ -204,6 +206,7 @@ impl Community {
                 snapshot: current,
                 reading: None,
                 presence_demand: Vec::new(),
+                presence_extra: Vec::new(),
                 _notifications: None,
             }
         });
@@ -217,7 +220,7 @@ impl Community {
     /// Follows the presence of everyone with a one-to-one DM, for the
     /// sidebar's avatar dots.
     fn follow_presence(&mut self) {
-        let demand: Vec<String> = self
+        let mut demand: Vec<String> = self
             .snapshot
             .channels
             .iter()
@@ -227,10 +230,22 @@ impl Community {
                 _ => None,
             })
             .collect();
+        for person in &self.presence_extra {
+            if !demand.contains(person) {
+                demand.push(person.clone());
+            }
+        }
         if demand != self.presence_demand {
             self.presence_demand = demand.clone();
             self.session.watch_presence(demand);
         }
+    }
+
+    /// Also follows these people's presence, replacing the previous extra
+    /// set.
+    pub fn set_presence_extra(&mut self, people: Vec<String>) {
+        self.presence_extra = people;
+        self.follow_presence();
     }
 
     pub fn open_channel(&mut self, channel: &str, cx: &mut App) -> Entity<ChannelModel> {

@@ -1,5 +1,6 @@
 //! First-run screens: set up an identity, then add a community.
 
+use super::add_community::AddCommunity;
 use crate::community::AppState;
 use buzz_ui::{ActiveTheme, Button, ButtonVariant, TextField, TypeStyled};
 use gpui_kit::component::input::InputState;
@@ -16,6 +17,8 @@ pub struct Onboarding {
     field: Entity<InputState>,
     error: Option<SharedString>,
     busy: bool,
+    /// The community step is the "Add a community" flow, invites included.
+    community: Option<Entity<AddCommunity>>,
 }
 
 impl Onboarding {
@@ -32,11 +35,14 @@ impl Onboarding {
             }
             _ => None,
         };
+        let community =
+            (step == Step::Community).then(|| cx.new(|cx| AddCommunity::new(true, window, cx)));
         Self {
             step,
             field,
             error,
             busy: false,
+            community,
         }
     }
 
@@ -71,6 +77,15 @@ impl Onboarding {
 impl Render for Onboarding {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        if let Some(community) = &self.community {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(community.clone())
+                .into_any_element();
+        }
         let (title, detail) = match self.step {
             Step::Identity => (
                 "Set up your Buzz identity",
@@ -127,5 +142,6 @@ impl Render for Onboarding {
                     )
                     .child(actions),
             )
+            .into_any_element()
     }
 }
