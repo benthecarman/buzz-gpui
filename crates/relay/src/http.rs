@@ -162,9 +162,15 @@ impl RelayHttp {
 
     /// `GET /` as NIP-11 relay information.
     pub async fn information(&self) -> Result<serde_json::Value, HttpError> {
+        self.get_public("/").await
+    }
+
+    /// An unauthenticated `GET` of a JSON document, such as NIP-11 or the
+    /// join policy. The relay only answers JSON on `/` with this `Accept`.
+    pub async fn get_public(&self, path: &str) -> Result<serde_json::Value, HttpError> {
         let response = self
             .client
-            .get(self.origin.endpoint("/"))
+            .get(self.origin.endpoint(path))
             .header("Accept", "application/nostr+json")
             .send()
             .await

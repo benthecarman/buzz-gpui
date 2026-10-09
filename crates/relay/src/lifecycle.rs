@@ -1,0 +1,748 @@
+//! Channel lifecycle and details (`docs/port/relay.md` §5m): create (9007),
+//! join (9021), leave (9022), archive and unarchive (9002 `archived`),
+//! details edits (9002 name/about/visibility/ttl) and the DM hide command
+//! (41012).
+//!
+//! Pure: templates, validation and the permission rules read from one
+//! strong read of a channel's 39000/39001/39002 ([`ChannelState`]). The
+//! session runs the reads, publishes, and polls for confirmation at
+//! [`CONFIRM_DELAYS`].
+//!
+//! Ports `channel-lifecycle-protocol.ts`, `channel-details-protocol.ts`
+//! and the 9007 template of `work-sessions.ts`.
+
+use crate::discovery::{Visibility, channel_visibility, is_uuid, session_metadata};
+use crate::event::{Verified, is_newer, kinds};
+use crate::messages::{Draft, EventTemplate};
+use crate::socket::Filter;
+use nostr::prelude::EventId;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// Confirmation polls after a lifecycle command (`channel-lifecycle.ts`).
+pub const CONFIRM_DELAYS: [Duration; 4] = [
+    Duration::from_millis(0),
+    Duration::from_millis(250),
+    Duration::from_millis(750),
+    Duration::from_millis(1500),
+];
+/// Overall budget for one lifecycle or administration run.
+pub const RUN_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub const MAX_NAME_CHARS: usize = 120;
+pub const MAX_ABOUT_CHARS: usize = 1000;
+const MAX_TTL: u64 = 2_147_483_647;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct LifecycleError(pub String);
+
+fn error(message: impl Into<String>) -> LifecycleError {
+    LifecycleError(message.into())
+}
+
+fn filter(value: serde_json::Value) -> Filter {
+    match value {
+        serde_json::Value::Object(map) => map,
+        _ => unreachable!("filters are objects"),
+    }
+}
+
+fn channel_id(value: &str) -> Result<&str, LifecycleError> {
+    if is_uuid(value) {
+        Ok(value)
+    } else {
+        Err(error("Invalid channel ID"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Channel state: one strong read of 39000/39001/39002
+
+/// A member's role in the relay-signed 39002 (`channel.rs:108-136`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MemberRole {
+    Owner,
+    Admin,
+    Member,
+    Guest,
+    Bot,
+    /// Missing or not a role this client knows.
+    Unknown,
+}
+
+impl MemberRole {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("owner") => Self::Owner,
+            Some("admin") => Self::Admin,
+            Some("member") => Self::Member,
+            Some("guest") => Self::Guest,
+            Some("bot") => Self::Bot,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+            Self::Guest => "guest",
+            Self::Bot => "bot",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn elevated(self) -> bool {
+        matches!(self, Self::Owner | Self::Admin)
+    }
+}
+
+/// The NIP-29 `t` type a lifecycle read requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateType {
+    Stream,
+    Forum,
+    Dm,
+}
+
+/// The exact, validated state of one channel, read strongly from the relay
+/// (`lifecycleSettings`, `memberAuthority`, `detailsSettings`).
+#[derive(Clone, Debug)]
+pub struct ChannelState {
+    pub channel: String,
+    /// The 39000 event id: the optimistic version of the details.
+    pub version: EventId,
+    pub channel_type: StateType,
+    pub archived: bool,
+    /// The exact `name` tag.
+    pub name: String,
+    pub about: String,
+    pub visibility: Option<Visibility>,
+    /// Absent means the channel is permanent.
+    pub ttl: Option<u64>,
+    /// Members and their 39002 roles.
+    pub roles: BTreeMap<String, MemberRole>,
+    /// The 39000 and 39002, for discovery.
+    pub metadata: Verified,
+    pub roster: Verified,
+}
+
+/// The strong exact read of one channel's state (`administration.ts:72-91`).
+pub fn state_filters(relay_author: &str, channel: &str) -> Vec<Filter> {
+    [
+        kinds::CHANNEL_METADATA,
+        kinds::CHANNEL_ADMINS,
+        kinds::CHANNEL_MEMBERS,
+    ]
+    .iter()
+    .map(|kind| {
+        filter(json!({
+            "kinds": [kind],
+            "consistency": "strong",
+            "authors": [relay_author],
+            "#d": [channel],
+            "limit": 1,
+        }))
+    })
+    .collect()
+}
+
+/// The single value of a tag that may appear at most once, with exactly
+/// one value (`exactLifecycleTag`).
+fn exact_tag<'a>(event: &'a Verified, name: &str) -> Result<Option<&'a str>, LifecycleError> {
+    let mut matches = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind() == name)
+        .map(|tag| tag.as_slice());
+    let first = matches.next();
+    if matches.next().is_some() || first.is_some_and(|tag| tag.len() != 2) {
+        return Err(error(format!("Malformed channel {name} state")));
+    }
+    Ok(first.map(|tag| tag[1].as_str()))
+}
+
+fn record<'a>(
+    events: &'a [Verified],
+    kind: u16,
+    channel: &str,
+    relay_author: &str,
+) -> Result<Option<&'a Verified>, LifecycleError> {
+    let mut selected: Option<&Verified> = None;
+    for event in events.iter().filter(|event| event.kind_u16() == kind) {
+        if event.pubkey_hex() != relay_author || exact_tag(event, "d")? != Some(channel) {
+            return Err(error("Channel state did not match the requested authority"));
+        }
+        if selected.is_none_or(|current| is_newer(event, current)) {
+            selected = Some(event);
+        }
+    }
+    Ok(selected)
+}
+
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A relay TTL must be an unambiguous positive i32.
+fn parse_ttl(value: Option<&str>) -> Result<Option<u64>, LifecycleError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let invalid = || error("Channel duration could not be verified.");
+    if value.starts_with('0') || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let ttl: u64 = value.parse().map_err(|_| invalid())?;
+    if ttl == 0 || ttl > MAX_TTL {
+        return Err(invalid());
+    }
+    Ok(Some(ttl))
+}
+
+impl ChannelState {
+    /// Validates the answer to [`state_filters`]. The 39001 must list
+    /// exactly the elevated members of the 39002, with the same roles.
+    pub fn parse(
+        events: &[Verified],
+        channel: &str,
+        relay_author: &str,
+    ) -> Result<Self, LifecycleError> {
+        if events.iter().any(|event| {
+            !matches!(
+                event.kind_u16(),
+                kinds::CHANNEL_METADATA | kinds::CHANNEL_ADMINS | kinds::CHANNEL_MEMBERS
+            )
+        }) {
+            return Err(error("Unexpected channel membership response"));
+        }
+        let metadata = record(events, kinds::CHANNEL_METADATA, channel, relay_author)?;
+        let admins = record(events, kinds::CHANNEL_ADMINS, channel, relay_author)?;
+        let roster = record(events, kinds::CHANNEL_MEMBERS, channel, relay_author)?;
+        let (Some(metadata), Some(admins), Some(roster)) = (metadata, admins, roster) else {
+            return Err(error(
+                "Current channel permissions could not be verified. Refresh and try again.",
+            ));
+        };
+        let channel_type = match exact_tag(metadata, "t")? {
+            Some("stream") => StateType::Stream,
+            Some("forum") => StateType::Forum,
+            Some("dm") => StateType::Dm,
+            _ => return Err(error("Current channel type could not be verified")),
+        };
+        let archived = match exact_tag(metadata, "archived")? {
+            None | Some("false") => false,
+            Some("true") => true,
+            Some(_) => return Err(error("Malformed channel archive state")),
+        };
+        let mut roles = BTreeMap::new();
+        for entry in roster.tags_named("p") {
+            let key = entry.get(1).map(String::as_str).unwrap_or_default();
+            if !(2..=4).contains(&entry.len()) || !is_hex64(key) || roles.contains_key(key) {
+                return Err(error("Malformed channel membership state"));
+            }
+            roles.insert(
+                key.to_owned(),
+                MemberRole::parse(entry.get(3).map(String::as_str)),
+            );
+        }
+        let inconsistent = || error("Member roles are inconsistent. Refresh members and roles.");
+        let mut elevated = BTreeMap::new();
+        for entry in admins.tags_named("p") {
+            let key = entry.get(1).map(String::as_str).unwrap_or_default();
+            let role = MemberRole::parse(entry.get(2).map(String::as_str));
+            if entry.len() != 3
+                || !is_hex64(key)
+                || !role.elevated()
+                || elevated.contains_key(key)
+                || roles.get(key) != Some(&role)
+            {
+                return Err(inconsistent());
+            }
+            elevated.insert(key.to_owned(), role);
+        }
+        if roles
+            .iter()
+            .any(|(key, role)| role.elevated() && elevated.get(key) != Some(role))
+        {
+            return Err(inconsistent());
+        }
+        Ok(Self {
+            channel: channel.to_owned(),
+            version: metadata.id,
+            channel_type,
+            archived,
+            name: exact_tag(metadata, "name")?.unwrap_or_default().to_owned(),
+            about: exact_tag(metadata, "about")?.unwrap_or_default().to_owned(),
+            visibility: channel_visibility(metadata),
+            ttl: parse_ttl(exact_tag(metadata, "ttl")?)?,
+            roles,
+            metadata: metadata.clone(),
+            roster: roster.clone(),
+        })
+    }
+
+    pub fn role(&self, key: &str) -> Option<MemberRole> {
+        self.roles.get(key).copied()
+    }
+
+    /// Session channels, top-level or child (`sessionMetadata`).
+    pub fn is_session(&self) -> bool {
+        session_metadata(Some(&self.about)).is_some()
+    }
+
+    fn child_session(&self) -> bool {
+        session_metadata(Some(&self.about)).is_some_and(|parent| parent.is_some())
+    }
+
+    /// A stream or forum that is not archived and not a session: the only
+    /// channels whose members are administered.
+    fn active(&self) -> bool {
+        self.channel_type != StateType::Dm && !self.archived && !self.is_session()
+    }
+
+    fn owners(&self) -> usize {
+        self.roles
+            .values()
+            .filter(|role| **role == MemberRole::Owner)
+            .count()
+    }
+
+    // ----- lifecycle (`lifecycleSettings`) -----
+
+    /// What the viewer may do to the channel as a whole. Refuses when the
+    /// viewer is not a member.
+    pub fn lifecycle(&self, viewer: &str) -> Result<LifecyclePermissions, LifecycleError> {
+        let Some(role) = self.role(viewer) else {
+            return Err(error("You are no longer a channel member"));
+        };
+        let dm = self.channel_type == StateType::Dm;
+        let manager = role.elevated();
+        let last_owner = role == MemberRole::Owner && self.owners() == 1;
+        Ok(LifecyclePermissions {
+            can_archive: !dm && !self.archived && manager,
+            can_unarchive: !dm && self.archived && manager,
+            can_delete: !dm && !self.archived && role == MemberRole::Owner,
+            can_leave: !dm && !last_owner,
+            can_hide: dm,
+            leave_reason: (last_owner && !dm)
+                .then(|| "Transfer ownership before leaving the channel.".to_owned()),
+        })
+    }
+
+    // ----- members (`memberAuthority`) -----
+
+    /// The viewer administers members: an elevated member of an active
+    /// channel.
+    pub fn can_manage(&self, viewer: &str) -> bool {
+        self.active() && self.role(viewer).is_some_and(MemberRole::elevated)
+    }
+
+    /// The viewer may change this member's role or remove them.
+    pub fn can_manage_member(&self, viewer: &str, key: &str) -> bool {
+        self.can_manage(viewer)
+            && key != viewer
+            && self
+                .role(key)
+                .is_some_and(|role| !matches!(role, MemberRole::Owner | MemberRole::Unknown))
+    }
+
+    /// Removal is also allowed for an agent whose verified owner is the
+    /// viewer; ownership never grants role edits.
+    pub fn can_remove_member(&self, viewer: &str, key: &str, owner: Option<&str>) -> bool {
+        self.can_manage_member(viewer, key)
+            || (self.active()
+                && self
+                    .role(viewer)
+                    .is_some_and(|role| role != MemberRole::Unknown)
+                && owner == Some(viewer)
+                && key != viewer
+                && self
+                    .role(key)
+                    .is_some_and(|role| !matches!(role, MemberRole::Owner | MemberRole::Unknown)))
+    }
+
+    // ----- details (`detailsSettings`) -----
+
+    pub fn details(&self, viewer: &str) -> Result<ChannelDetails, LifecycleError> {
+        let visibility = self
+            .visibility
+            .ok_or_else(|| error("Current channel details could not be verified."))?;
+        if self.name.is_empty() {
+            return Err(error("Current channel details could not be verified."));
+        }
+        let role = self.role(viewer);
+        Ok(ChannelDetails {
+            channel: self.channel.clone(),
+            version: self.version,
+            draft: DetailsDraft {
+                name: self.name.clone(),
+                description: self.about.clone(),
+                private: visibility == Visibility::Private,
+                ttl: self.ttl,
+            },
+            can_edit: self.channel_type != StateType::Dm
+                && !self.archived
+                && !self.child_session()
+                && role.is_some_and(MemberRole::elevated),
+        })
+    }
+}
+
+/// What [`ChannelState::lifecycle`] allows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LifecyclePermissions {
+    pub can_archive: bool,
+    pub can_unarchive: bool,
+    pub can_delete: bool,
+    pub can_leave: bool,
+    pub can_hide: bool,
+    /// Why Leave is unavailable, when it is.
+    pub leave_reason: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+
+/// A lifecycle command, published directly (never through the outbox).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Join,
+    Leave,
+    Archive,
+    Unarchive,
+    /// DMs only (41012).
+    Hide,
+}
+
+impl Action {
+    /// Whether the permissions allow this action. Join starts from a
+    /// non-member preview and is checked by [`join_ready`] instead.
+    pub fn allowed(self, permissions: &LifecyclePermissions) -> bool {
+        match self {
+            Self::Join => false,
+            Self::Leave => permissions.can_leave,
+            Self::Archive => permissions.can_archive,
+            Self::Unarchive => permissions.can_unarchive,
+            Self::Hide => permissions.can_hide,
+        }
+    }
+}
+
+/// `lifecycleTemplate`: content `""`, tags `[["h", id]]` plus `archived`
+/// for archive and unarchive.
+pub fn template(action: Action, channel: &str, now: u64) -> Result<EventTemplate, LifecycleError> {
+    let channel = channel_id(channel)?;
+    let kind = match action {
+        Action::Join => kinds::JOIN_CHANNEL,
+        Action::Leave => kinds::LEAVE_CHANNEL,
+        Action::Archive | Action::Unarchive => kinds::EDIT_CHANNEL,
+        Action::Hide => kinds::HIDE_DM,
+    };
+    let mut tags = vec![vec!["h".to_owned(), channel.to_owned()]];
+    match action {
+        Action::Archive => tags.push(vec!["archived".into(), "true".into()]),
+        Action::Unarchive => tags.push(vec!["archived".into(), "false".into()]),
+        _ => {}
+    }
+    Ok(EventTemplate {
+        kind,
+        created_at: now,
+        tags,
+        content: String::new(),
+    })
+}
+
+/// The confirmation read for an action (§5m.2): the viewer's roster for
+/// join and leave, the metadata for archive, the visibility list for hide.
+pub fn confirm_filter(action: Action, relay_author: &str, viewer: &str, channel: &str) -> Filter {
+    match action {
+        Action::Join | Action::Leave => filter(json!({
+            "kinds": [kinds::CHANNEL_MEMBERS],
+            "consistency": "strong",
+            "authors": [relay_author],
+            "#d": [channel],
+            "#p": [viewer],
+            "limit": 1,
+        })),
+        Action::Archive | Action::Unarchive => filter(json!({
+            "kinds": [kinds::CHANNEL_METADATA],
+            "consistency": "strong",
+            "authors": [relay_author],
+            "#d": [channel],
+            "limit": 1,
+        })),
+        Action::Hide => visibility_filter(relay_author, viewer, true),
+    }
+}
+
+/// Whether a confirmation read shows the action took effect.
+pub fn confirmed(
+    action: Action,
+    events: &[Verified],
+    relay_author: &str,
+    viewer: &str,
+    channel: &str,
+) -> bool {
+    let from_relay =
+        |event: &&Verified| event.pubkey_hex() == relay_author && event.tag("d") == Some(channel);
+    let newest = |kind: u16| {
+        events
+            .iter()
+            .filter(|event| event.kind_u16() == kind)
+            .filter(from_relay)
+            .reduce(|a, b| if is_newer(b, a) { b } else { a })
+    };
+    match action {
+        Action::Join => newest(kinds::CHANNEL_MEMBERS).is_some_and(|r| r.has_tag("p", viewer)),
+        Action::Leave => !newest(kinds::CHANNEL_MEMBERS).is_some_and(|r| r.has_tag("p", viewer)),
+        Action::Archive => {
+            newest(kinds::CHANNEL_METADATA).is_some_and(|m| m.tag("archived") == Some("true"))
+        }
+        Action::Unarchive => newest(kinds::CHANNEL_METADATA)
+            .is_some_and(|m| matches!(m.tag("archived"), None | Some("false"))),
+        Action::Hide => hidden_dms(events, relay_author, viewer)
+            .is_some_and(|ids| ids.iter().any(|id| id == channel)),
+    }
+}
+
+/// Join preconditions (`channel-lifecycle.ts:302-320`): the fresh 39000
+/// must be open public metadata and not archived. `Ok(true)` when the
+/// viewer is already a member, so nothing needs publishing.
+pub fn join_ready(
+    events: &[Verified],
+    relay_author: &str,
+    viewer: &str,
+    channel: &str,
+) -> Result<bool, LifecycleError> {
+    let metadata = record(events, kinds::CHANNEL_METADATA, channel, relay_author)?
+        .ok_or_else(|| error("This channel is unavailable."))?;
+    if !crate::discovery::open_metadata(metadata) {
+        return Err(error(
+            "This channel is private. Ask a member for an invitation.",
+        ));
+    }
+    if metadata.tag("archived") == Some("true") {
+        return Err(error("This channel is archived."));
+    }
+    Ok(
+        record(events, kinds::CHANNEL_MEMBERS, channel, relay_author)?
+            .is_some_and(|roster| roster.has_tag("p", viewer)),
+    )
+}
+
+/// Strong read of the 39000 and the viewer's 39002 for a join.
+pub fn join_filters(relay_author: &str, viewer: &str, channel: &str) -> Vec<Filter> {
+    vec![
+        confirm_filter(Action::Archive, relay_author, viewer, channel),
+        confirm_filter(Action::Join, relay_author, viewer, channel),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Create (9007)
+
+/// `canonical_channel_name`: no leading `#` or whitespace, no trailing
+/// whitespace.
+pub fn canonical_name(name: &str) -> String {
+    name.trim_start_matches(|c: char| c == '#' || c.is_whitespace())
+        .trim_end()
+        .to_owned()
+}
+
+fn validate_name(name: &str) -> Result<(), LifecycleError> {
+    if name.is_empty() || name != canonical_name(name) || name.chars().count() > MAX_NAME_CHARS {
+        return Err(error(
+            "Enter a channel name of 1–120 characters without a leading #.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_about(about: &str) -> Result<(), LifecycleError> {
+    if about.chars().count() > MAX_ABOUT_CHARS {
+        return Err(error("Use a description of at most 1,000 characters."));
+    }
+    if about.contains("Buzz session (") {
+        return Err(error(
+            "Remove \"Buzz session (\" from the description; that text is used by Buzz for work sessions.",
+        ));
+    }
+    Ok(())
+}
+
+/// What the create dialog submits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewChannel {
+    pub name: String,
+    pub description: String,
+    pub private: bool,
+}
+
+/// A 9007 stream for the outbox, with the client-chosen `id`. Tag order is
+/// enforced by the relay: `h, name, visibility, channel_type[, about]`.
+pub fn create(channel: &NewChannel, id: &str) -> Result<Draft, LifecycleError> {
+    let id = channel_id(id)?;
+    let name = canonical_name(&channel.name);
+    validate_name(&name)?;
+    let about = channel.description.trim();
+    validate_about(about)?;
+    let mut tags = vec![
+        vec!["h".to_owned(), id.to_owned()],
+        vec!["name".to_owned(), name],
+        vec![
+            "visibility".to_owned(),
+            if channel.private { "private" } else { "open" }.to_owned(),
+        ],
+        vec!["channel_type".to_owned(), "stream".to_owned()],
+    ];
+    if !about.is_empty() {
+        tags.push(vec!["about".to_owned(), about.to_owned()]);
+    }
+    Ok(Draft {
+        kind: kinds::CREATE_CHANNEL,
+        content: String::new(),
+        tags,
+    })
+}
+
+/// The strong creation receipt check after an uncertain delivery.
+pub fn creation_receipt_filter(id: &EventId, viewer: &str) -> Filter {
+    filter(json!({
+        "kinds": [kinds::CREATE_CHANNEL],
+        "ids": [id.to_hex()],
+        "authors": [viewer],
+        "limit": 1,
+        "consistency": "strong",
+    }))
+}
+
+/// The new channel's metadata and the viewer's roster entry.
+pub fn created_filters(relay_author: &str, viewer: &str, channel: &str) -> Vec<Filter> {
+    join_filters(relay_author, viewer, channel)
+}
+
+// ---------------------------------------------------------------------------
+// Details (9002)
+
+/// The editable details of a channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailsDraft {
+    pub name: String,
+    pub description: String,
+    pub private: bool,
+    /// `None` is permanent.
+    pub ttl: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelDetails {
+    pub channel: String,
+    /// Saving refuses when the channel's 39000 moved past this.
+    pub version: EventId,
+    pub draft: DetailsDraft,
+    pub can_edit: bool,
+}
+
+/// `detailsTemplate`: name and about always; visibility and ttl only when
+/// they change (an unchanged ttl would reset the relay's cleanup).
+pub fn edit_details(
+    channel: &str,
+    draft: &DetailsDraft,
+    base: &DetailsDraft,
+    now: u64,
+) -> Result<EventTemplate, LifecycleError> {
+    let channel = channel_id(channel)?;
+    validate_name(&draft.name)?;
+    validate_about(&draft.description)?;
+    if draft.ttl.is_some_and(|ttl| ttl == 0 || ttl > MAX_TTL) {
+        return Err(error("Channel duration could not be verified."));
+    }
+    let mut tags = vec![
+        vec!["h".to_owned(), channel.to_owned()],
+        vec!["name".to_owned(), draft.name.clone()],
+        vec!["about".to_owned(), draft.description.clone()],
+    ];
+    if draft.private != base.private {
+        tags.push(vec![
+            "visibility".to_owned(),
+            if draft.private { "private" } else { "open" }.to_owned(),
+        ]);
+    }
+    if draft.ttl != base.ttl {
+        tags.push(vec![
+            "ttl".to_owned(),
+            draft.ttl.map(|ttl| ttl.to_string()).unwrap_or_default(),
+        ]);
+    }
+    Ok(EventTemplate {
+        kind: kinds::EDIT_CHANNEL,
+        created_at: now,
+        tags,
+        content: String::new(),
+    })
+}
+
+/// A re-read state shows the saved draft.
+pub fn details_confirmed(state: &ChannelState, draft: &DetailsDraft) -> bool {
+    state.name == draft.name
+        && state.about == draft.description
+        && state.visibility
+            == Some(if draft.private {
+                Visibility::Private
+            } else {
+                Visibility::Public
+            })
+        && state.ttl == draft.ttl
+}
+
+// ---------------------------------------------------------------------------
+// DM visibility (30622, §5e.5)
+
+/// The viewer's relay-signed list of hidden DMs. `strong` on confirmation.
+pub fn visibility_filter(relay_author: &str, viewer: &str, strong: bool) -> Filter {
+    let mut f = filter(json!({
+        "kinds": [kinds::HIDDEN_DMS],
+        "authors": [relay_author],
+        "#d": [viewer],
+        "#p": [viewer],
+        "limit": 1,
+    }));
+    if strong {
+        f.insert("consistency".into(), json!("strong"));
+    }
+    f
+}
+
+/// Hidden DM ids from the newest valid 30622, or `None` when no list
+/// exists (nothing is hidden). Invalid lists are ignored.
+pub fn hidden_dms(events: &[Verified], relay_author: &str, viewer: &str) -> Option<Vec<String>> {
+    let newest = events
+        .iter()
+        .filter(|event| {
+            event.kind_u16() == kinds::HIDDEN_DMS
+                && event.pubkey_hex() == relay_author
+                && event.tag("d") == Some(viewer)
+        })
+        .reduce(|a, b| if is_newer(b, a) { b } else { a })?;
+    let people: Vec<&[String]> = newest.tags_named("p").collect();
+    let valid = newest.content.is_empty()
+        && people.len() == 1
+        && people[0].get(1).map(String::as_str) == Some(viewer)
+        && newest
+            .tags_named("h")
+            .all(|tag| tag.len() == 2 && is_uuid(&tag[1]));
+    if !valid {
+        return None;
+    }
+    Some(newest.tags_named("h").map(|tag| tag[1].clone()).collect())
+}
+
+#[cfg(test)]
+mod tests;

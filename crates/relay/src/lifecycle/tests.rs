@@ -1,0 +1,355 @@
+use super::*;
+use crate::testing::{CHANNEL, Signer, T0, key};
+
+struct Channel {
+    signer: Signer,
+    meta: Vec<Vec<String>>,
+    admins: Vec<(String, &'static str)>,
+    members: Vec<(String, &'static str)>,
+}
+
+impl Channel {
+    fn new() -> Self {
+        let signer = Signer::new();
+        let viewer = signer.viewer_hex();
+        Self {
+            signer,
+            meta: vec![
+                vec!["name".into(), "general".into()],
+                vec!["about".into(), "Chat".into()],
+                vec!["public".into()],
+                vec!["t".into(), "stream".into()],
+            ],
+            admins: vec![(viewer.clone(), "owner")],
+            members: vec![(viewer, "owner"), (key(2), "member")],
+        }
+    }
+
+    fn events(&self) -> Vec<Verified> {
+        let d = vec!["d".to_owned(), CHANNEL.to_owned()];
+        let meta: Vec<Vec<String>> = std::iter::once(d.clone())
+            .chain(self.meta.iter().cloned())
+            .collect();
+        let admins: Vec<Vec<String>> = std::iter::once(d.clone())
+            .chain(
+                self.admins
+                    .iter()
+                    .map(|(k, r)| vec!["p".to_owned(), k.clone(), r.to_string()]),
+            )
+            .collect();
+        let roster: Vec<Vec<String>> = std::iter::once(d)
+            .chain(
+                self.members
+                    .iter()
+                    .map(|(k, r)| vec!["p".to_owned(), k.clone(), String::new(), r.to_string()]),
+            )
+            .collect();
+        let sign = |kind, rows: &[Vec<String>]| {
+            let rows: Vec<Vec<&str>> = rows
+                .iter()
+                .map(|r| r.iter().map(String::as_str).collect())
+                .collect();
+            let refs: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+            self.signer.relay(kind, T0, &refs)
+        };
+        vec![
+            sign(kinds::CHANNEL_METADATA, &meta),
+            sign(kinds::CHANNEL_ADMINS, &admins),
+            sign(kinds::CHANNEL_MEMBERS, &roster),
+        ]
+    }
+
+    fn state(&self) -> Result<ChannelState, LifecycleError> {
+        ChannelState::parse(&self.events(), CHANNEL, &self.signer.relay_hex())
+    }
+}
+
+#[test]
+fn parses_a_consistent_channel() {
+    let channel = Channel::new();
+    let state = channel.state().unwrap();
+    let viewer = channel.signer.viewer_hex();
+    assert_eq!(state.name, "general");
+    assert_eq!(state.about, "Chat");
+    assert_eq!(state.channel_type, StateType::Stream);
+    assert_eq!(state.visibility, Some(Visibility::Public));
+    assert_eq!(state.role(&viewer), Some(MemberRole::Owner));
+    assert_eq!(state.role(&key(2)), Some(MemberRole::Member));
+    assert!(state.can_manage(&viewer));
+    assert!(state.can_manage_member(&viewer, &key(2)));
+    assert!(!state.can_manage_member(&viewer, &viewer));
+    assert!(!state.can_manage(&key(2)));
+}
+
+#[test]
+fn refuses_inconsistent_roles() {
+    let mut channel = Channel::new();
+    channel.admins.push((key(2), "admin"));
+    assert!(channel.state().unwrap_err().0.contains("inconsistent"));
+
+    let mut channel = Channel::new();
+    channel.admins.clear();
+    assert!(channel.state().is_err(), "an owner missing from 39001");
+}
+
+#[test]
+fn refuses_state_signed_by_someone_else() {
+    let channel = Channel::new();
+    let other = Signer::new();
+    assert!(ChannelState::parse(&channel.events(), CHANNEL, &other.relay_hex()).is_err());
+}
+
+#[test]
+fn the_last_owner_cannot_leave() {
+    let channel = Channel::new();
+    let state = channel.state().unwrap();
+    let viewer = channel.signer.viewer_hex();
+    let owner = state.lifecycle(&viewer).unwrap();
+    assert!(!owner.can_leave);
+    assert!(owner.can_archive && owner.can_delete && !owner.can_hide);
+    assert_eq!(
+        owner.leave_reason.as_deref(),
+        Some("Transfer ownership before leaving the channel.")
+    );
+    let member = state.lifecycle(&key(2)).unwrap();
+    assert!(member.can_leave && !member.can_archive);
+    assert!(state.lifecycle(&key(9)).is_err(), "not a member");
+}
+
+#[test]
+fn archived_channels_offer_unarchive_and_no_administration() {
+    let mut channel = Channel::new();
+    channel.meta.push(vec!["archived".into(), "true".into()]);
+    let state = channel.state().unwrap();
+    let viewer = channel.signer.viewer_hex();
+    let permissions = state.lifecycle(&viewer).unwrap();
+    assert!(permissions.can_unarchive && !permissions.can_archive);
+    assert!(!state.can_manage(&viewer));
+    assert!(!state.details(&viewer).unwrap().can_edit);
+}
+
+#[test]
+fn dms_can_only_be_hidden() {
+    let mut channel = Channel::new();
+    channel.meta = vec![
+        vec!["name".into(), "DM".into()],
+        vec!["private".into()],
+        vec!["hidden".into()],
+        vec!["t".into(), "dm".into()],
+    ];
+    let viewer = channel.signer.viewer_hex();
+    channel.admins.clear();
+    channel.members = vec![(viewer.clone(), "member"), (key(2), "member")];
+    let state = channel.state().unwrap();
+    let permissions = state.lifecycle(&viewer).unwrap();
+    assert!(permissions.can_hide);
+    assert!(!permissions.can_leave && !permissions.can_archive);
+    assert!(!state.can_manage(&viewer));
+}
+
+#[test]
+fn builds_lifecycle_templates() {
+    let archive = template(Action::Archive, CHANNEL, 5).unwrap();
+    assert_eq!(archive.kind, 9002);
+    assert_eq!(
+        archive.tags,
+        vec![vec!["h", CHANNEL], vec!["archived", "true"]]
+    );
+    let join = template(Action::Join, CHANNEL, 5).unwrap();
+    assert_eq!((join.kind, join.tags.len()), (9021, 1));
+    assert_eq!(template(Action::Leave, CHANNEL, 5).unwrap().kind, 9022);
+    assert_eq!(template(Action::Hide, CHANNEL, 5).unwrap().kind, 41012);
+    assert!(template(Action::Join, "general", 5).is_err());
+}
+
+#[test]
+fn confirms_join_leave_and_archive() {
+    let signer = Signer::new();
+    let relay = signer.relay_hex();
+    let viewer = signer.viewer_hex();
+    let roster = signer.relay(
+        kinds::CHANNEL_MEMBERS,
+        T0,
+        &[&["d", CHANNEL], &["p", &viewer]],
+    );
+    let joined = [roster];
+    assert!(confirmed(Action::Join, &joined, &relay, &viewer, CHANNEL));
+    assert!(!confirmed(Action::Leave, &joined, &relay, &viewer, CHANNEL));
+    assert!(confirmed(Action::Leave, &[], &relay, &viewer, CHANNEL));
+    let archived = signer.relay(
+        kinds::CHANNEL_METADATA,
+        T0,
+        &[&["d", CHANNEL], &["archived", "true"]],
+    );
+    assert!(confirmed(
+        Action::Archive,
+        std::slice::from_ref(&archived),
+        &relay,
+        &viewer,
+        CHANNEL
+    ));
+    assert!(!confirmed(
+        Action::Unarchive,
+        &[archived],
+        &relay,
+        &viewer,
+        CHANNEL
+    ));
+}
+
+#[test]
+fn join_needs_open_unarchived_metadata() {
+    let signer = Signer::new();
+    let relay = signer.relay_hex();
+    let viewer = signer.viewer_hex();
+    let open = signer.relay(
+        kinds::CHANNEL_METADATA,
+        T0,
+        &[&["d", CHANNEL], &["public"], &["t", "stream"]],
+    );
+    assert_eq!(
+        join_ready(std::slice::from_ref(&open), &relay, &viewer, CHANNEL),
+        Ok(false)
+    );
+    let roster = signer.relay(
+        kinds::CHANNEL_MEMBERS,
+        T0,
+        &[&["d", CHANNEL], &["p", &viewer]],
+    );
+    assert_eq!(
+        join_ready(&[open, roster], &relay, &viewer, CHANNEL),
+        Ok(true)
+    );
+    let private = signer.relay(
+        kinds::CHANNEL_METADATA,
+        T0,
+        &[&["d", CHANNEL], &["private"]],
+    );
+    assert!(join_ready(&[private], &relay, &viewer, CHANNEL).is_err());
+    assert!(join_ready(&[], &relay, &viewer, CHANNEL).is_err());
+}
+
+#[test]
+fn creates_a_stream_in_relay_tag_order() {
+    let draft = create(
+        &NewChannel {
+            name: "  #release-notes ".into(),
+            description: " Notes ".into(),
+            private: true,
+        },
+        CHANNEL,
+    )
+    .unwrap();
+    assert_eq!(draft.kind, 9007);
+    assert_eq!(
+        draft.tags,
+        vec![
+            vec!["h", CHANNEL],
+            vec!["name", "release-notes"],
+            vec!["visibility", "private"],
+            vec!["channel_type", "stream"],
+            vec!["about", "Notes"],
+        ]
+    );
+    let bare = NewChannel {
+        name: "x".into(),
+        description: String::new(),
+        private: false,
+    };
+    let draft = create(&bare, CHANNEL).unwrap();
+    assert_eq!(draft.tags.len(), 4, "no empty about");
+    assert_eq!(draft.tags[2], vec!["visibility", "open"]);
+    let empty = NewChannel {
+        name: " # ".into(),
+        ..bare.clone()
+    };
+    assert!(create(&empty, CHANNEL).is_err());
+    let long = NewChannel {
+        name: "x".repeat(121),
+        ..bare.clone()
+    };
+    assert!(create(&long, CHANNEL).is_err());
+    let session = NewChannel {
+        description: "Buzz session (buzz.sessions/v1)".into(),
+        ..bare
+    };
+    assert!(create(&session, CHANNEL).is_err());
+}
+
+#[test]
+fn details_edits_send_only_changed_visibility_and_ttl() {
+    let base = DetailsDraft {
+        name: "general".into(),
+        description: "Chat".into(),
+        private: false,
+        ttl: None,
+    };
+    let renamed = DetailsDraft {
+        name: "lobby".into(),
+        ..base.clone()
+    };
+    let event = edit_details(CHANNEL, &renamed, &base, 1).unwrap();
+    assert_eq!(
+        event.tags,
+        vec![
+            vec!["h", CHANNEL],
+            vec!["name", "lobby"],
+            vec!["about", "Chat"]
+        ]
+    );
+    let private = DetailsDraft {
+        private: true,
+        ttl: Some(60),
+        ..base.clone()
+    };
+    let event = edit_details(CHANNEL, &private, &base, 1).unwrap();
+    assert_eq!(event.tags[3], vec!["visibility", "private"]);
+    assert_eq!(event.tags[4], vec!["ttl", "60"]);
+    let cleared = edit_details(CHANNEL, &base, &private, 1).unwrap();
+    assert_eq!(cleared.tags[3], vec!["visibility", "open"]);
+    assert_eq!(cleared.tags[4], vec!["ttl", ""]);
+    let leading = DetailsDraft {
+        name: "#x".into(),
+        ..base.clone()
+    };
+    assert!(edit_details(CHANNEL, &leading, &base, 1).is_err());
+}
+
+#[test]
+fn details_confirmation_compares_every_field() {
+    let channel = Channel::new();
+    let state = channel.state().unwrap();
+    let details = state.details(&channel.signer.viewer_hex()).unwrap();
+    assert!(details.can_edit);
+    assert_eq!(details.version, state.version);
+    assert!(details_confirmed(&state, &details.draft));
+    let changed = DetailsDraft {
+        description: "Other".into(),
+        ..details.draft
+    };
+    assert!(!details_confirmed(&state, &changed));
+}
+
+#[test]
+fn reads_the_hidden_dm_list() {
+    let signer = Signer::new();
+    let relay = signer.relay_hex();
+    let viewer = signer.viewer_hex();
+    let list = signer.relay(
+        kinds::HIDDEN_DMS,
+        T0,
+        &[&["d", &viewer], &["p", &viewer], &["h", CHANNEL]],
+    );
+    assert_eq!(
+        hidden_dms(std::slice::from_ref(&list), &relay, &viewer),
+        Some(vec![CHANNEL.to_owned()])
+    );
+    assert!(confirmed(Action::Hide, &[list], &relay, &viewer, CHANNEL));
+    let bad = signer.relay(
+        kinds::HIDDEN_DMS,
+        T0 + 1,
+        &[&["d", &viewer], &["p", &viewer], &["h", "not-a-uuid"]],
+    );
+    assert_eq!(hidden_dms(&[bad], &relay, &viewer), None);
+    assert_eq!(hidden_dms(&[], &relay, &viewer), None);
+}

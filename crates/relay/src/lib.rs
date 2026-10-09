@@ -1,12 +1,16 @@
 //! Client for Buzz relays.
 
+pub mod community;
 pub mod discovery;
+pub mod dm;
 pub mod event;
 pub mod fold;
 pub mod http;
+pub mod lifecycle;
 pub mod links;
 pub mod live;
 pub mod media;
+pub mod members;
 pub mod messages;
 pub mod origin;
 pub mod outbox;
@@ -14,6 +18,7 @@ pub mod presence;
 pub mod profiles;
 pub mod read_state;
 pub mod reader;
+pub mod search;
 pub mod session;
 pub mod sidebar;
 pub mod socket;
@@ -22,6 +27,9 @@ pub mod threads;
 pub mod typing;
 pub mod unread;
 pub mod window;
+
+#[cfg(test)]
+mod testing;
 
 pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
 pub use event::{Verified, Verifier, kinds};
