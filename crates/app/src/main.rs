@@ -1,7 +1,9 @@
 mod community;
 mod config;
 mod hosts;
+mod idle;
 mod mirror;
+mod notifications;
 mod runtime;
 mod ui;
 
@@ -23,6 +25,7 @@ fn main() {
         runtime::Runtime::init(cx);
         Hosts::init(&config, cx);
         community::AppState::init(cx);
+        idle::Idle::init(cx);
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         gpui_kit::open_window(
             WindowOptions {

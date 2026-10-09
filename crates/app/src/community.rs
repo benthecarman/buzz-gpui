@@ -1,10 +1,12 @@
 //! The user's communities and their sessions, as GPUI entities.
 
+use crate::idle::Idle;
 use crate::mirror::mirror;
+use crate::notifications;
 use crate::runtime::Runtime;
 use buzz_identity::Identity;
 use buzz_relay_client::{
-    ChannelView, RelayOrigin, Session, SessionSnapshot, Store, TimelineSnapshot,
+    ChannelType, ChannelView, RelayOrigin, Session, SessionSnapshot, Store, TimelineSnapshot,
 };
 use gpui_kit::{App, AppContext, Context, Entity, Global, Task};
 use serde::{Deserialize, Serialize};
@@ -164,7 +166,13 @@ pub struct Community {
     pub origin: RelayOrigin,
     pub session: Arc<Session>,
     pub snapshot: Arc<SessionSnapshot>,
+    /// The channel last opened, which notifications skip while the window
+    /// is focused.
+    pub reading: Option<String>,
+    /// Whose presence the session follows.
+    presence_demand: Vec<String>,
     _watch: Task<()>,
+    _notifications: Option<Task<()>>,
 }
 
 impl Community {
@@ -180,21 +188,55 @@ impl Community {
             identity,
             store,
         ));
-        cx.new(|cx| {
+        if cx.try_global::<Idle>().is_some_and(|idle| idle.idle) {
+            session.set_idle(true);
+        }
+        let community = cx.new(|cx| {
             let snapshot = session.snapshot();
             let current = snapshot.borrow().clone();
             Self {
-                _watch: mirror(snapshot, cx, |this: &mut Self, value| this.snapshot = value),
+                _watch: mirror(snapshot, cx, |this: &mut Self, value| {
+                    this.snapshot = value;
+                    this.follow_presence();
+                }),
                 origin,
                 session,
                 snapshot: current,
+                reading: None,
+                presence_demand: Vec::new(),
+                _notifications: None,
             }
-        })
+        });
+        let notifications = notifications::listen(&community, cx);
+        community.update(cx, |community, _| {
+            community._notifications = Some(notifications);
+        });
+        community
     }
 
-    pub fn open_channel(&self, channel: &str, cx: &mut App) -> Entity<ChannelModel> {
+    /// Follows the presence of everyone with a one-to-one DM, for the
+    /// sidebar's avatar dots.
+    fn follow_presence(&mut self) {
+        let demand: Vec<String> = self
+            .snapshot
+            .channels
+            .iter()
+            .filter(|channel| channel.channel_type == Some(ChannelType::Dm) && !channel.archived)
+            .filter_map(|channel| match channel.participants.as_deref() {
+                Some([other]) => Some(other.clone()),
+                _ => None,
+            })
+            .collect();
+        if demand != self.presence_demand {
+            self.presence_demand = demand.clone();
+            self.session.watch_presence(demand);
+        }
+    }
+
+    pub fn open_channel(&mut self, channel: &str, cx: &mut App) -> Entity<ChannelModel> {
         let view = self.session.open_channel(channel);
         self.session.select(Some(channel.to_string()));
+        self.reading = Some(channel.to_string());
         cx.new(|cx| {
             let current = view.snapshot.borrow().clone();
             Self::channel_model(view, current, cx)
@@ -217,7 +259,7 @@ impl Community {
         }
     }
 
-    fn partition(&self) -> buzz_relay_client::Partition {
+    pub fn partition(&self) -> buzz_relay_client::Partition {
         buzz_relay_client::Partition::new(&self.origin, self.session.viewer())
     }
 
