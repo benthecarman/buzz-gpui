@@ -1,3 +1,4 @@
+use buzz_identity::Identity;
 use buzz_relay_client::*;
 use futures::{SinkExt, StreamExt};
 use nostr::prelude::{Event, EventBuilder, FinalizeEvent, Keys, Kind};
@@ -120,11 +121,11 @@ fn options() -> SocketOptions {
     }
 }
 
-fn socket(relay: &FakeRelay, keys: &Arc<Keys>) -> RelaySocket {
+fn socket(relay: &FakeRelay, identity: &Arc<Identity>) -> RelaySocket {
     RelaySocket::connect(
         &tokio::runtime::Handle::current(),
         RelayOrigin::parse(&relay.address).unwrap(),
-        keys.clone(),
+        identity.clone(),
         options(),
     )
 }
@@ -149,8 +150,8 @@ fn note(keys: &Keys, content: &str) -> Event {
 #[tokio::test]
 async fn authenticates_before_subscribing() {
     let mut relay = FakeRelay::start(true).await;
-    let keys = Arc::new(Keys::generate());
-    let socket = socket(&relay, &keys);
+    let identity = Arc::new(Identity::ephemeral());
+    let socket = socket(&relay, &identity);
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [9], "#h": ["general"]}))]);
 
     assert!(matches!(relay.next().await, Seen::Connected));
@@ -158,7 +159,7 @@ async fn authenticates_before_subscribing() {
         panic!("expected auth first");
     };
     assert_eq!(auth.kind, Kind::Authentication);
-    assert_eq!(auth.pubkey, keys.public_key());
+    assert_eq!(auth.pubkey, identity.public_key());
     let tags: Vec<Vec<String>> = auth.tags.iter().map(|t| t.as_slice().to_vec()).collect();
     assert!(tags.contains(&vec!["challenge".into(), "challenge-1".into()]));
     assert!(tags.contains(&vec!["relay".into(), relay.address.clone()]));
@@ -178,8 +179,8 @@ async fn authenticates_before_subscribing() {
 #[tokio::test]
 async fn delivers_verified_events_only() {
     let mut relay = FakeRelay::start(false).await;
-    let keys = Arc::new(Keys::generate());
-    let socket = socket(&relay, &keys);
+    let identity = Arc::new(Identity::ephemeral());
+    let socket = socket(&relay, &identity);
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [1]}))]);
     assert!(matches!(relay.next().await, Seen::Connected));
     let Seen::Req(id, _) = relay.next().await else {
@@ -209,8 +210,9 @@ async fn delivers_verified_events_only() {
 #[tokio::test]
 async fn publish_waits_for_ok_and_reports_rejections() {
     let mut relay = FakeRelay::start(false).await;
-    let keys = Arc::new(Keys::generate());
-    let socket = socket(&relay, &keys);
+    let identity = Arc::new(Identity::ephemeral());
+    let keys = Keys::generate();
+    let socket = socket(&relay, &identity);
     let mut state = socket.state();
     state.wait_for(|s| *s == SocketState::Ready).await.unwrap();
 
@@ -226,8 +228,8 @@ async fn publish_waits_for_ok_and_reports_rejections() {
 #[tokio::test]
 async fn resubscribes_after_reconnect_and_fails_publishes_while_down() {
     let mut relay = FakeRelay::start(true).await;
-    let keys = Arc::new(Keys::generate());
-    let socket = socket(&relay, &keys);
+    let identity = Arc::new(Identity::ephemeral());
+    let socket = socket(&relay, &identity);
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [9]}))]);
     assert!(matches!(relay.next().await, Seen::Connected));
     assert!(matches!(relay.next().await, Seen::Auth(_)));
@@ -265,11 +267,12 @@ async fn resubscribes_after_reconnect_and_fails_publishes_while_down() {
 
 #[tokio::test]
 async fn publish_without_connection_fails_fast() {
-    let keys = Arc::new(Keys::generate());
+    let identity = Arc::new(Identity::ephemeral());
+    let keys = Keys::generate();
     let socket = RelaySocket::connect(
         &tokio::runtime::Handle::current(),
         RelayOrigin::parse("ws://127.0.0.1:1").unwrap(),
-        keys.clone(),
+        identity.clone(),
         options(),
     );
     let result = tokio::time::timeout(Duration::from_secs(2), socket.publish(note(&keys, "x")))

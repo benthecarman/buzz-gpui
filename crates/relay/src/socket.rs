@@ -7,8 +7,9 @@
 //! exact signed bytes.
 
 use crate::origin::RelayOrigin;
+use buzz_identity::Identity;
 use futures::{SinkExt, StreamExt};
-use nostr::prelude::{Event, EventBuilder, EventId, FinalizeEvent, Keys, Kind, Tag};
+use nostr::prelude::{Event, EventId};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -129,7 +130,7 @@ impl RelaySocket {
     pub fn connect(
         runtime: &tokio::runtime::Handle,
         origin: RelayOrigin,
-        keys: Arc<Keys>,
+        identity: Arc<Identity>,
         options: SocketOptions,
     ) -> Self {
         let (commands, queue) = mpsc::unbounded_channel();
@@ -137,7 +138,7 @@ impl RelaySocket {
         let task = runtime.spawn(
             Actor {
                 origin,
-                keys,
+                identity,
                 options,
                 state: state_sender,
                 subscriptions: HashMap::new(),
@@ -204,7 +205,7 @@ struct Open {
 
 struct Actor {
     origin: RelayOrigin,
-    keys: Arc<Keys>,
+    identity: Arc<Identity>,
     options: SocketOptions,
     state: watch::Sender<SocketState>,
     subscriptions: HashMap<u64, Open>,
@@ -521,7 +522,7 @@ impl Actor {
                 let Some(challenge) = message.get(1).and_then(Value::as_str) else {
                     return Vec::new();
                 };
-                match auth_event(&self.keys, self.origin.websocket(), challenge) {
+                match self.identity.relay_auth(self.origin.websocket(), challenge) {
                     Ok(event) => {
                         session.auth_event = Some(event.id);
                         vec![json!(["AUTH", event]).to_string()]
@@ -591,17 +592,6 @@ fn sub_id(id: u64) -> String {
 
 fn parse_sub_id(value: &Value) -> Option<u64> {
     value.as_str()?.strip_prefix('s')?.parse().ok()
-}
-
-/// NIP-42: kind 22242 with the relay URL and the challenge.
-fn auth_event(keys: &Keys, relay: &str, challenge: &str) -> Result<Event, String> {
-    EventBuilder::new(Kind::Authentication, "")
-        .tags([
-            Tag::custom("relay", [relay]),
-            Tag::custom("challenge", [challenge]),
-        ])
-        .finalize(keys)
-        .map_err(|error| error.to_string())
 }
 
 fn backoff(options: &SocketOptions, attempt: u32) -> Duration {
