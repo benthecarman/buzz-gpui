@@ -6,6 +6,7 @@ pub mod fold;
 pub mod http;
 pub mod live;
 pub mod origin;
+pub mod profiles;
 pub mod reader;
 pub mod sidebar;
 pub mod socket;
@@ -18,6 +19,7 @@ pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use origin::RelayOrigin;
+pub use profiles::{Profile, ProfileDirectory, Profiles};
 pub use reader::{Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
