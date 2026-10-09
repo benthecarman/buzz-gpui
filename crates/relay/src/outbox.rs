@@ -24,8 +24,9 @@
 //! paused time.
 
 use crate::event::{Verified, kinds};
+use crate::fold::MessageClock;
 use crate::http::{HttpError, RelayHttp};
-use crate::messages::{Draft, MessageClock};
+use crate::messages::Draft;
 use crate::reader::{Priority, ReadOptions, Reader};
 use buzz_identity::{Identity, IdentityError, Purpose};
 use futures::FutureExt;

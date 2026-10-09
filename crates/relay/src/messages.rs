@@ -15,13 +15,14 @@
 //! "the emoji catalog is ready" (passed in as [`EmojiCatalog`]).
 
 use crate::event::kinds;
+use crate::fold::{message_author, thread_reference};
 use crate::origin::RelayOrigin;
 use crate::outbox::Delivery;
-use nostr::prelude::{Event, EventId};
+use nostr::prelude::{Event, EventId, PublicKey};
 use regex::Regex;
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+
+use std::collections::HashSet;
+use std::sync::LazyLock;
 
 pub type Tag = Vec<String>;
 
@@ -116,147 +117,15 @@ pub struct Author<'a> {
 
 impl Author<'_> {
     fn owns(&self, event: &Event) -> bool {
-        message_author(event, self.signing_authority) == self.viewer
-    }
-}
-
-/// The displayed author (`fold.ts:202-219`): relay-signed output names its
-/// author in `actor`, else in a leading `p` on channel events; any other
-/// signer is the author.
-pub fn message_author(event: &Event, signing_authority: Option<&str>) -> String {
-    let signer = event.pubkey.to_hex();
-    if signing_authority != Some(signer.as_str()) {
-        return signer;
-    }
-    if let Some(actor) = tags_of(event)
-        .find(|tag| {
-            tag.first().map(String::as_str) == Some("actor") && tag.get(1).is_some_and(|v| hex64(v))
-        })
-        .and_then(|tag| tag.get(1))
-    {
-        return actor.clone();
-    }
-    let leading = event.tags.first().map(|tag| tag.as_slice());
-    match leading {
-        Some([name, value, ..])
-            if name == "p"
-                && hex64(value)
-                && tags_of(event).any(|tag| tag.first().map(String::as_str) == Some("h")) =>
-        {
-            value.clone()
-        }
-        _ => signer,
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThreadReference {
-    pub root_id: String,
-    pub parent_id: String,
-}
-
-/// NIP-10 as relay ingest reads it (§5c.1): only marked `e` tags with a
-/// valid ID count, the last of each marker wins, and a lone `root` is not
-/// a reply.
-pub fn thread_reference(event: &Event) -> Option<ThreadReference> {
-    let mut root = None;
-    let mut reply = None;
-    for tag in tags_of(event) {
-        let [name, value, _, marker, ..] = tag else {
-            continue;
-        };
-        if name != "e" || value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-            continue;
-        }
-        match marker.as_str() {
-            "root" => root = Some(value.to_ascii_lowercase()),
-            "reply" => reply = Some(value.to_ascii_lowercase()),
-            _ => {}
-        }
-    }
-    let parent_id = reply?;
-    Some(ThreadReference {
-        root_id: root.unwrap_or_else(|| parent_id.clone()),
-        parent_id,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Send order (`message-order.ts`, §6.2)
-
-/// Largest lead over the local clock that other authors' timestamps may impose.
-const MAX_LEAD_MS: u64 = 5_000;
-/// Largest lead this device's own send chain may keep; beyond it (a clock
-/// rollback) the chain restarts at the clock.
-const MAX_OWN_LEAD_MS: u64 = 60_000;
-
-/// Per-session send clock: per-channel high-water marks from rendered
-/// evidence (anyone) and from this device's own sends.
-#[derive(Default)]
-pub struct MessageClock {
-    state: Mutex<ClockState>,
-}
-
-#[derive(Default)]
-struct ClockState {
-    latest: HashMap<String, u64>,
-    sent: HashMap<String, u64>,
-}
-
-impl MessageClock {
-    pub fn new() -> Self {
-        Self::default()
+        self.displayed_author(event) == self.viewer
     }
 
-    /// Records rendered channel or thread evidence so the next send sorts
-    /// after it.
-    pub fn observe(&self, channel_id: &str, ms: u64) {
-        let mut state = self.state.lock().expect("message clock lock");
-        let latest = state.latest.entry(channel_id.to_owned()).or_default();
-        *latest = (*latest).max(ms);
+    fn displayed_author(&self, event: &Event) -> String {
+        let authority = self
+            .signing_authority
+            .and_then(|key| PublicKey::from_hex(key).ok());
+        message_author(event, authority.as_ref()).to_hex()
     }
-
-    /// A send time after everything known in the channel. Other authors may
-    /// push it at most 5 s past the clock; own sends stay strictly
-    /// increasing up to a 60 s lead (§9.2 #20).
-    pub fn next(&self, channel_id: &str, now_ms: u64) -> u64 {
-        let mut state = self.state.lock().expect("message clock lock");
-        let latest = state.latest.get(channel_id).copied().unwrap_or(0);
-        let evidence = (latest + 1).min(now_ms + MAX_LEAD_MS);
-        let own = state.sent.get(channel_id).copied().unwrap_or(0) + 1;
-        let own = if own.saturating_sub(now_ms) > MAX_OWN_LEAD_MS {
-            0
-        } else {
-            own
-        };
-        let ms = now_ms.max(evidence).max(own);
-        state.sent.insert(channel_id.to_owned(), ms);
-        let latest = state.latest.entry(channel_id.to_owned()).or_default();
-        *latest = (*latest).max(ms);
-        ms
-    }
-}
-
-/// Effective send time: `created_at` plus a canonical 0–999 `ms` tag.
-pub fn event_ms(created_at: u64, tags: &[Tag]) -> u64 {
-    let offset = tags
-        .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("ms"))
-        .and_then(|tag| tag.get(1))
-        .filter(|value| {
-            let bytes = value.as_bytes();
-            (1..=3).contains(&bytes.len())
-                && bytes.iter().all(u8::is_ascii_digit)
-                && (bytes.len() == 1 || bytes[0] != b'0')
-        })
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    created_at * 1000 + offset
-}
-
-/// The one rendered order: effective ms ascending, then ID ascending.
-pub fn compare_messages(a: (u64, &str), b: (u64, &str)) -> Ordering {
-    a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1))
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +625,7 @@ pub fn sent_from_thread(
     }
     let label = row
         .root
-        .filter(|root| root.id == thread.root_id && root.channel_id == channel_id)
+        .filter(|root| root.id == thread.root_id.to_hex() && root.channel_id == channel_id)
         .map(|root| thread_excerpt(root.content))
         .unwrap_or_default();
     let body = if row.content.trim().is_empty() {
@@ -764,7 +633,7 @@ pub fn sent_from_thread(
     } else {
         row.content.to_owned()
     };
-    let mut provenance = vec!["buzz:sent-from-thread".to_owned(), thread.root_id.clone()];
+    let mut provenance = vec!["buzz:sent-from-thread".to_owned(), thread.root_id.to_hex()];
     if !label.is_empty() {
         provenance.push(label);
     }
@@ -929,7 +798,7 @@ pub fn remove<'a>(
             author.owns(event)
                 || authorization.is_some_and(|auth| {
                     auth.owner_id == author.viewer
-                        && message_author(event, author.signing_authority) == auth.agent_id
+                        && author.displayed_author(event) == auth.agent_id
                 })
         };
         if !allowed {
@@ -1501,8 +1370,12 @@ mod tests {
             "workflow",
             vec![vec!["p", &viewer_hex], vec!["h", CHANNEL]],
         );
-        assert_eq!(message_author(&attributed, Some(&relay_hex)), viewer_hex);
-        assert_eq!(message_author(&attributed, None), relay_hex);
+        let relay_key = relay.public_key();
+        assert_eq!(
+            message_author(&attributed, Some(&relay_key)).to_hex(),
+            viewer_hex
+        );
+        assert_eq!(message_author(&attributed, None).to_hex(), relay_hex);
         let actor = signed(
             &relay,
             9,
@@ -1513,7 +1386,10 @@ mod tests {
                 vec!["h", CHANNEL],
             ],
         );
-        assert_eq!(message_author(&actor, Some(&relay_hex)), viewer_hex);
+        assert_eq!(
+            message_author(&actor, Some(&relay_key)).to_hex(),
+            viewer_hex
+        );
         let author = Author {
             viewer: &viewer_hex,
             signing_authority: Some(&relay_hex),
@@ -1734,36 +1610,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_reference_matches_relay_ingest() {
-        let keys = Keys::generate();
-        let root = key('a');
-        let parent = key('b');
-        let lone_root = signed(&keys, 9, "x", vec![vec!["e", &root, "", "root"]]);
-        assert_eq!(thread_reference(&lone_root), None);
-        let upper = parent.to_uppercase();
-        let nested = signed(
-            &keys,
-            9,
-            "x",
-            vec![
-                vec!["e", &root, "", "root"],
-                vec!["e", "short", "", "reply"],
-                vec!["e", &upper, "", "reply"],
-                vec!["e", &root],
-            ],
-        );
-        assert_eq!(
-            thread_reference(&nested),
-            Some(ThreadReference {
-                root_id: root.clone(),
-                parent_id: parent.clone(),
-            })
-        );
-        let direct = signed(&keys, 9, "x", vec![vec!["e", &parent, "", "reply"]]);
-        assert_eq!(thread_reference(&direct).unwrap().root_id, parent);
-    }
-
-    #[test]
     fn reports_name_the_signer_and_reason() {
         let keys = Keys::generate();
         let message = signed(&keys, 9, "spam!", vec![vec!["h", CHANNEL]]);
@@ -1841,46 +1687,6 @@ mod tests {
         assert_eq!(
             parse_open_dm_receipt(&body(&key('e'), true, "response:nope"), &id),
             Err(DM_INVALID)
-        );
-    }
-
-    #[test]
-    fn clock_caps_foreign_lead_and_keeps_own_sends_increasing() {
-        let now = 2_000_000_000_000;
-        let clock = MessageClock::new();
-        clock.observe("near", now + 4_999);
-        let near: Vec<u64> = (0..3).map(|_| clock.next("near", now)).collect();
-        assert_eq!(near, [now + 5_000, now + 5_001, now + 5_002]);
-        clock.observe("far", now + 60_000);
-        let far: Vec<u64> = (0..3).map(|_| clock.next("far", now)).collect();
-        assert_eq!(far, [now + 5_000, now + 5_001, now + 5_002]);
-        assert_eq!(clock.next("elsewhere", now), now);
-    }
-
-    #[test]
-    fn clock_restarts_after_a_large_rollback() {
-        let now = 2_050_000_000_000;
-        let clock = MessageClock::new();
-        assert_eq!(clock.next("rollback", now), now);
-        assert_eq!(clock.next("rollback", now - 120_000), now - 115_000);
-        assert_eq!(clock.next("rollback", now - 120_000), now - 114_999);
-    }
-
-    #[test]
-    fn ms_tags_are_canonical() {
-        let ms = |value: &str| event_ms(100, &[tag(&["ms", value])]);
-        for offset in 0..1000 {
-            assert_eq!(ms(&offset.to_string()), 100_000 + offset);
-        }
-        for bad in [
-            "", "-1", "100900", "1.5", "1e2", "+1", " 1", "1 ", "01", "000", "NaN", "1000",
-        ] {
-            assert_eq!(ms(bad), 100_000, "{bad:?}");
-        }
-        assert_eq!(event_ms(100, &[]), 100_000);
-        assert_eq!(
-            compare_messages((100_500, "b"), (100_500, "a")),
-            Ordering::Greater
         );
     }
 }

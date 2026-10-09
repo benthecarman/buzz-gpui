@@ -21,7 +21,7 @@ pub use event::{Verified, Verifier, kinds};
 pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
-pub use messages::{Draft, EventTemplate, MessageClock, MessageError};
+pub use messages::{Draft, EventTemplate, MessageError};
 pub use origin::RelayOrigin;
 pub use outbox::{
     Delivery, HttpPublisher, Journal, MemoryJournal, Operation, Outbox, OutboxError, OutboxOptions,
