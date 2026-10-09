@@ -265,6 +265,24 @@ impl Timeline {
             .cloned()
     }
 
+    /// The newest verified top-level message: the bottom of the channel, as
+    /// a reading catch-up sees it. Unsent local rows do not count.
+    pub fn bottom(&self) -> Option<String> {
+        self.pages
+            .values()
+            .chain(self.traffic.values())
+            .filter(|event| {
+                crate::unread::CONTENT_KINDS.contains(&event.kind_u16())
+                    && crate::unread::thread_reference(event).is_none()
+            })
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| b.id.cmp(&a.id))
+            })
+            .map(Verified::id_hex)
+    }
+
     pub fn mark_stale(&mut self) {
         self.stale = true;
     }

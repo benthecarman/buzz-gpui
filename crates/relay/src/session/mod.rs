@@ -8,11 +8,14 @@
 //! by an access epoch so a result started before a revocation is dropped.
 //!
 //! The UI reads immutable snapshots from watch channels: one for the
-//! session (status, channels, profiles) and one per open channel.
+//! session (status, channels, profiles, unread counts) and one per open
+//! channel. Read state and unread live in [`unread`].
 
 mod timeline;
+mod unread;
 
 pub use timeline::{TimelineSnapshot, TimelineStatus};
+pub use unread::{ChannelUnread, READING_DWELL_MS, UnreadCounts};
 
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
 use crate::event::{Verified, Verifier, kinds};
@@ -23,6 +26,7 @@ use crate::messages::{self, Author, Compose, EmojiCatalog, Mentions};
 use crate::origin::RelayOrigin;
 use crate::outbox::{HttpPublisher, Outbox, OutboxOptions, SendOptions};
 use crate::profiles::{ProfileDirectory, Profiles};
+use crate::read_state::{PublishFailure, RefreshRequest, SnapshotDescriptor};
 use crate::reader::{ReadError, ReadErrorKind, ReadOptions, Reader, ReaderOptions};
 use crate::socket::Filter;
 use crate::store::{Partition, SqliteJournal, Store};
@@ -35,6 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use timeline::Timeline;
 use tokio::sync::{mpsc, oneshot, watch};
+use unread::{Mark, Reads};
 
 /// Closed channels kept warm for a quick return.
 const RETAINED_CLOSED: usize = 3;
@@ -62,6 +67,8 @@ pub struct RelayInfo {
     /// The relay's own signing key (NIP-11 `self`).
     pub authority: String,
     pub supports_channel_creation: bool,
+    /// NIP-11 `read_state_snapshot`: read state can be fetched completely.
+    pub read_state_snapshot: Option<SnapshotDescriptor>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +81,8 @@ pub struct SessionSnapshot {
     /// Channels the viewer is a member of, DMs included.
     pub channels: Arc<[ChannelSummary]>,
     pub profiles: Profiles,
+    /// Unread rows and badges per channel. Replaced only when it changes.
+    pub unread: Arc<UnreadCounts>,
 }
 
 pub struct Session {
@@ -100,6 +109,21 @@ impl ChannelView {
     pub fn channel(&self) -> &str {
         &self.channel
     }
+
+    /// Reports what the view shows while its channel is selected: the
+    /// message rows fully in view (at most 128, newest last) and whether
+    /// the list sits at its newest message. Rows that stay in view for
+    /// [`READING_DWELL_MS`] are read, and at the bottom the channel is
+    /// caught up. Report nothing in view and `at_bottom: false` while the
+    /// window is hidden or unfocused. Until the first report the view is
+    /// taken to be at the bottom.
+    pub fn viewport(&self, visible: Vec<EventId>, at_bottom: bool) {
+        let _ = self.commands.send(Message::Viewport {
+            channel: self.channel.clone(),
+            visible,
+            at_bottom,
+        });
+    }
 }
 
 impl Drop for ChannelView {
@@ -124,6 +148,7 @@ impl Session {
             roster: RosterStatus::Loading,
             channels: Arc::new([]),
             profiles: Profiles::default(),
+            unread: Arc::default(),
         }));
         let receiver = snapshot.subscribe();
         let verifier = Arc::new(Verifier::default());
@@ -160,6 +185,7 @@ impl Session {
             clock: Arc::new(MessageClock::new()),
             outbox: None,
             outbox_changes: None,
+            reads: None,
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -272,6 +298,41 @@ impl Session {
     pub async fn dismiss(&self, id: EventId) -> Result<(), String> {
         self.write(Write::Dismiss(id)).await
     }
+
+    async fn mark(&self, mark: Mark) -> Result<(), String> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Message::Mark { mark, reply })
+            .map_err(|_| "The session has closed".to_string())?;
+        answer
+            .await
+            .unwrap_or_else(|_| Err("The session has closed".to_string()))
+    }
+
+    /// Reads the whole channel, through the newest message seen or now,
+    /// whichever is later, and clears its manual unread marks. Saved at
+    /// once; synced to the viewer's other devices shortly after.
+    pub async fn mark_channel_read(&self, channel: &str) -> Result<(), String> {
+        self.mark(Mark::Channel(channel.to_string())).await
+    }
+
+    /// Marks every channel with anything unread as read, with one cut.
+    pub async fn mark_all_read(&self) -> Result<(), String> {
+        self.mark(Mark::All).await
+    }
+
+    /// Reads one loaded message and its loaded replies.
+    pub async fn mark_message_read(&self, channel: &str, id: EventId) -> Result<(), String> {
+        self.mark(Mark::MessageRead(channel.to_string(), id)).await
+    }
+
+    /// Shows a loaded message (and its loaded replies) as unread for the
+    /// rest of this channel visit, and the channel as unread on this
+    /// device until it is next opened. Never synced.
+    pub async fn mark_message_unread(&self, channel: &str, id: EventId) -> Result<(), String> {
+        self.mark(Mark::MessageUnread(channel.to_string(), id))
+            .await
+    }
 }
 
 enum Write {
@@ -335,6 +396,27 @@ enum Message {
         result: Result<Events, ReadError>,
     },
     Reconnect,
+    Mark {
+        mark: Mark,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Viewport {
+        channel: String,
+        visible: Vec<EventId>,
+        at_bottom: bool,
+    },
+    ReadRefresh {
+        request: RefreshRequest,
+        result: Result<Vec<Verified>, String>,
+    },
+    ReadPublished(Result<(), PublishFailure>),
+    ReadBack(Result<Vec<Verified>, String>),
+    Repair(Result<Events, ReadError>),
+    Homes {
+        request: crate::unread::HomesRequest,
+        result: Result<Events, ReadError>,
+    },
+    Lookup(Result<Events, ReadError>),
 }
 
 struct Actor {
@@ -367,12 +449,15 @@ struct Actor {
     clock: Arc<MessageClock>,
     outbox: Option<Outbox>,
     outbox_changes: Option<watch::Receiver<u64>>,
+    /// Read state and unread, from NIP-11 on.
+    reads: Option<Reads>,
 }
 
 impl Actor {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
         self.connect();
         loop {
+            let deadline = self.reads_deadline();
             let outbox_changed = async {
                 match &mut self.outbox_changes {
                     Some(changes) => changes.changed().await.is_ok(),
@@ -385,8 +470,21 @@ impl Actor {
                     None => std::future::pending().await,
                 }
             };
+            let timer = async move {
+                match deadline {
+                    Some(at) => {
+                        let wait = at.saturating_sub(unread::now_ms());
+                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                    }
+                    None => std::future::pending().await,
+                }
+            };
             let message = tokio::select! {
                 message = inbox.recv() => message,
+                () = timer => {
+                    self.reads_tick();
+                    continue;
+                }
                 Some(update) = live_update => {
                     self.live_update(update);
                     continue;
@@ -415,6 +513,7 @@ impl Actor {
             Message::Select(channel) => {
                 self.selected = channel;
                 self.update_interests();
+                self.update_reading();
             }
             Message::Retry => {
                 if self.relay.is_none() {
@@ -427,6 +526,7 @@ impl Actor {
                         strong: true,
                         ..Default::default()
                     });
+                    self.retry_reads();
                 }
             }
             Message::Reconnect => {
@@ -463,7 +563,15 @@ impl Actor {
                 sent,
                 catch_up,
                 result,
-            } => self.page(&channel, generation, sent, catch_up, result),
+            } => {
+                if let Ok(events) = &result
+                    && self.reads_accept(events)
+                {
+                    self.publish();
+                }
+                self.page(&channel, generation, sent, catch_up, result);
+                self.reading_loaded(&channel);
+            }
             Message::Profiles { ids, result } => {
                 self.profiles.finished(&ids);
                 if let Ok(events) = result {
@@ -478,6 +586,20 @@ impl Actor {
                     }
                 }
             }
+            Message::Mark { mark, reply } => {
+                let _ = reply.send(self.mark(mark));
+            }
+            Message::Viewport {
+                channel,
+                visible,
+                at_bottom,
+            } => self.viewport(&channel, visible, at_bottom),
+            Message::ReadRefresh { request, result } => self.read_refreshed(request, result),
+            Message::ReadPublished(outcome) => self.read_published(outcome),
+            Message::ReadBack(result) => self.read_back(result),
+            Message::Repair(result) => self.repaired(result),
+            Message::Homes { request, result } => self.homes(request, result),
+            Message::Lookup(result) => self.looked_up(result),
         }
     }
 
@@ -543,6 +665,7 @@ impl Actor {
         );
         self.outbox_changes = Some(outbox.changes());
         self.outbox = Some(outbox);
+        self.open_reads();
         self.set_status(SessionStatus::Ready);
         self.start_scan(ScanOptions::default());
     }
@@ -641,6 +764,7 @@ impl Actor {
         }
         self.purge_denied();
         self.update_interests();
+        self.reads_channels(true);
         self.ensure_profiles(self.channel_people());
         self.publish();
         if let Some(options) = self.rescan.take() {
@@ -734,6 +858,7 @@ impl Actor {
                 }
                 self.purge_denied();
                 self.update_interests();
+                self.reads_channels(false);
                 self.publish();
             }
             LiveUpdate::AccessHint { .. } => self.start_scan(ScanOptions {
@@ -743,6 +868,7 @@ impl Actor {
             LiveUpdate::Connected => {
                 self.set_live(true);
                 self.start_scan(ScanOptions::default());
+                self.reads_reconnected();
             }
             LiveUpdate::Disconnected => {
                 self.set_live(false);
@@ -750,6 +876,7 @@ impl Actor {
                     timeline.mark_stale();
                     timeline.publish();
                 }
+                self.reads_disconnected();
             }
         }
     }
@@ -768,7 +895,8 @@ impl Actor {
     }
 
     /// Every verified event goes through here, in the reference order:
-    /// discovery, membership hints, profiles, then channel timelines.
+    /// discovery, membership hints, read state, unread, outbox echo,
+    /// profiles, then channel timelines.
     fn accept(&mut self, events: &[Verified]) {
         let mut publish = false;
         if let Some(discovery) = &mut self.discovery {
@@ -785,6 +913,7 @@ impl Actor {
                 publish = true;
                 self.purge_denied();
                 self.update_interests();
+                self.reads_channels(false);
             }
         }
         let viewer = self.identity.pubkey_hex();
@@ -803,6 +932,7 @@ impl Actor {
                 ..Default::default()
             });
         }
+        publish |= self.reads_accept(events);
         if let Some(outbox) = &self.outbox {
             outbox.observe(events);
         }
@@ -815,6 +945,7 @@ impl Actor {
             }
         }
         self.ensure_profiles(people);
+        self.reading_arrivals(events);
         if publish {
             self.publish();
         }
@@ -837,6 +968,7 @@ impl Actor {
             self.load_head(channel, false);
         }
         self.update_interests();
+        self.update_reading();
     }
 
     fn close(&mut self, channel: &str) {
@@ -854,6 +986,7 @@ impl Actor {
             }
         }
         self.update_interests();
+        self.update_reading();
     }
 
     fn load_head(&mut self, channel: &str, catch_up: bool) {
@@ -950,6 +1083,7 @@ impl Actor {
                     discovery.deny(channel);
                 }
                 self.purge_denied();
+                self.reads_channels(false);
                 self.publish();
                 return;
             }
@@ -1117,6 +1251,7 @@ impl Actor {
             .as_ref()
             .map(|discovery| Arc::<[ChannelSummary]>::from(discovery.channels()))
             .unwrap_or_else(|| Arc::new([]));
+        let unread = self.unread_counts();
         let next = SessionSnapshot {
             status: self.snapshot.borrow().status.clone(),
             live: self.live.as_ref().is_some_and(Live::is_connected),
@@ -1124,6 +1259,7 @@ impl Actor {
             roster: self.roster.clone(),
             channels,
             profiles: self.profiles.snapshot(),
+            unread,
         };
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
@@ -1131,12 +1267,14 @@ impl Actor {
                 && current.relay == next.relay
                 && current.roster == next.roster
                 && Arc::ptr_eq(&current.profiles, &next.profiles)
+                && Arc::ptr_eq(&current.unread, &next.unread)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);
             }
             !same
         });
+        self.after_publish();
     }
 }
 
@@ -1166,5 +1304,6 @@ fn relay_info(info: &serde_json::Value) -> Result<RelayInfo, String> {
             .get("supported_nips")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|nips| nips.iter().any(|nip| nip.as_u64() == Some(29))),
+        read_state_snapshot: SnapshotDescriptor::from_nip11(info),
     })
 }

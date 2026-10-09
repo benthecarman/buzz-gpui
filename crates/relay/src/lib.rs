@@ -37,8 +37,8 @@ pub use read_state::{
 };
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
-    ChannelView, RelayInfo, RosterStatus, Session, SessionSnapshot, SessionStatus,
-    TimelineSnapshot, TimelineStatus,
+    ChannelUnread, ChannelView, READING_DWELL_MS, RelayInfo, RosterStatus, Session,
+    SessionSnapshot, SessionStatus, TimelineSnapshot, TimelineStatus, UnreadCounts,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
