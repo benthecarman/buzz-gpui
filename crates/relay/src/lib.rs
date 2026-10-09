@@ -1,5 +1,6 @@
 //! Client for Buzz relays.
 
+pub mod discovery;
 pub mod event;
 pub mod fold;
 pub mod http;
@@ -9,6 +10,7 @@ pub mod reader;
 pub mod socket;
 pub mod store;
 
+pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
 pub use event::{Verified, Verifier, kinds};
 pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
