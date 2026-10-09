@@ -1,0 +1,206 @@
+//! The viewer's own writes outside chat: profile, status and leaving the
+//! community. Each is one signed request with its receipt
+//! checked, run on the session's runtime so any executor can await it.
+
+use super::{Message, Session};
+use crate::account::{self, LeaveOutcome, ProfileEdit};
+use crate::event::{Verified, Verifier};
+use crate::http::RelayHttp;
+use crate::messages::EventTemplate;
+use crate::outbox::{PublishError, accept_publish};
+use crate::reader::{ReadOptions, Reader};
+use crate::user_status::{self, StatusInput, UserStatus};
+use buzz_identity::{Identity, Purpose};
+use nostr::prelude::Event;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// A status save gives up after this long (`user-status.ts`).
+const STATUS_TIMEOUT: Duration = Duration::from_secs(12);
+const PROFILE_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(super) struct Direct {
+    pub http: RelayHttp,
+    pub reader: Reader,
+    pub identity: Arc<Identity>,
+    /// One status save at a time.
+    pub status: tokio::sync::Mutex<()>,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn sign(identity: &Identity, template: EventTemplate) -> Result<Event, String> {
+    let unsigned = identity
+        .template(
+            Purpose::Content,
+            template.kind,
+            template.created_at,
+            template.tags,
+            template.content,
+        )
+        .map_err(|error| error.to_string())?;
+    identity
+        .sign(Purpose::Content, unsigned)
+        .map_err(|error| error.to_string())
+}
+
+async fn post(http: &RelayHttp, event: &Event) -> Result<Vec<u8>, crate::http::HttpError> {
+    http.post(
+        "/events",
+        serde_json::to_string(event).expect("events serialize"),
+    )
+    .await
+}
+
+impl Session {
+    /// Publishes the viewer's profile (§5f.5): reads the current kind 0
+    /// fresh so fields this app does not edit survive, signs the new one,
+    /// shows it at once, and posts it. A refused or unconfirmed save puts
+    /// the previous profile back.
+    pub async fn publish_profile(&self, edit: ProfileEdit) -> Result<(), String> {
+        let direct = (
+            self.direct.reader.clone(),
+            self.direct.http.clone(),
+            self.direct.identity.clone(),
+        );
+        let commands = self.commands.clone();
+        let viewer = self.viewer.clone();
+        let work = async move {
+            let (reader, http, identity) = direct;
+            account::validate(&edit).map_err(|error| error.to_string())?;
+            let events = reader
+                .read(
+                    vec![account::own_profile_filter(&viewer)],
+                    ReadOptions {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| format!("Your profile couldn’t be loaded. {}", error.message))?;
+            let existing = account::newest_profile(&events, &viewer).cloned();
+            let template = account::profile_template(
+                &edit,
+                existing.as_ref().map(|event| event.content.as_str()),
+                existing.as_ref().map(Verified::created_at_secs),
+                now(),
+            )
+            .map_err(|error| error.to_string())?;
+            let event = sign(&identity, template)?;
+            let verified = Verifier::default()
+                .verify(event.clone())
+                .map_err(|error| error.to_string())?;
+            // Shown at once; put back below if the relay does not take it.
+            let _ = commands.send(Message::With(Box::new(move |actor| {
+                if actor.profiles.accept(&[verified]) {
+                    actor.publish();
+                }
+            })));
+            match accept_publish(post(&http, &event).await, &event.id) {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    let (failed, viewer) = (event.id, viewer.clone());
+                    let _ = commands.send(Message::With(Box::new(move |actor| {
+                        if actor.profiles.revert(&viewer, &failed, existing) {
+                            actor.publish();
+                        }
+                    })));
+                    Err(match error {
+                        PublishError::Rejected(message) => message,
+                        PublishError::Uncertain(message) => {
+                            format!("{message}. Your edits are kept; save again to retry.")
+                        }
+                    })
+                }
+            }
+        };
+        self.run(async move {
+            tokio::time::timeout(PROFILE_TIMEOUT, work)
+                .await
+                .unwrap_or_else(|_| Err("Saving your profile timed out. Try again.".into()))
+        })
+        .await
+    }
+
+    /// The viewer's current status, read fresh. `None` when unset, cleared
+    /// or expired.
+    pub async fn own_status(&self) -> Result<Option<UserStatus>, String> {
+        let reader = self.direct.reader.clone();
+        let viewer = self.viewer.clone();
+        self.run(async move {
+            let events = reader
+                .read(
+                    vec![user_status::filter(&viewer)],
+                    ReadOptions {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| error.message)?;
+            Ok(user_status::current(&events, &viewer, now()))
+        })
+        .await
+    }
+
+    /// Saves the viewer's status (§5j.1); empty text and emoji clear it.
+    /// Reads the current status first so the new event replaces it.
+    pub async fn set_status(&self, input: StatusInput) -> Result<(), String> {
+        let Ok(_guard) = self.direct.status.try_lock() else {
+            return Err("A status update is already in progress.".into());
+        };
+        let reader = self.direct.reader.clone();
+        let http = self.direct.http.clone();
+        let identity = self.direct.identity.clone();
+        let viewer = self.viewer.clone();
+        let work = async move {
+            let events = reader
+                .read(
+                    vec![user_status::filter(&viewer)],
+                    ReadOptions {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| error.message)?;
+            let previous = user_status::latest_created_at(&events, &viewer);
+            let template = user_status::template(&input, previous, now())
+                .map_err(|error| error.to_string())?;
+            let event = sign(&identity, template)?;
+            accept_publish(post(&http, &event).await, &event.id)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        self.run(async move {
+            tokio::time::timeout(STATUS_TIMEOUT, work)
+                .await
+                .unwrap_or_else(|_| Err("Saving your status timed out. Try again.".into()))
+        })
+        .await
+    }
+
+    /// Asks the relay to end the viewer's membership (NIP-43, §1.8).
+    pub async fn leave(&self) -> Result<LeaveOutcome, String> {
+        let http = self.direct.http.clone();
+        let identity = self.direct.identity.clone();
+        self.run(async move {
+            let event = sign(&identity, account::leave_template(now()))?;
+            account::leave_outcome(post(&http, &event).await, &event.id)
+        })
+        .await
+    }
+
+    /// Stops the session for good: pending sends end and nothing writes
+    /// local storage afterwards, so it can be purged.
+    pub async fn dispose(&self) {
+        let (reply, done) = tokio::sync::oneshot::channel();
+        if self.commands.send(Message::Dispose(reply)).is_ok() {
+            let _ = done.await;
+        }
+    }
+}

@@ -1,5 +1,6 @@
 //! Client for Buzz relays.
 
+pub mod account;
 pub mod community;
 pub mod discovery;
 pub mod dm;
@@ -28,11 +29,13 @@ pub mod threads;
 pub mod typing;
 pub mod unread;
 pub mod upload;
+pub mod user_status;
 pub mod window;
 
 #[cfg(test)]
 mod testing;
 
+pub use account::{LeaveOutcome, ProfileEdit, ProfileError};
 pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
 pub use emoji::{CatalogStatus, EmojiSnapshot};
 pub use event::{Verified, Verifier, kinds};
@@ -81,3 +84,4 @@ pub use unread::{
     ThreadActivitySnapshot, ThreadFollowStore, Unread, UnreadError, UnreadOptions, UnreadSnapshot,
 };
 pub use upload::{UploadError, UploadFile};
+pub use user_status::{StatusInput, UserStatus};

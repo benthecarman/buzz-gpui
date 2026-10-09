@@ -99,7 +99,7 @@ impl Session {
     }
 
     /// Runs `work` on the I/O runtime, whatever executor awaits it.
-    async fn run<R: Send + 'static>(
+    pub(super) async fn run<R: Send + 'static>(
         &self,
         work: impl Future<Output = Result<R, String>> + Send + 'static,
     ) -> Result<R, String> {

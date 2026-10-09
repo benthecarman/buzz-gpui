@@ -200,6 +200,38 @@ impl ProfileDirectory {
         different
     }
 
+    /// Undoes an optimistic profile that the relay did not take: if
+    /// `pubkey`'s profile is still the event `failed`, it goes back to
+    /// `previous` (or to unknown). Returns whether the snapshot changed.
+    pub fn revert(
+        &mut self,
+        pubkey: &str,
+        failed: &nostr::prelude::EventId,
+        previous: Option<Verified>,
+    ) -> bool {
+        if self
+            .events
+            .get(pubkey)
+            .is_none_or(|event| event.id != *failed)
+        {
+            return false;
+        }
+        let mut next = (*self.snapshot).clone();
+        match previous {
+            Some(event) => {
+                next.insert(pubkey.to_string(), Arc::new(Profile::from_event(&event)));
+                self.events.insert(pubkey.to_string(), event);
+            }
+            None => {
+                self.events.remove(pubkey);
+                self.order.retain(|id| id != pubkey);
+                next.remove(pubkey);
+            }
+        }
+        self.snapshot = Arc::new(next);
+        true
+    }
+
     pub fn clear(&mut self) {
         self.events.clear();
         self.order.clear();
@@ -277,6 +309,24 @@ mod tests {
         // A newer event with identical fields leaves the snapshot alone.
         assert!(!directory.accept(&[profile(&keys, r#"{"name":"new"}"#, 11, vec![])]));
         assert!(Arc::ptr_eq(&before, &directory.snapshot()[&id]));
+    }
+
+    #[test]
+    fn reverts_only_the_failed_optimistic_profile() {
+        let keys = Keys::generate();
+        let id = keys.public_key().to_hex();
+        let mut directory = ProfileDirectory::default();
+        let saved = profile(&keys, r#"{"name":"saved"}"#, 1, vec![]);
+        let optimistic = profile(&keys, r#"{"name":"draft"}"#, 2, vec![]);
+        directory.accept(std::slice::from_ref(&saved));
+        directory.accept(std::slice::from_ref(&optimistic));
+        // A different event id is not the failed one.
+        assert!(!directory.revert(&id, &saved.id, Some(saved.clone())));
+        assert!(directory.revert(&id, &optimistic.id, Some(saved.clone())));
+        assert_eq!(directory.snapshot()[&id].name, "saved");
+        directory.accept(std::slice::from_ref(&optimistic));
+        assert!(directory.revert(&id, &optimistic.id, None));
+        assert!(!directory.snapshot().contains_key(&id));
     }
 
     #[test]

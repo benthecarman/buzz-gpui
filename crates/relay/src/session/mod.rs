@@ -13,6 +13,7 @@
 //! presence and typing in [`presence`], notification candidates in
 //! [`incoming`].
 
+mod account;
 mod actions;
 mod incoming;
 mod presence;
@@ -124,6 +125,7 @@ pub struct Session {
     origin: RelayOrigin,
     next_thread: std::sync::atomic::AtomicU64,
     media: Media,
+    direct: account::Direct,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -201,6 +203,12 @@ impl Session {
         );
         let viewer = identity.pubkey_hex();
         let media = Media::new(runtime.clone(), origin.clone(), identity.clone());
+        let direct = account::Direct {
+            http: http.clone(),
+            reader: reader.clone(),
+            identity: identity.clone(),
+            status: tokio::sync::Mutex::new(()),
+        };
         let actor = Actor {
             runtime: runtime.clone(),
             origin: origin.clone(),
@@ -247,6 +255,7 @@ impl Session {
             origin,
             next_thread: std::sync::atomic::AtomicU64::new(1),
             media,
+            direct,
             task,
         }
     }
@@ -564,6 +573,8 @@ enum Message {
     With(Box<dyn FnOnce(&mut Actor) + Send>),
     RefreshEmoji,
     EmojiRead(Result<Events, ReadError>),
+    /// Stop for good; reply once nothing more will be written.
+    Dispose(oneshot::Sender<()>),
 }
 
 struct Actor {
@@ -662,6 +673,13 @@ impl Actor {
             let Some(message) = message else {
                 return;
             };
+            if let Message::Dispose(reply) = message {
+                if let Some(outbox) = &self.outbox {
+                    outbox.dispose();
+                }
+                let _ = reply.send(());
+                return;
+            }
             self.handle(message);
         }
     }
@@ -800,6 +818,7 @@ impl Actor {
                     self.publish();
                 }
             }
+            Message::Dispose(_) => unreachable!("handled by the run loop"),
         }
     }
 
