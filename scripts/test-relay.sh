@@ -6,6 +6,7 @@
 #   scripts/test-relay.sh verify   WS (NIP-42) + HTTP (NIP-98) smoke checks
 #   scripts/test-relay.sh status   show deps/relay state
 #   scripts/test-relay.sh logs     tail relay log (`logs deps` for docker logs)
+#   scripts/test-relay.sh restart  restart only the relay process
 #   scripts/test-relay.sh down     stop relay and deps (data kept)
 #   scripts/test-relay.sh wipe     down + delete DB/minio data and seed.json
 #
@@ -63,7 +64,7 @@ nak() {
     fi
     [[ -x "${NAK}" ]] || die "could not get nak (nix build nixpkgs#nak failed)"
   fi
-  "${NAK}" "$@"
+  "${NAK}" "$@" </dev/null
 }
 
 ident() { jq -r --arg n "$1" --arg f "$2" '.identities[$n][$f]' "${IDENTITIES}"; }
@@ -146,7 +147,7 @@ BUZZ_METRICS_PORT=${METRICS_PORT}
 BUZZ_RELAY_PRIVATE_KEY=${BUZZ_RELAY_PRIVATE_KEY}
 BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
 RELAY_OWNER_PUBKEY=$(ident alice pk_hex)
-BUZZ_REQUIRE_AUTH_TOKEN=false
+BUZZ_REQUIRE_AUTH_TOKEN=true
 BUZZ_RECONCILE_CHANNELS=true
 BUZZ_PUSH_ENABLED=false
 BUZZ_GIT_CONFORMANCE_PROBE=false
@@ -212,7 +213,13 @@ relay_start() {
     port_in_use "${p}" && die "port ${p} already in use by something else; refusing to start"
   done
   log "Starting buzz-relay on ${WS_URL} (log: ${RELAY_LOG})"
-  (cd "${STATE}" && with_relay_env nohup "${BIN}/buzz-relay" >>"${RELAY_LOG}" 2>&1 & echo $! > "${RELAY_PID}")
+  local envs=()
+  mapfile -t envs < <(relay_env)
+  # Direct exec (no function/subshell wrapper) so $! is the relay itself and
+  # no inherited fd keeps the caller's pipes open.
+  setsid nohup env -C "${STATE}" "${envs[@]}" "${BIN}/buzz-relay" \
+    </dev/null >>"${RELAY_LOG}" 2>&1 &
+  echo $! > "${RELAY_PID}"
   for _ in $(seq 1 90); do
     relay_running || { tail -40 "${RELAY_LOG}" >&2; die "relay exited during startup"; }
     relay_ready && { log "Relay ready: ${WS_URL}"; return 0; }
@@ -292,17 +299,183 @@ require_ready() {
   [[ -f "${IDENTITIES}" ]] || die "missing ${IDENTITIES}"
 }
 
-cmd_seed() { die "TODO"; }
-cmd_verify() { die "TODO"; }
+# Ensure a channel named $2 exists (created by alice). Echoes its UUID.
+ensure_channel() {
+  local name="$1" type="$2" vis="$3" desc="$4" id
+  id="$(buzz_as alice channels list | jq -r --arg n "${name}" '[.[] | select(.name == $n)][0].channel_id // empty')"
+  if [[ -z "${id}" ]]; then
+    id="$(buzz_as alice channels create --name "${name}" --type "${type}" --visibility "${vis}" \
+      --description "${desc}" | jq -r '.channel_id')"
+    log "  created #${name} (${type}/${vis}) ${id}"
+  else
+    log "  #${name} exists ${id}"
+  fi
+  [[ "${id}" =~ ^[0-9a-f-]{36}$ ]] || die "could not create/find channel ${name}"
+  echo "${id}"
+}
+
+# post <who> <channel> <content> [reply-to-event-id] [kind] -> echoes event id
+post() {
+  local who="$1" ch="$2" content="$3" reply="${4:-}" kind="${5:-}" out id args=()
+  [[ -n "${reply}" ]] && args+=(--reply-to "${reply}")
+  [[ -n "${kind}" ]] && args+=(--kind "${kind}")
+  out="$(buzz_as "${who}" messages send --channel "${ch}" --content "${content}" "${args[@]}")"
+  id="$(jq -r '.event_id // empty' <<<"${out}")"
+  [[ "${id}" =~ ^[0-9a-f]{64}$ ]] || die "post by ${who} failed: ${out}"
+  echo "${id}"
+}
+
+react() { buzz_as "$1" reactions add --event "$2" --emoji "$3" >/dev/null || die "reaction by $1 failed"; }
+
+cmd_seed() {
+  require_ready
+  if [[ -f "${SEED_FILE}" && "${1:-}" != --force ]]; then
+    log "Already seeded (${SEED_FILE}); use 'wipe' + 'up' + 'seed' to start over, or 'seed --force' to post again."
+    jq . "${SEED_FILE}"
+    return 0
+  fi
+  local alice bob carol
+  alice="$(ident alice pk_hex)"; bob="$(ident bob pk_hex)"; carol="$(ident carol pk_hex)"
+
+  log "Relay membership (NIP-43): alice is owner via RELAY_OWNER_PUBKEY; admitting bob + carol"
+  for who in bob carol; do
+    with_relay_env "${BIN}/buzz-admin" add-member --pubkey "$(ident "${who}" pk_hex)" --role member >&2
+    sleep 1.1   # buzz-admin: serialize 13534 roster snapshots (1s granularity)
+  done
+
+  log "Profiles (kind 0)"
+  for who in alice bob carol; do
+    buzz_as "${who}" users set-profile --name "$(ident "${who}" display_name)" \
+      --about "Test identity '${who}' ($(ident "${who}" role)) for buzz-gpui" >/dev/null
+  done
+
+  log "Channels (NIP-29 kind 9007, created by alice)"
+  local general random core forum dm
+  general="$(ensure_channel general stream open 'General chat for everyone')"
+  random="$(ensure_channel random stream open 'Off-topic')"
+  core="$(ensure_channel core-team stream private 'Private: alice + bob only')"
+  forum="$(ensure_channel announcements forum open 'Forum-style announcements')"
+
+  log "Channel membership"
+  buzz_as bob channels join --channel "${general}" >/dev/null
+  buzz_as carol channels join --channel "${general}" >/dev/null
+  buzz_as bob channels join --channel "${random}" >/dev/null
+  buzz_as alice channels add-member --channel "${core}" --pubkey "${bob}" --role member >/dev/null
+
+  log "Messages, thread replies, reactions"
+  local welcome bob_hi carol_hi r1 r2 rnd core1 core2 ann ann_c dm1 dm2
+  welcome="$(post alice "${general}" 'Welcome to the buzz-gpui test community! Reply in thread to try threads.')"
+  bob_hi="$(post bob "${general}" 'Hi all, Bob here. Testing **markdown** and `code`.')"
+  carol_hi="$(post carol "${general}" "Hey @Alice and @Bob, Carol checking in.")"
+  r1="$(post bob "${general}" 'Thread reply #1: thanks for setting this up!' "${welcome}")"
+  r2="$(post carol "${general}" 'Thread reply #2: threads work.' "${welcome}")"
+  react bob "${welcome}" '👍'
+  react carol "${welcome}" '🎉'
+  react alice "${bob_hi}" '❤️'
+  rnd="$(post bob "${random}" 'Random channel: only Bob has joined, but it is open.')"
+  core1="$(post alice "${core}" 'Private channel: Carol must not see this.')"
+  core2="$(post bob "${core}" 'Confirmed, private reply.' "${core1}")"
+  # Forum channels use kind 45001 posts and kind 45003 comments.
+  ann="$(post alice "${forum}" 'v0 announcement: forum post (kind 45001).' '' 45001)"
+  ann_c="$(post carol "${forum}" 'Forum comment from Carol (kind 45003).' "${ann}" 45003)"
+
+  log "Direct message (alice <-> bob)"
+  dm="$(buzz_as alice dms open --pubkey "${bob}" | jq -r '.dm_id // .channel_id // empty')"
+  [[ "${dm}" =~ ^[0-9a-f-]{36}$ ]] || die "dms open failed"
+  dm1="$(post alice "${dm}" 'Hey Bob, this is a DM.')"
+  dm2="$(post bob "${dm}" 'Hi Alice, DM reply.')"
+
+  jq -n --arg general "${general}" --arg random "${random}" --arg core "${core}" \
+    --arg forum "${forum}" --arg dm "${dm}" \
+    --arg welcome "${welcome}" --arg bob_hi "${bob_hi}" --arg carol_hi "${carol_hi}" \
+    --arg r1 "${r1}" --arg r2 "${r2}" --arg rnd "${rnd}" --arg core1 "${core1}" \
+    --arg core2 "${core2}" --arg ann "${ann}" --arg ann_c "${ann_c}" --arg dm1 "${dm1}" --arg dm2 "${dm2}" '{
+      channels: {general: $general, random: $random, "core-team": $core,
+                 announcements: $forum, "dm-alice-bob": $dm},
+      events: {welcome: $welcome, bob_hi: $bob_hi, carol_hi: $carol_hi,
+               thread_reply_bob: $r1, thread_reply_carol: $r2, random_bob: $rnd,
+               core_alice: $core1, core_reply_bob: $core2,
+               forum_post: $ann, forum_comment_carol: $ann_c,
+               dm_alice: $dm1, dm_bob: $dm2}}' > "${SEED_FILE}"
+  log "Seeded -> ${SEED_FILE}"
+  jq . "${SEED_FILE}"
+}
+
+# ── verify ───────────────────────────────────────────────────────────────────
+
+# One-shot REQ over WS. --fpa waits for the relay's AUTH challenge before
+# sending the REQ (without it nak occasionally races the challenge and hangs).
+# Call `nak --version` in the parent shell first so ${NAK} is resolved.
+ws_req() {
+  local fpa=()
+  [[ " $* " == *" --auth "* ]] && fpa=(--fpa)
+  timeout 20 "${NAK}" req -q "${fpa[@]}" "$@" </dev/null || true  # non-zero on denied auth
+}
+
+check() {  # check <description> <expected> <actual>
+  if [[ "$2" == "$3" ]]; then printf '  ok    %s (%s)\n' "$1" "$3"
+  else printf '  FAIL  %s: expected %s, got %s\n' "$1" "$2" "$3"; FAILED=1; fi
+}
+
+cmd_verify() {
+  require_ready
+  [[ -f "${SEED_FILE}" ]] || die "run seed first"
+  FAILED=0
+  nak --version >/dev/null
+  local general core n code body
+  general="$(jq -r '.channels.general' "${SEED_FILE}")"
+  core="$(jq -r '.channels["core-team"]' "${SEED_FILE}")"
+
+  echo "NIP-11"
+  check "auth_required advertised" true \
+    "$(curl -s -H 'Accept: application/nostr+json' "${HTTP_URL}/" | jq -r '.limitation.auth_required')"
+
+  echo "WebSocket REQ with NIP-42 AUTH (nak)"
+  n="$(ws_req --auth --sec "$(ident bob sk_hex)" -k 9 -t "h=${general}" -l 100 "${WS_URL}" 2>/dev/null | wc -l)"
+  check "bob reads #general kind 9" 5 "${n}"
+  # Reactions are stored channel-scoped but carry no h tag, so nak's local
+  # filter check drops them for a #h REQ even though the relay sends them.
+  n="$(ws_req --auth --sec "$(ident bob sk_hex)" -k 7 -e "$(jq -r .events.welcome "${SEED_FILE}")" \
+        -l 100 "${WS_URL}" 2>/dev/null | wc -l)"
+  check "bob reads reactions on the welcome message (kind 7, #e)" 2 "${n}"
+  n="$(ws_req --auth --sec "$(ident bob sk_hex)" -k 9 -t "h=${core}" -l 100 "${WS_URL}" 2>/dev/null | wc -l)"
+  check "bob reads private #core-team" 2 "${n}"
+  n="$(ws_req --auth --sec "$(ident carol sk_hex)" -k 9 -t "h=${core}" -l 100 "${WS_URL}" 2>/dev/null | wc -l)"
+  check "carol (non-member) reads private #core-team" 0 "${n}"
+  n="$(ws_req -k 9 -t "h=${general}" -l 100 "${WS_URL}" 2>/dev/null | wc -l)"
+  check "unauthenticated REQ gets nothing" 0 "${n}"
+  n="$(ws_req --auth --sec "$(nak key generate)" -k 9 -t "h=${general}" -l 100 "${WS_URL}" 2>/dev/null | wc -l)"
+  check "authenticated non-member gets nothing" 0 "${n}"
+
+  echo "HTTP POST /query with NIP-98"
+  n="$(buzz_as bob messages get --channel "${general}" --limit 100 | jq 'if type == "array" then length else (.messages // .events | length) end')"
+  check "buzz-cli 'messages get' (POST /query, NIP-98) as bob" 5 "${n}"
+  body="$(jq -nc --arg h "${general}" '[{kinds: [9], "#h": [$h], limit: 100}]')"
+  # nak curl ignores --sec; it signs with NOSTR_SECRET_KEY.
+  n="$(NOSTR_SECRET_KEY="$(ident carol sk_hex)" nak curl -s -X POST </dev/null -H 'Content-Type: application/json' \
+        -d "${body}" "${HTTP_URL}/query" | jq 'length')"
+  check "raw POST /query via 'nak curl' (NIP-98) as carol" 5 "${n}"
+  # nak's NIP-98 event has no nonce/payload tag, so a second identical request
+  # from the same key in the same second is rejected as a replay; use bob.
+  body="$(jq -nc --arg h "${general}" '[{kinds: [7], "#h": [$h], limit: 100}]')"
+  n="$(NOSTR_SECRET_KEY="$(ident bob sk_hex)" nak curl -s -X POST </dev/null -H 'Content-Type: application/json' \
+        -d "${body}" "${HTTP_URL}/query" | jq 'length')"
+  check "raw POST /query #general reactions (kind 7, #h) as bob" 3 "${n}"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "${body}" "${HTTP_URL}/query")"
+  check "POST /query without auth" 401 "${code}"
+
+  [[ "${FAILED}" == 0 ]] && echo "All checks passed." || { echo "Some checks FAILED."; return 1; }
+}
 
 case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
+  restart) relay_stop; relay_start ;;
   wipe) cmd_wipe ;;
   status) cmd_status ;;
   logs) shift; cmd_logs "$@" ;;
   seed) shift; cmd_seed "$@" ;;
   verify) cmd_verify ;;
   build) build ;;
-  *) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
