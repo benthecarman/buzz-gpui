@@ -874,6 +874,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 [[package]]
 name = "buzz-agent-controller"
 version = "0.1.0"
+source = "git+https://github.com/benthecarman/buzz-app?rev=395f6e3d19674de0b91deb8bcf147aab9e8cd654#395f6e3d19674de0b91deb8bcf147aab9e8cd654"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.11.1",
@@ -900,6 +901,7 @@ dependencies = [
 [[package]]
 name = "buzz-credential-store"
 version = "0.1.0"
+source = "git+https://github.com/benthecarman/buzz-app?rev=395f6e3d19674de0b91deb8bcf147aab9e8cd654#395f6e3d19674de0b91deb8bcf147aab9e8cd654"
 dependencies = [
  "dirs 6.0.0",
  "keyring",

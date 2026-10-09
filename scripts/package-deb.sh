@@ -3,18 +3,12 @@
 # against Ubuntu's libraries rather than Nix store paths.
 #
 # Usage: scripts/package-deb.sh            -> dist/buzz-gpui_<version>_amd64.deb
-# The buzz-app checkout must sit next to this repo (../buzz-app).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
-projects="$(dirname "$here")"
-[ -d "$projects/buzz-app" ] || { echo "missing $projects/buzz-app" >&2; exit 1; }
 mkdir -p "$here/dist" "$HOME/.cache/buzz-gpui-deb/cargo" "$HOME/.cache/buzz-gpui-deb/target"
 
-# The workspace refers to the buzz-app checkout by absolute path, so mount
-# both repositories at their host paths.
 docker run --rm \
   -v "$here:$here" \
-  -v "$projects/buzz-app:$projects/buzz-app:ro" \
   -v "$HOME/.cache/buzz-gpui-deb/cargo:/root/.cargo" \
   -v "$HOME/.cache/buzz-gpui-deb/target:$here/target-deb" \
   -e CARGO_TARGET_DIR="$here/target-deb" \
