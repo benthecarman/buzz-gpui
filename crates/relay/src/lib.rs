@@ -15,6 +15,7 @@ pub mod session;
 pub mod sidebar;
 pub mod socket;
 pub mod store;
+pub mod threads;
 pub mod unread;
 pub mod window;
 
@@ -49,6 +50,10 @@ pub use socket::{
 };
 pub use store::{
     Partition, SqliteJournal, SqliteReadJournal, SqliteThreadFollows, Store, StoreError,
+};
+pub use threads::{
+    Completion, TargetStatus, ThreadConfig, ThreadFollows, ThreadRead, ThreadSnapshot, ThreadState,
+    ThreadStatus, thread_authority, verify_thread_windows,
 };
 pub use unread::{
     ChannelInfo, InboxItem, InboxSnapshot, MessageAttention, ThreadActivitySnapshot,
