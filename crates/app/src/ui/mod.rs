@@ -7,4 +7,5 @@ mod onboarding;
 mod sidebar;
 mod thread;
 mod time;
+mod typing;
 pub mod workspace;

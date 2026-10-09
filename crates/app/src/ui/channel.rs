@@ -215,6 +215,7 @@ impl Render for ChannelPage {
         let community = self.community.read(cx);
         let profiles = community.snapshot.profiles.clone();
         let viewer = community.session.viewer().to_string();
+        let typing = community.snapshot.typing.get(&self.channel.id).cloned();
         let read_only = self.channel.read_only;
 
         let header = PanelHeader::new()
@@ -371,6 +372,11 @@ impl Render for ChannelPage {
                     .text_color(c.text_warning)
                     .child(error)
             }))
-            .child(composer)
+            .child(
+                div()
+                    .relative()
+                    .children(typing.and_then(|who| super::typing::overlay(&who, &profiles, cx)))
+                    .child(composer),
+            )
     }
 }

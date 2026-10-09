@@ -1,8 +1,10 @@
 //! The channel sidebar (ui.md §3).
 
 use super::message::{channel_icon, display_name};
-use buzz_relay_client::{ChannelSummary, ChannelType, Profiles, SessionSnapshot};
-use buzz_ui::{ActiveTheme, Avatar, AvatarSize, Icon, IconName, NavigationItem, TypeStyled};
+use buzz_relay_client::{ChannelSummary, ChannelType, PresenceState, Profiles, SessionSnapshot};
+use buzz_ui::{
+    ActiveTheme, Avatar, AvatarSize, Icon, IconName, NavigationItem, Presence, TypeStyled,
+};
 use gpui_kit::*;
 use std::sync::Arc;
 
@@ -157,7 +159,19 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
                 .as_ref()
                 .and_then(|p| p.first())
                 .cloned();
-            let mut avatar = Avatar::new(label.clone()).size(AvatarSize::Px(22.));
+            // One-to-one DMs show the other person's presence; unknown
+            // shows nothing.
+            let presence = match channel.participants.as_deref() {
+                Some([other]) => snapshot.presence.get(other).map(|state| match state {
+                    PresenceState::Online => Presence::Online,
+                    PresenceState::Away => Presence::Away,
+                    PresenceState::Offline => Presence::Offline,
+                }),
+                _ => None,
+            };
+            let mut avatar = Avatar::new(label.clone())
+                .size(AvatarSize::Px(22.))
+                .presence(presence);
             if let Some(picture) = first
                 .as_ref()
                 .and_then(|p| profiles.get(p))
