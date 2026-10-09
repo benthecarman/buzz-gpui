@@ -4,6 +4,7 @@ mod agents;
 mod channel;
 mod message;
 mod onboarding;
+mod overlay;
 mod sidebar;
 mod thread;
 mod time;
