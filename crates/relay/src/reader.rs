@@ -609,42 +609,67 @@ mod scheduling_tests {
     use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind};
     use serde_json::json;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use tokio::sync::Semaphore;
 
-    /// Answers each query after a delay, counting calls and peak concurrency.
+    /// Holds every query until the test releases it, counting calls and
+    /// peak concurrency. Tests decide when fetches finish instead of racing
+    /// timers, so they stay deterministic on a loaded machine.
     struct Fake {
-        delay: Duration,
+        gate: Arc<Semaphore>,
         calls: Mutex<Vec<Vec<Filter>>>,
-        running: Arc<std::sync::atomic::AtomicUsize>,
-        peak: std::sync::atomic::AtomicUsize,
+        running: Arc<AtomicUsize>,
+        peak: AtomicUsize,
         event: Value,
     }
 
     impl Fake {
-        fn new(delay: Duration) -> Arc<Self> {
+        fn new(open: bool) -> Arc<Self> {
             let event = EventBuilder::new(Kind::from_u16(9), "hi")
                 .finalize(&Keys::generate())
                 .unwrap();
             Arc::new(Self {
-                delay,
+                gate: Arc::new(Semaphore::new(if open {
+                    Semaphore::MAX_PERMITS
+                } else {
+                    0
+                })),
                 calls: Mutex::default(),
                 running: Default::default(),
                 peak: Default::default(),
                 event: serde_json::to_value(event).unwrap(),
             })
         }
+
+        fn release(&self, count: usize) {
+            self.gate.add_permits(count);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+
+        /// Waits until `count` queries have started.
+        async fn started(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.calls() < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("queries did not start");
+        }
     }
 
     impl Source for Fake {
         fn query(&self, filters: Vec<Filter>) -> BoxFuture<'static, Result<Vec<Value>, HttpError>> {
-            use std::sync::atomic::Ordering::SeqCst;
             self.calls.lock().unwrap().push(filters);
             let now = self.running.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(now, SeqCst);
-            let delay = self.delay;
-            let event = self.event.clone();
-            let running = self.running.clone();
+            let (gate, running, event) =
+                (self.gate.clone(), self.running.clone(), self.event.clone());
             Box::pin(async move {
-                tokio::time::sleep(delay).await;
+                gate.acquire().await.expect("gate stays open").forget();
                 running.fetch_sub(1, SeqCst);
                 Ok(vec![event])
             })
@@ -671,7 +696,7 @@ mod scheduling_tests {
 
     #[tokio::test]
     async fn identical_reads_share_one_request() {
-        let fake = Fake::new(Duration::from_millis(50));
+        let fake = Fake::new(true);
         let reader = spawn_reader(&fake, ReaderOptions::default());
         let (a, b) = tokio::join!(
             reader.read(filter(5), ReadOptions::default()),
@@ -679,59 +704,85 @@ mod scheduling_tests {
         );
         assert_eq!(a.unwrap().len(), 1);
         assert_eq!(b.unwrap().len(), 1);
-        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        assert_eq!(fake.calls(), 1);
 
         let fresh = ReadOptions {
             fresh: true,
             ..Default::default()
         };
         let (_, _) = tokio::join!(reader.read(filter(5), fresh), reader.read(filter(5), fresh));
-        assert_eq!(
-            fake.calls.lock().unwrap().len(),
-            3,
-            "fresh reads never join"
-        );
+        assert_eq!(fake.calls(), 3, "fresh reads never join");
     }
 
     #[tokio::test]
     async fn dropping_one_consumer_keeps_the_other() {
-        let fake = Fake::new(Duration::from_millis(100));
+        let fake = Fake::new(false);
         let reader = spawn_reader(&fake, ReaderOptions::default());
-        let kept = reader.read(filter(5), ReadOptions::default());
-        let dropped = reader.read(filter(5), ReadOptions::default());
-        let result = tokio::select! {
-            result = kept => result,
-            _ = async { drop(tokio::time::timeout(Duration::from_millis(10), dropped).await); futures::future::pending::<()>().await } => unreachable!(),
-        };
-        assert!(result.is_ok());
+        let kept = tokio::spawn({
+            let reader = reader.clone();
+            async move { reader.read(filter(5), ReadOptions::default()).await }
+        });
+        let dropped = tokio::spawn({
+            let reader = reader.clone();
+            async move { reader.read(filter(5), ReadOptions::default()).await }
+        });
+        fake.started(1).await;
+        dropped.abort();
+        let _ = dropped.await;
+        fake.release(1);
+        assert!(kept.await.unwrap().is_ok());
+        assert_eq!(fake.calls(), 1);
     }
 
     #[tokio::test]
     async fn runs_at_most_three_and_one_background() {
-        let fake = Fake::new(Duration::from_millis(50));
+        let fake = Fake::new(false);
         let reader = spawn_reader(&fake, ReaderOptions::default());
         let reads: Vec<_> = (1..=6)
-            .map(|n| reader.read(filter(n), ReadOptions::default()))
+            .map(|n| {
+                let reader = reader.clone();
+                tokio::spawn(async move { reader.read(filter(n), ReadOptions::default()).await })
+            })
             .collect();
-        futures::future::join_all(reads).await;
-        assert_eq!(fake.peak.load(std::sync::atomic::Ordering::SeqCst), 3);
+        fake.started(3).await;
+        // Give the reader every chance to over-admit before checking.
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fake.calls(), 3);
+        fake.release(6);
+        for read in reads {
+            assert!(read.await.unwrap().is_ok());
+        }
+        assert_eq!(fake.peak.load(SeqCst), 3);
 
-        let fake = Fake::new(Duration::from_millis(50));
+        let fake = Fake::new(false);
         let reader = spawn_reader(&fake, ReaderOptions::default());
         let reads: Vec<_> = (1..=3)
-            .map(|n| reader.read(filter(n), ReadOptions::background()))
+            .map(|n| {
+                let reader = reader.clone();
+                tokio::spawn(async move { reader.read(filter(n), ReadOptions::background()).await })
+            })
             .collect();
-        futures::future::join_all(reads).await;
-        assert_eq!(fake.peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+        fake.started(1).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fake.calls(), 1, "only one background read at a time");
+        fake.release(3);
+        for read in reads {
+            assert!(read.await.unwrap().is_ok());
+        }
+        assert_eq!(fake.peak.load(SeqCst), 1);
     }
 
     #[tokio::test]
     async fn deadline_counts_queue_time() {
-        let fake = Fake::new(Duration::from_millis(200));
+        let fake = Fake::new(false);
         let reader = spawn_reader(
             &fake,
             ReaderOptions {
-                deadline: Duration::from_millis(300),
+                deadline: Duration::from_millis(200),
                 slots: 1,
                 ..Default::default()
             },
@@ -740,21 +791,25 @@ mod scheduling_tests {
             reader.read(filter(1), ReadOptions::default()),
             reader.read(filter(2), ReadOptions::default())
         );
-        assert!(first.is_ok());
-        let error = second.unwrap_err();
-        assert_eq!(error.message, "Relay read timed out");
+        assert_eq!(first.unwrap_err().message, "Relay read timed out");
+        // The second read never left the queue, yet its deadline still ran.
+        assert_eq!(second.unwrap_err().message, "Relay read timed out");
+        assert_eq!(fake.calls(), 1);
     }
 
     #[tokio::test]
     async fn invalidate_cancels_matching_reads() {
-        let fake = Fake::new(Duration::from_millis(200));
+        let fake = Fake::new(false);
         let reader = spawn_reader(&fake, ReaderOptions::default());
-        let read = reader.read(filter(7), ReadOptions::default());
-        let invalidate = async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            reader.invalidate(|filters| filters[0]["limit"] == json!(7));
-        };
-        let (result, _) = tokio::join!(read, invalidate);
-        assert_eq!(result.unwrap_err().kind, ReadErrorKind::Cancelled);
+        let read = tokio::spawn({
+            let reader = reader.clone();
+            async move { reader.read(filter(7), ReadOptions::default()).await }
+        });
+        fake.started(1).await;
+        reader.invalidate(|filters| filters[0]["limit"] == json!(7));
+        assert_eq!(
+            read.await.unwrap().unwrap_err().kind,
+            ReadErrorKind::Cancelled
+        );
     }
 }
