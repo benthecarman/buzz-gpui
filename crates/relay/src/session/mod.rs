@@ -8,13 +8,18 @@
 //! by an access epoch so a result started before a revocation is dropped.
 //!
 //! The UI reads immutable snapshots from watch channels: one for the
-//! session (status, channels, profiles, unread counts) and one per open
-//! channel. Read state and unread live in [`unread`].
+//! session (status, channels, profiles, unread counts, presence, typing)
+//! and one per open channel. Read state and unread live in [`unread`],
+//! presence and typing in [`presence`], notification candidates in
+//! [`incoming`].
 
+mod incoming;
+mod presence;
 mod threads;
 mod timeline;
 mod unread;
 
+pub use incoming::IncomingMessage;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{ChannelUnread, READING_DWELL_MS, UnreadCounts};
@@ -27,11 +32,16 @@ use crate::live::{Live, LiveOptions, LiveUpdate};
 use crate::messages::{self, Author, Compose, EmojiCatalog, Mentions};
 use crate::origin::RelayOrigin;
 use crate::outbox::{HttpPublisher, Outbox, OutboxOptions, SendOptions};
+use crate::presence::{
+    PresenceDirectory, PresenceMode, PresencePublisher, PresenceState, Publication, PublishOutcome,
+    SnapshotRead, SnapshotResult,
+};
 use crate::profiles::{ProfileDirectory, Profiles};
 use crate::read_state::{PublishFailure, RefreshRequest, SnapshotDescriptor};
 use crate::reader::{ReadError, ReadErrorKind, ReadOptions, Reader, ReaderOptions};
 use crate::socket::Filter;
 use crate::store::{Partition, SqliteJournal, Store};
+use crate::typing::Typing;
 use crate::window::{Cursor, page_filter, parse_page};
 use crate::{ChannelSummary, Events};
 use buzz_identity::Identity;
@@ -40,7 +50,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use timeline::Timeline;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use unread::{Mark, Reads};
 
 /// Closed channels kept warm for a quick return.
@@ -85,11 +95,21 @@ pub struct SessionSnapshot {
     pub profiles: Profiles,
     /// Unread rows and badges per channel. Replaced only when it changes.
     pub unread: Arc<UnreadCounts>,
+    /// Observed statuses of the people passed to
+    /// [`Session::watch_presence`]. Absent people are unknown: show no
+    /// badge. Replaced only when it changes.
+    pub presence: Arc<HashMap<String, PresenceState>>,
+    /// Channel id → people typing at its top level, in the order they
+    /// started. Replaced only when it changes.
+    pub typing: Arc<HashMap<String, Vec<String>>>,
+    /// Thread root id → people typing in that thread.
+    pub thread_typing: Arc<HashMap<String, Vec<String>>>,
 }
 
 pub struct Session {
     commands: mpsc::UnboundedSender<Message>,
     snapshot: watch::Receiver<Arc<SessionSnapshot>>,
+    incoming: broadcast::Sender<IncomingMessage>,
     viewer: String,
     origin: RelayOrigin,
     next_thread: std::sync::atomic::AtomicU64,
@@ -152,7 +172,11 @@ impl Session {
             channels: Arc::new([]),
             profiles: Profiles::default(),
             unread: Arc::default(),
+            presence: Arc::default(),
+            typing: Arc::default(),
+            thread_typing: Arc::default(),
         }));
+        let (incoming, _) = broadcast::channel(64);
         let receiver = snapshot.subscribe();
         let verifier = Arc::new(Verifier::default());
         let http = RelayHttp::new(origin.clone(), identity.clone());
@@ -190,11 +214,17 @@ impl Session {
             outbox_changes: None,
             reads: None,
             threads: HashMap::new(),
+            presence: PresenceDirectory::new(viewer.clone()),
+            publisher: PresencePublisher::default(),
+            typing: Typing::new(viewer.clone()),
+            incoming: incoming::Incoming::default(),
+            incoming_sender: incoming.clone(),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
             commands,
             snapshot: receiver,
+            incoming,
             viewer,
             origin,
             next_thread: std::sync::atomic::AtomicU64::new(1),
@@ -258,6 +288,32 @@ impl Session {
 
     pub fn retry(&self) {
         let _ = self.commands.send(Message::Retry);
+    }
+
+    /// Follows these people's presence (at most 256; the viewer first,
+    /// then in this order). Replaces the previous set; people no longer
+    /// listed lose their status. Results arrive in
+    /// [`SessionSnapshot::presence`].
+    pub fn watch_presence(&self, authors: Vec<String>) {
+        let _ = self.commands.send(Message::WatchPresence(authors));
+    }
+
+    /// Whether the machine has been idle long enough to show away. Only
+    /// matters in [`PresenceMode::Auto`].
+    pub fn set_idle(&self, idle: bool) {
+        let _ = self.commands.send(Message::SetIdle(idle));
+    }
+
+    /// The user's own status choice.
+    pub fn set_presence_mode(&self, mode: PresenceMode) {
+        let _ = self.commands.send(Message::SetPresenceMode(mode));
+    }
+
+    /// New messages from others that should notify: mentions, direct
+    /// messages and replies in the viewer's conversations, still unread and
+    /// not in view, each sent once. Lagging receivers lose old items.
+    pub fn incoming(&self) -> broadcast::Receiver<IncomingMessage> {
+        self.incoming.subscribe()
     }
 
     async fn write(&self, write: Write) -> Result<(), String> {
@@ -460,6 +516,17 @@ enum Message {
         result: Result<Events, ReadError>,
     },
     Lookup(Result<Events, ReadError>),
+    WatchPresence(Vec<String>),
+    SetIdle(bool),
+    SetPresenceMode(PresenceMode),
+    PresenceRead {
+        read: SnapshotRead,
+        result: SnapshotResult,
+    },
+    PresencePublished {
+        publication: Publication,
+        outcome: PublishOutcome,
+    },
 }
 
 struct Actor {
@@ -495,13 +562,21 @@ struct Actor {
     /// Read state and unread, from NIP-11 on.
     reads: Option<Reads>,
     threads: HashMap<u64, threads::OpenThread>,
+    presence: PresenceDirectory,
+    publisher: PresencePublisher,
+    typing: Typing,
+    incoming: incoming::Incoming,
+    incoming_sender: broadcast::Sender<IncomingMessage>,
 }
 
 impl Actor {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
         self.connect();
         loop {
-            let deadline = self.reads_deadline();
+            let deadline = [self.reads_deadline(), self.presence_deadline()]
+                .into_iter()
+                .flatten()
+                .min();
             let outbox_changed = async {
                 match &mut self.outbox_changes {
                     Some(changes) => changes.changed().await.is_ok(),
@@ -527,6 +602,7 @@ impl Actor {
                 message = inbox.recv() => message,
                 () = timer => {
                     self.reads_tick();
+                    self.presence_tick();
                     continue;
                 }
                 Some(update) = live_update => {
@@ -662,6 +738,18 @@ impl Actor {
             Message::Repair(result) => self.repaired(result),
             Message::Homes { request, result } => self.homes(request, result),
             Message::Lookup(result) => self.looked_up(result),
+            Message::WatchPresence(authors) => self.watch_presence(authors),
+            Message::SetIdle(idle) => {
+                self.publisher.set_idle(idle, unread::now_ms());
+            }
+            Message::SetPresenceMode(mode) => {
+                self.publisher.set_mode(mode, unread::now_ms());
+            }
+            Message::PresenceRead { read, result } => self.presence_read(read, result),
+            Message::PresencePublished {
+                publication,
+                outcome,
+            } => self.presence_published(publication, outcome),
         }
     }
 
@@ -898,8 +986,28 @@ impl Actor {
 
     fn live_update(&mut self, update: LiveUpdate) {
         match update {
-            LiveUpdate::Events { events, .. } => self.accept(&events),
-            LiveUpdate::Presence(_) | LiveUpdate::Status => {}
+            LiveUpdate::Events {
+                events,
+                phase,
+                scope,
+            } => {
+                // Typing pulses never enter history, unread or caches.
+                let (pulses, events): (Vec<Verified>, Vec<Verified>) = events
+                    .into_iter()
+                    .partition(|event| event.kind_u16() == kinds::TYPING);
+                let candidates = if phase == crate::live::Phase::Live {
+                    self.incoming_candidates(&events, &scope)
+                } else {
+                    Vec::new()
+                };
+                if !events.is_empty() {
+                    self.accept(&events);
+                }
+                self.typing_accept(&[events, pulses].concat());
+                self.admit_incoming(candidates);
+            }
+            LiveUpdate::Presence(events) => self.presence_live(&events),
+            LiveUpdate::Status => {}
             LiveUpdate::Established { route, channels } => {
                 if matches!(route, crate::RouteKey::Profiles) {
                     // Profiles changed while we were away are re-read.
@@ -931,11 +1039,13 @@ impl Actor {
             }),
             LiveUpdate::Connected => {
                 self.set_live(true);
+                self.presence_connected(true);
                 self.start_scan(ScanOptions::default());
                 self.reads_reconnected();
             }
             LiveUpdate::Disconnected => {
                 self.set_live(false);
+                self.presence_connected(false);
                 for timeline in self.timelines.values_mut() {
                     timeline.mark_stale();
                     timeline.publish();
@@ -1331,6 +1441,9 @@ impl Actor {
             channels,
             profiles: self.profiles.snapshot(),
             unread,
+            presence: self.presence.snapshot(),
+            typing: self.typing.snapshot().channels.clone(),
+            thread_typing: self.typing.snapshot().threads.clone(),
         };
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
@@ -1339,6 +1452,9 @@ impl Actor {
                 && current.roster == next.roster
                 && Arc::ptr_eq(&current.profiles, &next.profiles)
                 && Arc::ptr_eq(&current.unread, &next.unread)
+                && Arc::ptr_eq(&current.presence, &next.presence)
+                && Arc::ptr_eq(&current.typing, &next.typing)
+                && Arc::ptr_eq(&current.thread_typing, &next.thread_typing)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);

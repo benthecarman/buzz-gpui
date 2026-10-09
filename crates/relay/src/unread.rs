@@ -226,7 +226,7 @@ pub fn workflow_owner(event: &Event, authority: Option<&str>) -> Option<String> 
 }
 
 /// Preview text: agent envelopes (40002) carry `{"content": ...}`.
-fn preview_text(event: &Event) -> String {
+pub(crate) fn preview_text(event: &Event) -> String {
     if event.kind.as_u16() == kinds::AGENT_MESSAGE
         && let Ok(Value::Object(body)) = serde_json::from_str::<Value>(&event.content)
         && let Some(Value::String(content)) = body.get("content")
@@ -1607,6 +1607,11 @@ impl<F: ThreadFollowStore> Unread<F> {
             },
         );
         value
+    }
+
+    /// Whether this event is retained evidence already.
+    pub fn retains(&self, id: &str) -> bool {
+        self.events.contains(id)
     }
 
     /// One message's attention (badges' policy; the notification input).

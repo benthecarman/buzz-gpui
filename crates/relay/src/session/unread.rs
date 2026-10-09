@@ -126,8 +126,8 @@ struct Dwell {
 }
 
 pub(super) struct Reads {
-    sync: ReadStateSync<SqliteReadJournal>,
-    unread: Unread<SqliteThreadFollows>,
+    pub(super) sync: ReadStateSync<SqliteReadJournal>,
+    pub(super) unread: Unread<SqliteThreadFollows>,
     descriptor: Option<SnapshotDescriptor>,
     /// Allowed channel ids and whether each is a DM, for the projection.
     channels: Vec<(String, bool)>,
@@ -971,8 +971,11 @@ impl Actor {
         reads.counts.clone()
     }
 
-    /// Starts queued conversation lookups; after each publish.
+    /// Re-checks held notification candidates, then starts queued
+    /// conversation lookups (including any the re-check queued); after
+    /// each publish.
     pub(super) fn after_publish(&mut self) {
+        self.pump_incoming();
         self.pump_lookups();
     }
 }

@@ -8,6 +8,7 @@ pub mod live;
 pub mod messages;
 pub mod origin;
 pub mod outbox;
+pub mod presence;
 pub mod profiles;
 pub mod read_state;
 pub mod reader;
@@ -16,6 +17,7 @@ pub mod sidebar;
 pub mod socket;
 pub mod store;
 pub mod threads;
+pub mod typing;
 pub mod unread;
 pub mod window;
 
@@ -30,6 +32,7 @@ pub use outbox::{
     Delivery, HttpPublisher, Journal, MemoryJournal, Operation, Outbox, OutboxError, OutboxOptions,
     Publisher, Recovery, SendOptions,
 };
+pub use presence::{PresenceMode, PresenceState};
 pub use profiles::{Profile, ProfileDirectory, Profiles};
 pub use read_state::{
     MarkCoverage, PublishCommand, PublishFailure, ReadCapability, ReadJournal, ReadLookup,
@@ -38,15 +41,16 @@ pub use read_state::{
 };
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
-    ChannelUnread, ChannelView, READING_DWELL_MS, RelayInfo, RosterStatus, Session,
-    SessionSnapshot, SessionStatus, TimelineSnapshot, TimelineStatus, UnreadCounts,
+    ChannelUnread, ChannelView, IncomingMessage, READING_DWELL_MS, RelayInfo, RosterStatus,
+    Session, SessionSnapshot, SessionStatus, TimelineSnapshot, TimelineStatus, UnreadCounts,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
     sidebar_sections,
 };
 pub use socket::{
-    Filter, PublishError, RelaySocket, SocketOptions, SocketState, Subscription, SubscriptionEvent,
+    Filter, PublishError, RelaySocket, SocketOptions, SocketPublisher, SocketState, Subscription,
+    SubscriptionEvent,
 };
 pub use store::{
     Partition, SqliteJournal, SqliteReadJournal, SqliteThreadFollows, Store, StoreError,
@@ -56,6 +60,6 @@ pub use threads::{
     ThreadStatus, thread_authority, verify_thread_windows,
 };
 pub use unread::{
-    ChannelInfo, InboxItem, InboxSnapshot, MessageAttention, ThreadActivitySnapshot,
-    ThreadFollowStore, Unread, UnreadError, UnreadOptions, UnreadSnapshot,
+    AttentionStatus, Category, ChannelInfo, InboxItem, InboxSnapshot, MessageAttention,
+    ThreadActivitySnapshot, ThreadFollowStore, Unread, UnreadError, UnreadOptions, UnreadSnapshot,
 };

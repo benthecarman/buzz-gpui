@@ -119,6 +119,27 @@ pub struct RelaySocket {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// Publishes on a [`RelaySocket`] without owning it. Once the socket is
+/// dropped every publication fails with [`PublishError::NotConnected`].
+#[derive(Clone)]
+pub struct SocketPublisher {
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+impl SocketPublisher {
+    /// Sends a signed event and waits for the relay's `OK`.
+    pub async fn publish(&self, event: Event) -> Result<(), PublishError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Publish {
+                event: Box::new(event),
+                reply,
+            })
+            .map_err(|_| PublishError::NotConnected)?;
+        answer.await.unwrap_or(Err(PublishError::Unknown))
+    }
+}
+
 /// Live events for one REQ. Dropping it sends CLOSE.
 pub struct Subscription {
     id: u64,
@@ -201,14 +222,14 @@ impl RelaySocket {
 
     /// Sends a signed event and waits for the relay's `OK`.
     pub async fn publish(&self, event: Event) -> Result<(), PublishError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Command::Publish {
-                event: Box::new(event),
-                reply,
-            })
-            .map_err(|_| PublishError::NotConnected)?;
-        answer.await.unwrap_or(Err(PublishError::Unknown))
+        self.publisher().publish(event).await
+    }
+
+    /// A handle that publishes on this socket from other tasks.
+    pub fn publisher(&self) -> SocketPublisher {
+        SocketPublisher {
+            commands: self.commands.clone(),
+        }
     }
 
     /// Skips the current backoff.
