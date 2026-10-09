@@ -985,6 +985,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-identity",
  "futures",
+ "markdown",
  "nostr",
  "reqwest",
  "rusqlite",

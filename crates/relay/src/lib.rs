@@ -1,6 +1,7 @@
 //! Client for Buzz relays.
 
 pub mod event;
+pub mod fold;
 pub mod http;
 pub mod live;
 pub mod origin;
@@ -9,6 +10,7 @@ pub mod socket;
 pub mod store;
 
 pub use event::{Verified, Verifier, kinds};
+pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
 pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use origin::RelayOrigin;
