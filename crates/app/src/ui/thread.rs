@@ -1,6 +1,7 @@
 //! The thread panel in the Messages board's right dock (ui.md §4.11).
 
-use super::message::{self, Actions, Item, Layout};
+use super::markdown::Directory;
+use super::message::{self, Actions, Interaction, Item, Layout, Rows};
 use super::time;
 use crate::community::Community;
 use crate::mirror::mirror;
@@ -244,7 +245,7 @@ impl ThreadPanel {
         let channel = self.channel.clone();
         Actions {
             on_open_thread: None,
-            on_react: Some(Arc::new(move |row, content, _, cx| {
+            on_react: Some(Rc::new(move |row, content, _, cx| {
                 // Clicking your own reaction removes it; anyone else's adds yours.
                 let own = row
                     .reactions
@@ -270,7 +271,7 @@ impl ThreadPanel {
                     })
                     .detach();
             })),
-            on_retry: Some(Arc::new(move |row, _, cx| {
+            on_retry: Some(Rc::new(move |row, _, cx| {
                 let (session, id) = (session.clone(), row.id);
                 cx.foreground_executor()
                     .spawn(async move {
@@ -278,6 +279,7 @@ impl ThreadPanel {
                     })
                     .detach();
             })),
+            ..Default::default()
         }
     }
 
@@ -444,6 +446,7 @@ impl ThreadPanel {
 impl Render for ThreadPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_placeholder(window, cx);
+        let actions = self.actions(cx);
         let c = *cx.colors();
         let snapshot = self.snapshot.clone();
         let community = self.community.read(cx);
@@ -480,7 +483,16 @@ impl Render for ThreadPanel {
         let body = if self.entries.is_empty() {
             div().flex_1().into_any_element()
         } else {
-            let actions = Rc::new(self.actions(cx));
+            let rows = Rc::new(Rows {
+                viewer: viewer.clone(),
+                directory: Directory {
+                    profiles: profiles.clone(),
+                    channels: community.snapshot.channels.clone(),
+                    media: community.session.media().clone(),
+                },
+                actions,
+                interaction: Interaction::default(),
+            });
             let entries = self.entries.clone();
             let weak = cx.entity().downgrade();
             list(self.list.clone(), move |index, _, cx| {
@@ -489,7 +501,7 @@ impl Render for ThreadPanel {
                 };
                 div()
                     .px(px(24.))
-                    .child(render_entry(entry, &viewer, &profiles, &actions, &weak, cx))
+                    .child(render_entry(entry, &rows, &weak, cx))
                     .into_any_element()
             })
             .flex_1()
@@ -812,17 +824,13 @@ fn rails(rails: &[bool], color: Hsla) -> Vec<Div> {
 
 fn render_entry(
     entry: &Entry,
-    viewer: &str,
-    profiles: &Profiles,
-    actions: &Actions,
+    rows: &Rc<Rows>,
     panel: &WeakEntity<ThreadPanel>,
     cx: &mut App,
 ) -> AnyElement {
     let c = *cx.colors();
     match entry {
-        Entry::Root(item) => {
-            message::render_in(Layout::Thread, item, viewer, profiles, actions, cx)
-        }
+        Entry::Root(item) => message::render_in(Layout::Thread, item, rows, cx),
         Entry::Missing => div()
             .py(px(32.))
             .px(px(16.))
@@ -836,16 +844,14 @@ fn render_entry(
             .text_color(c.text_subtle)
             .child("Earlier reply unavailable in loaded history.")
             .into_any_element(),
-        Entry::Reply(reply) => render_reply(reply, viewer, profiles, actions, panel, cx),
-        Entry::Summary(summary) => render_summary(summary, profiles, panel, cx),
+        Entry::Reply(reply) => render_reply(reply, rows, panel, cx),
+        Entry::Summary(summary) => render_summary(summary, &rows.directory.profiles, panel, cx),
     }
 }
 
 fn render_reply(
     reply: &Reply,
-    viewer: &str,
-    profiles: &Profiles,
-    actions: &Actions,
+    rows: &Rc<Rows>,
     panel: &WeakEntity<ThreadPanel>,
     cx: &mut App,
 ) -> AnyElement {
@@ -926,9 +932,7 @@ fn render_reply(
             message_row.child(rail(depth + 1, line).top(px(top + avatar + 4.)).bottom_0());
     }
     let message_row = message_row
-        .child(message::render_in(
-            layout, &item, viewer, profiles, actions, cx,
-        ))
+        .child(message::render_in(layout, &item, rows, cx))
         .child(reply_button);
     div()
         .flex()

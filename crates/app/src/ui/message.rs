@@ -1,12 +1,17 @@
-//! One timeline row (ui.md §4.4–4.5).
+//! One timeline row (ui.md §4.4–4.5, §4.7).
 
-use super::time;
-use buzz_relay_client::fold::{Delivery, MessageRow};
-use buzz_relay_client::{Profile, Profiles};
-use buzz_ui::{ActiveTheme, Avatar, AvatarSize, IconName, TypeStyled};
-use gpui_kit::component::text::TextView;
+use super::markdown::{self, Directory};
+use super::{media, time};
+use buzz_relay_client::fold::{Attachment, AttachmentKind, Delivery, MessageRow};
+use buzz_relay_client::{EventId, Profile, Profiles};
+use buzz_ui::{
+    ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
+    MaterialStyled, Menu, MenuItem, Popover, PopoverPadding, PopoverWidth, Surface, Tooltip,
+    TypeStyled,
+};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A message plus how it sits in the timeline.
@@ -27,7 +32,7 @@ pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
     let mut previous: Option<&Arc<MessageRow>> = None;
     for row in rows {
         let new_day = previous.is_none_or(|p| !time::same_day(p.created_at, row.created_at));
-        let continues = previous.is_some_and(|p| continues(p, row));
+        let continues = !new_day && previous.is_some_and(|p| continues(p, row));
         items.push(Item {
             row: row.clone(),
             head: !continues,
@@ -38,10 +43,10 @@ pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
     items
 }
 
-/// Whether `row` continues the group `previous` started.
+/// Whether `row` continues the group `previous` started (same day checked
+/// separately).
 pub fn continues(previous: &MessageRow, row: &MessageRow) -> bool {
-    time::same_day(previous.created_at, row.created_at)
-        && previous.author == row.author
+    previous.author == row.author
         && row.created_at >= previous.created_at
         && row.created_at - previous.created_at <= 300
         && previous.membership.is_none()
@@ -52,6 +57,25 @@ pub fn continues(previous: &MessageRow, row: &MessageRow) -> bool {
         && row.sent_from_thread.is_none()
 }
 
+/// The day divider (§4.4): a label between two hairlines.
+pub fn day_divider(day: SharedString, cx: &App) -> Div {
+    let c = *cx.colors();
+    div()
+        .flex()
+        .items_center()
+        .my(px(12.))
+        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
+        .child(
+            div()
+                .px(px(12.))
+                .py(px(6.))
+                .text_caption()
+                .text_color(c.text_standard)
+                .child(day),
+        )
+        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
+}
+
 pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
     profiles
         .get(pubkey)
@@ -60,10 +84,97 @@ pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
         .into()
 }
 
+/// The default quick reactions (`quick-reactions.ts`).
+pub const QUICK_REACTIONS: [&str; 3] = ["👍", "❤️", "😂"];
+
+/// The reaction picker's built-in set.
+const PICKER: &[&str] = &[
+    "👍", "👎", "❤️", "😂", "🎉", "🙏", "👀", "🔥", "✅", "❌", "💯", "🚀", "😀", "😃", "😄", "😁",
+    "😅", "🤣", "😊", "😇", "🙂", "😉", "😍", "🥰", "😘", "😋", "😎", "🤩", "🥳", "🤔", "🤨", "😐",
+    "😑", "🙄", "😏", "😬", "😌", "😴", "🤯", "😱", "😢", "😭", "😤", "😡", "🤗", "🤝", "👏", "🙌",
+    "👋", "💪", "✌️", "🤞", "👌", "🫡", "💡", "📌", "📎", "📝", "⏰", "⚠️", "❓", "❗", "💬", "👑",
+    "⭐", "✨", "🌟", "☕", "🍕", "🎂", "🐛", "🛠️", "📦", "🧪", "🤖", "👻", "💀", "🙈", "🎯", "🏁",
+];
+
+/// Something a row asks its page to do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Command {
+    CopyLink,
+    CopyMessage,
+    MarkUnread,
+    Edit,
+    Delete,
+    /// Opens an image attachment in the viewer.
+    View(String),
+}
+
+/// Which floating element of a row is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Popup {
+    /// The "More message actions" menu.
+    More,
+    /// The reaction picker, from the action bar or the reactions row.
+    Picker { from_bar: bool },
+}
+
+/// What the pointer is over, for the hover action bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hover {
+    Row,
+    Bar,
+}
+
+/// Pointer and popup state the page keeps for its rows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Interaction {
+    pub hovered: Option<EventId>,
+    pub bar_hovered: Option<EventId>,
+    pub open: Option<(EventId, Popup)>,
+}
+
+impl Interaction {
+    fn bar_visible(&self, id: EventId) -> bool {
+        self.hovered == Some(id)
+            || self.bar_hovered == Some(id)
+            || self.open.is_some_and(|(open, _)| open == id)
+    }
+}
+
+pub type RowHandler = Rc<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>;
+pub type ReactHandler = Rc<dyn Fn(&Arc<MessageRow>, &str, &mut Window, &mut App)>;
+pub type HoverHandler = Rc<dyn Fn(EventId, Hover, bool, &mut Window, &mut App)>;
+pub type PopupHandler = Rc<dyn Fn(Option<(EventId, Popup)>, &mut Window, &mut App)>;
+pub type CommandHandler = Rc<dyn Fn(&Arc<MessageRow>, Command, &mut Window, &mut App)>;
+
+#[derive(Default)]
 pub struct Actions {
-    pub on_open_thread: Option<Arc<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>>,
-    pub on_react: Option<Arc<dyn Fn(&Arc<MessageRow>, &str, &mut Window, &mut App)>>,
-    pub on_retry: Option<Arc<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>>,
+    pub on_open_thread: Option<RowHandler>,
+    pub on_react: Option<ReactHandler>,
+    pub on_retry: Option<RowHandler>,
+    /// Without it rows show no action bar.
+    pub on_hover: Option<HoverHandler>,
+    pub on_popup: Option<PopupHandler>,
+    pub on_command: Option<CommandHandler>,
+}
+
+/// What every row of a page shares.
+pub struct Rows {
+    pub viewer: String,
+    pub directory: Directory,
+    pub actions: Actions,
+    pub interaction: Interaction,
+}
+
+impl Rows {
+    fn own(&self, row: &MessageRow) -> bool {
+        row.author.to_hex() == self.viewer || row.signer.is_some_and(|s| s.to_hex() == self.viewer)
+    }
+
+    fn popup(&self, value: Option<(EventId, Popup)>, window: &mut Window, cx: &mut App) {
+        if let Some(on_popup) = &self.actions.on_popup {
+            on_popup(value, window, cx);
+        }
+    }
 }
 
 /// Where a row is drawn. Thread panels use a 32px gutter (ui.md §4.11).
@@ -76,31 +187,19 @@ pub enum Layout {
     Nested,
 }
 
-pub fn render(
-    item: &Item,
-    viewer: &str,
-    profiles: &Profiles,
-    actions: &Actions,
-    cx: &App,
-) -> AnyElement {
-    render_in(Layout::Timeline, item, viewer, profiles, actions, cx)
+pub fn render(item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
+    render_in(Layout::Timeline, item, rows, cx)
 }
 
-pub fn render_in(
-    layout: Layout,
-    item: &Item,
-    viewer: &str,
-    profiles: &Profiles,
-    actions: &Actions,
-    cx: &App,
-) -> AnyElement {
-    let c = cx.colors().clone();
+pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
+    let c = *cx.colors();
     let (gutter, gap, avatar_size) = match layout {
         Layout::Timeline => (40., 12., AvatarSize::Large),
         Layout::Thread => (32., 8., AvatarSize::Default),
         Layout::Nested => (32., 8., AvatarSize::Small),
     };
     let row = &item.row;
+    let profiles = &rows.directory.profiles;
     let author = row.author.to_hex();
     let profile = profiles.get(&author);
     let name = display_name(profiles, &author);
@@ -129,14 +228,15 @@ pub fn render_in(
             .into_any_element();
     }
 
-    let group = SharedString::from(format!("message-{}", row.id.to_hex()));
+    let id = row.id.to_hex();
+    let bar_visible = rows.actions.on_hover.is_some() && rows.interaction.bar_visible(row.id);
     let left = if item.head {
         let mut avatar = Avatar::new(name.clone()).size(avatar_size);
         if agent {
             avatar = avatar.squircle();
         }
-        if let Some(picture) = profile.and_then(|p| p.picture.clone()) {
-            avatar = avatar.image(picture);
+        if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
+            avatar = avatar.image(media::avatar(picture, &rows.directory.media));
         }
         div()
             .flex_none()
@@ -147,15 +247,17 @@ pub fn render_in(
             .into_any_element()
     } else {
         div()
+            .id(SharedString::from(format!("time-{id}")))
             .flex_none()
             .w(px(gutter))
+            .h(px(20.))
             .flex()
             .justify_center()
             .text_caption()
             .line_height(px(20.))
             .text_color(c.text_subtle)
-            .invisible()
-            .group_hover(group.clone(), |style| style.visible())
+            .when(!bar_visible, |d| d.invisible())
+            .tooltip(Tooltip::text(time::full(row.created_at)))
             .child(time::compact(row.created_at))
             .into_any_element()
     };
@@ -177,107 +279,276 @@ pub fn render_in(
                 )
                 .child(
                     div()
+                        .id(SharedString::from(format!("byline-{id}")))
                         .text_caption()
                         .text_color(c.text_subtle)
+                        .tooltip(Tooltip::text(time::full(row.created_at)))
                         .child(time::byline(row.created_at)),
                 ),
         );
     }
-    if row.sent_from_thread.is_some() {
+    if let Some(sent) = &row.sent_from_thread {
+        let link = match &sent.excerpt {
+            Some(excerpt) => format!("Thread — {excerpt}"),
+            None => "Thread".to_string(),
+        };
         body = body.child(
             div()
+                .flex()
                 .my(px(4.))
                 .text_caption()
                 .text_color(c.text_subtle)
-                .child("Sent from Thread"),
+                .child("Sent from ")
+                .child(div().text_color(c.text_link).child(link)),
         );
     }
-    if !row.content.is_empty() {
+    if !row.content.trim().is_empty() {
         body = body.child(
             div()
-                .mt(if item.head { px(4.) } else { px(0.) })
+                .id(SharedString::from(format!("md-{id}")))
+                .when(item.head, |d| d.mt(px(4.)))
                 .text_body_sm()
                 .text_color(c.text_standard)
-                .child(TextView::markdown(
-                    SharedString::from(format!("md-{}", row.id.to_hex())),
-                    row.content.clone(),
-                )),
+                .child(markdown::body(row, &rows.directory, cx)),
         );
     }
-    if !row.reactions.is_empty() {
-        body = body.child(reactions(row, viewer, actions, cx));
+    if !row.attachments.is_empty() {
+        body = body.child(attachments(row, rows, cx));
     }
+    if !row.reactions.is_empty() {
+        body = body.child(reactions(row, rows, cx));
+    }
+    // Inside a thread the replies are already on screen.
     if row.reply_count > 0 && layout == Layout::Timeline {
-        body = body.child(thread_summary(row, profiles, actions, cx));
+        body = body.child(thread_summary(row, rows, cx));
     }
     if let Some(delivery) = &row.delivery
         && matches!(delivery.status, Delivery::Failed | Delivery::Unknown)
     {
-        let text = if delivery.status == Delivery::Failed {
-            "Couldn’t send this message."
-        } else {
-            "Delivery not yet confirmed."
-        };
-        let mut notice = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.))
-            .mt(px(6.))
-            .text_caption()
-            .text_color(c.text_warning)
-            .child(text);
-        if let Some(retry) = actions.on_retry.clone() {
-            let target = row.clone();
-            notice = notice.child(
-                buzz_ui::Button::new(
-                    SharedString::from(format!("retry-{}", row.id.to_hex())),
-                    "Retry",
-                )
-                .variant(buzz_ui::ButtonVariant::Ghost)
-                .size(buzz_ui::ButtonSize::Sm)
-                .on_click(move |_, window, cx| retry(&target, window, cx)),
-            );
-        }
-        body = body.child(notice);
+        body = body.child(delivery_notice(row, delivery, rows, cx));
     }
 
-    container
-        .child(
-            div()
-                .id(group.clone())
-                .group(group)
-                .flex()
-                .gap(px(gap))
-                .pt(if item.head { px(14.) } else { px(2.) })
-                .pb(px(2.))
-                .child(left)
-                .child(body),
-        )
-        .into_any_element()
+    let mut line = div()
+        .id(SharedString::from(format!("message-{id}")))
+        .relative()
+        .flex()
+        .gap(px(gap))
+        .pt(if item.head { px(14.) } else { px(2.) })
+        .pb(px(2.))
+        .child(left)
+        .child(body);
+    if let Some(on_hover) = rows.actions.on_hover.clone() {
+        let target = row.id;
+        line = line.on_hover(move |hovered, window, cx| {
+            on_hover(target, Hover::Row, *hovered, window, cx)
+        });
+    }
+    if bar_visible {
+        line = line.child(action_bar(item, rows, cx));
+    }
+    container.child(line).into_any_element()
 }
 
-/// The rule and date between rows of different days.
-pub fn day_divider(day: SharedString, cx: &App) -> impl IntoElement {
-    let c = cx.colors();
-    div()
+/// The hover action bar (§4.5): quick reactions, add reaction, reply, copy
+/// link and the more menu. Its bottom sits 4px under the byline, so a
+/// continuation row's bar floats over the row above.
+fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
+    let c = *cx.colors();
+    let row = &item.row;
+    let id = row.id.to_hex();
+    let open = rows
+        .interaction
+        .open
+        .filter(|(open, _)| *open == row.id)
+        .map(|(_, popup)| popup);
+    let delivered = delivered(row);
+    let button = |name: &str, icon: IconName| {
+        IconButton::new(SharedString::from(format!("{name}-{id}")), icon)
+            .size(IconButtonSize::Sm)
+            .surface(Surface::Floating)
+    };
+
+    let mut bar = div()
+        .id(SharedString::from(format!("bar-{id}")))
+        .absolute()
+        .right_0()
+        .top(if item.head { px(0.) } else { px(-36.) })
         .flex()
         .items_center()
-        .my(px(12.))
-        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
-        .child(
-            div()
-                .px(px(12.))
-                .py(px(6.))
-                .text_caption()
-                .text_color(c.text_standard)
-                .child(day),
-        )
-        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
+        .gap(px(2.))
+        .p(px(2.))
+        .floating_surface(&c)
+        .rounded(px(12.))
+        .occlude();
+    if let Some(on_hover) = rows.actions.on_hover.clone() {
+        let target = row.id;
+        bar = bar.on_hover(move |hovered, window, cx| {
+            on_hover(target, Hover::Bar, *hovered, window, cx)
+        });
+    }
+    if delivered && let Some(react) = rows.actions.on_react.clone() {
+        for (index, emoji) in QUICK_REACTIONS.iter().enumerate() {
+            let (react, target) = (react.clone(), row.clone());
+            bar = bar.child(
+                IconButton::new(
+                    SharedString::from(format!("quick-{index}-{id}")),
+                    IconName::Smiley,
+                )
+                .size(IconButtonSize::Sm)
+                .surface(Surface::Floating)
+                .child(div().text_size(px(14.)).child(*emoji))
+                .tooltip(format!("React with {emoji}"))
+                .on_click(move |_, window, cx| react(&target, emoji, window, cx)),
+            );
+        }
+        let (rows, target) = (rows.clone(), row.id);
+        bar = bar.child(
+            button("add-reaction", IconName::SmileyPlus)
+                .shape(IconButtonShape::Round)
+                .selected(open == Some(Popup::Picker { from_bar: true }))
+                .tooltip("Add reaction")
+                .on_click(move |_, window, cx| {
+                    rows.popup(Some((target, Popup::Picker { from_bar: true })), window, cx)
+                }),
+        );
+    }
+    if row.thread_root_id.is_none()
+        && let Some(open_thread) = rows.actions.on_open_thread.clone()
+    {
+        let target = row.clone();
+        bar = bar.child(
+            button("reply", IconName::ChatCircle)
+                .tooltip("Reply")
+                .on_click(move |_, window, cx| open_thread(&target, window, cx)),
+        );
+    }
+    if delivered && let Some(command) = rows.actions.on_command.clone() {
+        let target = row.clone();
+        bar = bar.child(
+            button("copy-link", IconName::Link)
+                .tooltip("Copy link")
+                .on_click(move |_, window, cx| command(&target, Command::CopyLink, window, cx)),
+        );
+    }
+    {
+        let (rows, target) = (rows.clone(), row.id);
+        bar = bar.child(
+            button("more", IconName::DotsThree)
+                .tooltip("More message actions")
+                .on_click(move |_, window, cx| rows.popup(Some((target, Popup::More)), window, cx)),
+        );
+    }
+    let popup = match open {
+        Some(Popup::More) => Some(more_menu(row, rows).into_any_element()),
+        Some(Popup::Picker { from_bar: true }) => Some(picker(row, rows).into_any_element()),
+        _ => None,
+    };
+    bar.children(popup.map(|popup| {
+        div().absolute().right_0().bottom_0().child(deferred(
+            anchored()
+                .anchor(Anchor::TopRight)
+                .offset(point(px(0.), px(4.)))
+                .snap_to_window_with_margin(px(8.))
+                .child(popup),
+        ))
+    }))
 }
 
-fn reactions(row: &Arc<MessageRow>, viewer: &str, actions: &Actions, cx: &App) -> impl IntoElement {
-    let c = cx.colors().clone();
+/// Links, reactions and edits need the relay to have the message.
+fn delivered(row: &MessageRow) -> bool {
+    row.delivery
+        .as_ref()
+        .is_none_or(|d| matches!(d.status, Delivery::Accepted | Delivery::Seen))
+}
+
+fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>) -> impl IntoElement {
+    let id = row.id.to_hex();
+    let own = rows.own(row);
+    let delivered = delivered(row);
+    let item = |name: &str, label: &str, icon: IconName, command: Command| {
+        let (rows, target) = (rows.clone(), row.clone());
+        MenuItem::new(
+            SharedString::from(format!("{name}-{id}")),
+            label.to_string(),
+        )
+        .icon(icon)
+        .on_click(move |_, window, cx| {
+            rows.popup(None, window, cx);
+            if let Some(on_command) = &rows.actions.on_command {
+                on_command(&target, command.clone(), window, cx);
+            }
+        })
+    };
+    let close = rows.clone();
+    let menu = Menu::new()
+        .when(delivered, |menu| {
+            menu.child(item(
+                "unread",
+                "Mark unread",
+                IconName::Envelope,
+                Command::MarkUnread,
+            ))
+        })
+        .child(item(
+            "copy",
+            "Copy message",
+            IconName::Copy,
+            Command::CopyMessage,
+        ))
+        .when(own && delivered, |menu| {
+            menu.child(item(
+                "edit",
+                "Edit message",
+                IconName::PencilSimple,
+                Command::Edit,
+            ))
+        })
+        .when(own, |menu| {
+            menu.child(item("delete", "Delete message", IconName::Trash, Command::Delete).danger())
+        });
+    div()
+        .occlude()
+        .on_mouse_down_out(move |_, window, cx| close.popup(None, window, cx))
+        .child(menu)
+}
+
+/// A small built-in reaction picker.
+fn picker(row: &Arc<MessageRow>, rows: &Rc<Rows>) -> impl IntoElement {
+    let id = row.id.to_hex();
+    let close = rows.clone();
+    let mut grid = div().flex().flex_wrap().gap(px(2.));
+    if let Some(react) = rows.actions.on_react.clone() {
+        for (index, emoji) in PICKER.iter().enumerate() {
+            let (react, rows, target) = (react.clone(), rows.clone(), row.clone());
+            grid = grid.child(
+                IconButton::new(
+                    SharedString::from(format!("pick-{index}-{id}")),
+                    IconName::Smiley,
+                )
+                .size(IconButtonSize::Sm)
+                .surface(Surface::Floating)
+                .child(div().text_size(px(18.)).child(*emoji))
+                .on_click(move |_, window, cx| {
+                    rows.popup(None, window, cx);
+                    react(&target, emoji, window, cx);
+                }),
+            );
+        }
+    }
+    div()
+        .occlude()
+        .on_mouse_down_out(move |_, window, cx| close.popup(None, window, cx))
+        .child(
+            Popover::new()
+                .width(PopoverWidth::Default)
+                .padding(PopoverPadding::List)
+                .child(grid),
+        )
+}
+
+fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
+    let c = *cx.colors();
+    let id = row.id.to_hex();
     let mut pills = div()
         .flex()
         .flex_wrap()
@@ -288,27 +559,68 @@ fn reactions(row: &Arc<MessageRow>, viewer: &str, actions: &Actions, cx: &App) -
         let mut people: Vec<String> = group.events.iter().map(|r| r.author.to_hex()).collect();
         people.sort();
         people.dedup();
-        let mine = people.iter().any(|p| p == viewer);
+        let mine = people.iter().any(|p| *p == rows.viewer);
+        // "You" first, then everyone else by name.
+        let mut names: Vec<String> = people
+            .iter()
+            .filter(|p| **p != rows.viewer)
+            .map(|p| display_name(&rows.directory.profiles, p).to_string())
+            .collect();
+        names.sort();
+        if mine {
+            names.insert(0, "You".into());
+        }
+        let glyph = match &group.emoji {
+            Some(custom) => {
+                let fallback = group.content.clone();
+                img(media::image(&custom.url, &rows.directory.media))
+                    .size(px(14.))
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback(move || {
+                        div()
+                            .text_size(px(12.))
+                            .child(fallback.clone())
+                            .into_any_element()
+                    })
+                    .into_any_element()
+            }
+            None => div()
+                .text_size(px(14.))
+                .line_height(px(18.))
+                .min_w(px(18.))
+                .flex()
+                .justify_center()
+                .child(group.content.clone())
+                .into_any_element(),
+        };
         let mut pill = div()
-            .id(SharedString::from(format!(
-                "reaction-{}-{index}",
-                row.id.to_hex()
-            )))
+            .id(SharedString::from(format!("reaction-{id}-{index}")))
             .flex()
             .items_center()
             .justify_center()
             .gap(px(6.))
             .min_w(px(48.))
+            .max_w(px(160.))
             .min_h(px(28.))
             .px(px(8.))
             .rounded_full()
             .border_1()
             .cursor_pointer()
-            .child(div().text_size(px(14.)).child(group.content.clone()))
-            .child(div().text_size(px(12.)).child(people.len().to_string()));
+            .tooltip(Tooltip::text(format!(
+                "{} {}",
+                group.content,
+                names.join(", ")
+            )))
+            .child(glyph)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(14.))
+                    .child(people.len().to_string()),
+            );
         pill = if mine {
-            pill.border_color(c.border_prominent)
-                .bg(c.affordance_selected)
+            pill.border_color(mix(c.affordance_prominent, c.border_standard, 0.4))
+                .bg(mix(c.affordance_prominent, c.surface_panel, 0.12))
                 .text_color(c.affordance_prominent)
         } else {
             pill.border_color(c.border_standard)
@@ -316,29 +628,334 @@ fn reactions(row: &Arc<MessageRow>, viewer: &str, actions: &Actions, cx: &App) -
                 .text_color(c.text_standard)
                 .hover(|style| style.bg(c.affordance_subtle_hover))
         };
-        if let Some(react) = actions.on_react.clone() {
+        if let Some(react) = rows.actions.on_react.clone() {
             let target = row.clone();
             let content = group.content.clone();
             pill = pill.on_click(move |_, window, cx| react(&target, &content, window, cx));
         }
         pills = pills.child(pill);
     }
+    if rows.actions.on_react.is_some() {
+        let open = rows.interaction.open == Some((row.id, Popup::Picker { from_bar: false }));
+        let (popup_rows, target) = (rows.clone(), row.id);
+        let button = div()
+            .id(SharedString::from(format!("react-more-{id}")))
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .border_1()
+            .cursor_pointer()
+            .map(|d| {
+                if open {
+                    d.border_color(c.border_standard)
+                        .bg(c.affordance_subtle)
+                        .text_color(c.text_standard)
+                } else {
+                    d.border_color(transparent_black())
+                        .text_color(c.text_subtle)
+                        .hover(|s| {
+                            s.border_color(c.border_standard)
+                                .bg(c.affordance_subtle)
+                                .text_color(c.text_standard)
+                        })
+                }
+            })
+            .tooltip(Tooltip::text("Add reaction"))
+            .child(Icon::new(IconName::SmileyPlus).size(16.))
+            .on_click(move |_, window, cx| {
+                popup_rows.popup(
+                    Some((target, Popup::Picker { from_bar: false })),
+                    window,
+                    cx,
+                )
+            });
+        pills = pills.child(div().relative().child(button).when(open, |d| {
+            d.child(
+                div().absolute().left_0().bottom_0().child(deferred(
+                    anchored()
+                        .anchor(Anchor::TopLeft)
+                        .offset(point(px(0.), px(4.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(picker(row, rows)),
+                )),
+            )
+        }));
+    }
     pills
 }
 
-fn thread_summary(
+/// CSS `color-mix(in srgb, a share, b)`.
+fn mix(a: Hsla, b: Hsla, share: f32) -> Hsla {
+    let (a, b) = (Rgba::from(a), Rgba::from(b));
+    let lerp = |x: f32, y: f32| x * share + y * (1. - share);
+    Hsla::from(Rgba {
+        r: lerp(a.r, b.r),
+        g: lerp(a.g, b.g),
+        b: lerp(a.b, b.b),
+        a: lerp(a.a, b.a),
+    })
+}
+
+/// Attachments in send order; adjacent images share a strip and adjacent
+/// files a group (§4.7).
+fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
+    let mut groups: Vec<(bool, Vec<(usize, &Attachment)>)> = Vec::new();
+    for (index, attachment) in row.attachments.iter().enumerate() {
+        let image = attachment.kind == AttachmentKind::Image;
+        match groups.last_mut() {
+            Some((kind, members)) if *kind == image => members.push((index, attachment)),
+            _ => groups.push((image, vec![(index, attachment)])),
+        }
+    }
+    let c = *cx.colors();
+    div()
+        .flex()
+        .flex_col()
+        .children(groups.into_iter().map(|(image, members)| {
+            if image {
+                let count = members.len();
+                div()
+                    .mt(px(8.))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex().flex_wrap().gap(px(8.)).p(px(4.)).children(
+                        members.into_iter().map(|(index, attachment)| {
+                            image_tile(row, index, attachment, rows, &c)
+                        }),
+                    ))
+                    .when(count > 1, |d| {
+                        d.child(
+                            div()
+                                .mt(px(4.))
+                                .text_caption()
+                                .text_color(c.text_subtle)
+                                .child(format!("{count} images")),
+                        )
+                    })
+                    .into_any_element()
+            } else {
+                div()
+                    .mt(px(8.))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .children(
+                        members
+                            .into_iter()
+                            .map(|(index, attachment)| file_tile(row, index, attachment, rows, &c)),
+                    )
+                    .into_any_element()
+            }
+        }))
+}
+
+fn image_tile(
     row: &Arc<MessageRow>,
-    profiles: &Profiles,
-    actions: &Actions,
+    index: usize,
+    attachment: &Attachment,
+    rows: &Rc<Rows>,
+    c: &buzz_ui::Colors,
+) -> AnyElement {
+    let unavailable = *c;
+    let mut tile = div()
+        .id(SharedString::from(format!(
+            "image-{}-{index}",
+            row.id.to_hex()
+        )))
+        .relative()
+        .size(px(72.))
+        .flex_none()
+        .rounded(px(16.))
+        .overflow_hidden()
+        .bg(c.surface_inset)
+        .cursor_pointer()
+        .child(
+            img(media::image(&attachment.url, &rows.directory.media))
+                .size_full()
+                .rounded(px(16.))
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(move || {
+                    div()
+                        .size_full()
+                        .p(px(4.))
+                        .rounded(px(8.))
+                        .bg(unavailable.affordance_subtle_hover)
+                        .text_caption()
+                        .text_color(unavailable.text_subtle)
+                        .child("Image unavailable")
+                        .into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(16.))
+                .border_1()
+                .border_color(c.border_image),
+        );
+    if let Some(command) = rows.actions.on_command.clone() {
+        let (target, url) = (row.clone(), attachment.url.clone());
+        tile = tile.on_click(move |_, window, cx| {
+            command(&target, Command::View(url.clone()), window, cx)
+        });
+    }
+    tile.into_any_element()
+}
+
+/// Files, and for now video and audio too: a card that downloads relay
+/// media to the Downloads folder or opens other links.
+fn file_tile(
+    row: &Arc<MessageRow>,
+    index: usize,
+    attachment: &Attachment,
+    rows: &Rc<Rows>,
+    c: &buzz_ui::Colors,
+) -> AnyElement {
+    let media = rows.directory.media.clone();
+    let relay = media.is_relay_media(&attachment.url);
+    let name = attachment
+        .name
+        .clone()
+        .or_else(|| mime_label(attachment.mime.as_deref()))
+        .unwrap_or_else(|| "File".into());
+    let meta = match attachment.size {
+        Some(size) => file_size(size),
+        None if relay => "Download file".into(),
+        None => "Open file".into(),
+    };
+    let icon = match attachment.kind {
+        AttachmentKind::Video => IconName::VideoCamera,
+        AttachmentKind::Audio => IconName::SpeakerHigh,
+        _ => IconName::FileText,
+    };
+    let (url, download_name) = (attachment.url.clone(), attachment.name.clone());
+    div()
+        .id(SharedString::from(format!(
+            "file-{}-{index}",
+            row.id.to_hex()
+        )))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .max_w(px(384.))
+        .min_w_0()
+        .px(px(12.))
+        .py(px(8.))
+        .border_1()
+        .border_color(c.border_standard)
+        .rounded(px(12.))
+        .bg(c.affordance_subtle)
+        .hover(|s| s.bg(c.affordance_subtle_hover))
+        .cursor_pointer()
+        .tooltip(Tooltip::text(name.clone()))
+        .child(Icon::new(icon).size(24.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate()
+                        .child(name),
+                )
+                .child(div().text_caption().text_color(c.text_subtle).child(meta)),
+        )
+        .when(relay, |d| d.child(Icon::new(IconName::Download).size(20.)))
+        .on_click(move |_, _, cx| {
+            if relay {
+                media::download(url.clone(), download_name.clone(), media.clone(), cx);
+            } else {
+                cx.open_url(&url);
+            }
+        })
+        .into_any_element()
+}
+
+/// `formatFileSize`.
+fn file_size(size: u64) -> String {
+    const K: u64 = 1024;
+    let round = |unit: u64| (size as f64 / unit as f64).round() as u64;
+    match size {
+        s if s < K => format!("{s} B"),
+        s if s < K * K => format!("{} KB", round(K)),
+        s if s < K * K * K => format!("{} MB", round(K * K)),
+        _ => format!("{} GB", round(K * K * K)),
+    }
+}
+
+fn mime_label(mime: Option<&str>) -> Option<String> {
+    let (kind, subtype) = mime?.split_once('/')?;
+    if kind.is_empty() || subtype.is_empty() {
+        return None;
+    }
+    if subtype == "pdf" {
+        return Some("PDF file".into());
+    }
+    subtype
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric())
+        .then(|| format!("{} file", subtype.to_uppercase()))
+}
+
+fn delivery_notice(
+    row: &Arc<MessageRow>,
+    delivery: &buzz_relay_client::fold::LocalDelivery,
+    rows: &Rc<Rows>,
     cx: &App,
 ) -> impl IntoElement {
-    let c = cx.colors().clone();
+    let c = cx.colors();
+    let text = if delivery.status == Delivery::Failed {
+        "Couldn’t send this message.".to_string()
+    } else {
+        match &delivery.error {
+            Some(error) => format!("Delivery not yet confirmed. {error}"),
+            None => "Delivery not yet confirmed.".to_string(),
+        }
+    };
+    let mut notice = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.))
+        .mt(px(6.))
+        .text_caption()
+        .text_color(c.text_warning)
+        .child(text);
+    if let Some(retry) = rows.actions.on_retry.clone() {
+        let target = row.clone();
+        notice = notice.child(
+            buzz_ui::Button::new(
+                SharedString::from(format!("retry-{}", row.id.to_hex())),
+                "Retry",
+            )
+            .variant(buzz_ui::ButtonVariant::Ghost)
+            .size(buzz_ui::ButtonSize::Sm)
+            .on_click(move |_, window, cx| retry(&target, window, cx)),
+        );
+    }
+    notice
+}
+
+fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
+    let c = *cx.colors();
+    let profiles = &rows.directory.profiles;
     let mut avatars = div().flex();
     for (index, participant) in row.participants.iter().take(3).enumerate() {
         let hex = participant.to_hex();
+        let profile = profiles.get(&hex);
         let mut avatar = Avatar::new(display_name(profiles, &hex)).size(AvatarSize::Small);
-        if let Some(picture) = profiles.get(&hex).and_then(|p| p.picture.clone()) {
-            avatar = avatar.image(picture);
+        if profile.is_some_and(|p| p.is_agent) {
+            avatar = avatar.squircle();
+        }
+        if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
+            avatar = avatar.image(media::avatar(picture, &rows.directory.media));
         }
         avatars = avatars.child(
             div()
@@ -347,6 +964,20 @@ fn thread_summary(
                 .p(px(1.5))
                 .bg(c.surface_panel)
                 .child(avatar),
+        );
+    }
+    if row.participants.len() > 3 {
+        avatars = avatars.child(
+            div()
+                .ml(px(-4.))
+                .size(px(24.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(c.affordance_selected)
+                .text_caption()
+                .child(format!("+{}", row.participants.len() - 3)),
         );
     }
     let label = if row.reply_count == 1 {
@@ -358,6 +989,7 @@ fn thread_summary(
         .id(SharedString::from(format!("thread-{}", row.id.to_hex())))
         .flex()
         .items_center()
+        .self_start()
         .gap(px(8.))
         .ml(px(-4.))
         .mt(px(4.))
@@ -371,7 +1003,7 @@ fn thread_summary(
         .hover(|style| style.bg(c.affordance_subtle_hover))
         .child(avatars)
         .child(label);
-    if let Some(open) = actions.on_open_thread.clone() {
+    if let Some(open) = rows.actions.on_open_thread.clone() {
         let target = row.clone();
         summary = summary.on_click(move |_, window, cx| open(&target, window, cx));
     }
@@ -403,5 +1035,27 @@ pub fn channel_icon(channel: &buzz_relay_client::ChannelSummary) -> IconName {
         Some(ChannelType::Dm) => IconName::ChatCircle,
         _ if channel.private => IconName::Lock,
         _ => IconName::Hash,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn formats_file_sizes_like_the_reference() {
+        assert_eq!(file_size(900), "900 B");
+        assert_eq!(file_size(13 * 1024 + 100), "13 KB");
+        assert_eq!(file_size(5 * 1024 * 1024), "5 MB");
+        assert_eq!(
+            mime_label(Some("application/pdf")).as_deref(),
+            Some("PDF file")
+        );
+        assert_eq!(
+            mime_label(Some("text/plain")).as_deref(),
+            Some("PLAIN file")
+        );
+        assert_eq!(mime_label(Some("application/vnd.x+y")), None);
     }
 }

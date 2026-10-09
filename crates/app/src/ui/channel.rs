@@ -1,28 +1,58 @@
-//! The channel page: header, timeline and composer (ui.md §4.1–4.8).
+//! The channel page: header, timeline and composer (ui.md §4.1–4.8,
+//! §4.12).
 
-use super::message::{self, Actions, Item};
+use super::markdown::Directory;
+use super::media;
+use super::message::{self, Actions, Command, Hover, Interaction, Item, Rows};
 use crate::community::{ChannelModel, Community};
 use buzz_relay_client::fold::MessageRow;
-use buzz_relay_client::{ChannelSummary, TimelineStatus};
-use buzz_ui::{ActiveTheme, IconButton, IconButtonSize, IconName, PanelHeader, TypeStyled};
+use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus, message_link};
+use buzz_ui::{
+    ActiveTheme, AlertDialog, Button, ButtonSize, ButtonVariant, Icon, IconButton, IconButtonSize,
+    IconName, PanelHeader, Scrim, Toast, ToastTone, TypeStyled, tokens::shadow,
+};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Older history loads when the reader is this many rows from the top.
 const LOAD_OLDER_WITHIN: usize = 5;
+/// The jump pill shows this far from the bottom (`JumpToLatestButton`).
+const JUMP_DISTANCE: Pixels = px(80.);
+/// `useToastNotification`'s timeout.
+const TOAST_DURATION: Duration = Duration::from_secs(4);
+
+/// Asks the workspace to open a thread panel.
+pub type OpenThread = Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)>;
 
 pub struct ChannelPage {
     community: Entity<Community>,
     channel: ChannelSummary,
     model: Entity<ChannelModel>,
     items: Vec<Item>,
+    /// Row 0 is the top edge (load older); messages follow.
     list: ListState,
     composer: Entity<TextareaState>,
+    placeholder: SharedString,
     sending: bool,
     error: Option<SharedString>,
-    /// Asks the workspace to open a thread panel.
-    on_open_thread: Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)>,
+    on_open_thread: OpenThread,
+    interaction: Interaction,
+    /// The composer is editing this message (§4.8 edit mode).
+    editing: Option<Arc<MessageRow>>,
+    /// The delete confirmation is open for this message.
+    deleting: Option<Arc<MessageRow>>,
+    toast: Option<(SharedString, usize)>,
+    toasts: usize,
+    /// An image attachment open in the viewer.
+    viewing: Option<String>,
+    /// Rows that arrived while the reader was scrolled up.
+    unseen: usize,
+    /// The reader is at least [`JUMP_DISTANCE`] from the bottom.
+    away: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -30,20 +60,21 @@ impl ChannelPage {
     pub fn new(
         community: Entity<Community>,
         channel: ChannelSummary,
-        on_open_thread: Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)>,
+        on_open_thread: OpenThread,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let model = community.update(cx, |community, cx| community.open_channel(&channel.id, cx));
-        let list = ListState::new(0, ListAlignment::Bottom, px(1000.));
+        let list = ListState::new(1, ListAlignment::Bottom, px(1000.));
         list.set_follow_mode(FollowMode::Tail);
-        let placeholder = match channel.channel_type {
+        let placeholder: SharedString = match channel.channel_type {
             Some(buzz_relay_client::ChannelType::Dm) => format!("Message {}", channel.name),
             _ => format!("Message #{}", channel.name),
-        };
+        }
+        .into();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder(placeholder)
+                .placeholder(placeholder.clone())
                 .submit_on_enter(true)
                 .auto_grow(1, 9)
         });
@@ -53,10 +84,10 @@ impl ChannelPage {
             cx.subscribe_in(
                 &composer,
                 window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { shift: false, .. } = event {
-                        this.send(window, cx);
-                    }
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
                 },
             ),
         ];
@@ -66,8 +97,12 @@ impl ChannelPage {
             let Some(this) = weak.upgrade() else {
                 return;
             };
-            let near_top = event.visible_range.start < LOAD_OLDER_WITHIN;
-            let ids = this.read(cx).items[event.visible_range.clone()]
+            // Row 0 is the edge.
+            let near_top = event.visible_range.start < LOAD_OLDER_WITHIN + 1;
+            let items = &this.read(cx).items;
+            let start = event.visible_range.start.saturating_sub(1).min(items.len());
+            let end = event.visible_range.end.saturating_sub(1).min(items.len());
+            let ids = items[start..end]
                 .iter()
                 .map(|item| item.row.id)
                 .take(128)
@@ -85,9 +120,18 @@ impl ChannelPage {
             items: Vec::new(),
             list,
             composer,
+            placeholder,
             sending: false,
             error: None,
             on_open_thread,
+            interaction: Interaction::default(),
+            editing: None,
+            deleting: None,
+            toast: None,
+            toasts: 0,
+            viewing: None,
+            unseen: 0,
+            away: false,
             _subscriptions: subscriptions,
         };
         page.sync_items(cx);
@@ -114,20 +158,36 @@ impl ChannelPage {
             .and_then(|first| new.iter().position(|id| id == first))
         {
             Some(prepended) if new[prepended..].starts_with(&old) => {
-                self.list.splice(0..0, prepended);
+                // List indices are one past item indices: row 0 is the edge.
+                self.list.splice(1..1, prepended);
                 let end = prepended + old.len();
-                self.list.splice(end..end, new.len() - end);
+                let appended = new.len() - end;
+                self.list.splice(end + 1..end + 1, appended);
                 // Head flags of the old first row and the row before the
                 // appended tail may have changed.
                 if !old.is_empty() {
-                    self.list.splice(prepended..prepended + 1, 1);
-                    self.list.splice(end - 1..end, 1);
+                    self.list.splice(prepended + 1..prepended + 2, 1);
+                    self.list.splice(end..end + 1, 1);
+                }
+                if self.away {
+                    self.unseen += appended;
                 }
             }
-            _ => self.list.reset(new.len()),
+            _ => self.list.reset(new.len() + 1),
+        }
+        // The edge's state may have changed.
+        self.list.splice(0..1, 1);
+        if let Some(editing) = &self.editing
+            && !new.contains(&editing.id)
+        {
+            self.editing = None;
         }
         self.items = next;
         cx.notify();
+    }
+
+    fn session(&self, cx: &App) -> Arc<buzz_relay_client::Session> {
+        self.community.read(cx).session.clone()
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -135,21 +195,40 @@ impl ChannelPage {
         if content.is_empty() || self.sending {
             return;
         }
-        self.sending = true;
-        let session = self.community.read(cx).session.clone();
+        let session = self.session(cx);
         let channel = self.channel.id.clone();
-        self.list.set_follow_mode(FollowMode::Tail);
+        let editing = self.editing.clone();
+        if let Some(row) = &editing
+            && content == edit_text(row).trim()
+        {
+            self.cancel_edit(window, cx);
+            return;
+        }
+        self.sending = true;
+        if editing.is_none() {
+            self.list.set_follow_mode(FollowMode::Tail);
+            self.unseen = 0;
+        }
         cx.spawn_in(window, async move |this, cx| {
-            let result = session
-                .send(&channel, &content, Default::default(), None)
-                .await;
+            let result = match &editing {
+                Some(row) => session.edit(&channel, row.id, &content).await,
+                None => {
+                    session
+                        .send(&channel, &content, Default::default(), None)
+                        .await
+                }
+            };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.sending = false;
                 match result {
                     Ok(()) => {
                         this.error = None;
-                        this.composer
-                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        if this.editing.is_some() {
+                            this.cancel_edit(window, cx);
+                        } else {
+                            this.composer
+                                .update(cx, |state, cx| state.set_value("", window, cx));
+                        }
                     }
                     Err(error) => this.error = Some(error.into()),
                 }
@@ -159,18 +238,141 @@ impl ChannelPage {
         .detach();
     }
 
+    fn start_edit(&mut self, row: Arc<MessageRow>, window: &mut Window, cx: &mut Context<Self>) {
+        let text = edit_text(&row);
+        self.editing = Some(row);
+        self.composer.update(cx, |state, cx| {
+            state.set_value(text, window, cx);
+            state.set_placeholder("Edit message", window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = None;
+        let placeholder = self.placeholder.clone();
+        self.composer.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+            state.set_placeholder(placeholder, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.toasts += 1;
+        let generation = self.toasts;
+        self.toast = Some((text.to_string().into(), generation));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast.as_ref().is_some_and(|(_, g)| *g == generation) {
+                    this.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn command(
+        &mut self,
+        row: Arc<MessageRow>,
+        command: Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            Command::CopyLink => {
+                let link = message_link(&self.channel.id, &row.id);
+                cx.write_to_clipboard(ClipboardItem::new_string(link));
+                self.show_toast("Link copied", cx);
+            }
+            Command::CopyMessage => {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_text(&row)));
+                self.show_toast("Message copied", cx);
+            }
+            Command::MarkUnread => {
+                let (session, channel) = (self.session(cx), self.channel.id.clone());
+                cx.foreground_executor()
+                    .spawn(async move {
+                        if let Err(error) = session.mark_message_unread(&channel, row.id).await {
+                            tracing::warn!(%error, "mark unread failed");
+                        }
+                    })
+                    .detach();
+            }
+            Command::Edit => self.start_edit(row, window, cx),
+            Command::Delete => {
+                self.deleting = Some(row);
+                cx.notify();
+            }
+            Command::View(url) => {
+                self.viewing = Some(url);
+                cx.notify();
+            }
+        }
+    }
+
+    fn delete(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.deleting.take() else {
+            return;
+        };
+        let (session, channel) = (self.session(cx), self.channel.id.clone());
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = session.remove(&channel, row.id).await {
+                let _ = this.update(cx, |this, cx| {
+                    this.error = Some(error.into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn hover(&mut self, id: EventId, target: Hover, hovered: bool, cx: &mut Context<Self>) {
+        // A row under the pointer means it left every other row's bar; a bar
+        // that vanished while hovered never reports leaving.
+        if target == Hover::Row
+            && hovered
+            && self.interaction.bar_hovered.is_some_and(|bar| bar != id)
+        {
+            self.interaction.bar_hovered = None;
+            cx.notify();
+        }
+        let slot = match target {
+            Hover::Row => &mut self.interaction.hovered,
+            Hover::Bar => &mut self.interaction.bar_hovered,
+        };
+        let next = if hovered {
+            Some(id)
+        } else if *slot == Some(id) {
+            None
+        } else {
+            *slot
+        };
+        if *slot != next {
+            *slot = next;
+            cx.notify();
+        }
+    }
+
     fn actions(&self, cx: &mut Context<Self>) -> Actions {
-        let session = self.community.read(cx).session.clone();
+        let session = self.session(cx);
         let channel = self.channel.id.clone();
         let viewer = session.viewer().to_string();
         let react_session = session.clone();
         let react_channel = channel.clone();
         let open = self.on_open_thread.clone();
+        let this = cx.entity().downgrade();
+        let (hover, popup, command) = (this.clone(), this.clone(), this);
         Actions {
-            on_open_thread: Some(Arc::new(move |row, window, cx| {
+            on_open_thread: Some(Rc::new(move |row, window, cx| {
                 open(row.clone(), window, cx)
             })),
-            on_react: Some(Arc::new(move |row, content, _, cx| {
+            on_react: Some(Rc::new(move |row, content, _, cx| {
                 // Clicking your own reaction removes it; anyone else's adds yours.
                 let own = row
                     .reactions
@@ -196,7 +398,7 @@ impl ChannelPage {
                     })
                     .detach();
             })),
-            on_retry: Some(Arc::new(move |row, _, cx| {
+            on_retry: Some(Rc::new(move |row, _, cx| {
                 let (session, id) = (session.clone(), row.id);
                 cx.foreground_executor()
                     .spawn(async move {
@@ -204,19 +406,279 @@ impl ChannelPage {
                     })
                     .detach();
             })),
+            on_hover: Some(Rc::new(move |id, target, hovered, _, cx| {
+                let _ = hover.update(cx, |this, cx| this.hover(id, target, hovered, cx));
+            })),
+            on_popup: Some(Rc::new(move |open, _, cx| {
+                let _ = popup.update(cx, |this, cx| {
+                    if this.interaction.open != open {
+                        this.interaction.open = open;
+                        cx.notify();
+                    }
+                });
+            })),
+            on_command: Some(Rc::new(move |row, action, window, cx| {
+                let row = row.clone();
+                let _ = command.update(cx, |this, cx| this.command(row, action, window, cx));
+            })),
         }
+    }
+
+    /// The list's first row: load older, its progress, its retry, or the
+    /// history window limit (§4.3).
+    fn edge(
+        snapshot: &buzz_relay_client::TimelineSnapshot,
+        model: Entity<ChannelModel>,
+        cx: &App,
+    ) -> AnyElement {
+        let c = cx.colors();
+        let frame = || {
+            div()
+                .h(px(56.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(8.))
+                .text_caption()
+                .text_color(c.text_subtle)
+        };
+        if snapshot.history_limited {
+            return frame()
+                .child("History window limit reached")
+                .into_any_element();
+        }
+        if !snapshot.has_more {
+            return div().into_any_element();
+        }
+        let label = if snapshot.loading_older {
+            "Loading older…"
+        } else if snapshot.error.is_some() {
+            "Retry older messages"
+        } else {
+            "Load older messages"
+        };
+        frame()
+            .child(
+                Button::new("load-older", label)
+                    .variant(ButtonVariant::Subtle)
+                    .size(ButtonSize::Md)
+                    .disabled(snapshot.loading_older)
+                    .on_click(move |_, _, cx| model.read(cx).load_older()),
+            )
+            .into_any_element()
+    }
+
+    fn composer_shell(&self, cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
+        if self.channel.read_only {
+            return div()
+                .flex()
+                .flex_wrap()
+                .gap(px(12.))
+                .px(px(16.))
+                .py(px(8.))
+                .mb(px(8.))
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child("Read-only preview · You haven’t joined this conversation.")
+                .into_any_element();
+        }
+        let has_text = !self.composer.read(cx).value().trim().is_empty();
+        let editing = self.editing.is_some();
+        let header = editing.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .mt(px(-12.))
+                .mx(px(-6.))
+                .mb(px(-12.))
+                .px(px(12.))
+                .py(px(8.))
+                .rounded_t(px(19.))
+                .bg(c.surface_inset)
+                .text_label_sm()
+                .text_color(c.text_subtle)
+                .child(Icon::new(IconName::PencilSimple).size(18.))
+                .child(div().flex_1().child("Editing message"))
+                .child(
+                    IconButton::new("cancel-edit", IconName::X)
+                        .size(IconButtonSize::Sm)
+                        .icon_size(18.)
+                        .tooltip("Cancel edit")
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .mx(px(16.))
+            .mb(px(16.))
+            .pt(px(12.))
+            .px(px(6.))
+            .pb(px(6.))
+            .rounded(px(20.))
+            .border_1()
+            .border_color(c.border_standard)
+            .bg(c.surface_panel)
+            .shadow_xs()
+            .overflow_hidden()
+            .text_body()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.editing.is_some() {
+                    this.cancel_edit(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .children(header)
+            .child(
+                div()
+                    .pl(px(4.))
+                    .pt(px(4.))
+                    .child(Textarea::new(&self.composer).appearance(false)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .child(
+                                IconButton::new("mention", IconName::At)
+                                    .size(IconButtonSize::Sm)
+                                    .tooltip("Mention a member"),
+                            )
+                            .child(
+                                IconButton::new("emoji", IconName::Smiley)
+                                    .size(IconButtonSize::Sm)
+                                    .tooltip("Insert emoji"),
+                            )
+                            .child(
+                                IconButton::new("format", IconName::TextAa)
+                                    .size(IconButtonSize::Sm)
+                                    .tooltip("Toggle formatting"),
+                            ),
+                    )
+                    .child(
+                        IconButton::new("send", IconName::ArrowUp)
+                            .size(IconButtonSize::Sm)
+                            .when(has_text, |b| b.variant(ButtonVariant::Prominent))
+                            .disabled(!has_text || self.sending)
+                            .tooltip(if editing {
+                                "Save changes"
+                            } else {
+                                "Send message"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn jump_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = *cx.colors();
+        let label = match self.unseen {
+            0 => "Jump to latest".to_string(),
+            1 => "1 new message".to_string(),
+            n => format!("{n} new messages"),
+        };
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(2.))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("jump-to-latest")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(32.))
+                    .px(px(16.))
+                    .rounded(px(12.))
+                    .bg(c.glass_4)
+                    .shadow({
+                        let mut shadows = shadow::sm();
+                        shadows.extend(shadow::rims(c.rim_lit, c.rim_shade));
+                        shadows
+                    })
+                    .cursor_pointer()
+                    .text_label_sm()
+                    .text_color(c.text_standard)
+                    .hover(|s| s.bg(c.affordance_subtle_hover))
+                    .child(Icon::new(IconName::ArrowDown).size(16.))
+                    .child(label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.list.set_follow_mode(FollowMode::Tail);
+                        this.unseen = 0;
+                        this.away = false;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// A full-window overlay for dialogs and the image viewer.
+    fn overlay(window: &Window, child: impl IntoElement) -> impl IntoElement {
+        deferred(
+            anchored()
+                .position_mode(AnchoredPositionMode::Window)
+                .position(point(px(0.), px(0.)))
+                .child(
+                    div()
+                        .id("overlay")
+                        .w(window.viewport_size().width)
+                        .h(window.viewport_size().height)
+                        .occlude()
+                        .child(child),
+                ),
+        )
+        .with_priority(2)
     }
 }
 
+/// What "Edit message" puts in the composer: the body with its attachment
+/// Markdown (`messageEditText`).
+fn edit_text(row: &MessageRow) -> String {
+    row.source_content
+        .clone()
+        .unwrap_or_else(|| row.content.clone())
+}
+
+/// `messageCopyText`: the body, then each attachment's URL.
+fn copy_text(row: &MessageRow) -> String {
+    std::iter::once(row.content.as_str())
+        .chain(row.attachments.iter().map(|a| a.url.as_str()))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 impl Render for ChannelPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = cx.colors().clone();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = *cx.colors();
         let snapshot = self.model.read(cx).snapshot.clone();
         let community = self.community.read(cx);
-        let profiles = community.snapshot.profiles.clone();
+        let directory = Directory {
+            profiles: community.snapshot.profiles.clone(),
+            channels: community.snapshot.channels.clone(),
+            media: community.session.media().clone(),
+        };
         let viewer = community.session.viewer().to_string();
         let typing = community.snapshot.typing.get(&self.channel.id).cloned();
-        let read_only = self.channel.read_only;
+
+        // Distance from the bottom, for the jump pill.
+        let max = self.list.max_offset_for_scrollbar().y;
+        let offset = -self.list.scroll_px_offset_for_scrollbar().y;
+        self.away = !self.list.is_following_tail() && max - offset >= JUMP_DISTANCE;
+        if !self.away {
+            self.unseen = 0;
+        }
 
         let header = PanelHeader::new()
             .joined(true)
@@ -224,10 +686,24 @@ impl Render for ChannelPage {
                 Some(message::channel_icon(&self.channel)),
                 self.channel.name.clone(),
             )
-            .action(IconButton::new("members", IconName::Users).size(IconButtonSize::Sm))
-            .action(IconButton::new("more", IconName::DotsThree).size(IconButtonSize::Sm));
+            .action(
+                IconButton::new("members", IconName::Users)
+                    .size(IconButtonSize::Sm)
+                    .tooltip("Channel members"),
+            )
+            .action(
+                IconButton::new("more", IconName::DotsThree)
+                    .size(IconButtonSize::Sm)
+                    .tooltip("Channel actions"),
+            );
 
-        let actions = Arc::new(self.actions(cx));
+        let typing_profiles = community.snapshot.profiles.clone();
+        let rows = Rc::new(Rows {
+            viewer,
+            directory,
+            actions: self.actions(cx),
+            interaction: self.interaction.clone(),
+        });
         let items = self.items.clone();
         let timeline = if self.items.is_empty() {
             let text = match &snapshot.status {
@@ -247,19 +723,26 @@ impl Render for ChannelPage {
                 .child(text)
                 .into_any_element()
         } else {
-            let profiles = profiles.clone();
-            let viewer = viewer.clone();
+            let model = self.model.clone();
+            let edge_snapshot = snapshot.clone();
             div()
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .flex()
                 .flex_col()
                 .child(
                     list(self.list.clone(), move |index, _, cx| {
-                        match items.get(index) {
+                        if index == 0 {
+                            return div()
+                                .px(px(24.))
+                                .child(Self::edge(&edge_snapshot, model.clone(), cx))
+                                .into_any_element();
+                        }
+                        match items.get(index - 1) {
                             Some(item) => div()
                                 .px(px(24.))
-                                .child(message::render(item, &viewer, &profiles, &actions, cx))
+                                .child(message::render(item, &rows, cx))
                                 .into_any_element(),
                             None => div().into_any_element(),
                         }
@@ -267,91 +750,94 @@ impl Render for ChannelPage {
                     .size_full(),
                 )
                 .child(div().h(px(12.)))
+                .when(self.away, |d| d.child(self.jump_pill(cx)))
                 .into_any_element()
         };
 
-        let edge = (snapshot.loading_older || snapshot.history_limited).then(|| {
-            div()
-                .flex()
-                .justify_center()
-                .h(px(32.))
-                .items_center()
-                .text_caption()
-                .text_color(c.text_subtle)
-                .child(if snapshot.history_limited {
-                    "History window limit reached"
-                } else {
-                    "Loading older…"
-                })
+        let composer = self.composer_shell(cx);
+
+        let toast = self.toast.as_ref().map(|(text, generation)| {
+            let right = window.viewport_size().width - px(16.) - px(384.);
+            deferred(
+                anchored()
+                    .position_mode(AnchoredPositionMode::Window)
+                    .position(point(right, px(128.)))
+                    .child(
+                        Toast::new(("toast", *generation), text.clone())
+                            .tone(ToastTone::Success)
+                            .on_dismiss(cx.listener(|this, _, _, cx| {
+                                this.toast = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .with_priority(3)
         });
 
-        let composer = if read_only {
-            div()
-                .mx(px(16.))
-                .mb(px(16.))
-                .p(px(12.))
-                .rounded(px(20.))
-                .border_1()
-                .border_color(c.border_standard)
-                .bg(c.surface_panel)
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child("Join this channel to send messages.")
-                .into_any_element()
-        } else {
-            let send_enabled = !self.composer.read(cx).value().trim().is_empty();
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .mx(px(16.))
-                .mb(px(16.))
-                .pt(px(12.))
-                .px(px(6.))
-                .pb(px(6.))
-                .rounded(px(20.))
-                .border_1()
-                .border_color(c.border_standard)
-                .bg(c.surface_panel)
-                .shadow_xs()
-                .text_body()
-                .child(
-                    div()
-                        .pl(px(4.))
-                        .pt(px(4.))
-                        .child(Textarea::new(&self.composer).appearance(false)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(4.))
-                                .child(
-                                    IconButton::new("mention", IconName::At)
-                                        .size(IconButtonSize::Sm),
-                                )
-                                .child(
-                                    IconButton::new("emoji", IconName::Smiley)
-                                        .size(IconButtonSize::Sm),
-                                )
-                                .child(
-                                    IconButton::new("format", IconName::TextAa)
-                                        .size(IconButtonSize::Sm),
-                                ),
+        let dialog = self.deleting.as_ref().map(|_| {
+            Self::overlay(
+                window,
+                Scrim::new().child(
+                    AlertDialog::new("Delete message?")
+                        .description(
+                            "This requests removal of this message from Buzz’s relay. People may \
+                             still have copies. This cannot be undone.",
                         )
-                        .child(
-                            IconButton::new("send", IconName::ArrowUp)
-                                .size(IconButtonSize::Sm)
-                                .disabled(!send_enabled)
-                                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                        .action(
+                            Button::new("delete-cancel", "Cancel")
+                                .variant(ButtonVariant::Subtle)
+                                .size(ButtonSize::Sm)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deleting = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .action(
+                            Button::new("delete-confirm", "Delete")
+                                .variant(ButtonVariant::Destructive)
+                                .size(ButtonSize::Sm)
+                                .on_click(cx.listener(|this, _, _, cx| this.delete(cx))),
                         ),
-                )
-                .into_any_element()
-        };
+                ),
+            )
+        });
+
+        let viewer = self.viewing.as_ref().map(|url| {
+            let media = self.community.read(cx).session.media().clone();
+            let size = window.viewport_size();
+            Self::overlay(
+                window,
+                div()
+                    .id("image-viewer")
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(c.bg_scrim)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.viewing = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        img(media::image(url, &media))
+                            .max_w(size.width - px(96.))
+                            .max_h(size.height - px(96.))
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .child(
+                        div().absolute().top(px(16.)).right(px(16.)).child(
+                            IconButton::new("close-viewer", IconName::X)
+                                .size(IconButtonSize::Md)
+                                .variant(ButtonVariant::Media)
+                                .tooltip("Close")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.viewing = None;
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            )
+        });
 
         div()
             .flex()
@@ -362,7 +848,6 @@ impl Render for ChannelPage {
             .text_body_sm()
             .text_color(c.text_standard)
             .child(header)
-            .children(edge)
             .child(timeline)
             .children(self.error.clone().map(|error| {
                 div()
@@ -375,8 +860,40 @@ impl Render for ChannelPage {
             .child(
                 div()
                     .relative()
-                    .children(typing.and_then(|who| super::typing::overlay(&who, &profiles, cx)))
+                    .children(
+                        typing.and_then(|who| super::typing::overlay(&who, &typing_profiles, cx)),
+                    )
                     .child(composer),
             )
+            .children(toast)
+            .children(dialog)
+            .children(viewer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn copies_the_body_then_attachment_urls() {
+        use buzz_relay_client::fold::{Attachment, AttachmentKind};
+        let mut row = super::super::markdown::tests::row("Look");
+        assert_eq!(copy_text(&row), "Look");
+        row.attachments = vec![Attachment {
+            url: "https://x.test/media/a.png".into(),
+            kind: AttachmentKind::Image,
+            mime: None,
+            size: None,
+            name: None,
+            duration: None,
+            waveform: None,
+            voice_note: false,
+            dimensions: None,
+            blurhash: None,
+            preview_url: None,
+        }];
+        assert_eq!(copy_text(&row), "Look\n\nhttps://x.test/media/a.png");
     }
 }
