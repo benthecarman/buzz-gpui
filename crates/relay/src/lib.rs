@@ -9,11 +9,13 @@ pub mod messages;
 pub mod origin;
 pub mod outbox;
 pub mod profiles;
+pub mod read_state;
 pub mod reader;
 pub mod session;
 pub mod sidebar;
 pub mod socket;
 pub mod store;
+pub mod unread;
 pub mod window;
 
 pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
@@ -28,6 +30,11 @@ pub use outbox::{
     Publisher, Recovery, SendOptions,
 };
 pub use profiles::{Profile, ProfileDirectory, Profiles};
+pub use read_state::{
+    MarkCoverage, PublishCommand, PublishFailure, ReadCapability, ReadJournal, ReadLookup,
+    ReadMutationResult, ReadState, ReadStateError, ReadStateJournal, ReadStateSync,
+    ReadSyncSnapshot, ReadSyncStatus, ReadTarget, ReadUpdate, SnapshotDescriptor,
+};
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
     ChannelView, RelayInfo, RosterStatus, Session, SessionSnapshot, SessionStatus,
@@ -41,3 +48,7 @@ pub use socket::{
     Filter, PublishError, RelaySocket, SocketOptions, SocketState, Subscription, SubscriptionEvent,
 };
 pub use store::{Partition, SqliteJournal, Store, StoreError};
+pub use unread::{
+    ChannelInfo, InboxItem, InboxSnapshot, MessageAttention, ThreadActivitySnapshot,
+    ThreadFollowStore, Unread, UnreadError, UnreadOptions, UnreadSnapshot,
+};
