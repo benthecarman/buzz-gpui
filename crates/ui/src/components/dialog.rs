@@ -83,6 +83,7 @@ pub struct Dialog {
     body: Vec<AnyElement>,
     footer: Vec<AnyElement>,
     footer_leading: Vec<AnyElement>,
+    header_actions: Vec<AnyElement>,
     compact_header_gap: bool,
     compact_footer_gap: bool,
     heading_title: bool,
@@ -99,6 +100,7 @@ impl Dialog {
             body: Vec::new(),
             footer: Vec::new(),
             footer_leading: Vec::new(),
+            header_actions: Vec::new(),
             compact_header_gap: false,
             compact_footer_gap: false,
             heading_title: false,
@@ -132,6 +134,12 @@ impl Dialog {
     /// Footer action pinned to the start (`margin-right: auto`).
     pub fn footer_leading(mut self, element: impl IntoElement) -> Self {
         self.footer_leading.push(element.into_any_element());
+        self
+    }
+
+    /// A header action, before the close button (gap 8).
+    pub fn header_action(mut self, element: impl IntoElement) -> Self {
+        self.header_actions.push(element.into_any_element());
         self
     }
 
@@ -204,14 +212,21 @@ impl RenderOnce for Dialog {
                                 )
                             }),
                     )
-                    .when_some(self.on_close, |this, f| {
-                        this.child(
-                            IconButton::new("dialog-close", IconName::X)
-                                .size(IconButtonSize::Sm)
-                                .surface(Surface::Floating)
-                                .on_click(move |e, w, cx| f(e, w, cx)),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .gap(rems(0.5))
+                            .children(self.header_actions)
+                            .when_some(self.on_close, |this, f| {
+                                this.child(
+                                    IconButton::new("dialog-close", IconName::X)
+                                        .size(IconButtonSize::Sm)
+                                        .surface(Surface::Floating)
+                                        .on_click(move |e, w, cx| f(e, w, cx)),
+                                )
+                            }),
+                    ),
             )
             .child(
                 div()
