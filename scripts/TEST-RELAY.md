@@ -13,11 +13,17 @@ scripts/test-relay.sh logs     # tail .test-relay/relay.log (`logs deps` for doc
 scripts/test-relay.sh restart  # restart only the relay
 scripts/test-relay.sh down     # stop relay + `docker compose -p buzz-gpui-test down` (data kept)
 scripts/test-relay.sh wipe     # down + delete DB/minio data and seed.json
+scripts/test-relay.sh up-tls   # also run a TLS relay at wss://localhost:53443
+scripts/test-relay.sh down-tls # stop only the TLS relay and its TLS proxy
 ```
 
 Fresh start: `wipe`, `up`, `seed`. All commands can be run again safely.
 The first `up` builds with cargo in `nix shell` (cmake etc.) and gets `nak`
 from nixpkgs.
+
+State goes to `.test-relay/` next to the script. To use one test relay from
+several git worktrees, set `TEST_RELAY_DIR` to the main checkout's
+`.test-relay`.
 
 ## Endpoints and ports (all bound to 127.0.0.1)
 
@@ -29,6 +35,8 @@ from nixpkgs.
 | Postgres (`buzz`/`buzz_dev`, db `buzz`) | `:55432` |
 | Redis | `:56379` |
 | MinIO S3 / console (`buzz_dev`/`buzz_dev_secret`, bucket `buzz-media`) | `:59000` / `:59001` |
+| TLS relay (`up-tls`): WS / HTTP | `wss://localhost:53443` / `https://localhost:53443` |
+| TLS relay backend (plain; unusable directly) / health / metrics | `:53001` / `:58081` / `:59103` |
 
 The deps run in compose project `buzz-gpui-test` (`scripts/test-relay.compose.yml`),
 with containers named `buzz-gpui-test-*`. Typesense is not needed: this relay
@@ -41,6 +49,9 @@ version searches with Postgres full-text search.
 - `seed.json`: seeded channel UUIDs and event ids
 - `relay.env`: stable relay signing key (`BUZZ_RELAY_PRIVATE_KEY`)
 - `relay.log`, `relay.pid`, `build.log`, `data/` (postgres + minio), `git-repos/`
+- `tls/`: the TLS relay (see below): `ca.pem` + `ca.key` (test CA),
+  `server.pem` + `server.key` (localhost certificate), `ca-bundle.pem`,
+  `relay.json`, `relay.log`/`relay.pid`, `proxy.log`/`proxy.pid`, `git-repos/`
 
 `identities.json`:
 
@@ -120,6 +131,43 @@ private channel; `hidden` marks a DM.
   `127.0.0.1` with a `sed` before the build. Other upstream code is unchanged.
 - **Disabled features.** The git object-store probe
   (`BUZZ_GIT_CONFORMANCE_PROBE=false`) and push are off.
+
+## TLS relay
+
+The agent controller accepts only `wss://` relays, so agents need a TLS relay.
+`up-tls` runs one next to the plain relay and does not change it:
+
+- A second `buzz-relay` process with `RELAY_URL=wss://localhost:53443`, its
+  own database (`buzz_tls`, in the same postgres container) and Redis DB 1.
+  It listens on `127.0.0.1:53001`. The relay takes the scheme of the
+  expected NIP-42 `relay` tag and NIP-98 `u` URL from `RELAY_URL`, so one
+  process cannot serve both `ws://` and `wss://`.
+- `socat` (from nixpkgs) terminates TLS on `127.0.0.1:53443` and forwards the
+  raw bytes, so the `Host` header (`localhost:53443`) and WebSocket upgrades
+  pass through unchanged.
+- A local CA (`tls/ca.pem`, generated once with `openssl`) signs a
+  certificate for `localhost` and `127.0.0.1`. `tls/ca-bundle.pem` holds the
+  system roots and the test CA. Point `SSL_CERT_FILE` at it: reqwest
+  (rustls-platform-verifier), the `buzz` CLI and `buzz-acp` read it.
+- `buzz-acp` is built from the same upstream checkout with
+  `--features tokio-tungstenite/rustls-tls-native-roots`. Upstream's
+  WebSocket client trusts only the bundled webpki roots, so without this
+  feature it cannot trust the test CA. The source is not changed.
+- `BUZZ_ALLOW_NIP_OA_AUTH=true`: agents are not relay members. The relay
+  admits them through their owner's NIP-OA attestation.
+- alice owns the community. `up-tls` creates an open `#general` as alice.
+  bob and carol are not members. `tls/relay.json` records the URLs, the CA
+  and bundle paths, the `buzz-acp` and `buzz` binaries, and the `#general`
+  UUID.
+
+Check it:
+
+```sh
+curl --cacert .test-relay/tls/ca.pem https://localhost:53443/_readiness
+SSL_CERT_FILE=.test-relay/tls/ca-bundle.pem BUZZ_RELAY_URL=https://localhost:53443 \
+  BUZZ_PRIVATE_KEY=$(jq -r .identities.alice.sk_hex .test-relay/identities.json) \
+  .test-relay/buzz/target/debug/buzz channels list
+```
 
 ## Using the upstream tools directly
 

@@ -9,12 +9,15 @@
 #   scripts/test-relay.sh restart  restart only the relay process
 #   scripts/test-relay.sh down     stop relay and deps (data kept)
 #   scripts/test-relay.sh wipe     down + delete DB/minio data and seed.json
+#   scripts/test-relay.sh up-tls   also run a TLS relay at wss://localhost:53443
+#   scripts/test-relay.sh down-tls stop only the TLS relay and its TLS proxy
 #
-# Everything lives in .test-relay/ (gitignored). See scripts/TEST-RELAY.md.
+# Everything lives in .test-relay/ (gitignored), or in $TEST_RELAY_DIR if set
+# (to share one test relay between worktrees). See scripts/TEST-RELAY.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE="${ROOT}/.test-relay"
+STATE="${TEST_RELAY_DIR:-${ROOT}/.test-relay}"
 SRC="${STATE}/buzz"
 BUZZ_REPO="https://github.com/block/buzz"
 BUZZ_REV="5142cf6b2a0f44686eeda1ed07905ee3560fd78e"
@@ -42,6 +45,27 @@ RELAY_ENV="${STATE}/relay.env"
 RELAY_LOG="${STATE}/relay.log"
 RELAY_PID="${STATE}/relay.pid"
 BIN="${SRC}/target/debug"
+
+# TLS relay (`up-tls`): a second relay process configured for the origin
+# wss://localhost:53443, with its own database and Redis DB, behind a socat
+# TLS terminator. The relay derives the NIP-42 `relay` and NIP-98 `u` scheme
+# from RELAY_URL, so one process cannot serve both ws:// and wss://.
+TLS_PORT=53443
+TLS_BACKEND_PORT=53001
+TLS_HEALTH_PORT=58081
+TLS_METRICS_PORT=59103
+TLS_HOST="localhost:${TLS_PORT}"
+TLS_WS_URL="wss://${TLS_HOST}"
+TLS_HTTP_URL="https://${TLS_HOST}"
+TLS_DB="buzz_tls"
+TLS_DIR="${STATE}/tls"
+TLS_CA="${TLS_DIR}/ca.pem"
+TLS_BUNDLE="${TLS_DIR}/ca-bundle.pem"
+TLS_STATE_FILE="${TLS_DIR}/relay.json"
+TLS_RELAY_LOG="${TLS_DIR}/relay.log"
+TLS_RELAY_PID="${TLS_DIR}/relay.pid"
+TLS_PROXY_LOG="${TLS_DIR}/proxy.log"
+TLS_PROXY_PID="${TLS_DIR}/proxy.pid"
 
 export TEST_RELAY_STATE="${STATE}"
 export TEST_RELAY_UID="$(id -u)"
@@ -162,17 +186,32 @@ RUST_LOG=${RUST_LOG:-info,buzz_relay=debug,buzz_auth=debug}
 EOF
 }
 
-with_relay_env() {
-  local envs=()
-  mapfile -t envs < <(relay_env)
+# with_env_of <env-function> <command...>
+with_env_of() {
+  local envs=() source="$1"; shift
+  mapfile -t envs < <("${source}")
   env "${envs[@]}" "$@"
 }
 
+with_relay_env() { with_env_of relay_env "$@"; }
+
 # ── deps + relay lifecycle ───────────────────────────────────────────────────
 
-relay_running() {
-  [[ -f "${RELAY_PID}" ]] && kill -0 "$(cat "${RELAY_PID}")" 2>/dev/null
+pid_running() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# stop_pid <pidfile> <name>
+stop_pid() {
+  if pid_running "$1"; then
+    local pid; pid="$(cat "$1")"
+    log "Stopping $2 (pid ${pid})"
+    kill "${pid}" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "${pid}" 2>/dev/null || break; sleep 0.5; done
+    kill -9 "${pid}" 2>/dev/null || true
+  fi
+  rm -f "$1"
 }
+
+relay_running() { pid_running "${RELAY_PID}"; }
 
 relay_ready() {
   [[ "$(curl -s -o /dev/null -w '%{http_code}' "${HTTP_URL}/_readiness" || true)" == "200" ]]
@@ -228,16 +267,7 @@ relay_start() {
   die "relay not ready after 90s; see ${RELAY_LOG}"
 }
 
-relay_stop() {
-  if relay_running; then
-    local pid; pid="$(cat "${RELAY_PID}")"
-    log "Stopping relay (pid ${pid})"
-    kill "${pid}" 2>/dev/null || true
-    for _ in $(seq 1 20); do kill -0 "${pid}" 2>/dev/null || break; sleep 0.5; done
-    kill -9 "${pid}" 2>/dev/null || true
-  fi
-  rm -f "${RELAY_PID}"
-}
+relay_stop() { stop_pid "${RELAY_PID}" relay; }
 
 cmd_up() {
   mkdir -p "${STATE}"
@@ -256,6 +286,7 @@ EOF
 }
 
 cmd_down() {
+  cmd_down_tls
   relay_stop
   log "Stopping deps (compose project ${PROJECT})..."
   compose down >&2
@@ -263,8 +294,9 @@ cmd_down() {
 
 cmd_wipe() {
   cmd_down
-  log "Deleting ${STATE}/data, git-repos, seed.json (identities + relay key kept)"
-  rm -rf "${STATE}/data" "${STATE}/git-repos" "${SEED_FILE}"
+  log "Deleting ${STATE}/data, git-repos, seed.json (identities, relay key, TLS CA kept)"
+  rm -rf "${STATE}/data" "${STATE}/git-repos" "${SEED_FILE}" \
+    "${TLS_DIR}/git-repos" "${TLS_STATE_FILE}"
 }
 
 cmd_status() {
@@ -279,6 +311,15 @@ cmd_status() {
     echo "not running"
   fi
   [[ -f "${SEED_FILE}" ]] && { echo "== seed (${SEED_FILE})"; jq -c '.channels' "${SEED_FILE}"; }
+  echo "== TLS relay (${TLS_WS_URL})"
+  if pid_running "${TLS_RELAY_PID}"; then
+    echo "relay pid $(cat "${TLS_RELAY_PID}") running; proxy: $(pid_running "${TLS_PROXY_PID}" \
+      && echo "pid $(cat "${TLS_PROXY_PID}")" || echo NOT running); readiness over TLS: \
+$(tls_ready && echo ready || echo NOT ready)"
+    [[ -f "${TLS_STATE_FILE}" ]] && jq -c '{channels, ca_bundle}' "${TLS_STATE_FILE}"
+  else
+    echo "not running (scripts/test-relay.sh up-tls)"
+  fi
   return 0
 }
 
@@ -288,10 +329,12 @@ cmd_logs() {
 
 # ── seed + verify ────────────────────────────────────────────────────────────
 
-# Run the repo's own CLI (`buzz`, HTTP + NIP-98) as a named identity.
+# Run the repo's own CLI (`buzz`, HTTP + NIP-98) as a named identity, against
+# ${CLI_URL} (the plain relay unless the TLS commands switch it).
+CLI_URL="${HTTP_URL}"
 buzz_as() {
   local who="$1"; shift
-  BUZZ_RELAY_URL="${HTTP_URL}" BUZZ_PRIVATE_KEY="$(ident "${who}" sk_hex)" "${BIN}/buzz" "$@"
+  BUZZ_RELAY_URL="${CLI_URL}" BUZZ_PRIVATE_KEY="$(ident "${who}" sk_hex)" "${BIN}/buzz" "$@"
 }
 
 require_ready() {
@@ -467,6 +510,174 @@ cmd_verify() {
   [[ "${FAILED}" == 0 ]] && echo "All checks passed." || { echo "Some checks FAILED."; return 1; }
 }
 
+# ── TLS relay ────────────────────────────────────────────────────────────────
+
+SOCAT=""
+socat_bin() {
+  if [[ -z "${SOCAT}" ]]; then
+    if type -P socat >/dev/null 2>&1; then
+      SOCAT="$(type -P socat)"
+    else
+      SOCAT="$(nix build nixpkgs#socat --no-link --print-out-paths 2>/dev/null)/bin/socat"
+    fi
+    [[ -x "${SOCAT}" ]] || die "could not get socat (nix build nixpkgs#socat failed)"
+  fi
+  echo "${SOCAT}"
+}
+
+# Upstream buzz-acp's WebSocket client trusts only the bundled webpki roots,
+# so it could never trust the test CA. Building it with tokio-tungstenite's
+# native-roots feature adds the roots from SSL_CERT_FILE (the controller
+# passes that variable through to buzz-acp). No source change.
+build_acp() {
+  ensure_src
+  log "Building buzz-acp (with native TLS roots)..."
+  (cd "${SRC}" && nix shell nixpkgs#cmake nixpkgs#pkg-config nixpkgs#protobuf --command \
+    cargo build -q -p buzz-acp --features tokio-tungstenite/rustls-tls-native-roots) \
+    >>"${STATE}/build.log" 2>&1 || die "cargo build buzz-acp failed; see ${STATE}/build.log"
+}
+
+# A local CA and a localhost certificate it signs. Generated once.
+tls_certs() {
+  mkdir -p "${TLS_DIR}"
+  if [[ ! -f "${TLS_DIR}/server.pem" ]]; then
+    log "Generating test CA and localhost certificate -> ${TLS_DIR}"
+    (
+      umask 077
+      cd "${TLS_DIR}"
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+        -keyout ca.key -out ca.pem -days 3650 -subj "/CN=buzz-gpui test relay CA" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+      openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+        -keyout server.key -out server.csr -subj "/CN=localhost" 2>/dev/null
+      printf '%s\n' "basicConstraints=critical,CA:FALSE" \
+        "keyUsage=critical,digitalSignature" "extendedKeyUsage=serverAuth" \
+        "subjectAltName=DNS:localhost,IP:127.0.0.1" > server.ext
+      openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key \
+        -set_serial "0x$(openssl rand -hex 16)" -days 825 -extfile server.ext \
+        -out server.pem 2>/dev/null
+      rm -f server.csr server.ext
+      chmod 644 ca.pem server.pem
+    ) || die "certificate generation failed"
+  fi
+  # SSL_CERT_FILE replaces the system store (rustls-native-certs, OpenSSL),
+  # so the bundle carries the system roots too.
+  local system="${NIX_SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+  { [[ -f "${system}" ]] && cat "${system}"; cat "${TLS_CA}"; } > "${TLS_BUNDLE}"
+}
+
+tls_db() {
+  local exists
+  exists="$(docker exec buzz-gpui-test-postgres psql -U buzz -d buzz -tAc \
+    "SELECT 1 FROM pg_database WHERE datname = '${TLS_DB}'")"
+  if [[ -z "${exists}" ]]; then
+    log "Creating database ${TLS_DB}"
+    docker exec buzz-gpui-test-postgres createdb -U buzz "${TLS_DB}" >&2
+  fi
+}
+
+tls_relay_env() {
+  relay_env | grep -vE '^(DATABASE_URL|REDIS_URL|RELAY_URL|BUZZ_BIND_ADDR|BUZZ_HEALTH_PORT|BUZZ_METRICS_PORT|BUZZ_GIT_REPO_PATH)='
+  cat <<EOF
+DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:${PG_PORT}/${TLS_DB}
+REDIS_URL=${REDIS_URL}/1
+RELAY_URL=${TLS_WS_URL}
+BUZZ_BIND_ADDR=127.0.0.1:${TLS_BACKEND_PORT}
+BUZZ_HEALTH_PORT=${TLS_HEALTH_PORT}
+BUZZ_METRICS_PORT=${TLS_METRICS_PORT}
+BUZZ_GIT_REPO_PATH=${TLS_DIR}/git-repos
+BUZZ_ALLOW_NIP_OA_AUTH=true
+EOF
+}
+
+tls_ready() {
+  [[ "$(curl -s --cacert "${TLS_CA}" -o /dev/null -w '%{http_code}' \
+    "${TLS_HTTP_URL}/_readiness" || true)" == "200" ]]
+}
+
+tls_proxy_start() {
+  pid_running "${TLS_PROXY_PID}" && return 0
+  port_in_use "${TLS_PORT}" && die "port ${TLS_PORT} already in use by something else; refusing to start"
+  local socat; socat="$(socat_bin)"
+  log "Starting TLS proxy 127.0.0.1:${TLS_PORT} -> 127.0.0.1:${TLS_BACKEND_PORT} (log: ${TLS_PROXY_LOG})"
+  # Plain TCP relay after the handshake, so Host and WebSocket upgrades pass
+  # through untouched.
+  setsid nohup "${socat}" \
+    "OPENSSL-LISTEN:${TLS_PORT},bind=127.0.0.1,reuseaddr,fork,cert=${TLS_DIR}/server.pem,key=${TLS_DIR}/server.key,verify=0" \
+    "TCP:127.0.0.1:${TLS_BACKEND_PORT}" </dev/null >>"${TLS_PROXY_LOG}" 2>&1 &
+  echo $! > "${TLS_PROXY_PID}"
+}
+
+tls_relay_start() {
+  if pid_running "${TLS_RELAY_PID}"; then
+    log "TLS relay already running (pid $(cat "${TLS_RELAY_PID}"))"
+  else
+    for p in "${TLS_BACKEND_PORT}" "${TLS_HEALTH_PORT}" "${TLS_METRICS_PORT}"; do
+      port_in_use "${p}" && die "port ${p} already in use by something else; refusing to start"
+    done
+    mkdir -p "${TLS_DIR}/git-repos"
+    log "Starting TLS buzz-relay for ${TLS_WS_URL} (log: ${TLS_RELAY_LOG})"
+    local envs=()
+    mapfile -t envs < <(tls_relay_env)
+    setsid nohup env -C "${TLS_DIR}" "${envs[@]}" "${BIN}/buzz-relay" \
+      </dev/null >>"${TLS_RELAY_LOG}" 2>&1 &
+    echo $! > "${TLS_RELAY_PID}"
+  fi
+  for _ in $(seq 1 90); do
+    pid_running "${TLS_RELAY_PID}" || { tail -40 "${TLS_RELAY_LOG}" >&2; die "TLS relay exited during startup"; }
+    pid_running "${TLS_PROXY_PID}" || { tail -20 "${TLS_PROXY_LOG}" >&2; die "TLS proxy exited"; }
+    tls_ready && { log "TLS relay ready: ${TLS_WS_URL}"; return 0; }
+    sleep 1
+  done
+  die "TLS relay not ready after 90s; see ${TLS_RELAY_LOG}"
+}
+
+# alice owns the TLS community (RELAY_OWNER_PUBKEY); it gets an open
+# #general. Agents are admitted through their owner's NIP-OA attestation
+# (BUZZ_ALLOW_NIP_OA_AUTH), not as relay members.
+tls_seed() {
+  local general
+  CLI_URL="${TLS_HTTP_URL}"
+  general="$(SSL_CERT_FILE="${TLS_BUNDLE}" ensure_channel general stream open 'General chat for everyone')"
+  CLI_URL="${HTTP_URL}"
+  jq -n --arg ws "${TLS_WS_URL}" --arg http "${TLS_HTTP_URL}" --arg host "${TLS_HOST}" \
+    --arg ca "${TLS_CA}" --arg bundle "${TLS_BUNDLE}" \
+    --arg acp "${BIN}/buzz-acp" --arg cli "${BIN}/buzz" --arg general "${general}" \
+    '{relay_ws_url: $ws, relay_http_url: $http, community_host: $host,
+      ca_file: $ca, ca_bundle: $bundle, buzz_acp: $acp, buzz_cli: $cli,
+      channels: {general: $general}}' > "${TLS_STATE_FILE}"
+}
+
+cmd_up_tls() {
+  mkdir -p "${STATE}"
+  command -v jq >/dev/null || die "jq required"
+  command -v openssl >/dev/null || die "openssl required"
+  build
+  build_acp
+  ensure_identities
+  ensure_relay_env
+  deps_up
+  tls_certs
+  tls_db
+  log "Running migrations on ${TLS_DB}..."
+  with_env_of tls_relay_env "${BIN}/buzz-admin" migrate >&2
+  tls_proxy_start
+  tls_relay_start
+  tls_seed
+  cat <<EOF
+TLS relay:  ${TLS_WS_URL}  (HTTP ${TLS_HTTP_URL})
+CA:         ${TLS_CA}
+Trust:      SSL_CERT_FILE=${TLS_BUNDLE}
+State:      ${TLS_STATE_FILE}
+EOF
+}
+
+cmd_down_tls() {
+  stop_pid "${TLS_PROXY_PID}" "TLS proxy"
+  stop_pid "${TLS_RELAY_PID}" "TLS relay"
+}
+
 case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
@@ -477,5 +688,7 @@ case "${1:-}" in
   seed) shift; cmd_seed "$@" ;;
   verify) cmd_verify ;;
   build) build ;;
-  *) sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  up-tls) cmd_up_tls ;;
+  down-tls) cmd_down_tls ;;
+  *) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
