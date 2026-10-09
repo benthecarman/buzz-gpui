@@ -2,12 +2,14 @@
 
 pub mod event;
 pub mod http;
+pub mod live;
 pub mod origin;
 pub mod reader;
 pub mod socket;
 
 pub use event::{Verified, Verifier, kinds};
 pub use http::{HttpError, RelayHttp};
+pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
 pub use origin::RelayOrigin;
 pub use reader::{Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use socket::{
