@@ -14,10 +14,19 @@ Apache-2.0).
 ## Fonts
 
 `assets/fonts/inter/` holds static instances of Inter 4.1
-([rsms/inter](https://github.com/rsms/inter)), extracted unchanged from the
-release's `Inter.ttc` (as packaged by nixpkgs). Copyright 2016 The Inter
-Project Authors. Licensed under the SIL Open Font License 1.1; see
+([rsms/inter](https://github.com/rsms/inter)), extracted from the release's
+`Inter.ttc` (as packaged by nixpkgs). They are modified only by removing
+U+2600, U+2665, U+26A0 and U+2764 from their character maps, so those
+symbols draw as colour emoji. Copyright 2016 The Inter Project Authors.
+Licensed under the SIL Open Font License 1.1; see
 `assets/fonts/inter/OFL.txt`.
+
+`assets/fonts/buzz-color-emoji/BuzzColorEmoji.ttf` is Noto Color Emoji 2.051
+([googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji)),
+modified and renamed "Buzz Color Emoji": the family is renamed and U+006D maps
+to its space glyph (`crates/ui/src/fonts.rs` explains why). Copyright 2022
+Google Inc. Licensed under the SIL Open Font License 1.1; see
+`assets/fonts/buzz-color-emoji/OFL.txt`.
 
 `assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf` is JetBrains Mono 2.304
 ([JetBrains/JetBrainsMono](https://github.com/JetBrains/JetBrainsMono)),

@@ -455,6 +455,7 @@ impl Render for Workspace {
                 )
                 .children(profile)
                 .font_family("Inter")
+                .emoji_fallback()
                 .text_color(c.text_standard)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     let keys = &event.keystroke;

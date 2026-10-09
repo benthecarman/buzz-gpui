@@ -13,6 +13,13 @@ pub trait TypeStyled: Styled + Sized {
             .font_weight(role.weight())
     }
 
+    /// Draws emoji from the bundled colour font (see [`crate::fonts`]).
+    /// Set once near the root; children inherit it.
+    fn emoji_fallback(mut self) -> Self {
+        self.text_style().font_fallbacks = Some(crate::fonts::fallbacks());
+        self
+    }
+
     fn text_display(self) -> Self {
         self.text_role(TextRole::Display)
     }
