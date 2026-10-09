@@ -27,18 +27,7 @@ pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
     let mut previous: Option<&Arc<MessageRow>> = None;
     for row in rows {
         let new_day = previous.is_none_or(|p| !time::same_day(p.created_at, row.created_at));
-        let continues = !new_day
-            && previous.is_some_and(|p| {
-                p.author == row.author
-                    && row.created_at >= p.created_at
-                    && row.created_at - p.created_at <= 300
-                    && p.membership.is_none()
-                    && row.membership.is_none()
-                    && p.workflow_owner.is_none()
-                    && row.workflow_owner.is_none()
-                    && p.sent_from_thread.is_none()
-                    && row.sent_from_thread.is_none()
-            });
+        let continues = previous.is_some_and(|p| continues(p, row));
         items.push(Item {
             row: row.clone(),
             head: !continues,
@@ -47,6 +36,20 @@ pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
         previous = Some(row);
     }
     items
+}
+
+/// Whether `row` continues the group `previous` started.
+pub fn continues(previous: &MessageRow, row: &MessageRow) -> bool {
+    time::same_day(previous.created_at, row.created_at)
+        && previous.author == row.author
+        && row.created_at >= previous.created_at
+        && row.created_at - previous.created_at <= 300
+        && previous.membership.is_none()
+        && row.membership.is_none()
+        && previous.workflow_owner.is_none()
+        && row.workflow_owner.is_none()
+        && previous.sent_from_thread.is_none()
+        && row.sent_from_thread.is_none()
 }
 
 pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
@@ -63,6 +66,16 @@ pub struct Actions {
     pub on_retry: Option<Arc<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>>,
 }
 
+/// Where a row is drawn. Thread panels use a 32px gutter (ui.md §4.11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Timeline,
+    /// A thread root or top-level reply: 32px avatar.
+    Thread,
+    /// A nested reply: 24px avatar centred in the 32px gutter.
+    Nested,
+}
+
 pub fn render(
     item: &Item,
     viewer: &str,
@@ -70,7 +83,23 @@ pub fn render(
     actions: &Actions,
     cx: &App,
 ) -> AnyElement {
+    render_in(Layout::Timeline, item, viewer, profiles, actions, cx)
+}
+
+pub fn render_in(
+    layout: Layout,
+    item: &Item,
+    viewer: &str,
+    profiles: &Profiles,
+    actions: &Actions,
+    cx: &App,
+) -> AnyElement {
     let c = cx.colors().clone();
+    let (gutter, gap, avatar_size) = match layout {
+        Layout::Timeline => (40., 12., AvatarSize::Large),
+        Layout::Thread => (32., 8., AvatarSize::Default),
+        Layout::Nested => (32., 8., AvatarSize::Small),
+    };
     let row = &item.row;
     let author = row.author.to_hex();
     let profile = profiles.get(&author);
@@ -79,22 +108,7 @@ pub fn render(
 
     let mut container = div().flex().flex_col().w_full();
     if let Some(day) = &item.day {
-        container = container.child(
-            div()
-                .flex()
-                .items_center()
-                .my(px(12.))
-                .child(div().flex_1().h(px(1.)).bg(c.border_standard))
-                .child(
-                    div()
-                        .px(px(12.))
-                        .py(px(6.))
-                        .text_caption()
-                        .text_color(c.text_standard)
-                        .child(day.clone()),
-                )
-                .child(div().flex_1().h(px(1.)).bg(c.border_standard)),
-        );
+        container = container.child(day_divider(day.clone(), cx));
     }
 
     if let Some(change) = &row.membership {
@@ -117,7 +131,7 @@ pub fn render(
 
     let group = SharedString::from(format!("message-{}", row.id.to_hex()));
     let left = if item.head {
-        let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Large);
+        let mut avatar = Avatar::new(name.clone()).size(avatar_size);
         if agent {
             avatar = avatar.squircle();
         }
@@ -126,13 +140,15 @@ pub fn render(
         }
         div()
             .flex_none()
-            .w(px(40.))
+            .w(px(gutter))
+            .flex()
+            .justify_center()
             .child(avatar)
             .into_any_element()
     } else {
         div()
             .flex_none()
-            .w(px(40.))
+            .w(px(gutter))
             .flex()
             .justify_center()
             .text_caption()
@@ -191,7 +207,7 @@ pub fn render(
     if !row.reactions.is_empty() {
         body = body.child(reactions(row, viewer, actions, cx));
     }
-    if row.reply_count > 0 {
+    if row.reply_count > 0 && layout == Layout::Timeline {
         body = body.child(thread_summary(row, profiles, actions, cx));
     }
     if let Some(delivery) = &row.delivery
@@ -232,13 +248,32 @@ pub fn render(
                 .id(group.clone())
                 .group(group)
                 .flex()
-                .gap(px(12.))
+                .gap(px(gap))
                 .pt(if item.head { px(14.) } else { px(2.) })
                 .pb(px(2.))
                 .child(left)
                 .child(body),
         )
         .into_any_element()
+}
+
+/// The rule and date between rows of different days.
+pub fn day_divider(day: SharedString, cx: &App) -> impl IntoElement {
+    let c = cx.colors();
+    div()
+        .flex()
+        .items_center()
+        .my(px(12.))
+        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
+        .child(
+            div()
+                .px(px(12.))
+                .py(px(6.))
+                .text_caption()
+                .text_color(c.text_standard)
+                .child(day),
+        )
+        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
 }
 
 fn reactions(row: &Arc<MessageRow>, viewer: &str, actions: &Actions, cx: &App) -> impl IntoElement {
