@@ -13,7 +13,7 @@ use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::{CustomEmoji, EmojiSnapshot, Partition};
 use buzz_ui::{ActiveTheme, Icon, IconName, MaterialStyled, SearchField, Tooltip, TypeStyled};
 use emojis::{Emoji, Group, SkinTone, UnicodeVersion};
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,9 @@ impl Pick {
 }
 
 pub struct Picked(pub Pick);
+
+/// Escape in the picker: close it without a pick.
+pub struct Dismissed;
 
 // ---------------------------------------------------------------------------
 // Search
@@ -482,6 +485,7 @@ pub struct EmojiPicker {
 }
 
 impl EventEmitter<Picked> for EmojiPicker {}
+impl EventEmitter<Dismissed> for EmojiPicker {}
 
 impl EmojiPicker {
     pub fn new(community: Entity<Community>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -761,6 +765,10 @@ impl Render for EmojiPicker {
 
         div()
             .id("emoji-picker")
+            .capture_action(cx.listener(|_, _: &Escape, _, cx| {
+                cx.stop_propagation();
+                cx.emit(Dismissed);
+            }))
             .w(px(WIDTH))
             .flex()
             .flex_col()

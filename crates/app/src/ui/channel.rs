@@ -3,7 +3,7 @@
 
 use super::channel_menu::{ChannelActions, JoinNotice};
 use super::composer::{self, Composer, ComposerEvent, Submission};
-use super::emoji_picker::{self, EmojiPicker, Picked};
+use super::emoji_picker::{self, Dismissed, EmojiPicker, Picked};
 use super::markdown::Directory;
 use super::message::{self, Actions, Command, Hover, Interaction, Item, Popup, Rows};
 use crate::community::{ChannelModel, Community};
@@ -145,6 +145,15 @@ impl ChannelPage {
                 }
                 cx.notify();
             }),
+            cx.subscribe_in(
+                &reaction_picker,
+                window,
+                |this, _, _: &Dismissed, window, cx| {
+                    this.interaction.open = None;
+                    this.input.update(cx, |state, cx| state.focus(window, cx));
+                    cx.notify();
+                },
+            ),
         ];
         let weak = cx.entity().downgrade();
         let model_for_scroll = model.clone();

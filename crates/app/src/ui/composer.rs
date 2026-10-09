@@ -7,7 +7,7 @@
 //! reply or an edit) and reports back with [`Composer::sent`] or
 //! [`Composer::failed`].
 
-use super::emoji_picker::{self, Candidate, EmojiPicker, Picked};
+use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
 use super::media;
 use super::message::{self, channel_icon};
 use crate::community::{AppState, Community};
@@ -129,6 +129,11 @@ impl Composer {
                 cx.subscribe_in(&picker, window, |this, _, Picked(pick), window, cx| {
                     this.picker_open = false;
                     this.insert_text(&pick.text(), window, cx);
+                }),
+                cx.subscribe_in(&picker, window, |this, _, _: &Dismissed, window, cx| {
+                    this.picker_open = false;
+                    this.focus(window, cx);
+                    cx.notify();
                 }),
                 cx.observe(&community, |_, _, cx| cx.notify()),
             ];
