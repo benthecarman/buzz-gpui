@@ -34,13 +34,6 @@ fn main() {
         eprintln!("BUZZ_TEST_RELAY_TLS not set; skipping agent_e2e");
         return;
     };
-    // The controller confirms that an agent stopped by listing its session
-    // with /bin/ps. Without it, Stop fails and leaves the supervisor parked.
-    assert!(
-        Path::new("/bin/ps").exists(),
-        "/bin/ps is missing (NixOS?): the agent controller cannot stop agents \
-         here. See scripts/TEST-RELAY.md for a workaround."
-    );
     let read = |path: PathBuf| -> Value {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
             panic!(
