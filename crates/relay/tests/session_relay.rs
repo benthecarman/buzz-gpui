@@ -1,7 +1,7 @@
 //! A whole community session against the local test relay. Skipped unless
 //! `BUZZ_TEST_RELAY` points at `.test-relay`.
 
-use buzz_identity::Identity;
+use buzz_identity::{Identity, Purpose};
 use buzz_relay_client::*;
 use serde_json::Value;
 use std::sync::Arc;
@@ -169,4 +169,171 @@ async fn sends_reacts_and_deletes_through_the_outbox() {
         t.rows.iter().all(|r| r.id != id)
     })
     .await;
+}
+
+fn identity(identities: &Value, name: &str) -> Arc<Identity> {
+    Arc::new(Identity::from_nsec(identities["identities"][name]["nsec"].as_str().unwrap()).unwrap())
+}
+
+/// Posts a top-level message as `name` over HTTP.
+async fn post(origin: &RelayOrigin, identities: &Value, name: &str, channel: &str, content: &str) {
+    let author = identity(identities, name);
+    let unsigned = author
+        .template(
+            Purpose::Content,
+            9,
+            nostr::prelude::Timestamp::now().as_secs(),
+            vec![vec!["h".into(), channel.to_string()]],
+            content.to_string(),
+        )
+        .unwrap();
+    let event = author.sign(Purpose::Content, unsigned).unwrap();
+    RelayHttp::new(origin.clone(), author)
+        .post("/events", serde_json::to_string(&event).unwrap())
+        .await
+        .unwrap();
+}
+
+fn open_as_alice(origin: &RelayOrigin, identities: &Value, store: Store) -> Session {
+    Session::open(
+        &tokio::runtime::Handle::current(),
+        origin.clone(),
+        identity(identities, "alice"),
+        store,
+    )
+}
+
+/// Read-state frontiers are whole seconds and a read covers messages in
+/// its own second, so a message meant to be new waits for the next one.
+async fn next_second() {
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+}
+
+// Read state syncs between alice's sessions, so the tests below use
+// channels no other test reads: #general here, the DM below.
+#[tokio::test(flavor = "multi_thread")]
+async fn marking_a_channel_read_persists_and_syncs() {
+    let Some((origin, identities, seed)) = fixture() else {
+        return;
+    };
+    let general = seed["channels"]["general"].as_str().unwrap().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buzz.sqlite3");
+
+    let session = open_as_alice(&origin, &identities, Store::open(&path).unwrap());
+    let mut snapshot = session.snapshot();
+    until(&mut snapshot, "the unread sample", |s| {
+        s.roster == RosterStatus::Ready && s.unread.observed
+    })
+    .await;
+    session.mark_channel_read(&general).await.unwrap();
+    until(&mut snapshot, "#general read", |s| {
+        !s.unread.channel(&general).unread
+    })
+    .await;
+
+    next_second().await;
+    let content = format!("unread test {}", std::process::id());
+    post(&origin, &identities, "bob", &general, &content).await;
+    let unread = until(&mut snapshot, "#general unread", |s| {
+        s.unread.channel(&general).unread
+    })
+    .await;
+    let row = unread.unread.channel(&general);
+    assert!(row.count >= 1 && row.bold, "{row:?}");
+
+    session.mark_channel_read(&general).await.unwrap();
+    until(&mut snapshot, "#general read again", |s| {
+        !s.unread.channel(&general).unread
+    })
+    .await;
+    // The read reaches the relay after the publish debounce.
+    until(&mut snapshot, "the read published", |s| {
+        s.unread
+            .sync
+            .as_ref()
+            .is_some_and(|sync| sync.status == ReadSyncStatus::Reconciled)
+    })
+    .await;
+    drop(session);
+
+    // The same device remembers it from its store...
+    let session = open_as_alice(&origin, &identities, Store::open(&path).unwrap());
+    let mut snapshot = session.snapshot();
+    let reopened = until(&mut snapshot, "the reopened sample", |s| {
+        s.roster == RosterStatus::Ready && s.unread.observed
+    })
+    .await;
+    assert!(
+        !reopened.unread.channel(&general).unread,
+        "{:?}",
+        reopened.unread
+    );
+    drop(session);
+
+    // ...and a new device learns it from the relay.
+    let session = open_as_alice(&origin, &identities, Store::in_memory().unwrap());
+    let mut snapshot = session.snapshot();
+    let synced = until(&mut snapshot, "a new device's sample", |s| {
+        s.roster == RosterStatus::Ready && s.unread.observed
+    })
+    .await;
+    assert!(
+        !synced.unread.channel(&general).unread,
+        "{:?}",
+        synced.unread
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_arriving_while_reading_stay_read() {
+    let Some((origin, identities, seed)) = fixture() else {
+        return;
+    };
+    let dm = seed["channels"]["dm-alice-bob"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session = open_as_alice(&origin, &identities, Store::in_memory().unwrap());
+    let mut snapshot = session.snapshot();
+    until(&mut snapshot, "the unread sample", |s| {
+        s.roster == RosterStatus::Ready && s.unread.observed && s.live
+    })
+    .await;
+    session.mark_channel_read(&dm).await.unwrap();
+
+    let view = session.open_channel(&dm);
+    session.select(Some(dm.clone()));
+    let mut timeline = view.snapshot.clone();
+    until(&mut timeline, "the DM", |t| {
+        t.status == TimelineStatus::Ready
+    })
+    .await;
+
+    next_second().await;
+    let content = format!("reading test {}", std::process::id());
+    post(&origin, &identities, "bob", &dm, &content).await;
+    until(&mut timeline, "bob's message", |t| {
+        t.rows.iter().any(|r| r.content == content)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(READING_DWELL_MS + 700)).await;
+    let reading = snapshot.borrow().unread.clone();
+    assert!(
+        !reading.channel(&dm).unread,
+        "a message that arrived while reading is unread: {reading:?}"
+    );
+
+    // Leaving ends the reading: the next message counts, as a direct one.
+    session.select(None);
+    drop(view);
+    next_second().await;
+    let content = format!("after reading {}", std::process::id());
+    post(&origin, &identities, "bob", &dm, &content).await;
+    let left = until(&mut snapshot, "unread after leaving", |s| {
+        s.unread.channel(&dm).unread
+    })
+    .await;
+    let row = left.unread.channel(&dm);
+    assert!(row.priority && left.unread.direct >= 1, "{:?}", left.unread);
 }
