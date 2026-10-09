@@ -7,7 +7,8 @@ use crate::{
 };
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, SharedString, Styled, Window, div, prelude::FluentBuilder, rems,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    prelude::FluentBuilder, rems,
 };
 use std::rc::Rc;
 
@@ -43,13 +44,16 @@ impl RenderOnce for Scrim {
 }
 
 /// Dialog widths.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum DialogSize {
     /// `min(496px, 100vw - 32px)`.
     #[default]
     Default,
     /// `min(896px, 100vw - 32px)`.
     Wide,
+    /// `min(<px>, 100vw - 32px)`, for feature dialogs with their own width
+    /// (the agent dialogs use 860 and 640).
+    Px(f32),
 }
 
 fn popup(width: f32, cx: &App) -> gpui_kit::Div {
@@ -81,6 +85,7 @@ pub struct Dialog {
     footer_leading: Vec<AnyElement>,
     compact_header_gap: bool,
     compact_footer_gap: bool,
+    heading_title: bool,
     on_close: Option<ClickHandler>,
 }
 
@@ -96,8 +101,16 @@ impl Dialog {
             footer_leading: Vec::new(),
             compact_header_gap: false,
             compact_footer_gap: false,
+            heading_title: false,
             on_close: None,
         }
+    }
+
+    /// Title in `text-heading` (24px) instead of `text-label`, as the
+    /// agent dialogs use.
+    pub fn heading_title(mut self) -> Self {
+        self.heading_title = true;
+        self
     }
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
@@ -148,15 +161,20 @@ impl ParentElement for Dialog {
 }
 
 impl RenderOnce for Dialog {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let c = cx.colors();
         let width = match self.size {
             DialogSize::Default => 496.,
             DialogSize::Wide => 896.,
+            DialogSize::Px(px) => px,
         };
         let has_footer = !self.footer.is_empty() || !self.footer_leading.is_empty();
+        let heading = self.heading_title;
+        // `max-height: 100dvh - 48px`; the body scrolls.
+        let max_height = window.viewport_size().height - gpui_kit::px(48.);
         popup(width, cx)
             .id(self.id.clone())
+            .max_h(max_height)
             .child(
                 div()
                     .flex()
@@ -169,7 +187,17 @@ impl RenderOnce for Dialog {
                             .flex_col()
                             .gap(rems(0.5))
                             .min_w_0()
-                            .child(div().text_label().child(self.title))
+                            .child(
+                                div()
+                                    .map(|this| {
+                                        if heading {
+                                            this.text_heading()
+                                        } else {
+                                            this.text_label()
+                                        }
+                                    })
+                                    .child(self.title),
+                            )
                             .when_some(self.description, |this, text| {
                                 this.child(
                                     div().text_body_sm().text_color(c.text_subtle).child(text),
@@ -187,8 +215,12 @@ impl RenderOnce for Dialog {
             )
             .child(
                 div()
+                    .id("dialog-body")
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .pt(rems(if self.compact_header_gap { 0.75 } else { 1.5 }))
                     .pb(rems(if !has_footer {
                         0.
