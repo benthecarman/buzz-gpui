@@ -25,6 +25,16 @@ const JUMP_DISTANCE: Pixels = px(80.);
 /// `useToastNotification`'s timeout.
 const TOAST_DURATION: Duration = Duration::from_secs(4);
 
+/// Whether [`ChannelPage::reveal`] found the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reveal {
+    /// The first page has not arrived yet.
+    Loading,
+    Shown,
+    /// Not a top-level message in the loaded window.
+    Absent,
+}
+
 /// Asks the workspace to open a thread panel.
 pub type OpenThread = Arc<dyn Fn(Arc<MessageRow>, &mut Window, &mut App)>;
 
@@ -53,6 +63,8 @@ pub struct ChannelPage {
     unseen: usize,
     /// The reader is at least [`JUMP_DISTANCE`] from the bottom.
     away: bool,
+    /// A message just revealed by navigation, tinted for a moment.
+    highlight: Option<EventId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -132,6 +144,7 @@ impl ChannelPage {
             viewing: None,
             unseen: 0,
             away: false,
+            highlight: None,
             _subscriptions: subscriptions,
         };
         page.sync_items(cx);
@@ -144,6 +157,45 @@ impl ChannelPage {
 
     pub fn composer(&self) -> Entity<TextareaState> {
         self.composer.clone()
+    }
+
+    /// Scrolls a top-level message into view and tints it briefly. A reply,
+    /// or a message outside the loaded window, is not revealed here; there
+    /// is no "around message" query (relay.md §5c.5).
+    pub fn reveal(&mut self, id: EventId, cx: &mut Context<Self>) -> Reveal {
+        let index = self
+            .items
+            .iter()
+            .position(|item| item.row.id == id && item.row.thread_root_id.is_none());
+        let Some(index) = index else {
+            // A cached window may be missing what the relay now has.
+            let snapshot = &self.model.read(cx).snapshot;
+            return match snapshot.status {
+                TimelineStatus::Loading => Reveal::Loading,
+                TimelineStatus::Ready if snapshot.stale => Reveal::Loading,
+                _ => Reveal::Absent,
+            };
+        };
+        // List row 0 is the edge.
+        self.list.scroll_to(ListOffset {
+            item_ix: index + 1,
+            offset_in_item: px(0.),
+        });
+        self.highlight = Some(id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(super::navigation::HIGHLIGHT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.highlight == Some(id) {
+                    this.highlight = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+        Reveal::Shown
     }
 
     /// Rebuilds the rows, telling the list exactly what was added at either
@@ -725,6 +777,7 @@ impl Render for ChannelPage {
         } else {
             let model = self.model.clone();
             let edge_snapshot = snapshot.clone();
+            let highlight = self.highlight;
             div()
                 .relative()
                 .flex_1()
@@ -740,10 +793,16 @@ impl Render for ChannelPage {
                                 .into_any_element();
                         }
                         match items.get(index - 1) {
-                            Some(item) => div()
-                                .px(px(24.))
-                                .child(message::render(item, &rows, cx))
-                                .into_any_element(),
+                            Some(item) => {
+                                let row = message::render(item, &rows, cx);
+                                div()
+                                    .px(px(24.))
+                                    .child(match highlight == Some(item.row.id) {
+                                        true => super::navigation::highlighted(row, cx),
+                                        false => row,
+                                    })
+                                    .into_any_element()
+                            }
                             None => div().into_any_element(),
                         }
                     })

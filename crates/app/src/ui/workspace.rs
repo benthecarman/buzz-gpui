@@ -2,18 +2,22 @@
 //! sidebar and the current page (ui.md §2).
 
 use super::agents::AgentsPage;
-use super::channel::ChannelPage;
+use super::channel::{ChannelPage, Reveal};
+use super::navigation::{History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
+use super::profile_card::{self, ProfileCard};
 use super::sidebar::{self, Page, SidebarProps};
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
-use buzz_relay_client::ChannelSummary;
+use crate::deep_links::{self, Link};
+use buzz_relay_client::{ChannelSummary, ChannelType, RelayOrigin, RosterStatus};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonShape, IconButtonSize,
     IconName, MaterialStyled, ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
 };
 use gpui_kit::*;
 use nostr::prelude::EventId;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct Workspace {
@@ -25,6 +29,16 @@ pub struct Workspace {
     agents: Option<Entity<AgentsPage>>,
     onboarding: Option<(Step, Entity<Onboarding>)>,
     _community_observer: Option<Subscription>,
+    /// Places visited, for Back and Forward.
+    history: History,
+    /// A place waiting for its community's channel list.
+    pending: Option<Target>,
+    /// The thread panel reveals a message rather than showing a thread.
+    thread_exact: bool,
+    /// Waits for the channel's first page to reveal a message in it.
+    _revealing: Option<Subscription>,
+    /// The person whose card a mention opened, and where.
+    profile: Option<(String, Point<Pixels>)>,
 }
 
 impl Workspace {
@@ -40,6 +54,11 @@ impl Workspace {
             agents: None,
             onboarding: None,
             _community_observer: None,
+            history: History::default(),
+            pending: None,
+            thread_exact: false,
+            _revealing: None,
+            profile: None,
         };
         workspace.sync(window, cx);
         workspace
@@ -76,6 +95,9 @@ impl Workspace {
     /// Reopens the channel last selected in this community once it is
     /// known to the session.
     fn restore_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.apply_pending(window, cx) {
+            return;
+        }
         if self.channel.is_some() || self.page != Page::Messages {
             return;
         }
@@ -97,7 +119,18 @@ impl Workspace {
         }
     }
 
-    fn select_channel(
+    /// Opens a channel and records the visit.
+    pub fn select_channel(
+        &mut self,
+        channel: &ChannelSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_channel(channel, window, cx);
+        self.record(cx);
+    }
+
+    fn show_channel(
         &mut self,
         channel: &ChannelSummary,
         window: &mut Window,
@@ -117,6 +150,7 @@ impl Workspace {
         };
         community.read(cx).remember_channel(&channel.id, cx);
         self.thread = None;
+        self._revealing = None;
         let weak = cx.entity().downgrade();
         let open_thread: super::channel::OpenThread = Arc::new(move |row, window, cx| {
             let _ = weak.update(cx, |this, cx| this.open_thread(row.id, window, cx));
@@ -132,12 +166,26 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_thread(&mut self, root: EventId, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens a thread beside the channel and records the visit.
+    pub fn open_thread(&mut self, root: EventId, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_thread(root, false, window, cx);
+        self.record(cx);
+    }
+
+    /// With `exact`, `id` is any message, revealed in its thread.
+    fn show_thread(
+        &mut self,
+        id: EventId,
+        exact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(community), Some(channel)) = (self.community.clone(), &self.channel) else {
             return;
         };
         if let Some(thread) = &self.thread
-            && thread.read(cx).root_id() == root
+            && thread.read(cx).root_id() == id
+            && self.thread_exact == exact
         {
             ThreadPanel::focus(thread, window, cx);
             return;
@@ -146,21 +194,38 @@ impl Workspace {
         let weak = cx.entity().downgrade();
         let on_close: thread::OnClose = Arc::new(move |window, cx| {
             let _ = weak.update(cx, |this, cx| {
-                this.thread = None;
-                if let Some(channel) = &this.channel {
-                    let composer = channel.read(cx).composer();
-                    composer.update(cx, |state, cx| state.focus(window, cx));
-                }
-                cx.notify();
+                this.close_thread(window, cx);
+                this.record(cx);
             });
         });
-        let panel = cx.new(|cx| ThreadPanel::new(community, channel, root, on_close, window, cx));
+        let panel = cx.new(|cx| match exact {
+            true => ThreadPanel::exact(community, channel, id, on_close, window, cx),
+            false => ThreadPanel::new(community, channel, id, on_close, window, cx),
+        });
         ThreadPanel::focus(&panel, window, cx);
         self.thread = Some(panel);
+        self.thread_exact = exact;
         cx.notify();
     }
 
-    fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
+    fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.take().is_none() {
+            return;
+        }
+        if let Some(channel) = &self.channel {
+            let composer = channel.read(cx).composer();
+            composer.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Shows a page and records the visit.
+    pub fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.show_page(page, cx);
+        self.record(cx);
+    }
+
+    fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         if page == Page::Agents && self.agents.is_none() {
             self.agents = Some(cx.new(AgentsPage::new));
@@ -211,8 +276,20 @@ impl Workspace {
                             cx.notify();
                         }),
                     ))
-                    .child(header_button("back", IconName::ArrowLeft).disabled(true))
-                    .child(header_button("forward", IconName::ArrowRight).disabled(true)),
+                    .child(
+                        header_button("back", IconName::ArrowLeft)
+                            .tooltip("Go back")
+                            .disabled(!self.history.can_go_back())
+                            .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
+                    )
+                    .child(
+                        header_button("forward", IconName::ArrowRight)
+                            .tooltip("Go forward")
+                            .disabled(!self.history.can_go_forward())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.go_forward(window, cx)),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -280,7 +357,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding {
             onboarding.clone().into_any_element()
@@ -333,11 +410,21 @@ impl Render for Workspace {
                     cx,
                 )
             });
+        let profile = self.profile_card(window, cx);
         ShellBackground::new().child(
             div()
                 .flex()
                 .flex_col()
                 .size_full()
+                .on_mouse_down(
+                    MouseButton::Navigate(NavigationDirection::Back),
+                    cx.listener(|this, _, window, cx| this.go_back(window, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Navigate(NavigationDirection::Forward),
+                    cx.listener(|this, _, window, cx| this.go_forward(window, cx)),
+                )
+                .children(profile)
                 .font_family("Inter")
                 .text_color(c.text_standard)
                 .child(self.header(cx))
@@ -354,6 +441,309 @@ impl Render for Workspace {
                         ),
                     ),
                 ),
+        )
+    }
+}
+
+// Navigation: history, links and requests from outside the window.
+impl Workspace {
+    /// Where the window is now, as history records it.
+    fn here(&self, cx: &App) -> Option<Target> {
+        if self.onboarding.is_some() {
+            return None;
+        }
+        let community = self
+            .community
+            .as_ref()
+            .map(|community| community.read(cx).origin.to_string());
+        let place = match (self.page, &self.channel) {
+            (Page::Messages, Some(channel)) => {
+                let channel = channel.read(cx).channel_id().to_string();
+                let thread = self.thread.as_ref().map(|thread| thread.read(cx).root_id());
+                Place::Conversation {
+                    channel,
+                    message: thread,
+                    thread: thread.filter(|_| !self.thread_exact),
+                }
+            }
+            (page, _) => Place::Page(page),
+        };
+        Some(Target { community, place })
+    }
+
+    /// Records the place the user just went to.
+    fn record(&mut self, cx: &mut Context<Self>) {
+        if let Some(here) = self.here(cx) {
+            self.history.push(here);
+        }
+        cx.notify();
+    }
+
+    /// Goes to `target` as a new visit.
+    pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.history.push(target.clone());
+        self.apply(target, window, cx);
+    }
+
+    pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.history.back() {
+            self.apply(target, window, cx);
+        }
+    }
+
+    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.history.forward() {
+            self.apply(target, window, cx);
+        }
+    }
+
+    /// The Messages page, on the channel last open there.
+    pub fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_page(Page::Messages, cx);
+        if self.channel.is_none() {
+            self.restore_selection(window, cx);
+        }
+        self.record(cx);
+    }
+
+    /// Shows `target` without recording it.
+    fn apply(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending = None;
+        self._revealing = None;
+        self.profile = None;
+        if let Some(origin) = &target.community {
+            let state = cx.global::<AppState>();
+            let index = state
+                .communities
+                .iter()
+                .position(|community| community.read(cx).origin.to_string() == *origin);
+            let Some(index) = index else {
+                tracing::warn!(%origin, "that community is no longer saved");
+                cx.notify();
+                return;
+            };
+            if state.selected != Some(index) {
+                AppState::select(index, cx);
+                self.sync(window, cx);
+            }
+        }
+        match target.place {
+            Place::Page(page) => {
+                self.show_page(page, cx);
+                if page == Page::Messages && self.channel.is_none() {
+                    self.restore_selection(window, cx);
+                }
+            }
+            Place::Conversation {
+                ref channel,
+                message,
+                thread,
+            } => {
+                let Some(community) = &self.community else {
+                    return;
+                };
+                let snapshot = community.read(cx).snapshot.clone();
+                let Some(summary) = snapshot.channels.iter().find(|c| c.id == *channel) else {
+                    // A link can arrive before the channel list does.
+                    if snapshot.roster == RosterStatus::Ready {
+                        tracing::warn!(%channel, "that channel is not available here");
+                    } else {
+                        self.pending = Some(target.clone());
+                    }
+                    cx.notify();
+                    return;
+                };
+                self.show_channel(summary, window, cx);
+                match (message, thread) {
+                    (Some(message), Some(thread)) if message == thread => {
+                        self.show_thread(message, false, window, cx)
+                    }
+                    (Some(message), _) => self.reveal(message, window, cx),
+                    (None, _) => self.close_thread(window, cx),
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Applies a place that was waiting for its channel list. True while
+    /// it still waits or once it opened, so the remembered channel does
+    /// not replace it.
+    fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.pending.clone() else {
+            return false;
+        };
+        let Some(community) = &self.community else {
+            return false;
+        };
+        let community = community.read(cx);
+        // The user moved on to another community.
+        if target.community.as_deref() != Some(&community.origin.to_string()) {
+            self.pending = None;
+            return false;
+        }
+        let snapshot = community.snapshot.clone();
+        let Place::Conversation { channel, .. } = &target.place else {
+            return false;
+        };
+        let known = snapshot.channels.iter().any(|c| c.id == *channel);
+        if !known && snapshot.roster != RosterStatus::Ready {
+            return true;
+        }
+        // Either opens it or gives up on it.
+        self.apply(target, window, cx);
+        known
+    }
+
+    /// Reveals a message in the open channel: in the timeline when it is a
+    /// loaded top-level message, else in the thread panel in exact mode
+    /// (relay.md §5c.5).
+    fn reveal(&mut self, message: EventId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.channel.clone() else {
+            return;
+        };
+        let outcome = page.update(cx, |page, cx| page.reveal(message, cx));
+        self.revealed(outcome, message, window, cx);
+        if outcome == Reveal::Loading {
+            self._revealing = Some(cx.observe_in(&page, window, move |this, page, window, cx| {
+                let outcome = page.update(cx, |page, cx| page.reveal(message, cx));
+                this.revealed(outcome, message, window, cx);
+            }));
+        }
+    }
+
+    fn revealed(
+        &mut self,
+        outcome: Reveal,
+        message: EventId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            Reveal::Loading => return,
+            Reveal::Shown => self.close_thread(window, cx),
+            Reveal::Absent => self.show_thread(message, true, window, cx),
+        }
+        self._revealing = None;
+    }
+
+    /// A `buzz://` link: conversations bind to the selected community;
+    /// invitations add theirs. Web links go to the browser.
+    pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match deep_links::parse(url) {
+            Some(Link::Conversation {
+                channel,
+                message,
+                thread,
+            }) => {
+                let Some(community) = &self.community else {
+                    tracing::warn!("select a community before opening a Buzz link");
+                    return;
+                };
+                let community = Some(community.read(cx).origin.to_string());
+                let target = Target {
+                    community,
+                    place: Place::Conversation {
+                        channel,
+                        message,
+                        thread,
+                    },
+                };
+                self.navigate(target, window, cx);
+            }
+            Some(Link::Join { relay, .. }) => self.join(&relay, cx),
+            None if url.starts_with("https://") || url.starts_with("http://") => cx.open_url(url),
+            None => tracing::warn!("ignored a link this app cannot open"),
+        }
+    }
+
+    /// Adds an invitation's community. There is no invite claim flow yet,
+    /// so the code goes unused: the relay admits only members it already
+    /// knows.
+    fn join(&mut self, relay: &RelayOrigin, cx: &mut Context<Self>) {
+        tracing::info!(%relay, "adding the community from an invitation");
+        if let Err(error) = AppState::add_community(&relay.to_string(), cx) {
+            tracing::warn!(%error, "could not add the invited community");
+        }
+    }
+
+    /// Something from outside the window, which is already in front.
+    pub fn handle(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
+        match request {
+            Request::Url(url) => self.open_url(&url, window, cx),
+            Request::Open(target) => self.navigate(target, window, cx),
+        }
+    }
+
+    pub fn show_profile(
+        &mut self,
+        pubkey: String,
+        at: Point<Pixels>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile = Some((pubkey, at));
+        cx.notify();
+    }
+
+    /// The card a mention opened, kept inside the window.
+    fn profile_card(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pubkey, at) = self.profile.clone()?;
+        let community = self.community.as_ref()?.read(cx);
+        let snapshot = community.snapshot.clone();
+        let viewer = community.session.viewer().to_string();
+        let media = community.session.media().clone();
+        let origin = community.origin.to_string();
+        // The DM with just this person, or notes to self.
+        let dm = snapshot
+            .channels
+            .iter()
+            .find(|channel| {
+                channel.channel_type == Some(ChannelType::Dm)
+                    && match channel.participants.as_deref() {
+                        Some([]) => pubkey == viewer,
+                        Some([other]) => *other == pubkey,
+                        _ => false,
+                    }
+            })
+            .map(|channel| channel.id.clone());
+        let weak = cx.entity().downgrade();
+        let on_message = dm.map(|dm| -> profile_card::OnMessage {
+            Rc::new(move |window, cx| {
+                let target = Target::channel(Some(origin.clone()), dm.clone());
+                let _ = weak.update(cx, |this, cx| this.navigate(target, window, cx));
+            })
+        });
+        let card = ProfileCard {
+            pubkey: &pubkey,
+            profile: snapshot.profiles.get(&pubkey).map(|p| &**p),
+            media: &media,
+            on_message,
+        }
+        .render(cx);
+        let viewport = window.viewport_size();
+        let x =
+            at.x.min(viewport.width - profile_card::WIDTH - px(8.))
+                .max(px(8.));
+        Some(
+            deferred(
+                anchored()
+                    .position_mode(AnchoredPositionMode::Window)
+                    .position(point(x, at.y + px(8.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            .id("profile-card")
+                            .occlude()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.profile = None;
+                                cx.notify();
+                            }))
+                            .child(card),
+                    ),
+            )
+            .with_priority(2)
+            .into_any_element(),
         )
     }
 }

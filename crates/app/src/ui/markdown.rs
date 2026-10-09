@@ -15,6 +15,8 @@
 //! (`skipHtml`). Bodies over the size or depth limits render as plain text.
 
 use super::media;
+use super::navigation;
+use crate::deep_links::{self, Link};
 use buzz_relay_client::fold::{CustomEmoji, MessageRow, message_markdown};
 use buzz_relay_client::{ChannelSummary, ChannelType, Media, Profiles};
 use buzz_ui::{ActiveTheme, Icon, IconName, TypeStyled, tokens::font};
@@ -1112,7 +1114,13 @@ impl Objects {
                 (IconName::At, 0.)
             };
             return Some(
-                reference(format!("mention-{key}"), Some(icon), gap, name).into_any_element(),
+                reference(format!("mention-{key}"), Some(icon), gap, name)
+                    .cursor_pointer()
+                    .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
+                        navigation::show_profile(key.clone(), event.position(), window, cx)
+                    })
+                    .into_any_element(),
             );
         }
         if let Some(link) = buzz_relay_client::parse_buzz_link(url) {
@@ -1135,7 +1143,28 @@ impl Objects {
                 None if !label.is_empty() && label != url => label.to_string(),
                 None => "Private channel".to_string(),
             };
-            return Some(reference(format!("ref-{url}"), Some(icon), 3., text).into_any_element());
+            let target = url.to_string();
+            return Some(
+                reference(format!("ref-{url}"), Some(icon), 3., text)
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| navigation::open_url(&target, window, cx))
+                    .into_any_element(),
+            );
+        }
+        if let Some(Link::Join { relay, .. }) = deep_links::parse(url) {
+            let target = url.to_string();
+            let host = relay.websocket().split("://").nth(1).unwrap_or_default();
+            let text = if label.is_empty() || label == url {
+                format!("Join {host}")
+            } else {
+                label.to_string()
+            };
+            return Some(
+                reference(format!("join-{url}"), Some(IconName::Globe), 3., text)
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| navigation::open_url(&target, window, cx))
+                    .into_any_element(),
+            );
         }
         let safe = url::Url::parse(url).ok().filter(|parsed| {
             matches!(parsed.scheme(), "http" | "https")

@@ -8,7 +8,7 @@ use buzz_ui::{
 use gpui_kit::*;
 use std::sync::Arc;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Messages,
     Agents,

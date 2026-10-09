@@ -8,7 +8,7 @@ use crate::mirror::mirror;
 use buzz_relay_client::fold::{MessageRow, ReplyTree};
 use buzz_relay_client::session::ThreadView;
 use buzz_relay_client::threads::{Direction, ReadKind};
-use buzz_relay_client::{Profiles, ThreadSnapshot, ThreadStatus};
+use buzz_relay_client::{Profiles, TargetStatus, ThreadSnapshot, ThreadStatus};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconButton, IconButtonSize, IconName,
     PanelHeader, Tab, TabVariant, Tabs, TypeStyled,
@@ -50,6 +50,10 @@ pub struct ThreadPanel {
     sending: bool,
     error: Option<SharedString>,
     on_close: OnClose,
+    /// Exact mode: the message to reveal once its thread has loaded.
+    revealing: Option<EventId>,
+    /// The revealed message, tinted for a moment.
+    highlight: Option<EventId>,
     _watch: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -63,10 +67,34 @@ impl ThreadPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::open(community, channel, root_id, false, on_close, window, cx)
+    }
+
+    /// Reveals `message`, any message, in its thread (relay.md §5c.5).
+    pub fn exact(
+        community: Entity<Community>,
+        channel: String,
+        message: EventId,
+        on_close: OnClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::open(community, channel, message, true, on_close, window, cx)
+    }
+
+    fn open(
+        community: Entity<Community>,
+        channel: String,
+        root_id: EventId,
+        exact: bool,
+        on_close: OnClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let view = community
             .read(cx)
             .session
-            .open_thread(&channel, root_id, false);
+            .open_thread(&channel, root_id, exact);
         let snapshot = view.snapshot.borrow().clone();
         let watch = mirror(view.snapshot.clone(), cx, |this: &mut Self, value| {
             this.snapshot = value;
@@ -79,7 +107,7 @@ impl ThreadPanel {
                 .submit_on_enter(true)
                 .auto_grow(1, 9)
         });
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe(&community, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &composer,
@@ -91,6 +119,9 @@ impl ThreadPanel {
                 },
             ),
         ];
+        if exact {
+            subscriptions.push(cx.observe_self(|this, cx| this.reveal_target(cx)));
+        }
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
             let Some(this) = weak.upgrade() else {
@@ -122,6 +153,8 @@ impl ThreadPanel {
             sending: false,
             error: None,
             on_close,
+            revealing: exact.then_some(root_id),
+            highlight: None,
             _watch: watch,
             _subscriptions: subscriptions,
         };
@@ -158,6 +191,46 @@ impl ThreadPanel {
         self.list
             .splice(prefix..old_end, next.len() - suffix - prefix);
         self.entries = next;
+    }
+
+    /// Once the thread around the selected message has loaded, opens the
+    /// branches above it, scrolls to it and tints it.
+    fn reveal_target(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.revealing else {
+            return;
+        };
+        let snapshot = &self.snapshot;
+        if snapshot.target_status == Some(TargetStatus::Loading)
+            || matches!(snapshot.status, ThreadStatus::Idle | ThreadStatus::Loading)
+        {
+            return;
+        }
+        self.revealing = None;
+        if snapshot.target_status != Some(TargetStatus::Ready) {
+            return;
+        }
+        let ancestors = snapshot.tree.ancestors(&id);
+        self.expanded.extend(ancestors);
+        self.sync_entries();
+        let Some(index) = self.entries.iter().position(|e| e.row_id() == Some(id)) else {
+            return;
+        };
+        self.list.scroll_to(ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.),
+        });
+        self.highlight = Some(id);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(super::navigation::HIGHLIGHT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.highlight = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn expand(&mut self, id: EventId, cx: &mut Context<Self>) {
@@ -495,13 +568,18 @@ impl Render for ThreadPanel {
             });
             let entries = self.entries.clone();
             let weak = cx.entity().downgrade();
+            let highlight = self.highlight;
             list(self.list.clone(), move |index, _, cx| {
                 let Some(entry) = entries.get(index) else {
                     return div().into_any_element();
                 };
+                let row = render_entry(entry, &rows, &weak, cx);
                 div()
                     .px(px(24.))
-                    .child(render_entry(entry, &rows, &weak, cx))
+                    .child(match highlight.is_some() && entry.row_id() == highlight {
+                        true => super::navigation::highlighted(row, cx),
+                        false => row,
+                    })
                     .into_any_element()
             })
             .flex_1()
@@ -636,6 +714,16 @@ enum Entry {
     Orphan(EventId),
     Reply(Reply),
     Summary(Summary),
+}
+
+impl Entry {
+    fn row_id(&self) -> Option<EventId> {
+        match self {
+            Entry::Root(item) => Some(item.row.id),
+            Entry::Reply(reply) => Some(reply.item.row.id),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]

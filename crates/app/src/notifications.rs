@@ -4,13 +4,15 @@
 //! this module applies the user's side: only the selected community, the
 //! community's preferences, channel visibility, a two-minute dedupe, and
 //! the reference text format. Banners go to the freedesktop notification
-//! service on a worker thread, silent and fire-and-forget: a missing
-//! service is logged, never retried and never fatal.
+//! service from the tokio runtime, silent and never awaited by the UI: a
+//! missing service is logged, never retried and never fatal. Clicking a
+//! banner brings the window forward on the message it is about.
 //!
 //! [`Session::incoming`]: buzz_relay_client::Session::incoming
 
 use crate::community::{AppState, Community};
 use crate::runtime::Runtime;
+use crate::ui::navigation::{self, Place, Request, Target};
 use buzz_relay_client::{
     Category, ChannelSummary, ChannelType, IncomingMessage, Partition, Profiles, Store,
 };
@@ -148,10 +150,23 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
         .find(|channel| channel.id == item.channel_id)
         .cloned();
     let (title, body) = text(item, channel.as_ref(), &this.snapshot.profiles);
+    // A reply's thread root is only a hint; the click reveals the message
+    // wherever it is.
+    let target = Target {
+        community: Some(this.origin.to_string()),
+        place: Place::Conversation {
+            channel: item.channel_id.clone(),
+            message: Some(item.message_id),
+            thread: item
+                .thread_root
+                .as_deref()
+                .and_then(|root| buzz_relay_client::EventId::from_hex(root).ok()),
+        },
+    };
     if !cx.default_global::<Shown>().admit(key, Instant::now()) {
         return;
     }
-    show(title, body);
+    show(title, body, target, cx);
 }
 
 /// Title and body (`content.ts`).
@@ -263,46 +278,60 @@ fn prose(node: &markdown::mdast::Node) -> String {
     }
 }
 
-/// Submits a banner on the notification worker, so a slow or missing
-/// notification service never blocks the UI.
-fn show(title: String, body: String) {
-    use std::sync::OnceLock;
-    use std::sync::mpsc::{Sender, channel};
-    static WORKER: OnceLock<Option<Sender<(String, String)>>> = OnceLock::new();
-    let worker = WORKER.get_or_init(|| {
-        let (sender, banners) = channel::<(String, String)>();
-        std::thread::Builder::new()
-            .name("buzz-notify".into())
-            .spawn(move || {
-                for (title, body) in banners {
-                    submit(&title, &body);
+/// Shows a banner without waiting on the notification service, and
+/// keeps listening for its click.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn show(title: String, body: String, target: Target, cx: &App) {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    /// Banners still listened to. Each holds a bus connection, and some
+    /// services keep banners until dismissed, so the oldest are let go.
+    const LISTENING: usize = 32;
+    static WAITING: Mutex<VecDeque<tokio::task::AbortHandle>> = Mutex::new(VecDeque::new());
+
+    let Some(sender) = navigation::sender(cx) else {
+        return;
+    };
+    let task = Runtime::handle(cx).spawn(async move {
+        let shown = notify_rust::Notification::new()
+            .appname("Buzz")
+            .icon("buzz-gpui")
+            .summary(&title)
+            .body(&body)
+            .action("default", "Open")
+            .hint(notify_rust::Hint::DesktopEntry("buzz-gpui".into()))
+            .hint(notify_rust::Hint::SuppressSound(true))
+            .show_async()
+            .await;
+        let banner = match shown {
+            Ok(banner) => banner,
+            Err(error) => {
+                tracing::warn!(%error, "could not show a notification");
+                return;
+            }
+        };
+        banner
+            .wait_for_action_async(|response| {
+                if matches!(response, notify_rust::NotificationResponse::Default) {
+                    let _ = sender.unbounded_send(Request::Open(target));
                 }
             })
-            .map_err(|error| tracing::warn!(%error, "could not start notifications"))
-            .ok()
-            .map(|_| sender)
+            .await;
     });
-    if let Some(sender) = worker {
-        let _ = sender.send((title, body));
+    let mut waiting = WAITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    waiting.retain(|task| !task.is_finished());
+    if waiting.len() >= LISTENING
+        && let Some(oldest) = waiting.pop_front()
+    {
+        oldest.abort();
     }
-}
-
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn submit(title: &str, body: &str) {
-    let result = notify_rust::Notification::new()
-        .appname("Buzz")
-        .icon("buzz-gpui")
-        .summary(title)
-        .body(body)
-        .hint(notify_rust::Hint::SuppressSound(true))
-        .show();
-    if let Err(error) = result {
-        tracing::warn!(%error, "could not show a notification");
-    }
+    waiting.push_back(task.abort_handle());
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn submit(title: &str, _body: &str) {
+fn show(title: String, _body: String, _target: Target, _cx: &App) {
     tracing::debug!(%title, "desktop notifications are not supported on this platform");
 }
 
