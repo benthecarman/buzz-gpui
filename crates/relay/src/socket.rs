@@ -1,11 +1,13 @@
 //! One WebSocket to one relay, kept open for the life of a community session.
 //!
-//! The socket authenticates with NIP-42 when the relay asks, re-sends every
-//! open subscription after a reconnect, and matches `OK` replies to
-//! publishes. It never retries a publish itself: an event whose `OK` was
+//! The socket authenticates with NIP-42 when the relay asks, holds every
+//! subscription until then, and matches `OK` replies to publishes. After a
+//! reconnect it either re-sends open subscriptions or reports them lost,
+//! depending on [`SocketOptions::resubscribe`]. It never retries a publish itself: an event whose `OK` was
 //! lost is reported as such, and the outbox decides what to do with the
 //! exact signed bytes.
 
+use crate::event::{Verified, Verifier};
 use crate::origin::RelayOrigin;
 use buzz_identity::Identity;
 use futures::{SinkExt, StreamExt};
@@ -33,8 +35,7 @@ pub enum SocketState {
 
 #[derive(Debug)]
 pub enum SubscriptionEvent {
-    /// Signature already verified.
-    Event(Box<Event>),
+    Event(Verified),
     /// Stored events have all been sent; what follows is live.
     Eose,
     /// The relay ended the subscription. It is not re-sent.
@@ -42,6 +43,9 @@ pub enum SubscriptionEvent {
     /// The socket reconnected and re-sent this subscription. Events stored
     /// while disconnected arrive again, so consumers must dedupe by ID.
     Resubscribed,
+    /// The connection dropped and this subscription was discarded (only
+    /// when [`SocketOptions::resubscribe`] is off).
+    Lost,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -70,6 +74,12 @@ pub struct SocketOptions {
     pub dead_after: Duration,
     pub min_backoff: Duration,
     pub max_backoff: Duration,
+    /// Reconnect if authentication has not finished this long after
+    /// connecting.
+    pub auth_deadline: Duration,
+    /// Re-send open subscriptions after a reconnect. When off, they are
+    /// reported [`SubscriptionEvent::Lost`] so the owner can rebuild them.
+    pub resubscribe: bool,
 }
 
 impl Default for SocketOptions {
@@ -81,7 +91,9 @@ impl Default for SocketOptions {
             ping_interval: Duration::from_secs(25),
             dead_after: Duration::from_secs(70),
             min_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(30),
+            max_backoff: Duration::from_secs(8),
+            auth_deadline: Duration::from_secs(10),
+            resubscribe: true,
         }
     }
 }
@@ -120,6 +132,17 @@ impl Subscription {
     }
 }
 
+impl futures::Stream for Subscription {
+    type Item = SubscriptionEvent;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<SubscriptionEvent>> {
+        self.events.poll_recv(cx)
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Unsubscribe(self.id));
@@ -131,6 +154,7 @@ impl RelaySocket {
         runtime: &tokio::runtime::Handle,
         origin: RelayOrigin,
         identity: Arc<Identity>,
+        verifier: Arc<Verifier>,
         options: SocketOptions,
     ) -> Self {
         let (commands, queue) = mpsc::unbounded_channel();
@@ -139,6 +163,7 @@ impl RelaySocket {
             Actor {
                 origin,
                 identity,
+                verifier,
                 options,
                 state: state_sender,
                 subscriptions: HashMap::new(),
@@ -206,6 +231,7 @@ struct Open {
 struct Actor {
     origin: RelayOrigin,
     identity: Arc<Identity>,
+    verifier: Arc<Verifier>,
     options: SocketOptions,
     state: watch::Sender<SocketState>,
     subscriptions: HashMap<u64, Open>,
@@ -302,6 +328,8 @@ impl Actor {
         // REQ: a relay that requires auth would only refuse it.
         let auth_wait = tokio::time::sleep(self.options.auth_wait);
         tokio::pin!(auth_wait);
+        let auth_deadline = tokio::time::sleep(self.options.auth_deadline);
+        tokio::pin!(auth_deadline);
         self.state.send_replace(SocketState::Authenticating);
 
         loop {
@@ -366,6 +394,9 @@ impl Actor {
                     }
                 }
                 _ = &mut dead => return self.lost(&mut session, "relay stopped responding"),
+                _ = &mut auth_deadline, if session.auth_event.is_some() && !session.authenticated => {
+                    return self.lost(&mut session, "authentication timed out");
+                }
                 _ = session.next_publish_deadline() => {
                     session.expire_publishes();
                 }
@@ -378,6 +409,11 @@ impl Actor {
     fn lost(&mut self, session: &mut Session, error: &str) -> End {
         for (_, (reply, _)) in session.publishes.drain() {
             let _ = reply.send(Err(PublishError::Unknown));
+        }
+        if !self.options.resubscribe {
+            for (_, open) in self.subscriptions.drain() {
+                let _ = open.events.send(SubscriptionEvent::Lost);
+            }
         }
         End::Lost(error.to_string())
     }
@@ -449,11 +485,11 @@ impl Actor {
                 let Some(open) = self.subscriptions.get(&id) else {
                     return Vec::new();
                 };
-                match serde_json::from_value::<Event>(event.clone()) {
-                    Ok(event) if event.verify().is_ok() => {
-                        let _ = open.events.send(SubscriptionEvent::Event(Box::new(event)));
+                match self.verifier.verify_json(event) {
+                    Ok(event) => {
+                        let _ = open.events.send(SubscriptionEvent::Event(event));
                     }
-                    _ => {
+                    Err(_) => {
                         tracing::warn!(origin = %self.origin, "dropping event with a bad signature")
                     }
                 }
@@ -594,10 +630,16 @@ fn parse_sub_id(value: &Value) -> Option<u64> {
     value.as_str()?.strip_prefix('s')?.parse().ok()
 }
 
+/// Exponential backoff with jitter in [50%, 100%], so many clients
+/// dropped together do not reconnect in lockstep.
 fn backoff(options: &SocketOptions, attempt: u32) -> Duration {
     let exponent = attempt.saturating_sub(1).min(16);
-    options
+    let full = options
         .min_backoff
         .saturating_mul(1 << exponent)
-        .min(options.max_backoff)
+        .min(options.max_backoff);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    full.mul_f64(0.5 + f64::from(nanos % 1000) / 2000.0)
 }

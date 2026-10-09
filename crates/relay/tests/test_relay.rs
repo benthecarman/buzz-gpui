@@ -71,6 +71,7 @@ async fn reads_a_channel_over_both_transports() {
         &tokio::runtime::Handle::current(),
         fixture.origin.clone(),
         alice,
+        Arc::new(Verifier::default()),
         SocketOptions::default(),
     );
     let mut subscription = socket.subscribe(vec![filter(

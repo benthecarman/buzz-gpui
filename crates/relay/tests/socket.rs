@@ -126,6 +126,7 @@ fn socket(relay: &FakeRelay, identity: &Arc<Identity>) -> RelaySocket {
         &tokio::runtime::Handle::current(),
         RelayOrigin::parse(&relay.address).unwrap(),
         identity.clone(),
+        Arc::new(Verifier::default()),
         options(),
     )
 }
@@ -273,10 +274,47 @@ async fn publish_without_connection_fails_fast() {
         &tokio::runtime::Handle::current(),
         RelayOrigin::parse("ws://127.0.0.1:1").unwrap(),
         identity.clone(),
+        Arc::new(Verifier::default()),
         options(),
     );
     let result = tokio::time::timeout(Duration::from_secs(2), socket.publish(note(&keys, "x")))
         .await
         .expect("publish must not wait for a connection");
     assert_eq!(result, Err(PublishError::NotConnected));
+}
+
+#[tokio::test]
+async fn without_resubscribe_subscriptions_are_reported_lost() {
+    let mut relay = FakeRelay::start(false).await;
+    let identity = Arc::new(Identity::ephemeral());
+    let socket = RelaySocket::connect(
+        &tokio::runtime::Handle::current(),
+        RelayOrigin::parse(&relay.address).unwrap(),
+        identity,
+        Arc::new(Verifier::default()),
+        SocketOptions {
+            resubscribe: false,
+            ..options()
+        },
+    );
+    let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [9]}))]);
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Req(..)));
+    assert!(matches!(
+        next_event(&mut subscription).await,
+        SubscriptionEvent::Eose
+    ));
+
+    relay.kick.send(()).unwrap();
+    assert!(matches!(
+        next_event(&mut subscription).await,
+        SubscriptionEvent::Lost
+    ));
+    assert!(matches!(relay.next().await, Seen::Connected));
+    // Nothing is re-sent on the new connection.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), relay.seen.recv())
+            .await
+            .is_err()
+    );
 }
