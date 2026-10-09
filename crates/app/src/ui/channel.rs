@@ -2,7 +2,6 @@
 //! §4.12).
 
 use super::markdown::Directory;
-use super::media;
 use super::message::{self, Actions, Command, Hover, Interaction, Item, Rows};
 use crate::community::{ChannelModel, Community};
 use buzz_relay_client::fold::MessageRow;
@@ -57,8 +56,6 @@ pub struct ChannelPage {
     deleting: Option<Arc<MessageRow>>,
     toast: Option<(SharedString, usize)>,
     toasts: usize,
-    /// An image attachment open in the viewer.
-    viewing: Option<String>,
     /// Rows that arrived while the reader was scrolled up.
     unseen: usize,
     /// The reader is at least [`JUMP_DISTANCE`] from the bottom.
@@ -141,7 +138,6 @@ impl ChannelPage {
             deleting: None,
             toast: None,
             toasts: 0,
-            viewing: None,
             unseen: 0,
             away: false,
             highlight: None,
@@ -358,10 +354,6 @@ impl ChannelPage {
             Command::Edit => self.start_edit(row, window, cx),
             Command::Delete => {
                 self.deleting = Some(row);
-                cx.notify();
-            }
-            Command::View(url) => {
-                self.viewing = Some(url);
                 cx.notify();
             }
         }
@@ -861,43 +853,6 @@ impl Render for ChannelPage {
             )
         });
 
-        let viewer = self.viewing.as_ref().map(|url| {
-            let media = self.community.read(cx).session.media().clone();
-            let size = window.viewport_size();
-            Self::overlay(
-                window,
-                div()
-                    .id("image-viewer")
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(c.bg_scrim)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.viewing = None;
-                        cx.notify();
-                    }))
-                    .child(
-                        img(media::image(url, &media))
-                            .max_w(size.width - px(96.))
-                            .max_h(size.height - px(96.))
-                            .object_fit(ObjectFit::Contain),
-                    )
-                    .child(
-                        div().absolute().top(px(16.)).right(px(16.)).child(
-                            IconButton::new("close-viewer", IconName::X)
-                                .size(IconButtonSize::Md)
-                                .variant(ButtonVariant::Media)
-                                .tooltip("Close")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.viewing = None;
-                                    cx.notify();
-                                })),
-                        ),
-                    ),
-            )
-        });
-
         div()
             .flex()
             .flex_col()
@@ -926,7 +881,6 @@ impl Render for ChannelPage {
             )
             .children(toast)
             .children(dialog)
-            .children(viewer)
     }
 }
 

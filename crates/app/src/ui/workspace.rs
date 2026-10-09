@@ -440,7 +440,8 @@ impl Render for Workspace {
                                 .child(main),
                         ),
                     ),
-                ),
+                )
+                .children(super::media::review_overlay(cx)),
         )
     }
 }

@@ -1,4 +1,5 @@
-//! Images from message attachments, custom emoji and profile pictures.
+//! Attachment media: images, custom emoji and profile pictures, plus the
+//! audio and video players and the media review viewer.
 //!
 //! GPUI's own URI loader goes through the app's HTTP client and cannot sign
 //! the Blossom `get` authorization relay media needs (relay.md §5n.6), so
@@ -6,10 +7,28 @@
 //! [`ImageSource::Custom`] instead. GPUI's asset cache keeps one load per
 //! URL and redraws the view that asked once it lands.
 
+mod audio;
+mod engine;
+mod review;
+mod seek;
+mod video;
+
+pub use audio::{audio_attachment, voice_note};
+pub use review::{open_review, review_overlay};
+pub use video::video_preview;
+
 use buzz_relay_client::Media;
+use buzz_ui::{ActiveTheme, TypeStyled};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long a loaded thumbnail takes to fade in over its blurhash.
+const FADE: Duration = Duration::from_millis(180);
+/// Blurhash previews decode to this many pixels a side (`BLURHASH_SIZE`).
+const BLURHASH_SIZE: u32 = 32;
 
 /// One remote image request. Hashing by URL alone lets every view share a
 /// load; a media client is tied to one community, and so is its URL.
@@ -76,11 +95,253 @@ pub fn avatar(url: &str, media: &Media) -> ImageSource {
 
 fn source(remote: Remote) -> ImageSource {
     ImageSource::Custom(Arc::new(move |window, cx| {
-        match window.use_asset::<RemoteImage>(&remote, cx)? {
-            Ok(image) => image.use_render_image(window, cx).map(Ok),
-            Err(error) => Some(Err(ImageCacheError::Asset(error))),
-        }
+        decoded(&remote, window, cx).map(|result| result.map_err(ImageCacheError::Asset))
     }))
+}
+
+/// The decoded image, `None` while it loads.
+fn decoded(
+    remote: &Remote,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Result<Arc<RenderImage>, SharedString>> {
+    match window.use_asset::<RemoteImage>(remote, cx)? {
+        Ok(image) => image.use_render_image(window, cx).map(Ok),
+        Err(error) => Some(Err(error)),
+    }
+}
+
+/// The pixel size of the image at `url` once it has loaded.
+fn natural_size(url: &str, media: &Media, window: &mut Window, cx: &mut App) -> Option<Size<f32>> {
+    let remote = Remote {
+        url: url.to_string().into(),
+        fallback: None,
+        media: media.clone(),
+    };
+    let image = decoded(&remote, window, cx)?.ok()?;
+    let size = image.size(0);
+    Some(gpui_kit::size(size.width.0 as f32, size.height.0 as f32))
+}
+
+/// Packs BGRA pixels into the image type GPUI paints.
+fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<RenderImage>> {
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
+/// A blurhash decoded to a small image (`paintBlurhash`). The hash was
+/// validated when the event was folded.
+enum Blurhash {}
+
+impl Asset for Blurhash {
+    type Source = SharedString;
+    type Output = Option<Arc<RenderImage>>;
+
+    #[allow(clippy::manual_async_fn)]
+    fn load(
+        hash: SharedString,
+        _: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        async move { blurhash_image(&hash) }
+    }
+}
+
+fn blurhash_image(hash: &str) -> Option<Arc<RenderImage>> {
+    let mut pixels = blurhash::decode(hash, BLURHASH_SIZE, BLURHASH_SIZE, 1.).ok()?;
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    render_image(BLURHASH_SIZE, BLURHASH_SIZE, pixels)
+}
+
+/// Fade-in progress of one thumbnail, kept while it stays on screen.
+struct Fade {
+    started: Option<Instant>,
+    /// Shown at full opacity: it was already loaded when first drawn, or
+    /// its fade finished.
+    settled: bool,
+}
+
+/// A thumbnail's pixels (`ImagePixels`): the blurhash, when there is one,
+/// while the original loads, then the original fading in over it. Fills
+/// its parent with `object-fit: cover`.
+pub fn thumbnail(url: &str, blurhash: Option<&str>, media: &Media) -> impl IntoElement {
+    let remote = Remote {
+        url: url.to_string().into(),
+        fallback: None,
+        media: media.clone(),
+    };
+    let hash = blurhash.map(SharedString::from);
+    Lazy::new("pixels", move |window, cx| {
+        let c = *cx.colors();
+        let image = decoded(&remote, window, cx);
+        if let Some(Err(_)) = image {
+            return unavailable(&c).into_any_element();
+        }
+        let loaded = image.is_some();
+        let fade = window.use_keyed_state("fade", cx, |_, _| Fade {
+            started: None,
+            settled: loaded,
+        });
+        let opacity = fade.update(cx, |fade, cx| {
+            if fade.settled || cx.reduce_motion() {
+                return 1.;
+            }
+            if !loaded {
+                return 0.;
+            }
+            let started = *fade.started.get_or_insert_with(Instant::now);
+            let progress = started.elapsed().as_secs_f32() / FADE.as_secs_f32();
+            fade.settled = progress >= 1.;
+            progress.min(1.)
+        });
+        // Loading itself redraws the view once it lands; only the fade ticks.
+        if loaded && opacity < 1. {
+            window.request_animation_frame();
+        }
+        let preview = (opacity < 1.)
+            .then(|| {
+                hash.as_ref()
+                    .and_then(|hash| window.use_asset::<Blurhash>(hash, cx).flatten())
+            })
+            .flatten();
+        div()
+            .relative()
+            .size_full()
+            .when_some(preview, |this, preview| {
+                this.child(img(preview).absolute().inset_0().size_full())
+            })
+            .when_some(image.and_then(Result::ok), |this, image| {
+                this.child(
+                    img(image)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(opacity),
+                )
+            })
+            .into_any_element()
+    })
+}
+
+/// The "Image unavailable" tile (`.imageUnavailable`).
+fn unavailable(c: &buzz_ui::Colors) -> Div {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(4.))
+        .rounded(px(8.))
+        .bg(c.affordance_subtle_hover)
+        .text_caption()
+        .text_color(c.text_subtle)
+        .child("Image unavailable")
+}
+
+/// Builds its content during layout, where the window is available for
+/// asset loads and per-element state; row renderers only get `&App`.
+pub struct Lazy {
+    id: ElementId,
+    build: Option<Build>,
+}
+
+type Build = Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement>;
+
+impl Lazy {
+    pub fn new(
+        id: impl Into<ElementId>,
+        build: impl FnOnce(&mut Window, &mut App) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            build: Some(Box::new(build)),
+        }
+    }
+}
+
+impl IntoElement for Lazy {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Lazy {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, AnyElement) {
+        let build = self.build.take().expect("Lazy laid out twice");
+        let mut element = build(window, cx);
+        (element.request_layout(window, cx), element)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        element: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        element: &mut AnyElement,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.paint(window, cx);
+    }
+}
+
+/// `formatMediaTime`: `m:ss`, or `h:mm:ss` from an hour.
+fn media_time(seconds: f64) -> String {
+    let total = if seconds.is_finite() {
+        seconds.max(0.).floor() as u64
+    } else {
+        0
+    };
+    let (hours, minutes, rest) = (total / 3600, total % 3600 / 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{rest:02}")
+    } else {
+        format!("{minutes}:{rest:02}")
+    }
+}
+
+/// `videoTime`: [`media_time`] padded to `00:00`.
+fn video_time(seconds: f64) -> String {
+    format!("{:0>5}", media_time(seconds))
+}
+
+/// Tabular figures, so running times do not jitter.
+fn tabular() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
 
 /// Sniffs the formats GPUI decodes from their magic bytes. Senders' MIME
@@ -205,5 +466,26 @@ mod tests {
         assert_eq!(file_name(Some("../a/b.pdf"), "https://x/y"), "a b.pdf");
         assert_eq!(file_name(None, "https://x/media/abc.png"), "abc.png");
         assert_eq!(file_name(Some("  "), "https://x/"), "File");
+    }
+
+    #[test]
+    fn formats_media_times_like_the_reference() {
+        assert_eq!(media_time(0.), "0:00");
+        assert_eq!(media_time(65.9), "1:05");
+        assert_eq!(media_time(3_725.), "1:02:05");
+        assert_eq!(media_time(f64::NAN), "0:00");
+        assert_eq!(video_time(8.03), "00:08");
+        assert_eq!(video_time(605.), "10:05");
+        assert_eq!(video_time(3_725.), "1:02:05");
+    }
+
+    #[test]
+    fn decodes_blurhash_previews() {
+        let image = blurhash_image("LEHV6nWB2yk8pyo0adR*.7kCMdnj").expect("a valid hash decodes");
+        assert_eq!(image.size(0), size(DevicePixels(32), DevicePixels(32)));
+        // Swapped to BGRA, the order GPUI paints.
+        let rgba = blurhash::decode("LEHV6nWB2yk8pyo0adR*.7kCMdnj", 32, 32, 1.).unwrap();
+        let bgra = &image.as_bytes(0).unwrap()[..4];
+        assert_eq!(bgra, [rgba[2], rgba[1], rgba[0], rgba[3]]);
     }
 }

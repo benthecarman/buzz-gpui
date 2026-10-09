@@ -104,8 +104,6 @@ pub enum Command {
     MarkUnread,
     Edit,
     Delete,
-    /// Opens an image attachment in the viewer.
-    View(String),
 }
 
 /// Which floating element of a row is open.
@@ -699,22 +697,55 @@ fn mix(a: Hsla, b: Hsla, share: f32) -> Hsla {
 }
 
 /// Attachments in send order; adjacent images share a strip and adjacent
-/// files a group (§4.7).
+/// files a group (§4.7). Videos and audio stand alone.
 fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
-    let mut groups: Vec<(bool, Vec<(usize, &Attachment)>)> = Vec::new();
+    let mut groups: Vec<(AttachmentKind, Vec<(usize, &Attachment)>)> = Vec::new();
     for (index, attachment) in row.attachments.iter().enumerate() {
-        let image = attachment.kind == AttachmentKind::Image;
         match groups.last_mut() {
-            Some((kind, members)) if *kind == image => members.push((index, attachment)),
-            _ => groups.push((image, vec![(index, attachment)])),
+            Some((kind, members)) if *kind == attachment.kind => members.push((index, attachment)),
+            _ => groups.push((attachment.kind, vec![(index, attachment)])),
         }
     }
     let c = *cx.colors();
+    let media = &rows.directory.media;
     div()
         .flex()
         .flex_col()
-        .children(groups.into_iter().map(|(image, members)| {
-            if image {
+        .children(groups.into_iter().map(|(kind, members)| {
+            if kind == AttachmentKind::Video {
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(members.into_iter().map(|(index, attachment)| {
+                        let (target, url, media) =
+                            (row.clone(), attachment.url.clone(), media.clone());
+                        media::video_preview(
+                            SharedString::from(format!("video-{}-{index}", row.id.to_hex())),
+                            attachment,
+                            &rows.directory.media,
+                            Rc::new(move |window, cx| {
+                                media::open_review(&target.attachments, &url, &media, window, cx)
+                            }),
+                        )
+                    }))
+                    .into_any_element()
+            } else if kind == AttachmentKind::Audio {
+                // Only relay media plays inline; other links stay file cards.
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(members.into_iter().map(|(index, attachment)| {
+                        let id = SharedString::from(format!("audio-{}-{index}", row.id.to_hex()));
+                        if !media.is_relay_media(&attachment.url) {
+                            file_tile(row, index, attachment, rows, &c)
+                        } else if attachment.voice_note {
+                            media::voice_note(id, attachment, media, cx)
+                        } else {
+                            media::audio_attachment(id, attachment, media, cx)
+                        }
+                    }))
+                    .into_any_element()
+            } else if kind == AttachmentKind::Image {
                 let count = members.len();
                 div()
                     .mt(px(8.))
@@ -758,8 +789,9 @@ fn image_tile(
     rows: &Rc<Rows>,
     c: &buzz_ui::Colors,
 ) -> AnyElement {
-    let unavailable = *c;
-    let mut tile = div()
+    let media = rows.directory.media.clone();
+    let (target, url) = (row.clone(), attachment.url.clone());
+    div()
         .id(SharedString::from(format!(
             "image-{}-{index}",
             row.id.to_hex()
@@ -771,23 +803,11 @@ fn image_tile(
         .overflow_hidden()
         .bg(c.surface_inset)
         .cursor_pointer()
-        .child(
-            img(media::image(&attachment.url, &rows.directory.media))
-                .size_full()
-                .rounded(px(16.))
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(move || {
-                    div()
-                        .size_full()
-                        .p(px(4.))
-                        .rounded(px(8.))
-                        .bg(unavailable.affordance_subtle_hover)
-                        .text_caption()
-                        .text_color(unavailable.text_subtle)
-                        .child("Image unavailable")
-                        .into_any_element()
-                }),
-        )
+        .child(media::thumbnail(
+            &attachment.url,
+            attachment.blurhash.as_deref(),
+            &media,
+        ))
         .child(
             div()
                 .absolute()
@@ -795,18 +815,15 @@ fn image_tile(
                 .rounded(px(16.))
                 .border_1()
                 .border_color(c.border_image),
-        );
-    if let Some(command) = rows.actions.on_command.clone() {
-        let (target, url) = (row.clone(), attachment.url.clone());
-        tile = tile.on_click(move |_, window, cx| {
-            command(&target, Command::View(url.clone()), window, cx)
-        });
-    }
-    tile.into_any_element()
+        )
+        .on_click(move |_, window, cx| {
+            media::open_review(&target.attachments, &url, &media, window, cx)
+        })
+        .into_any_element()
 }
 
-/// Files, and for now video and audio too: a card that downloads relay
-/// media to the Downloads folder or opens other links.
+/// Files, and audio that does not play inline: a card that downloads
+/// relay media to the Downloads folder or opens other links.
 fn file_tile(
     row: &Arc<MessageRow>,
     index: usize,
