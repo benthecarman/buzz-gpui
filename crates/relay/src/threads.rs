@@ -178,7 +178,8 @@ pub struct ThreadSnapshot {
 }
 
 impl ThreadSnapshot {
-    fn idle(exact: bool) -> Self {
+    /// Before anything loaded.
+    pub fn idle(exact: bool) -> Self {
         Self {
             status: ThreadStatus::Idle,
             root: None,

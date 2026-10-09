@@ -11,9 +11,11 @@
 //! session (status, channels, profiles, unread counts) and one per open
 //! channel. Read state and unread live in [`unread`].
 
+mod threads;
 mod timeline;
 mod unread;
 
+pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{ChannelUnread, READING_DWELL_MS, UnreadCounts};
 
@@ -90,6 +92,7 @@ pub struct Session {
     snapshot: watch::Receiver<Arc<SessionSnapshot>>,
     viewer: String,
     origin: RelayOrigin,
+    next_thread: std::sync::atomic::AtomicU64,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -186,6 +189,7 @@ impl Session {
             outbox: None,
             outbox_changes: None,
             reads: None,
+            threads: HashMap::new(),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -193,6 +197,7 @@ impl Session {
             snapshot: receiver,
             viewer,
             origin,
+            next_thread: std::sync::atomic::AtomicU64::new(1),
             task,
         }
     }
@@ -225,6 +230,28 @@ impl Session {
 
     /// The channel in front of the user: its live route and catch-up go
     /// first.
+    /// Opens a thread panel on `message`: the root, or with `exact` a reply
+    /// to reveal in its thread.
+    pub fn open_thread(&self, channel: &str, message: EventId, exact: bool) -> ThreadView {
+        let id = self
+            .next_thread
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (view, snapshot) =
+            watch::channel(Arc::new(crate::threads::ThreadSnapshot::idle(exact)));
+        let _ = self.commands.send(Message::OpenThread {
+            id,
+            channel: channel.to_string(),
+            message,
+            exact,
+            view,
+        });
+        ThreadView {
+            snapshot,
+            id,
+            commands: self.commands.clone(),
+        }
+    }
+
     pub fn select(&self, channel: Option<String>) {
         let _ = self.commands.send(Message::Select(channel));
     }
@@ -367,6 +394,22 @@ impl Drop for Session {
 }
 
 enum Message {
+    OpenThread {
+        id: u64,
+        channel: String,
+        message: EventId,
+        exact: bool,
+        view: watch::Sender<Arc<crate::threads::ThreadSnapshot>>,
+    },
+    CloseThread(u64),
+    ThreadMore(u64),
+    ThreadRefresh(u64),
+    ThreadRead {
+        id: u64,
+        token: u64,
+        channel: String,
+        result: Result<Events, ReadError>,
+    },
     Open {
         channel: String,
         view: watch::Sender<Arc<TimelineSnapshot>>,
@@ -451,6 +494,7 @@ struct Actor {
     outbox_changes: Option<watch::Receiver<u64>>,
     /// Read state and unread, from NIP-11 on.
     reads: Option<Reads>,
+    threads: HashMap<u64, threads::OpenThread>,
 }
 
 impl Actor {
@@ -507,6 +551,24 @@ impl Actor {
 
     fn handle(&mut self, message: Message) {
         match message {
+            Message::OpenThread {
+                id,
+                channel,
+                message,
+                exact,
+                view,
+            } => self.open_thread(id, channel, message, exact, view),
+            Message::CloseThread(id) => {
+                self.threads.remove(&id);
+            }
+            Message::ThreadMore(id) => self.thread_more(id, false),
+            Message::ThreadRefresh(id) => self.thread_more(id, true),
+            Message::ThreadRead {
+                id,
+                token,
+                channel,
+                result,
+            } => self.thread_result(id, token, &channel, result),
             Message::Open { channel, view } => self.open(&channel, view),
             Message::Close(channel) => self.close(&channel),
             Message::LoadOlder(channel) => self.load_older(&channel),
@@ -783,6 +845,7 @@ impl Actor {
             .filter(|id| !discovery.can_access(id))
             .cloned()
             .collect();
+        self.threads_purge();
         if denied.is_empty() {
             return;
         }
@@ -844,6 +907,7 @@ impl Actor {
                         self.read_profiles(ids, filter);
                     }
                 }
+                self.threads_established(&channels);
                 for channel in channels {
                     if self.timelines.get(&channel).is_some_and(|t| t.stale) {
                         self.load_head(&channel, true);
@@ -944,6 +1008,7 @@ impl Actor {
                 people.extend(timeline.people());
             }
         }
+        self.threads_receive(events);
         self.ensure_profiles(people);
         self.reading_arrivals(events);
         if publish {
@@ -1191,10 +1256,20 @@ impl Actor {
 
     /// Shows the outbox's signed operations in their timelines.
     fn local_changed(&mut self) {
+        let local = self.local_operations();
+        for timeline in self.timelines.values_mut() {
+            timeline.set_local(&local);
+            timeline.publish();
+        }
+        self.threads_local(&local);
+    }
+
+    /// The outbox's signed operations with their delivery state.
+    fn local_operations(&self) -> Vec<(Verified, LocalDelivery)> {
         let Some(outbox) = &self.outbox else {
-            return;
+            return Vec::new();
         };
-        let local: Vec<(Verified, LocalDelivery)> = outbox
+        outbox
             .visible()
             .iter()
             .filter_map(|op| {
@@ -1215,11 +1290,7 @@ impl Actor {
                     },
                 ))
             })
-            .collect();
-        for timeline in self.timelines.values_mut() {
-            timeline.set_local(&local);
-            timeline.publish();
-        }
+            .collect()
     }
 
     // ----- profiles -----

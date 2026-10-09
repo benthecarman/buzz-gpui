@@ -337,3 +337,38 @@ async fn messages_arriving_while_reading_stay_read() {
     let row = left.unread.channel(&dm);
     assert!(row.priority && left.unread.direct >= 1, "{:?}", left.unread);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opens_a_thread_with_its_replies() {
+    let Some((origin, identities, seed)) = fixture() else {
+        return;
+    };
+    let carol = Arc::new(
+        Identity::from_nsec(identities["identities"]["carol"]["nsec"].as_str().unwrap()).unwrap(),
+    );
+    let session = Session::open(
+        &tokio::runtime::Handle::current(),
+        origin,
+        carol,
+        Store::in_memory().unwrap(),
+    );
+    let mut snapshot = session.snapshot();
+    until(&mut snapshot, "the roster", |s| {
+        s.roster == RosterStatus::Ready
+    })
+    .await;
+    let general = seed["channels"]["general"].as_str().unwrap();
+    let root: nostr::prelude::EventId =
+        seed["events"]["welcome"].as_str().unwrap().parse().unwrap();
+    let view = session.open_thread(general, root, false);
+    let mut thread = view.snapshot.clone();
+    let loaded = until(&mut thread, "the thread", |t| {
+        t.root.is_some() && t.replies.len() >= 2
+    })
+    .await;
+    assert_eq!(loaded.root.as_ref().unwrap().id, root);
+    let replies: Vec<String> = loaded.replies.iter().map(|r| r.id.to_hex()).collect();
+    for name in ["thread_reply_bob", "thread_reply_carol"] {
+        assert!(replies.contains(&seed["events"][name].as_str().unwrap().to_string()));
+    }
+}

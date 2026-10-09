@@ -251,6 +251,15 @@ impl Timeline {
         self.local = local;
     }
 
+    /// Every event retained here, to seed a thread view.
+    pub fn events(&self) -> Vec<Verified> {
+        self.pages
+            .values()
+            .chain(self.traffic.values())
+            .cloned()
+            .collect()
+    }
+
     /// An event shown in this channel, for edits, reactions and removals.
     pub fn find(&self, id: &EventId) -> Option<Verified> {
         self.pages
