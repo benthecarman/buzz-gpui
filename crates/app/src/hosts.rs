@@ -120,7 +120,7 @@ fn start_embedded(
     let (connector, listener) = transport::memory();
     let server = runtime.spawn(buzz_host_rpc::serve(
         listener,
-        Arc::new(RpcHandler(Arc::new(host))),
+        Arc::new(RpcHandler(host)),
         // In-process only, so there is nobody to authenticate.
         ServerOptions::default(),
     ));

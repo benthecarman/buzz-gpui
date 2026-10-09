@@ -83,7 +83,7 @@ async fn create_save_and_delete_over_rpc() {
     let (connector, listener) = transport::memory();
     tokio::spawn(serve(
         listener,
-        Arc::new(RpcHandler(Arc::new(host))),
+        Arc::new(RpcHandler(host)),
         ServerOptions::default(),
     ));
     let client = HostClient::<HostProtocol>::spawn(

@@ -56,6 +56,11 @@ pub enum Request {
         /// The NIP-OA `auth` tag, JSON encoded.
         auth: String,
     },
+    /// Publishes the agent's pending profile. Also done automatically after
+    /// a create and when the host starts; this is the manual retry.
+    PublishProfile {
+        id: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

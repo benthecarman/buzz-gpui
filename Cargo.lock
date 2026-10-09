@@ -936,10 +936,12 @@ dependencies = [
 name = "buzz-host"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "buzz-agent-controller",
  "buzz-credential-store",
  "buzz-host-rpc",
  "futures",
+ "reqwest",
  "secp256k1 0.31.1",
  "serde",
  "serde_json",

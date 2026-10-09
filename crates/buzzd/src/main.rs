@@ -107,7 +107,7 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
         watch_interval: Duration::from_secs(1),
     })
     .map_err(anyhow::Error::msg)?;
-    let handler = Arc::new(RpcHandler(Arc::new(host)));
+    let handler = Arc::new(RpcHandler(host));
     let options = ServerOptions {
         token: Some(token),
         ..Default::default()

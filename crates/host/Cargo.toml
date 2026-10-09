@@ -10,7 +10,9 @@ publish.workspace = true
 buzz-agent-controller.workspace = true
 buzz-credential-store.workspace = true
 buzz-host-rpc = { path = "../host-rpc" }
+base64 = "0.22"
 futures = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

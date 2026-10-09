@@ -8,6 +8,7 @@
 pub mod api;
 pub mod credentials;
 pub mod harness;
+mod profile;
 
 use api::{AgentAction, AgentsSnapshot, HostEvent, HostProtocol, Request, Response};
 pub use buzz_agent_controller::Credentials;
@@ -41,6 +42,9 @@ type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 
 pub struct AgentHost {
     info: HostInfo,
+    http: reqwest::Client,
+    /// Lets background work started from `&self` keep the host alive.
+    weak: std::sync::Weak<AgentHost>,
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<(u64, HostEvent)>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -58,8 +62,9 @@ struct Owner {
 }
 
 impl AgentHost {
-    /// Opens the store and starts agents marked to start with the host.
-    pub fn start(config: HostConfig) -> Result<Self, String> {
+    /// Opens the store, starts agents marked to start with the host, and
+    /// retries agent profiles left unpublished. Must run inside tokio.
+    pub fn start(config: HostConfig) -> Result<Arc<Self>, String> {
         buzz_agent_controller::warm_tools_path();
         std::fs::create_dir_all(&config.workspace)
             .map_err(|_| "Could not create the agent workspace")?;
@@ -105,12 +110,16 @@ impl AgentHost {
                 }
             })
             .map_err(|_| "Could not start the agent host thread")?;
-        Ok(Self {
+        let host = Arc::new_cyclic(|weak| Self {
             info: config.info,
+            http: profile::client(),
+            weak: weak.clone(),
             jobs,
             events,
             thread: Some(thread),
-        })
+        });
+        host.publish_pending_profiles();
+        Ok(host)
     }
 
     async fn run<T: Send + 'static>(
@@ -199,8 +208,8 @@ impl AgentHost {
                 request_id,
                 edit,
                 auth,
-            } => {
-                self.run(move |owner| {
+            } => self
+                .run(move |owner| {
                     let prepared = owner
                         .creating
                         .as_ref()
@@ -215,11 +224,80 @@ impl AgentHost {
                     prepared.save_key(owner.credentials.as_ref())?;
                     owner.controller.create(&prepared, edit, &auth)?;
                     owner.creating = None;
-                    owner.snapshot().map(Response::Agents)
+                    owner
+                        .snapshot()
+                        .map(|snapshot| (snapshot, prepared.id.clone()))
                 })
                 .await
+                .map(|(snapshot, id)| {
+                    self.publish_profile_later(id);
+                    Response::Agents(snapshot)
+                }),
+            Request::PublishProfile { id } => {
+                self.publish_profile(&id).await.map_err(RpcError::Failed)?;
+                self.run(|owner| owner.snapshot().map(Response::Agents))
+                    .await
             }
         }
+    }
+}
+
+impl AgentHost {
+    /// Publishes the agent's pending profile and records it, unless the
+    /// agent's settings changed meanwhile.
+    async fn publish_profile(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        let target = id.clone();
+        let (profile, key) = self
+            .run(move |owner| {
+                let profile = owner.controller.creation_profile(&target)?;
+                let key = owner
+                    .credentials
+                    .read(&profile.credential_id, &profile.pubkey)?
+                    .ok_or("The agent's key is unavailable")?;
+                Ok((profile, key))
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        profile::publish(&self.http, &profile, &key).await?;
+        let revision = profile.revision;
+        self.run(move |owner| {
+            let current = owner.controller.creation_profile(&id)?;
+            if current.revision != revision {
+                return Err("The agent changed while publishing; retry".into());
+            }
+            owner.controller.profile_published(&id, revision)
+        })
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    /// Fire-and-forget publication; failures leave the profile pending,
+    /// which the snapshot shows.
+    fn publish_profile_later(&self, id: String) {
+        let Some(host) = self.weak.upgrade() else {
+            return;
+        };
+        tokio::spawn(async move {
+            if let Err(error) = host.publish_profile(&id).await {
+                tracing::warn!(agent = %id, %error, "agent profile publication failed");
+            }
+        });
+    }
+
+    /// Retries profiles left pending, e.g. by a crash or an offline relay.
+    pub fn publish_pending_profiles(self: &Arc<Self>) {
+        let host = self.clone();
+        tokio::spawn(async move {
+            let Ok(Response::Agents(snapshot)) = host.request(Request::Agents).await else {
+                return;
+            };
+            for agent in snapshot.agents.iter().filter(|agent| agent.profile_pending) {
+                if let Err(error) = host.publish_profile(&agent.id).await {
+                    tracing::warn!(agent = %agent.id, %error, "agent profile publication failed");
+                }
+            }
+        });
     }
 }
 
