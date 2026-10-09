@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 image = { version = "0.25", default-features = false }
-rust-embed = { version = "8", features = ["include-exclude"] }
+rust-embed = { version = "8", features = ["include-exclude", "debug-embed"] }
 smallvec = "1"
 
 [dev-dependencies]
