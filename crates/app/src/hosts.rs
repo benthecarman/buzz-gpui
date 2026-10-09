@@ -4,7 +4,8 @@
 use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
 use crate::runtime::Runtime;
 use buzz_host::api::{
-    AgentsSnapshot, Harness, HostAnswer, HostAsk, HostEvent, HostProtocol, Request, Response,
+    AgentDefaults, AgentsSnapshot, Harness, HostAnswer, HostAsk, HostEvent, HostProtocol, Request,
+    Response,
 };
 use buzz_host::credentials::{FileCredentials, KeyringCredentials};
 use buzz_host::{AgentHost, HostConfig, RpcHandler};
@@ -13,10 +14,12 @@ use buzz_host_rpc::{
     ClientEvent, ClientHandler, ConnectionState, HostClient, HostClientOptions, HostInfo, RpcError,
     ServerOptions,
 };
+use buzz_identity::Identity;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use gpui_kit::{App, AppContext, Context, Entity, Global, SharedString, Task};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Agent keys created on this machine use the same credential service as
@@ -38,6 +41,10 @@ pub struct HostConnection {
     pub state: ConnectionState,
     pub agents: AgentsSnapshot,
     pub harnesses: Option<Vec<Harness>>,
+    /// Fetched when a form needs them, not on connect: hosts older than
+    /// this request drop the connection on it.
+    pub defaults: Option<AgentDefaults>,
+    signing: SigningSlot,
     client: Arc<HostClient<HostProtocol>>,
     _watch: Task<()>,
 }
@@ -247,12 +254,36 @@ fn remote_token(host: &RemoteHost) -> Option<String> {
         .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }
 
-/// Nothing is signed for a host yet.
-struct Answers;
+/// What the GUI will sign for a host: armed by an import the user started,
+/// for exactly the keys they chose, so a host cannot get any other agent
+/// key attested to the user.
+struct Signing {
+    identity: Arc<Identity>,
+    pubkeys: HashSet<String>,
+}
+
+type SigningSlot = Arc<Mutex<Option<Signing>>>;
+
+struct Answers(SigningSlot);
 
 impl ClientHandler<HostProtocol> for Answers {
-    fn handle(&self, _: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        Box::pin(async { Err(RpcError::Failed("This app did not ask to sign that".into())) })
+    fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
+        let HostAsk::AttestAgent { agent_pubkey } = ask;
+        let mut slot = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        let answer = match slot.as_mut() {
+            Some(signing) if signing.pubkeys.contains(&agent_pubkey) => {
+                signing.pubkeys.remove(&agent_pubkey);
+                signing
+                    .identity
+                    .attest_agent(&agent_pubkey)
+                    .map(HostAnswer::Attestation)
+                    .map_err(|error| RpcError::Failed(error.to_string()))
+            }
+            _ => Err(RpcError::Failed(
+                "This app did not ask to import that agent".into(),
+            )),
+        };
+        Box::pin(async move { answer })
     }
 }
 
@@ -265,10 +296,11 @@ impl HostConnection {
         cx: &mut App,
     ) -> Entity<Self> {
         let runtime = Runtime::handle(cx);
+        let signing = SigningSlot::default();
         let client = Arc::new(HostClient::<HostProtocol>::spawn(
             &runtime,
             connector,
-            Arc::new(Answers),
+            Arc::new(Answers(signing.clone())),
             HostClientOptions {
                 token,
                 ..Default::default()
@@ -282,6 +314,8 @@ impl HostConnection {
                 state: client.state().borrow().clone(),
                 agents: AgentsSnapshot::default(),
                 harnesses: None,
+                defaults: None,
+                signing,
                 client,
                 _watch: watch,
             }
@@ -392,13 +426,49 @@ impl HostConnection {
             let response = response
                 .await
                 .unwrap_or_else(|_| Err(RpcError::Failed("Request was cancelled".into())));
-            if let Ok(Response::Agents(snapshot)) = &response {
-                let snapshot = snapshot.clone();
-                let _ = this.update(cx, |this, cx| {
-                    this.apply(snapshot);
-                    cx.notify();
-                });
+            match &response {
+                Ok(Response::Agents(snapshot)) => {
+                    let snapshot = snapshot.clone();
+                    let _ = this.update(cx, |this, cx| {
+                        this.apply(snapshot);
+                        cx.notify();
+                    });
+                }
+                Ok(Response::Defaults(defaults)) => {
+                    let defaults = defaults.clone();
+                    let _ = this.update(cx, |this, cx| {
+                        this.defaults = Some(defaults);
+                        cx.notify();
+                    });
+                }
+                _ => {}
             }
+            response
+        })
+    }
+
+    /// Loads the host's agent defaults into [`Self::defaults`].
+    pub fn load_defaults(&self, cx: &mut Context<Self>) {
+        self.request(Request::Defaults, cx).detach();
+    }
+
+    /// Commits an import. While it runs, the host may ask this app to attest
+    /// the given agent keys, and only those, with `identity`.
+    pub fn import(
+        &self,
+        token: String,
+        ids: Vec<String>,
+        pubkeys: HashSet<String>,
+        identity: Arc<Identity>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Response, RpcError>> {
+        let slot = self.signing.clone();
+        *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
+            Some(Signing { identity, pubkeys });
+        let response = self.request(Request::ImportCommit { token, ids }, cx);
+        cx.spawn(async move |_, _| {
+            let response = response.await;
+            *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
             response
         })
     }

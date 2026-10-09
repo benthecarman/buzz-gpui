@@ -1,9 +1,12 @@
 //! The Agents page (ui.md §5a): the agent inventory of this computer and of
 //! every remote `buzzd`, one section per host.
 
+mod defaults;
 mod editor;
+mod form;
 mod harness;
 mod host_dialog;
+mod import;
 
 use crate::hosts::{HostConnection, Hosts};
 use crate::ui::overlay::{self, Align, Dismiss};
@@ -14,6 +17,7 @@ use buzz_ui::{
     Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, MenuSize,
     PanelHeader, Presence, Surface, TypeStyled, tokens::radius,
 };
+use defaults::DefaultsDialog;
 use editor::{AgentEditor, Dismissed};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -39,6 +43,10 @@ enum Modal {
     },
     AddHost {
         dialog: Entity<AddHost>,
+        _subscription: Subscription,
+    },
+    Defaults {
+        dialog: Entity<DefaultsDialog>,
         _subscription: Subscription,
     },
     Manage(Entity<HostConnection>, String),
@@ -181,6 +189,22 @@ impl AgentsPage {
         let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx));
         self.menu = None;
         self.modal = Some(Modal::AddHost {
+            dialog,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn agent_defaults(
+        &mut self,
+        host: Entity<HostConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog = cx.new(|cx| DefaultsDialog::new(host, window, cx));
+        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx));
+        self.menu = None;
+        self.modal = Some(Modal::Defaults {
             dialog,
             _subscription: subscription,
         });
@@ -425,6 +449,7 @@ impl AgentsPage {
                         let reconnect = host.clone();
                         let refresh = host.clone();
                         let remove = host.clone();
+                        let defaults = host.clone();
                         let mut menu = Menu::new()
                             .child(
                                 MenuItem::new("host-refresh", "Refresh agents")
@@ -434,6 +459,15 @@ impl AgentsPage {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.menu = None;
                                         refresh.update(cx, |host, cx| host.refresh(cx).detach());
+                                    })),
+                            )
+                            .child(
+                                MenuItem::new("host-defaults", "Agent defaults")
+                                    .icon(IconName::SlidersHorizontal)
+                                    .icon_size(14.)
+                                    .disabled(!connected)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.agent_defaults(defaults.clone(), window, cx);
                                     })),
                             )
                             .child(
@@ -1131,6 +1165,7 @@ impl AgentsPage {
             match self.modal.as_ref()? {
                 Modal::Editor { editor, .. } => (editor.clone().into_any_element(), None),
                 Modal::AddHost { dialog, .. } => (dialog.clone().into_any_element(), None),
+                Modal::Defaults { dialog, .. } => (dialog.clone().into_any_element(), None),
                 Modal::Manage(host, id) => (self.manage_dialog(host, id, cx)?, Some(close)),
                 Modal::Delete {
                     host,

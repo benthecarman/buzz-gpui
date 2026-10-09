@@ -1,6 +1,7 @@
 //! The Add host dialog: connects to a remote `buzzd`.
 
-use super::editor::{Dismissed, field};
+use super::editor::Dismissed;
+use super::form::field;
 use crate::hosts::Hosts;
 use buzz_ui::{ActiveTheme, Button, Dialog, Surface, TextField, TypeStyled};
 use gpui_kit::component::input::InputState;
