@@ -12,6 +12,8 @@ use buzz_relay_client::kit::setup::{ChannelCreationInput, CreationVisibility};
 use buzz_relay_client::lifecycle::{
     DEFAULT_TEMPORARY_TTL, DraftErrors, NewChannel, canonical_name, draft_errors,
 };
+use buzz_relay_client::sidebar::GroupSource;
+use buzz_relay_client::sidebar_store::PreferencesStatus;
 use buzz_ui::{Button, Dialog, Surface, Switch, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::*;
@@ -32,6 +34,8 @@ pub struct NewChannelDialog {
     busy: bool,
     error: Option<SharedString>,
     on_open: OpenChannel,
+    /// The sidebar group a new channel goes into (`initialGroup`).
+    group: Option<String>,
     /// The template selector, while Templates & teams is on.
     template: Option<Entity<TemplateEditor>>,
     /// A creation awaiting "Retry channel"; the form shows it frozen.
@@ -43,6 +47,13 @@ pub struct NewChannelDialog {
 }
 
 impl EventEmitter<Dismissed> for NewChannelDialog {}
+
+/// The sidebar group whose "Create channel" opened the dialog, set just
+/// before the dialog opens and taken by it.
+#[derive(Default)]
+pub struct CreateIn(pub Option<String>);
+
+impl Global for CreateIn {}
 
 /// What the dialog holds, apart from its inputs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,7 +130,12 @@ impl NewChannelDialog {
             let _ = this.update_in(cx, |this, window, cx| this.restore(pending, window, cx));
         })
         .detach();
+        let group = cx
+            .try_global::<CreateIn>()
+            .and_then(|create| create.0.clone());
+        cx.set_global(CreateIn(None));
         Self {
+            group,
             template,
             pending: None,
             community,
@@ -269,6 +285,37 @@ impl NewChannelDialog {
                     Some(Ok(setup)) => setup,
                     None => None,
                 };
+                // A channel created from a sidebar group goes into it.
+                let setup = match &self.group {
+                    Some(group) => {
+                        let sidebar = self.community.read(cx).snapshot.sidebar.clone();
+                        let ready = sidebar.status == PreferencesStatus::Ready;
+                        let data = sidebar.data.as_ref();
+                        if !ready
+                            || !data.is_some_and(|d| d.sections.iter().any(|s| s.id == *group))
+                        {
+                            self.error = Some(
+                                if ready {
+                                    "This group is no longer available. Close this dialog and \
+                                     create from another sidebar group or Channels."
+                                } else {
+                                    "Wait for saved sidebar groups to load, then try again."
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        let personal =
+                            data.is_some_and(|d| d.group_source == GroupSource::Personal);
+                        let mut setup = setup.unwrap_or_default();
+                        setup.group_id = group.clone();
+                        setup.group_source =
+                            Some(if personal { "personal" } else { "legacy" }.into());
+                        Some(setup)
+                    }
+                    None => setup,
+                };
                 let channel = NewChannel {
                     name: canonical_name(&draft.name),
                     description: draft.description.trim().to_owned(),
@@ -403,7 +450,23 @@ impl NewChannelDialog {
             .as_ref()
             .filter(|_| !pending)
             .and_then(|t| t.read(cx).draft().and_then(|d| d.problem.clone()));
-        Dialog::new("create-channel", "Create a channel")
+        let title = match &self.group {
+            Some(group) => {
+                let name = self
+                    .community
+                    .read(cx)
+                    .snapshot
+                    .sidebar
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.sections.iter().find(|s| s.id == *group))
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "saved group".into());
+                format!("Create a channel in {name}")
+            }
+            None => "Create a channel".into(),
+        };
+        Dialog::new("create-channel", title)
             .compact_header_gap()
             .on_close(close)
             .child(

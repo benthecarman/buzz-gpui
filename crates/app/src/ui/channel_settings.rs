@@ -437,6 +437,8 @@ pub struct ChannelSettingsPanel {
     outbox: Entity<OutboxStatus>,
     /// "Save as template…", while Templates & teams is on.
     save_as: Option<Entity<super::templates::SaveAsTemplate>>,
+    /// The "Personal group" select among the setup tools.
+    personal_group: Entity<super::personal_group::PersonalGroupSelect>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -525,6 +527,13 @@ impl ChannelSettingsPanel {
             let (community, channel) = (community.clone(), channel_id.clone());
             cx.new(|cx| super::templates::SaveAsTemplate::new(community, channel, cx))
         });
+        let personal_group = cx.new(|cx| {
+            super::personal_group::PersonalGroupSelect::new(
+                community.clone(),
+                channel_id.clone(),
+                cx,
+            )
+        });
         let mut panel = Self {
             save_as,
             community,
@@ -547,6 +556,7 @@ impl ChannelSettingsPanel {
             diagnostics: false,
             tools,
             outbox,
+            personal_group,
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -1446,6 +1456,7 @@ impl Render for ChannelSettingsPanel {
                     this.children(self.status(attempt.as_ref(), cx))
                 })
                 .children(self.save_as.clone())
+                .child(self.personal_group.clone())
                 .when(shows_lifecycle(channel), |this| {
                     this.child(self.lifecycle_actions(cx))
                 })

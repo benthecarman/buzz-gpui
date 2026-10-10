@@ -55,6 +55,7 @@ mod outbox_status;
 pub(crate) mod overlay;
 pub mod pages;
 mod panels;
+mod personal_group;
 pub mod profile_panel;
 pub mod projects;
 mod rail_menu;

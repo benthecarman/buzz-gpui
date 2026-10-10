@@ -294,6 +294,7 @@ impl ChannelSidebar {
         }
         if is_channel_section_key(&key) {
             let create = props.on_create_channel.clone();
+            let group = key.strip_prefix("group:").map(str::to_owned);
             actions = actions.child(
                 action(format!("create-channel-{key}"), IconName::Plus)
                     .tooltip(if create.is_some() {
@@ -305,6 +306,7 @@ impl ChannelSidebar {
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         if let Some(create) = &create {
+                            cx.set_global(crate::ui::new_channel::CreateIn(group.clone()));
                             create(window, cx);
                         }
                     }),
