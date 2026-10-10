@@ -38,10 +38,10 @@ pub fn elapsed(created_at: u64, now: u64) -> String {
     }
 }
 
-/// "Workflow by {name}" names trusted workflow output by its owner.
+/// "Workflow · owned by {name}" names trusted workflow output by its owner.
 fn sender(item: &ThreadActivityItem, profiles: &Profiles) -> SharedString {
     match &item.workflow_owner_id {
-        Some(owner) => format!("Workflow by {}", display_name(profiles, owner)).into(),
+        Some(owner) => super::workflows::workflow_label(&display_name(profiles, owner)).into(),
         None => display_name(profiles, &item.author_id),
     }
 }

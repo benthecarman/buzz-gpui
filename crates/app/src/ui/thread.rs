@@ -663,14 +663,14 @@ impl ThreadPanel {
         let profiles = self.community.read(cx).snapshot.profiles.clone();
         let context = self.reply_parent.map(|_| match self.selected_parent() {
             Some(parent) => ReplyContext::Parent {
-                name: message::display_name(&profiles, &parent.author.to_hex()),
+                name: super::workflows::sender_name(&profiles, parent),
                 excerpt: parent.content.clone().into(),
             },
             None => ReplyContext::Missing,
         });
         let can_send = self.can_send();
         let placeholder = self.snapshot.root.as_ref().map(|root| {
-            let name = message::display_name(&profiles, &root.author.to_hex());
+            let name = super::workflows::sender_name(&profiles, root);
             SharedString::from(format!("Reply in thread to {name}"))
         });
         self.composer.update(cx, |composer, cx| {
