@@ -1,16 +1,19 @@
 //! The New tab picker (`ChannelTabPicker.tsx`): choose another channel,
-//! direct message or channel tool to open as a tab.
+//! direct message or channel tool to open as a tab. It matches, ranks and
+//! highlights as Command-K does.
 
 use super::message::channel_icon;
+use super::search_kit::usage::{self, SearchUsage, picker_text, record_choice, search_order};
+use super::search_kit::{Highlight, match_name, matched_label};
 use super::sidebar::channel_label;
 use crate::community::Community;
-use buzz_relay_client::search::match_name;
 use buzz_relay_client::{ChannelSummary, ChannelType};
 use buzz_ui::{
     ActiveTheme, IconName, NavigationItem, SearchField, Tab, TabVariant, Tabs, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,20 +47,24 @@ pub struct ChannelTabPicker {
     tools: Vec<Tool>,
     category: Category,
     input: Entity<InputState>,
-    /// The highlighted choice's key; nothing until the user types.
-    highlighted: Option<String>,
+    highlight: Highlight,
+    /// Read once, so a choice made here cannot reorder the list.
+    usage: SearchUsage,
     on_choose: ChooseChannel,
     on_tool: ChooseTool,
     _subscription: Subscription,
 }
 
-/// One row: its key, label, icon and match rank.
+/// One row, in display order.
 struct Choice {
     key: String,
     label: SharedString,
     icon: IconName,
-    rank: u8,
+    positions: Vec<usize>,
 }
+
+/// A candidate row with its match rank (`None` before anything is typed).
+type Candidate = (Choice, Option<u8>);
 
 impl ChannelTabPicker {
     pub fn new(
@@ -71,22 +78,20 @@ impl ChannelTabPicker {
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search channels…"));
         input.update(cx, |state, cx| state.focus(window, cx));
-        let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
+        let subscription = cx.subscribe_in(&input, window, |_, _, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
-                this.highlighted = this.choices(cx).first().map(|c| c.key.clone());
-                if this.needle(cx).is_empty() {
-                    this.highlighted = None;
-                }
                 cx.notify();
             }
         });
+        let usage = usage::usage_of(community.read(cx), cx);
         Self {
             community,
             current,
             tools,
             category: Category::Channels,
             input,
-            highlighted: None,
+            highlight: Highlight::new(),
+            usage,
             on_choose,
             on_tool,
             _subscription: subscription,
@@ -98,8 +103,12 @@ impl ChannelTabPicker {
         input.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    fn query(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
     fn needle(&self, cx: &App) -> String {
-        let value = self.input.read(cx).value().trim().to_lowercase();
+        let value = self.query(cx).trim().to_lowercase();
         value.trim_start_matches('#').to_string()
     }
 
@@ -115,7 +124,6 @@ impl ChannelTabPicker {
             state.set_placeholder(placeholder, window, cx);
             state.focus(window, cx);
         });
-        self.highlighted = None;
         cx.notify();
     }
 
@@ -138,6 +146,9 @@ impl ChannelTabPicker {
             .collect()
     }
 
+    /// The rows for the typed text, in the shared search order. Everything
+    /// here is on this device, so fuzzy matches are stable: "bgp" finds
+    /// buzz-github-prs.
     fn choices(&self, cx: &App) -> Vec<Choice> {
         let needle = self.needle(cx);
         let profiles = &self.community.read(cx).snapshot.profiles;
@@ -162,27 +173,49 @@ impl ChannelTabPicker {
                 })
                 .collect(),
         };
-        let mut matched: Vec<Choice> = all
+        let matched: Vec<Candidate> = all
             .into_iter()
             .filter_map(|(key, label, icon)| {
-                let rank = match needle.is_empty() {
-                    true => 0,
-                    false => match_name(&label, &needle)?,
+                let found = match needle.is_empty() {
+                    true => None,
+                    false => Some(match_name(&label, &needle)?),
                 };
-                Some(Choice {
+                let rank = found.as_ref().map(|found| found.rank);
+                let positions = found.map(|found| found.positions).unwrap_or_default();
+                let choice = Choice {
                     key,
                     label,
                     icon,
-                    rank,
-                })
+                    positions,
+                };
+                Some((choice, rank))
             })
             .collect();
-        // Stable within a rank, as the list arrived.
-        matched.sort_by_key(|choice| choice.rank);
-        matched
+        let typed = picker_text("tab", &needle);
+        let keys: HashSet<String> = matched
+            .iter()
+            .map(|(choice, _)| choice.key.clone())
+            .collect();
+        let picked = self.usage.pick(&typed, &keys);
+        let mut ordered: Vec<(f64, Choice)> = matched
+            .into_iter()
+            .map(|(choice, rank)| {
+                let order = rank.map_or(0., |rank| {
+                    search_order(&self.usage, picked.as_deref(), &choice.key, rank as f64)
+                });
+                (order, choice)
+            })
+            .collect();
+        // Stable within an order, as the list arrived.
+        ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+        ordered.into_iter().map(|(_, choice)| choice).collect()
     }
 
     fn run(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = picker_text("tab", &self.needle(cx));
+        if !typed.is_empty() {
+            record_choice(self.community.read(cx), &typed, key, cx);
+        }
         if let Some(channel) = key.strip_prefix("channel:") {
             (self.on_choose)(channel.to_string(), window, cx);
         } else if let Some(tool) = key.strip_prefix("tool:")
@@ -192,27 +225,8 @@ impl ChannelTabPicker {
         }
     }
 
-    fn move_highlight(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let keys: Vec<String> = self.choices(cx).into_iter().map(|c| c.key).collect();
-        if keys.is_empty() {
-            return;
-        }
-        let index = self
-            .highlighted
-            .as_ref()
-            .and_then(|key| keys.iter().position(|k| k == key));
-        // Clamped at both ends; the first move from nothing lands on an end.
-        let next = match index {
-            None if delta > 0 => 0,
-            None => keys.len() - 1,
-            Some(index) => (index as isize + delta).clamp(0, keys.len() as isize - 1) as usize,
-        };
-        self.highlighted = Some(keys[next].clone());
-        cx.notify();
-    }
-
     fn empty_text(&self, cx: &App) -> &'static str {
-        if !self.needle(cx).is_empty() {
+        if !self.query(cx).trim().is_empty() {
             return "No matches. Try another name.";
         }
         match self.category {
@@ -229,12 +243,12 @@ impl Render for ChannelTabPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let choices = self.choices(cx);
-        if let Some(key) = &self.highlighted
-            && !choices.iter().any(|choice| &choice.key == key)
-        {
-            // The highlighted row left: fall back to the first.
-            self.highlighted = choices.first().map(|choice| choice.key.clone());
-        }
+        let keys: Vec<String> = choices.iter().map(|choice| choice.key.clone()).collect();
+        let query = self.query(cx);
+        self.highlight.sync(&query, &keys);
+        self.highlight
+            .reveal(|key| keys.iter().position(|k| k == key));
+        let active = self.highlight.active().map(str::to_owned);
         let category = self.category;
         let tabs = CATEGORIES
             .iter()
@@ -257,11 +271,27 @@ impl Render for ChannelTabPicker {
         });
         let rows = choices.into_iter().map(|choice| {
             let key = choice.key.clone();
-            NavigationItem::new(SharedString::from(choice.key.clone()), choice.label)
-                .icon(choice.icon)
-                .selected(self.highlighted.as_ref() == Some(&choice.key))
-                .on_click(cx.listener(move |this, _, window, cx| this.run(&key, window, cx)))
+            let hover_key = choice.key.clone();
+            let row_keys = keys.clone();
+            div()
+                .id(SharedString::from(format!("row-{}", choice.key)))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                    if this.highlight.hover(&hover_key, event.position, &row_keys) {
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    NavigationItem::new(
+                        SharedString::from(choice.key.clone()),
+                        choice.label.clone(),
+                    )
+                    .styled_label(matched_label(choice.label, &choice.positions))
+                    .icon(choice.icon)
+                    .selected(active.as_ref() == Some(&choice.key))
+                    .on_click(cx.listener(move |this, _, window, cx| this.run(&key, window, cx))),
+                )
         });
+        let step_keys = keys.clone();
         div()
             .id("channel-tab-picker")
             .flex()
@@ -271,35 +301,46 @@ impl Render for ChannelTabPicker {
             .px(rems(1.5))
             .py(rems(1.))
             .gap(rems(1.))
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
-                    "down" => this.move_highlight(1, cx),
-                    "up" => this.move_highlight(-1, cx),
+                    "down" => {
+                        this.highlight.step(true, &step_keys);
+                    }
+                    "up" => {
+                        this.highlight.step(false, &step_keys);
+                    }
                     "enter" => {
-                        if let Some(key) = this.highlighted.clone() {
+                        if let Some(key) = this.highlight.chosen(&step_keys) {
                             this.run(&key, window, cx);
                         }
                     }
                     _ => return,
                 }
                 cx.stop_propagation();
+                cx.notify();
             }))
             .child(tabs)
             .child(
                 div()
-                    .id("channel-tab-choices")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
                     .child(SearchField::new(&self.input))
                     .child(
                         div()
+                            .id("channel-tab-choices")
                             .flex()
                             .flex_col()
-                            .gap(rems(0.125))
+                            .flex_1()
+                            .min_h_0()
                             .mt(rems(1.))
+                            .gap(rems(0.125))
+                            .overflow_y_scroll()
+                            .track_scroll(self.highlight.scroll_handle())
+                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
+                                this.highlight.track_pointer(event.position)
+                            }))
                             .children(rows)
                             .children(empty),
                     ),

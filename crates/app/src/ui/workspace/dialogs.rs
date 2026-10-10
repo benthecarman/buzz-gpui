@@ -68,6 +68,20 @@ impl Workspace {
     }
 
     /// Search Buzz. Without a ready community it offers pages only.
+    /// Mod+K, unless a dialog is open.
+    pub fn search_buzz(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_none() {
+            self.open_search(window, cx);
+        }
+    }
+
+    /// Mod+F, unless a dialog is open.
+    pub fn search_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_none() {
+            self.open_conversation_search(window, cx);
+        }
+    }
+
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search(false, window, cx);
     }

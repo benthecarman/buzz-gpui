@@ -490,19 +490,6 @@ impl Render for Workspace {
                     .font_family("Inter")
                     .emoji_fallback()
                     .text_color(c.text_standard)
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        let keys = &event.keystroke;
-                        if keys.key == "k" && keys.modifiers.secondary() && this.dialog.is_none() {
-                            cx.stop_propagation();
-                            this.open_search(window, cx);
-                        } else if keys.key == "f"
-                            && keys.modifiers.secondary()
-                            && this.dialog.is_none()
-                        {
-                            cx.stop_propagation();
-                            this.open_conversation_search(window, cx);
-                        }
-                    }))
                     .child(header)
                     .child(
                         div().flex().flex_1().min_h_0().child(self.rail(cx)).child(

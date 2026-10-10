@@ -4,8 +4,8 @@ use super::ClickHandler;
 use crate::{ActiveTheme, Icon, IconName, Surface, TypeStyled, tokens::radius};
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
-    prelude::FluentBuilder, rems,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, StyledText,
+    Window, div, prelude::FluentBuilder, rems,
 };
 use std::rc::Rc;
 
@@ -32,6 +32,9 @@ pub enum NavigationItemVariant {
 pub struct NavigationItem {
     id: ElementId,
     label: SharedString,
+    /// Replaces the plain label, such as one with matched letters
+    /// underlined.
+    styled_label: Option<StyledText>,
     variant: NavigationItemVariant,
     icon: Option<IconName>,
     icon_stroke: Option<f32>,
@@ -49,6 +52,7 @@ impl NavigationItem {
         Self {
             id: id.into(),
             label: label.into(),
+            styled_label: None,
             variant: NavigationItemVariant::default(),
             icon: None,
             icon_stroke: None,
@@ -60,6 +64,12 @@ impl NavigationItem {
             surface: Surface::default(),
             on_click: None,
         }
+    }
+
+    /// Draws the label with its own runs, e.g. underlined matches.
+    pub fn styled_label(mut self, label: StyledText) -> Self {
+        self.styled_label = Some(label);
+        self
     }
 
     pub fn variant(mut self, variant: NavigationItemVariant) -> Self {
@@ -236,7 +246,10 @@ impl RenderOnce for NavigationItem {
                     .when_some(label_color, |this, color| {
                         this.text_color(color).font_weight(FontWeight::SEMIBOLD)
                     })
-                    .child(self.label),
+                    .map(|this| match self.styled_label {
+                        Some(styled) => this.child(styled),
+                        None => this.child(self.label),
+                    }),
             )
             .when_some(self.trailing, |this, trailing| {
                 this.child(

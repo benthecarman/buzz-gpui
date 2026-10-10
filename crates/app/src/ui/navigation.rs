@@ -23,6 +23,10 @@ actions!(
         GoHome,
         /// Mod+W : closes the channel's shown tab, else the window.
         CloseTab,
+        /// Mod+K : Search Buzz.
+        SearchBuzz,
+        /// Mod+F : Search this conversation.
+        SearchConversation,
     ]
 );
 
@@ -179,11 +183,16 @@ pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
     cx.on_action(|_: &GoForward, cx| with_workspace(cx, Workspace::go_forward));
     cx.on_action(|_: &GoHome, cx| with_workspace(cx, Workspace::go_home));
     cx.on_action(|_: &CloseTab, cx| with_workspace(cx, Workspace::close_tab_or_window));
+    // Bound app-wide, so they work with nothing in the window focused.
+    cx.on_action(|_: &SearchBuzz, cx| with_workspace(cx, Workspace::search_buzz));
+    cx.on_action(|_: &SearchConversation, cx| with_workspace(cx, Workspace::search_conversation));
     cx.bind_keys([
         KeyBinding::new("secondary-[", GoBack, None),
         KeyBinding::new("secondary-]", GoForward, None),
         KeyBinding::new("secondary-shift-a", GoHome, None),
         KeyBinding::new("secondary-w", CloseTab, None),
+        KeyBinding::new("secondary-k", SearchBuzz, None),
+        KeyBinding::new("secondary-f", SearchConversation, None),
     ]);
     cx.spawn(async move |cx| {
         while let Some(arrival) = arrivals.next().await {
