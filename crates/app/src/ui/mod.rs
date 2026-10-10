@@ -57,6 +57,7 @@ pub mod pages;
 mod panels;
 pub mod profile_panel;
 pub mod projects;
+mod rail_menu;
 mod reading;
 mod reminders;
 mod renderers;

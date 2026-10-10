@@ -522,7 +522,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn rail(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let menu = super::rail_menu::state(window, cx);
         let state = cx.global::<AppState>();
         let selected = state.selected;
         let mut rail = div()
@@ -534,20 +535,27 @@ impl Workspace {
             .py(rems(0.5));
         for (index, community) in state.communities.iter().enumerate() {
             let name = community.read(cx).name();
-            rail =
-                rail.child(
-                    IconButton::new(
-                        SharedString::from(format!("community-{index}")),
-                        IconName::Globe,
-                    )
-                    .selected(selected == Some(index))
-                    .child(Avatar::new(name).squircle().size(AvatarSize::Small))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_community(index, window, cx)
-                    })),
-                );
+            let menu = menu.clone();
+            rail = rail.child(
+                div()
+                    .on_mouse_down(MouseButton::Right, move |event, _, cx| {
+                        super::rail_menu::open(&menu, index, event.position, cx)
+                    })
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("community-{index}")),
+                            IconName::Globe,
+                        )
+                        .selected(selected == Some(index))
+                        .child(Avatar::new(name).squircle().size(AvatarSize::Small))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| this.select_community(index, window, cx),
+                        )),
+                    ),
+            );
         }
-        rail.child(
+        let menu = super::rail_menu::render(&menu, cx);
+        rail.children(menu).child(
             IconButton::new("add-community", IconName::Plus)
                 .tooltip("Add a community")
                 .on_click(cx.listener(|this, _, window, cx| this.open_add_community(window, cx))),
@@ -638,14 +646,19 @@ impl Render for Workspace {
                     .text_color(c.text_standard)
                     .child(header)
                     .child(
-                        div().flex().flex_1().min_h_0().child(self.rail(cx)).child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .pr(px(gutter))
-                                .pb(px(gutter))
-                                .child(body),
-                        ),
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.rail(window, cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .pr(px(gutter))
+                                    .pb(px(gutter))
+                                    .child(body),
+                            ),
                     )
                     .children(dialog)
                     .children(live_notice)
