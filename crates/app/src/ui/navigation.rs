@@ -195,8 +195,9 @@ struct Navigator {
 
 impl Global for Navigator {}
 
-/// Binds the shortcuts and starts delivering [`Request`]s. Requests sent
-/// before [`install`] wait for the window.
+/// Handles the navigation shortcuts, which `crate::shortcuts` binds, and
+/// starts delivering [`Request`]s. Requests sent before [`install`] wait
+/// for the window.
 pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
     let (sender, mut arrivals) = unbounded::<Arrival>();
     cx.set_global(Navigator {
@@ -210,14 +211,7 @@ pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
     // Bound app-wide, so they work with nothing in the window focused.
     cx.on_action(|_: &SearchBuzz, cx| with_workspace(cx, Workspace::search_buzz));
     cx.on_action(|_: &SearchConversation, cx| with_workspace(cx, Workspace::search_conversation));
-    cx.bind_keys([
-        KeyBinding::new("secondary-[", GoBack, None),
-        KeyBinding::new("secondary-]", GoForward, None),
-        KeyBinding::new("secondary-shift-a", GoHome, None),
-        KeyBinding::new("secondary-w", CloseTab, None),
-        KeyBinding::new("secondary-k", SearchBuzz, None),
-        KeyBinding::new("secondary-f", SearchConversation, None),
-    ]);
+    // Bindings come from `crate::shortcuts`, which can rebind them.
     cx.spawn(async move |cx| {
         while let Some(arrival) = arrivals.next().await {
             cx.update(|cx| {
@@ -251,7 +245,7 @@ pub fn sender(cx: &App) -> Option<UnboundedSender<Arrival>> {
 
 /// Runs `f` on the workspace once the current update finishes, so it works
 /// from global action handlers too, which run while the window is busy.
-fn with_workspace(
+pub(crate) fn with_workspace(
     cx: &mut App,
     f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) {

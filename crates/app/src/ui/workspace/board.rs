@@ -255,9 +255,18 @@ impl Workspace {
     }
 
     /// Mod+W: the shown channel tab closes; with none, the window does.
-    /// Not while a dialog is open.
+    /// Not while a dialog is open: the workspace's, a Settings dialog, or
+    /// any dialog or media viewer holding focus.
     pub fn close_tab_or_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.is_some() {
+        let settings_modal = self.page == Page::SETTINGS
+            && self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.read(cx).has_modal());
+        let focused_dialog = window.context_stack().iter().any(|context| {
+            context.contains(buzz_ui::DIALOG_CONTEXT) || context.contains("MediaReview")
+        });
+        if self.dialog.is_some() || settings_modal || focused_dialog {
             return;
         }
         let on_board = self.page == Page::MESSAGES && self.channel.is_some();

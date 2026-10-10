@@ -9,6 +9,7 @@ mod main_window;
 mod mirror;
 mod notifications;
 mod runtime;
+mod shortcuts;
 #[cfg(unix)]
 mod single_instance;
 mod sounds;
@@ -16,7 +17,6 @@ mod sounds;
 mod tray;
 mod ui;
 
-use gpui_kit::*;
 use hosts::Hosts;
 use ui::navigation::{self, Request};
 
@@ -83,11 +83,7 @@ fn main() {
                 });
             });
         }
-        cx.bind_keys([KeyBinding::new(
-            "secondary-,",
-            ui::settings::OpenSettings,
-            None,
-        )]);
+        shortcuts::init(cx);
         main_window::init(cx);
         main_window::open(cx);
     });

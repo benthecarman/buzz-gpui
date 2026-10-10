@@ -253,7 +253,10 @@ impl Workspace {
             .gap(rems(0.5))
             .child(
                 header_button("search", IconName::MagnifyingGlass)
-                    .tooltip("Search Buzz (Ctrl+K)")
+                    .tooltip(format!(
+                        "Search Buzz ({})",
+                        crate::shortcuts::text("global-search", cx)
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
             )
             .child(self.account.clone())

@@ -125,6 +125,8 @@ pub struct SettingsPage {
     retention_menu: bool,
     /// The last archive save or clear failed.
     archive_error: Option<SharedString>,
+    /// Made on first visit; keeps the row being rebound and its notice.
+    shortcuts: Option<Entity<shortcuts::ShortcutSettings>>,
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -149,6 +151,7 @@ impl SettingsPage {
             sound_menu: None,
             retention_menu: false,
             archive_error: None,
+            shortcuts: None,
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -206,6 +209,11 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// A dialog is open over the page.
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         cx.notify();
@@ -220,6 +228,8 @@ impl SettingsPage {
         // Leaving Profile hides the private key, as unmounting it does.
         self.profile.nsec_revealed = false;
         self.profile.nsec_message = None;
+        // Leaving Shortcuts stops a capture and clears its notice.
+        self.shortcuts = None;
     }
 
     /// The settings sidebar (§5b.2). The shell draws it in the navigation
@@ -316,7 +326,11 @@ impl SettingsPage {
             Section::Communities => self.communities_section(cx),
             Section::Appearance => appearance::render(cx),
             Section::Notifications => self.notifications_section(window, cx),
-            Section::Shortcuts => shortcuts::render(cx),
+            Section::Shortcuts => self
+                .shortcuts
+                .get_or_insert_with(|| cx.new(|cx| shortcuts::ShortcutSettings::new(window, cx)))
+                .clone()
+                .into_any_element(),
             Section::Agents => self.agents_section(window, cx),
             Section::About => about::render(cx),
         }
