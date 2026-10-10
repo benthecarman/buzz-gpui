@@ -4,7 +4,7 @@
 //! "Working now" list.
 
 use super::agent_activity::row::AgentActivityRow;
-use super::message::display_name;
+use super::identity::Names;
 use super::{media, navigation};
 use crate::agent_activity::current::{CurrentActivity, Root};
 use crate::hosts::Hosts;
@@ -281,12 +281,12 @@ impl AgentChooser {
 
     /// Follows the activity in `channel`. `thread` is the panel's root, or
     /// `None` in a channel, where `excerpt` names threads from the loaded rows. Names
-    /// and pictures come from `people`.
+    /// are the conversation's scoped names; pictures come from `profiles`.
     pub fn set(
         &mut self,
         activity: &Activity,
         (channel, thread): (&str, Option<&str>),
-        (profiles, media): (&Profiles, &Media),
+        (profiles, names, media): (&Profiles, &Names, &Media),
         excerpt: impl Fn(&str) -> Option<String>,
         on_open: OnOpen,
         cx: &mut Context<Self>,
@@ -308,7 +308,7 @@ impl AgentChooser {
                     });
                 Row {
                     pubkey: pubkey.clone(),
-                    name: display_name(profiles, pubkey),
+                    name: names.display(pubkey).into(),
                     picture: profiles.get(pubkey).and_then(|p| p.picture.clone()),
                     status: detail.label.clone(),
                     scope: thread
@@ -586,7 +586,7 @@ impl Render for AgentChooser {
 pub fn overlay(
     humans: &[String],
     agents: Option<Entity<AgentChooser>>,
-    profiles: &Profiles,
+    names: &Names,
     narrow: bool,
     cx: &App,
 ) -> Option<AnyElement> {
@@ -597,7 +597,7 @@ pub fn overlay(
     let c = cx.colors();
     let names: Vec<SharedString> = humans
         .iter()
-        .map(|pubkey| display_name(profiles, pubkey))
+        .map(|pubkey| SharedString::from(names.display(pubkey)))
         .collect();
     // The live region reads "X is working. Y is typing".
     let working: Vec<SharedString> = agents

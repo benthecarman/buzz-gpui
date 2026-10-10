@@ -860,6 +860,7 @@ impl Render for ChannelPage {
         let owned = typing::owned_agents(cx);
         let community = self.community.read(cx);
         let directory = Directory::of(community, Some(&self.channel.members), cx);
+        let names = directory.names.clone();
         let viewer = community.session.viewer().to_string();
 
         // Who is typing, and which of the viewer's agents work here.
@@ -933,7 +934,7 @@ impl Render for ChannelPage {
                 chooser.set(
                     &activity,
                     (&self.channel.id, None),
-                    (&profiles, &media),
+                    (&profiles, &names, &media),
                     |root| {
                         items
                             .iter()
@@ -1062,7 +1063,7 @@ impl Render for ChannelPage {
                 typing::overlay(
                     &activity.humans,
                     Some(self.activity.clone()),
-                    &profiles,
+                    &names,
                     narrow,
                     cx,
                 )

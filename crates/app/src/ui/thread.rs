@@ -793,11 +793,12 @@ impl Render for ThreadPanel {
             .find(|channel| channel.id == self.channel)
             .map(|channel| channel.members.clone());
         let directory = Directory::of(community, members.as_deref(), cx);
+        let names = directory.names.clone();
         self.activity.update(cx, |chooser, cx| {
             chooser.set(
                 &activity,
                 (&self.channel, Some(&root_hex)),
-                (&profiles, &media),
+                (&profiles, &names, &media),
                 |_| None,
                 // Already here: the thread is open.
                 Rc::new(|_, _, _| {}),
@@ -992,7 +993,7 @@ impl Render for ThreadPanel {
         let typing = typing::overlay(
             &activity.humans,
             Some(self.activity.clone()),
-            &profiles,
+            &names,
             narrow,
             cx,
         );
