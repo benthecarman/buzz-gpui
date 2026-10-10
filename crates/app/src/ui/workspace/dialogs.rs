@@ -3,11 +3,11 @@
 
 use super::Workspace;
 use crate::ui::add_community::AddCommunity;
-use crate::ui::modal::{Callback, Dismissed, OpenChannel, OpenConversation};
+use crate::ui::modal::{Dismissed, OpenChannel, OpenConversation};
 use crate::ui::new_channel::NewChannelDialog;
 use crate::ui::new_message::NewMessageDialog;
 use crate::ui::overlay::{self, Dismiss};
-use crate::ui::search::SearchDialog;
+use crate::ui::search::{OpenPage, SearchDialog};
 use crate::ui::sidebar::{self, Page};
 use buzz_relay_client::{ChannelSummary, EventId};
 use gpui_kit::*;
@@ -75,11 +75,15 @@ impl Workspace {
             .map(|page| page.read(cx).channel().clone());
         let on_open = Self::opener(cx);
         let weak = cx.entity().downgrade();
-        let on_agents: Callback = Rc::new(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| this.select_page(Page::Agents, cx));
+        let on_page: OpenPage = Rc::new(move |page, window, cx| {
+            let _ = weak.update(cx, |this, cx| match page {
+                Page::Messages => this.go_home(window, cx),
+                Page::Settings => this.open_settings(None, window, cx),
+                Page::Agents => this.select_page(page, cx),
+            });
         });
         let dialog =
-            cx.new(|cx| SearchDialog::new(community, current, on_open, on_agents, window, cx));
+            cx.new(|cx| SearchDialog::new(community, current, on_open, on_page, window, cx));
         self.show(dialog, true, cx);
     }
 

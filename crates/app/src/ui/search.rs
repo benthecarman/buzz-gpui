@@ -1,29 +1,49 @@
 //! Search Buzz (ui.md §2.3; `PageSearch.tsx`, `SearchResults.tsx`): the
 //! header's search palette. Typed text matches pages and conversations by
 //! name and searches messages on the relay; `from:`, `in:`, `after:` and
-//! `before:` narrow the message search (`parseSearchOperators.ts`).
+//! `before:` narrow the message search (`parseSearchOperators.ts`). An
+//! author picked for `from:` shows as a chip in the field.
 
 use super::message::{channel_icon, display_name};
-use super::modal::{Callback, Dismissed, Leading, OpenChannel, group_label, note, row};
-use super::sidebar::channel_label;
+use super::modal::{Dismissed, Leading, OpenChannel, group_label, note, row};
+use super::sidebar::{Page, channel_label};
 use crate::community::Community;
 use buzz_relay_client::members::{Person, match_tier};
-use buzz_relay_client::search::{self, Day};
-use buzz_relay_client::{ChannelSummary, ChannelType, EventId, MessageSearch, SearchOutcome};
+use buzz_relay_client::search::{self, Day, match_name};
+use buzz_relay_client::{
+    ChannelSummary, ChannelType, EventId, MessageSearch, Profile, SearchOutcome,
+};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, IconButton, IconButtonSize, IconName, SearchField, Surface,
-    TypeStyled, tokens::shadow,
+    ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonSize, IconName, Surface,
+    TextField, TypeStyled,
+    tokens::{radius, shadow},
 };
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use nostr::nips::nip19::ToBech32;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// Typeahead waits for a brief pause before reading the relay.
 const DEBOUNCE: Duration = Duration::from_millis(180);
 /// Conversations shown per name group.
 const NAME_MATCHES: usize = 8;
+/// People and agents the `from:` picker shows.
+const AUTHOR_MATCHES: usize = 12;
+const PLACEHOLDER: &str = "Search pages, conversations and messages…";
+
+/// Shows a page of the app.
+pub type OpenPage = Rc<dyn Fn(Page, &mut Window, &mut App)>;
+
+/// The pages search offers, in buzz-app's order (`presentation.ts`):
+/// fixed pages, then others by name, then Settings.
+const PAGES: [(Page, &str, IconName); 3] = [
+    (Page::Messages, "Messages", IconName::ChatsCircle),
+    (Page::Agents, "Agents", IconName::Robot),
+    (Page::Settings, "Settings", IconName::Gear),
+];
 
 /// What a result row does.
 #[derive(Clone)]
@@ -33,7 +53,21 @@ enum Action {
     Scope(ChannelSummary),
     /// Replace the query, e.g. to complete an operator.
     Query(String),
-    Agents,
+    /// Search messages by this author; `prefix` is the text typed before
+    /// `from:`.
+    Author {
+        pubkey: String,
+        name: SharedString,
+        prefix: String,
+    },
+    Page(Page),
+}
+
+/// The author picked from the `from:` picker.
+#[derive(Clone)]
+struct Author {
+    pubkey: String,
+    name: SharedString,
 }
 
 struct Entry {
@@ -77,8 +111,10 @@ pub struct SearchDialog {
     remote: Remote,
     loading: bool,
     pending: Option<Task<()>>,
+    /// Shown as a chip; the query carries it as `from:<hex>`.
+    author: Option<Author>,
     on_open: OpenChannel,
-    on_agents: Callback,
+    on_page: OpenPage,
     _subscription: Subscription,
 }
 
@@ -89,13 +125,11 @@ impl SearchDialog {
         community: Entity<Community>,
         current: Option<ChannelSummary>,
         on_open: OpenChannel,
-        on_agents: Callback,
+        on_page: OpenPage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search pages, conversations and messages…")
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
         input.update(cx, |state, cx| state.focus(window, cx));
         let subscription =
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -112,13 +146,25 @@ impl SearchDialog {
             remote: Remote::default(),
             loading: false,
             pending: None,
+            author: None,
             on_open,
-            on_agents,
+            on_page,
             _subscription: subscription,
         }
     }
 
+    /// The query as searched: the chip's `from:<hex>`, then the typed text
+    /// (`SearchChoices.tsx` maps edits back the same way).
     fn query(&self, cx: &App) -> String {
+        let text = self.display(cx);
+        match &self.author {
+            Some(author) => format!("from:{} {}", author.pubkey, text.trim_start()),
+            None => text,
+        }
+    }
+
+    /// What the field shows.
+    fn display(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
     }
 
@@ -237,8 +283,16 @@ impl SearchDialog {
                 self.set_query(String::new(), window, cx);
             }
             Action::Query(text) => self.set_query(text, window, cx),
-            Action::Agents => {
-                (self.on_agents)(window, cx);
+            Action::Author {
+                pubkey,
+                name,
+                prefix,
+            } => {
+                self.author = Some(Author { pubkey, name });
+                self.set_query(prefix, window, cx);
+            }
+            Action::Page(page) => {
+                (self.on_page)(page, window, cx);
                 cx.emit(Dismissed);
             }
         }
@@ -247,10 +301,105 @@ impl SearchDialog {
     fn unscope(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.scope = None;
         self.input.update(cx, |state, cx| {
-            state.set_placeholder("Search pages, conversations and messages…", window, cx);
+            state.set_placeholder(PLACEHOLDER, window, cx);
             state.focus(window, cx);
         });
         self.changed(window, cx);
+    }
+
+    /// The chip's ×: the author no longer narrows the search.
+    fn remove_author(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.author = None;
+        self.input.update(cx, |state, cx| state.focus(window, cx));
+        self.changed(window, cx);
+    }
+
+    /// The `from:` picker (`SearchResults.tsx:248-351`): the relay's
+    /// people and the scoped conversation's members whose names match,
+    /// accents and case folded; exact names, then people before agents,
+    /// then members.
+    fn author_groups(&self, needle: &str, current: bool, cx: &App) -> Vec<Group> {
+        let snapshot = &self.community.read(cx).snapshot;
+        let display = self.display(cx);
+        let prefix = display
+            .rfind("from:")
+            .map(|at| display[..at].to_string())
+            .unwrap_or_default();
+        let members: Vec<String> = self
+            .scope
+            .as_ref()
+            .map(|scope| scope.members.clone())
+            .unwrap_or_default();
+        let mut candidates: Vec<(String, Profile)> = members
+            .iter()
+            .filter_map(|key| Some((key.clone(), (**snapshot.profiles.get(key)?).clone())))
+            .collect();
+        let remote = match (current, &self.remote.people) {
+            (true, Some(Ok(people))) => Some(people),
+            _ => None,
+        };
+        for person in remote.into_iter().flatten() {
+            if !candidates.iter().any(|(key, _)| *key == person.pubkey) {
+                candidates.push((person.pubkey.clone(), person.profile.clone()));
+            }
+        }
+        let mut ranked: Vec<(u8, String, Profile)> = candidates
+            .into_iter()
+            .filter_map(|(key, profile)| {
+                let tier = match_tier(&profile.name, needle).filter(|tier| *tier < 4)?;
+                Some((tier, key, profile))
+            })
+            .collect();
+        ranked.sort_by_key(|(tier, key, profile)| {
+            (
+                *tier != 0,
+                profile.is_agent,
+                !members.contains(key),
+                profile.name.to_lowercase(),
+            )
+        });
+        ranked.truncate(AUTHOR_MATCHES);
+        let entry = |key: &String, profile: &Profile| Entry {
+            key: format!("author:{key}"),
+            leading: EntryLeading::Person(key.clone()),
+            label: profile.name.clone().into(),
+            detail: Some(key.chars().take(12).collect::<String>().into()),
+            action: Action::Author {
+                pubkey: key.clone(),
+                name: profile.name.clone().into(),
+                prefix: prefix.clone(),
+            },
+        };
+        let people: Vec<Entry> = ranked
+            .iter()
+            .filter(|(_, _, profile)| !profile.is_agent)
+            .map(|(_, key, profile)| entry(key, profile))
+            .collect();
+        let agents: Vec<Entry> = ranked
+            .iter()
+            .filter(|(_, _, profile)| profile.is_agent)
+            .map(|(_, key, profile)| entry(key, profile))
+            .collect();
+        let empty = match (current, &self.remote.people) {
+            _ if needle.is_empty() => Some("Type a name to search people."),
+            _ if !people.is_empty() || !agents.is_empty() => None,
+            (true, Some(Ok(_))) => Some("No matching people. Try a different name."),
+            (true, Some(Err(_))) => Some("People search is unavailable. Try a longer name."),
+            _ => Some("Searching people…"),
+        };
+        let mut groups = vec![Group {
+            label: "People",
+            entries: people,
+            empty: empty.map(Into::into),
+        }];
+        if !agents.is_empty() {
+            groups.push(Group {
+                label: "Agents",
+                entries: agents,
+                empty: None,
+            });
+        }
+        groups
     }
 
     fn groups(&self, cx: &App) -> Vec<Group> {
@@ -261,6 +410,7 @@ impl SearchDialog {
         let parsed = search::parse(query.trim());
         let current = self.remote.query == query
             && self.remote.scope.as_deref() == self.scope.as_ref().map(|s| s.id.as_str());
+        let display = self.display(cx);
         let channels: Vec<&ChannelSummary> = snapshot
             .channels
             .iter()
@@ -277,41 +427,12 @@ impl SearchDialog {
 
         // A `from:` still being typed picks a person.
         if let Some(needle) = search::unfinished_author(&query) {
-            let needle = needle.trim_start_matches('@').to_lowercase();
-            let mut entries = Vec::new();
-            let empty = match (current, &self.remote.people) {
-                _ if needle.is_empty() => Some("Type a name to search people."),
-                (true, Some(Ok(people))) => {
-                    for person in people.iter().take(12) {
-                        let token = author_token(&person.pubkey, &person.profile.name);
-                        let prefix = query
-                            .rfind("from:")
-                            .map(|at| &query[..at])
-                            .unwrap_or_default();
-                        entries.push(Entry {
-                            key: format!("author:{}", person.pubkey),
-                            leading: EntryLeading::Person(person.pubkey.clone()),
-                            label: person.profile.name.clone().into(),
-                            detail: Some(person.pubkey.chars().take(12).collect::<String>().into()),
-                            action: Action::Query(format!("{prefix}from:{token} ")),
-                        });
-                    }
-                    entries
-                        .is_empty()
-                        .then_some("No matching people. Try a different name.")
-                }
-                (true, Some(Err(_))) => Some("People search is unavailable. Try a longer name."),
-                _ => Some("Searching people…"),
-            };
-            return vec![Group {
-                label: "People",
-                entries,
-                empty: empty.map(Into::into),
-            }];
+            let needle = needle.trim_start_matches('@').to_string();
+            return self.author_groups(&needle, current, cx);
         }
 
         // An `after:` or `before:` still being typed picks a day.
-        if let Some((prefix, operator)) = date_prompt(&query) {
+        if let Some((prefix, operator)) = date_prompt(&display) {
             let entries = date_presets(Local::now().date_naive())
                 .into_iter()
                 .map(|(label, day)| {
@@ -405,19 +526,29 @@ impl SearchDialog {
             detail: Some("Search messages in this conversation".into()),
             action: Action::Scope(channel.clone()),
         });
-        let agents = Entry {
-            key: "page:agents".into(),
-            leading: EntryLeading::Icon(IconName::Robot),
-            label: "Agents".into(),
+        let page = |(page, label, icon): (Page, &str, IconName)| Entry {
+            key: format!("page:{label}"),
+            leading: EntryLeading::Icon(icon),
+            label: label.to_string().into(),
             detail: None,
-            action: Action::Agents,
+            action: Action::Page(page),
         };
 
         if query.trim().is_empty() {
             let mut recent: Vec<&ChannelSummary> =
                 channels.iter().copied().filter(|c| !c.read_only).collect();
-            // Without activity times, unread conversations lead.
-            recent.sort_by_key(|c| !snapshot.unread.channel(&c.id).unread);
+            // Newest message first (`lastActivityAt ?? updatedAt`).
+            let activity = |c: &ChannelSummary| {
+                snapshot
+                    .unread
+                    .latest
+                    .get(&c.id)
+                    .copied()
+                    .or(c.last_activity_at)
+                    .or(c.updated_at)
+                    .unwrap_or(0)
+            };
+            recent.sort_by_key(|c| std::cmp::Reverse(activity(c)));
             let mut groups: Vec<Group> = Vec::new();
             if let Some(entry) = scope_action {
                 groups.push(Group {
@@ -437,18 +568,19 @@ impl SearchDialog {
             });
             groups.push(Group {
                 label: "Actions",
-                entries: vec![agents],
+                entries: PAGES.into_iter().map(page).collect(),
                 empty: None,
             });
             return groups;
         }
 
+        // Names match by case only, as `matchName` does.
         let needle = parsed.text.trim_start_matches('#').to_lowercase();
-        let rank = |name: &str| match_tier(name, &needle).unwrap_or(6);
+        let rank = |name: &str| match_name(name, &needle);
         let mut named: Vec<(&ChannelSummary, u8)> = channels
             .iter()
-            .filter(|c| !needle.is_empty() && label(c).to_lowercase().contains(&needle))
-            .map(|c| (*c, rank(&label(c))))
+            .filter(|_| !needle.is_empty())
+            .filter_map(|c| Some((*c, rank(&label(c))?)))
             .collect();
         named.sort_by_key(|(c, rank)| (*rank, label(c).to_lowercase()));
         let mut channel_rows: Vec<(u8, Entry)> = named
@@ -459,7 +591,8 @@ impl SearchDialog {
         if current {
             for channel in &self.remote.public {
                 if !named.iter().any(|(c, _)| c.id == channel.id) {
-                    channel_rows.push((rank(&channel.name) + 1, conversation(channel, None)));
+                    let rank = rank(&channel.name).unwrap_or(6);
+                    channel_rows.push((rank, conversation(channel, None)));
                 }
             }
         }
@@ -470,10 +603,12 @@ impl SearchDialog {
             .map(|(c, rank)| (*rank, conversation(c, None)))
             .take(NAME_MATCHES)
             .collect();
-        let pages: Vec<(u8, Entry)> = (!needle.is_empty() && "agents".contains(&needle))
-            .then(|| (rank("Agents"), agents))
+        let mut pages: Vec<(u8, Entry)> = PAGES
             .into_iter()
+            .filter(|_| !needle.is_empty())
+            .filter_map(|entry| Some((rank(entry.1)?, page(entry))))
             .collect();
+        pages.sort_by_key(|(rank, _)| *rank);
         let mut named_groups: Vec<(u8, Group)> = [
             ("Channels", channel_rows),
             ("Direct messages", dms),
@@ -585,15 +720,6 @@ fn local_midnight(day: Day) -> Option<u64> {
     u64::try_from(midnight.timestamp()).ok()
 }
 
-/// `from:@name` when the name is one word, else the key.
-fn author_token(pubkey: &str, name: &str) -> String {
-    if !name.is_empty() && !name.chars().any(char::is_whitespace) && name != pubkey {
-        format!("@{name}")
-    } else {
-        pubkey.to_string()
-    }
-}
-
 /// The text before an unfinished `after:`/`before:` token, and which one.
 fn date_prompt(query: &str) -> Option<(String, &'static str)> {
     let token_start = query.rfind(char::is_whitespace).map_or(0, |at| at + 1);
@@ -633,6 +759,58 @@ fn conversation_detail(channel: &ChannelSummary) -> &'static str {
             Some(ChannelType::Session) => "Session",
             _ => "Conversation",
         }
+    }
+}
+
+impl SearchDialog {
+    /// The search field (`SearchChoices.tsx`): magnifier, the author chip
+    /// when one is picked, the text, and a clear button.
+    fn field(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = *cx.colors();
+        let chip = self.author.as_ref().map(|author| {
+            let npub = nostr::prelude::PublicKey::from_hex(&author.pubkey)
+                .ok()
+                .and_then(|key| key.to_bech32().ok())
+                .unwrap_or_else(|| author.pubkey.clone());
+            div()
+                .id("search-author-chip")
+                .max_w(px(240.))
+                .px(rems(0.5))
+                .py(rems(0.125))
+                .rounded(radius::CHIP)
+                .bg(c.affordance_subtle)
+                .hover(|s| s.bg(c.affordance_subtle_hover))
+                .text_body_sm()
+                .text_color(c.text_link)
+                .truncate()
+                .cursor_pointer()
+                .tooltip(buzz_ui::Tooltip::text(npub))
+                .child(format!("× from:@{}", author.name))
+                .on_click(cx.listener(|this, _, window, cx| this.remove_author(window, cx)))
+        });
+        let input = self.input.clone();
+        let clear = (!self.display(cx).is_empty()).then(|| {
+            IconButton::new("search-clear", IconName::X)
+                .size(IconButtonSize::Sm)
+                .surface(Surface::Floating)
+                .on_click(move |_, window, cx| {
+                    input.update(cx, |state, cx| {
+                        state.set_value("", window, cx);
+                        state.focus(window, cx);
+                    });
+                })
+        });
+        TextField::new(&self.input)
+            .surface(Surface::Floating)
+            .leading(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(rems(0.5))
+                    .child(Icon::new(IconName::MagnifyingGlass).size(16.))
+                    .children(chip),
+            )
+            .when_some(clear, |this, clear| this.trailing(clear))
     }
 }
 
@@ -781,12 +959,7 @@ impl Render for SearchDialog {
                                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
                             ),
                     )
-                    .child(
-                        div()
-                            .pt(rems(1.5))
-                            .children(scope)
-                            .child(SearchField::new(&self.input).surface(Surface::Floating)),
-                    )
+                    .child(div().pt(rems(1.5)).children(scope).child(self.field(cx)))
                     .child(
                         div()
                             .id("search-results")
@@ -831,8 +1004,9 @@ mod tests {
     }
 
     #[test]
-    fn author_tokens_use_one_word_names() {
-        assert_eq!(author_token("ab", "alice"), "@alice");
-        assert_eq!(author_token("ab", "Alice Smith"), "ab");
+    fn pages_follow_buzz_app_order() {
+        let labels: Vec<&str> = PAGES.iter().map(|(_, label, _)| *label).collect();
+        assert_eq!(labels, ["Messages", "Agents", "Settings"]);
+        assert_eq!(match_name("Settings", "set"), Some(1));
     }
 }

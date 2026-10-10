@@ -69,6 +69,13 @@ async fn lists_channels_and_folds_a_timeline() {
         .unwrap();
     assert_eq!(dm.channel_type, Some(ChannelType::Dm));
     assert_eq!(ready.relay.as_ref().unwrap().authority.len(), 64);
+    // The unread sample also yields each channel's newest message time.
+    let sampled = until(&mut snapshot, "message times", |s| {
+        s.unread.latest.contains_key(&channel("general"))
+            && s.unread.latest.contains_key(&channel("dm-alice-bob"))
+    })
+    .await;
+    assert!(sampled.unread.latest[&channel("general")] > 1_600_000_000);
 
     let view = session.open_channel(&channel("general"));
     let mut timeline = view.snapshot.clone();

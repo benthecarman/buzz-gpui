@@ -119,6 +119,66 @@ impl ParsedSearch {
     }
 }
 
+/// How well a page or conversation name matches typed text (`matchName`),
+/// lower is better: 0 exact, 1 prefix, 2 at a word start, 3 any
+/// substring, 4 letters in order where each run starts at a word start
+/// ("bgp" in "buzz-github-prs"), 5 letters in order. `needle` is already
+/// lowercased. Case is folded, accents are not, as in buzz-app.
+pub fn match_name(label: &str, needle: &str) -> Option<u8> {
+    let text = label.to_lowercase();
+    if text == needle {
+        return Some(0);
+    }
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let mut substring = false;
+    if !needle.is_empty() {
+        let mut from = 0;
+        while let Some(found) = text[from..].find(needle) {
+            let at = from + found;
+            if at == 0 {
+                return Some(1);
+            }
+            if !word(text[..at].chars().next_back()) {
+                return Some(2);
+            }
+            substring = true;
+            from = at + text[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    if substring {
+        return Some(3);
+    }
+    // Spaces in typed text only separate words; they need not match.
+    let letters: Vec<char> = needle.chars().filter(|c| !c.is_whitespace()).collect();
+    if letters.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // runs[i][j][in_run]: letters[i..] match chars[j..] with every run of
+    // consecutive matches starting at a word start.
+    let mut runs = vec![vec![[false; 2]; chars.len() + 1]; letters.len() + 1];
+    runs[letters.len()].fill([true; 2]);
+    for i in (0..letters.len()).rev() {
+        for j in (0..chars.len()).rev() {
+            for in_run in [false, true] {
+                let starts = in_run || j == 0 || !word(Some(chars[j - 1]));
+                let take = chars[j] == letters[i] && starts && runs[i + 1][j + 1][1];
+                runs[i][j][usize::from(in_run)] = take || runs[i][j + 1][0];
+            }
+        }
+    }
+    if runs[0][0][0] {
+        return Some(4);
+    }
+    let mut wanted = letters.iter().peekable();
+    for c in &chars {
+        if wanted.peek() == Some(&c) {
+            wanted.next();
+        }
+    }
+    wanted.peek().is_none().then_some(5)
+}
+
 /// Drops trailing punctuation, so `in:general,` still names `general`.
 fn clean(value: &str) -> &str {
     value.trim_end_matches(['.', ',', ';', ':', '!', '?'])
@@ -327,6 +387,24 @@ pub fn hits(events: &[Verified], scoped: Option<&str>) -> Vec<SearchHit> {
 mod tests {
     use super::*;
     use crate::testing::{CHANNEL, Signer, T0};
+
+    #[test]
+    fn ranks_names_like_buzz_app() {
+        assert_eq!(match_name("General", "general"), Some(0));
+        assert_eq!(match_name("general-chat", "gen"), Some(1));
+        assert_eq!(match_name("team-general", "gen"), Some(2));
+        assert_eq!(match_name("regenerate", "gen"), Some(3));
+        assert_eq!(match_name("buzz-github-prs", "bgp"), Some(4));
+        assert_eq!(match_name("buzz github", "b g"), Some(4));
+        assert_eq!(match_name("Settings", "stg"), Some(5));
+        assert_eq!(match_name("Agents", "xyz"), None);
+        assert_eq!(match_name("Agents", " "), None);
+        // Overlapping hits: a later word start still wins over a substring.
+        assert_eq!(match_name("aab ab", "ab"), Some(2));
+        // Case only; accents are not folded for names.
+        assert_eq!(match_name("Café", "cafe"), None);
+        assert_eq!(match_name("ÉQUIPE", "équipe"), Some(0));
+    }
 
     fn day(year: i32, month: u32, day: u32) -> Day {
         Day { year, month, day }

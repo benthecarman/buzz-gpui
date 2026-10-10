@@ -10,9 +10,6 @@ use std::rc::Rc;
 /// A dialog asks its host to close it.
 pub struct Dismissed;
 
-/// A plain UI callback.
-pub type Callback = Rc<dyn Fn(&mut Window, &mut App)>;
-
 /// Opens a channel, optionally revealing a message in it.
 pub type OpenChannel = Rc<dyn Fn(&ChannelSummary, Option<EventId>, &mut Window, &mut App)>;
 /// Opens a conversation by ID once the channel list has it.

@@ -60,6 +60,9 @@ pub struct UnreadCounts {
     pub observed: bool,
     /// Read-state sync health; `None` before the relay identified itself.
     pub sync: Option<ReadSyncSnapshot>,
+    /// Newest message time per channel in Unix seconds, read or not, from
+    /// the same evidence as the counts. For "recent" ordering.
+    pub latest: HashMap<String, u64>,
 }
 
 impl UnreadCounts {
@@ -945,6 +948,9 @@ impl Actor {
             let snapshot = reads
                 .unread
                 .snapshot(&ReadTarget::channel(id.as_str()), &reads.sync);
+            if let Some(latest) = &snapshot.latest_message {
+                counts.latest.insert(id.clone(), latest.created_at);
+            }
             if !snapshot.unread() {
                 continue;
             }
