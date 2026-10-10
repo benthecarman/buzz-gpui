@@ -58,14 +58,22 @@
             let
               buzzApp = builtins.fetchGit {
                 url = "https://github.com/benthecarman/buzz-app";
-                rev = "6958ff1fc2bf1dc682a9e445acdaaa020fb17a58";
+                rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a";
+                allRefs = true;
+              };
+              # buzz-agent likewise reads its model manifest from the buzz
+              # workspace's scripts directory.
+              buzz = builtins.fetchGit {
+                url = "https://github.com/block/buzz";
+                rev = "4f51b9e1010e086a16c099cd8d8218ca974a5e18";
                 allRefs = true;
               };
             in
             ''
               cp ${buzzApp}/crates/build_env.rs "$NIX_BUILD_TOP/cargo-vendor-dir/build_env.rs"
-              mkdir -p "$NIX_BUILD_TOP/runtime"
+              mkdir -p "$NIX_BUILD_TOP/runtime" "$NIX_BUILD_TOP/scripts"
               cp ${buzzApp}/runtime/agent-runtime.json "$NIX_BUILD_TOP/runtime/"
+              cp ${buzz}/scripts/model-capabilities.json "$NIX_BUILD_TOP/scripts/"
             '';
           # Tests need a display, a keyring or a relay; they run in CI-like
           # environments, not in the package build.
