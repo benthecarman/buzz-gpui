@@ -4,7 +4,7 @@
 //! header's Me pill, search, history and the Me sidebar slot already work;
 //! filling it in means replacing [`MePage`] and [`MeSidebar`].
 
-use super::pages::{self, Layout, Navigation, Page, PageSpec, Placement};
+use super::pages::{self, Navigation, Page, PageSpec, Placement};
 use crate::community::AppState;
 use buzz_ui::{ActiveTheme, IconName, TypeStyled};
 use gpui_kit::*;
@@ -18,7 +18,6 @@ pub fn register(cx: &mut App) {
             // generic page glyph.
             icon: IconName::Browser,
             placement: Placement::Topbar,
-            layout: Layout::Workspace,
             navigation: Navigation::Own(|_, cx| cx.new(|_| MeSidebar).into()),
             collapsible: true,
             badge: None,

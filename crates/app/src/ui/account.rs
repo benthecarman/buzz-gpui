@@ -16,6 +16,9 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 
+/// Opens the viewer's profile.
+pub type OnProfile = Rc<dyn Fn(&mut Window, &mut App)>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Open {
     Menu,
@@ -35,6 +38,9 @@ enum Modal {
 pub struct Account {
     /// Whether Settings is the current page, for the menu's check mark.
     pub settings_open: bool,
+    /// Opens the viewer's profile in the companion panel, set by the
+    /// workspace while a community is selected.
+    pub on_profile: Option<OnProfile>,
     open: Option<Open>,
     modal: Option<Modal>,
     /// The viewer's status in the selected community, by community.
@@ -61,6 +67,7 @@ impl Account {
     pub fn new(_: &mut Context<Self>) -> Self {
         Self {
             settings_open: false,
+            on_profile: None,
             open: None,
             modal: None,
             status: None,
@@ -279,12 +286,22 @@ impl Account {
             .py(rems(0.5))
             .px(rems(0.25))
             .min_w_0()
-            .child(
-                div()
-                    .flex_none()
-                    .size(rems(2.5))
-                    .child(profile.avatar(AvatarSize::Px(40.), false)),
-            )
+            .child(div().flex_none().size(rems(2.5)).map(|this| {
+                match self.on_profile.clone() {
+                    Some(on_profile) => this.child(
+                        IconButton::new("view-profile", IconName::User)
+                            .variant(ButtonVariant::Avatar)
+                            .shape(IconButtonShape::Round)
+                            .tooltip("View your profile")
+                            .child(profile.avatar(AvatarSize::Px(40.), false))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_open(None, cx);
+                                on_profile(window, cx);
+                            })),
+                    ),
+                    None => this.child(profile.avatar(AvatarSize::Px(40.), false)),
+                }
+            }))
             .child(
                 div()
                     .flex()

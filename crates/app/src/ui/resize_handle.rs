@@ -129,7 +129,7 @@ impl RenderOnce for ResizeHandle {
                 commit(window, cx);
             }
         };
-        let finish_out = finish.clone();
+        let finish_out = finish;
 
         div()
             .id(id.clone())

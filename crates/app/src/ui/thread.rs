@@ -57,6 +57,9 @@ pub struct ThreadPanel {
     revealing: Option<EventId>,
     /// The revealed message, tinted for a moment.
     highlight: Option<EventId>,
+    /// Draws its own "Thread" header. Off inside a tab pane, whose tab
+    /// strip names and closes it.
+    pub show_header: bool,
     _watch: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -170,6 +173,7 @@ impl ThreadPanel {
             on_close,
             revealing: exact.then_some(root_id),
             highlight: None,
+            show_header: false,
             _watch: watch,
             _subscriptions: subscriptions,
         };
@@ -471,16 +475,18 @@ impl Render for ThreadPanel {
             .is_some_and(|channel| channel.read_only);
 
         let weak = cx.entity().downgrade();
-        let header = PanelHeader::new().joined(true).leading(
-            Tabs::new(TabVariant::Navigation).tab(
-                Tab::new("thread-tab", "Thread")
-                    .icon(IconName::ChatCircle)
-                    .selected(true)
-                    .on_close(move |_, window, cx| {
-                        let _ = weak.update(cx, |this, cx| this.close(window, cx));
-                    }),
-            ),
-        );
+        let header = self.show_header.then(|| {
+            PanelHeader::new().joined(true).leading(
+                Tabs::new(TabVariant::Navigation).tab(
+                    Tab::new("thread-tab", "Thread")
+                        .icon(IconName::ChatCircle)
+                        .selected(true)
+                        .on_close(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| this.close(window, cx));
+                        }),
+                ),
+            )
+        });
 
         let note = |text: SharedString| {
             div()
@@ -571,7 +577,7 @@ impl Render for ThreadPanel {
                     this.close(window, cx);
                 }
             }))
-            .child(header)
+            .children(header)
             .when(loading_older, |this| {
                 this.child(
                     div()
@@ -609,41 +615,6 @@ pub fn dev_open_thread() -> Option<EventId> {
         return None;
     }
     EventId::from_hex(&std::env::var("BUZZ_DEV_OPEN_THREAD").ok()?).ok()
-}
-
-/// The board's columns with the thread docked on the right (ui.md §4.1):
-/// `minmax(320px, 1.1fr) minmax(316px, 1fr)`.
-pub fn board(channel: AnyElement, thread: Option<Entity<ThreadPanel>>, cx: &App) -> AnyElement {
-    let Some(thread) = thread else {
-        return channel;
-    };
-    let c = cx.colors();
-    div()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .child(
-            div()
-                .flex()
-                .flex_grow(1.1)
-                .flex_basis(px(0.))
-                .min_w(px(320.))
-                .h_full()
-                .child(channel),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_grow(1.)
-                .flex_basis(px(0.))
-                .min_w(px(316.))
-                .h_full()
-                .border_l_1()
-                .border_color(c.border_standard)
-                .child(thread),
-        )
-        .into_any_element()
 }
 
 /// One row of the flattened reply tree.

@@ -21,6 +21,8 @@ actions!(
         GoForward,
         /// Mod+Shift+A : the Messages page.
         GoHome,
+        /// Mod+W : closes the channel's shown tab, else the window.
+        CloseTab,
     ]
 );
 
@@ -176,10 +178,12 @@ pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
     cx.on_action(|_: &GoBack, cx| with_workspace(cx, Workspace::go_back));
     cx.on_action(|_: &GoForward, cx| with_workspace(cx, Workspace::go_forward));
     cx.on_action(|_: &GoHome, cx| with_workspace(cx, Workspace::go_home));
+    cx.on_action(|_: &CloseTab, cx| with_workspace(cx, Workspace::close_tab_or_window));
     cx.bind_keys([
         KeyBinding::new("secondary-[", GoBack, None),
         KeyBinding::new("secondary-]", GoForward, None),
         KeyBinding::new("secondary-shift-a", GoHome, None),
+        KeyBinding::new("secondary-w", CloseTab, None),
     ]);
     cx.spawn(async move |cx| {
         while let Some(arrival) = arrivals.next().await {

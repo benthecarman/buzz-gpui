@@ -10,8 +10,8 @@ use crate::community::{ChannelModel, Community};
 use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus};
 use buzz_ui::{
-    ActiveTheme, Button, ButtonSize, ButtonVariant, Icon, IconName, PanelHeader, TypeStyled,
-    tokens::shadow,
+    ActiveTheme, Button, ButtonSize, ButtonVariant, Icon, IconButton, IconButtonSize, IconName,
+    PanelHeader, TypeStyled, tokens::shadow,
 };
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::prelude::FluentBuilder;
@@ -63,7 +63,29 @@ pub struct ChannelPage {
     actions: Entity<ChannelActions>,
     /// Join for a read-only preview (§4.12).
     join: Entity<JoinNotice>,
+    /// The header's tab pane toggle, set by the workspace each frame:
+    /// whether the pane shows, and what the button does.
+    pub pane: Option<(bool, PaneToggle)>,
+    /// Shown inside another channel's tab pane, so without its header.
+    pub secondary: bool,
+    /// Channel panel launchers for the header, set by the workspace.
+    pub launchers: Vec<Launcher>,
+    /// Channel panels the header menu opens as tabs, set by the workspace.
+    pub menu_panels: Vec<super::channel_menu::MenuPanel>,
 }
+
+/// A header button toggling a channel panel (`channelLauncher`).
+#[derive(Clone)]
+pub struct Launcher {
+    pub key: &'static str,
+    pub icon: IconName,
+    pub label: &'static str,
+    pub pressed: bool,
+    pub toggle: PaneToggle,
+}
+
+/// Opens or closes the channel's tab pane.
+pub type PaneToggle = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl EventEmitter<ChannelClosed> for ChannelPage {}
 
@@ -162,6 +184,10 @@ impl ChannelPage {
         let mut page = Self {
             actions,
             join,
+            pane: None,
+            secondary: false,
+            launchers: Vec::new(),
+            menu_panels: Vec::new(),
             community,
             channel,
             model,
@@ -514,6 +540,9 @@ fn composer_placeholder(
 impl Render for ChannelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        let menu_panels = self.menu_panels.clone();
+        self.actions
+            .update(cx, |actions, _| actions.menu_panels = menu_panels);
         let snapshot = self.model.read(cx).snapshot.clone();
         let community = self.community.read(cx);
         let directory = Directory::of(community, Some(&self.channel.members), cx);
@@ -528,13 +557,39 @@ impl Render for ChannelPage {
             self.unseen = 0;
         }
 
-        let header = PanelHeader::new()
-            .joined(true)
-            .label(
-                Some(message::channel_icon(&self.channel)),
-                super::sidebar::channel_label(&self.channel, &community.snapshot.profiles),
+        let pane = self.pane.clone().map(|(open, toggle)| {
+            IconButton::new("toggle-tab-pane", IconName::SidebarRight)
+                .size(IconButtonSize::Sm)
+                .tooltip(if open {
+                    "Close tab pane"
+                } else {
+                    "Open tab pane"
+                })
+                .selected(open)
+                .on_click(move |_, window, cx| toggle(window, cx))
+        });
+        let launchers = self.launchers.iter().map(|launcher| {
+            let toggle = launcher.toggle.clone();
+            IconButton::new(
+                SharedString::from(format!("launch-{}", launcher.key)),
+                launcher.icon,
             )
-            .action(self.actions.clone());
+            .size(IconButtonSize::Sm)
+            .tooltip(launcher.label)
+            .selected(launcher.pressed)
+            .on_click(move |_, window, cx| toggle(window, cx))
+        });
+        let header = (!self.secondary).then(|| {
+            PanelHeader::new()
+                .joined(true)
+                .label(
+                    Some(message::channel_icon(&self.channel)),
+                    super::sidebar::channel_label(&self.channel, &community.snapshot.profiles),
+                )
+                .action(self.actions.clone())
+                .action(div().flex().gap(rems(0.375)).children(launchers))
+                .when_some(pane, |header, pane| header.action(pane))
+        });
 
         let typing_profiles = community.snapshot.profiles.clone();
         let mut rows = Rows::new(viewer, directory);
@@ -615,7 +670,7 @@ impl Render for ChannelPage {
             .h_full()
             .text_body_sm()
             .text_color(c.text_standard)
-            .child(header)
+            .children(header)
             .child(timeline)
             .children(self.error.clone().map(|error| {
                 div()

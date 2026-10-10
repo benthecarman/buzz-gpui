@@ -126,8 +126,16 @@ impl Workspace {
                 .surface(Surface::Header)
         };
         let settings_open = self.page == Page::SETTINGS;
-        self.account
-            .update(cx, |account, _| account.settings_open = settings_open);
+        let weak = cx.entity().downgrade();
+        let on_profile = self.community.is_some().then(|| {
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| this.open_own_profile(window, cx));
+            }) as crate::ui::account::OnProfile
+        });
+        self.account.update(cx, |account, _| {
+            account.settings_open = settings_open;
+            account.on_profile = on_profile;
+        });
         let header_pages = pages::placed(Placement::Topbar, cx);
         let compact = self.compact_pages || narrow;
         let selected = self.page;
@@ -332,9 +340,11 @@ impl Workspace {
             &snapshot,
             SidebarProps {
                 page: self.page,
+                // Another page shows no channel as selected.
                 selected: self
                     .channel
                     .as_ref()
+                    .filter(|_| self.page == Page::MESSAGES)
                     .map(|c| c.read(cx).channel_id().to_string()),
                 on_select_channel: Arc::new(move |channel, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.select_channel(channel, window, cx));

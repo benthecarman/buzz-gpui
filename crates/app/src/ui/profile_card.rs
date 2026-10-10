@@ -28,6 +28,20 @@ pub struct ProfileCard<'a> {
 
 impl ProfileCard<'_> {
     pub fn render(self, cx: &App) -> AnyElement {
+        Popover::new().children(self.content(cx)).into_any_element()
+    }
+
+    /// The same content filling a companion panel, at its 20px inset.
+    pub fn panel(self, cx: &App) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .p(px(20.))
+            .children(self.content(cx))
+            .into_any_element()
+    }
+
+    fn content(self, cx: &App) -> Vec<AnyElement> {
         let c = cx.colors();
         let fallback = Profile::fallback(self.pubkey);
         let profile = self.profile.unwrap_or(&fallback);
@@ -54,54 +68,53 @@ impl ProfileCard<'_> {
                     .disabled(true)
                     .tooltip("No direct message with this person yet"),
             });
-        Popover::new()
+        let about = profile
+            .about
+            .as_ref()
+            .filter(|about| !about.trim().is_empty())
+            .map(|about| {
+                div()
+                    .mt(px(12.))
+                    .text_body_sm()
+                    .text_color(c.text_standard)
+                    .line_clamp(4)
+                    .child(about.trim().to_string())
+                    .into_any_element()
+            });
+        [div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(avatar)
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(avatar)
+                    .flex_col()
+                    .min_w_0()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_label()
-                                    .text_color(c.text_standard)
-                                    .truncate()
-                                    .child(profile.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(c.text_subtle)
-                                    .truncate()
-                                    .child(if profile.is_agent {
-                                        format!("Agent · {detail}")
-                                    } else {
-                                        detail
-                                    }),
-                            ),
+                            .text_label()
+                            .text_color(c.text_standard)
+                            .truncate()
+                            .child(profile.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(c.text_subtle)
+                            .truncate()
+                            .child(if profile.is_agent {
+                                format!("Agent · {detail}")
+                            } else {
+                                detail
+                            }),
                     ),
             )
-            .children(
-                profile
-                    .about
-                    .as_ref()
-                    .filter(|about| !about.trim().is_empty())
-                    .map(|about| {
-                        div()
-                            .mt(px(12.))
-                            .text_body_sm()
-                            .text_color(c.text_standard)
-                            .line_clamp(4)
-                            .child(about.trim().to_string())
-                    }),
-            )
-            .child(div().mt(px(16.)).child(message))
-            .into_any_element()
+            .into_any_element()]
+        .into_iter()
+        .chain(about)
+        .chain([div().mt(px(16.)).child(message).into_any_element()])
+        .collect()
     }
 }
 

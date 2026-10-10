@@ -23,6 +23,9 @@ use std::rc::Rc;
 /// closes.
 pub type OnRemoved = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// A channel panel the menu opens as a tab, such as "View channel usage".
+pub type MenuPanel = (SharedString, Rc<dyn Fn(&mut Window, &mut App)>);
+
 enum Modal {
     Members {
         dialog: Entity<MembersDialog>,
@@ -47,6 +50,8 @@ pub struct ChannelActions {
     busy: bool,
     error: Option<SharedString>,
     on_removed: OnRemoved,
+    /// Registered channel panels' entries, set by the page each frame.
+    pub menu_panels: Vec<MenuPanel>,
 }
 
 impl ChannelActions {
@@ -64,6 +69,7 @@ impl ChannelActions {
             busy: false,
             error: None,
             on_removed,
+            menu_panels: Vec::new(),
         }
     }
 
@@ -155,11 +161,27 @@ impl ChannelActions {
             MenuItem::new(id, label).icon(icon).icon_size(14.)
         };
         let link = format!("buzz://channel/{}", self.channel.id);
+        let panels = self
+            .menu_panels
+            .iter()
+            .enumerate()
+            .map(|(index, (label, open))| {
+                let open = open.clone();
+                MenuItem::new(("menu-panel", index), label.clone())
+                    .icon(IconName::Info)
+                    .icon_size(14.)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.menu_open = false;
+                        open(window, cx);
+                        cx.notify();
+                    }))
+            });
         let mut menu = Menu::new()
             .child(
                 item("view-details", "View channel details", IconName::Info)
                     .on_click(cx.listener(|this, _, window, cx| this.open_details(window, cx))),
             )
+            .children(panels)
             .child(
                 item("copy-link", "Copy link", IconName::Link).on_click(cx.listener(
                     move |this, _, _, cx| {

@@ -40,15 +40,6 @@ pub enum Placement {
     Sidebar,
 }
 
-/// How the shell frames a page's content (`Page.layout`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Layout {
-    /// The page fills the main region and owns its padding.
-    Workspace,
-    /// A centred 56rem column in a scroll container.
-    Document,
-}
-
 /// Which sidebar the shell shows beside a page.
 #[derive(Clone, Copy)]
 pub enum Navigation {
@@ -71,7 +62,6 @@ pub struct PageSpec {
     pub label: &'static str,
     pub icon: IconName,
     pub placement: Placement,
-    pub layout: Layout,
     pub navigation: Navigation,
     /// The header toggle collapses the sidebar (Messages, Agents, Me and
     /// Settings). Other pages always show it on a wide window.
@@ -89,7 +79,6 @@ impl PageSpec {
             label,
             icon,
             placement: Placement::Sidebar,
-            layout: Layout::Workspace,
             navigation: Navigation::Channels,
             collapsible: false,
             badge: None,
@@ -113,7 +102,6 @@ pub fn init(cx: &mut App) {
             label: "Messages",
             icon: IconName::ChatsCircle,
             placement: Placement::Topbar,
-            layout: Layout::Workspace,
             navigation: Navigation::Channels,
             collapsible: true,
             badge: None,
@@ -123,9 +111,13 @@ pub fn init(cx: &mut App) {
     );
     super::me::register(cx);
     register(
-        PageSpec::sidebar(Page::AGENTS, "Agents", IconName::Robot, |_, cx| {
-            cx.new(super::agents::AgentsPage::new).into()
-        }),
+        PageSpec {
+            // Agents shares the channel sidebar and its collapse toggle.
+            collapsible: true,
+            ..PageSpec::sidebar(Page::AGENTS, "Agents", IconName::Robot, |_, cx| {
+                cx.new(super::agents::AgentsPage::new).into()
+            })
+        },
         cx,
     );
 }

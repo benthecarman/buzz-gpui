@@ -1,12 +1,15 @@
 //! The window: header, community rail and the joined panel holding the
 //! sidebar and the current page (ui.md §2).
 
+mod board;
+mod companion;
 mod dialogs;
 pub mod layout;
 mod shell;
 
 use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
+use super::channel_tabs::{TabState, ThreadTarget};
 use super::navigation::{History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
@@ -42,6 +45,21 @@ pub struct Workspace {
     toggle_focus: FocusHandle,
     /// The page region, focused after a page change.
     main_focus: FocusHandle,
+    /// Each channel's tab pane, per community, kept across visits.
+    tab_states: HashMap<(EntityId, String), TabState>,
+    /// The open channel's tab views, made on this visit.
+    tab_views: HashMap<String, board::TabView>,
+    tab_strip: ScrollHandle,
+    /// A channel panel a header launcher opened, for this visit.
+    drawer: Option<board::Drawer>,
+    /// The tab last scrolled into view.
+    revealed_tab: Option<String>,
+    /// The tab pane's width once dragged, kept while it is closed.
+    board_width: Option<f32>,
+    pane_opening: u64,
+    companion: Option<companion::Companion>,
+    companion_width: Option<f32>,
+    companion_opening: u64,
     community: Option<Entity<Community>>,
     channel: Option<Entity<ChannelPage>>,
     thread: Option<Entity<ThreadPanel>>,
@@ -85,6 +103,16 @@ impl Workspace {
             overflow_open: false,
             toggle_focus: cx.focus_handle(),
             main_focus: cx.focus_handle(),
+            tab_states: HashMap::new(),
+            tab_views: HashMap::new(),
+            tab_strip: ScrollHandle::new(),
+            drawer: None,
+            revealed_tab: None,
+            board_width: None,
+            pane_opening: 0,
+            companion: None,
+            companion_width: None,
+            companion_opening: 0,
             community: None,
             channel: None,
             thread: None,
@@ -201,7 +229,8 @@ impl Workspace {
         if current.as_ref().map(Entity::entity_id) != self.community.as_ref().map(Entity::entity_id)
         {
             self.channel = None;
-            self.thread = None;
+            self.leave_channel_tabs();
+            self.companion = None;
             self._community_observer = current.as_ref().map(|community| {
                 cx.observe_in(community, window, |this, _, window, cx| {
                     this.restore_selection(window, cx);
@@ -271,7 +300,7 @@ impl Workspace {
             return;
         };
         community.read(cx).remember_channel(&channel.id, cx);
-        self.thread = None;
+        self.leave_channel_tabs();
         self._revealing = None;
         let weak = cx.entity().downgrade();
         let open_thread: super::channel::OpenThread = Arc::new(move |row, window, cx| {
@@ -287,6 +316,7 @@ impl Workspace {
             |this, _, _: &ChannelClosed, window, cx| this.close_channel(window, cx),
         ));
         self.channel = Some(page);
+        self.restore_channel_tabs(window, cx);
         if let Some(root) = thread::dev_open_thread() {
             self.open_thread(root, window, cx);
         }
@@ -307,36 +337,26 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(community), Some(channel)) = (self.community.clone(), &self.channel) else {
+        if self.channel.is_none() {
             return;
-        };
+        }
         if let Some(thread) = &self.thread
             && thread.read(cx).root_id() == id
             && self.thread_exact == exact
         {
-            ThreadPanel::focus(thread, window, cx);
+            let thread = thread.clone();
+            self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
+            ThreadPanel::focus(&thread, window, cx);
             return;
         }
-        let channel = channel.read(cx).channel_id().to_string();
-        let weak = cx.entity().downgrade();
-        let on_close: thread::OnClose = Arc::new(move |window, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.close_thread(window, cx);
-                this.record(cx);
-            });
-        });
-        let panel = cx.new(|cx| match exact {
-            true => ThreadPanel::exact(community, channel, id, on_close, window, cx),
-            false => ThreadPanel::new(community, channel, id, on_close, window, cx),
-        });
-        ThreadPanel::focus(&panel, window, cx);
-        self.thread = Some(panel);
-        self.thread_exact = exact;
+        self.open_thread_tab(ThreadTarget { root: id, exact }, window, cx);
         cx.notify();
     }
 
     fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.thread.take().is_none() {
+        let had_tab = self.tabs(cx).thread.is_some();
+        self.update_tabs(cx, |state| state.close_thread());
+        if self.thread.take().is_none() && !had_tab {
             return;
         }
         if let Some(channel) = &self.channel {
@@ -426,9 +446,7 @@ impl Render for Workspace {
             match self.page {
                 Page::SETTINGS => self.settings_page(window, cx).into_any_element(),
                 Page::MESSAGES => match &self.channel {
-                    Some(channel) => {
-                        thread::board(channel.clone().into_any_element(), self.thread.clone(), cx)
-                    }
+                    Some(_) => self.board(window, cx),
                     None => div()
                         .flex_1()
                         .flex()
@@ -439,8 +457,14 @@ impl Render for Workspace {
                         .child("Select a channel to read it.")
                         .into_any_element(),
                 },
-                page => self.page_view(page, cx),
+                page => self.page_view(page),
             }
+        };
+        // Messages stacks the companion under its tab pane; other pages
+        // get the shell's dock.
+        let main = match self.page == Page::MESSAGES && self.channel.is_some() {
+            true => main,
+            false => self.frame(main, window, cx),
         };
         let profile = self.profile_card(window, cx);
         let header = self.header(window, cx);
@@ -517,24 +541,15 @@ impl Workspace {
         Some(Target { community, place })
     }
 
-    /// A registered page's view, framed by its layout: document pages
-    /// get a centred 56rem column with page padding (ui.md §2.9).
-    fn page_view(&self, page: Page, cx: &App) -> AnyElement {
-        let Some(view) = self.views.get(&page).cloned() else {
-            return div().into_any_element();
-        };
-        match pages::spec(page, cx).map(|spec| spec.layout) {
-            Some(pages::Layout::Document) => div()
-                .id("document-page")
-                .size_full()
-                .overflow_y_scroll()
-                .px(rems(1.))
-                .pt(rems(3.5))
-                .pb(rems(2.5))
-                .child(div().w_full().max_w(rems(56.)).mx_auto().child(view))
-                .into_any_element(),
-            _ => view.into_any_element(),
-        }
+    /// A registered page's view. Every bundled page uses buzz-app's
+    /// workspace layout and owns its padding; document layout is only for
+    /// external plugins, which are skipped.
+    fn page_view(&self, page: Page) -> AnyElement {
+        self.views
+            .get(&page)
+            .cloned()
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|| div().into_any_element())
     }
 
     /// Records the place the user just went to.
@@ -736,6 +751,14 @@ impl Workspace {
     /// A `buzz://` link: conversations bind to the selected community;
     /// invitations add theirs. Web links go to the browser.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.route_link_to_tab(url, window, cx) {
+            return;
+        }
+        self.open_link(url, window, cx);
+    }
+
+    /// A link from outside the window, or one no tab takes.
+    fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         match deep_links::parse(url) {
             Some(Link::Conversation {
                 channel,
@@ -767,7 +790,7 @@ impl Workspace {
     pub fn handle(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
         match request {
             Request::Focus => {}
-            Request::Url(url) => self.open_url(&url, window, cx),
+            Request::Url(url) => self.open_link(&url, window, cx),
             Request::Open(target) => self.navigate(target, window, cx),
         }
     }
