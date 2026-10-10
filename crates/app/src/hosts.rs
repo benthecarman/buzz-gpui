@@ -5,6 +5,7 @@ pub mod control;
 pub mod models;
 mod sign_in;
 
+use crate::agent_plugins::process::{HostSpawner, ProcessSinks, Spawner};
 use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
 use crate::runtime::Runtime;
 use buzz_host::api::{
@@ -77,6 +78,8 @@ pub struct HostConnection {
     received: bool,
     signing: SigningSlot,
     client: Arc<HostClient<HostProtocol>>,
+    /// Where output of processes started on this host goes.
+    processes: ProcessSinks,
     _watch: Task<()>,
 }
 
@@ -331,6 +334,8 @@ struct Answers {
     /// loopback port there, not here.
     remote: bool,
     client: ClientSlot,
+    /// Claude Code process output, by handle.
+    processes: ProcessSinks,
 }
 
 impl ClientHandler<HostProtocol> for Answers {
@@ -355,7 +360,11 @@ impl ClientHandler<HostProtocol> for Answers {
                     Ok(HostAnswer::Opened)
                 });
             }
-            _ => return Box::pin(async { Err(RpcError::Failed("Not supported".into())) }),
+            // claude code: delivered as the ask is read, so in order.
+            HostAsk::ProcessOutput { handle, output } => {
+                let answer = self.processes.deliver(handle, output);
+                return Box::pin(async move { answer });
+            }
         };
         let mut slot = self
             .signing
@@ -390,6 +399,7 @@ impl HostConnection {
         let signing = SigningSlot::default();
         let slot = ClientSlot::default();
         let (browser, pages) = futures::channel::mpsc::unbounded();
+        let processes = ProcessSinks::default();
         let client = Arc::new(HostClient::<HostProtocol>::spawn(
             &runtime,
             connector,
@@ -398,6 +408,7 @@ impl HostConnection {
                 browser,
                 remote: remote.is_some(),
                 client: slot.clone(),
+                processes: processes.clone(),
             }),
             HostClientOptions {
                 token,
@@ -412,6 +423,7 @@ impl HostConnection {
             }
         })
         .detach();
+        processes.follow(&client, &runtime);
         cx.new(|cx| {
             let watch = Self::watch(&client, &runtime, cx);
             Self {
@@ -428,8 +440,18 @@ impl HostConnection {
                 received: false,
                 signing,
                 client,
+                processes,
                 _watch: watch,
             }
+        })
+    }
+
+    /// Starts agent type `owner`'s declared processes on this host.
+    pub fn spawner(&self, owner: &'static str) -> Spawner {
+        Arc::new(HostSpawner {
+            client: self.client.clone(),
+            sinks: self.processes.clone(),
+            owner,
         })
     }
 

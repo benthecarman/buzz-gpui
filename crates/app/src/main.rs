@@ -1,6 +1,8 @@
 mod agent_activity;
+mod agent_plugins;
 mod agents2;
 mod appearance;
+mod buzz_mcp;
 mod community;
 mod config;
 mod deep_links;
