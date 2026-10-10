@@ -7,7 +7,7 @@ use super::{
     section,
 };
 use crate::hosts::{HostConnection, Hosts};
-use crate::ui::agents::{AddHost, DefaultsDialog, Dismissed, harness_row};
+use crate::ui::agents::{AddHost, DefaultsDialog, Dismissed, Saved, harness_row};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, AlertDialog, Badge, BadgeTone, Button, ButtonSize, Icon, IconButton,
@@ -34,10 +34,15 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) {
         let dialog = cx.new(|cx| DefaultsDialog::new(host, window, cx));
-        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx));
+        let subscriptions = [
+            cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
+            cx.subscribe(&dialog, |this, _, Saved(text), cx| {
+                this.show_toast(text.clone(), cx)
+            }),
+        ];
         self.modal = Some(Modal::Defaults {
             dialog,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         });
         cx.notify();
     }

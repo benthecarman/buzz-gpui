@@ -2,11 +2,11 @@
 //! what its agents use for choices they leave empty. Opened from the host's
 //! menu on the Agents page, as this app has no Settings page yet.
 
-use super::editor::{Dismissed, connected};
-use super::form::{AiFields, Choice, EnvFields, Form, Picker, Scope};
+use super::editor::{Dismissed, Saved, connected, saved_message};
+use super::form::{self, AiFields, Choice, EnvFields, Form, Picker, Scope};
 use crate::hosts::HostConnection;
 use buzz_host::api::{
-    AgentDefaults, AgentEdit, DefaultsEdit, Harness, HarnessEdit, HarnessKind, Request,
+    AgentDefaults, AgentEdit, DefaultsEdit, Harness, HarnessEdit, HarnessKind, Request, Response,
     SessionPolicy,
 };
 use buzz_host::harness::{defaults_name, from_defaults_name};
@@ -22,10 +22,13 @@ pub struct DefaultsDialog {
     loaded: Option<AgentDefaults>,
     busy: bool,
     error: Option<SharedString>,
+    /// Saved, but some agents did not restart with the new defaults.
+    notice: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<Dismissed> for DefaultsDialog {}
+impl EventEmitter<Saved> for DefaultsDialog {}
 
 impl Form for DefaultsDialog {
     fn open(&mut self) -> &mut Option<Picker> {
@@ -88,6 +91,7 @@ impl DefaultsDialog {
             loaded: None,
             busy: false,
             error: None,
+            notice: None,
             _subscriptions: subscriptions,
         };
         if let Some(defaults) = host.read(cx).defaults.clone() {
@@ -175,6 +179,7 @@ impl DefaultsDialog {
         };
         self.busy = true;
         self.error = None;
+        self.notice = None;
         self.open = None;
         let response = self.host.update(cx, |host, cx| {
             host.request(Request::SaveDefaults { edit }, cx)
@@ -184,6 +189,18 @@ impl DefaultsDialog {
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 match response {
+                    Ok(Response::Defaults(saved)) => {
+                        let failures = saved.restart_failures.unwrap_or(0);
+                        let message = saved_message(saved.restarted.unwrap_or(0), failures);
+                        if failures > 0 {
+                            this.notice = Some(message.into());
+                            this.loaded = Some(saved);
+                            cx.notify();
+                        } else {
+                            cx.emit(Saved(message.into()));
+                            cx.emit(Dismissed);
+                        }
+                    }
                     Ok(_) => cx.emit(Dismissed),
                     Err(error) => {
                         this.error = Some(error.to_string().into());
@@ -225,42 +242,53 @@ impl Render for DefaultsDialog {
                 .child(self.ai.render(&scope, window, cx))
                 .child(self.env.render("Environment variables", self.busy, cx))
         };
-        Dialog::new("agent-defaults", "Agent defaults")
-            .size(DialogSize::Px(640.))
-            .heading_title()
-            .description(format!(
-                "Used when an agent on {label} starts without its own choices. Changes apply \
+        let escape = form::escape(cx);
+        let dialog =
+            Dialog::new("agent-defaults", "Agent defaults")
+                .size(DialogSize::Px(640.))
+                .heading_title()
+                .description(format!(
+                    "Used when an agent on {label} starts without its own choices. Changes apply \
                  on its next start."
-            ))
-            .on_close(cx.listener(|this, _, _, cx| {
-                if !this.busy {
-                    cx.emit(Dismissed)
-                }
-            }))
-            .child(
-                div().flex().flex_col().gap(rems(1.5)).child(body).children(
-                    self.error
-                        .clone()
-                        .map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
-                ),
-            )
-            .footer(
-                Button::new("discard-defaults", "Discard")
-                    .surface(Surface::Floating)
-                    .disabled(self.busy || self.loaded.is_none())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(defaults) = this.loaded.clone() {
-                            this.error = None;
-                            this.fill(defaults, window, cx);
-                        }
-                    })),
-            )
-            .footer(
-                Button::new("save-defaults", "Save defaults")
-                    .prominent()
-                    .loading(self.busy)
-                    .disabled(self.loaded.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-            )
+                ))
+                .on_close(cx.listener(|this, _, _, cx| {
+                    if !this.busy {
+                        cx.emit(Dismissed)
+                    }
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(rems(1.5))
+                        .child(body)
+                        .children(
+                            self.notice
+                                .clone()
+                                .map(|notice| div().text_body_sm().child(notice)),
+                        )
+                        .children(self.error.clone().map(|error| {
+                            div().text_body_sm().text_color(c.text_danger).child(error)
+                        })),
+                )
+                .footer(
+                    Button::new("discard-defaults", "Discard")
+                        .surface(Surface::Floating)
+                        .disabled(self.busy || self.loaded.is_none())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(defaults) = this.loaded.clone() {
+                                this.error = None;
+                                this.fill(defaults, window, cx);
+                            }
+                        })),
+                )
+                .footer(
+                    Button::new("save-defaults", "Save defaults")
+                        .prominent()
+                        .loading(self.busy)
+                        .disabled(self.loaded.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                );
+        div().capture_action(escape).child(dialog)
     }
 }

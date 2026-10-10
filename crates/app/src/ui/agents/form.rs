@@ -9,12 +9,13 @@ use super::harness;
 use crate::hosts::HostConnection;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_host::api::{
-    AgentDefaults, Harness, HarnessKind, ModelOption, Request, Response, SessionPolicy,
+    AgentDefaults, DatabricksSettings, Harness, HarnessKind, ModelOption, Request, Response,
+    SessionPolicy,
 };
 use buzz_host::harness::{Provider, defaults_name, efforts, providers};
 use buzz_ui::{
-    ActiveTheme, Button, ButtonSize, Colors, IconButton, IconButtonSize, IconName, Menu, MenuItem,
-    MenuSize, Select, Spinner, Surface, TextField, TypeStyled,
+    ActiveTheme, Button, ButtonSize, Colors, Icon, IconButton, IconButtonSize, IconName, Menu,
+    MenuItem, MenuSize, Select, Spinner, Surface, TextField, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -72,6 +73,28 @@ pub trait Form: Sized + 'static {
     fn env(&mut self) -> &mut EnvFields;
     /// The host and the `Models` request for the current draft.
     fn models_request(&self, cx: &App) -> Result<(Entity<HostConnection>, Request), String>;
+}
+
+/// Escape closes an open select before the dialog: the form captures the
+/// dialog's `Cancel` on its way down while a menu is open.
+pub fn escape<T: Form>(
+    cx: &mut Context<T>,
+) -> impl Fn(&buzz_ui::Cancel, &mut Window, &mut App) + use<T> {
+    let form = cx.entity().downgrade();
+    move |_, _, cx| {
+        let closed = form
+            .update(cx, |this, cx| {
+                let open = this.open().take().is_some();
+                if open {
+                    cx.notify();
+                }
+                open
+            })
+            .unwrap_or(false);
+        if closed {
+            cx.stop_propagation();
+        }
+    }
 }
 
 fn dismiss<T: Form>(cx: &mut Context<T>) -> Dismiss {
@@ -202,6 +225,15 @@ pub enum Catalog {
     Failed(SharedString),
 }
 
+/// "Test connection" (Pi and Goose).
+pub enum Test {
+    Idle,
+    Testing,
+    /// The model that answered, when the host may say.
+    Passed(Option<String>),
+    Failed(SharedString),
+}
+
 /// What the AI fields render against.
 pub struct Scope<'a> {
     pub harnesses: &'a [Harness],
@@ -229,7 +261,18 @@ pub struct AiFields {
     generation: u64,
     /// Environment keys saved on the host, values unknown.
     pub saved_keys: Vec<String>,
-    placeholders: (SharedString, SharedString),
+    pub test: Test,
+    /// Buzz Agent's Databricks workspace and model filter.
+    pub databricks_host: Entity<InputState>,
+    pub databricks_filter: Entity<InputState>,
+    /// What the agent has saved.
+    pub databricks_saved: Option<DatabricksSettings>,
+    /// The Advanced → Model accordion.
+    advanced_open: bool,
+    /// "Disconnect": its progress, then its outcome.
+    disconnect: Option<Result<SharedString, SharedString>>,
+    disconnecting: bool,
+    placeholders: (SharedString, SharedString, SharedString),
     _subscriptions: Vec<Subscription>,
 }
 
@@ -271,9 +314,22 @@ impl AiFields {
         let custom_provider = input("Provider ID", false, window, cx);
         let api_key = input("Paste API key", true, window, cx);
         let model = input("Choose or enter a model", false, window, cx);
-        let mut subscriptions = Vec::new();
-        for state in [&executable, &api_key, &model] {
-            subscriptions.push(cx.subscribe(state, |_, _, _: &InputEvent, cx| cx.notify()));
+        let databricks_host = input("https://workspace.example.com", false, window, cx);
+        let databricks_filter = input("", false, window, cx);
+        let mut subscriptions =
+            vec![cx.subscribe(&executable, |_, _, _: &InputEvent, cx| cx.notify())];
+        // A test result is about the draft it tested.
+        for state in [&api_key, &model, &databricks_host, &databricks_filter] {
+            subscriptions.push(cx.subscribe(state, |this: &mut T, _, _: &InputEvent, cx| {
+                let ai = this.ai();
+                if !matches!(ai.test, Test::Testing) {
+                    ai.test = Test::Idle;
+                }
+                if !ai.disconnecting {
+                    ai.disconnect = None;
+                }
+                cx.notify()
+            }));
         }
         // A different provider has a different catalog.
         subscriptions.push(cx.subscribe(
@@ -296,14 +352,67 @@ impl AiFields {
             catalog: Catalog::Idle,
             generation: 0,
             saved_keys: Vec::new(),
+            test: Test::Idle,
+            databricks_host,
+            databricks_filter,
+            databricks_saved: None,
+            advanced_open: false,
+            disconnect: None,
+            disconnecting: false,
             placeholders: Default::default(),
             _subscriptions: subscriptions,
         }
     }
 
+    /// A different harness or provider: catalogs and test results are
+    /// stale.
     pub fn invalidate(&mut self) {
         self.generation += 1;
         self.catalog = Catalog::Idle;
+        self.test = Test::Idle;
+    }
+
+    /// The Databricks settings to save: the displayed fields once either
+    /// is filled in, else none, which follows the agent defaults.
+    pub fn databricks(&self, cx: &App) -> Option<DatabricksSettings> {
+        let host = self.databricks_host.read(cx).value().trim().to_string();
+        let filter = self.databricks_filter.read(cx).value().trim().to_string();
+        if host.is_empty() && filter.is_empty() {
+            return None;
+        }
+        Some(DatabricksSettings { host, filter })
+    }
+
+    /// Fills the Databricks fields from saved settings.
+    pub fn set_databricks(
+        &mut self,
+        saved: Option<DatabricksSettings>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (host, filter) = saved
+            .clone()
+            .map(|saved| (saved.host, saved.filter))
+            .unwrap_or_default();
+        self.databricks_host
+            .update(cx, |state, cx| state.set_value(host, window, cx));
+        self.databricks_filter
+            .update(cx, |state, cx| state.set_value(filter, window, cx));
+        self.databricks_saved = saved;
+    }
+
+    /// Agent defaults set the Databricks workspace, and this agent does
+    /// not.
+    fn databricks_inherited(&self, cx: &Scope) -> bool {
+        self.inherited(HarnessKind::BuzzAgent, cx)
+            .is_some_and(|defaults| {
+                defaults
+                    .environment_keys
+                    .iter()
+                    .any(|key| key == "DATABRICKS_HOST")
+            })
+            && self.databricks_saved.is_none()
+            && !self.saved_keys.iter().any(|key| key == "DATABRICKS_HOST")
     }
 
     /// The picked harness; else the defaults' harness when it is
@@ -433,13 +542,26 @@ impl AiFields {
             (Some(HarnessKind::Pi), _) => "Paste API key or use an existing Pi sign-in".into(),
             _ => "Paste API key".into(),
         };
-        let wanted: (SharedString, SharedString) = (model.into(), api_key.into());
+        let inherited = self.databricks_inherited(cx);
+        let workspace = if inherited {
+            "Use agent defaults"
+        } else {
+            "https://workspace.example.com"
+        };
+        let wanted: (SharedString, SharedString, SharedString) =
+            (model.into(), api_key.into(), workspace.into());
         if wanted != self.placeholders {
-            let (model, api_key) = wanted.clone();
+            let (model, api_key, workspace) = wanted.clone();
+            let filter = if inherited { "Use agent defaults" } else { "" };
             self.model
                 .update(app, |state, cx| state.set_placeholder(model, window, cx));
             self.api_key
                 .update(app, |state, cx| state.set_placeholder(api_key, window, cx));
+            self.databricks_host.update(app, |state, cx| {
+                state.set_placeholder(workspace, window, cx)
+            });
+            self.databricks_filter
+                .update(app, |state, cx| state.set_placeholder(filter, window, cx));
             self.placeholders = wanted;
         }
     }
@@ -491,8 +613,18 @@ impl AiFields {
             if let Some(provider) = self.key_provider(kind, ctx, cx) {
                 fields = fields.child(self.api_key_field(provider, &c));
             }
+            // buzz-app tests only a provider the draft names itself.
+            if !self.for_defaults
+                && matches!(kind, HarnessKind::Pi | HarnessKind::Goose)
+                && !self.provider_id(cx).is_empty()
+            {
+                fields = fields.child(self.test_field(ctx, cx));
+            }
             fields = fields.child(self.model_field(ctx, Some(kind), window, cx));
             fields = fields.child(self.effort_field(ctx, kind, window, cx));
+            if !self.for_defaults && kind == HarnessKind::BuzzAgent {
+                fields = fields.child(self.advanced(ctx, cx));
+            }
         } else {
             fields = fields.child(self.model_field(ctx, None, window, cx));
         }
@@ -694,6 +826,139 @@ impl AiFields {
             ));
         }
         column
+    }
+
+    /// "Test connection" and its result, above the model.
+    fn test_field<T: Form>(&self, ctx: &Scope, cx: &mut Context<T>) -> Div {
+        let c = *cx.colors();
+        let testing = matches!(self.test, Test::Testing);
+        let status = match &self.test {
+            Test::Idle => None,
+            Test::Testing => Some((
+                None,
+                c.text_subtle,
+                "Sending a short test message…".to_string(),
+            )),
+            Test::Passed(model) => Some((
+                Some(IconName::CheckCircle),
+                c.text_success,
+                match model {
+                    Some(model) => format!("Connected using {model}."),
+                    None => "Connected. The model replied.".into(),
+                },
+            )),
+            Test::Failed(error) => Some((
+                Some(IconName::WarningCircle),
+                c.text_danger,
+                error.to_string(),
+            )),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(rems(0.5))
+            .child(
+                Button::new("test-connection", "Test connection")
+                    .surface(Surface::Floating)
+                    .loading(testing)
+                    .disabled(ctx.busy || testing)
+                    .on_click(cx.listener(|this: &mut T, _, _, cx| test(this, cx))),
+            )
+            .children(status.map(|(icon, color, text)| {
+                div()
+                    .flex()
+                    .items_start()
+                    .w_full()
+                    .gap(rems(0.5))
+                    .text_body_sm()
+                    .text_color(color)
+                    .children(icon.map(|icon| {
+                        div()
+                            .flex_none()
+                            .pt(px(2.))
+                            .child(Icon::new(icon).size(16.).color(color))
+                    }))
+                    .child(div().flex_1().min_w_0().child(text))
+            }))
+    }
+
+    /// Advanced → Model (§5a.7 6c): Buzz Agent's Databricks workspace and
+    /// model filter, and "Disconnect" from the workspace's sign-in.
+    fn advanced<T: Form>(&self, ctx: &Scope, cx: &mut Context<T>) -> Div {
+        let c = *cx.colors();
+        let open = self.advanced_open;
+        let header = div()
+            .id("advanced-model-toggle")
+            .flex()
+            .items_center()
+            .justify_between()
+            .py(rems(0.5))
+            .px(rems(0.5))
+            .mx(rems(-0.5))
+            .rounded(buzz_ui::tokens::radius::CONTROL)
+            .cursor_pointer()
+            .hover(|this| this.bg(c.affordance_subtle_hover))
+            .child(div().text_label().child("Model"))
+            .child(
+                Icon::new(if open {
+                    IconName::CaretUp
+                } else {
+                    IconName::CaretDown
+                })
+                .size(16.)
+                .color(c.text_subtle),
+            )
+            .on_click(cx.listener(|this: &mut T, _, _, cx| {
+                let ai = this.ai();
+                ai.advanced_open = !ai.advanced_open;
+                cx.notify();
+            }));
+        let mut section = div().flex().flex_col().gap(rems(1.)).child(header);
+        if open {
+            let status = self.disconnect.clone().map(|outcome| match outcome {
+                Ok(text) => div().text_body_sm().text_color(c.text_subtle).child(text),
+                Err(text) => div().text_body_sm().text_color(c.text_danger).child(text),
+            });
+            section = section
+                .child(field(
+                    "Databricks workspace (HTTPS origin)",
+                    None,
+                    TextField::new(&self.databricks_host).surface(Surface::Floating),
+                    &c,
+                ))
+                .child(field(
+                    "Model filter (optional)",
+                    Some("Editing either field saves both displayed values.".into()),
+                    TextField::new(&self.databricks_filter).surface(Surface::Floating),
+                    &c,
+                ))
+                .child(
+                    div().flex().child(
+                        Button::new("databricks-disconnect", "Disconnect")
+                            .surface(Surface::Floating)
+                            .size(ButtonSize::Sm)
+                            .loading(self.disconnecting)
+                            .disabled(ctx.busy || self.disconnecting)
+                            .on_click(cx.listener(|this: &mut T, _, _, cx| disconnect(this, cx))),
+                    ),
+                )
+                .children(status)
+                .child(note(
+                    "Credentials are kept on the agent’s host for this workspace, not shared \
+                     with buzz-app or old Buzz. Disconnect removes the host’s cache, not your \
+                     browser session.",
+                    &c,
+                ));
+        }
+        // `h3 text-label`, 32px above and 8px below.
+        div()
+            .flex()
+            .flex_col()
+            .gap(rems(0.5))
+            .mt(rems(1.))
+            .child(div().text_label().child("Advanced"))
+            .child(section)
     }
 
     fn api_key_field(&self, provider: Provider, c: &Colors) -> Div {
@@ -987,6 +1252,78 @@ pub fn browse<T: Form>(this: &mut T, cx: &mut Context<T>) {
         });
     })
     .detach();
+}
+
+/// "Test connection": one short prompt through the draft's harness.
+fn test<T: Form>(this: &mut T, cx: &mut Context<T>) {
+    let (host, request) = match this.models_request(cx) {
+        Ok((host, Request::Models { id, revision, edit })) => {
+            (host, Request::TestConnection { id, revision, edit })
+        }
+        Ok(_) => return,
+        Err(error) => {
+            this.ai().test = Test::Failed(error.into());
+            cx.notify();
+            return;
+        }
+    };
+    *this.open() = None;
+    this.ai().test = Test::Testing;
+    let response = host.update(cx, |host, cx| host.request(request, cx));
+    cx.spawn(async move |this, cx| {
+        let response = response.await;
+        let _ = this.update(cx, |this, cx| {
+            let ai = this.ai();
+            // A harness or provider change meanwhile already cleared it.
+            if !matches!(ai.test, Test::Testing) {
+                return;
+            }
+            ai.test = match response {
+                Ok(Response::Tested { model }) => Test::Passed(model),
+                Ok(_) => Test::Failed("The host sent an unexpected reply.".into()),
+                Err(error) => Test::Failed(error.to_string().into()),
+            };
+            cx.notify();
+        });
+    })
+    .detach();
+    cx.notify();
+}
+
+/// "Disconnect": removes the host's cached Databricks sign-in for the
+/// shown workspace, or for the one agent defaults set.
+fn disconnect<T: Form>(this: &mut T, cx: &mut Context<T>) {
+    let host = match this.models_request(cx) {
+        Ok((host, _)) => host,
+        Err(error) => {
+            this.ai().disconnect = Some(Err(error.into()));
+            cx.notify();
+            return;
+        }
+    };
+    let ai = this.ai();
+    let workspace = ai.databricks_host.read(cx).value().trim().to_string();
+    ai.disconnecting = true;
+    ai.disconnect = Some(Ok(
+        "Removing this host’s credentials for this workspace…".into()
+    ));
+    let response = host.update(cx, |host, cx| {
+        host.request(Request::DisconnectDatabricks { workspace }, cx)
+    });
+    cx.spawn(async move |this, cx| {
+        let response = response.await;
+        let _ = this.update(cx, |this, cx| {
+            let ai = this.ai();
+            ai.disconnecting = false;
+            ai.disconnect = Some(match response {
+                Ok(_) => Ok("Disconnected from this workspace on this host.".into()),
+                Err(error) => Err(error.to_string().into()),
+            });
+            cx.notify();
+        });
+    })
+    .detach();
+    cx.notify();
 }
 
 /// One environment variable in the form.

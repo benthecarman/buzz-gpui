@@ -9,7 +9,7 @@ mod host_dialog;
 mod import;
 
 pub(crate) use defaults::DefaultsDialog;
-pub(crate) use editor::Dismissed;
+pub(crate) use editor::{Dismissed, Saved};
 pub(crate) use host_dialog::AddHost;
 
 use crate::hosts::{HostConnection, Hosts};
@@ -20,7 +20,7 @@ use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Badge, BadgeTone, Button, ButtonSize, Dialog,
     Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, MenuSize,
-    PanelHeader, Presence, Surface, TypeStyled, tokens::radius,
+    PanelHeader, Presence, Surface, Toast, ToastTone, TypeStyled, tokens::radius,
 };
 use editor::AgentEditor;
 use gpui_kit::prelude::FluentBuilder;
@@ -42,11 +42,11 @@ enum OpenMenu {
 enum Modal {
     Editor {
         editor: Entity<AgentEditor>,
-        _subscription: Subscription,
+        _subscriptions: [Subscription; 2],
     },
     Defaults {
         dialog: Entity<DefaultsDialog>,
-        _subscription: Subscription,
+        _subscriptions: [Subscription; 2],
     },
     Manage(Entity<HostConnection>, String),
     Delete {
@@ -71,7 +71,12 @@ pub struct AgentsPage {
     harnesses_open: HashSet<EntityId>,
     /// The content column width, measured after layout, for the tile grid.
     width: Rc<Cell<Pixels>>,
+    /// A confirmation, such as what a save restarted, and its generation.
+    toast: Option<(SharedString, usize)>,
+    toasts: usize,
 }
+
+const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl AgentsPage {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -85,6 +90,8 @@ impl AgentsPage {
             failures: HashMap::new(),
             harnesses_open: HashSet::new(),
             width: Rc::new(Cell::new(px(0.))),
+            toast: None,
+            toasts: 0,
         };
         page.sync_hosts(cx);
         page
@@ -116,6 +123,23 @@ impl AgentsPage {
 
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
+        cx.notify();
+    }
+
+    fn show_toast(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        self.toasts += 1;
+        let generation = self.toasts;
+        self.toast = Some((text, generation));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast.as_ref().is_some_and(|(_, g)| *g == generation) {
+                    this.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -153,11 +177,16 @@ impl AgentsPage {
     }
 
     fn open_editor(&mut self, editor: Entity<AgentEditor>, cx: &mut Context<Self>) {
-        let subscription = cx.subscribe(&editor, |this, _, _: &Dismissed, cx| this.close_modal(cx));
+        let subscriptions = [
+            cx.subscribe(&editor, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
+            cx.subscribe(&editor, |this, _, Saved(text), cx| {
+                this.show_toast(text.clone(), cx)
+            }),
+        ];
         self.menu = None;
         self.modal = Some(Modal::Editor {
             editor,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         });
         cx.notify();
     }
@@ -186,11 +215,16 @@ impl AgentsPage {
         cx: &mut Context<Self>,
     ) {
         let dialog = cx.new(|cx| DefaultsDialog::new(host, window, cx));
-        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx));
+        let subscriptions = [
+            cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
+            cx.subscribe(&dialog, |this, _, Saved(text), cx| {
+                this.show_toast(text.clone(), cx)
+            }),
+        ];
         self.menu = None;
         self.modal = Some(Modal::Defaults {
             dialog,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         });
         cx.notify();
     }
@@ -1250,6 +1284,23 @@ impl Render for AgentsPage {
             .map(|host| self.host_section(host, window, cx).into_any_element())
             .collect();
         let modal = self.modal(window, cx);
+        let toast = self.toast.as_ref().map(|(text, generation)| {
+            let right = window.viewport_size().width - px(16.) - px(384.);
+            deferred(
+                anchored()
+                    .position_mode(AnchoredPositionMode::Window)
+                    .position(point(right, px(128.)))
+                    .child(
+                        Toast::new(("agents-toast", *generation), text.clone())
+                            .tone(ToastTone::Success)
+                            .on_dismiss(cx.listener(|this, _, _, cx| {
+                                this.toast = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .with_priority(3)
+        });
         div()
             .flex()
             .flex_col()
@@ -1280,5 +1331,6 @@ impl Render for AgentsPage {
                     ),
             )
             .children(modal)
+            .children(toast)
     }
 }

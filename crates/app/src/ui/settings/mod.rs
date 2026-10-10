@@ -89,7 +89,7 @@ enum Modal {
     /// The Agents page's defaults dialog, for one host.
     Defaults {
         dialog: Entity<DefaultsDialog>,
-        _subscription: Subscription,
+        _subscriptions: [Subscription; 2],
     },
     RemoveHost {
         host: Entity<HostConnection>,

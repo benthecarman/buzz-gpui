@@ -17,8 +17,8 @@ use crate::community::AppState;
 use crate::community::IdentityState;
 use crate::hosts::HostConnection;
 use buzz_host::api::{
-    Agent, AgentAction, AgentDefaults, AgentEdit, Harness, HarnessEdit, Request, Response,
-    SessionPolicy,
+    Agent, AgentAction, AgentDefaults, AgentEdit, DatabricksSettings, Harness, HarnessEdit,
+    HarnessKind, Request, Response, SessionPolicy,
 };
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
@@ -31,6 +31,27 @@ use gpui_kit::*;
 
 /// The dialog is done; the page closes it.
 pub struct Dismissed;
+
+/// Settings were saved; the page confirms it with a toast.
+pub struct Saved(pub SharedString);
+
+/// buzz-app's `savedMessage`: what a save restarted.
+pub fn saved_message(restarted: u32, failures: u32) -> String {
+    let agents = |n: u32| format!("{n} agent{}", if n == 1 { "" } else { "s" });
+    let saved = if restarted == 0 {
+        "Saved.".to_string()
+    } else {
+        format!("Saved. Restarted {}.", agents(restarted))
+    };
+    if failures == 0 {
+        saved
+    } else {
+        format!(
+            "{saved} {} couldn’t restart with the new settings; check Agents.",
+            agents(failures)
+        )
+    }
+}
 
 enum Mode {
     Create { hosts: Vec<Entity<HostConnection>> },
@@ -57,6 +78,7 @@ struct Values {
     session: Option<SessionPolicy>,
     workspace: String,
     args: String,
+    databricks: Option<DatabricksSettings>,
 }
 
 pub struct AgentEditor {
@@ -88,6 +110,7 @@ pub struct AgentEditor {
 }
 
 impl EventEmitter<Dismissed> for AgentEditor {}
+impl EventEmitter<Saved> for AgentEditor {}
 
 pub fn connected(host: &Entity<HostConnection>, cx: &App) -> bool {
     matches!(host.read(cx).state, ConnectionState::Connected { .. })
@@ -278,9 +301,20 @@ impl AgentEditor {
         self.ai.choice = Some(choice);
         self.ai
             .set_provider(kind, &agent.harness.provider, window, cx);
-        self.ai.effort = agent.launch_effort.clone();
+        // The host reports the effort the agent launches with, its own or
+        // inherited; one equal to its defaults' shows as inherited.
+        let inherited = self.defaults(cx).filter(|defaults| {
+            kind.and_then(buzz_host::harness::defaults_name) == Some(defaults.harness.as_str())
+        });
+        self.ai.effort = agent.launch_effort.clone().filter(|effort| {
+            inherited
+                .as_ref()
+                .is_none_or(|defaults| defaults.effort != *effort)
+        });
         self.ai.session = agent.session_policy;
         self.ai.saved_keys = agent.harness.environment_keys.clone();
+        self.ai
+            .set_databricks(agent.harness.databricks.clone(), window, cx);
         self.ai.invalidate();
         self.env
             .load(&agent.harness.environment_keys, &[], window, cx);
@@ -326,6 +360,7 @@ impl AgentEditor {
             session: self.ai.session,
             workspace: text(&self.workspace),
             args: self.args.read(cx).value().trim().to_string(),
+            databricks: self.ai.databricks(cx),
         }
     }
 
@@ -413,11 +448,20 @@ impl AgentEditor {
             Some(original) if original.session == values.session => None,
             _ => Some(values.session),
         };
-        let effort = values
-            .effort
-            .clone()
-            .filter(|_| original.is_none_or(|original| original.effort != values.effort))
-            .filter(|_| kind.is_some_and(|kind| !buzz_host::harness::efforts(kind).is_empty()));
+        // A changed effort is sent; one cleared back to the defaults is
+        // `Some(None)`.
+        let effort = match original {
+            _ if !kind.is_some_and(|kind| !buzz_host::harness::efforts(kind).is_empty()) => None,
+            Some(original) if original.effort == values.effort => None,
+            None if values.effort.is_none() => None,
+            _ => Some(values.effort.clone()),
+        };
+        // Only Buzz Agent uses Databricks; other harnesses keep what is
+        // saved.
+        let databricks = match kind {
+            Some(HarnessKind::BuzzAgent) => values.databricks.clone(),
+            _ => saved.and_then(|agent| agent.harness.databricks.clone()),
+        };
         let defaults = self.defaults(cx);
         let scope = Scope {
             harnesses: &harnesses,
@@ -439,6 +483,7 @@ impl AgentEditor {
                 args,
                 model,
                 provider,
+                databricks,
             },
             environment,
             effort,
@@ -599,15 +644,37 @@ impl AgentEditor {
             let result = response.await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(response) => {
+                    let Response::Agents(snapshot) = response else {
+                        return this.fail("The host sent an unexpected reply.", cx);
+                    };
                     // A renamed agent needs its profile published again.
-                    let pending = matches!(&response, Response::Agents(snapshot)
-                        if snapshot.agents.iter().any(|a| a.id == id && a.profile_pending));
+                    let pending = snapshot
+                        .agents
+                        .iter()
+                        .any(|a| a.id == id && a.profile_pending);
                     if pending {
                         host.update(cx, |host, cx| {
-                            host.request(Request::PublishProfile { id }, cx).detach()
+                            host.request(Request::PublishProfile { id: id.clone() }, cx)
+                                .detach()
                         });
                     }
-                    cx.emit(Dismissed);
+                    let failures = snapshot.restart_failures.unwrap_or(0);
+                    let message = saved_message(snapshot.restarted.unwrap_or(0), failures);
+                    if failures > 0 {
+                        // The dialog stays open on what did not restart.
+                        this.busy = false;
+                        this.status = Some(message.into());
+                        if let Some(saved) = snapshot.agents.iter().find(|a| a.id == id) {
+                            if let Mode::Edit { agent } = &mut this.mode {
+                                **agent = saved.clone();
+                            }
+                            this.original = Some(this.values(cx));
+                        }
+                        cx.notify();
+                    } else {
+                        cx.emit(Saved(message.into()));
+                        cx.emit(Dismissed);
+                    }
                 }
                 Err(error) => this.fail(error.to_string(), cx),
             });
@@ -967,7 +1034,8 @@ impl Render for AgentEditor {
             }
         });
 
-        match &self.mode {
+        let escape = form::escape(cx);
+        let dialog = match &self.mode {
             Mode::Create { hosts } => {
                 let hosts = hosts.clone();
                 let destination = self
@@ -1041,7 +1109,7 @@ impl Render for AgentEditor {
                             );
                     }
                 }
-                dialog
+                dialog.into_any_element()
             }
             Mode::Edit { agent } => {
                 let agent = agent.clone();
@@ -1162,7 +1230,25 @@ impl Render for AgentEditor {
                             .disabled(!dirty)
                             .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                     )
+                    .into_any_element()
             }
-        }
+        };
+        div().capture_action(escape).child(dialog)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::saved_message;
+
+    #[test]
+    fn saved_messages_follow_the_reference() {
+        assert_eq!(saved_message(0, 0), "Saved.");
+        assert_eq!(saved_message(1, 0), "Saved. Restarted 1 agent.");
+        assert_eq!(
+            saved_message(2, 1),
+            "Saved. Restarted 2 agents. 1 agent couldn’t restart with the new settings; \
+             check Agents."
+        );
     }
 }
