@@ -205,7 +205,8 @@ impl Identity {
         self.keys.public_key().to_hex()
     }
 
-    /// For the explicit "export key" action only.
+    /// For explicit exports only: the "export key" action, and Pair
+    /// mobile's end-to-end encrypted transfer to the user's phone.
     pub fn nsec(&self) -> Zeroizing<String> {
         Zeroizing::new(
             self.keys
