@@ -6,6 +6,8 @@
 
 pub mod claude;
 pub mod client;
+#[cfg(test)]
+mod e2e;
 pub mod prompt;
 pub mod runtime;
 pub mod sessions;
