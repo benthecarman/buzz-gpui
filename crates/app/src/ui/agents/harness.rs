@@ -55,6 +55,10 @@ mod tests {
             missing: Vec::new(),
             setup_hint: String::new(),
             setup_url: None,
+            status: None,
+            install_supported: false,
+            update_supported: false,
+            login_command: None,
         }];
         assert_eq!(
             kind_of("/opt/pi/bin/custom-pi", &detected),

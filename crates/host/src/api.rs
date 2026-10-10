@@ -106,6 +106,14 @@ pub enum Request {
     DisconnectDatabricks {
         workspace: String,
     },
+    /// Installs Pi or Claude Code with a pinned Node.js into this host's own
+    /// directory, never user-global, then restarts agents that were waiting
+    /// for Pi. One install runs at a time.
+    InstallHarness {
+        kind: HarnessKind,
+    },
+    /// Asks Claude Code whether it is signed in. Never part of a snapshot.
+    ClaudeAuth,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -125,6 +133,24 @@ pub enum Response {
         model: Option<String>,
     },
     Disconnected,
+    Installed(InstallReport),
+    /// `Some(false)` when Claude Code says it is signed out; `None` when
+    /// that could not be confirmed.
+    ClaudeAuth(Option<bool>),
+}
+
+/// What an install did (buzz-app's `InstallReport`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InstallReport {
+    pub ready: bool,
+    /// Agents waiting for Pi that restarted, and those that did not.
+    pub restarted: u32,
+    pub restart_failures: u32,
+    /// The install log on the host, and its last 8 KiB.
+    pub log_path: String,
+    pub output: String,
+    pub error: Option<String>,
 }
 
 /// Requests the host makes of the GUI, which holds the human key.
@@ -309,6 +335,29 @@ pub struct Harness {
     pub missing: Vec<String>,
     pub setup_hint: String,
     pub setup_url: Option<String>,
+    /// `None` from hosts that predate it.
+    #[serde(default)]
+    pub status: Option<HarnessStatus>,
+    /// The host can install this harness itself.
+    #[serde(default)]
+    pub install_supported: bool,
+    /// The host's own install is older than the release it pins.
+    #[serde(default)]
+    pub update_supported: bool,
+    /// Claude Code: the terminal command that signs in.
+    #[serde(default)]
+    pub login_command: Option<String>,
+}
+
+/// buzz-app's harness status: what a harness still needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessStatus {
+    Ready,
+    /// The CLI, or Node.js for it, is missing.
+    CliNeeded,
+    /// The CLI is there but its ACP adapter is not.
+    AdapterNeeded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +400,20 @@ pub struct AgentDefaults {
     /// Set on the reply to a save, as in [`AgentsSnapshot`].
     pub restarted: Option<u32>,
     pub restart_failures: Option<u32>,
+    /// What this host's build fills in for Buzz Agent.
+    pub build: BuildDefaults,
+}
+
+/// Mirrors the controller's `BuildDefaults`: public, nonsecret build
+/// configuration for Buzz Agent. Empty when the build sets none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BuildDefaults {
+    pub provider: String,
+    pub model: String,
+    /// The Databricks workspace and model filter.
+    pub host: String,
+    pub filter: String,
 }
 
 /// Mirrors the controller's `AgentDefaultsEdit`.

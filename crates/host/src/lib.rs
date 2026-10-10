@@ -9,6 +9,7 @@ pub mod api;
 pub mod credentials;
 pub mod harness;
 mod import;
+mod install;
 mod models;
 mod profile;
 
@@ -58,6 +59,11 @@ pub struct AgentHost {
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<(u64, HostEvent)>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The state directory, which also holds the harnesses this host
+    /// installs itself (buzz-app's app-data directory).
+    app_data: PathBuf,
+    /// One harness install at a time; stopped with the host.
+    setup: install::Setup,
 }
 
 struct Owner {
@@ -109,6 +115,7 @@ impl AgentHost {
             events: events.clone(),
         };
         let interval = config.watch_interval;
+        let app_data = owner.state_dir.clone();
         let thread = std::thread::Builder::new()
             .name("agent-host".into())
             .spawn(move || {
@@ -136,6 +143,8 @@ impl AgentHost {
             jobs,
             events,
             thread: Some(thread),
+            app_data,
+            setup: install::Setup::default(),
         });
         host.publish_pending_profiles();
         Ok(host)
@@ -223,10 +232,19 @@ impl AgentHost {
                 self.run(|owner| owner.snapshot().map(Response::Agents))
                     .await
             }
-            Request::Harnesses => tokio::task::spawn_blocking(harness::detect)
+            Request::Harnesses => {
+                let app_data = self.app_data.clone();
+                tokio::task::spawn_blocking(move || harness::detect(&app_data))
+                    .await
+                    .map(Response::Harnesses)
+                    .map_err(|_| RpcError::Failed("Harness detection failed".into()))
+            }
+            Request::InstallHarness { kind } => self
+                .install(kind)
                 .await
-                .map(Response::Harnesses)
-                .map_err(|_| RpcError::Failed("Harness detection failed".into())),
+                .map(Response::Installed)
+                .map_err(RpcError::Failed),
+            Request::ClaudeAuth => Ok(Response::ClaudeAuth(self.claude_auth().await)),
             Request::Action { id, action } => {
                 self.run(move |owner| {
                     let action = match action {
@@ -617,9 +635,127 @@ impl AgentHost {
 /// How long [`AgentHost::shutdown`] waits for the agents to stop.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
+impl AgentHost {
+    /// Installs Pi or Claude Code into the host's own directory (buzz-app's
+    /// `pi_install` and `claude_install`). After Pi installs, agents whose
+    /// start failed because it was missing restart.
+    async fn install(&self, kind: api::HarnessKind) -> Result<api::InstallReport, String> {
+        let (tool, label) = match kind {
+            api::HarnessKind::Pi => (install::Tool::Pi, "Pi"),
+            api::HarnessKind::Claude => (install::Tool::Claude, "Claude Code"),
+            _ => return Err("This harness is installed outside Buzz".into()),
+        };
+        if !install::supported() {
+            return Err(format!(
+                "{label} installation is supported only on macOS and Linux"
+            ));
+        }
+        let _guard = self.setup.claim()?;
+        Self::tools_path()
+            .await
+            .map_err(|error| error.to_string())?;
+        let [cli, adapter] = tool.binaries();
+        if [cli, adapter, "node"]
+            .iter()
+            .all(|name| buzz_agent_controller::installed(name).is_some())
+        {
+            return Err(match tool {
+                install::Tool::Pi => {
+                    "Pi is installed user-globally; update it with npm, then click Check again"
+                }
+                install::Tool::Claude => {
+                    "Claude Code is installed user-globally; update it in your terminal, then \
+                     click Check again"
+                }
+            }
+            .into());
+        }
+        let waiting = match tool {
+            install::Tool::Pi => self
+                .run(|owner| {
+                    Ok(owner
+                        .controller
+                        .snapshot()?
+                        .agents
+                        .iter()
+                        .filter(|agent| install::waiting_for_pi(agent))
+                        .map(|agent| agent.id.clone())
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .map_err(|error| error.to_string())?,
+            install::Tool::Claude => Vec::new(),
+        };
+        let path = install::log_path(&self.app_data, tool);
+        let mut report = install::run_install(&path, |log| {
+            install::install(&self.setup, &self.app_data, log, tool)
+        })
+        .await?;
+        if !report.ready {
+            return Ok(report);
+        }
+        if [cli, adapter, "node"]
+            .iter()
+            .any(|name| buzz_agent_controller::managed_tool(&self.app_data, name).is_none())
+        {
+            report.ready = false;
+            report.error = Some(format!(
+                "{label} install finished but its tools were not found. See the log."
+            ));
+            return Ok(report);
+        }
+        for id in waiting {
+            let outcome = self
+                .run(move |owner| {
+                    // Stop or Edit may have changed the agent since.
+                    let still = owner
+                        .controller
+                        .snapshot()?
+                        .agents
+                        .iter()
+                        .any(|agent| agent.id == id && install::waiting_for_pi(agent));
+                    if !still {
+                        return Ok(None);
+                    }
+                    let restarted = owner.controller.action(&id, Action::Restart).is_ok();
+                    let running = owner.controller.snapshot()?.agents.iter().any(|agent| {
+                        agent.id == id
+                            && agent.status == buzz_agent_controller::ProcessStatus::Running
+                    });
+                    Ok(Some(restarted && running))
+                })
+                .await;
+            match outcome {
+                Ok(None) => {}
+                Ok(Some(true)) => report.restarted += 1,
+                _ => report.restart_failures += 1,
+            }
+        }
+        Ok(report)
+    }
+
+    /// Whether Claude Code is signed in (buzz-app's `claude_auth_status`).
+    async fn claude_auth(&self) -> Option<bool> {
+        Self::tools_path().await.ok()?;
+        let app_data = self.app_data.clone();
+        let setup = tokio::task::spawn_blocking(move || harness::claude_setup(&app_data))
+            .await
+            .ok()?;
+        let mut path = buzz_agent_controller::tools_path().ok()?;
+        if let Some(bin) = &setup.node_bin {
+            path = std::env::join_paths(
+                std::iter::once(bin.clone()).chain(std::env::split_paths(&path)),
+            )
+            .ok()?;
+        }
+        harness::claude_signed_in(setup.tools.cli.as_deref()?, &path).await
+    }
+}
+
 impl Drop for AgentHost {
     /// Stops every agent this host started.
     fn drop(&mut self) {
+        self.setup.shutdown();
         let (jobs, _) = mpsc::channel();
         drop(std::mem::replace(&mut self.jobs, jobs));
         if let Some(thread) = self.thread.take() {
@@ -731,7 +867,13 @@ impl Owner {
         let snapshot = self.controller.snapshot()?;
         let json = serde_json::to_value(&snapshot.default_settings)
             .map_err(|_| "Could not read agent defaults")?;
-        serde_json::from_value(json).map_err(|_| "Could not read agent defaults".into())
+        let mut defaults: AgentDefaults =
+            serde_json::from_value(json).map_err(|_| "Could not read agent defaults")?;
+        let build = serde_json::to_value(buzz_agent_controller::build_defaults())
+            .map_err(|_| "Could not read agent defaults")?;
+        defaults.build =
+            serde_json::from_value(build).map_err(|_| "Could not read agent defaults")?;
+        Ok(defaults)
     }
 
     fn import_preview(
