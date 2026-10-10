@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
+pub use crate::session::{CreationSnapshot, KitSnapshot, KitStatus};
 pub use native::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG};
 pub use payload::{TeamManifest, TeamPayload};
 

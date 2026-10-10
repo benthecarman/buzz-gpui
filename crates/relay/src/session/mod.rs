@@ -23,6 +23,7 @@ mod feedback;
 mod gifs;
 mod inbox;
 mod incoming;
+mod kit;
 mod live_feed;
 mod members;
 mod memories;
@@ -45,6 +46,7 @@ pub use catalog::CommunityCatalog;
 pub use feedback::{FeedbackState, PendingFeedback};
 pub use inbox::{EXPIRED as INBOX_EXPIRED, InboxFeed, InboxFeedStatus, InboxState};
 pub use incoming::IncomingMessage;
+pub use kit::{CreationSnapshot, KitSnapshot, KitStatus};
 pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
 pub use memories::{MemoryEntry, MemoryError, MemoryListing};
@@ -304,6 +306,8 @@ pub struct Session {
     inbox: watch::Receiver<Arc<inbox::InboxState>>,
     /// Details saves by channel, kept through panel close and reopen.
     details: std::sync::Mutex<HashMap<String, crate::lifecycle::DetailsAttempt>>,
+    /// The channel kit and channel creation with setup.
+    kit: Arc<kit::KitShared>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -502,6 +506,7 @@ impl Session {
             reminders,
             inbox: inbox_view,
             details: Default::default(),
+            kit: Arc::default(),
             task,
         }
     }
