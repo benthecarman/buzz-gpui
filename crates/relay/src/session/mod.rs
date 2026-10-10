@@ -17,6 +17,7 @@ mod account;
 mod actions;
 mod gifs;
 mod incoming;
+mod messaging;
 mod observer;
 mod presence;
 mod threads;
