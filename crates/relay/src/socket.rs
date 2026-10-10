@@ -33,6 +33,36 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+/// TLS for `wss://` trusts what the HTTP client trusts: the platform
+/// verifier, as reqwest uses, so the system's roots and `SSL_CERT_FILE`.
+/// The bundled web roots alone refuse a relay behind a private CA whose
+/// HTTP reads succeed, and live updates then never connect. `None` (the
+/// platform verifier could not start) falls back to the bundled roots.
+fn tls() -> Option<tokio_tungstenite::Connector> {
+    static CONFIG: std::sync::OnceLock<Option<Arc<rustls::ClientConfig>>> =
+        std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            use rustls_platform_verifier::BuilderVerifierExt;
+            let provider = rustls::crypto::CryptoProvider::get_default()
+                .cloned()
+                .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .and_then(|builder| builder.with_platform_verifier())
+                .map(|builder| builder.with_no_client_auth());
+            match config {
+                Ok(config) => Some(Arc::new(config)),
+                Err(error) => {
+                    tracing::warn!(%error, "platform TLS verifier unavailable");
+                    None
+                }
+            }
+        })
+        .clone()
+        .map(tokio_tungstenite::Connector::Rustls)
+}
+
 /// A NIP-01 filter. Buzz relays accept extra fields (`search`,
 /// `thread_window`, ...), so filters are plain JSON objects.
 pub type Filter = serde_json::Map<String, Value>;
@@ -599,10 +629,11 @@ impl Actor {
             .max_frame_size(Some(16 * MAX_FRAME));
         let connected = tokio::time::timeout_at(
             deadline,
-            tokio_tungstenite::connect_async_with_config(
+            tokio_tungstenite::connect_async_tls_with_config(
                 self.origin.websocket(),
                 Some(config),
                 false,
+                tls(),
             ),
         )
         .await;

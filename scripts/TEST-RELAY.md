@@ -147,8 +147,10 @@ The agent controller accepts only `wss://` relays, so agents need a TLS relay.
   pass through unchanged.
 - A local CA (`tls/ca.pem`, generated once with `openssl`) signs a
   certificate for `localhost` and `127.0.0.1`. `tls/ca-bundle.pem` holds the
-  system roots and the test CA. Point `SSL_CERT_FILE` at it: reqwest
-  (rustls-platform-verifier), the `buzz` CLI and `buzz-acp` read it.
+  system roots and the test CA. Point `SSL_CERT_FILE` at it: the app's
+  HTTP and WebSocket clients (both rustls-platform-verifier), the `buzz`
+  CLI and `buzz-acp` read it. `crates/relay/tests/tls_relay.rs` checks that
+  live updates connect through it.
 - `buzz-acp` is built from the same upstream checkout with
   `--features tokio-tungstenite/rustls-tls-native-roots`. Upstream's
   WebSocket client trusts only the bundled webpki roots, so without this
