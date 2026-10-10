@@ -25,3 +25,22 @@ cd third_party/gpui-pre-linux
 CARGO_TARGET_DIR=../../target/vendored cargo test --features gpui/test-support --lib
 rm Cargo.lock
 ```
+
+## gpui-base 0.7.1
+
+gpui-kit's base crate, which holds its text input, from crates.io
+(Apache-2.0, Longbridge). The first commit that adds it here is the
+published crate unchanged (without its `Cargo.lock`), so
+`git log -p third_party/gpui-base` shows every change made since. The
+workspace uses it through `[patch.crates-io]`. Drop it when upstream has
+equivalents.
+
+Patches: none yet.
+
+Run its tests on their own, since it isn't a workspace member:
+
+```sh
+cd third_party/gpui-base
+CARGO_TARGET_DIR=../../target/vendored cargo test --features test-support --lib
+rm Cargo.lock
+```

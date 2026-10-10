@@ -11,6 +11,11 @@ crates.
 Apache-2.0, © Zed Industries, Inc.), with the changes listed in
 `third_party/README.md`; its license is in `third_party/gpui-pre-linux/`.
 
+`third_party/gpui-base/` is gpui-kit's base crate, gpui-base 0.7.1
+([longbridge/gpui-kit](https://github.com/longbridge/gpui-kit), Apache-2.0,
+© 2024-2026 Longbridge), with the changes listed in `third_party/README.md`;
+its license is in `third_party/gpui-base/`.
+
 The app icons in `assets/icons/` are copied from buzz-app's
 `src-tauri/icons`, which copied them from Block Buzz's
 `desktop/src-tauri/icons` ([block/buzz](https://github.com/block/buzz),
