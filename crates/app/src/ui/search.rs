@@ -284,6 +284,9 @@ impl SearchDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if let Some(community) = &community {
+            super::archives::ensure(community, false, cx);
+        }
         let placeholder = if scope.is_some() {
             SCOPED_PLACEHOLDER
         } else {
@@ -734,6 +737,7 @@ impl SearchDialog {
         let mut ranked: Vec<(u8, String, Profile)> = if current.is_some() {
             candidates
                 .into_iter()
+                .filter(|(key, _)| !super::archives::hides(community, key, cx))
                 .map(|(key, profile)| (tier(&key, &profile), key, profile))
                 .filter(|(tier, ..)| *tier < 4)
                 .collect()

@@ -22,7 +22,7 @@ pub(crate) mod harness;
 mod host_dialog;
 mod import;
 mod inventory;
-mod relay;
+pub(crate) mod relay;
 pub(crate) mod review;
 mod share;
 pub(crate) mod snapshot_preview;

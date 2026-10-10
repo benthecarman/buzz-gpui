@@ -5,6 +5,7 @@ mod add_community;
 pub mod agent_activity;
 pub(crate) mod agents;
 pub mod agents2;
+mod archives;
 mod channel;
 mod channel_activity;
 mod channel_menu;

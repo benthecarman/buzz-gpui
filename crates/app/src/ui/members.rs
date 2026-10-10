@@ -125,6 +125,7 @@ impl MembersDialog {
             _subscription: subscription,
         };
         dialog.refresh(window, cx);
+        super::archives::ensure(&dialog.community, false, cx);
         dialog
     }
 
@@ -209,6 +210,11 @@ impl MembersDialog {
     }
 
     fn add(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
+        if super::archives::hides(&self.community, &pubkey, cx) {
+            self.error = Some("Archived identities cannot be added. Choose someone else.".into());
+            cx.notify();
+            return;
+        }
         if !self.busy.insert(pubkey.clone()) {
             return;
         }
@@ -675,6 +681,13 @@ impl Render for MembersDialog {
         if let Some(message) = &self.error {
             list = list.child(div().px(rems(1.)).child(error(message.clone(), cx)));
         }
+        if super::archives::status(&self.community, cx) == Some(super::archives::Status::Error) {
+            list = list.child(
+                div()
+                    .px(rems(1.))
+                    .child(error("Archived identities could not be checked.", cx)),
+            );
+        }
         let mut filter = None;
         match &self.state {
             None => {
@@ -758,6 +771,8 @@ impl Render for MembersDialog {
                                 .people
                                 .iter()
                                 .filter(|p| !state.roles.contains_key(&p.pubkey))
+                                // Archived identities cannot be added.
+                                .filter(|p| !super::archives::hides(&self.community, &p.pubkey, cx))
                                 .collect();
                             if others.is_empty() {
                                 section =

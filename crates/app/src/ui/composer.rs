@@ -1287,6 +1287,7 @@ impl Composer {
                 self.channel_suggestions(&query, cx)
             }
             Trigger::Mention => {
+                super::archives::ensure(&self.community, false, cx);
                 self.search_people(&query.text, cx);
                 let Some(found) = self.mention_suggestions(&query, cx) else {
                     self.completion = None;
@@ -1483,7 +1484,19 @@ impl Composer {
             presence: &snapshot.presence,
             history: &history,
         };
-        mentions::complete(&inputs, text, directory)
+        let mut completion = mentions::complete(&inputs, text, directory);
+        // Archived identities leave the choices (`archiveHides`).
+        completion
+            .people
+            .retain(|person| !super::archives::hides(&self.community, &person.pubkey, cx));
+        if completion
+            .space
+            .as_deref()
+            .is_some_and(|key| super::archives::hides(&self.community, key, cx))
+        {
+            completion.space = None;
+        }
+        completion
     }
 
     /// Starts the open-channel lookup for `#query` after a typing pause,
