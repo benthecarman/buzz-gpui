@@ -1747,6 +1747,7 @@ impl Actor {
             // Names and emoji seen only in a lost channel must not stay.
             self.profiles.clear();
             self.emoji_clear();
+            self.statuses_clear();
             self.ensure_profiles(self.channel_people());
             let people: Vec<String> = self.timelines.values().flat_map(Timeline::people).collect();
             self.ensure_profiles(people);

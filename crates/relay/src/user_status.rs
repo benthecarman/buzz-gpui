@@ -328,6 +328,15 @@ impl StatusDirectory {
         self.loaded.clear();
     }
 
+    /// Access changed or the cache was cleared (`statuses.clear`): every
+    /// status is forgotten and the watched people are read again. Returns
+    /// whether the snapshot changed.
+    pub fn clear(&mut self, now_ms: u64) -> bool {
+        self.reconnect();
+        self.records.clear();
+        self.recompute(now_ms)
+    }
+
     /// The next wall-clock time, in milliseconds, there is work: a status
     /// expiring ([`Self::tick`]) or a retry falling due
     /// ([`Self::next_read`]).
@@ -613,6 +622,9 @@ mod tests {
         assert!(directory.unwatch(&watched, 100_000));
         assert!(!directory.snapshot().contains_key(&b));
         assert!(directory.snapshot().contains_key(&me));
+        // An access change forgets everything and reads again.
+        assert!(directory.clear(100_000));
+        assert!(directory.snapshot().is_empty());
     }
 
     #[test]

@@ -16,6 +16,7 @@ use nostr::prelude::Event;
 use std::sync::Arc;
 use std::time::Duration;
 
+const STATUS_UNAVAILABLE: &str = "Status updates are unavailable in this community.";
 /// A status save gives up after this long (`user-status.ts`).
 const STATUS_TIMEOUT: Duration = Duration::from_secs(12);
 const PROFILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -186,27 +187,15 @@ impl Session {
     /// The viewer's current status, read fresh. `None` when unset, cleared
     /// or expired.
     pub async fn own_status(&self) -> Result<Option<UserStatus>, String> {
-        let reader = self.direct.reader.clone();
-        let viewer = self.viewer.clone();
-        self.run(async move {
-            let events = reader
-                .read(
-                    vec![user_status::filter(&viewer)],
-                    ReadOptions {
-                        fresh: true,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| error.message)?;
-            Ok(user_status::current(&events, &viewer, now()))
-        })
-        .await
+        self.user_status(&self.viewer).await
     }
 
     /// Saves the viewer's status (§5j.1); empty text and emoji clear it.
     /// Reads the current status first so the new event replaces it.
     pub async fn set_status(&self, input: StatusInput) -> Result<(), String> {
+        if self.commands.is_closed() {
+            return Err(STATUS_UNAVAILABLE.into());
+        }
         let Ok(_guard) = self.direct.status.try_lock() else {
             return Err("A status update is already in progress.".into());
         };
@@ -226,10 +215,19 @@ impl Session {
                 )
                 .await
                 .map_err(|error| error.message)?;
-            let previous = user_status::latest_created_at(&events, &viewer);
+            let own: Vec<Verified> = events
+                .iter()
+                .filter(|event| event.pubkey_hex() == viewer)
+                .cloned()
+                .collect();
+            let previous = user_status::latest_created_at(&own, &viewer);
+            let _ = commands.send(Message::With(Box::new(move |actor| {
+                actor.statuses_observe(&own);
+            })));
             let template = user_status::template(&input, previous, now())
                 .map_err(|error| error.to_string())?;
-            let event = sign(&identity, template)?;
+            // Only a signer that may sign statuses can save one.
+            let event = sign(&identity, template).map_err(|_| STATUS_UNAVAILABLE.to_string())?;
             accept_publish(post(&http, &event).await, &event.id)
                 .map_err(|error| error.to_string())?;
             // Shown in the session's statuses at once, as live traffic

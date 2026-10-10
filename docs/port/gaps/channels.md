@@ -845,13 +845,13 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 |---|---|---|---|---|
 | Parse rules (`d=general`, ≤100 UTF-16, expiration) | user-status.ts:17-41; user-status-policy.ts:1-11 | DONE (user_status.rs:91-115) | - | - |
 | Save (fresh read, monotonic, 300 s skew, 12 s, one at a time) | user-status.ts:208-284 | DONE (user_status.rs:120-158; session/account.rs:155-189) | - | - |
-| Writable gate | user-status.ts:209-215, 329-332 | MISSING | - | S |
-| Watched directory for others (refcounted, batches of 100) | user-status.ts:123-207 | MISSING | Only `own_status` | M |
-| Live 30315 updates | user-status.ts:96-122 | PARTIAL | Subscribed (live.rs:482), dropped | S |
-| Expiry timer republish | user-status.ts:68-95 | MISSING | - | S |
-| Background retries 5/15/60 s | user-status.ts:149-161 | MISSING | - | S |
-| `current(userId)` for others; reload on reconnect/clear | user-status.ts:310-350 | PARTIAL | Viewer only (session/account.rs:136-151) | S |
-| Status on profiles, member lists, rows | UI consumers | MISSING | Only the account panel | M |
+| Writable gate | user-status.ts:209-215, 329-332 | DONE (session/account.rs `set_status`) | - | - |
+| Watched directory for others (refcounted, batches of 100) | user-status.ts:123-207 | DONE (user_status.rs `StatusDirectory`; session/statuses.rs `Session::watch_statuses`) | - | - |
+| Live 30315 updates | user-status.ts:96-122 | DONE (session/mod.rs `accept`, through `StatusDirectory::accept`) | - | - |
+| Expiry timer republish | user-status.ts:68-95 | DONE (user_status.rs `StatusDirectory::deadline`; session/statuses.rs `statuses_tick`) | - | - |
+| Background retries 5/15/60 s | user-status.ts:149-161 | DONE (user_status.rs `StatusDirectory::finished`, `next_read`) | - | - |
+| `current(userId)` for others; reload on reconnect/clear | user-status.ts:310-350 | DONE (`Session::user_status`; session/statuses.rs `statuses_reconnected`, `statuses_clear`) | - | - |
+| Status on profiles, member lists, rows | UI consumers | MISSING | Data ready: `Session::watch_statuses`, `SessionSnapshot::statuses`; render it | M |
 
 ### Me preferences (Me groups kit)
 

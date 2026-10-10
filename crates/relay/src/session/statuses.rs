@@ -9,7 +9,7 @@ use super::unread::now_ms;
 use super::{Actor, Message, Session};
 use crate::event::Verified;
 use crate::reader::{Events, ReadError, ReadOptions};
-use crate::user_status::{StatusRead, batch_filter, watch_keys};
+use crate::user_status::{self, StatusRead, UserStatus, batch_filter, watch_keys};
 use tokio::sync::mpsc;
 
 /// Keeps people's statuses in [`super::SessionSnapshot::statuses`] while
@@ -48,6 +48,37 @@ impl Session {
             commands: self.commands.clone(),
             ids,
         }
+    }
+
+    /// One person's status, read fresh (`statuses.current`); also updates
+    /// the snapshot. `None` when unset, cleared or expired.
+    pub async fn user_status(&self, user: &str) -> Result<Option<UserStatus>, String> {
+        let reader = self.direct.reader.clone();
+        let commands = self.commands.clone();
+        let user = user.to_owned();
+        self.run(async move {
+            let events = reader
+                .read(
+                    vec![user_status::filter(&user)],
+                    ReadOptions {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| error.message)?;
+            let current = user_status::current(&events, &user, now_ms() / 1000);
+            let own: Vec<Verified> = events
+                .iter()
+                .filter(|event| event.pubkey_hex() == user)
+                .cloned()
+                .collect();
+            let _ = commands.send(Message::With(Box::new(move |actor| {
+                actor.statuses_observe(&own);
+            })));
+            Ok(current)
+        })
+        .await
     }
 }
 
@@ -92,9 +123,23 @@ impl Actor {
 
     /// Shows a status the viewer just saved, before live traffic echoes it.
     pub(super) fn status_saved(&mut self, event: Verified) {
-        if self.statuses.accept(&[event], now_ms()) {
+        self.statuses_observe(&[event]);
+    }
+
+    /// Takes statuses read fresh outside the directory's own reads.
+    pub(super) fn statuses_observe(&mut self, events: &[Verified]) {
+        if self.statuses.accept(events, now_ms()) {
             self.publish();
         }
+    }
+
+    /// Access changed or the cache was cleared: every status is forgotten
+    /// and the watched people are read again (`statuses.clear`).
+    pub(super) fn statuses_clear(&mut self) {
+        if self.statuses.clear(now_ms()) {
+            self.publish();
+        }
+        self.statuses_schedule();
     }
 
     pub(super) fn statuses_deadline(&self) -> Option<u64> {

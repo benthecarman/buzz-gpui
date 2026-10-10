@@ -182,3 +182,55 @@ async fn joins_with_an_invite_then_leaves() {
     );
     again.dispose().await;
 }
+
+/// Another member's status reaches a session watching them, and their
+/// clear arrives live.
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_statuses_follow_live_changes() {
+    let Ok(dir) = std::env::var("BUZZ_TEST_RELAY") else {
+        eprintln!("BUZZ_TEST_RELAY not set; skipping");
+        return;
+    };
+    let identities: Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/identities.json")).unwrap())
+            .unwrap();
+    let origin = RelayOrigin::parse(identities["relay_ws_url"].as_str().unwrap()).unwrap();
+    let open = |name: &str| {
+        let nsec = identities["identities"][name]["nsec"].as_str().unwrap();
+        Session::open(
+            &tokio::runtime::Handle::current(),
+            origin.clone(),
+            Arc::new(Identity::from_nsec(nsec).unwrap()),
+            Store::in_memory().unwrap(),
+        )
+    };
+    let (bob, alice) = (open("bob"), open("alice"));
+    let bob_id = bob.viewer().to_string();
+    let snapshot = alice.snapshot();
+    assert!(wait_for(|| snapshot.borrow().live).await);
+    let _watch = alice.watch_statuses(std::slice::from_ref(&bob_id));
+    let text = format!("Status test {}", std::process::id());
+    bob.set_status(StatusInput {
+        text: text.clone(),
+        emoji: String::new(),
+        expires_at: None,
+    })
+    .await
+    .unwrap();
+    assert!(
+        wait_for(|| snapshot
+            .borrow()
+            .statuses
+            .get(&bob_id)
+            .is_some_and(|status| status.text == text))
+        .await,
+        "the watched status arrives"
+    );
+    bob.set_status(StatusInput::default()).await.unwrap();
+    assert!(
+        wait_for(|| !snapshot.borrow().statuses.contains_key(&bob_id)).await,
+        "the clear arrives live"
+    );
+    bob.dispose().await;
+    alice.dispose().await;
+}
