@@ -24,6 +24,7 @@ mod inbox;
 mod incoming;
 mod live_feed;
 mod members;
+mod memories;
 mod messaging;
 mod observer;
 mod presence;
@@ -43,6 +44,7 @@ pub use inbox::{EXPIRED as INBOX_EXPIRED, InboxFeed, InboxFeedStatus, InboxState
 pub use incoming::IncomingMessage;
 pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
+pub use memories::{MemoryEntry, MemoryError, MemoryListing};
 pub use observer::{ActivityFeed, FeedStatus};
 pub use statuses::StatusWatch;
 pub use teams::{TeamKit, TeamsStatus, TeamsView};
