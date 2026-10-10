@@ -4,10 +4,12 @@
 //! One viewer is open at a time, app-wide, so any row can open it; the
 //! workspace draws it above everything through [`review_overlay`].
 
+use super::comments::{Comments, VideoTime};
 use super::video::{SKIP_SECONDS, VideoPlayer};
 use super::{Remote, decoded, natural_size};
+use crate::community::AppState;
 use buzz_relay_client::Media;
-use buzz_relay_client::fold::{Attachment, AttachmentKind};
+use buzz_relay_client::fold::{Attachment, AttachmentKind, MessageRow};
 use buzz_ui::{
     ActiveTheme, Appearance, Button, ButtonSize, ButtonVariant, IconButton, IconButtonSize,
     IconName, PanelHeader, ThemeScope, TypeStyled,
@@ -16,6 +18,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 const MIN_ZOOM: f32 = 0.5;
 const BASE_MAX_ZOOM: f32 = 4.;
@@ -49,15 +52,20 @@ fn host(cx: &mut App) -> Entity<Host> {
     host
 }
 
-/// Opens `url` from a message's `attachments`: an image with the message's
-/// other images as its gallery, or a video in the player.
+/// The comments sidebar's width (`minmax(0, 24rem)`).
+const COMMENTS_WIDTH: f32 = 384.;
+
+/// Opens `url` from `row`'s attachments: an image with the message's
+/// other images as its gallery, or a video in the player, beside the
+/// message's comments.
 pub fn open_review(
-    attachments: &[Attachment],
+    row: &Arc<MessageRow>,
     url: &str,
     media: &Media,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let attachments = &row.attachments;
     let Some(selected) = attachments.iter().find(|a| a.url == url) else {
         return;
     };
@@ -74,6 +82,18 @@ pub fn open_review(
     let restore = window.focused(cx);
     let media = media.clone();
     let review = cx.new(|cx| Review::new(items, index, media, cx));
+    // Comments are the message's thread, in the selected community.
+    if let Some(community) = AppState::current(cx) {
+        let video = review.read(cx).video.clone();
+        let video_time =
+            video.map(|video| Rc::new(move |cx: &App| video.read(cx).position()) as VideoTime);
+        let (channel, id) = (row.channel.to_string(), row.id);
+        let comments = cx.new(|cx| Comments::new(community, channel, id, video_time, window, cx));
+        let had_comments = row.reply_count > 0 || row.thread_root_id.is_some();
+        review.update(cx, |review, cx| {
+            review.set_comments(comments, had_comments, cx)
+        });
+    }
     let focus = review.read(cx).focus.clone();
     focus.focus(window, cx);
     host(cx).update(cx, |host, cx| {
@@ -133,6 +153,11 @@ pub struct Review {
     press: Option<Press>,
     /// The stage's bounds as last drawn.
     stage: Rc<Cell<Bounds<Pixels>>>,
+    comments: Option<Entity<Comments>>,
+    show_comments: bool,
+    /// Once the reader toggles the sidebar, loading no longer opens it.
+    toggled: bool,
+    _comments: Option<Subscription>,
 }
 
 impl Review {
@@ -158,7 +183,31 @@ impl Review {
             offset: point(0., 0.),
             press: None,
             stage: Rc::default(),
+            comments: None,
+            show_comments: false,
+            toggled: false,
+            _comments: None,
         }
+    }
+
+    /// Opens on the sidebar when the message had replies, and once they
+    /// load (or fail to), unless the reader chose otherwise.
+    fn set_comments(&mut self, comments: Entity<Comments>, had: bool, cx: &mut Context<Self>) {
+        self.show_comments = had;
+        self._comments = Some(cx.observe(&comments, |this, comments, cx| {
+            if !this.toggled && comments.read(cx).has_comments() {
+                this.show_comments = true;
+            }
+            cx.notify();
+        }));
+        self.comments = Some(comments);
+        cx.notify();
+    }
+
+    fn toggle_comments(&mut self, cx: &mut Context<Self>) {
+        self.toggled = true;
+        self.show_comments = !self.show_comments;
+        cx.notify();
     }
 
     fn selected(&self) -> Option<&Attachment> {
@@ -173,6 +222,13 @@ impl Review {
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        let typing = self
+            .comments
+            .as_ref()
+            .is_some_and(|comments| comments.read(cx).typing(window, cx));
+        if typing && keystroke.key != "escape" {
+            return;
+        }
         let modifiers = keystroke.modifiers;
         if modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift {
             return;
@@ -639,22 +695,64 @@ impl Render for Review {
                     })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .when(!expanded, |this| {
+                        let shown = self.show_comments;
                         this.child(
-                            PanelHeader::new().title(title).action(
-                                IconButton::new("close", IconName::X)
-                                    .size(IconButtonSize::Sm)
-                                    .tooltip("Close fullscreen viewer")
-                                    .on_click(|_, window, cx| close(window, cx)),
-                            ),
+                            PanelHeader::new()
+                                .title(title)
+                                .when(self.comments.is_some(), |header| {
+                                    header.action(
+                                        IconButton::new("toggle-comments", IconName::SidebarRight)
+                                            .size(IconButtonSize::Sm)
+                                            .icon_size(20.)
+                                            .selected(shown)
+                                            .tooltip(if shown {
+                                                "Hide comments"
+                                            } else {
+                                                "Show comments"
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_comments(cx)
+                                            })),
+                                    )
+                                })
+                                .action(
+                                    IconButton::new("close", IconName::X)
+                                        .size(IconButtonSize::Sm)
+                                        .icon_size(20.)
+                                        .tooltip("Close fullscreen viewer")
+                                        .on_click(|_, window, cx| close(window, cx)),
+                                ),
                         )
                     })
                     .child(
                         div()
-                            .relative()
+                            .flex()
                             .flex_1()
                             .min_h_0()
-                            .bg(c.bg_media_canvas)
-                            .child(stage),
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .bg(c.bg_media_canvas)
+                                    .child(stage),
+                            )
+                            .when_some(
+                                self.comments
+                                    .clone()
+                                    .filter(|_| self.show_comments && !expanded),
+                                |this, comments| {
+                                    this.child(
+                                        div()
+                                            .flex_none()
+                                            .w(px(COMMENTS_WIDTH))
+                                            .h_full()
+                                            .border_l_1()
+                                            .border_color(c.border_standard)
+                                            .child(comments),
+                                    )
+                                },
+                            ),
                     ),
             )
     }

@@ -704,7 +704,7 @@ fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEle
                             attachment,
                             &rows.directory.media,
                             Rc::new(move |window, cx| {
-                                media::open_review(&target.attachments, &url, &media, window, cx)
+                                media::open_review(&target, &url, &media, window, cx)
                             }),
                         )
                     }))
@@ -796,9 +796,7 @@ fn image_tile(
                 .border_1()
                 .border_color(c.border_image),
         )
-        .on_click(move |_, window, cx| {
-            media::open_review(&target.attachments, &url, &media, window, cx)
-        })
+        .on_click(move |_, window, cx| media::open_review(&target, &url, &media, window, cx))
         .into_any_element()
 }
 

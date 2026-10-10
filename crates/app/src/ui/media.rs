@@ -8,6 +8,7 @@
 //! URL and redraws the view that asked once it lands.
 
 mod audio;
+mod comments;
 mod engine;
 pub mod recorder;
 mod review;

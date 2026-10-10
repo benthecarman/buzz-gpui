@@ -340,6 +340,11 @@ impl VideoPlayer {
         }
     }
 
+    /// Seconds into the video, for comments at the current frame.
+    pub fn position(&self) -> f64 {
+        self.position
+    }
+
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.as_mut() else {
             return;
