@@ -108,6 +108,8 @@ pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
 /// Something a row asks its page to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// "Review report": shows the report dialog again.
+    ReviewReport,
     CopyLink,
     CopyMessage,
     MarkRead,
@@ -224,6 +226,9 @@ pub struct Rows {
     pub in_thread: bool,
     /// Focus for the open more menu's keyboard.
     pub menu_focus: Option<FocusHandle>,
+    /// A report sent while its conversation was hidden: the message and
+    /// the failure, `None` while it is still submitting.
+    pub report: Option<(EventId, Option<SharedString>)>,
     /// A reaction error to show under a row.
     pub reaction_error: Option<(EventId, SharedString)>,
     /// Unread and agent activity of the rows shown.
@@ -258,6 +263,7 @@ impl Rows {
             working: Vec::new(),
             in_thread: false,
             menu_focus: None,
+            report: None,
             reaction_error: None,
             marks: Marks::default(),
             media: media::RowMedia::default(),
@@ -505,6 +511,9 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
     }
     if let Some(notice) = delivery_notice(row, rows, cx) {
         body = body.child(notice);
+    }
+    if let Some((_, failure)) = rows.report.as_ref().filter(|(id, _)| *id == row.id) {
+        body = body.child(report_state(row, failure.clone(), rows, cx));
     }
     if !row.attachments.is_empty() {
         body = body.child(media::attachments(row, rows, cx));
@@ -1815,6 +1824,41 @@ fn delivery_notice(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<A
         );
     }
     Some(notice.into_any_element())
+}
+
+/// A report sent while the conversation was hidden: "Submitting report…",
+/// or its failure with "Review report" (`ReportMessageDialog`).
+fn report_state(
+    row: &Arc<MessageRow>,
+    failure: Option<SharedString>,
+    rows: &Rc<Rows>,
+    cx: &App,
+) -> AnyElement {
+    let c = cx.colors();
+    let line = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.))
+        .mt(px(6.))
+        .text_body_sm()
+        .text_color(c.text_standard);
+    let Some(failure) = failure else {
+        return line.child("Submitting report…").into_any_element();
+    };
+    let (rows, target) = (rows.clone(), row.clone());
+    line.child(failure)
+        .child(
+            buzz_ui::Button::new(
+                SharedString::from(format!("review-report-{}", row.id.to_hex())),
+                "Review report",
+            )
+            .size(buzz_ui::ButtonSize::Sm)
+            .on_click(move |_, window, cx| {
+                rows.command(&target, Command::ReviewReport, window, cx)
+            }),
+        )
+        .into_any_element()
 }
 
 /// Redraws every window once `after` passes, once per row.

@@ -79,6 +79,10 @@ pub struct MessageActions {
     deleting: Option<Deletion>,
     editing: Option<Editing>,
     reporting: Option<(Entity<ReportDialog>, Subscription)>,
+    /// The conversation stopped being shown while a report was sent or
+    /// failed: its row shows the state instead of the dialog until
+    /// "Review report" (`ReportMessageDialog`'s `present`).
+    report_hidden: bool,
     /// The page alert (`role="alert"`): unread and follow failures.
     error: Option<SharedString>,
     reaction_error: Option<(EventId, SharedString)>,
@@ -147,6 +151,7 @@ impl MessageActions {
             deleting: None,
             editing: None,
             reporting: None,
+            report_hidden: false,
             error: None,
             reaction_error: None,
             hooks,
@@ -403,6 +408,25 @@ impl MessageActions {
     }
 
     /// Fills a page's rows with these actions and their state.
+    /// The conversation is shown or not (`ConversationPresentation`). An
+    /// unsent report is discarded as it hides; a sent or failed one stays,
+    /// summed up in its row.
+    pub fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
+        if presented {
+            return;
+        }
+        let Some((dialog, _)) = &self.reporting else {
+            return;
+        };
+        let dialog = dialog.read(cx);
+        if dialog.pending() || dialog.error().is_some() {
+            self.report_hidden = true;
+        } else {
+            self.reporting = None;
+        }
+        cx.notify();
+    }
+
     pub fn fill(this: &Entity<Self>, rows: &mut Rows, cx: &mut App) {
         let quick = emoji_picker::quick_bar(&this.read(cx).community.clone(), cx);
         let me = this.read(cx);
@@ -425,6 +449,14 @@ impl MessageActions {
         rows.menu = self.menu;
         rows.menu_focus = Some(self.menu_focus.clone());
         rows.reaction_error = self.reaction_error.clone();
+        rows.report = self
+            .reporting
+            .as_ref()
+            .filter(|_| self.report_hidden)
+            .map(|(dialog, _)| {
+                let dialog = dialog.read(cx);
+                (dialog.message(), dialog.error())
+            });
         rows.presence = snapshot.presence.clone();
         rows.working = match self.hooks.thread {
             Some(root) => snapshot.thread_typing.get(&root.to_hex()).cloned(),
@@ -657,9 +689,15 @@ impl MessageActions {
                 });
                 let subscription = cx.subscribe(&dialog, |this, _, ReportClosed, cx| {
                     this.reporting = None;
+                    this.report_hidden = false;
                     cx.notify();
                 });
                 self.reporting = Some((dialog, subscription));
+                self.report_hidden = false;
+            }
+            Command::ReviewReport => {
+                self.report_hidden = false;
+                cx.notify();
             }
             Command::Reply => (self.hooks.reply)(row, window, cx),
             Command::React { content, emoji } => self.react(row, content, emoji, window, cx),
@@ -835,7 +873,7 @@ impl MessageActions {
         if let Some(deletion) = &self.deleting {
             out.push(self.delete_dialog(deletion, window, cx));
         }
-        if let Some((dialog, _)) = &self.reporting {
+        if let Some((dialog, _)) = self.reporting.as_ref().filter(|_| !self.report_hidden) {
             let close = dialog.clone();
             out.push(
                 overlay::modal(

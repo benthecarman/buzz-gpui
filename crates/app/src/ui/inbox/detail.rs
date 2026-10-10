@@ -90,6 +90,13 @@ impl InboxDetail {
         }
         self.item = item;
         self.incomplete = incomplete;
+        // The reader stays while the preview updates, but is not shown.
+        let presented = incomplete.is_none();
+        match &self.reader {
+            Some(Reader::Channel(page)) => ChannelPage::set_presented(page, presented, cx),
+            Some(Reader::Thread(panel)) => ThreadPanel::set_presented(panel, presented, cx),
+            None => {}
+        }
         self.admit(window, cx);
         cx.notify();
     }

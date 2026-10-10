@@ -299,6 +299,12 @@ impl ChannelPage {
         self.actions.clone()
     }
 
+    /// Whether this reader is shown (`ConversationPresentation`).
+    pub fn set_presented(this: &Entity<Self>, presented: bool, cx: &mut App) {
+        let actions = this.read(cx).message_actions.clone();
+        actions.update(cx, |actions, cx| actions.set_presented(presented, cx));
+    }
+
     pub fn channel_id(&self) -> &str {
         &self.channel.id
     }

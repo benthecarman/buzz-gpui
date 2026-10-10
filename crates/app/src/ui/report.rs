@@ -70,6 +70,15 @@ impl ReportDialog {
         self.pending
     }
 
+    /// The last submission's failure, until the next one.
+    pub fn error(&self) -> Option<SharedString> {
+        self.error.clone()
+    }
+
+    pub fn message(&self) -> EventId {
+        self.message
+    }
+
     fn close(&mut self, cx: &mut Context<Self>) {
         // A dispatched report must settle; only unsent ones are discarded.
         if !self.pending {
