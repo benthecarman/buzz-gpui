@@ -80,6 +80,7 @@ pub struct MenuItem {
     label: SharedString,
     icon: Option<IconName>,
     icon_size: f32,
+    leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
     checked: Option<bool>,
     submenu: bool,
@@ -97,6 +98,7 @@ impl MenuItem {
             label: label.into(),
             icon: None,
             icon_size: 16.,
+            leading: None,
             trailing: None,
             checked: None,
             submenu: false,
@@ -117,6 +119,13 @@ impl MenuItem {
     /// Context menus draw 14px icons.
     pub fn icon_size(mut self, px: f32) -> Self {
         self.icon_size = px;
+        self
+    }
+
+    /// Leading content in place of an icon, such as a person's avatar
+    /// (`ChoiceRow` `leading`).
+    pub fn leading(mut self, element: impl IntoElement) -> Self {
+        self.leading = Some(element.into_any_element());
         self
     }
 
@@ -233,6 +242,7 @@ impl RenderOnce for MenuItem {
                     Icon::new(icon).size(self.icon_size).into_any_element(),
                 ))
             })
+            .children(self.leading.map(&quiet_slot))
             .child(div().flex_1().min_w_0().truncate().child(self.label))
             .children(self.trailing.map(&quiet_slot))
             .when_some(self.checked, |this, checked| {
