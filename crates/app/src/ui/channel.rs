@@ -3,29 +3,26 @@
 
 use super::channel_menu::{ChannelActions, JoinNotice};
 use super::composer::{Composer, ComposerEvent, Submission};
-use super::emoji_picker::{self, Dismissed, EmojiPicker, Picked};
 use super::markdown::Directory;
-use super::message::{self, Actions, Command, Hover, Interaction, Item, Popup, Rows};
+use super::message::{self, Item, Rows};
+use super::message_actions::{Hooks, MessageActions};
 use crate::community::{ChannelModel, Community};
-use buzz_relay_client::fold::{Delivery, MessageRow};
-use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus, message_link};
+use buzz_relay_client::fold::MessageRow;
+use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus};
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Button, ButtonSize, ButtonVariant, Icon, IconName, PanelHeader,
-    Scrim, Toast, ToastTone, TypeStyled, tokens::shadow,
+    ActiveTheme, Button, ButtonSize, ButtonVariant, Icon, IconName, PanelHeader, TypeStyled,
+    tokens::shadow,
 };
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Older history loads when the reader is this many rows from the top.
 const LOAD_OLDER_WITHIN: usize = 5;
 /// The jump pill shows this far from the bottom (`JumpToLatestButton`).
 const JUMP_DISTANCE: Pixels = px(80.);
-/// `useToastNotification`'s timeout.
-const TOAST_DURATION: Duration = Duration::from_secs(4);
 
 /// Whether [`ChannelPage::reveal`] found the message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,15 +49,9 @@ pub struct ChannelPage {
     list: ListState,
     composer: Entity<Composer>,
     input: Entity<TextareaState>,
-    /// Reacts to the row whose reaction picker is open.
-    reaction_picker: Entity<EmojiPicker>,
+    /// Row actions: the hover bar, menus, reactions and dialogs.
+    message_actions: Entity<MessageActions>,
     error: Option<SharedString>,
-    on_open_thread: OpenThread,
-    interaction: Interaction,
-    /// The delete confirmation is open for this message.
-    deleting: Option<Arc<MessageRow>>,
-    toast: Option<(SharedString, usize)>,
-    toasts: usize,
     /// Rows that arrived while the reader was scrolled up.
     unseen: usize,
     /// The reader is at least [`JUMP_DISTANCE`] from the bottom.
@@ -99,8 +90,10 @@ impl ChannelPage {
             )
         });
         let input = composer.read(cx).input();
-        let reaction_picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx));
+        let message_actions =
+            Self::message_actions(&community, &channel, &composer, &on_open_thread, window, cx);
         let subscriptions = vec![
+            cx.observe(&message_actions, |_, _, cx| cx.notify()),
             cx.observe_in(&model, window, |this, _, window, cx| {
                 this.sync_items(window, cx)
             }),
@@ -131,30 +124,6 @@ impl ChannelPage {
                     ComposerEvent::Submit(submission) => this.send(submission.clone(), window, cx),
                     ComposerEvent::EditLast => this.edit_last(window, cx),
                     ComposerEvent::CancelReply => {}
-                },
-            ),
-            cx.subscribe_in(&reaction_picker, window, |this, _, Picked(pick), _, cx| {
-                if let Some((id, Popup::Picker { .. })) = this.interaction.open.take()
-                    && let Some(item) = this.items.iter().find(|item| item.row.id == id)
-                {
-                    let row = item.row.clone();
-                    emoji_picker::toggle_reaction(
-                        &this.community,
-                        &this.channel.id,
-                        &row,
-                        &pick.text(),
-                        cx,
-                    );
-                }
-                cx.notify();
-            }),
-            cx.subscribe_in(
-                &reaction_picker,
-                window,
-                |this, _, _: &Dismissed, window, cx| {
-                    this.interaction.open = None;
-                    this.input.update(cx, |state, cx| state.focus(window, cx));
-                    cx.notify();
                 },
             ),
         ];
@@ -197,13 +166,8 @@ impl ChannelPage {
             list,
             composer,
             input,
-            reaction_picker,
+            message_actions,
             error: None,
-            on_open_thread,
-            interaction: Interaction::default(),
-            deleting: None,
-            toast: None,
-            toasts: 0,
             unseen: 0,
             away: false,
             highlight: None,
@@ -369,167 +333,51 @@ impl ChannelPage {
     /// Up in an empty composer edits the viewer's newest editable message
     /// (`lastEditableMessage`).
     fn edit_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let viewer = self.session(cx).viewer().to_string();
         let row = self
-            .items
-            .iter()
-            .rev()
-            .map(|item| &item.row)
-            .find(|row| {
-                row.author.to_hex() == viewer
-                    && row.membership.is_none()
-                    && !row.is_agent_envelope()
-                    && row.diff.is_none()
-                    && row
-                        .delivery
-                        .as_ref()
-                        .is_none_or(|d| matches!(d.status, Delivery::Accepted | Delivery::Seen))
-            })
-            .cloned();
+            .message_actions
+            .read(cx)
+            .last_editable(self.items.iter().map(|item| &item.row), cx);
         if let Some(row) = row {
             self.start_edit(row, window, cx);
         }
     }
 
-    fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.toasts += 1;
-        let generation = self.toasts;
-        self.toast = Some((text.to_string().into(), generation));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_DURATION).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.toast.as_ref().is_some_and(|(_, g)| *g == generation) {
-                    this.toast = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn command(
-        &mut self,
-        row: Arc<MessageRow>,
-        command: Command,
+    /// The row actions, wired to this page's composer and thread panel.
+    fn message_actions(
+        community: &Entity<Community>,
+        channel: &ChannelSummary,
+        composer: &Entity<Composer>,
+        on_open_thread: &OpenThread,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        match command {
-            Command::CopyLink => {
-                let link = message_link(&self.channel.id, &row.id);
-                cx.write_to_clipboard(ClipboardItem::new_string(link));
-                self.show_toast("Link copied", cx);
-            }
-            Command::CopyMessage => {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_text(&row)));
-                self.show_toast("Message copied", cx);
-            }
-            Command::MarkUnread => {
-                let (session, channel) = (self.session(cx), self.channel.id.clone());
-                cx.foreground_executor()
-                    .spawn(async move {
-                        if let Err(error) = session.mark_message_unread(&channel, row.id).await {
-                            tracing::warn!(%error, "mark unread failed");
-                        }
-                    })
-                    .detach();
-            }
-            Command::Edit => self.start_edit(row, window, cx),
-            Command::Delete => {
-                self.deleting = Some(row);
-                cx.notify();
-            }
-        }
-    }
-
-    fn delete(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = self.deleting.take() else {
-            return;
+    ) -> Entity<MessageActions> {
+        let page = cx.entity().downgrade();
+        let (edit_composer, focus_composer) = (composer.downgrade(), composer.downgrade());
+        let (reply, open) = (on_open_thread.clone(), on_open_thread.clone());
+        let hooks = Hooks {
+            reply: Rc::new(move |row, window, cx| reply(row, window, cx)),
+            open_thread: Some(Rc::new(move |row, window, cx| open(row, window, cx))),
+            edit: Rc::new(move |row, window, cx| {
+                let _ =
+                    edit_composer.update(cx, |composer, cx| composer.start_edit(row, window, cx));
+            }),
+            focus_composer: Rc::new(move |window, cx| {
+                let _ = focus_composer.update(cx, |composer, cx| composer.focus(window, cx));
+            }),
+            thread_root: None,
+            find: Rc::new(move |id, cx| {
+                page.upgrade().and_then(|page| {
+                    page.read(cx)
+                        .items
+                        .iter()
+                        .find(|item| item.row.id == id)
+                        .map(|item| item.row.clone())
+                })
+            }),
+            thread: None,
         };
-        let (session, channel) = (self.session(cx), self.channel.id.clone());
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = session.remove(&channel, row.id).await {
-                let _ = this.update(cx, |this, cx| {
-                    this.error = Some(error.into());
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn hover(&mut self, id: EventId, target: Hover, hovered: bool, cx: &mut Context<Self>) {
-        // A row under the pointer means it left every other row's bar; a bar
-        // that vanished while hovered never reports leaving.
-        if target == Hover::Row
-            && hovered
-            && self.interaction.bar_hovered.is_some_and(|bar| bar != id)
-        {
-            self.interaction.bar_hovered = None;
-            cx.notify();
-        }
-        let slot = match target {
-            Hover::Row => &mut self.interaction.hovered,
-            Hover::Bar => &mut self.interaction.bar_hovered,
-        };
-        let next = if hovered {
-            Some(id)
-        } else if *slot == Some(id) {
-            None
-        } else {
-            *slot
-        };
-        if *slot != next {
-            *slot = next;
-            cx.notify();
-        }
-    }
-
-    fn actions(&self, cx: &mut Context<Self>) -> Actions {
-        let session = self.session(cx);
-        let open = self.on_open_thread.clone();
-        let this = cx.entity().downgrade();
-        let (hover, popup, command) = (this.clone(), this.clone(), this);
-        let (community, channel) = (self.community.clone(), self.channel.id.clone());
-        Actions {
-            on_open_thread: Some(Rc::new(move |row, window, cx| {
-                open(row.clone(), window, cx)
-            })),
-            on_react: Some(Rc::new(move |row, content, _, cx| {
-                emoji_picker::toggle_reaction(&community, &channel, row, content, cx)
-            })),
-            on_retry: Some(Rc::new(move |row, _, cx| {
-                let (session, id) = (session.clone(), row.id);
-                cx.foreground_executor()
-                    .spawn(async move {
-                        let _ = session.retry_send(id).await;
-                    })
-                    .detach();
-            })),
-            on_hover: Some(Rc::new(move |id, target, hovered, _, cx| {
-                let _ = hover.update(cx, |this, cx| this.hover(id, target, hovered, cx));
-            })),
-            on_popup: Some(Rc::new(move |open, window, cx| {
-                let _ = popup.update(cx, |this, cx| {
-                    if this.interaction.open != open {
-                        if matches!(open, Some((_, Popup::Picker { .. }))) {
-                            this.reaction_picker.update(cx, |picker, cx| {
-                                picker.reset(window, cx);
-                                picker.focus(window, cx);
-                            });
-                        }
-                        this.interaction.open = open;
-                        cx.notify();
-                    }
-                });
-            })),
-            on_command: Some(Rc::new(move |row, action, window, cx| {
-                let row = row.clone();
-                let _ = command.update(cx, |this, cx| this.command(row, action, window, cx));
-            })),
-        }
+        let (community, channel) = (community.clone(), channel.id.clone());
+        cx.new(|cx| MessageActions::new(community, channel, hooks, window, cx))
     }
 
     /// The list's first row: load older, its progress, its retry, or the
@@ -626,33 +474,6 @@ impl ChannelPage {
                     })),
             )
     }
-
-    /// A full-window overlay for dialogs and the image viewer.
-    fn overlay(window: &Window, child: impl IntoElement) -> impl IntoElement {
-        deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(point(px(0.), px(0.)))
-                .child(
-                    div()
-                        .id("overlay")
-                        .w(window.viewport_size().width)
-                        .h(window.viewport_size().height)
-                        .occlude()
-                        .child(child),
-                ),
-        )
-        .with_priority(2)
-    }
-}
-
-/// `messageCopyText`: the body, then each attachment's URL.
-fn copy_text(row: &MessageRow) -> String {
-    std::iter::once(row.content.as_str())
-        .chain(row.attachments.iter().map(|a| a.url.as_str()))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// `MessageComposer`'s label: `Message #<name>`, where a DM's name is its
@@ -676,11 +497,7 @@ impl Render for ChannelPage {
         let c = *cx.colors();
         let snapshot = self.model.read(cx).snapshot.clone();
         let community = self.community.read(cx);
-        let directory = Directory {
-            profiles: community.snapshot.profiles.clone(),
-            channels: community.snapshot.channels.clone(),
-            media: community.session.media().clone(),
-        };
+        let directory = Directory::of(community, Some(&self.channel.members), cx);
         let viewer = community.session.viewer().to_string();
         let typing = community.snapshot.typing.get(&self.channel.id).cloned();
 
@@ -701,14 +518,10 @@ impl Render for ChannelPage {
             .action(self.actions.clone());
 
         let typing_profiles = community.snapshot.profiles.clone();
-        let rows = Rc::new(Rows {
-            viewer,
-            directory,
-            actions: self.actions(cx),
-            interaction: self.interaction.clone(),
-            quick_reactions: emoji_picker::quick_bar(&self.community, cx),
-            picker: Some(self.reaction_picker.clone()),
-        });
+        let mut rows = Rows::new(viewer, directory);
+        let actions = self.message_actions.clone();
+        MessageActions::fill(&actions, &mut rows, cx);
+        let rows = Rc::new(rows);
         let items = self.items.clone();
         let timeline = if self.items.is_empty() {
             let text = match &snapshot.status {
@@ -768,51 +581,12 @@ impl Render for ChannelPage {
 
         let composer = self.composer_shell();
 
-        let toast = self.toast.as_ref().map(|(text, generation)| {
-            let right = window.viewport_size().width - px(16.) - px(384.);
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(point(right, px(128.)))
-                    .child(
-                        Toast::new(("toast", *generation), text.clone())
-                            .tone(ToastTone::Success)
-                            .on_dismiss(cx.listener(|this, _, _, cx| {
-                                this.toast = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .with_priority(3)
-        });
-
-        let dialog = self.deleting.as_ref().map(|_| {
-            Self::overlay(
-                window,
-                Scrim::new().child(
-                    AlertDialog::new("Delete message?")
-                        .description(
-                            "This requests removal of this message from Buzz’s relay. People may \
-                             still have copies. This cannot be undone.",
-                        )
-                        .action(
-                            Button::new("delete-cancel", "Cancel")
-                                .variant(ButtonVariant::Subtle)
-                                .size(ButtonSize::Sm)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.deleting = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .action(
-                            Button::new("delete-confirm", "Delete")
-                                .variant(ButtonVariant::Destructive)
-                                .size(ButtonSize::Sm)
-                                .on_click(cx.listener(|this, _, _, cx| this.delete(cx))),
-                        ),
-                ),
-            )
-        });
+        let overlays = self
+            .message_actions
+            .update(cx, |actions, cx| actions.overlays(window, cx));
+        let status = self
+            .message_actions
+            .update(cx, |actions, cx| actions.status(cx));
 
         div()
             .flex()
@@ -832,6 +606,7 @@ impl Render for ChannelPage {
                     .text_color(c.text_warning)
                     .child(error)
             }))
+            .children(status)
             .child(
                 div()
                     .relative()
@@ -840,8 +615,7 @@ impl Render for ChannelPage {
                     )
                     .child(composer),
             )
-            .children(toast)
-            .children(dialog)
+            .children(overlays)
     }
 }
 
@@ -849,28 +623,6 @@ impl Render for ChannelPage {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
-
-    #[test]
-    fn copies_the_body_then_attachment_urls() {
-        use buzz_relay_client::fold::{Attachment, AttachmentKind};
-        let mut row = super::super::markdown::tests::row("Look");
-        assert_eq!(copy_text(&row), "Look");
-        row.attachments = vec![Attachment {
-            url: "https://x.test/media/a.png".into(),
-            kind: AttachmentKind::Image,
-            mime: None,
-            size: None,
-            name: None,
-            duration: None,
-            waveform: None,
-            voice_note: false,
-            dimensions: None,
-            blurhash: None,
-            preview_url: None,
-            insecure: false,
-        }];
-        assert_eq!(copy_text(&row), "Look\n\nhttps://x.test/media/a.png");
-    }
 
     #[test]
     fn dms_are_named_after_their_people() {

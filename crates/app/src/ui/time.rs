@@ -65,11 +65,71 @@ pub fn same_day(a: u64, b: u64) -> bool {
     local(a).date_naive() == local(b).date_naive()
 }
 
-/// Full time for tooltips: "Friday, October 2, 2026 at 3:05:09 PM".
+/// Full time for tooltips, as `Intl.DateTimeFormat` (en-US, `dateStyle:
+/// "full"`, `timeStyle: "long"`) writes it: "Friday, October 2, 2026 at
+/// 3:05:09 PM EDT".
 pub fn full(seconds: u64) -> String {
+    let time = local(seconds);
+    format!(
+        "{} {}",
+        time.format("%A, %B %-d, %Y at %-I:%M:%S %p"),
+        zone(seconds, time.offset().local_minus_utc())
+    )
+}
+
+/// `dateStyle: "full"`, `timeStyle: "short"`: "Friday, October 2, 2026 at
+/// 3:05 PM".
+pub fn full_short(seconds: u64) -> String {
     local(seconds)
-        .format("%A, %B %-d, %Y at %-I:%M:%S %p")
+        .format("%A, %B %-d, %Y at %-I:%M %p")
         .to_string()
+}
+
+/// "Oct 2", for dates more than a week old.
+pub fn short_month_day(seconds: u64) -> String {
+    local(seconds).format("%b %-d").to_string()
+}
+
+/// The zone as en-US `Intl` names it: US abbreviations and "UTC" by name,
+/// every other zone by its offset ("GMT+2", "GMT+5:30", "GMT").
+fn zone(seconds: u64, offset_seconds: i32) -> String {
+    const NAMED: &[&str] = &[
+        "UTC", "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST", "PDT", "AKST", "AKDT", "HST", "HDT",
+    ];
+    let abbreviation = local_abbreviation(seconds);
+    if let Some(name) = abbreviation.filter(|name| NAMED.contains(&name.as_str())) {
+        return name;
+    }
+    gmt_offset(offset_seconds)
+}
+
+fn gmt_offset(offset_seconds: i32) -> String {
+    if offset_seconds == 0 {
+        return "GMT".into();
+    }
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let minutes = offset_seconds.unsigned_abs() / 60;
+    match minutes % 60 {
+        0 => format!("GMT{sign}{}", minutes / 60),
+        rest => format!("GMT{sign}{}:{rest:02}", minutes / 60),
+    }
+}
+
+/// The C library's abbreviation for the local zone at that instant.
+fn local_abbreviation(seconds: u64) -> Option<String> {
+    let time = seconds as libc::time_t;
+    // SAFETY: `localtime_r` fills the zeroed `tm` we own; `tm_zone` then
+    // points at static zone data, read before any other zone call.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&time, &mut tm).is_null() || tm.tm_zone.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(tm.tm_zone)
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +138,17 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, m, d, h, min, 0).single().unwrap()
+    }
+
+    #[test]
+    fn zones_read_like_intl() {
+        assert_eq!(gmt_offset(0), "GMT");
+        assert_eq!(gmt_offset(2 * 3600), "GMT+2");
+        assert_eq!(gmt_offset(5 * 3600 + 1800), "GMT+5:30");
+        assert_eq!(gmt_offset(-3 * 3600), "GMT-3");
+        let full = full(1_700_000_000);
+        assert!(full.contains(" at "));
+        assert!(full.rsplit(' ').next().is_some_and(|zone| !zone.is_empty()));
     }
 
     #[test]

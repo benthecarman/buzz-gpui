@@ -1,9 +1,9 @@
 //! The thread panel in the Messages board's right dock (ui.md §4.11).
 
 use super::composer::{Composer, ComposerEvent, ReplyContext, Submission};
-use super::emoji_picker;
 use super::markdown::Directory;
-use super::message::{self, Actions, Interaction, Item, Layout, Rows};
+use super::message::{self, Item, Layout, Rows};
+use super::message_actions::{Hooks, MessageActions};
 use super::time;
 use crate::community::Community;
 use crate::mirror::mirror;
@@ -12,8 +12,8 @@ use buzz_relay_client::session::ThreadView;
 use buzz_relay_client::threads::{Direction, ReadKind};
 use buzz_relay_client::{Profiles, TargetStatus, ThreadSnapshot, ThreadStatus};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconButton, IconButtonSize, IconName,
-    PanelHeader, Tab, TabVariant, Tabs, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconName, PanelHeader, Tab, TabVariant,
+    Tabs, TypeStyled,
 };
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::prelude::FluentBuilder;
@@ -49,6 +49,8 @@ pub struct ThreadPanel {
     reply_parent: Option<EventId>,
     composer: Entity<Composer>,
     input: Entity<TextareaState>,
+    /// Row actions: the hover bar, menus, reactions and dialogs.
+    message_actions: Entity<MessageActions>,
     error: Option<SharedString>,
     on_close: OnClose,
     /// Exact mode: the message to reveal once its thread has loaded.
@@ -114,15 +116,18 @@ impl ThreadPanel {
             )
         });
         let input = composer.read(cx).input();
+        let message_actions =
+            Self::message_actions(&community, &channel, root_id, &composer, window, cx);
         let mut subscriptions = vec![
             cx.observe(&community, |_, _, cx| cx.notify()),
+            cx.observe(&message_actions, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &composer,
                 window,
                 |this, _, event: &ComposerEvent, window, cx| match event {
                     ComposerEvent::Submit(submission) => this.send(submission.clone(), window, cx),
                     ComposerEvent::CancelReply => this.reply_to(None, window, cx),
-                    ComposerEvent::EditLast => {}
+                    ComposerEvent::EditLast => this.edit_last(window, cx),
                 },
             ),
         ];
@@ -157,6 +162,7 @@ impl ThreadPanel {
             reply_parent: None,
             composer,
             input,
+            message_actions,
             error: None,
             on_close,
             revealing: exact.then_some(root_id),
@@ -170,6 +176,71 @@ impl ThreadPanel {
 
     pub fn root_id(&self) -> EventId {
         self.root_id
+    }
+
+    /// The row actions, wired to this panel's composer.
+    fn message_actions(
+        community: &Entity<Community>,
+        channel: &str,
+        root_id: EventId,
+        composer: &Entity<Composer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<MessageActions> {
+        let panel = cx.entity().downgrade();
+        let (reply, root, find) = (panel.clone(), panel.clone(), panel);
+        let (edit_composer, focus_composer) = (composer.downgrade(), composer.downgrade());
+        let hooks = Hooks {
+            reply: Rc::new(move |row, window, cx| {
+                let _ = reply.update(cx, |this, cx| {
+                    let parent = (Some(row.id) != this.snapshot.root.as_ref().map(|r| r.id))
+                        .then_some(row.id);
+                    this.reply_to(parent, window, cx)
+                });
+            }),
+            open_thread: None,
+            edit: Rc::new(move |row, window, cx| {
+                let _ =
+                    edit_composer.update(cx, |composer, cx| composer.start_edit(row, window, cx));
+            }),
+            focus_composer: Rc::new(move |window, cx| {
+                let _ = focus_composer.update(cx, |composer, cx| composer.focus(window, cx));
+            }),
+            thread_root: Some(Rc::new(move |cx| {
+                root.upgrade()
+                    .and_then(|panel| panel.read(cx).snapshot.root.clone())
+            })),
+            find: Rc::new(move |id, cx| {
+                find.upgrade().and_then(|panel| {
+                    let snapshot = &panel.read(cx).snapshot;
+                    snapshot
+                        .root
+                        .iter()
+                        .chain(snapshot.replies.iter())
+                        .find(|row| row.id == id)
+                        .cloned()
+                })
+            }),
+            thread: Some(root_id),
+        };
+        let (community, channel) = (community.clone(), channel.to_string());
+        cx.new(|cx| MessageActions::new(community, channel, hooks, window, cx))
+    }
+
+    /// Up in an empty composer edits the viewer's newest editable reply.
+    fn edit_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rows: Vec<Arc<MessageRow>> = self
+            .snapshot
+            .root
+            .iter()
+            .chain(self.snapshot.replies.iter())
+            .cloned()
+            .collect();
+        let row = self.message_actions.read(cx).last_editable(rows.iter(), cx);
+        if let Some(row) = row {
+            self.composer
+                .update(cx, |composer, cx| composer.start_edit(row, window, cx));
+        }
     }
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -257,6 +328,10 @@ impl ThreadPanel {
     }
 
     fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = submission.editing.clone() {
+            self.save_edit(row, submission, window, cx);
+            return;
+        }
         let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) else {
             self.composer.update(cx, |composer, cx| composer.failed(cx));
             return;
@@ -306,6 +381,36 @@ impl ThreadPanel {
         .detach();
     }
 
+    /// Saves an edit made in the panel's composer.
+    fn save_edit(
+        &mut self,
+        row: Arc<MessageRow>,
+        submission: Submission,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self.community.read(cx).session.clone();
+        let channel = self.channel.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = session.edit(&channel, row.id, &submission.content).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        this.error = None;
+                        this.composer
+                            .update(cx, |composer, cx| composer.sent(window, cx));
+                    }
+                    Err(error) => {
+                        this.error = Some(error.into());
+                        this.composer.update(cx, |composer, cx| composer.failed(cx));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The reply target, if it is still among the loaded replies.
     fn selected_parent(&self) -> Option<&Arc<MessageRow>> {
         let id = self.reply_parent?;
@@ -314,26 +419,6 @@ impl ThreadPanel {
 
     fn can_send(&self) -> bool {
         self.reply_parent.is_none() || self.selected_parent().is_some()
-    }
-
-    fn actions(&self, cx: &mut Context<Self>) -> Actions {
-        let session = self.community.read(cx).session.clone();
-        let (community, channel) = (self.community.clone(), self.channel.clone());
-        Actions {
-            on_open_thread: None,
-            on_react: Some(Rc::new(move |row, content, _, cx| {
-                emoji_picker::toggle_reaction(&community, &channel, row, content, cx)
-            })),
-            on_retry: Some(Rc::new(move |row, _, cx| {
-                let (session, id) = (session.clone(), row.id);
-                cx.foreground_executor()
-                    .spawn(async move {
-                        let _ = session.retry_send(id).await;
-                    })
-                    .detach();
-            })),
-            ..Default::default()
-        }
     }
 
     fn retry(&self) {
@@ -399,11 +484,9 @@ impl ThreadPanel {
 impl Render for ThreadPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_composer(window, cx);
-        let actions = self.actions(cx);
         let c = *cx.colors();
         let snapshot = self.snapshot.clone();
         let community = self.community.read(cx);
-        let profiles = community.snapshot.profiles.clone();
         let viewer = community.session.viewer().to_string();
         let read_only = community
             .snapshot
@@ -436,18 +519,20 @@ impl Render for ThreadPanel {
         let body = if self.entries.is_empty() {
             div().flex_1().into_any_element()
         } else {
-            let rows = Rc::new(Rows {
-                viewer: viewer.clone(),
-                directory: Directory {
-                    profiles: profiles.clone(),
-                    channels: community.snapshot.channels.clone(),
-                    media: community.session.media().clone(),
-                },
-                actions,
-                interaction: Interaction::default(),
-                quick_reactions: Vec::new(),
-                picker: None,
-            });
+            let members = community
+                .snapshot
+                .channels
+                .iter()
+                .find(|channel| channel.id == self.channel)
+                .map(|channel| channel.members.clone());
+            let mut rows = Rows::new(
+                viewer.clone(),
+                Directory::of(community, members.as_deref(), cx),
+            );
+            rows.in_thread = true;
+            let actions = self.message_actions.clone();
+            MessageActions::fill(&actions, &mut rows, cx);
+            let rows = Rc::new(rows);
             let entries = self.entries.clone();
             let weak = cx.entity().downgrade();
             let highlight = self.highlight;
@@ -674,6 +759,7 @@ fn entries(snapshot: &ThreadSnapshot, expanded: &HashSet<EventId>) -> Vec<Entry>
             row: root.clone(),
             head: true,
             day: Some(time::day(root.created_at).into()),
+            group: None,
         })),
         None if matches!(snapshot.status, ThreadStatus::Ready | ThreadStatus::Error) => {
             walk.out.push(Entry::Missing)
@@ -727,6 +813,7 @@ impl Walk<'_> {
                     row: row.clone(),
                     head: !continues,
                     day,
+                    group: None,
                 },
                 depth,
                 rails: rails.clone(),
@@ -814,21 +901,15 @@ fn render_entry(
             .text_color(c.text_subtle)
             .child("Earlier reply unavailable in loaded history.")
             .into_any_element(),
-        Entry::Reply(reply) => render_reply(reply, rows, panel, cx),
+        Entry::Reply(reply) => render_reply(reply, rows, cx),
         Entry::Summary(summary) => render_summary(summary, &rows.directory.profiles, panel, cx),
     }
 }
 
-fn render_reply(
-    reply: &Reply,
-    rows: &Rc<Rows>,
-    panel: &WeakEntity<ThreadPanel>,
-    cx: &mut App,
-) -> AnyElement {
+fn render_reply(reply: &Reply, rows: &Rc<Rows>, cx: &mut App) -> AnyElement {
     let c = *cx.colors();
     let line = c.border_standard;
     let depth = reply.depth;
-    let row = &reply.item.row;
     let layout = if depth > 0 {
         Layout::Nested
     } else {
@@ -855,28 +936,7 @@ fn render_reply(
     };
     let top = if item.head { 14. } else { 2. };
     let avatar = if depth > 0 { 24. } else { 32. };
-    let group = SharedString::from(format!("thread-reply-{}", row.id.to_hex()));
-    let target = row.id;
-    let panel = panel.clone();
-    let reply_button = div()
-        .absolute()
-        .top(px(top - 2.))
-        .right_0()
-        .invisible()
-        .group_hover(group.clone(), |style| style.visible())
-        .child(
-            IconButton::new(
-                SharedString::from(format!("reply-{}", row.id.to_hex())),
-                IconName::ChatCircle,
-            )
-            .size(IconButtonSize::Sm)
-            .tooltip("Reply")
-            .on_click(move |_, window, cx| {
-                let _ = panel.update(cx, |this, cx| this.reply_to(Some(target), window, cx));
-            }),
-        );
     let mut message_row = div()
-        .group(group)
         .relative()
         .pl(px(indent(depth)))
         .children(rails(&reply.rails[..depth.saturating_sub(1)], line));
@@ -901,9 +961,7 @@ fn render_reply(
         message_row =
             message_row.child(rail(depth + 1, line).top(px(top + avatar + 4.)).bottom_0());
     }
-    let message_row = message_row
-        .child(message::render_in(layout, &item, rows, cx))
-        .child(reply_button);
+    let message_row = message_row.child(message::render_in(layout, &item, rows, cx));
     div()
         .flex()
         .flex_col()

@@ -5,7 +5,7 @@
 
 use super::super::composer::{Composer, ComposerEvent, Submission};
 use super::super::markdown::Directory;
-use super::super::message::{self, Interaction, Layout, Rows};
+use super::super::message::{self, Layout, Rows};
 use crate::community::Community;
 use crate::mirror::mirror;
 use buzz_relay_client::session::ThreadView;
@@ -172,18 +172,10 @@ impl Render for Comments {
         let resolved = snapshot.root.is_some();
         let count = snapshot.replies.len();
         let community = self.community.read(cx);
-        let rows = Rc::new(Rows {
-            viewer: community.session.viewer().to_string(),
-            directory: Directory {
-                profiles: community.snapshot.profiles.clone(),
-                channels: community.snapshot.channels.clone(),
-                media: community.session.media().clone(),
-            },
-            actions: Default::default(),
-            interaction: Interaction::default(),
-            quick_reactions: Vec::new(),
-            picker: None,
-        });
+        let rows = Rc::new(Rows::new(
+            community.session.viewer(),
+            Directory::of(community, None, cx),
+        ));
         let note = |text: SharedString| {
             div()
                 .px(px(16.))

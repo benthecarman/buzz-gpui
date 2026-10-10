@@ -10,7 +10,6 @@
 use super::gif_picker::{self, GifPanel, PickedGif};
 use super::media;
 use crate::community::{AppState, Community};
-use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::{CustomEmoji, EmojiSnapshot, Partition};
 use buzz_ui::{
     ActiveTheme, Icon, IconName, MaterialStyled, SearchField, Tab, TabVariant, Tabs, Tooltip,
@@ -318,41 +317,6 @@ pub fn record_reaction(partition: &Partition, emoji: &str, cx: &mut App) {
     {
         tracing::warn!(%error, "could not save reaction usage");
     }
-}
-
-/// Adds the viewer's `content` reaction to `row`, or removes it if they
-/// already reacted with it, counting additions for the quick reactions.
-pub fn toggle_reaction(
-    community: &Entity<Community>,
-    channel: &str,
-    row: &MessageRow,
-    content: &str,
-    cx: &mut App,
-) {
-    let community = community.read(cx);
-    let (session, partition) = (community.session.clone(), community.partition());
-    let viewer = session.viewer().to_string();
-    let own = row
-        .reactions
-        .iter()
-        .find(|group| group.content == content)
-        .and_then(|group| group.events.iter().find(|r| r.author.to_hex() == viewer))
-        .map(|reaction| reaction.id);
-    if own.is_none() {
-        record_reaction(&partition, content, cx);
-    }
-    let (channel, id, content) = (channel.to_string(), row.id, content.to_string());
-    cx.foreground_executor()
-        .spawn(async move {
-            let result = match own {
-                Some(reaction) => session.remove(&channel, reaction).await,
-                None => session.react(&channel, id, &content).await,
-            };
-            if let Err(error) = result {
-                tracing::warn!(%error, "reaction failed");
-            }
-        })
-        .detach();
 }
 
 /// One hover-bar reaction: an emoji, or a custom one's image.

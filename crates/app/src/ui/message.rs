@@ -1,18 +1,32 @@
-//! One timeline row (ui.md §4.4–4.5, §4.7).
+//! One timeline row (ui.md §4.4–4.5, §4.7), after buzz-app's
+//! `MessageRow.tsx`, `MessageActionBar.tsx` and `MessageReactions.tsx`.
 
 use super::emoji_picker::{self, EmojiPicker, QuickReaction};
+use super::identity::Names;
 use super::markdown::{self, Directory};
-use super::{media, time};
-use buzz_relay_client::fold::{Attachment, AttachmentKind, Delivery, MessageRow};
-use buzz_relay_client::{EventId, Profile, Profiles};
+use super::outbox_ops::{Ops, SharedOps};
+use super::{media, membership, navigation, renderers, time};
+use buzz_relay_client::fold::{
+    Attachment, AttachmentKind, CustomEmoji, Delivery, MessageRow, ReactionGroup,
+};
+use buzz_relay_client::{ChannelSummary, ChannelType, EventId, PresenceState, Profile, Profiles};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
-    MaterialStyled, Menu, MenuItem, Surface, Tooltip, TypeStyled,
+    MaterialStyled, Menu, MenuItem, Presence, Surface, Tooltip, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use nostr::nips::nip19::ToBech32;
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Nothing is said about a send for its first ten seconds (`delivery.ts`).
+pub const DELIVERY_GRACE_MS: u64 = 10_000;
+/// Rows this narrow drop the quick reactions; the picker keeps them all.
+const QUICK_REACTIONS_MIN_WIDTH: f32 = 260.;
 
 /// A message plus how it sits in the timeline.
 #[derive(Clone)]
@@ -22,23 +36,30 @@ pub struct Item {
     pub head: bool,
     /// A day divider goes above this row.
     pub day: Option<SharedString>,
+    /// A run of membership rows shown as one, oldest first.
+    pub group: Option<Arc<[Arc<MessageRow>]>>,
 }
 
 /// Groups rows as buzz-app's `continuesMessageGroup` does: same author, at
 /// most five minutes apart, same local day, and neither row a system,
-/// workflow or sent-from-thread message.
+/// workflow or sent-from-thread message. Nearby membership rows merge
+/// first (`membershipRows`).
 pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
-    let mut items = Vec::with_capacity(rows.len());
-    let mut previous: Option<&Arc<MessageRow>> = None;
-    for row in rows {
-        let new_day = previous.is_none_or(|p| !time::same_day(p.created_at, row.created_at));
-        let continues = !new_day && previous.is_some_and(|p| continues(p, row));
+    let grouped = membership::group(rows);
+    let mut items = Vec::with_capacity(grouped.len());
+    let mut previous: Option<(&Arc<MessageRow>, u64)> = None;
+    for entry in &grouped {
+        let row = &entry.row;
+        let at = entry.created_at;
+        let new_day = previous.is_none_or(|(_, p)| !time::same_day(p, at));
+        let continues = !new_day && previous.is_some_and(|(p, _)| continues(p, row));
         items.push(Item {
             row: row.clone(),
             head: !continues,
-            day: new_day.then(|| time::day(row.created_at).into()),
+            day: new_day.then(|| time::day(at).into()),
+            group: entry.group.clone(),
         });
-        previous = Some(row);
+        previous = Some((row, row.created_at));
     }
     items
 }
@@ -89,9 +110,22 @@ pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
 pub enum Command {
     CopyLink,
     CopyMessage,
+    MarkRead,
     MarkUnread,
+    SendToChannel,
     Edit,
     Delete,
+    Follow(bool),
+    Report,
+    /// Reply in the thread: the thread root, with reply intent.
+    Reply,
+    /// Toggle the viewer's reaction, reusing a pill's custom emoji.
+    React {
+        content: String,
+        emoji: Option<CustomEmoji>,
+    },
+    /// Retry a failed outbox operation (a reaction change).
+    RetryOperation(EventId),
 }
 
 /// Which floating element of a row is open.
@@ -101,6 +135,8 @@ pub enum Popup {
     More,
     /// The reaction picker, from the action bar or the reactions row.
     Picker { from_bar: bool },
+    /// The workflow byline's details.
+    WorkflowInfo,
 }
 
 /// What the pointer is over, for the hover action bar.
@@ -116,54 +152,170 @@ pub struct Interaction {
     pub hovered: Option<EventId>,
     pub bar_hovered: Option<EventId>,
     pub open: Option<(EventId, Popup)>,
+    /// The keyboard highlight in the open more menu.
+    pub highlight: Option<usize>,
+    /// The reaction pill whose preview is open: `(message, index)`, and
+    /// the pill it slid from.
+    pub preview: Option<(EventId, usize, Option<usize>)>,
 }
 
 impl Interaction {
     fn bar_visible(&self, id: EventId) -> bool {
         self.hovered == Some(id)
             || self.bar_hovered == Some(id)
-            || self.open.is_some_and(|(open, _)| open == id)
+            || self
+                .open
+                .is_some_and(|(open, popup)| open == id && popup != Popup::WorkflowInfo)
     }
 }
 
+/// What the open more menu needs to know about its row, read when it
+/// opens: whether the message is unread and its thread followed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MenuFacts {
+    pub unread: bool,
+    pub following: bool,
+}
+
 pub type RowHandler = Rc<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>;
-pub type ReactHandler = Rc<dyn Fn(&Arc<MessageRow>, &str, &mut Window, &mut App)>;
 pub type HoverHandler = Rc<dyn Fn(EventId, Hover, bool, &mut Window, &mut App)>;
 pub type PopupHandler = Rc<dyn Fn(Option<(EventId, Popup)>, &mut Window, &mut App)>;
 pub type CommandHandler = Rc<dyn Fn(&Arc<MessageRow>, Command, &mut Window, &mut App)>;
+pub type HighlightHandler = Rc<dyn Fn(Option<usize>, &mut Window, &mut App)>;
+pub type PreviewHandler =
+    Rc<dyn Fn(Option<(EventId, usize, Option<usize>)>, &mut Window, &mut App)>;
+pub type WantProfiles = Rc<dyn Fn(Vec<String>, &mut App)>;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Actions {
+    /// Opens the row's thread (the summary button).
     pub on_open_thread: Option<RowHandler>,
-    pub on_react: Option<ReactHandler>,
     pub on_retry: Option<RowHandler>,
     /// Without it rows show no action bar.
     pub on_hover: Option<HoverHandler>,
     pub on_popup: Option<PopupHandler>,
     pub on_command: Option<CommandHandler>,
+    pub on_highlight: Option<HighlightHandler>,
+    pub on_preview: Option<PreviewHandler>,
+    pub on_want_profiles: Option<WantProfiles>,
 }
 
 /// What every row of a page shares.
 pub struct Rows {
     pub viewer: String,
     pub directory: Directory,
+    /// The page's conversation, for what the viewer may do in it.
+    pub channel: Option<ChannelSummary>,
     pub actions: Actions,
     pub interaction: Interaction,
     /// The hover bar's three reactions (`quick-reactions.ts`).
     pub quick_reactions: Vec<QuickReaction>,
     /// The page's reaction picker; it reports picks to the page.
     pub picker: Option<Entity<EmojiPicker>>,
+    pub ops: SharedOps,
+    pub menu: MenuFacts,
+    /// Observed presence, for agent avatars.
+    pub presence: Arc<HashMap<String, PresenceState>>,
+    /// Agents working (typing) in this conversation.
+    pub working: Vec<String>,
+    /// The rows sit in a thread panel.
+    pub in_thread: bool,
+    /// Focus for the open more menu's keyboard.
+    pub menu_focus: Option<FocusHandle>,
+    /// A reaction error to show under a row.
+    pub reaction_error: Option<(EventId, SharedString)>,
 }
 
 impl Rows {
+    /// Rows that only display: no actions, no picker.
+    pub fn new(viewer: impl Into<String>, directory: Directory) -> Self {
+        Self {
+            viewer: viewer.into(),
+            directory,
+            channel: None,
+            actions: Actions::default(),
+            interaction: Interaction::default(),
+            quick_reactions: Vec::new(),
+            picker: None,
+            ops: Arc::new(Ops::default()),
+            menu: MenuFacts::default(),
+            presence: Arc::default(),
+            working: Vec::new(),
+            in_thread: false,
+            menu_focus: None,
+            reaction_error: None,
+        }
+    }
+
+    fn names(&self) -> &Names {
+        &self.directory.names
+    }
+
     fn own(&self, row: &MessageRow) -> bool {
-        row.author.to_hex() == self.viewer || row.signer.is_some_and(|s| s.to_hex() == self.viewer)
+        row.author.to_hex() == self.viewer
     }
 
     fn popup(&self, value: Option<(EventId, Popup)>, window: &mut Window, cx: &mut App) {
         if let Some(on_popup) = &self.actions.on_popup {
             on_popup(value, window, cx);
         }
+    }
+
+    fn command(&self, row: &Arc<MessageRow>, command: Command, window: &mut Window, cx: &mut App) {
+        if let Some(on_command) = &self.actions.on_command {
+            on_command(row, command, window, cx);
+        }
+    }
+
+    fn archived(&self) -> bool {
+        self.channel.as_ref().is_some_and(|c| c.archived)
+    }
+
+    fn read_only(&self) -> bool {
+        self.channel.as_ref().is_some_and(|c| c.read_only)
+    }
+
+    fn listed(&self) -> bool {
+        self.channel.as_ref().is_some_and(|channel| {
+            self.directory
+                .channels
+                .iter()
+                .any(|listed| listed.id == channel.id)
+        })
+    }
+
+    fn dm(&self) -> bool {
+        self.channel
+            .as_ref()
+            .is_some_and(|c| c.channel_type == Some(ChannelType::Dm))
+    }
+
+    /// `canReact`: a listed, writable, unarchived conversation.
+    fn can_react(&self) -> bool {
+        self.actions.on_command.is_some() && self.listed() && !self.archived() && !self.read_only()
+    }
+
+    /// `useManagedMessage`: read state, edit and delete need a delivered,
+    /// ordinary row in a writable channel.
+    fn managed(&self, row: &MessageRow) -> bool {
+        self.channel
+            .as_ref()
+            .is_some_and(|c| !c.read_only && self.listed())
+            && row.membership.is_none()
+            && row.diff.is_none()
+            && delivered(row)
+    }
+
+    /// A delete authorized by the agent's attested owner, the viewer.
+    pub fn owns_agent(&self, row: &MessageRow) -> bool {
+        let author = row.author.to_hex();
+        author != self.viewer
+            && !self.archived()
+            && self
+                .directory
+                .profiles
+                .get(&author)
+                .is_some_and(|p| p.is_agent && p.attested_owner.as_deref() == Some(&self.viewer))
     }
 }
 
@@ -181,6 +333,20 @@ pub fn render(item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
     render_in(Layout::Timeline, item, rows, cx)
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn presence_badge(state: Option<&PresenceState>) -> Option<Presence> {
+    state.map(|state| match state {
+        PresenceState::Online => Presence::Online,
+        PresenceState::Away => Presence::Away,
+        PresenceState::Offline => Presence::Offline,
+    })
+}
+
 pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
     let c = *cx.colors();
     let (gutter, gap, avatar_size) = match layout {
@@ -189,53 +355,35 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         Layout::Nested => (32., 8., AvatarSize::Small),
     };
     let row = &item.row;
+    let names = rows.names();
     let profiles = &rows.directory.profiles;
     let author = row.author.to_hex();
     let profile = profiles.get(&author);
-    let name = display_name(profiles, &author);
-    let agent = row.is_agent_envelope() || profile.is_some_and(|p| p.is_agent);
+    let name: SharedString = names.display(&author).into();
+    let agent = row.is_agent_envelope()
+        || names.is_library_agent(&author)
+        || profile.is_some_and(|p| p.is_agent);
 
     let mut container = div().flex().flex_col().w_full();
     if let Some(day) = &item.day {
         container = container.child(day_divider(day.clone(), cx));
     }
 
-    if let Some(change) = &row.membership {
-        let subject = display_name(profiles, &change.target.to_hex());
-        let text = format!("{subject} {}", membership_text(change, profiles));
+    if row.membership.is_some() {
         return container
-            .child(
-                div()
-                    .flex()
-                    .justify_center()
-                    .gap(px(12.))
-                    .pt(px(8.))
-                    .pb(px(16.))
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child(text),
-            )
+            .child(membership::render(
+                row,
+                item.group.as_deref(),
+                names,
+                &rows.directory.media,
+                cx,
+            ))
             .into_any_element();
     }
 
     let id = row.id.to_hex();
     let bar_visible = rows.actions.on_hover.is_some() && rows.interaction.bar_visible(row.id);
-    let left = if item.head {
-        let mut avatar = Avatar::new(name.clone()).size(avatar_size);
-        if agent {
-            avatar = avatar.squircle();
-        }
-        if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
-            avatar = avatar.image(media::avatar(picture, &rows.directory.media));
-        }
-        div()
-            .flex_none()
-            .w(px(gutter))
-            .flex()
-            .justify_center()
-            .child(avatar)
-            .into_any_element()
-    } else {
+    let left = if !item.head {
         div()
             .id(SharedString::from(format!("time-{id}")))
             .flex_none()
@@ -247,79 +395,114 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
             .line_height(px(20.))
             .text_color(c.text_subtle)
             .when(!bar_visible, |d| d.invisible())
-            .tooltip(Tooltip::text(time::full(row.created_at)))
+            .tooltip(time_tooltip(row.created_at))
             .child(time::compact(row.created_at))
+            .into_any_element()
+    } else if row.workflow_owner.is_some() {
+        div()
+            .flex_none()
+            .w(px(gutter))
+            .flex()
+            .justify_center()
+            .child(
+                Avatar::new("Workflow")
+                    .size(avatar_size)
+                    .squircle()
+                    .fallback_icon(IconName::Lightning, 20.),
+            )
+            .into_any_element()
+    } else {
+        let mut avatar = Avatar::new(name.clone()).size(avatar_size);
+        if agent {
+            avatar = avatar
+                .squircle()
+                .presence(presence_badge(rows.presence.get(&author)));
+        }
+        if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
+            avatar = avatar.image(media::avatar(picture, &rows.directory.media));
+        }
+        let thinking = agent && rows.working.contains(&author);
+        let size = match avatar_size {
+            AvatarSize::Large => 40.,
+            AvatarSize::Small => 24.,
+            _ => 32.,
+        };
+        let target = author.clone();
+        div()
+            .flex_none()
+            .w(px(gutter))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id(SharedString::from(format!("avatar-{id}")))
+                    .relative()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .child(avatar)
+                    .when(thinking, |d| d.child(thinking_badge(size, &c)))
+                    .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
+                        navigation::show_profile(target.clone(), event.position(), window, cx)
+                    }),
+            )
             .into_any_element()
     };
 
     let mut body = div().flex().flex_col().flex_1().min_w_0();
     if item.head {
+        body = body.child(byline(row, &name, rows, cx));
+    }
+    if let Some(sent) = &row.sent_from_thread {
+        let label = match &sent.excerpt {
+            Some(excerpt) => format!("Thread — {excerpt}"),
+            None => "Thread".to_string(),
+        };
+        let url = sent_from_thread_link(&row.channel, &sent.root_id);
         body = body.child(
             div()
                 .flex()
                 .flex_wrap()
-                .items_baseline()
-                .gap(px(8.))
-                .text_body_sm()
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(c.text_standard)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("byline-{id}")))
-                        .text_caption()
-                        .text_color(c.text_subtle)
-                        .tooltip(Tooltip::text(time::full(row.created_at)))
-                        .child(time::byline(row.created_at)),
-                ),
-        );
-    }
-    if let Some(sent) = &row.sent_from_thread {
-        let link = match &sent.excerpt {
-            Some(excerpt) => format!("Thread — {excerpt}"),
-            None => "Thread".to_string(),
-        };
-        body = body.child(
-            div()
-                .flex()
+                .items_center()
+                .gap(px(4.))
                 .my(px(4.))
                 .text_caption()
                 .text_color(c.text_subtle)
-                .child("Sent from ")
-                .child(div().text_color(c.text_link).child(link)),
+                .child("Sent from")
+                .child(markdown::link_chip(
+                    &url,
+                    &label,
+                    &rows.directory,
+                    &format!("sent-{id}"),
+                    cx,
+                )),
         );
     }
-    if let Some(card) = super::diff::card(row) {
-        body = body.child(div().when(item.head, |d| d.mt(px(4.))).child(card));
-    } else if !row.content.trim().is_empty() {
+    if !row.content.trim().is_empty() || row.diff.is_some() {
         body = body.child(
             div()
                 .id(SharedString::from(format!("md-{id}")))
                 .when(item.head, |d| d.mt(px(4.)))
                 .text_body_sm()
                 .text_color(c.text_standard)
-                .child(markdown::body(row, &rows.directory, cx)),
+                .child(renderers::message_body(row, &rows.directory, cx)),
         );
+    }
+    if let Some(notice) = delivery_notice(row, rows, cx) {
+        body = body.child(notice);
     }
     if !row.attachments.is_empty() {
         body = body.child(attachments(row, rows, cx));
     }
-    if !row.reactions.is_empty() {
-        body = body.child(reactions(row, rows, cx));
+    if let Some(reactions) = reactions(row, rows, cx) {
+        body = body.child(reactions);
     }
     // Inside a thread the replies are already on screen.
-    if row.reply_count > 0 && layout == Layout::Timeline {
+    if row.reply_count > 0 && layout == Layout::Timeline && rows.actions.on_open_thread.is_some() {
         body = body.child(thread_summary(row, rows, cx));
     }
-    if let Some(delivery) = &row.delivery
-        && matches!(delivery.status, Delivery::Failed | Delivery::Unknown)
-    {
-        body = body.child(delivery_notice(row, delivery, rows, cx));
-    }
 
+    let width = row_width(&id);
     let mut line = div()
         .id(SharedString::from(format!("message-{id}")))
         .relative()
@@ -327,6 +510,7 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         .gap(px(gap))
         .pt(if item.head { px(14.) } else { px(2.) })
         .pb(px(2.))
+        .child(measure(width.clone()))
         .child(left)
         .child(body);
     if let Some(on_hover) = rows.actions.on_hover.clone() {
@@ -336,15 +520,276 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         });
     }
     if bar_visible {
-        line = line.child(action_bar(item, rows, cx));
+        line = line.child(action_bar(item, rows, width.get(), cx));
     }
     container.child(line).into_any_element()
+}
+
+/// `buzz://message?channel&id=root&thread=root`.
+fn sent_from_thread_link(channel: &str, root: &EventId) -> String {
+    let mut url = url::Url::parse("buzz://message").expect("static URL");
+    url.query_pairs_mut()
+        .append_pair("channel", channel)
+        .append_pair("id", &root.to_hex())
+        .append_pair("thread", &root.to_hex());
+    url.to_string()
+}
+
+/// A 500ms full date-and-time tooltip.
+fn time_tooltip(seconds: u64) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    Tooltip::text(time::full(seconds))
+}
+
+/// The name (or workflow byline) and time over a group's first row.
+fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App) -> AnyElement {
+    let c = *cx.colors();
+    let id = row.id.to_hex();
+    let mut line = div()
+        .flex()
+        .flex_wrap()
+        .items_baseline()
+        .gap(px(8.))
+        .text_body_sm();
+    match row.workflow_owner {
+        Some(owner) => {
+            let owner_hex = owner.to_hex();
+            let fallback: String = owner_hex.chars().take(10).collect::<String>() + "…";
+            let owner_name = rows.names().name(&owner_hex, &fallback);
+            let target = owner_hex.clone();
+            line = line
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(c.text_standard)
+                        .child("Workflow"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(4.))
+                        .min_w_0()
+                        .text_color(c.text_subtle)
+                        .child("· owned by")
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("workflow-owner-{id}")))
+                                .text_color(c.text_link)
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .child(owner_name.clone())
+                                .on_click(move |event, window, cx| {
+                                    navigation::show_profile(
+                                        target.clone(),
+                                        event.position(),
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                        ),
+                )
+                .child(workflow_info(row, &owner_hex, &owner_name, rows, cx));
+        }
+        None => {
+            line = line.child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(c.text_standard)
+                    .min_w_0()
+                    .child(name.clone()),
+            );
+        }
+    }
+    line.child(
+        div()
+            .id(SharedString::from(format!("byline-{id}")))
+            .text_caption()
+            .text_color(c.text_subtle)
+            .tooltip(time_tooltip(row.created_at))
+            .child(time::byline(row.created_at)),
+    )
+    .into_any_element()
+}
+
+fn npub(hex: &str) -> String {
+    nostr::prelude::PublicKey::from_hex(hex)
+        .ok()
+        .and_then(|key| key.to_bech32().ok())
+        .unwrap_or_else(|| hex.to_string())
+}
+
+/// The workflow info button and its popover (`WorkflowByline.tsx`).
+fn workflow_info(
+    row: &Arc<MessageRow>,
+    owner: &str,
+    owner_name: &str,
+    rows: &Rc<Rows>,
+    cx: &App,
+) -> AnyElement {
+    let c = *cx.colors();
+    let open = rows.interaction.open == Some((row.id, Popup::WorkflowInfo));
+    let (toggle, target) = (rows.clone(), row.id);
+    let button = IconButton::new(
+        SharedString::from(format!("workflow-info-{}", row.id.to_hex())),
+        IconName::Info,
+    )
+    .size(IconButtonSize::Xs)
+    .selected(open)
+    .tooltip("Workflow message details")
+    .on_click(move |_, window, cx| {
+        let next = (!open).then_some((target, Popup::WorkflowInfo));
+        toggle.popup(next, window, cx)
+    });
+    let signer = row.signer.unwrap_or(row.author).to_hex();
+    let detail = |term: &str, value: String| {
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .mt(px(8.))
+                    .text_color(c.text_subtle)
+                    .child(term.to_string()),
+            )
+            .child(div().child(value))
+    };
+    let close = rows.clone();
+    div()
+        .relative()
+        .child(button)
+        .when(open, |d| {
+            d.child(
+                div().absolute().left_0().bottom_0().child(deferred(
+                    anchored()
+                        .anchor(Anchor::TopLeft)
+                        .offset(point(px(0.), px(4.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .occlude()
+                                .on_mouse_down_out(move |_, window, cx| {
+                                    close.popup(None, window, cx)
+                                })
+                                .w(px(288.))
+                                .p(px(12.))
+                                .floating_surface(&c)
+                                .rounded(px(16.))
+                                .text_body_sm()
+                                .text_color(c.text_standard)
+                                .child(div().text_label_sm().child("Workflow message"))
+                                .child(div().mt(px(4.)).text_color(c.text_subtle).child(
+                                    "Sent automatically. This community’s relay attributes \
+                                     the workflow to this owner; the owner did not sign this \
+                                     message.",
+                                ))
+                                .child(
+                                    div()
+                                        .my(px(12.))
+                                        .child(detail("Workflow owner", owner_name.to_string()))
+                                        .child(detail("Owner public key", npub(owner)))
+                                        .child(detail("Signed by the relay", npub(&signer))),
+                                )
+                                .child(div().text_color(c.text_subtle).child(
+                                    "Workflow and run details are not included in this message.",
+                                )),
+                        ),
+                )),
+            )
+        })
+        .into_any_element()
+}
+
+/// The agent "thinking" pill over an avatar's corner: three dots pulsing
+/// on the online green (`ThinkingBadge.tsx`, an 88px design scaled to the
+/// avatar).
+fn thinking_badge(size: f32, c: &buzz_ui::Colors) -> impl IntoElement {
+    let scale = size / 88.;
+    let (width, height) = (64. * scale, 32. * scale);
+    let center = 74.8 * scale;
+    let dot = 7. * scale;
+    let color = c.text_inverse;
+    div()
+        .absolute()
+        .left(px(center - height / 2.))
+        .top(px(center - height / 2.))
+        .w(px(width))
+        .h(px(height))
+        .rounded_full()
+        .border_1()
+        .border_color(c.surface_panel)
+        .bg(c.status_online)
+        .flex()
+        .items_center()
+        .justify_center()
+        .with_animation(
+            "thinking-dots",
+            Animation::new(Duration::from_millis(1200)).repeat(),
+            move |pill, delta| {
+                pill.gap(px(4. * scale)).children((0..3).map(|n| {
+                    // 0–40% and 100%: 40% opacity; 20%: full and lifted.
+                    let phase = (delta - n as f32 * 80. / 1200.).rem_euclid(1.);
+                    let lift = if phase < 0.4 {
+                        1. - ((phase - 0.2).abs() / 0.2)
+                    } else {
+                        0.
+                    };
+                    div()
+                        .size(px(dot))
+                        .rounded_full()
+                        .bg(color)
+                        .opacity(0.4 + 0.6 * lift)
+                        .mt(px(-2. * scale * lift))
+                }))
+            },
+        )
+}
+
+/// The row's laid-out width, measured each frame.
+fn row_width(id: &str) -> Rc<Cell<f32>> {
+    thread_local! {
+        static WIDTHS: std::cell::RefCell<HashMap<String, Rc<Cell<f32>>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    WIDTHS.with_borrow_mut(|widths| {
+        if widths.len() > 4096 {
+            widths.clear();
+        }
+        widths
+            .entry(id.to_string())
+            .or_insert_with(|| Rc::new(Cell::new(f32::MAX)))
+            .clone()
+    })
+}
+
+fn measure(width: Rc<Cell<f32>>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let next = f32::from(bounds.size.width);
+            if (width.get() - next).abs() > 0.5 {
+                let was_narrow = width.get() <= QUICK_REACTIONS_MIN_WIDTH;
+                width.set(next);
+                if was_narrow != (next <= QUICK_REACTIONS_MIN_WIDTH) {
+                    window.refresh();
+                }
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// Links, reactions and edits need the relay to have the message.
+pub fn delivered(row: &MessageRow) -> bool {
+    row.delivery
+        .as_ref()
+        .is_none_or(|d| matches!(d.status, Delivery::Accepted | Delivery::Seen))
 }
 
 /// The hover action bar (§4.5): quick reactions, add reaction, reply, copy
 /// link and the more menu. Its bottom sits 4px under the byline, so a
 /// continuation row's bar floats over the row above.
-fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
+fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoElement {
     let c = *cx.colors();
     let row = &item.row;
     let id = row.id.to_hex();
@@ -378,36 +823,67 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
             on_hover(target, Hover::Bar, *hovered, window, cx)
         });
     }
-    if delivered && let Some(react) = rows.actions.on_react.clone() {
-        for (index, quick) in rows.quick_reactions.iter().enumerate() {
-            let (react, target) = (react.clone(), row.clone());
-            let content = quick.content.clone();
-            let glyph = match &quick.image {
-                Some(url) => img(media::image(url, &rows.directory.media))
-                    .size(px(16.))
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element(),
-                None => div()
-                    .text_size(px(14.))
-                    .child(content.clone())
-                    .into_any_element(),
-            };
-            bar = bar.child(
-                IconButton::new(
-                    SharedString::from(format!("quick-{index}-{id}")),
-                    IconName::Smiley,
-                )
-                .size(IconButtonSize::Sm)
-                .surface(Surface::Floating)
-                .child(glyph)
-                .tooltip(format!("React with {content}"))
-                .on_click(move |_, window, cx| react(&target, &content, window, cx)),
-            );
+    if rows.can_react() {
+        let busy = !delivered || rows.ops.reaction_blocked(row);
+        if width > QUICK_REACTIONS_MIN_WIDTH {
+            for (index, quick) in rows.quick_reactions.iter().enumerate() {
+                let content = quick.content.to_string();
+                let custom = quick.image.as_ref().map(|url| CustomEmoji {
+                    shortcode: content.trim_matches(':').to_lowercase(),
+                    url: url.clone(),
+                });
+                let mine = row.reactions.iter().any(|group| {
+                    group.content == content
+                        && group.emoji.as_ref().map(|e| &e.url) == custom.as_ref().map(|e| &e.url)
+                        && group
+                            .events
+                            .iter()
+                            .any(|r| r.author.to_hex() == rows.viewer)
+                });
+                let glyph = match &quick.image {
+                    Some(url) => img(media::image(url, &rows.directory.media))
+                        .size(px(16.))
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                    None => div()
+                        .text_size(px(14.))
+                        .child(content.clone())
+                        .into_any_element(),
+                };
+                let (rows2, target) = (rows.clone(), row.clone());
+                let group = SharedString::from(format!("quick-{index}-{id}"));
+                bar = bar.child(
+                    div().group(group.clone()).child(
+                        IconButton::new(group.clone(), IconName::Smiley)
+                            .size(IconButtonSize::Sm)
+                            .surface(Surface::Floating)
+                            .disabled(busy)
+                            .selected(mine)
+                            .child(lift(glyph, group, busy))
+                            .tooltip(format!(
+                                "{} {content}",
+                                if mine { "Remove" } else { "React with" }
+                            ))
+                            .on_click(move |_, window, cx| {
+                                rows2.command(
+                                    &target,
+                                    Command::React {
+                                        content: content.clone(),
+                                        emoji: custom.clone(),
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            }),
+                    ),
+                );
+            }
         }
         let (rows, target) = (rows.clone(), row.id);
         bar = bar.child(
             button("add-reaction", IconName::SmileyPlus)
                 .shape(IconButtonShape::Round)
+                .disabled(busy)
                 .selected(open == Some(Popup::Picker { from_bar: true }))
                 .tooltip("Add reaction")
                 .on_click(move |_, window, cx| {
@@ -415,104 +891,295 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
                 }),
         );
     }
-    if row.thread_root_id.is_none()
-        && let Some(open_thread) = rows.actions.on_open_thread.clone()
-    {
-        let target = row.clone();
+    if rows.actions.on_command.is_some() {
+        let unavailable = !delivered
+            || rows.archived()
+            || (rows.channel.is_some() && (!rows.listed() || rows.read_only()));
+        let (rows2, target) = (rows.clone(), row.clone());
         bar = bar.child(
             button("reply", IconName::ChatCircle)
-                .tooltip("Reply")
-                .on_click(move |_, window, cx| open_thread(&target, window, cx)),
+                .disabled(unavailable)
+                .tooltip(if unavailable {
+                    "Reply unavailable for this message"
+                } else {
+                    "Reply"
+                })
+                .on_click(move |_, window, cx| rows2.command(&target, Command::Reply, window, cx)),
         );
-    }
-    if delivered && let Some(command) = rows.actions.on_command.clone() {
-        let target = row.clone();
+        let (rows2, target) = (rows.clone(), row.clone());
         bar = bar.child(
             button("copy-link", IconName::Link)
-                .tooltip("Copy link")
-                .on_click(move |_, window, cx| command(&target, Command::CopyLink, window, cx)),
+                .disabled(!delivered)
+                .tooltip(if delivered {
+                    "Copy link"
+                } else {
+                    "Message link unavailable"
+                })
+                .on_click(move |_, window, cx| {
+                    rows2.command(&target, Command::CopyLink, window, cx)
+                }),
         );
     }
     {
-        let (rows, target) = (rows.clone(), row.id);
+        let (rows2, target) = (rows.clone(), row.id);
         bar = bar.child(
             button("more", IconName::DotsThree)
+                .selected(open == Some(Popup::More))
                 .tooltip("More message actions")
-                .on_click(move |_, window, cx| rows.popup(Some((target, Popup::More)), window, cx)),
+                .on_click(move |_, window, cx| {
+                    rows2.popup(Some((target, Popup::More)), window, cx)
+                }),
         );
     }
     let popup = match open {
-        Some(Popup::More) => Some(more_menu(row, rows).into_any_element()),
+        Some(Popup::More) => Some(more_menu(row, rows, cx)),
         Some(Popup::Picker { from_bar: true }) => Some(picker(rows)),
         _ => None,
     };
+    // Menus drop below the bar's end; the reaction picker opens above it,
+    // 6px off, flipping below when there is no room.
+    let above = matches!(open, Some(Popup::Picker { .. }));
     bar.children(popup.map(|popup| {
-        div().absolute().right_0().bottom_0().child(deferred(
+        let anchor = div().absolute().right_0();
+        let anchor = if above {
+            anchor.top_0()
+        } else {
+            anchor.bottom_0()
+        };
+        anchor.child(deferred(
             anchored()
-                .anchor(Anchor::TopRight)
-                .offset(point(px(0.), px(4.)))
+                .anchor(if above {
+                    Anchor::BottomRight
+                } else {
+                    Anchor::TopRight
+                })
+                .offset(point(px(0.), px(if above { -6. } else { 4. })))
                 .snap_to_window_with_margin(px(8.))
                 .child(popup),
         ))
     }))
 }
 
-/// Links, reactions and edits need the relay to have the message.
-fn delivered(row: &MessageRow) -> bool {
-    row.delivery
-        .as_ref()
-        .is_none_or(|d| matches!(d.status, Delivery::Accepted | Delivery::Seen))
+/// A quick reaction's glyph: lifts 1px and grows 12% under the pointer,
+/// presses to 96%, over 120ms.
+fn lift(glyph: AnyElement, group: SharedString, disabled: bool) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(!disabled, |d| {
+            d.group_hover(group, |s| s.mt(px(-2.)).text_size(px(15.7)))
+        })
+        .child(glyph)
 }
 
-fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>) -> impl IntoElement {
-    let id = row.id.to_hex();
-    let own = rows.own(row);
+/// One more-menu row: its command, label, icon and whether it is off.
+struct Entry {
+    name: &'static str,
+    label: &'static str,
+    icon: IconName,
+    icon_size: f32,
+    command: Command,
+    disabled: bool,
+}
+
+/// `MessageActionBar`'s menu, in its order: read state, Copy message,
+/// Send to channel, Edit, Delete, Follow, then Report.
+fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    let managed = rows.managed(row) && rows.actions.on_command.is_some();
     let delivered = delivered(row);
-    let item = |name: &str, label: &str, icon: IconName, command: Command| {
-        let (rows, target) = (rows.clone(), row.clone());
-        MenuItem::new(
-            SharedString::from(format!("{name}-{id}")),
-            label.to_string(),
-        )
-        .icon(icon)
-        .on_click(move |_, window, cx| {
-            rows.popup(None, window, cx);
-            if let Some(on_command) = &rows.actions.on_command {
-                on_command(&target, command.clone(), window, cx);
+    if managed {
+        let unread = rows.menu.unread;
+        entries.push(Entry {
+            name: "read-state",
+            label: if unread { "Mark read" } else { "Mark unread" },
+            icon: if unread {
+                IconName::EnvelopeOpen
+            } else {
+                IconName::Envelope
+            },
+            icon_size: 16.,
+            command: if unread {
+                Command::MarkRead
+            } else {
+                Command::MarkUnread
+            },
+            disabled: false,
+        });
+    }
+    entries.push(Entry {
+        name: "copy",
+        label: "Copy message",
+        icon: IconName::Copy,
+        icon_size: 16.,
+        command: Command::CopyMessage,
+        disabled: false,
+    });
+    let writable = rows.listed() && !rows.archived() && !rows.read_only();
+    if writable
+        && row.thread_root_id.is_some()
+        && rows.own(row)
+        && !row.is_agent_envelope()
+        && row.diff.is_none()
+        && delivered
+    {
+        entries.push(Entry {
+            name: "send-to-channel",
+            label: "Send to channel",
+            icon: IconName::HashArrowIn,
+            icon_size: 16.,
+            command: Command::SendToChannel,
+            disabled: false,
+        });
+    }
+    if managed {
+        let own = rows.own(row) && !rows.archived();
+        let busy = rows.ops.changing(row.id);
+        if own && editable(row) {
+            entries.push(Entry {
+                name: "edit",
+                label: "Edit message",
+                icon: IconName::PencilSimple,
+                icon_size: 14.,
+                command: Command::Edit,
+                disabled: busy || rows.ops.deleting(row.id),
+            });
+        }
+        if own || rows.owns_agent(row) {
+            entries.push(Entry {
+                name: "delete",
+                label: "Delete message",
+                icon: IconName::Trash,
+                icon_size: 14.,
+                command: Command::Delete,
+                disabled: busy || rows.ops.editing(row.id),
+            });
+        }
+        if !rows.dm() {
+            let following = rows.menu.following;
+            entries.push(Entry {
+                name: "follow",
+                label: if following {
+                    "Unfollow thread"
+                } else {
+                    "Follow thread"
+                },
+                icon: if following {
+                    IconName::BellSlash
+                } else {
+                    IconName::Bell
+                },
+                icon_size: 16.,
+                command: Command::Follow(!following),
+                disabled: false,
+            });
+        }
+    }
+    if row.membership.is_none() && delivered && rows.actions.on_command.is_some() {
+        entries.push(Entry {
+            name: "report",
+            label: "Report",
+            icon: IconName::Flag,
+            icon_size: 16.,
+            command: Command::Report,
+            disabled: false,
+        });
+    }
+    entries
+}
+
+/// `lastEditableMessage`'s row checks: an ordinary, delivered message.
+pub fn editable(row: &MessageRow) -> bool {
+    row.membership.is_none() && !row.is_agent_envelope() && row.diff.is_none() && delivered(row)
+}
+
+fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>, _cx: &App) -> AnyElement {
+    let id = row.id.to_hex();
+    let entries = Rc::new(menu_entries(row, rows));
+    let highlight = rows.interaction.highlight;
+    let mut menu = Menu::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let (rows2, target, command) = (rows.clone(), row.clone(), entry.command.clone());
+        menu = menu.child(
+            MenuItem::new(
+                SharedString::from(format!("{}-{id}", entry.name)),
+                entry.label,
+            )
+            .icon(entry.icon)
+            .icon_size(entry.icon_size)
+            .disabled(entry.disabled)
+            .highlighted(highlight == Some(index))
+            .on_click(move |_, window, cx| {
+                rows2.popup(None, window, cx);
+                rows2.command(&target, command.clone(), window, cx);
+            }),
+        );
+    }
+    let close = rows.clone();
+    let keys = rows.clone();
+    let target = row.clone();
+    div()
+        .id(SharedString::from(format!("more-menu-{id}")))
+        .occlude()
+        .when_some(rows.menu_focus.as_ref(), |d, focus| d.track_focus(focus))
+        .on_mouse_down_out(move |_, window, cx| close.popup(None, window, cx))
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            let count = entries.len();
+            let enabled = |i: usize| entries.get(i).is_some_and(|e| !e.disabled);
+            let step = |from: Option<usize>, forward: bool| -> Option<usize> {
+                let mut index = from;
+                for _ in 0..count {
+                    let next = match (index, forward) {
+                        (None, true) => 0,
+                        (None, false) => count - 1,
+                        (Some(i), true) => (i + 1) % count,
+                        (Some(i), false) => (i + count - 1) % count,
+                    };
+                    if enabled(next) {
+                        return Some(next);
+                    }
+                    index = Some(next);
+                }
+                None
+            };
+            let highlight = keys.interaction.highlight;
+            let set = |value: Option<usize>, window: &mut Window, cx: &mut App| {
+                if let Some(on_highlight) = &keys.actions.on_highlight {
+                    on_highlight(value, window, cx);
+                }
+            };
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    cx.stop_propagation();
+                    keys.popup(None, window, cx);
+                }
+                "down" if count > 0 => {
+                    cx.stop_propagation();
+                    set(step(highlight, true), window, cx);
+                }
+                "up" if count > 0 => {
+                    cx.stop_propagation();
+                    set(step(highlight, false), window, cx);
+                }
+                "home" if count > 0 => set(step(None, true), window, cx),
+                "end" if count > 0 => set(step(None, false), window, cx),
+                "enter" | "space" => {
+                    if let Some(entry) = highlight
+                        .and_then(|i| entries.get(i))
+                        .filter(|e| !e.disabled)
+                    {
+                        cx.stop_propagation();
+                        let command = entry.command.clone();
+                        keys.popup(None, window, cx);
+                        keys.command(&target, command, window, cx);
+                    }
+                }
+                _ => {}
             }
         })
-    };
-    let close = rows.clone();
-    let menu = Menu::new()
-        .when(delivered, |menu| {
-            menu.child(item(
-                "unread",
-                "Mark unread",
-                IconName::Envelope,
-                Command::MarkUnread,
-            ))
-        })
-        .child(item(
-            "copy",
-            "Copy message",
-            IconName::Copy,
-            Command::CopyMessage,
-        ))
-        .when(own && delivered, |menu| {
-            menu.child(item(
-                "edit",
-                "Edit message",
-                IconName::PencilSimple,
-                Command::Edit,
-            ))
-        })
-        .when(own, |menu| {
-            menu.child(item("delete", "Delete message", IconName::Trash, Command::Delete).danger())
-        });
-    div()
-        .occlude()
-        .on_mouse_down_out(move |_, window, cx| close.popup(None, window, cx))
         .child(menu)
+        .into_any_element()
 }
 
 /// The page's emoji picker as the reaction picker. The page reacts with
@@ -526,55 +1193,179 @@ fn picker(rows: &Rc<Rows>) -> AnyElement {
         .into_any_element()
 }
 
-fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
+/// `reaction-name.ts`: an emoji's `:shortcode:`, else itself.
+pub fn reaction_name(group: &ReactionGroup) -> String {
+    if let Some(custom) = &group.emoji {
+        return format!(":{}:", custom.shortcode);
+    }
+    emojis::get(&group.content)
+        .and_then(|emoji| emoji.shortcode())
+        .map(|code| format!(":{code}:"))
+        .unwrap_or_else(|| group.content.clone())
+}
+
+/// "You" first, then the other reactors in event order; unknown names
+/// are the first ten hex characters.
+pub fn reactor_names(group: &ReactionGroup, viewer: &str, names: &Names) -> (Vec<String>, bool) {
+    let mut authors: Vec<String> = Vec::new();
+    for event in &group.events {
+        let author = event.author.to_hex();
+        if !authors.contains(&author) {
+            authors.push(author);
+        }
+    }
+    let mine = authors.iter().any(|a| a == viewer);
+    let mut out: Vec<String> = Vec::new();
+    if mine {
+        out.push("You".into());
+    }
+    out.extend(
+        authors
+            .iter()
+            .filter(|a| *a != viewer)
+            .map(|a| names.display(a)),
+    );
+    (out, mine)
+}
+
+fn reaction_glyph(group: &ReactionGroup, size: f32, rows: &Rows, cx: &App) -> AnyElement {
+    if let Some(custom) = &group.emoji
+        && let Some(element) = renderers::inline(
+            &format!(":{}:", custom.shortcode),
+            std::slice::from_ref(custom),
+            &rows.directory.media,
+            cx,
+        )
+    {
+        return element;
+    }
+    match &group.emoji {
+        Some(custom) => {
+            let fallback = format!(":{}:", custom.shortcode);
+            img(media::image(&custom.url, &rows.directory.media))
+                .size(px(size))
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(move || {
+                    div()
+                        .max_w(px(96.))
+                        .text_size(px(12.))
+                        .line_height(px(12.))
+                        .truncate()
+                        .child(fallback.clone())
+                        .into_any_element()
+                })
+                .into_any_element()
+        }
+        None => div()
+            .text_size(px(14.))
+            .line_height(px(18.))
+            .min_w(px(18.))
+            .max_w(px(96.))
+            .truncate()
+            .flex()
+            .justify_center()
+            .child(group.content.clone())
+            .into_any_element(),
+    }
+}
+
+/// The count, rolling up or down over 260ms when it changes
+/// (`AnimatedReactionCount.tsx`).
+fn reaction_count(key: SharedString, value: usize) -> AnyElement {
+    thread_local! {
+        static SHOWN: std::cell::RefCell<HashMap<SharedString, (usize, usize, u64)>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    let (from, version) = SHOWN.with_borrow_mut(|shown| {
+        let entry = shown.entry(key.clone()).or_insert((value, value, 0));
+        if entry.1 != value {
+            *entry = (entry.1, value, entry.2 + 1);
+        }
+        (entry.0, entry.2)
+    });
+    let text = |n: usize| {
+        div()
+            .h(px(14.))
+            .text_size(px(12.))
+            .line_height(px(14.))
+            .child(n.to_string())
+    };
+    if from == value {
+        return text(value).into_any_element();
+    }
+    let up = value > from;
+    let (top, bottom) = if up { (from, value) } else { (value, from) };
+    let settle = key.clone();
+    div()
+        .h(px(14.))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(text(top))
+                .child(text(bottom))
+                .with_animation(
+                    SharedString::from(format!("{key}-roll-{version}")),
+                    Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint),
+                    move |column, delta| {
+                        if delta >= 1. {
+                            SHOWN.with_borrow_mut(|shown| {
+                                if let Some(entry) = shown.get_mut(&settle) {
+                                    entry.0 = entry.1;
+                                }
+                            });
+                        }
+                        let progress = if up { delta } else { 1. - delta };
+                        column.mt(px(-14. * progress))
+                    },
+                ),
+        )
+        .into_any_element()
+}
+
+/// `cubic-bezier(0.23, 1, 0.32, 1)`, near enough.
+fn ease_out_quint(t: f32) -> f32 {
+    1. - (1. - t).powi(5)
+}
+
+fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElement> {
     let c = *cx.colors();
     let id = row.id.to_hex();
+    let failure = rows.ops.reaction_failure(row);
+    let error = rows
+        .reaction_error
+        .as_ref()
+        .filter(|(target, _)| *target == row.id)
+        .map(|(_, error)| error.clone());
+    if row.reactions.is_empty() && failure.is_none() && error.is_none() {
+        return None;
+    }
+    let can = rows.can_react() && delivered(row);
+    let unavailable = rows.ops.reaction_blocked(row);
     let mut pills = div()
+        .id(SharedString::from(format!("reactions-{id}")))
         .flex()
         .flex_wrap()
         .items_center()
         .gap(px(6.))
         .mt(px(6.));
-    for (index, group) in row.reactions.iter().enumerate() {
-        let mut people: Vec<String> = group.events.iter().map(|r| r.author.to_hex()).collect();
-        people.sort();
-        people.dedup();
-        let mine = people.iter().any(|p| *p == rows.viewer);
-        // "You" first, then everyone else by name.
-        let mut names: Vec<String> = people
-            .iter()
-            .filter(|p| **p != rows.viewer)
-            .map(|p| display_name(&rows.directory.profiles, p).to_string())
-            .collect();
-        names.sort();
-        if mine {
-            names.insert(0, "You".into());
-        }
-        let glyph = match &group.emoji {
-            Some(custom) => {
-                let fallback = group.content.clone();
-                img(media::image(&custom.url, &rows.directory.media))
-                    .size(px(14.))
-                    .object_fit(ObjectFit::Contain)
-                    .with_fallback(move || {
-                        div()
-                            .text_size(px(12.))
-                            .child(fallback.clone())
-                            .into_any_element()
-                    })
-                    .into_any_element()
+    if let Some(on_preview) = rows.actions.on_preview.clone() {
+        let target = row.id;
+        let open = rows.interaction.preview.filter(|(id, _, _)| *id == target);
+        pills = pills.on_hover(move |hovered, window, cx| {
+            if !hovered && open.is_some() {
+                on_preview(None, window, cx)
             }
-            None => div()
-                .text_size(px(14.))
-                .line_height(px(18.))
-                .min_w(px(18.))
-                .flex()
-                .justify_center()
-                .child(group.content.clone())
-                .into_any_element(),
-        };
+        });
+    }
+    for (index, group) in row.reactions.iter().enumerate() {
+        let (names, mine) = reactor_names(group, &rows.viewer, rows.names());
+        let people = names.len();
+        let glyph = reaction_glyph(group, 14., rows, cx);
+        let key = SharedString::from(format!("reaction-{id}-{index}"));
         let mut pill = div()
-            .id(SharedString::from(format!("reaction-{id}-{index}")))
+            .id(key.clone())
             .flex()
             .items_center()
             .justify_center()
@@ -585,19 +1376,8 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEleme
             .px(px(8.))
             .rounded_full()
             .border_1()
-            .cursor_pointer()
-            .tooltip(Tooltip::text(format!(
-                "{} {}",
-                group.content,
-                names.join(", ")
-            )))
             .child(glyph)
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .line_height(px(14.))
-                    .child(people.len().to_string()),
-            );
+            .child(reaction_count(key.clone(), people));
         pill = if mine {
             pill.border_color(mix(c.affordance_prominent, c.border_standard, 0.4))
                 .bg(mix(c.affordance_prominent, c.surface_panel, 0.12))
@@ -606,16 +1386,77 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEleme
             pill.border_color(c.border_standard)
                 .bg(c.affordance_subtle)
                 .text_color(c.text_standard)
-                .hover(|style| style.bg(c.affordance_subtle_hover))
+                .when(can, |p| {
+                    p.hover(|style| style.bg(c.affordance_subtle_hover))
+                })
         };
-        if let Some(react) = rows.actions.on_react.clone() {
-            let target = row.clone();
-            let content = group.content.clone();
-            pill = pill.on_click(move |_, window, cx| react(&target, &content, window, cx));
+        if can {
+            pill = pill.cursor_pointer();
+            if !unavailable {
+                let (rows2, target) = (rows.clone(), row.clone());
+                let (content, emoji) = (group.content.clone(), group.emoji.clone());
+                pill = pill.on_click(move |_, window, cx| {
+                    rows2.command(
+                        &target,
+                        Command::React {
+                            content: content.clone(),
+                            emoji: emoji.clone(),
+                        },
+                        window,
+                        cx,
+                    )
+                });
+            }
         }
-        pills = pills.child(pill);
+        // The preview card: 100ms to open, then instant along the row,
+        // sliding in from the pill it left.
+        let open = rows.interaction.preview;
+        let shown = open.is_some_and(|(m, i, _)| m == row.id && i == index);
+        if let Some(on_preview) = rows.actions.on_preview.clone() {
+            let target = row.id;
+            let want = rows.actions.on_want_profiles.clone();
+            let authors: Vec<String> = group.events.iter().map(|e| e.author.to_hex()).collect();
+            pill = pill.on_hover(move |hovered, window, cx| {
+                if *hovered {
+                    let from = open.filter(|(m, _, _)| *m == target).map(|(_, i, _)| i);
+                    let delay = open.is_none_or(|(m, _, _)| m != target);
+                    // Reactors' names load as the card opens.
+                    if let Some(want) = &want {
+                        want(authors.clone(), cx);
+                    }
+                    if delay {
+                        let on_preview = on_preview.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(100))
+                                    .await;
+                                let _ = cx.update(|window, cx| {
+                                    on_preview(Some((target, index, None)), window, cx)
+                                });
+                            })
+                            .detach();
+                    } else {
+                        on_preview(Some((target, index, from)), window, cx)
+                    }
+                }
+            });
+        }
+        let preview = shown.then(|| {
+            let slide = open.and_then(|(_, i, from)| from.map(|f| (i as f32 - f as f32).signum()));
+            reaction_preview(group, names.join(", "), slide, rows, &c, cx)
+        });
+        pills = pills.child(div().relative().child(pill).children(preview.map(|card| {
+            div().absolute().left_0().top_0().child(deferred(
+                anchored()
+                    .anchor(Anchor::BottomLeft)
+                    .offset(point(px(0.), px(-6.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(card),
+            ))
+        })));
     }
-    if rows.actions.on_react.is_some() {
+    if can && !row.reactions.is_empty() {
         let open = rows.interaction.open == Some((row.id, Popup::Picker { from_bar: false }));
         let (popup_rows, target) = (rows.clone(), row.id);
         let button = div()
@@ -626,7 +1467,6 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEleme
             .justify_center()
             .rounded_full()
             .border_1()
-            .cursor_pointer()
             .map(|d| {
                 if open {
                     d.border_color(c.border_standard)
@@ -635,35 +1475,125 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEleme
                 } else {
                     d.border_color(transparent_black())
                         .text_color(c.text_subtle)
-                        .hover(|s| {
-                            s.border_color(c.border_standard)
-                                .bg(c.affordance_subtle)
-                                .text_color(c.text_standard)
+                        .when(!unavailable, |d| {
+                            d.hover(|s| {
+                                s.border_color(c.border_standard)
+                                    .bg(c.affordance_subtle)
+                                    .text_color(c.text_standard)
+                            })
                         })
                 }
             })
+            .when(!unavailable, |d| d.cursor_pointer())
             .tooltip(Tooltip::text("Add reaction"))
             .child(Icon::new(IconName::SmileyPlus).size(16.))
-            .on_click(move |_, window, cx| {
-                popup_rows.popup(
-                    Some((target, Popup::Picker { from_bar: false })),
-                    window,
-                    cx,
-                )
+            .when(!unavailable, |d| {
+                d.on_click(move |_, window, cx| {
+                    popup_rows.popup(
+                        Some((target, Popup::Picker { from_bar: false })),
+                        window,
+                        cx,
+                    )
+                })
             });
         pills = pills.child(div().relative().child(button).when(open, |d| {
             d.child(
-                div().absolute().left_0().bottom_0().child(deferred(
+                div().absolute().left_0().top_0().child(deferred(
                     anchored()
-                        .anchor(Anchor::TopLeft)
-                        .offset(point(px(0.), px(4.)))
+                        .anchor(Anchor::BottomLeft)
+                        .offset(point(px(0.), px(-6.)))
                         .snap_to_window_with_margin(px(8.))
                         .child(picker(rows)),
                 )),
             )
         }));
     }
-    pills
+    if let Some(error) = error {
+        pills = pills.child(div().text_caption().text_color(c.text_danger).child(error));
+    }
+    if let Some(op) = failure {
+        let (rows2, target, op_id) = (rows.clone(), row.clone(), op.id);
+        pills = pills.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .text_caption()
+                .text_color(c.text_subtle)
+                .child(if op.delivery == buzz_relay_client::Delivery::Failed {
+                    "Couldn’t update reaction."
+                } else {
+                    "Reaction delivery not confirmed."
+                })
+                .child(
+                    buzz_ui::Button::new(
+                        SharedString::from(format!("retry-reaction-{id}")),
+                        "Retry reaction",
+                    )
+                    .variant(buzz_ui::ButtonVariant::Ghost)
+                    .size(buzz_ui::ButtonSize::Sm)
+                    .on_click(move |_, window, cx| {
+                        rows2.command(&target, Command::RetryOperation(op_id), window, cx)
+                    }),
+                ),
+        );
+    }
+    Some(pills.into_any_element())
+}
+
+/// The reaction preview card: the glyph and its `:name:`, then who
+/// reacted (`ReactionPill`'s `PreviewCard`).
+fn reaction_preview(
+    group: &ReactionGroup,
+    names: String,
+    slide: Option<f32>,
+    rows: &Rows,
+    c: &buzz_ui::Colors,
+    cx: &App,
+) -> AnyElement {
+    let card = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .px(px(12.))
+        .py(px(8.))
+        .floating_surface(c)
+        .rounded(px(12.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .h(px(16.))
+                .child(reaction_glyph(group, 14., rows, cx))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(c.text_subtle)
+                        .child(reaction_name(group)),
+                ),
+        )
+        .child(
+            div()
+                .max_w(px(224.))
+                .text_label_sm()
+                .text_color(c.text_standard)
+                .child(names),
+        );
+    match slide {
+        Some(direction) if direction != 0. => card
+            .with_animation(
+                SharedString::from(format!("reaction-preview-{direction}")),
+                Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint),
+                move |card, delta| {
+                    // From 12px on the side it came from, at 98%.
+                    card.ml(px(-12. * direction * (1. - delta)))
+                        .opacity(0.6 + 0.4 * delta)
+                },
+            )
+            .into_any_element(),
+        _ => card.into_any_element(),
+    }
 }
 
 /// CSS `color-mix(in srgb, a share, b)`.
@@ -720,8 +1650,10 @@ fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoEle
                         let id = SharedString::from(format!("audio-{}-{index}", row.id.to_hex()));
                         if !media.is_relay_media(&attachment.url) {
                             file_tile(row, index, attachment, rows, &c)
-                        } else if attachment.voice_note {
-                            media::voice_note(id, attachment, media, cx)
+                        } else if let Some(custom) =
+                            renderers::attachment(attachment, id.clone(), media, cx)
+                        {
+                            custom
                         } else {
                             media::audio_attachment(id, attachment, media, cx)
                         }
@@ -909,21 +1841,36 @@ fn mime_label(mime: Option<&str>) -> Option<String> {
         .then(|| format!("{} file", subtype.to_uppercase()))
 }
 
-fn delivery_notice(
-    row: &Arc<MessageRow>,
-    delivery: &buzz_relay_client::fold::LocalDelivery,
-    rows: &Rc<Rows>,
-    cx: &App,
-) -> impl IntoElement {
-    let c = cx.colors();
-    let text = if delivery.status == Delivery::Failed {
-        "Couldn’t send this message.".to_string()
-    } else {
-        match &delivery.error {
-            Some(error) => format!("Delivery not yet confirmed. {error}"),
-            None => "Delivery not yet confirmed.".to_string(),
+/// `deliveryFeedback` at `now` (ms): nothing for a seen message or in the
+/// first ten seconds.
+pub fn delivery_feedback(row: &MessageRow, now: u64) -> Option<String> {
+    let delivery = row.delivery.as_ref()?;
+    if delivery.status == Delivery::Seen || now < row.created_at * 1000 + DELIVERY_GRACE_MS {
+        return None;
+    }
+    Some(match (&delivery.status, &delivery.error) {
+        (Delivery::Failed, _) => "Couldn’t send this message.".to_string(),
+        (_, Some(error)) => format!("Delivery not yet confirmed. {error}"),
+        (_, None) => "Delivery not yet confirmed.".to_string(),
+    })
+}
+
+/// The delivery line under an unconfirmed send, once its grace period
+/// ends. The row redraws itself when it does.
+fn delivery_notice(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElement> {
+    let delivery = row.delivery.as_ref()?;
+    if delivery.status == Delivery::Seen {
+        return None;
+    }
+    let now = now_ms();
+    let due = row.created_at * 1000 + DELIVERY_GRACE_MS;
+    let Some(text) = delivery_feedback(row, now) else {
+        if now < due {
+            schedule_refresh(row.id, Duration::from_millis(due - now), cx);
         }
+        return None;
     };
+    let c = cx.colors();
     let mut notice = div()
         .flex()
         .flex_wrap()
@@ -933,7 +1880,9 @@ fn delivery_notice(
         .text_caption()
         .text_color(c.text_warning)
         .child(text);
-    if let Some(retry) = rows.actions.on_retry.clone() {
+    if matches!(delivery.status, Delivery::Failed | Delivery::Unknown)
+        && let Some(retry) = rows.actions.on_retry.clone()
+    {
         let target = row.clone();
         notice = notice.child(
             buzz_ui::Button::new(
@@ -945,18 +1894,37 @@ fn delivery_notice(
             .on_click(move |_, window, cx| retry(&target, window, cx)),
         );
     }
-    notice
+    Some(notice.into_any_element())
+}
+
+/// Redraws every window once `after` passes, once per row.
+fn schedule_refresh(id: EventId, after: Duration, cx: &App) {
+    thread_local! {
+        static PENDING: std::cell::RefCell<std::collections::HashSet<EventId>> =
+            std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+    if !PENDING.with_borrow_mut(|pending| pending.insert(id)) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(after).await;
+        PENDING.with_borrow_mut(|pending| pending.remove(&id));
+        cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
 }
 
 fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
     let c = *cx.colors();
     let profiles = &rows.directory.profiles;
+    let names = rows.names();
     let mut avatars = div().flex();
     for (index, participant) in row.participants.iter().take(3).enumerate() {
         let hex = participant.to_hex();
         let profile = profiles.get(&hex);
-        let mut avatar = Avatar::new(display_name(profiles, &hex)).size(AvatarSize::Small);
-        if profile.is_some_and(|p| p.is_agent) {
+        let name = names.display(&hex);
+        let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Small);
+        if names.is_library_agent(&hex) {
             avatar = avatar.squircle();
         }
         if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
@@ -964,10 +1932,15 @@ fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Into
         }
         avatars = avatars.child(
             div()
+                .id(SharedString::from(format!(
+                    "participant-{}-{index}",
+                    row.id.to_hex()
+                )))
                 .when(index > 0, |d| d.ml(px(-4.)))
                 .rounded_full()
                 .p(px(1.5))
                 .bg(c.surface_panel)
+                .tooltip(Tooltip::text(name))
                 .child(avatar),
         );
     }
@@ -1015,27 +1988,8 @@ fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Into
     summary
 }
 
-fn membership_text(
-    change: &buzz_relay_client::fold::MembershipChange,
-    profiles: &Profiles,
-) -> String {
-    use buzz_relay_client::fold::MembershipKind;
-    match change.kind {
-        MembershipKind::Joined => "joined".into(),
-        MembershipKind::Left => "left the channel".into(),
-        MembershipKind::Removed if change.actor != change.target => {
-            format!(
-                "was removed by {}",
-                display_name(profiles, &change.actor.to_hex())
-            )
-        }
-        MembershipKind::Removed => "was removed".into(),
-    }
-}
-
 /// Icon for a channel in headers and the sidebar.
 pub fn channel_icon(channel: &buzz_relay_client::ChannelSummary) -> IconName {
-    use buzz_relay_client::ChannelType;
     match channel.channel_type {
         Some(ChannelType::Dm) => IconName::ChatCircle,
         _ if channel.private => IconName::Lock,
@@ -1046,6 +2000,7 @@ pub fn channel_icon(channel: &buzz_relay_client::ChannelSummary) -> IconName {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_relay_client::fold::{LocalDelivery, Reaction};
     use core::prelude::v1::test;
 
     #[test]
@@ -1062,5 +2017,93 @@ mod tests {
             Some("PLAIN file")
         );
         assert_eq!(mime_label(Some("application/vnd.x+y")), None);
+    }
+
+    #[test]
+    fn delivery_waits_out_its_grace_period() {
+        let mut row = super::super::markdown::tests::row("hi");
+        row.created_at = 100;
+        row.delivery = Some(LocalDelivery {
+            status: Delivery::Sending,
+            error: None,
+        });
+        assert_eq!(delivery_feedback(&row, 100_000 + 9_999), None);
+        assert_eq!(
+            delivery_feedback(&row, 110_000).as_deref(),
+            Some("Delivery not yet confirmed.")
+        );
+        row.delivery = Some(LocalDelivery {
+            status: Delivery::Accepted,
+            error: Some("Slow relay.".into()),
+        });
+        assert_eq!(
+            delivery_feedback(&row, 120_000).as_deref(),
+            Some("Delivery not yet confirmed. Slow relay.")
+        );
+        row.delivery = Some(LocalDelivery {
+            status: Delivery::Failed,
+            error: None,
+        });
+        assert_eq!(
+            delivery_feedback(&row, 120_000).as_deref(),
+            Some("Couldn’t send this message.")
+        );
+        row.delivery = Some(LocalDelivery {
+            status: Delivery::Seen,
+            error: None,
+        });
+        assert_eq!(delivery_feedback(&row, 120_000), None);
+    }
+
+    #[test]
+    fn reactors_list_you_first_then_event_order() {
+        let (viewer, zed, amy) = (
+            buzz_identity::Identity::ephemeral().public_key(),
+            buzz_identity::Identity::ephemeral().public_key(),
+            buzz_identity::Identity::ephemeral().public_key(),
+        );
+        let profiles: Profiles = Arc::new(
+            [(zed, "Zed"), (amy, "Amy")]
+                .into_iter()
+                .map(|(k, n)| {
+                    (
+                        k.to_hex(),
+                        Arc::new(Profile {
+                            name: n.into(),
+                            ..Default::default()
+                        }),
+                    )
+                })
+                .collect(),
+        );
+        let names = super::super::identity::names(
+            &profiles,
+            &Default::default(),
+            &viewer.to_hex(),
+            None,
+            None,
+        );
+        let event = |author| Reaction {
+            id: EventId::from_byte_array([0; 32]),
+            author,
+        };
+        let group = ReactionGroup {
+            content: "👍".into(),
+            emoji: None,
+            events: vec![event(zed), event(viewer), event(amy), event(zed)],
+        };
+        let (list, mine) = reactor_names(&group, &viewer.to_hex(), &names);
+        assert!(mine);
+        assert_eq!(list, ["You", "Zed", "Amy"]);
+        assert_eq!(reaction_name(&group), ":+1:");
+    }
+
+    #[test]
+    fn sent_from_thread_links_open_the_root_in_its_thread() {
+        let root = EventId::from_byte_array([3; 32]);
+        let link = sent_from_thread_link("c-1", &root);
+        let parsed = buzz_relay_client::parse_buzz_link(&link).unwrap();
+        assert_eq!(parsed.message, Some(root));
+        assert_eq!(parsed.thread, Some(root));
     }
 }
