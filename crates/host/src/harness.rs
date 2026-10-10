@@ -1,71 +1,22 @@
-//! Finds the agent harnesses installed on this machine.
+//! The harnesses agents on this host can use, as buzz-app lists them
+//! (`src-tauri/src/agents.rs`, `harness_options`).
 //!
 //! Discovery uses the controller's tool PATH (the user's login-shell PATH
-//! plus common install locations), the same PATH agents launch with.
+//! plus common install locations), the same PATH agents launch with. Pi and
+//! Claude Code may also be installed into the host's own tools, under its
+//! state directory; a complete user install always wins over those.
 
-use crate::api::{Harness, HarnessKind, HarnessStatus};
+use crate::api::{
+    ClaudeSetup, ConfigurationPolicy, Harness, HarnessKind, HarnessOption, HarnessStatus,
+    ProviderOption, SelectorEnvironment,
+};
+use buzz_agent_controller::{
+    HarnessConfigurationPolicy, installed, installed_npm_tool, managed_tool,
+};
 /// The preset catalog (Hermes, Claude Code): labels, setup guides and hints
 /// for harnesses Buzz does not configure itself.
 pub use buzz_agent_controller::{HarnessPreset, harness_presets};
-use buzz_agent_controller::{harness_preset, installed, installed_npm_tool, managed_tool};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
-
-struct Spec {
-    kind: HarnessKind,
-    label: &'static str,
-    /// Executables the harness needs. The first one is the ACP worker.
-    requires: &'static [&'static str],
-    /// The controller resolves these commands itself; others are stored as
-    /// the absolute path of the worker.
-    named_command: Option<&'static str>,
-    preset: Option<&'static str>,
-    setup_hint: &'static str,
-}
-
-const SPECS: &[Spec] = &[
-    Spec {
-        kind: HarnessKind::BuzzAgent,
-        label: "Buzz Agent",
-        requires: &["buzz-agent", "buzz-dev-mcp"],
-        named_command: Some("buzz-agent"),
-        preset: None,
-        setup_hint: "Install buzz-agent and buzz-dev-mcp from block/buzz.",
-    },
-    Spec {
-        kind: HarnessKind::Goose,
-        label: "Goose",
-        requires: &["goose-acp"],
-        named_command: Some("goose"),
-        preset: None,
-        setup_hint: "Install goose-acp and configure Goose with `goose configure`.",
-    },
-    Spec {
-        kind: HarnessKind::Claude,
-        label: "Claude Code",
-        requires: &["claude-agent-acp", "claude", "node"],
-        named_command: None,
-        preset: Some("claude-agent-acp"),
-        setup_hint: "Install Claude Code and `@agentclientprotocol/claude-agent-acp` with npm, then sign in with `claude`.",
-    },
-    Spec {
-        kind: HarnessKind::Pi,
-        label: "Pi",
-        requires: &["buzz-pi-acp", "pi", "node"],
-        named_command: None,
-        preset: None,
-        setup_hint: "Install the Pi CLI and buzz-pi-acp with npm.",
-    },
-    Spec {
-        kind: HarnessKind::Hermes,
-        label: "Hermes Agent",
-        requires: &["hermes-acp"],
-        named_command: None,
-        preset: Some("hermes-acp"),
-        setup_hint: "Install Hermes with ACP support and configure it with `hermes model`.",
-    },
-];
 
 /// The listener every harness runs under.
 pub const LISTENER: &str = "buzz-acp";
@@ -89,6 +40,8 @@ const BUZZ_AGENT_PROVIDERS: &[Provider] = &[
     provider("databricks_v2", "Databricks v2", None),
     provider("openai", "OpenAI", Some("OPENAI_COMPAT_API_KEY")),
 ];
+/// Common IDs checked against Goose's provider registry; custom IDs remain
+/// editable.
 const GOOSE_PROVIDERS: &[Provider] = &[
     provider("anthropic", "Anthropic", Some("ANTHROPIC_API_KEY")),
     provider("openai", "OpenAI", Some("OPENAI_API_KEY")),
@@ -124,6 +77,299 @@ pub fn providers(kind: HarnessKind) -> &'static [Provider] {
     }
 }
 
+/// Where the host installs Pi, Claude Code and their Node.js: buzz-app's
+/// app data directory.
+pub fn tools_root(state_dir: &Path) -> &Path {
+    state_dir
+}
+
+/// Pi and Claude Code installs are supported here.
+pub const INSTALL_SUPPORTED: bool = cfg!(all(
+    any(target_os = "macos", target_os = "linux"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+));
+
+fn provider_options(list: &[Provider]) -> Vec<ProviderOption> {
+    list.iter()
+        .map(|provider| ProviderOption {
+            value: provider.id.to_string(),
+            label: provider.label.to_string(),
+        })
+        .collect()
+}
+
+/// Converts through JSON names so policy enums added upstream stay strings.
+fn policy(command: &str) -> Option<ConfigurationPolicy> {
+    let policy = HarnessConfigurationPolicy::for_command(command);
+    let json = serde_json::to_value(policy).ok()?;
+    let text = |key: &str| json.get(key)?.as_str().map(str::to_string);
+    Some(ConfigurationPolicy {
+        authentication: text("authentication")?,
+        provider: text("provider")?,
+        model: text("model")?,
+        selector_environment: policy.selector_environment.map(|selector| {
+            let json = serde_json::to_value(selector).unwrap_or_default();
+            SelectorEnvironment {
+                model: json["model"].as_str().unwrap_or_default().to_string(),
+                provider: json["provider"].as_str().unwrap_or_default().to_string(),
+            }
+        }),
+    })
+}
+
+fn npm_status(cli: bool, adapter: bool, node: bool) -> &'static str {
+    if !cli || !node {
+        "cli-needed"
+    } else if !adapter {
+        "adapter-needed"
+    } else {
+        "ready"
+    }
+}
+
+struct NpmTools {
+    cli: Option<PathBuf>,
+    adapter: Option<PathBuf>,
+    node: Option<PathBuf>,
+}
+
+/// An existing, complete user install always wins. Otherwise the host's
+/// own pair is used when its pinned Node can run its npm shims.
+fn npm_choice(user: NpmTools, managed: NpmTools) -> (Option<PathBuf>, &'static str, bool) {
+    let user_ready = user.cli.is_some() && user.adapter.is_some() && user.node.is_some();
+    let managed_selected = !user_ready && managed.adapter.is_some() && managed.node.is_some();
+    let selected = if user_ready {
+        user
+    } else if managed_selected {
+        NpmTools {
+            cli: managed.cli.or(user.cli),
+            ..managed
+        }
+    } else {
+        user
+    };
+    let status = npm_status(
+        selected.cli.is_some(),
+        selected.adapter.is_some(),
+        selected.node.is_some(),
+    );
+    (selected.adapter, status, managed_selected)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn pi_current(app_data: &Path) -> bool {
+    buzz_desktop::managed_npm::current(app_data)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn pi_current(_: &Path) -> bool {
+    true
+}
+
+/// Claude Code's tools and how to sign in to it.
+pub struct Claude {
+    pub setup: ClaudeSetup,
+    pub cli: Option<PathBuf>,
+    pub node: Option<PathBuf>,
+    pub adapter: Option<PathBuf>,
+}
+
+pub fn claude(app_data: &Path) -> Claude {
+    let cli = installed_npm_tool("claude");
+    let managed_cli = managed_tool(app_data, "claude");
+    let managed_node = managed_tool(app_data, "node");
+    let (adapter, status, managed) = npm_choice(
+        NpmTools {
+            cli: cli.clone(),
+            adapter: installed_npm_tool("claude-agent-acp"),
+            node: installed_npm_tool("node"),
+        },
+        NpmTools {
+            cli: managed_cli.clone(),
+            adapter: managed_tool(app_data, "claude-agent-acp"),
+            node: managed_node.clone(),
+        },
+    );
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    let cli = if managed { managed_cli.or(cli) } else { cli };
+    let node = managed.then_some(managed_node).flatten();
+    let login_command =
+        cli.as_ref()
+            .map(|cli| match node.as_ref().and_then(|node| node.parent()) {
+                Some(node_bin) => format!(
+                    "PATH={}:\"$PATH\" {} auth login",
+                    quote(node_bin),
+                    quote(cli)
+                ),
+                None => format!("{} auth login", quote(cli)),
+            });
+    Claude {
+        setup: ClaudeSetup {
+            status: status.into(),
+            install_supported: INSTALL_SUPPORTED,
+            login_command,
+        },
+        cli,
+        node,
+        adapter,
+    }
+}
+
+/// Editing suggestions and executable presence only; availability does not
+/// establish provider credentials or an ACP session.
+pub fn options(app_data: &Path) -> Vec<HarnessOption> {
+    let (pi, pi_status, pi_managed) = npm_choice(
+        NpmTools {
+            cli: installed("pi"),
+            adapter: installed("buzz-pi-acp"),
+            node: installed("node"),
+        },
+        NpmTools {
+            cli: managed_tool(app_data, "pi"),
+            adapter: managed_tool(app_data, "buzz-pi-acp"),
+            node: managed_tool(app_data, "node"),
+        },
+    );
+    let mut options = vec![
+        HarnessOption {
+            command: "buzz-agent".into(),
+            label: "Buzz Agent".into(),
+            available: true,
+            status: "ready".into(),
+            providers: provider_options(BUZZ_AGENT_PROVIDERS),
+            configuration_policy: policy("buzz-agent"),
+            ..Default::default()
+        },
+        HarnessOption {
+            command: "goose".into(),
+            label: "Goose".into(),
+            available: true,
+            status: "ready".into(),
+            providers: provider_options(GOOSE_PROVIDERS),
+            configuration_policy: policy("goose"),
+            ..Default::default()
+        },
+        HarnessOption {
+            command: pi.map_or_else(
+                || "buzz-pi-acp".into(),
+                |path| path.to_string_lossy().into_owned(),
+            ),
+            label: "Pi".into(),
+            available: pi_status == "ready",
+            status: pi_status.into(),
+            install_supported: Some(INSTALL_SUPPORTED),
+            update_supported: Some(pi_managed && pi_status == "ready" && !pi_current(app_data)),
+            // Pi reports signed-in providers through its model catalog.
+            providers: Vec::new(),
+            configuration_policy: policy("buzz-pi-acp"),
+            ..Default::default()
+        },
+    ];
+    options.extend(
+        harness_presets()
+            .iter()
+            .filter(|preset| preset.id != "claude")
+            .map(|preset| {
+                let command = installed(&preset.command);
+                HarnessOption {
+                    configuration_policy: policy(&preset.command),
+                    available: command.is_some(),
+                    status: if command.is_some() {
+                        "ready"
+                    } else {
+                        "cli-needed"
+                    }
+                    .into(),
+                    command: command.map_or_else(
+                        || preset.command.clone(),
+                        |path| path.to_string_lossy().into_owned(),
+                    ),
+                    label: preset.label.clone(),
+                    install_supported: Some(false),
+                    update_supported: Some(false),
+                    default_args: preset.args.clone(),
+                    providers: Vec::new(),
+                }
+            }),
+    );
+    let claude = claude(app_data);
+    options.push(HarnessOption {
+        configuration_policy: policy("claude-agent-acp"),
+        command: claude.adapter.map_or_else(
+            || "claude-agent-acp".into(),
+            |path| path.to_string_lossy().into_owned(),
+        ),
+        label: "Claude Code".into(),
+        available: claude.setup.status == "ready",
+        status: claude.setup.status,
+        install_supported: Some(claude.setup.install_supported),
+        update_supported: Some(false),
+        default_args: Vec::new(),
+        providers: Vec::new(),
+    });
+    options
+}
+
+/// The harness kind a command runs, by its executable name. `None` for a
+/// custom executable.
+pub fn kind_of(command: &str) -> Option<HarnessKind> {
+    let name = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+        .trim_end_matches(".exe");
+    match name {
+        "buzz-agent" => Some(HarnessKind::BuzzAgent),
+        "goose" | "goose-acp" => Some(HarnessKind::Goose),
+        "buzz-pi-acp" => Some(HarnessKind::Pi),
+        "claude-agent-acp" => Some(HarnessKind::Claude),
+        "hermes-acp" => Some(HarnessKind::Hermes),
+        _ => None,
+    }
+}
+
+/// A harness option's status.
+pub fn status(option: &HarnessOption) -> Option<HarnessStatus> {
+    match option.status.as_str() {
+        "ready" => Some(HarnessStatus::Ready),
+        "cli-needed" => Some(HarnessStatus::CliNeeded),
+        "adapter-needed" => Some(HarnessStatus::AdapterNeeded),
+        _ => None,
+    }
+}
+
+/// The options as [`Request::Harnesses`](crate::api::Request::Harnesses)
+/// answers them, for GUIs from before harness options. `claude` adds Claude
+/// Code's sign-in command.
+pub fn legacy(options: &[HarnessOption], claude: Option<&ClaudeSetup>) -> Vec<Harness> {
+    options
+        .iter()
+        .filter_map(|option| {
+            let kind = kind_of(&option.command)?;
+            let preset = buzz_agent_controller::harness_preset(&option.command);
+            let missing = match option.status.as_str() {
+                "ready" => Vec::new(),
+                "adapter-needed" => vec!["ACP adapter".into()],
+                _ => vec!["CLI".into()],
+            };
+            Some(Harness {
+                kind,
+                label: option.label.clone(),
+                command: option.available.then(|| option.command.clone()),
+                missing,
+                setup_hint: preset.map(|p| p.setup_hint.clone()).unwrap_or_default(),
+                setup_url: preset.map(|p| p.setup_url.clone()),
+                status: status(option),
+                install_supported: option.install_supported == Some(true),
+                update_supported: option.update_supported == Some(true),
+                login_command: (kind == HarnessKind::Claude)
+                    .then(|| claude.and_then(|setup| setup.login_command.clone()))
+                    .flatten(),
+            })
+        })
+        .collect()
+}
+
 /// Suggested effort levels (buzz-app's `effortChoices`); not evidence of
 /// what a model supports.
 pub fn efforts(kind: HarnessKind) -> &'static [&'static str] {
@@ -155,391 +401,92 @@ pub fn from_defaults_name(name: &str) -> Option<HarnessKind> {
     }
 }
 
-/// One npm-installed harness's tools: its CLI, its ACP adapter and the
-/// Node.js they run on.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NpmTools {
-    pub cli: Option<PathBuf>,
-    pub adapter: Option<PathBuf>,
-    pub node: Option<PathBuf>,
-}
-
-impl NpmTools {
-    fn status(&self) -> HarnessStatus {
-        if self.cli.is_none() || self.node.is_none() {
-            HarnessStatus::CliNeeded
-        } else if self.adapter.is_none() {
-            HarnessStatus::AdapterNeeded
-        } else {
-            HarnessStatus::Ready
-        }
-    }
-}
-
-/// buzz-app's `npm_choice`: a complete user install always wins. Otherwise
-/// the host's own install is used when its pinned Node can run its npm
-/// shims. Returns the tools in use, their status, and whether they are the
-/// host's own.
-pub fn npm_choice(user: NpmTools, managed: NpmTools) -> (NpmTools, HarnessStatus, bool) {
-    let user_ready = user.cli.is_some() && user.adapter.is_some() && user.node.is_some();
-    let managed_selected = !user_ready && managed.adapter.is_some() && managed.node.is_some();
-    let selected = if managed_selected {
-        NpmTools {
-            cli: managed.cli.or(user.cli),
-            ..managed
-        }
-    } else {
-        user
-    };
-    let status = selected.status();
-    (selected, status, managed_selected)
-}
-
-/// Pi's tools: on PATH, or the host's own install under `app_data`.
-fn pi_tools(app_data: &Path) -> (NpmTools, HarnessStatus, bool) {
-    npm_choice(
-        NpmTools {
-            cli: installed("pi"),
-            adapter: installed("buzz-pi-acp"),
-            node: installed("node"),
-        },
-        NpmTools {
-            cli: managed_tool(app_data, "pi"),
-            adapter: managed_tool(app_data, "buzz-pi-acp"),
-            node: managed_tool(app_data, "node"),
-        },
-    )
-}
-
-/// Claude Code's tools (buzz-app's `claude_setup`).
-pub struct ClaudeSetup {
-    pub tools: NpmTools,
-    pub status: HarnessStatus,
-    /// The host's own Node.js directory, put first on PATH when the host
-    /// installed Claude Code itself.
-    pub node_bin: Option<PathBuf>,
-}
-
-pub fn claude_setup(app_data: &Path) -> ClaudeSetup {
-    let user_cli = installed_npm_tool("claude");
-    let (mut tools, status, managed) = npm_choice(
-        NpmTools {
-            cli: user_cli.clone(),
-            adapter: installed_npm_tool("claude-agent-acp"),
-            node: installed_npm_tool("node"),
-        },
-        NpmTools {
-            cli: managed_tool(app_data, "claude"),
-            adapter: managed_tool(app_data, "claude-agent-acp"),
-            node: managed_tool(app_data, "node"),
-        },
-    );
-    if !managed {
-        tools.cli = user_cli;
-    }
-    let node_bin = if managed {
-        tools
-            .node
-            .as_ref()
-            .and_then(|node| node.parent())
-            .map(Path::to_path_buf)
-    } else {
-        None
-    };
-    ClaudeSetup {
-        tools,
-        status,
-        node_bin,
-    }
-}
-
-/// The command that signs in to Claude Code, quoted for a POSIX shell.
-pub fn login_command(cli: &Path, node_bin: Option<&Path>) -> String {
-    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
-    match node_bin {
-        Some(bin) => format!("PATH={}:\"$PATH\" {} auth login", quote(bin), quote(cli)),
-        None => format!("{} auth login", quote(cli)),
-    }
-}
-
-/// Asks Claude Code whether it is signed in: `claude auth status` within
-/// five seconds. `Some(false)` only when it says so; `None` when unsure.
-pub async fn claude_signed_in(cli: &Path, path: &std::ffi::OsStr) -> Option<bool> {
-    let (output, status) =
-        run_output(cli, &["auth", "status"], Duration::from_secs(5), path, 4096).await?;
-    let logged_in = serde_json::from_str::<serde_json::Value>(&output)
-        .ok()?
-        .get("loggedIn")?
-        .as_bool()?;
-    match (status.code(), logged_in) {
-        (Some(0), true) => Some(true),
-        (Some(1), false) => Some(false),
-        _ => None,
-    }
-}
-
-/// Runs `executable` with `PATH` set and stdin closed, reading at most
-/// `max_output` bytes of stdout before `deadline`; its whole process group
-/// is killed otherwise. buzz-app's `host_command::run_output`.
-async fn run_output(
-    executable: &Path,
-    args: &[&str],
-    deadline: Duration,
-    path: &std::ffi::OsStr,
-    max_output: u64,
-) -> Option<(String, std::process::ExitStatus)> {
-    use tokio::io::AsyncReadExt;
-    let mut command = tokio::process::Command::new(executable);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    if !path.is_empty() {
-        command.env("PATH", path);
-    }
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command.spawn().ok()?;
-    let group = child.id();
-    let stdout = child.stdout.take()?;
-    let output = tokio::time::timeout(deadline, async {
-        let mut bytes = Vec::new();
-        stdout
-            .take(max_output + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .ok()?;
-        if bytes.len() as u64 > max_output {
-            return None;
-        }
-        let status = child.wait().await.ok()?;
-        Some((bytes, status))
-    })
-    .await;
-    if let Ok(Some((bytes, status))) = output {
-        return Some((String::from_utf8(bytes).ok()?, status));
-    }
-    #[cfg(unix)]
-    if let Some(group) = group {
-        // SAFETY: signals the process group this probe created.
-        unsafe {
-            libc::kill(-(group as i32), libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-    None
-}
-
-/// What an npm harness still needs, by executable name.
-fn npm_missing(tools: &NpmTools, cli: &str, adapter: &str) -> Vec<String> {
-    [
-        (tools.adapter.is_none(), adapter),
-        (tools.cli.is_none(), cli),
-        (tools.node.is_none(), "node"),
-    ]
-    .into_iter()
-    .filter(|(missing, _)| *missing)
-    .map(|(_, name)| name.to_string())
-    .collect()
-}
-
-/// Blocks until login-shell PATH discovery finishes (at most ~15 s, once per
-/// process). `app_data` holds the harnesses this host installed itself.
-pub fn detect(app_data: &Path) -> Vec<Harness> {
-    buzz_agent_controller::prepare_tools_path();
-    let listener_missing = installed(LISTENER).is_none();
-    SPECS
-        .iter()
-        .map(|spec| {
-            let preset = spec.preset.and_then(harness_preset);
-            let mut harness = Harness {
-                kind: spec.kind,
-                label: preset.map_or(spec.label, |p| p.label.as_str()).to_string(),
-                command: None,
-                missing: Vec::new(),
-                setup_hint: preset
-                    .map_or(spec.setup_hint, |p| p.setup_hint.as_str())
-                    .to_string(),
-                setup_url: preset.map(|p| p.setup_url.clone()),
-                status: None,
-                install_supported: false,
-                update_supported: false,
-                login_command: None,
-            };
-            let (worker, status) = match spec.kind {
-                HarnessKind::Pi => {
-                    let (tools, status, managed) = pi_tools(app_data);
-                    harness.missing = npm_missing(&tools, "pi", "buzz-pi-acp");
-                    harness.install_supported = crate::install::supported();
-                    harness.update_supported = managed
-                        && status == HarnessStatus::Ready
-                        && !crate::install::current(app_data);
-                    (tools.adapter, status)
-                }
-                HarnessKind::Claude => {
-                    let setup = claude_setup(app_data);
-                    harness.missing = npm_missing(&setup.tools, "claude", "claude-agent-acp");
-                    harness.install_supported = crate::install::supported();
-                    harness.login_command = setup
-                        .tools
-                        .cli
-                        .as_deref()
-                        .map(|cli| login_command(cli, setup.node_bin.as_deref()));
-                    (setup.tools.adapter, setup.status)
-                }
-                _ => {
-                    harness.missing = spec
-                        .requires
-                        .iter()
-                        .filter(|name| installed(name).is_none())
-                        .map(|name| name.to_string())
-                        .collect();
-                    let status = if harness.missing.is_empty() {
-                        HarnessStatus::Ready
-                    } else {
-                        HarnessStatus::CliNeeded
-                    };
-                    (installed(spec.requires[0]), status)
-                }
-            };
-            // Without the listener nothing runs, whatever the harness has.
-            if listener_missing {
-                harness.missing.insert(0, LISTENER.into());
-            }
-            harness.status = Some(if listener_missing {
-                HarnessStatus::CliNeeded
-            } else {
-                status
-            });
-            let command = match (spec.named_command, &worker) {
-                (Some(name), Some(_)) => Some(name.to_string()),
-                (None, Some(path)) => Some(path.to_string_lossy().into_owned()),
-                (_, None) => None,
-            };
-            harness.command = harness.missing.is_empty().then_some(command).flatten();
-            harness
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tools(cli: bool, adapter: bool, node: bool, root: &str) -> NpmTools {
-        let path = |name: &str, on: bool| on.then(|| PathBuf::from(format!("{root}/{name}")));
+        let path = |name: &str| Some(PathBuf::from(format!("{root}/{name}")));
         NpmTools {
-            cli: path("cli", cli),
-            adapter: path("adapter", adapter),
-            node: path("node", node),
+            cli: cli.then(|| path("cli")).flatten(),
+            adapter: adapter.then(|| path("adapter")).flatten(),
+            node: node.then(|| path("node")).flatten(),
         }
     }
 
     #[test]
-    fn a_complete_user_install_wins_over_the_hosts_own() {
-        let (chosen, status, managed) = npm_choice(
-            tools(true, true, true, "/usr"),
-            tools(true, true, true, "/data"),
+    fn a_complete_user_install_wins_over_the_host_tools() {
+        let (adapter, status, managed) = npm_choice(
+            tools(true, true, true, "/user"),
+            tools(true, true, true, "/host"),
         );
-        assert_eq!(status, HarnessStatus::Ready);
+        assert_eq!(adapter, Some("/user/adapter".into()));
+        assert_eq!(status, "ready");
         assert!(!managed);
-        assert_eq!(chosen.adapter, Some(PathBuf::from("/usr/adapter")));
     }
 
     #[test]
-    fn the_hosts_own_install_fills_in_for_an_incomplete_user_one() {
-        let (chosen, status, managed) = npm_choice(
-            tools(true, false, true, "/usr"),
-            tools(true, true, true, "/data"),
+    fn host_tools_fill_in_an_incomplete_user_install() {
+        let (adapter, status, managed) = npm_choice(
+            tools(true, false, true, "/user"),
+            tools(false, true, true, "/host"),
         );
-        assert_eq!(status, HarnessStatus::Ready);
+        assert_eq!(adapter, Some("/host/adapter".into()));
+        // The user's CLI runs with the host's adapter and Node.
+        assert_eq!(status, "ready");
         assert!(managed);
-        assert_eq!(chosen.node, Some(PathBuf::from("/data/node")));
-        // Its CLI falls back to the user's.
-        let (chosen, _, managed) = npm_choice(
-            tools(true, false, false, "/usr"),
-            tools(false, true, true, "/data"),
-        );
-        assert!(managed);
-        assert_eq!(chosen.cli, Some(PathBuf::from("/usr/cli")));
     }
 
     #[test]
-    fn status_names_what_is_missing() {
-        let none = NpmTools::default;
-        let status = |user| npm_choice(user, none()).1;
-        assert_eq!(
-            status(tools(false, true, true, "/usr")),
-            HarnessStatus::CliNeeded
-        );
-        assert_eq!(
-            status(tools(true, true, false, "/usr")),
-            HarnessStatus::CliNeeded
-        );
-        assert_eq!(
-            status(tools(true, false, true, "/usr")),
-            HarnessStatus::AdapterNeeded
-        );
-        assert_eq!(
-            npm_missing(&tools(true, false, false, "/usr"), "pi", "buzz-pi-acp"),
-            ["buzz-pi-acp", "node"]
-        );
+    fn statuses_name_what_is_missing() {
+        assert_eq!(npm_status(false, true, true), "cli-needed");
+        assert_eq!(npm_status(true, true, false), "cli-needed");
+        assert_eq!(npm_status(true, false, true), "adapter-needed");
+        assert_eq!(npm_status(true, true, true), "ready");
     }
 
-    /// A fake `claude` answering `auth status` with `json` and `code`.
-    #[cfg(unix)]
-    async fn auth(json: &str, code: u8) -> Option<bool> {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let cli = dir.path().join("claude");
-        let source = dir.path().join("claude.source");
-        std::fs::write(
-            &source,
-            format!("#!/bin/sh\nprintf '%s' '{json}'\nexit {code}\n"),
-        )
-        .unwrap();
-        // Copied by a child process, so no test thread's fork holds the
-        // executable open for writing (ETXTBSY).
-        assert!(
-            std::process::Command::new("cp")
-                .arg(&source)
-                .arg(&cli)
-                .status()
+    #[test]
+    fn options_list_buzz_apps_harnesses_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        let options = options(root.path());
+        let labels: Vec<_> = options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Buzz Agent", "Goose", "Pi", "Hermes Agent", "Claude Code"]
+        );
+        assert_eq!(options[0].providers[0].value, "databricks_v2");
+        assert!(options[0].configuration_policy.is_some());
+        assert_eq!(
+            options[1]
+                .configuration_policy
+                .as_ref()
                 .unwrap()
-                .success()
+                .authentication,
+            "harnessWithOverrides"
         );
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
-        claude_signed_in(&cli, std::ffi::OsStr::new("/usr/bin:/bin")).await
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn claude_sign_in_is_confirmed_only_by_a_matching_exit_code() {
-        assert_eq!(auth(r#"{"loggedIn":true}"#, 0).await, Some(true));
-        assert_eq!(auth(r#"{"loggedIn":false}"#, 1).await, Some(false));
-        assert_eq!(auth(r#"{"loggedIn":true}"#, 1).await, None);
-        assert_eq!(auth("not json", 0).await, None);
-        assert_eq!(
-            claude_signed_in(Path::new("/nonexistent/claude"), std::ffi::OsStr::new("")).await,
-            None
-        );
+        assert_eq!(kind_of(&options[2].command), Some(HarnessKind::Pi));
     }
 
     #[test]
-    fn login_commands_quote_paths_and_put_the_hosts_node_first() {
+    fn legacy_harnesses_carry_status_and_sign_in() {
+        let root = tempfile::tempdir().unwrap();
+        let options = options(root.path());
+        let setup = ClaudeSetup {
+            status: "ready".into(),
+            install_supported: true,
+            login_command: Some("'claude' auth login".into()),
+        };
+        let list = legacy(&options, Some(&setup));
+        let find = |kind| list.iter().find(|h| h.kind == kind).unwrap();
         assert_eq!(
-            login_command(Path::new("/usr/bin/claude"), None),
-            "'/usr/bin/claude' auth login"
+            find(HarnessKind::BuzzAgent).status,
+            Some(HarnessStatus::Ready)
         );
         assert_eq!(
-            login_command(
-                Path::new("/data/claude-tools/bin/claude"),
-                Some(Path::new("/data/it's/node/bin"))
-            ),
-            "PATH='/data/it'\\''s/node/bin':\"$PATH\" '/data/claude-tools/bin/claude' auth login"
+            find(HarnessKind::Claude).login_command.as_deref(),
+            Some("'claude' auth login")
         );
+        assert_eq!(find(HarnessKind::Goose).login_command, None);
+        assert_eq!(find(HarnessKind::Pi).install_supported, INSTALL_SUPPORTED);
     }
 }

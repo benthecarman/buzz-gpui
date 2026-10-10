@@ -113,7 +113,7 @@ async fn create_save_and_delete_over_rpc() {
         relay_url: "wss://relay.example.com".into(),
         owner: owner.clone(),
     };
-    let Response::Prepared { id, pubkey } = client.request(prepare()).await.unwrap() else {
+    let Response::Prepared { id, pubkey, .. } = client.request(prepare()).await.unwrap() else {
         panic!("expected prepared");
     };
     let Response::Prepared { pubkey: again, .. } = client.request(prepare()).await.unwrap() else {

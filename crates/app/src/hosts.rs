@@ -1,6 +1,8 @@
 //! Every agent host the GUI manages: the one embedded in this process and any
 //! remote `buzzd` instances from the config file.
 
+mod sign_in;
+
 use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
 use crate::runtime::Runtime;
 use buzz_host::api::{
@@ -29,6 +31,10 @@ pub(crate) const AGENT_KEY_SERVICE: &str = "dev.local.buzz.foundation.agents";
 /// The embedded host's server, and the host itself, which sign-out asks
 /// to stop its agents.
 type Embedded = (tokio::task::JoinHandle<std::io::Result<()>>, Arc<AgentHost>);
+
+/// How long a request that waits on a person (a keyring prompt, a browser
+/// sign-in) or an installer may take.
+pub const PERSON_WAIT: Duration = Duration::from_secs(600);
 
 pub struct Hosts {
     pub hosts: Vec<Entity<HostConnection>>,
@@ -294,12 +300,47 @@ struct Signing {
 
 type SigningSlot = Arc<Mutex<Option<Signing>>>;
 
-struct Answers(SigningSlot);
+/// The client a host's asks may send requests back over, set once it is
+/// spawned.
+type ClientSlot = Arc<std::sync::OnceLock<std::sync::Weak<HostClient<HostProtocol>>>>;
+
+struct Answers {
+    signing: SigningSlot,
+    /// Opens pages in the browser, on the UI thread.
+    browser: futures::channel::mpsc::UnboundedSender<String>,
+    /// The host runs on another machine, so its sign-in redirects to a
+    /// loopback port there, not here.
+    remote: bool,
+    client: ClientSlot,
+}
 
 impl ClientHandler<HostProtocol> for Answers {
     fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        let HostAsk::AttestAgent { agent_pubkey } = ask;
-        let mut slot = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        let agent_pubkey = match ask {
+            HostAsk::AttestAgent { agent_pubkey } => agent_pubkey,
+            HostAsk::OpenUrl { url } => {
+                let browser = self.browser.clone();
+                let client = self.client.get().cloned();
+                let remote = self.remote;
+                return Box::pin(async move {
+                    if remote {
+                        let client = client
+                            .ok_or_else(|| RpcError::Failed("Not connected to the host".into()))?;
+                        sign_in::relay(&url, client)
+                            .await
+                            .map_err(RpcError::Failed)?;
+                    }
+                    browser
+                        .unbounded_send(url)
+                        .map_err(|_| RpcError::Failed("Could not open the browser".into()))?;
+                    Ok(HostAnswer::Opened)
+                });
+            }
+        };
+        let mut slot = self
+            .signing
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let answer = match slot.as_mut() {
             Some(signing) if signing.pubkeys.contains(&agent_pubkey) => {
                 signing.pubkeys.remove(&agent_pubkey);
@@ -327,15 +368,30 @@ impl HostConnection {
     ) -> Entity<Self> {
         let runtime = Runtime::handle(cx);
         let signing = SigningSlot::default();
+        let slot = ClientSlot::default();
+        let (browser, pages) = futures::channel::mpsc::unbounded();
         let client = Arc::new(HostClient::<HostProtocol>::spawn(
             &runtime,
             connector,
-            Arc::new(Answers(signing.clone())),
+            Arc::new(Answers {
+                signing: signing.clone(),
+                browser,
+                remote: remote.is_some(),
+                client: slot.clone(),
+            }),
             HostClientOptions {
                 token,
                 ..Default::default()
             },
         ));
+        let _ = slot.set(Arc::downgrade(&client));
+        cx.spawn(async move |cx| {
+            let mut pages = pages;
+            while let Some(url) = pages.next().await {
+                cx.update(|cx| cx.open_url(&url));
+            }
+        })
+        .detach();
         cx.new(|cx| {
             let watch = Self::watch(&client, &runtime, cx);
             Self {
@@ -363,7 +419,7 @@ impl HostConnection {
     ) -> Task<()> {
         enum Update {
             State(ConnectionState),
-            Event(ClientEvent<HostEvent>),
+            Event(Box<ClientEvent<HostEvent>>),
         }
         let (sender, mut updates) = futures::channel::mpsc::unbounded();
         let mut states = client.state();
@@ -376,9 +432,9 @@ impl HostConnection {
                         Err(_) => return,
                     },
                     event = events.recv() => match event {
-                        Ok(event) => Update::Event(event),
+                        Ok(event) => Update::Event(Box::new(event)),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            Update::Event(ClientEvent::Resync)
+                            Update::Event(Box::new(ClientEvent::Resync))
                         }
                         Err(_) => return,
                     },
@@ -392,19 +448,21 @@ impl HostConnection {
             while let Some(update) = updates.next().await {
                 let refresh = this.update(cx, |this, cx| {
                     let refresh = match update {
+                        Update::Event(event) => match *event {
+                            ClientEvent::Connected(_) | ClientEvent::Resync => true,
+                            ClientEvent::Event {
+                                body: HostEvent::Agents(snapshot),
+                                ..
+                            } => {
+                                this.apply(snapshot);
+                                false
+                            }
+                            ClientEvent::Disconnected => false,
+                        },
                         Update::State(state) => {
                             this.state = state;
                             false
                         }
-                        Update::Event(ClientEvent::Connected(_) | ClientEvent::Resync) => true,
-                        Update::Event(ClientEvent::Event {
-                            body: HostEvent::Agents(snapshot),
-                            ..
-                        }) => {
-                            this.apply(snapshot);
-                            false
-                        }
-                        Update::Event(ClientEvent::Disconnected) => false,
                     };
                     cx.notify();
                     refresh
@@ -505,7 +563,8 @@ impl HostConnection {
             ..Install::default()
         };
         cx.notify();
-        let response = self.request(Request::InstallHarness { kind }, cx);
+        // Downloads and npm installs take minutes.
+        let response = self.request_within(Request::InstallHarness { kind }, PERSON_WAIT * 3, cx);
         cx.spawn(async move |this, cx| {
             let response = response.await;
             let refresh = this.update(cx, |this, cx| {
@@ -541,6 +600,32 @@ impl HostConnection {
             HarnessKind::Claude => &mut self.claude_install,
             _ => &mut self.pi_install,
         }
+    }
+
+    /// As [`Self::request`], waiting up to `timeout`: for requests that
+    /// wait on a person (a sign-in, a keyring prompt) or an installer.
+    pub fn request_within(
+        &self,
+        request: Request,
+        timeout: Duration,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Response, RpcError>> {
+        let client = self.client.clone();
+        let response =
+            Runtime::handle(cx).spawn(async move { client.request_within(request, timeout).await });
+        cx.spawn(async move |this, cx| {
+            let response = response
+                .await
+                .unwrap_or_else(|_| Err(RpcError::Failed("Request was cancelled".into())));
+            if let Ok(Response::Agents(snapshot)) = &response {
+                let snapshot = snapshot.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.apply(snapshot);
+                    cx.notify();
+                });
+            }
+            response
+        })
     }
 
     /// Loads the host's agent defaults into [`Self::defaults`].

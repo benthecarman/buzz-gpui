@@ -98,7 +98,7 @@ async fn lifecycle(f: Fixture, scratch: &Path) {
     let log = |id: &str| state.join(format!("state/agent-controller/logs/{id}.log"));
 
     // Create: the host makes the key, alice attests it.
-    let Response::Prepared { id, pubkey } = host
+    let Response::Prepared { id, pubkey, .. } = host
         .request(Request::CreatePrepare {
             request_id: "e2e".into(),
             relay_url: f.relay_url.clone(),
@@ -148,9 +148,34 @@ async fn lifecycle(f: Fixture, scratch: &Path) {
     )
     .await;
 
+    // Only its owner may start it.
+    let Response::Agents(refused) = host
+        .request(Request::Action {
+            id: id.clone(),
+            action: AgentAction::Start,
+            replay_floor: None,
+            owner: Some(Identity::ephemeral().pubkey_hex()),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected agents");
+    };
+    let refused = refused.agents.iter().find(|a| a.id == id).unwrap();
+    assert_ne!(refused.status, ProcessStatus::Running);
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("different Buzz identity")),
+        "{refused:?}"
+    );
+
     host.request(Request::Action {
         id: id.clone(),
         action: AgentAction::Start,
+        replay_floor: None,
+        owner: Some(f.alice.pubkey_hex()),
     })
     .await
     .unwrap();
@@ -241,6 +266,8 @@ async fn lifecycle(f: Fixture, scratch: &Path) {
     host.request(Request::Action {
         id: id.clone(),
         action: AgentAction::Stop,
+        replay_floor: None,
+        owner: None,
     })
     .await
     .unwrap();

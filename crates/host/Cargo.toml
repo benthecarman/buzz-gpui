@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 buzz-agent-controller.workspace = true
 buzz-credential-store.workspace = true
+buzz-desktop.workspace = true
 buzz-host-rpc = { path = "../host-rpc" }
 base64 = "0.22"
 futures = "0.3"
@@ -22,10 +23,12 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "io-util"] }
 tracing = "0.1"
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
 [dev-dependencies]
+rmp-serde = "1"
 buzz-identity = { path = "../identity" }
 buzz-relay-client = { path = "../relay" }
 secp256k1 = { version = "0.31", features = ["rand", "global-context"] }

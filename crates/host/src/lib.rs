@@ -4,14 +4,19 @@
 //! a dedicated thread and every operation is a job sent to that thread. The
 //! thread also watches process status, so GUIs receive changes they did not
 //! cause (an agent crashing, finishing a restore) without polling.
+//!
+//! Waits outside the controller (OS credential prompts, Pi checks, sign-in,
+//! installers) happen between jobs, as in buzz-app's native host, so Stop
+//! and other requests stay answerable while a start waits.
 
 pub mod api;
 pub mod credentials;
 pub mod harness;
 mod import;
-mod install;
 mod models;
 mod profile;
+mod setup;
+mod start;
 
 use api::{
     AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
@@ -22,7 +27,8 @@ use buzz_agent_controller::{Action, Controller, Imports, NewAgent, RuntimeBundle
 use buzz_host_rpc::{EventSource, HostHandler, HostInfo, Peer, RpcError};
 use futures::future::BoxFuture;
 pub use import::Asker;
-use std::collections::BTreeMap;
+use start::{MentionReplay, PendingStart};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -37,7 +43,8 @@ pub fn dispatch_supervisor() {
 
 pub struct HostConfig {
     pub info: HostInfo,
-    /// Holds the controller's store, run directories and locks.
+    /// Holds the controller's store, run directories and locks, and the
+    /// host's own installs of Pi and Claude Code.
     pub state_dir: PathBuf,
     /// Default working directory for new agents.
     pub workspace: PathBuf,
@@ -59,24 +66,46 @@ pub struct AgentHost {
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<(u64, HostEvent)>,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// The state directory, which also holds the harnesses this host
-    /// installs itself (buzz-app's app-data directory).
-    app_data: PathBuf,
-    /// One harness install at a time; stopped with the host.
-    setup: install::Setup,
+    /// The runtime the host started in, for work its own thread starts.
+    runtime: tokio::runtime::Handle,
+    /// One model lookup or sign-in at a time, by ticket.
+    models: buzz_desktop::agent_models::ModelHost,
+    /// One harness install at a time.
+    setup: buzz_desktop::harness_setup::HarnessSetup,
+    state_dir: PathBuf,
+    legacy_dir: Option<PathBuf>,
+    /// Loopback ports of sign-ins this host started, which a GUI may
+    /// forward a browser callback to.
+    sign_ins: std::sync::Mutex<BTreeMap<u16, std::time::Instant>>,
 }
 
 struct Owner {
     controller: Controller,
     credentials: Arc<dyn Credentials>,
     workspace: PathBuf,
+    state_dir: PathBuf,
     /// The pending create: request ID and its generated key.
     creating: Option<(String, Arc<NewAgent>)>,
     imports: Imports,
     /// The import preview a commit must match.
     previewed: Option<import::Previewed>,
     legacy_dir: Option<PathBuf>,
-    state_dir: PathBuf,
+    /// Problems reading earlier Buzz installs, shown on the Agents page.
+    inventory_warnings: Vec<String>,
+    /// Starts waiting on a credential, a Pi check or the owner check.
+    starts: BTreeMap<String, PendingStart>,
+    /// Agents that start with the host, not yet admitted, and the mention
+    /// replay attached to them meanwhile.
+    queued: BTreeMap<String, Option<MentionReplay>>,
+    next_start: u64,
+    /// Agents with an explicit Start or Stop since the host opened; a
+    /// queued restore skips them.
+    acted: BTreeSet<String>,
+    /// Profile publications in flight, one per agent.
+    publishing: BTreeSet<String>,
+    log_challenges: BTreeMap<String, start::LogChallenge>,
+    /// Refuses a start while old Buzz runs; replaced in tests.
+    legacy_check: fn() -> Result<(), String>,
     last: Option<AgentsSnapshot>,
     seq: u64,
     events: broadcast::Sender<(u64, HostEvent)>,
@@ -115,7 +144,19 @@ impl AgentHost {
         if let Err(error) = buzz_agent_controller::ensure_buzz_cli_skill(&config.workspace) {
             tracing::warn!(%error, "could not install the buzz CLI skill");
         }
-        let store = Store::open(config.state_dir.join("agent-controller"))?;
+        let mut store = Store::open(config.state_dir.join("agent-controller"))?;
+        let mut inventory_warnings = match &config.legacy_dir {
+            Some(parent) => store.migrate_legacy(parent),
+            None => Vec::new(),
+        };
+        inventory_warnings.extend(store.clean_imported_prompts()?);
+        let queued = store
+            .snapshot()?
+            .agents
+            .into_iter()
+            .filter(|agent| agent.start_on_app_launch)
+            .map(|agent| (agent.id, None))
+            .collect();
         let controller = Controller::new(
             store,
             config.credentials.clone(),
@@ -128,26 +169,29 @@ impl AgentHost {
             controller,
             credentials: config.credentials,
             workspace: config.workspace,
+            state_dir: config.state_dir.clone(),
             creating: None,
             imports: Imports::default(),
             previewed: None,
-            legacy_dir: config.legacy_dir,
-            state_dir: config.state_dir,
+            legacy_dir: config.legacy_dir.clone(),
+            inventory_warnings,
+            starts: BTreeMap::new(),
+            queued,
+            next_start: 0,
+            acted: BTreeSet::new(),
+            publishing: BTreeSet::new(),
+            log_challenges: BTreeMap::new(),
+            legacy_check: start::refuse_legacy,
             last: None,
             seq: 0,
             events: events.clone(),
             gate,
         };
         let interval = config.watch_interval;
-        let app_data = owner.state_dir.clone();
+        let open = matches!(owner.gate, Gate::Open);
         let thread = std::thread::Builder::new()
             .name("agent-host".into())
             .spawn(move || {
-                if matches!(owner.gate, Gate::Open)
-                    && let Err(error) = owner.controller.restore()
-                {
-                    tracing::warn!(%error, "could not restore agents");
-                }
                 owner.publish();
                 loop {
                     match queue.recv_timeout(interval) {
@@ -169,9 +213,19 @@ impl AgentHost {
             jobs,
             events,
             thread: Some(thread),
-            app_data,
-            setup: install::Setup::default(),
+            runtime: tokio::runtime::Handle::current(),
+            models: buzz_desktop::agent_models::ModelHost::new(Ok(config
+                .state_dir
+                .join("agent-controller"))),
+            setup: Default::default(),
+            state_dir: config.state_dir,
+            legacy_dir: config.legacy_dir,
+            sign_ins: Default::default(),
         });
+        // A GUI's host restores once someone signs in.
+        if open {
+            host.restore();
+        }
         host.publish_pending_profiles();
         Ok(host)
     }
@@ -179,7 +233,20 @@ impl AgentHost {
     /// Names the key signed in to the GUI. The first call starts that key's
     /// agents marked to start with the host.
     pub fn set_owner(&self, viewer: String) {
-        let _ = self.jobs.send(Box::new(move |owner| owner.sign_in(viewer)));
+        let (first, signed_in) = tokio::sync::oneshot::channel();
+        let _ = self.jobs.send(Box::new(move |owner| {
+            let _ = first.send(owner.sign_in(viewer));
+        }));
+        // Restores off the host thread, which must never hold the last
+        // reference to the host.
+        let host = self.weak.clone();
+        self.runtime.spawn(async move {
+            if signed_in.await == Ok(true)
+                && let Some(host) = host.upgrade()
+            {
+                host.restore();
+            }
+        });
     }
 
     /// Stops every agent this host runs and waits until they have stopped
@@ -213,6 +280,14 @@ impl AgentHost {
             .map_err(RpcError::Failed)
     }
 
+    /// As [`Self::run`], with the error as text.
+    async fn run_text<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut Owner) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        self.run(job).await.map_err(|error| error.to_string())
+    }
+
     /// Serves a request that needs nothing from the GUI. Imports that need
     /// an owner attestation fail; use [`Self::request_with`].
     pub async fn request(&self, request: Request) -> Result<Response, RpcError> {
@@ -226,46 +301,46 @@ impl AgentHost {
         asker: Option<Arc<dyn Asker>>,
     ) -> Result<Response, RpcError> {
         match request {
-            Request::Models { id, revision, edit } => {
-                self.models(id, revision, edit).await.map(Response::Models)
-            }
+            Request::Models { id, revision, edit } => self
+                .legacy_models(id, revision, edit, asker)
+                .await
+                .map(Response::Models),
+            Request::TestConnection { id, revision, edit } => self
+                .legacy_test(id, revision, edit)
+                .await
+                .map(|model| Response::Tested { model }),
+            Request::DisconnectDatabricks { workspace } => self
+                .legacy_disconnect(workspace)
+                .await
+                .map(|_| Response::Disconnected),
+            Request::ModelsBegin => self.models.begin().map(Response::Ticket).map_err(failed),
+            Request::ModelsCancel { ticket } => self
+                .models
+                .cancel(ticket)
+                .map(|_| Response::Done)
+                .map_err(failed),
+            Request::ModelsRun { ticket, request } => self
+                .run_models(ticket, request, asker)
+                .await
+                .map(Response::Catalog),
+            Request::SignInCallback { port, target } => self
+                .sign_in_callback(port, target)
+                .await
+                .map(Response::SignInPage),
             Request::Defaults => {
                 self.run(|owner| owner.defaults().map(Response::Defaults))
                     .await
             }
             Request::SaveDefaults { edit } => {
-                self.run(move |owner| {
-                    let json = serde_json::to_value(&edit).map_err(|_| "Invalid agent defaults")?;
-                    let edit: buzz_agent_controller::AgentDefaultsEdit =
-                        serde_json::from_value(json)
-                            .map_err(|error| format!("Invalid agent defaults: {error}"))?;
-                    // Agents that inherit a changed default restart with it.
-                    let (restarted, failures) = owner
-                        .save_and_restart(|owner| owner.controller.save_defaults(edit).map(drop))?;
-                    let mut defaults = owner.defaults()?;
-                    defaults.restarted = Some(restarted);
-                    defaults.restart_failures = Some(failures);
-                    Ok(Response::Defaults(defaults))
-                })
-                .await
-            }
-            Request::TestConnection { id, revision, edit } => self
-                .test_connection(id, revision, edit)
-                .await
-                .map(|model| Response::Tested { model }),
-            Request::DisconnectDatabricks { workspace } => {
-                self.run(move |owner| {
-                    let workspace = match workspace.as_str() {
-                        "" => owner
-                            .controller
-                            .inherited_workspace()?
-                            .ok_or("Agent defaults no longer set a Databricks workspace")?,
-                        _ => workspace,
-                    };
-                    owner.controller.disconnect(&workspace)?;
-                    Ok(Response::Disconnected)
-                })
-                .await
+                let edit = convert::<buzz_agent_controller::AgentDefaultsEdit>(&edit)
+                    .map_err(|error| failed(format!("Invalid agent defaults: {error}")))?;
+                let (restarted, failures) = self
+                    .save_and_restart(move |owner| owner.controller.save_defaults(edit).map(drop))
+                    .await?;
+                let mut defaults = self.run(|owner| owner.defaults()).await?;
+                defaults.restarted = Some(restarted);
+                defaults.restart_failures = Some(failures);
+                Ok(Response::Defaults(defaults))
             }
             Request::ImportPreview {
                 source,
@@ -276,57 +351,93 @@ impl AgentHost {
             }
             Request::ImportCommit { token, ids } => self.import_commit(token, ids, asker).await,
             Request::Agents => {
+                Self::tools_path().await?;
                 self.run(|owner| owner.snapshot().map(Response::Agents))
                     .await
             }
             Request::Harnesses => {
-                let app_data = self.app_data.clone();
-                tokio::task::spawn_blocking(move || harness::detect(&app_data))
-                    .await
-                    .map(Response::Harnesses)
-                    .map_err(|_| RpcError::Failed("Harness detection failed".into()))
-            }
-            Request::InstallHarness { kind } => self
-                .install(kind)
+                Self::tools_path().await?;
+                let app_data = self.state_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    let claude = harness::claude(&app_data).setup;
+                    harness::legacy(&harness::options(&app_data), Some(&claude))
+                })
                 .await
-                .map(Response::Installed)
-                .map_err(RpcError::Failed),
-            Request::ClaudeAuth => Ok(Response::ClaudeAuth(self.claude_auth().await)),
-            Request::Action { id, action } => {
-                self.run(move |owner| {
-                    let action = match action {
-                        AgentAction::Start => Action::Start,
-                        AgentAction::Stop => Action::Stop,
-                        AgentAction::Restart => Action::Restart,
+                .map(Response::Harnesses)
+                .map_err(|_| failed("Harness detection failed"))
+            }
+            Request::Action {
+                id,
+                action,
+                replay_floor,
+                owner,
+            } => match action {
+                AgentAction::Stop => {
+                    self.run(move |host| {
+                        host.starts.remove(&id);
+                        host.queued.remove(&id);
+                        host.acted.insert(id.clone());
+                        host.controller.action(&id, Action::Stop)?;
+                        host.snapshot().map(Response::Agents)
+                    })
+                    .await
+                }
+                AgentAction::Start | AgentAction::Restart => {
+                    let action = if action == AgentAction::Start {
+                        Action::Start
+                    } else {
+                        Action::Restart
                     };
-                    if !matches!(action, Action::Stop) {
-                        owner.may_start(&id)?;
-                    }
-                    owner.controller.action(&id, action)?;
-                    owner.snapshot().map(Response::Agents)
+                    self.start_agent(
+                        id,
+                        action,
+                        start::StartOptions {
+                            replay_floor,
+                            owner,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map(Response::Agents)
+                    .map_err(RpcError::Failed)
+                }
+            },
+            Request::AttachMention {
+                id,
+                revision,
+                replay_floor,
+            } => {
+                self.run(move |owner| {
+                    owner
+                        .attach_mention(&id, revision, replay_floor)
+                        .map(|_| Response::Done)
                 })
                 .await
             }
             Request::SetStartOnLaunch { id, value } => {
                 self.run(move |owner| {
                     owner.controller.set_start_on_app_launch(&id, value)?;
+                    if !value {
+                        owner.queued.remove(&id);
+                    }
                     owner.snapshot().map(Response::Agents)
                 })
                 .await
             }
             Request::Save { id, revision, edit } => {
-                self.run(move |owner| {
-                    let (restarted, failures) =
-                        owner.save_and_restart(|owner| owner.save(&id, revision, &edit))?;
-                    let mut snapshot = owner.snapshot()?;
-                    snapshot.restarted = Some(restarted);
-                    snapshot.restart_failures = Some(failures);
-                    Ok(Response::Agents(snapshot))
-                })
-                .await
+                let (restarted, failures) = self
+                    .save_and_restart(move |owner| owner.save(&id, revision, &edit))
+                    .await?;
+                let mut snapshot = self.run(|owner| owner.snapshot()).await?;
+                snapshot.restarted = Some(restarted);
+                snapshot.restart_failures = Some(failures);
+                Ok(Response::Agents(snapshot))
             }
             Request::Delete { id, revision } => {
                 self.run(move |owner| {
+                    owner.starts.remove(&id);
+                    owner.queued.remove(&id);
+                    owner.acted.insert(id.clone());
                     owner.controller.delete(&id, revision)?;
                     owner.snapshot().map(Response::Agents)
                 })
@@ -337,88 +448,216 @@ impl AgentHost {
                 relay_url,
                 owner: human,
             } => {
-                self.run(move |owner| {
-                    if let Some((id, prepared)) = &owner.creating
-                        && *id == request_id
-                    {
-                        if !prepared.matches(&relay_url, &human)? {
-                            return Err("Create destination or owner changed".into());
-                        }
-                        return Ok(prepared_response(prepared));
-                    }
-                    let prepared = Arc::new(NewAgent::prepare(&relay_url, &human)?);
-                    let response = prepared_response(&prepared);
-                    owner.creating = Some((request_id, prepared));
-                    Ok(response)
-                })
-                .await
+                self.run(move |owner| owner.create_prepare(request_id, &relay_url, &human))
+                    .await
             }
             Request::CreateCommit {
                 request_id,
                 edit,
                 auth,
-            } => self
-                .run(move |owner| {
-                    let prepared = owner
-                        .creating
-                        .as_ref()
-                        .filter(|(id, _)| *id == request_id)
-                        .map(|(_, prepared)| prepared.clone())
-                        .ok_or("Create request expired; start again")?;
-                    let mut edit = controller_edit(&edit)?;
-                    if edit.workspace.is_empty() {
-                        edit.workspace = owner.workspace.to_string_lossy().into_owned();
-                    }
-                    prepared.validate(edit.clone(), &auth)?;
-                    prepared.save_key(owner.credentials.as_ref())?;
-                    owner.controller.create(&prepared, edit, &auth)?;
-                    owner.creating = None;
-                    owner
-                        .snapshot()
-                        .map(|snapshot| (snapshot, prepared.id.clone()))
-                })
-                .await
-                .map(|(snapshot, id)| {
-                    self.publish_profile_later(id);
-                    Response::Agents(snapshot)
-                }),
+            } => self.create_commit(request_id, edit, auth).await,
             Request::PublishProfile { id } => {
                 self.publish_profile(&id).await.map_err(RpcError::Failed)?;
                 self.run(|owner| owner.snapshot().map(Response::Agents))
                     .await
             }
+            Request::UseHere { id, resolution } => {
+                let resolution = convert::<buzz_agent_controller::CommunityResolution>(&resolution)
+                    .map_err(|_| failed("Invalid community resolution"))?;
+                self.run(move |owner| {
+                    owner.controller.use_here(&id, resolution)?;
+                    owner.snapshot().map(Response::Agents)
+                })
+                .await
+            }
+            Request::LocalCloneSettings { id } => {
+                self.run(move |owner| {
+                    let settings = owner.controller.local_clone_settings(&id)?;
+                    Ok(Response::CloneSettings(api::CloneSettings {
+                        name: settings.name,
+                        system_prompt: settings.system_prompt,
+                    }))
+                })
+                .await
+            }
+            Request::CloneSettings { source, pubkey } => {
+                let parent = self.legacy_parent()?;
+                let settings = tokio::task::spawn_blocking(move || {
+                    Imports::clone_settings(import::legacy(source), parent, &pubkey)
+                })
+                .await
+                .map_err(|_| failed("Could not read clone settings"))?
+                .map_err(RpcError::Failed)?;
+                Ok(Response::CloneSettings(api::CloneSettings {
+                    name: settings.name,
+                    system_prompt: settings.system_prompt,
+                }))
+            }
+            Request::Library => {
+                let path = self
+                    .legacy_parent()?
+                    .join(buzz_agent_controller::LegacySource::Installed.app_directory())
+                    .join("agents/managed-agents.json");
+                let library = tokio::task::spawn_blocking(move || {
+                    buzz_desktop::relay::agent::read_agent_library(path)
+                })
+                .await
+                .map_err(|_| failed("Current Buzz library unavailable"))?
+                .map_err(RpcError::Failed)?;
+                serde_json::from_value(library)
+                    .map(Response::Library)
+                    .map_err(|_| failed("Current Buzz library unavailable"))
+            }
+            Request::ClaudeAuth => Ok(Response::ClaudeAuth(self.claude_auth().await)),
+            Request::InstallHarness { kind } => self
+                .install(kind)
+                .await
+                .map(Response::Installed)
+                .map_err(RpcError::Failed),
+            Request::LogChallenge {
+                id,
+                pubkey,
+                relay_url,
+            } => {
+                self.run(move |owner| {
+                    owner
+                        .log_challenge(id, pubkey, relay_url)
+                        .map(Response::Nonce)
+                })
+                .await
+            }
+            Request::ReadLog {
+                id,
+                pubkey,
+                relay_url,
+                nonce,
+                signature,
+            } => {
+                self.run(move |owner| {
+                    owner
+                        .read_log(&id, &pubkey, &relay_url, &nonce, &signature)
+                        .map(Response::Log)
+                })
+                .await
+            }
         }
+    }
+
+    fn legacy_parent(&self) -> Result<PathBuf, RpcError> {
+        self.legacy_dir
+            .clone()
+            .ok_or_else(|| failed("This host has no data directory to import from"))
+    }
+
+    /// Login-shell PATH discovery blocks for up to ~15 s, once.
+    async fn tools_path() -> Result<(), RpcError> {
+        tokio::task::spawn_blocking(buzz_agent_controller::prepare_tools_path)
+            .await
+            .map_err(|_| failed("Could not find installed tools"))
+    }
+
+    async fn create_commit(
+        &self,
+        request_id: String,
+        edit: api::AgentEdit,
+        auth: String,
+    ) -> Result<Response, RpcError> {
+        let (prepared, credentials, edit, auth) = self
+            .run(move |owner| {
+                let prepared = owner
+                    .creating
+                    .as_ref()
+                    .filter(|(id, _)| *id == request_id)
+                    .map(|(_, prepared)| prepared.clone())
+                    .ok_or("Create request expired; reopen Add agent")?;
+                let edit = owner.draft(&edit)?;
+                prepared.validate(edit.clone(), &auth)?;
+                Ok((prepared, owner.credentials.clone(), edit, auth))
+            })
+            .await?;
+        // The key write may wait on the OS keyring; never on the host thread.
+        let saved = prepared.clone();
+        tokio::task::spawn_blocking(move || {
+            credentials.retry();
+            saved.save_key(credentials.as_ref())
+        })
+        .await
+        .map_err(|_| failed("Native credential operation failed"))?
+        .map_err(RpcError::Failed)?;
+        let id = prepared.id.clone();
+        let snapshot = self
+            .run(move |owner| {
+                if !owner
+                    .creating
+                    .as_ref()
+                    .is_some_and(|(_, pending)| Arc::ptr_eq(pending, &prepared))
+                {
+                    return Err("Create request was replaced".into());
+                }
+                owner.controller.create(&prepared, edit, &auth)?;
+                owner.creating = None;
+                owner.snapshot()
+            })
+            .await?;
+        self.publish_profile_later(id);
+        Ok(Response::Agents(snapshot))
     }
 }
 
 impl AgentHost {
     /// Publishes the agent's pending profile and records it, unless the
-    /// agent's settings changed meanwhile.
+    /// agent's settings changed meanwhile. One publication per agent runs
+    /// at a time.
     async fn publish_profile(&self, id: &str) -> Result<(), String> {
-        let id = id.to_string();
-        let target = id.clone();
-        let (profile, key) = self
-            .run(move |owner| {
+        let target = id.to_string();
+        let (profile, credentials) = self
+            .run_text(move |owner| {
                 let profile = owner.controller.creation_profile(&target)?;
-                let key = owner
-                    .credentials
-                    .read(&profile.credential_id, &profile.pubkey)?
-                    .ok_or("The agent's key is unavailable")?;
-                Ok((profile, key))
+                if !owner.publishing.insert(target) {
+                    return Err(
+                        "Profile publication is already in progress; refresh status before retrying"
+                            .into(),
+                    );
+                }
+                Ok((profile, owner.credentials.clone()))
             })
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
+        let result = self.publish_acquired(id, profile, credentials).await;
+        let target = id.to_string();
+        let _ = self
+            .run(move |owner| {
+                owner.publishing.remove(&target);
+                Ok(())
+            })
+            .await;
+        result
+    }
+
+    async fn publish_acquired(
+        &self,
+        id: &str,
+        profile: buzz_agent_controller::CreationProfile,
+        credentials: Arc<dyn Credentials>,
+    ) -> Result<(), String> {
+        let (profile, key) = tokio::task::spawn_blocking(move || {
+            credentials
+                .read(&profile.credential_id, &profile.pubkey)
+                .map(|key| (profile, key))
+        })
+        .await
+        .map_err(|_| "Native credential operation failed")??;
+        let key = key.ok_or("The agent's key is unavailable")?;
         profile::publish(&self.http, &profile, &key).await?;
         let revision = profile.revision;
-        self.run(move |owner| {
+        let id = id.to_string();
+        self.run_text(move |owner| {
             let current = owner.controller.creation_profile(&id)?;
             if current.revision != revision {
-                return Err("The agent changed while publishing; retry".into());
+                return Err("Saved profile changed; retry publication".into());
             }
             owner.controller.profile_published(&id, revision)
         })
         .await
-        .map_err(|error| error.to_string())
     }
 
     /// Fire-and-forget publication; failures leave the profile pending,
@@ -438,7 +677,7 @@ impl AgentHost {
     pub fn publish_pending_profiles(self: &Arc<Self>) {
         let host = self.clone();
         tokio::spawn(async move {
-            let Ok(Response::Agents(snapshot)) = host.request(Request::Agents).await else {
+            let Ok(snapshot) = host.run(|owner| owner.snapshot()).await else {
                 return;
             };
             for agent in snapshot.agents.iter().filter(|agent| agent.profile_pending) {
@@ -455,111 +694,6 @@ fn failed(message: impl Into<String>) -> RpcError {
 }
 
 impl AgentHost {
-    /// Model contexts come from the controller on its thread; the harness
-    /// then runs on tokio, so a slow lookup never blocks other requests.
-    async fn models(
-        &self,
-        id: Option<String>,
-        revision: u64,
-        edit: api::AgentEdit,
-    ) -> Result<api::ModelCatalog, RpcError> {
-        match models::lookup(&edit.harness.command) {
-            models::Lookup::Databricks => Err(failed(
-                "Buzz Agent lists models only for Databricks, which needs a sign-in this \
-                 host cannot run yet. Enter a model ID.",
-            )),
-            models::Lookup::None => Err(failed(
-                "This harness does not list its models. Enter a model ID.",
-            )),
-            models::Lookup::Goose => {
-                let context = self.goose_context(id, revision, edit).await?;
-                models::goose(context).await.map_err(RpcError::Failed)
-            }
-            models::Lookup::Pi => {
-                let context = self.pi_context(id, revision, edit).await?;
-                models::pi(context).await.map_err(RpcError::Failed)
-            }
-        }
-    }
-
-    /// Sends one prompt through the draft's Pi or Goose setup. Returns the
-    /// model that answered, unless a saved override chose it: override
-    /// values never leave the host.
-    async fn test_connection(
-        &self,
-        id: Option<String>,
-        revision: u64,
-        edit: api::AgentEdit,
-    ) -> Result<Option<String>, RpcError> {
-        match models::lookup(&edit.harness.command) {
-            models::Lookup::Goose => {
-                let context = self.goose_context(id, revision, edit).await?;
-                let overridden =
-                    context.model_overridden || context.environment.contains_key("GOOSE_PROVIDER");
-                let model = models::goose_test(context)
-                    .await
-                    .map_err(RpcError::Failed)?;
-                Ok((!overridden).then_some(model))
-            }
-            models::Lookup::Pi => {
-                let provider = edit.harness.provider.clone();
-                let model = edit.harness.model.clone();
-                let context = self.pi_context(id, revision, edit).await?;
-                models::pi_test(context, &provider, &model)
-                    .await
-                    .map(Some)
-                    .map_err(RpcError::Failed)
-            }
-            _ => Err(failed(
-                "Connection tests are only available for Pi and Goose",
-            )),
-        }
-    }
-
-    /// Login-shell PATH discovery blocks for up to ~15 s, once.
-    async fn tools_path() -> Result<(), RpcError> {
-        tokio::task::spawn_blocking(buzz_agent_controller::prepare_tools_path)
-            .await
-            .map_err(|_| failed("Could not find installed tools"))
-    }
-
-    async fn goose_context(
-        &self,
-        id: Option<String>,
-        revision: u64,
-        edit: api::AgentEdit,
-    ) -> Result<buzz_agent_controller::GooseModelContext, RpcError> {
-        Self::tools_path().await?;
-        self.run(move |owner| {
-            let edit = owner.draft(&edit)?;
-            match id {
-                Some(id) => owner.controller.goose_model_context(&id, revision, edit),
-                None => {
-                    let edit = owner.controller.effective_draft(edit)?;
-                    owner.controller.draft_goose_model_context(edit)
-                }
-            }
-        })
-        .await
-    }
-
-    async fn pi_context(
-        &self,
-        id: Option<String>,
-        revision: u64,
-        edit: api::AgentEdit,
-    ) -> Result<buzz_agent_controller::pi::PiContext, RpcError> {
-        Self::tools_path().await?;
-        self.run(move |owner| {
-            let edit = owner.draft(&edit)?;
-            match id {
-                Some(id) => owner.controller.pi_model_context(&id, revision, edit),
-                None => Controller::draft_pi_model_context(owner.controller.effective_draft(edit)?),
-            }
-        })
-        .await
-    }
-
     /// Imports from the previewed source. Candidates without an owner
     /// attestation get one signed by the GUI, then import from a staged copy
     /// of the source that carries it.
@@ -594,7 +728,9 @@ impl AgentHost {
                         agent_pubkey: pubkey.clone(),
                     })
                     .await?;
-                let HostAnswer::Attestation(tag) = answer;
+                let HostAnswer::Attestation(tag) = answer else {
+                    return Err(failed("The app did not attest the agent"));
+                };
                 import::verify_attestation(&tag, &pubkey).map_err(RpcError::Failed)?;
                 attestations.insert(pubkey, tag);
             }
@@ -663,126 +799,10 @@ impl AgentHost {
 /// How long [`AgentHost::shutdown`] waits for the agents to stop.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-impl AgentHost {
-    /// Installs Pi or Claude Code into the host's own directory (buzz-app's
-    /// `pi_install` and `claude_install`). After Pi installs, agents whose
-    /// start failed because it was missing restart.
-    async fn install(&self, kind: api::HarnessKind) -> Result<api::InstallReport, String> {
-        let (tool, label) = match kind {
-            api::HarnessKind::Pi => (install::Tool::Pi, "Pi"),
-            api::HarnessKind::Claude => (install::Tool::Claude, "Claude Code"),
-            _ => return Err("This harness is installed outside Buzz".into()),
-        };
-        if !install::supported() {
-            return Err(format!(
-                "{label} installation is supported only on macOS and Linux"
-            ));
-        }
-        let _guard = self.setup.claim()?;
-        Self::tools_path()
-            .await
-            .map_err(|error| error.to_string())?;
-        let [cli, adapter] = tool.binaries();
-        if [cli, adapter, "node"]
-            .iter()
-            .all(|name| buzz_agent_controller::installed(name).is_some())
-        {
-            return Err(match tool {
-                install::Tool::Pi => {
-                    "Pi is installed user-globally; update it with npm, then click Check again"
-                }
-                install::Tool::Claude => {
-                    "Claude Code is installed user-globally; update it in your terminal, then \
-                     click Check again"
-                }
-            }
-            .into());
-        }
-        let waiting = match tool {
-            install::Tool::Pi => self
-                .run(|owner| {
-                    Ok(owner
-                        .controller
-                        .snapshot()?
-                        .agents
-                        .iter()
-                        .filter(|agent| install::waiting_for_pi(agent))
-                        .map(|agent| agent.id.clone())
-                        .collect::<Vec<_>>())
-                })
-                .await
-                .map_err(|error| error.to_string())?,
-            install::Tool::Claude => Vec::new(),
-        };
-        let path = install::log_path(&self.app_data, tool);
-        let mut report = install::run_install(&path, |log| {
-            install::install(&self.setup, &self.app_data, log, tool)
-        })
-        .await?;
-        if !report.ready {
-            return Ok(report);
-        }
-        if [cli, adapter, "node"]
-            .iter()
-            .any(|name| buzz_agent_controller::managed_tool(&self.app_data, name).is_none())
-        {
-            report.ready = false;
-            report.error = Some(format!(
-                "{label} install finished but its tools were not found. See the log."
-            ));
-            return Ok(report);
-        }
-        for id in waiting {
-            let outcome = self
-                .run(move |owner| {
-                    // Stop or Edit may have changed the agent since.
-                    let still = owner
-                        .controller
-                        .snapshot()?
-                        .agents
-                        .iter()
-                        .any(|agent| agent.id == id && install::waiting_for_pi(agent));
-                    if !still {
-                        return Ok(None);
-                    }
-                    let restarted = owner.controller.action(&id, Action::Restart).is_ok();
-                    let running = owner.controller.snapshot()?.agents.iter().any(|agent| {
-                        agent.id == id
-                            && agent.status == buzz_agent_controller::ProcessStatus::Running
-                    });
-                    Ok(Some(restarted && running))
-                })
-                .await;
-            match outcome {
-                Ok(None) => {}
-                Ok(Some(true)) => report.restarted += 1,
-                _ => report.restart_failures += 1,
-            }
-        }
-        Ok(report)
-    }
-
-    /// Whether Claude Code is signed in (buzz-app's `claude_auth_status`).
-    async fn claude_auth(&self) -> Option<bool> {
-        Self::tools_path().await.ok()?;
-        let app_data = self.app_data.clone();
-        let setup = tokio::task::spawn_blocking(move || harness::claude_setup(&app_data))
-            .await
-            .ok()?;
-        let mut path = buzz_agent_controller::tools_path().ok()?;
-        if let Some(bin) = &setup.node_bin {
-            path = std::env::join_paths(
-                std::iter::once(bin.clone()).chain(std::env::split_paths(&path)),
-            )
-            .ok()?;
-        }
-        harness::claude_signed_in(setup.tools.cli.as_deref()?, &path).await
-    }
-}
-
 impl Drop for AgentHost {
-    /// Stops every agent this host started.
+    /// Stops every agent this host started, and any installer or sign-in.
     fn drop(&mut self) {
+        self.models.shutdown();
         self.setup.shutdown();
         let (jobs, _) = mpsc::channel();
         drop(std::mem::replace(&mut self.jobs, jobs));
@@ -793,37 +813,23 @@ impl Drop for AgentHost {
 }
 
 impl Owner {
-    /// Whether this agent may start for whoever is signed in.
-    fn may_start(&self, id: &str) -> Result<(), String> {
+    /// Who an agent start must answer to: `None` for buzzd, which has no
+    /// human key, and an error before anyone signed in to the GUI.
+    fn gate_owner(&self) -> Result<Option<String>, String> {
         match &self.gate {
-            Gate::Open => Ok(()),
+            Gate::Open => Ok(None),
             Gate::Waiting => Err("Set up your identity first".into()),
-            Gate::SignedIn(viewer) => self.controller.check_owner(id, Some(viewer)),
+            Gate::SignedIn(viewer) => Ok(Some(viewer.clone())),
         }
     }
 
-    /// The first sign-in restores the agents marked to start with the
-    /// host, as `Controller::restore` does, refusing other owners' agents.
-    fn sign_in(&mut self, viewer: String) {
+    /// Names the signed-in key. True the first time, when the agents
+    /// marked to start with the host should start (refusing other owners'
+    /// agents, as `Controller::restore` does).
+    fn sign_in(&mut self, viewer: String) -> bool {
         let first = matches!(self.gate, Gate::Waiting);
         self.gate = Gate::SignedIn(viewer);
-        if !first {
-            return;
-        }
-        let ids = match self.controller.launch_ids() {
-            Ok(ids) => ids,
-            Err(error) => {
-                tracing::warn!(%error, "could not restore agents");
-                return;
-            }
-        };
-        for id in ids {
-            if let Err(error) = self.may_start(&id) {
-                self.controller.record_error(&id, error);
-            } else if let Err(error) = self.controller.action(&id, Action::Start) {
-                tracing::warn!(agent = %id, %error, "could not restore agent");
-            }
-        }
+        first
     }
 
     /// Saves an agent. The controller keeps an agent's own effort until its
@@ -869,51 +875,6 @@ impl Owner {
             .ok_or_else(|| "Agent no longer exists".into())
     }
 
-    /// The agent is running, and runs (`Some(true)`) or does not run yet
-    /// (`Some(false)`) its saved settings. `None` when it is not running.
-    fn current(&mut self, id: &str) -> Result<Option<bool>, String> {
-        Ok(self
-            .controller
-            .snapshot()?
-            .agents
-            .into_iter()
-            .find(|agent| {
-                agent.id == id
-                    && agent.enabled
-                    && agent.status == buzz_agent_controller::ProcessStatus::Running
-            })
-            .map(|agent| agent.restart_diff.is_empty()))
-    }
-
-    /// Runs a save, then restarts running agents whose launch settings it
-    /// changed (buzz-app's `save_and_restart`). Stopped agents stay
-    /// stopped. Returns how many restarted and how many did not.
-    fn save_and_restart(
-        &mut self,
-        save: impl FnOnce(&mut Self) -> Result<(), String>,
-    ) -> Result<(u32, u32), String> {
-        let before = self.controller.running_settings()?;
-        save(self)?;
-        let after = self.controller.running_settings()?;
-        let (mut restarted, mut failures) = (0, 0);
-        for id in changed_running(&before, &after) {
-            if self.current(&id)? != Some(false) {
-                continue;
-            }
-            let outcome = self.controller.action(&id, Action::Restart);
-            match (outcome, self.current(&id)) {
-                (Ok(_), Ok(Some(true))) => restarted += 1,
-                (outcome, _) => {
-                    if let Err(error) = outcome {
-                        tracing::warn!(agent = %id, %error, "agent did not restart after a save");
-                    }
-                    failures += 1;
-                }
-            }
-        }
-        Ok((restarted, failures))
-    }
-
     /// A form draft as the controller takes it; an empty workspace means
     /// the host's default, as on create.
     fn draft(&self, edit: &api::AgentEdit) -> Result<buzz_agent_controller::AgentEdit, String> {
@@ -926,15 +887,43 @@ impl Owner {
 
     fn defaults(&mut self) -> Result<AgentDefaults, String> {
         let snapshot = self.controller.snapshot()?;
-        let json = serde_json::to_value(&snapshot.default_settings)
-            .map_err(|_| "Could not read agent defaults")?;
         let mut defaults: AgentDefaults =
-            serde_json::from_value(json).map_err(|_| "Could not read agent defaults")?;
-        let build = serde_json::to_value(buzz_agent_controller::build_defaults())
+            convert(&snapshot.default_settings).map_err(|_| "Could not read agent defaults")?;
+        defaults.build = convert(&buzz_agent_controller::build_defaults())
             .map_err(|_| "Could not read agent defaults")?;
-        defaults.build =
-            serde_json::from_value(build).map_err(|_| "Could not read agent defaults")?;
         Ok(defaults)
+    }
+
+    /// Generates the new agent's key, or returns the one an earlier
+    /// attempt with the same request saved.
+    fn create_prepare(
+        &mut self,
+        request_id: String,
+        relay_url: &str,
+        human: &str,
+    ) -> Result<Response, String> {
+        if let Some(agent) = self
+            .controller
+            .created_request(&request_id, relay_url, human)?
+        {
+            return Ok(Response::Prepared {
+                id: agent.id,
+                pubkey: agent.pubkey,
+                saved: true,
+            });
+        }
+        if let Some((id, prepared)) = &self.creating
+            && *id == request_id
+        {
+            if !prepared.matches(relay_url, human)? {
+                return Err("Create destination or owner changed".into());
+            }
+            return Ok(prepared_response(prepared));
+        }
+        let prepared = Arc::new(NewAgent::prepare(relay_url, human)?);
+        let response = prepared_response(&prepared);
+        self.creating = Some((request_id, prepared));
+        Ok(response)
     }
 
     fn import_preview(
@@ -959,9 +948,7 @@ impl Owner {
             .into_iter()
             .map(|agent| agent.pubkey)
             .collect();
-        let json = serde_json::to_value(&preview).map_err(|_| "Could not read the import")?;
-        let mut view: ImportPreview =
-            serde_json::from_value(json).map_err(|_| "Could not read the import")?;
+        let mut view: ImportPreview = convert(&preview).map_err(|_| "Could not read the import")?;
         for candidate in &mut view.candidates {
             candidate.imported = saved.contains(&candidate.pubkey);
             candidate.needs_attestation = unattested.contains(&candidate.pubkey);
@@ -983,12 +970,39 @@ impl Owner {
     }
 
     fn snapshot(&mut self) -> Result<AgentsSnapshot, String> {
-        let snapshot = self.controller.snapshot()?;
-        let json = serde_json::to_value(&snapshot).map_err(|_| "Could not read agents")?;
-        let mut snapshot: AgentsSnapshot =
-            serde_json::from_value(json).map_err(|_| "Could not read agents")?;
+        let mut data = self.controller.snapshot()?;
+        for agent in &mut data.agents {
+            if let Some(pending) = self.starts.get(&agent.id) {
+                agent.status = pending.status;
+                agent.error = None;
+            } else if self.queued.contains_key(&agent.id) {
+                agent.status = buzz_agent_controller::ProcessStatus::Waiting;
+                agent.error = None;
+            }
+        }
+        let mut snapshot: AgentsSnapshot = convert(&data).map_err(|_| "Could not read agents")?;
+        let build = buzz_agent_controller::build_defaults();
         snapshot.seq = self.seq;
         snapshot.default_workspace = self.workspace.to_string_lossy().into_owned();
+        snapshot.inventory_warnings = self.inventory_warnings.clone();
+        snapshot.import_available = Some(self.legacy_dir.is_some());
+        snapshot.create_available = Some(true);
+        snapshot.avatar_editing_available = true;
+        snapshot.local_inventory_actions = true;
+        snapshot.harness_options = Some(harness::options(&self.state_dir));
+        snapshot.claude_setup = Some(harness::claude(&self.state_dir).setup);
+        snapshot.databricks_defaults = Some(api::DatabricksSettings {
+            host: build.host.clone(),
+            filter: build.filter.clone(),
+        });
+        snapshot.agent_defaults = Some(api::BuildDefaults {
+            provider: build.provider,
+            model: build.model,
+            host: build.host,
+            filter: build.filter,
+            owner_only: build.owner_only,
+        });
+        snapshot.default_settings = convert(&data.default_settings).ok();
         Ok(snapshot)
     }
 
@@ -1015,19 +1029,6 @@ impl Owner {
     }
 }
 
-/// Agents running both before and after a save whose launch settings
-/// differ.
-fn changed_running(
-    before: &BTreeMap<String, serde_json::Value>,
-    after: &BTreeMap<String, serde_json::Value>,
-) -> Vec<String> {
-    after
-        .iter()
-        .filter(|(id, settings)| before.get(*id).is_some_and(|old| old != *settings))
-        .map(|(id, _)| id.clone())
-        .collect()
-}
-
 /// A harness command of another kind than `command` that accepts the same
 /// environment: Pi and Goose take behavior overrides, the rest do not.
 fn effort_detour(command: &str) -> &'static str {
@@ -1046,13 +1047,18 @@ fn prepared_response(prepared: &NewAgent) -> Response {
     Response::Prepared {
         id: prepared.id.clone(),
         pubkey: prepared.key.pubkey().to_string(),
+        saved: false,
     }
 }
 
 /// Converts through JSON field names, the controller's own contract.
+fn convert<T: serde::de::DeserializeOwned>(value: &impl serde::Serialize) -> Result<T, String> {
+    let json = serde_json::to_value(value).map_err(|error| error.to_string())?;
+    serde_json::from_value(json).map_err(|error| error.to_string())
+}
+
 fn controller_edit(edit: &api::AgentEdit) -> Result<buzz_agent_controller::AgentEdit, String> {
-    let json = serde_json::to_value(edit).map_err(|_| "Invalid agent settings")?;
-    serde_json::from_value(json).map_err(|error| format!("Invalid agent settings: {error}"))
+    convert(edit).map_err(|error| format!("Invalid agent settings: {error}"))
 }
 
 /// Serves an [`AgentHost`] over host-rpc.

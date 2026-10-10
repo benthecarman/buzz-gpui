@@ -12,7 +12,7 @@ pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
 pub(crate) use editor::{Dismissed, Saved};
 pub(crate) use host_dialog::AddHost;
 
-use crate::hosts::{HostConnection, Hosts};
+use crate::hosts::{HostConnection, Hosts, PERSON_WAIT};
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::settings::OpenHostSettings;
 use buzz_host::api::{Agent, AgentAction, Harness, ProcessStatus, Request};
@@ -161,7 +161,8 @@ impl AgentsPage {
         let key = (host.entity_id(), id);
         self.pending.insert(key.clone());
         self.failures.remove(&key);
-        let response = host.update(cx, |host, cx| host.request(request, cx));
+        // A start may wait on a keyring prompt.
+        let response = host.update(cx, |host, cx| host.request_within(request, PERSON_WAIT, cx));
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -816,6 +817,8 @@ impl AgentsPage {
                     let request = Request::Action {
                         id: agent_id.clone(),
                         action,
+                        replay_floor: None,
+                        owner: None,
                     };
                     this.act(&host, agent_id.clone(), request, cx);
                 }))
@@ -1043,6 +1046,8 @@ impl AgentsPage {
         let action = |action| Request::Action {
             id: agent.id.clone(),
             action,
+            replay_floor: None,
+            owner: None,
         };
         let start_label = if agent.status == ProcessStatus::Failed {
             "Retry start"

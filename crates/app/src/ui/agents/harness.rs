@@ -52,6 +52,60 @@ pub fn kind_of(command: &str, harnesses: &[Harness]) -> Option<HarnessKind> {
     }
 }
 
+/// A provider choice in the agent form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Provider {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// The environment variable holding its API key, when it takes one.
+    pub key: Option<&'static str>,
+}
+
+const fn provider(id: &'static str, label: &'static str, key: Option<&'static str>) -> Provider {
+    Provider { id, label, key }
+}
+
+/// buzz-app's `harnessOptions` providers and API key variables
+/// (`src/bundled/agents/agent-edit.ts`).
+const BUZZ_AGENT_PROVIDERS: &[Provider] = &[
+    provider("databricks_v2", "Databricks v2", None),
+    provider("openai", "OpenAI", Some("OPENAI_COMPAT_API_KEY")),
+];
+const GOOSE_PROVIDERS: &[Provider] = &[
+    provider("anthropic", "Anthropic", Some("ANTHROPIC_API_KEY")),
+    provider("openai", "OpenAI", Some("OPENAI_API_KEY")),
+    provider("openrouter", "OpenRouter", Some("OPENROUTER_API_KEY")),
+    provider("google", "Google Gemini", Some("GOOGLE_API_KEY")),
+    provider("github_copilot", "GitHub Copilot", None),
+    provider("databricks", "Databricks", None),
+    provider("databricks_v2", "Databricks v2", None),
+    provider("ollama", "Ollama", None),
+    provider("groq", "Groq", Some("GROQ_API_KEY")),
+    provider("mistral", "Mistral AI", Some("MISTRAL_API_KEY")),
+    provider("together", "Together AI", Some("TOGETHER_API_KEY")),
+    provider("perplexity", "Perplexity", Some("PERPLEXITY_API_KEY")),
+    provider("cerebras", "Cerebras", Some("CEREBRAS_API_KEY")),
+    provider("custom_deepseek", "DeepSeek", Some("DEEPSEEK_API_KEY")),
+];
+/// Pi lists signed-in providers through its model catalog; these are the
+/// ones a key can sign in to from the form.
+const PI_PROVIDERS: &[Provider] = &[
+    provider("openai", "OpenAI", Some("OPENAI_API_KEY")),
+    provider("anthropic", "Anthropic", Some("ANTHROPIC_API_KEY")),
+    provider("google", "Google Gemini", Some("GEMINI_API_KEY")),
+    provider("openrouter", "OpenRouter", Some("OPENROUTER_API_KEY")),
+];
+
+/// Providers the harness can be pointed at. Presets choose their own.
+pub fn providers(kind: HarnessKind) -> &'static [Provider] {
+    match kind {
+        HarnessKind::BuzzAgent => BUZZ_AGENT_PROVIDERS,
+        HarnessKind::Goose => GOOSE_PROVIDERS,
+        HarnessKind::Pi => PI_PROVIDERS,
+        HarnessKind::Claude | HarnessKind::Hermes => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

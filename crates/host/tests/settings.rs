@@ -38,7 +38,9 @@ struct Answers(Arc<Gui>);
 
 impl ClientHandler<HostProtocol> for Answers {
     fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        let HostAsk::AttestAgent { agent_pubkey } = ask;
+        let HostAsk::AttestAgent { agent_pubkey } = ask else {
+            return Box::pin(async { Err(RpcError::Failed("unexpected ask".into())) });
+        };
         self.0.asked.lock().unwrap().push(agent_pubkey.clone());
         let tag = attest(&self.0.human, &agent_pubkey);
         Box::pin(async move { Ok(HostAnswer::Attestation(tag)) })
@@ -269,7 +271,7 @@ echo '{"id":"catalog","type":"response","command":"get_available_models","succes
         .request(models(draft("buzz-agent", "databricks_v2", &[])))
         .await
     else {
-        panic!("Buzz Agent has no catalog here");
+        panic!("Buzz Agent lists models only from a Databricks workspace");
     };
     assert!(message.contains("Databricks"), "{message}");
 }

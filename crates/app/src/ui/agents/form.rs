@@ -6,13 +6,14 @@
 //! keys, never values, so a field left empty keeps what is saved.
 
 use super::harness;
+use super::harness::{Provider, providers};
 use crate::hosts::HostConnection;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_host::api::{
     AgentDefaults, DatabricksSettings, Harness, HarnessKind, ModelOption, Request, Response,
     SessionPolicy,
 };
-use buzz_host::harness::{Provider, defaults_name, efforts, providers};
+use buzz_host::harness::{defaults_name, efforts};
 use buzz_ui::{
     ActiveTheme, Button, ButtonSize, Colors, Icon, IconButton, IconButtonSize, IconName, Menu,
     MenuItem, MenuSize, Select, Spinner, Surface, TextField, TypeStyled,

@@ -557,7 +557,7 @@ impl AgentEditor {
         let weak_host = host.downgrade();
         cx.spawn(async move |this, cx| {
             let id = match prepare.await {
-                Ok(Response::Prepared { id, pubkey }) => match identity.attest_agent(&pubkey) {
+                Ok(Response::Prepared { id, pubkey, .. }) => match identity.attest_agent(&pubkey) {
                     Ok(auth) => {
                         let commit = weak_host.update(cx, |host, cx| {
                             host.request(
@@ -601,6 +601,8 @@ impl AgentEditor {
                 Request::Action {
                     id,
                     action: AgentAction::Start,
+                    replay_floor: None,
+                    owner: None,
                 },
                 cx,
             )

@@ -27,6 +27,14 @@ pub enum Request {
     Action {
         id: String,
         action: AgentAction,
+        /// Start or Restart replays channel messages from this Unix time,
+        /// for a mention sent while the agent was stopped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_floor: Option<u64>,
+        /// The human asking. A Start or Restart is refused when the agent's
+        /// owner attestation names someone else; older GUIs send none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     SetStartOnLaunch {
         id: String,
@@ -114,8 +122,72 @@ pub enum Request {
     },
     /// Asks Claude Code whether it is signed in. Never part of a snapshot.
     ClaudeAuth,
+    /// Adds a mention's replay floor to a start that is already waiting or
+    /// starting. Never starts an agent itself.
+    AttachMention {
+        id: String,
+        revision: u64,
+        replay_floor: u64,
+    },
+    /// Finishes an older incomplete import in a community, with the
+    /// owner's signed [`CommunityResolution`]. The agent stays stopped.
+    UseHere {
+        id: String,
+        resolution: CommunityResolution,
+    },
+    /// The name and instructions a new agent cloned from a saved one starts
+    /// with.
+    LocalCloneSettings {
+        id: String,
+    },
+    /// As [`Request::LocalCloneSettings`], for an identity in an earlier
+    /// Buzz install's library.
+    CloneSettings {
+        source: ImportSource,
+        pubkey: String,
+    },
+    /// The agent library of the earlier Buzz install on the host.
+    Library,
+    /// Reserves the host's one model lookup. Answered with
+    /// [`Response::Ticket`].
+    ModelsBegin,
+    /// Cancels the ticket's lookup, or releases an unused ticket.
+    ModelsCancel {
+        ticket: u64,
+    },
+    /// Lists, tests, signs in to or disconnects a draft's models under a
+    /// ticket from [`Request::ModelsBegin`]. A Databricks sign-in asks the
+    /// GUI to open the browser with [`HostAsk::OpenUrl`].
+    ModelsRun {
+        ticket: u64,
+        request: ModelRequest,
+    },
+    /// Starts reading an agent's harness log. The GUI signs the returned
+    /// nonce with the human key and sends it in [`Request::ReadLog`].
+    LogChallenge {
+        id: String,
+        pubkey: String,
+        relay_url: String,
+    },
+    ReadLog {
+        id: String,
+        pubkey: String,
+        relay_url: String,
+        nonce: String,
+        signature: String,
+    },
+    /// The GUI's browser reached the loopback address of a sign-in the
+    /// host started. The host replays the request on its own loopback
+    /// listener at `port` and returns the page to show.
+    SignInCallback {
+        port: u16,
+        target: String,
+    },
 }
 
+// Responses are moved once, from the wire to their caller; boxing the
+// snapshot would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
     Agents(AgentsSnapshot),
@@ -123,6 +195,9 @@ pub enum Response {
     Prepared {
         id: String,
         pubkey: String,
+        /// A retried create whose agent is already saved.
+        #[serde(default)]
+        saved: bool,
     },
     Models(ModelCatalog),
     Defaults(AgentDefaults),
@@ -137,6 +212,15 @@ pub enum Response {
     /// `Some(false)` when Claude Code says it is signed out; `None` when
     /// that could not be confirmed.
     ClaudeAuth(Option<bool>),
+    /// Answers requests that return nothing.
+    Done,
+    CloneSettings(CloneSettings),
+    Library(Library),
+    Ticket(u64),
+    Catalog(Catalog),
+    Nonce(String),
+    Log(String),
+    SignInPage(SignInPage),
 }
 
 /// What an install did (buzz-app's `InstallReport`).
@@ -159,12 +243,17 @@ pub enum HostAsk {
     /// Sign the NIP-OA owner attestation for an agent key being imported.
     /// The GUI only answers for keys it asked to import.
     AttestAgent { agent_pubkey: String },
+    /// Open this sign-in page in the human's browser. Its redirect goes to
+    /// a loopback port on the host; a GUI on another machine forwards the
+    /// browser's callback with [`Request::SignInCallback`].
+    OpenUrl { url: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HostAnswer {
     /// The `auth` tag, JSON encoded.
     Attestation(String),
+    Opened,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +286,91 @@ pub struct AgentsSnapshot {
     /// save changed, restarted with them, and those that did not restart.
     pub restarted: Option<u32>,
     pub restart_failures: Option<u32>,
+    /// Identities an earlier Buzz install on the host knows, which can be
+    /// imported.
+    pub parked: Vec<ParkedIdentity>,
+    /// Problems reading those installs.
+    pub inventory_warnings: Vec<String>,
+    /// `None` from hosts that do not say; treat as available.
+    pub import_available: Option<bool>,
+    pub create_available: Option<bool>,
+    pub avatar_editing_available: bool,
+    /// The host serves Use here and clone settings.
+    pub local_inventory_actions: bool,
+    /// The harnesses agents can use, with their setup status. `None` from
+    /// older hosts, which answer [`Request::Harnesses`] instead.
+    pub harness_options: Option<Vec<HarnessOption>>,
+    pub claude_setup: Option<ClaudeSetup>,
+    /// The build's Databricks workspace and model filter.
+    pub databricks_defaults: Option<DatabricksSettings>,
+    /// The build's model defaults for Buzz Agent.
+    pub agent_defaults: Option<BuildDefaults>,
+    /// The host's agent defaults, as [`Request::Defaults`] returns them.
+    pub default_settings: Option<AgentDefaults>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ParkedIdentity {
+    pub pubkey: String,
+    pub name: String,
+    pub sources: Vec<ImportSource>,
+}
+
+/// One harness agents can use, as buzz-app's `harnessOptions` lists it.
+/// Availability is executable presence only, not sign-in.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HarnessOption {
+    /// What [`HarnessEdit::command`] holds for this harness.
+    pub command: String,
+    pub label: String,
+    pub available: bool,
+    /// `ready`, `cli-needed` or `adapter-needed`.
+    pub status: String,
+    /// The host can install it (Pi and Claude Code).
+    pub install_supported: Option<bool>,
+    /// The host's own install is older than the pinned release.
+    pub update_supported: Option<bool>,
+    pub default_args: Vec<String>,
+    pub providers: Vec<ProviderOption>,
+    pub configuration_policy: Option<ConfigurationPolicy>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// The controller's `HarnessConfigurationPolicy`, as strings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ConfigurationPolicy {
+    /// `provider`, `harnessWithOverrides` or `external`.
+    pub authentication: String,
+    /// `selector`, `discovered` or `external`.
+    pub provider: String,
+    /// `optional` or `withProvider`.
+    pub model: String,
+    pub selector_environment: Option<SelectorEnvironment>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SelectorEnvironment {
+    pub model: String,
+    pub provider: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeSetup {
+    pub status: String,
+    pub install_supported: bool,
+    /// Signs in to Claude Code in a terminal on the host.
+    pub login_command: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -228,7 +402,27 @@ pub struct Agent {
     pub launch_effort: Option<String>,
     pub deployed_remote: bool,
     pub needs_team_import: bool,
+    /// Older hosts leave it out, which means configured.
+    #[serde(default = "yes")]
     pub configured: bool,
+    /// The environment variable that picks the launch model or provider,
+    /// when one does; its value stays on the host.
+    pub launch_model_env: Option<String>,
+    pub launch_provider_env: Option<String>,
+    /// Settings saved since the running process started.
+    pub restart_diff: Vec<RestartDiffEntry>,
+    /// Imported provider backend; local agents have none.
+    pub backend: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RestartDiffEntry {
+    pub field: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -414,6 +608,8 @@ pub struct BuildDefaults {
     /// The Databricks workspace and model filter.
     pub host: String,
     pub filter: String,
+    /// Agents answer only their owner and same-owner agents.
+    pub owner_only: bool,
 }
 
 /// Mirrors the controller's `AgentDefaultsEdit`.
@@ -432,7 +628,7 @@ pub struct DefaultsEdit {
 }
 
 /// Which earlier Buzz install to import from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ImportSource {
     Installed,
@@ -463,4 +659,184 @@ pub struct ImportCandidate {
     /// The old record has no owner attestation; importing asks the GUI to
     /// sign one.
     pub needs_attestation: bool,
+}
+
+/// The owner's signed intent to set up one agent identity in one
+/// community: a schnorr signature over
+/// `nostr:agent-community:{pubkey}:{relay_url}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CommunityResolution {
+    pub pubkey: String,
+    /// `wss://host`, without a trailing slash.
+    pub relay_url: String,
+    pub owner: String,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CloneSettings {
+    pub name: String,
+    pub system_prompt: String,
+}
+
+/// The agent library of an earlier Buzz install: definitions (profiles)
+/// and the identities created from them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Library {
+    pub definitions: Vec<LibraryDefinition>,
+    pub identities: Vec<LibraryIdentity>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LibraryDefinition {
+    pub id: String,
+    pub name: String,
+    pub avatar: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LibraryIdentity {
+    pub pubkey: String,
+    pub name: String,
+    pub avatar: Option<String>,
+    pub definition_id: Option<String>,
+}
+
+/// buzz-app's model request (`agent_models_run`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelRequest {
+    /// The saved agent being edited; `None` for a new draft.
+    pub id: Option<String>,
+    /// Set exactly when `id` is.
+    pub expected_revision: Option<u64>,
+    /// Only a disconnect may leave it out.
+    pub edit: Option<AgentEdit>,
+    /// The Databricks workspace and model filter the form shows.
+    pub host: String,
+    pub filter: String,
+    pub action: ModelAction,
+    /// Blank `host` and `filter` follow the host's agent defaults.
+    pub inherit_workspace: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelAction {
+    /// Browse or Retry: list models, signing in if needed.
+    #[default]
+    Connect,
+    /// List models without signing in.
+    Refresh,
+    Disconnect,
+    /// One short completion with the draft's provider and model.
+    Test,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Catalog {
+    /// The Databricks workspace used; empty for Pi, Goose or an inherited
+    /// one.
+    pub host: String,
+    pub models: Vec<ModelOption>,
+    pub model_overridden: bool,
+    pub disconnected: bool,
+    /// For a test: the `provider/model` that replied, unless an override
+    /// chose it.
+    pub tested_model: Option<String>,
+}
+
+/// What the host's loopback sign-in listener answered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SignInPage {
+    pub status: u16,
+    pub content_type: String,
+    pub body: String,
+}
+
+#[cfg(test)]
+mod tests {
+    //! The wire stays readable across versions: what an older peer sends
+    //! decodes here, and what this side adds an older peer ignores.
+    use super::*;
+
+    fn wire<T: Serialize>(value: &T) -> Vec<u8> {
+        rmp_serde::to_vec_named(value).unwrap()
+    }
+
+    #[test]
+    fn an_older_gui_start_has_no_floor_or_owner() {
+        #[derive(Serialize)]
+        enum OldRequest {
+            Action { id: String, action: AgentAction },
+        }
+        let old = wire(&OldRequest::Action {
+            id: "a".into(),
+            action: AgentAction::Start,
+        });
+        let Request::Action {
+            replay_floor,
+            owner,
+            ..
+        } = rmp_serde::from_slice(&old).unwrap()
+        else {
+            panic!("expected an action");
+        };
+        assert_eq!((replay_floor, owner), (None, None));
+    }
+
+    #[test]
+    fn an_older_host_snapshot_reads_as_configured_with_no_options() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldAgent {
+            id: String,
+            status: ProcessStatus,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldSnapshot {
+            seq: u64,
+            agents: Vec<OldAgent>,
+            runtime_available: bool,
+        }
+        let old = wire(&OldSnapshot {
+            seq: 3,
+            agents: vec![OldAgent {
+                id: "a".into(),
+                status: ProcessStatus::Running,
+            }],
+            runtime_available: true,
+        });
+        let snapshot: AgentsSnapshot = rmp_serde::from_slice(&old).unwrap();
+        assert!(snapshot.agents[0].configured);
+        assert!(snapshot.harness_options.is_none());
+        assert_eq!(snapshot.import_available, None);
+    }
+
+    #[test]
+    fn an_older_peer_skips_the_new_snapshot_fields() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldSnapshot {
+            seq: u64,
+            agents: Vec<serde::de::IgnoredAny>,
+        }
+        let snapshot = AgentsSnapshot {
+            seq: 7,
+            agents: vec![Agent::default()],
+            harness_options: Some(vec![HarnessOption::default()]),
+            parked: vec![ParkedIdentity::default()],
+            ..Default::default()
+        };
+        let old: OldSnapshot = rmp_serde::from_slice(&wire(&snapshot)).unwrap();
+        assert_eq!((old.seq, old.agents.len()), (7, 1));
+    }
 }
