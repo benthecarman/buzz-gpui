@@ -37,6 +37,8 @@ const UNCONFIRMED: &str = "This may have taken effect, but it is not confirmed y
 const DETAILS_ACCESS: &str = "Channel access changed. Reopen channel settings.";
 const LIFECYCLE_ACCESS: &str = "Channel access unavailable; refresh membership";
 const TIMED_OUT: &str = "The request timed out. Try again.";
+const ROSTER_UNAVAILABLE: &str = "The member list could not load. Try again.";
+const ROSTER_UNCONFIRMED: &str = "The member list could not be confirmed. Try again.";
 
 /// The viewer's hidden DM list as last read (`DmVisibility`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -259,11 +261,42 @@ impl Session {
     }
 
     /// The channel's validated relay state: roles, permissions and details.
+    /// A failed read and an answer without the channel's records read as
+    /// the members dialog words them (`ChannelMembersDialog.tsx`).
     pub async fn channel_state(&self, channel: &str) -> Result<ChannelState, String> {
         let (ops, channel) = (self.ops(), channel.to_owned());
         self.run(async move {
             let ctx = ops.context().await?;
-            ops.state(&ctx, &channel).await
+            let filters = lifecycle::state_filters(&ctx.relay, &channel);
+            let events = read(&ctx, filters).await.map_err(|_| ROSTER_UNAVAILABLE)?;
+            ChannelState::parse(&events, &channel, &ctx.relay).map_err(|error| {
+                let error = error.to_string();
+                if error == lifecycle::UNVERIFIED {
+                    ROSTER_UNCONFIRMED.to_owned()
+                } else {
+                    error
+                }
+            })
+        })
+        .await
+    }
+
+    /// Reads these people's profiles now, in pages of 500, and reports
+    /// whether every page answered (`profiles.ensure(…, "foreground")`).
+    pub async fn load_profiles(&self, people: Vec<String>) -> Result<(), String> {
+        let ops = self.ops();
+        self.run(async move {
+            let ctx = ops.context().await?;
+            for batch in people.chunks(500) {
+                let filter =
+                    json!({"kinds": [kinds::PROFILE], "authors": batch, "limit": batch.len()});
+                let serde_json::Value::Object(filter) = filter else {
+                    unreachable!("filters are objects");
+                };
+                let events = read(&ctx, vec![filter]).await?;
+                ops.adopt_profiles(&events).await?;
+            }
+            Ok(())
         })
         .await
     }

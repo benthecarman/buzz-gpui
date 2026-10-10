@@ -229,6 +229,10 @@ fn parse_ttl(value: Option<&str>) -> Result<Option<u64>, LifecycleError> {
     Ok(Some(ttl))
 }
 
+/// The channel's metadata, admins or roster record is missing.
+pub const UNVERIFIED: &str =
+    "Current channel permissions could not be verified. Refresh and try again.";
+
 impl ChannelState {
     /// Validates the answer to [`state_filters`]. The 39001 must list
     /// exactly the elevated members of the 39002, with the same roles.
@@ -249,9 +253,7 @@ impl ChannelState {
         let admins = record(events, kinds::CHANNEL_ADMINS, channel, relay_author)?;
         let roster = record(events, kinds::CHANNEL_MEMBERS, channel, relay_author)?;
         let (Some(metadata), Some(admins), Some(roster)) = (metadata, admins, roster) else {
-            return Err(error(
-                "Current channel permissions could not be verified. Refresh and try again.",
-            ));
+            return Err(error(UNVERIFIED));
         };
         let channel_type = match exact_tag(metadata, "t")? {
             Some("stream") => StateType::Stream,

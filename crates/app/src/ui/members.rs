@@ -52,19 +52,47 @@ impl Group {
 
     /// Owners and admins by role first; then agents; everyone else is a
     /// member.
-    fn of(key: &str, role: MemberRole, profiles: &Profiles) -> Self {
+    fn of(key: &str, role: MemberRole, profiles: &Profiles, known: &HashSet<String>) -> Self {
         match role {
             MemberRole::Owner => Self::Owners,
             MemberRole::Admin => Self::Admins,
-            _ if is_agent(key, role, profiles) => Self::Agents,
+            _ if is_agent(key, role, profiles, known) => Self::Agents,
             _ => Self::Members,
         }
     }
 }
 
-fn is_agent(key: &str, role: MemberRole, profiles: &Profiles) -> bool {
-    role == MemberRole::Bot || profiles.get(key).is_some_and(|p| p.is_agent)
+/// A bot by role, a known agent of the viewer's library, or an agent by
+/// its signed profile (`useKnownAgents` plus `isAgent`).
+fn is_agent(key: &str, role: MemberRole, profiles: &Profiles, known: &HashSet<String>) -> bool {
+    role == MemberRole::Bot || known.contains(key) || profiles.get(key).is_some_and(|p| p.is_agent)
 }
+
+/// The viewer's library agents, by key.
+fn known_agents(cx: &App) -> HashSet<String> {
+    super::identity::AgentLibrary::from_hosts(cx)
+        .agents
+        .into_iter()
+        .map(|(pubkey, _, _)| pubkey)
+        .collect()
+}
+
+/// The role a row announces (`roleLabel`): an agent's bot role reads as
+/// member, and a member the roster could not verify says so.
+fn role_label(role: Option<MemberRole>, agent: bool) -> &'static str {
+    match role {
+        Some(MemberRole::Bot) if agent => "member",
+        Some(MemberRole::Owner) => "owner",
+        Some(MemberRole::Admin) => "admin",
+        Some(MemberRole::Member) => "member",
+        Some(MemberRole::Guest) => "guest",
+        Some(MemberRole::Bot) => "bot",
+        Some(MemberRole::Unknown) | None => "Role unverified",
+    }
+}
+
+/// The search results shown per page (`MEMBER_SEARCH_PAGE_SIZE`).
+const SEARCH_PAGE: usize = 30;
 
 /// An agent's owner, when its attestation verifies.
 fn owner_of(key: &str, profiles: &Profiles) -> Option<String> {
@@ -79,7 +107,14 @@ pub struct MembersDialog {
     input: Entity<InputState>,
     /// People found for the typed text, with the text they answer.
     found: Option<(String, Result<PeoplePage, String>)>,
+    /// Relay pages read for the found text, and how many results show.
+    found_pages: usize,
+    shown: usize,
     searching: Option<Task<()>>,
+    /// "Some names could not load."
+    names_failed: bool,
+    /// "Some agent managers or their names could not load."
+    owners_failed: bool,
     /// People being added, changed or messaged.
     busy: HashSet<String>,
     error: Option<SharedString>,
@@ -128,7 +163,11 @@ impl MembersDialog {
             loading: false,
             input,
             found: None,
+            found_pages: 0,
+            shown: SEARCH_PAGE,
             searching: None,
+            names_failed: false,
+            owners_failed: false,
             busy: HashSet::new(),
             error: None,
             additions: Vec::new(),
@@ -197,17 +236,39 @@ impl MembersDialog {
         let channel = self.channel.id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let state = session.channel_state(&channel).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if let Ok(state) = &state {
-                    let people: Vec<String> = state.roles.keys().cloned().collect();
-                    this.community.update(cx, |community, _| {
-                        community.session.want_profiles(people.clone());
-                        community.set_presence_extra(people);
-                    });
-                }
+            let Ok(people) = this.update_in(cx, |this, window, cx| {
+                // Without a confirmed roster the sidebar's members still
+                // show, their roles unverified.
+                let people: Vec<String> = match &state {
+                    Ok(state) => state.roles.keys().cloned().collect(),
+                    Err(_) => this.summary(cx).members,
+                };
+                this.community.update(cx, |community, _| {
+                    community.set_presence_extra(people.clone());
+                });
                 this.state = Some(state);
                 this.loading = false;
                 this.update_placeholder(window, cx);
+                cx.notify();
+                people
+            }) else {
+                return;
+            };
+            let names = session.load_profiles(people.clone()).await;
+            let owners: Vec<String> = session
+                .snapshot()
+                .borrow()
+                .profiles
+                .iter()
+                .filter(|(key, _)| people.contains(key))
+                .filter_map(|(_, profile)| profile.attested_owner.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let owners = session.load_profiles(owners).await;
+            let _ = this.update(cx, |this, cx| {
+                this.names_failed = names.is_err();
+                this.owners_failed = owners.is_err();
                 cx.notify();
             });
         })
@@ -254,12 +315,51 @@ impl MembersDialog {
             return;
         }
         let session = self.community.read(cx).session.clone();
+        self.shown = SEARCH_PAGE;
         self.searching = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(DEBOUNCE).await;
             let page = session.search_members(&query, 1).await;
             let _ = this.update(cx, |this, cx| {
                 this.found = Some((query, page));
+                this.found_pages = 1;
                 this.searching = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// "Show more results": the next bound of results, reading the relay's
+    /// next page once the ones already read are all shown.
+    fn show_more(&mut self, available: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let more_here = available > self.shown;
+        self.shown += SEARCH_PAGE;
+        if more_here {
+            cx.notify();
+            return;
+        }
+        let Some((query, Ok(_))) = self.found.clone() else {
+            return;
+        };
+        let session = self.community.read(cx).session.clone();
+        let page = self.found_pages + 1;
+        self.searching = Some(cx.spawn_in(window, async move |this, cx| {
+            let next = session.search_members(&query, page).await;
+            let _ = this.update(cx, |this, cx| {
+                this.searching = None;
+                match (next, &mut this.found) {
+                    (Ok(next), Some((text, Ok(found)))) if *text == query => {
+                        for person in next.people {
+                            if !found.people.iter().any(|p| p.pubkey == person.pubkey) {
+                                found.people.push(person);
+                            }
+                        }
+                        found.more = next.more;
+                        this.found_pages = page;
+                    }
+                    (Err(error), Some((text, found))) if *text == query => *found = Err(error),
+                    _ => {}
+                }
                 cx.notify();
             });
         }));
@@ -415,7 +515,7 @@ impl MembersDialog {
     ) -> Menu {
         let viewer = self.viewer(cx);
         let profiles = self.community.read(cx).snapshot.profiles.clone();
-        let agent = is_agent(pubkey, role, &profiles);
+        let agent = is_agent(pubkey, role, &profiles, &known_agents(cx));
         let owner = owner_of(pubkey, &profiles);
         let key = pubkey.to_string();
         let profile_item = |id: &'static str, label: &'static str, target: String| {
@@ -492,18 +592,33 @@ impl MembersDialog {
         menu
     }
 
+    /// A member's row. Without `state` the roster is unconfirmed: the
+    /// row announces its role as unverified and offers no actions.
+    #[allow(clippy::too_many_arguments)]
     fn member_row(
         &self,
         pubkey: &str,
         role: MemberRole,
-        state: &ChannelState,
+        state: Option<&ChannelState>,
+        key_label: &str,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let c = *cx.colors();
         let viewer = self.viewer(cx);
         let profiles = self.community.read(cx).snapshot.profiles.clone();
-        let agent = is_agent(pubkey, role, &profiles);
+        let agent = is_agent(pubkey, role, &profiles, &known_agents(cx));
+        let label = format!(
+            "Open profile for {} ({key_label}){}, {}{}",
+            display_name(&profiles, pubkey),
+            if agent { ", agent" } else { "" },
+            role_label(state.map(|_| role), agent),
+            if super::archives::hides(&self.community, pubkey, cx) {
+                ", archived"
+            } else {
+                ""
+            },
+        );
         let mut name = display_name(&profiles, pubkey).to_string();
         if pubkey == viewer {
             name.push_str(" (you)");
@@ -522,13 +637,14 @@ impl MembersDialog {
         let menu_open = self.menu.as_deref() == Some(pubkey);
         let busy = self.busy.contains(pubkey);
         let key = pubkey.to_string();
-        let menu = menu_open.then(|| {
+        let menu = state.filter(|_| menu_open).map(|state| {
             let menu = self.actions_menu(pubkey, role, state, cx);
             overlay::dropdown(window, Align::End, menu, Self::dismiss_menu(cx))
         });
         let id = SharedString::from(format!("member-{pubkey}"));
         div()
             .id(id)
+            .aria_label(label)
             .group("member-row")
             .flex()
             .items_center()
@@ -555,7 +671,7 @@ impl MembersDialog {
                     })),
             )
             .when(busy, |this| this.child(Spinner::new().size(16.)))
-            .when(!busy, |this| {
+            .when(!busy && state.is_some(), |this| {
                 this.child(
                     div()
                         .relative()
@@ -666,7 +782,12 @@ impl MembersDialog {
                 .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx)))
         };
         if change.change == Change::Remove {
-            let agent = is_agent(&change.pubkey, change.expected, &profiles);
+            let agent = is_agent(
+                &change.pubkey,
+                change.expected,
+                &profiles,
+                &known_agents(cx),
+            );
             let noun = if agent { "agent" } else { "member" };
             return AlertDialog::new(format!("Remove {noun} from channel"))
                 .child(
@@ -776,6 +897,7 @@ impl Render for MembersDialog {
         let profiles = self.community.read(cx).snapshot.profiles.clone();
         let query = self.input.read(cx).value().trim().to_lowercase();
         let can_add = self.can_add(cx);
+        let known = known_agents(cx);
 
         let mut list = div().flex().flex_col().gap(rems(0.75));
         if !can_add {
@@ -831,7 +953,9 @@ impl Render for MembersDialog {
                         let keys = state
                             .roles
                             .iter()
-                            .filter(|(key, role)| Group::of(key, **role, &profiles) == *group)
+                            .filter(|(key, role)| {
+                                Group::of(key, **role, &profiles, &known) == *group
+                            })
                             .map(|(key, role)| (key, *role))
                             .collect();
                         (*group, keys)
@@ -865,8 +989,17 @@ impl Render for MembersDialog {
                         format!("{} · {}", group.label(), keys.len()),
                         cx,
                     ));
+                    let labels = super::templates::public_key_labels(state.roles.keys());
                     for (key, role) in keys {
-                        section = section.child(self.member_row(key, role, &state, window, cx));
+                        let label = labels.get(key.as_str()).cloned().unwrap_or_default();
+                        section = section.child(self.member_row(
+                            key,
+                            role,
+                            Some(&state),
+                            &label,
+                            window,
+                            cx,
+                        ));
                     }
                     list = list.child(section);
                 }
@@ -898,8 +1031,23 @@ impl Render for MembersDialog {
                                 section =
                                     section.child(note("No other matching people or agents.", cx));
                             }
-                            for person in others {
+                            let available = others.len();
+                            for person in others.into_iter().take(self.shown) {
                                 section = section.child(self.candidate_row(person, cx));
+                            }
+                            if available > self.shown || page.more {
+                                section = section.child(
+                                    div().flex().justify_center().child(
+                                        Button::new("members-more", "Show more results")
+                                            .outline()
+                                            .size(ButtonSize::Sm)
+                                            .surface(Surface::Floating)
+                                            .disabled(self.searching.is_some())
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.show_more(available, window, cx)
+                                            })),
+                                    ),
+                                );
                             }
                         }
                         Some((text, Err(message))) if text.to_lowercase() == query => {
@@ -911,7 +1059,67 @@ impl Render for MembersDialog {
                     list = list.child(section);
                 }
             }
-            Some(Err(_)) => {}
+            Some(Err(_)) => {
+                let members = summary.members.clone();
+                let labels = super::templates::public_key_labels(members.iter());
+                let mut keys: Vec<&String> = members
+                    .iter()
+                    .filter(|key| {
+                        query.is_empty()
+                            || members::match_tier(&display_name(&profiles, key), &query).is_some()
+                    })
+                    .collect();
+                keys.sort_by_key(|key| {
+                    (**key != viewer, display_name(&profiles, key).to_lowercase())
+                });
+                for group in [Group::Members, Group::Agents] {
+                    let rows: Vec<&String> = keys
+                        .iter()
+                        .copied()
+                        .filter(|key| {
+                            Group::of(key, MemberRole::Unknown, &profiles, &known) == group
+                        })
+                        .collect();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    let mut section = div().flex().flex_col().child(group_label(
+                        format!("{} · {}", group.label(), rows.len()),
+                        cx,
+                    ));
+                    for key in rows {
+                        let label = labels.get(key.as_str()).cloned().unwrap_or_default();
+                        section = section.child(self.member_row(
+                            key,
+                            MemberRole::Unknown,
+                            None,
+                            &label,
+                            window,
+                            cx,
+                        ));
+                    }
+                    list = list.child(section);
+                }
+            }
+        }
+        if self.names_failed {
+            list = list.child(note(
+                "Some names could not load. Public keys still identify members. Try again.",
+                cx,
+            ));
+        }
+        if self.owners_failed {
+            list = list.child(note(
+                "Some agent managers or their names could not load. Try again.",
+                cx,
+            ));
+        }
+        if agents_failed(cx) {
+            list = list.child(
+                div()
+                    .px(rems(1.))
+                    .child(error("Some agents could not load.", cx)),
+            );
         }
 
         for (index, (pubkey, message)) in self.addition_errors().into_iter().enumerate() {
@@ -994,6 +1202,19 @@ impl Render for MembersDialog {
             )
             .into_any_element()
     }
+}
+
+/// A host the viewer's agents live on could not list them.
+fn agents_failed(cx: &App) -> bool {
+    cx.try_global::<crate::hosts::Hosts>().is_some_and(|hosts| {
+        hosts.hosts.iter().any(|host| {
+            !matches!(
+                host.read(cx).state,
+                buzz_host_rpc::ConnectionState::Connected { .. }
+                    | buzz_host_rpc::ConnectionState::Connecting { .. }
+            )
+        })
+    })
 }
 
 /// Starts an agent the viewer manages here once it is in the channel
@@ -1092,10 +1313,25 @@ mod tests {
             ..Default::default()
         };
         let profiles: Profiles = Arc::new(HashMap::from([("a".to_string(), Arc::new(agent))]));
-        assert_eq!(Group::of("a", MemberRole::Admin, &profiles), Group::Admins);
-        assert_eq!(Group::of("a", MemberRole::Member, &profiles), Group::Agents);
-        assert_eq!(Group::of("b", MemberRole::Bot, &profiles), Group::Agents);
-        assert_eq!(Group::of("b", MemberRole::Guest, &profiles), Group::Members);
-        assert_eq!(Group::of("b", MemberRole::Owner, &profiles), Group::Owners);
+        assert_eq!(
+            Group::of("a", MemberRole::Admin, &profiles, &HashSet::new()),
+            Group::Admins
+        );
+        assert_eq!(
+            Group::of("a", MemberRole::Member, &profiles, &HashSet::new()),
+            Group::Agents
+        );
+        assert_eq!(
+            Group::of("b", MemberRole::Bot, &profiles, &HashSet::new()),
+            Group::Agents
+        );
+        assert_eq!(
+            Group::of("b", MemberRole::Guest, &profiles, &HashSet::new()),
+            Group::Members
+        );
+        assert_eq!(
+            Group::of("b", MemberRole::Owner, &profiles, &HashSet::new()),
+            Group::Owners
+        );
     }
 }
