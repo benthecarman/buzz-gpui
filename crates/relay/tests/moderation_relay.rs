@@ -98,12 +98,33 @@ impl Paced for Session {
     }
 
     async fn change(&self, change: Change) -> Result<(), String> {
+        next_second().await;
         paced(|| self.change_community_member(change.clone())).await
     }
 
     async fn mint(&self, ttl: u64, uses: Option<u32>) -> Result<moderation::Invite, String> {
         paced(|| self.mint_invite(ttl, uses)).await
     }
+}
+
+/// Sleeps into the next wall-clock second.
+///
+/// The relay signs each roster snapshot at the current second. A change
+/// that brings the roster back to a member set already published in that
+/// second, such as a demotion right after a promotion, makes an event
+/// with the same id as the earlier snapshot. The relay then keeps the
+/// snapshot in between as current until its reconcile sweep, up to a
+/// minute later. buzz-admin bumps `created_at` past the newest roster for
+/// this reason; the relay's own command path does not. One change per
+/// second keeps every snapshot new.
+async fn next_second() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    tokio::time::sleep(Duration::from_nanos(
+        1_000_000_000 - u64::from(now.subsec_nanos()),
+    ))
+    .await;
 }
 
 fn role(members: &[Member], pubkey: &str) -> Option<Role> {
