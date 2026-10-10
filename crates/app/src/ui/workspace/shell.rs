@@ -359,12 +359,22 @@ impl Workspace {
             &community,
             SidebarProps {
                 page: self.page,
-                // Another page shows no channel as selected.
-                selected: self
-                    .channel
-                    .as_ref()
-                    .filter(|_| self.page == Page::MESSAGES)
-                    .map(|c| c.read(cx).channel_id().to_string()),
+                // Another page shows no channel as selected. Behind a
+                // failure notice the selection is the failed target's, not
+                // the conversation restored before it (`route.target`).
+                selected: match &self.failure {
+                    Some(failed) => match failed.target.as_ref().map(|target| &target.place) {
+                        Some(crate::ui::navigation::Place::Conversation { channel, .. }) => {
+                            Some(channel.clone())
+                        }
+                        _ => None,
+                    },
+                    None => self
+                        .channel
+                        .as_ref()
+                        .filter(|_| self.page == Page::MESSAGES)
+                        .map(|c| c.read(cx).channel_id().to_string()),
+                },
                 on_select_channel: Arc::new(move |channel, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.select_channel(channel, window, cx));
                 }),
