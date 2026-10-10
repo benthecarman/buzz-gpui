@@ -854,7 +854,10 @@ impl Workspace {
                         _ => false,
                     }
             })
-            .map(|channel| channel.id.clone());
+            .map(|channel| channel.id.clone())
+            // A hidden DM is reopened through the relay, which unhides it
+            // (`ProfilePanel.tsx`). Notes to self cannot be reopened so.
+            .filter(|dm| pubkey == viewer || !snapshot.hidden_dms.contains(dm));
         let weak = cx.entity().downgrade();
         let on_message: Option<profile_card::OnMessage> = match dm {
             Some(dm) => Some(Rc::new(move |window, cx| {
