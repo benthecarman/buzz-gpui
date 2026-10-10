@@ -1187,6 +1187,7 @@ dependencies = [
 name = "buzz-relay-client"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "buzz-desktop",
  "buzz-identity",
  "crc32fast",

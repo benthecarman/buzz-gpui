@@ -16,6 +16,7 @@
 mod account;
 mod actions;
 mod activity;
+mod catalog;
 mod channels;
 mod feedback;
 mod gifs;
@@ -28,16 +29,19 @@ mod presence;
 mod publisher;
 mod sidebar;
 mod statuses;
+mod teams;
 mod threads;
 mod timeline;
 mod unread;
 
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
+pub use catalog::CommunityCatalog;
 pub use feedback::{FeedbackState, PendingFeedback};
 pub use incoming::IncomingMessage;
 pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
 pub use statuses::StatusWatch;
+pub use teams::{TeamKit, TeamsStatus, TeamsView};
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{

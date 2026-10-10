@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = "0.22"
 buzz-desktop.workspace = true
 buzz-identity = { path = "../identity" }
 futures = "0.3"

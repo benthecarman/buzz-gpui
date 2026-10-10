@@ -3,6 +3,7 @@
 pub mod account;
 pub mod archive;
 pub mod budget;
+pub mod catalog;
 pub mod community;
 pub mod discovery;
 pub mod dm;
@@ -30,6 +31,7 @@ pub mod sidebar;
 pub mod sidebar_store;
 pub mod socket;
 pub mod store;
+pub mod teams;
 pub mod threads;
 pub mod typing;
 pub mod unread;

@@ -201,6 +201,8 @@ pub fn is_workflow_operation(event: &UnsignedEvent) -> bool {
 fn purpose(kind: u16) -> Purpose {
     if kind == kinds::APP_DATA {
         Purpose::AppData
+    } else if crate::catalog::is_catalog_kind(kind) {
+        Purpose::Catalog
     } else {
         Purpose::Content
     }
@@ -801,9 +803,14 @@ impl Outbox {
                 return Err(OutboxError::Refused(RECOVER_FIRST.into()));
             }
         }
-        if (draft.kind == kinds::CHAT && draft.content.trim().is_empty())
-            || input_bytes(&draft) > MAX_INPUT_BYTES
-        {
+        // NIP-AP admits larger public definitions than ordinary input.
+        let too_large = if crate::catalog::is_catalog_kind(draft.kind) {
+            draft.content.len() > crate::catalog::MAX_CONTENT_BYTES
+                || input_bytes(&draft) > crate::catalog::MAX_EVENT_BYTES
+        } else {
+            input_bytes(&draft) > MAX_INPUT_BYTES
+        };
+        if (draft.kind == kinds::CHAT && draft.content.trim().is_empty()) || too_large {
             return Err(OutboxError::Refused("Message is empty or too large".into()));
         }
         if state.pending.len() >= MAX_PENDING {
