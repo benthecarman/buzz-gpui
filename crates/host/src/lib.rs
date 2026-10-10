@@ -10,6 +10,7 @@
 //! and other requests stay answerable while a start waits.
 
 pub mod api;
+mod app_agents;
 pub mod credentials;
 pub mod harness;
 mod import;
@@ -78,6 +79,7 @@ pub struct AgentHost {
     /// Loopback ports of sign-ins this host started, which a GUI may
     /// forward a browser callback to.
     sign_ins: std::sync::Mutex<BTreeMap<u16, std::time::Instant>>,
+    app_agents: app_agents::AppAgentHost,
 }
 
 struct Owner {
@@ -164,6 +166,10 @@ impl AgentHost {
             Ok(RuntimeBundle::installed()),
             config.state_dir.join("agent-ownership"),
         );
+        let app_agents = app_agents::AppAgentHost::new(
+            config.state_dir.join("agents2").join("identities.json"),
+            config.credentials.clone(),
+        );
         let (events, _) = broadcast::channel(256);
         let (jobs, queue) = mpsc::channel::<Job>();
         let mut owner = Owner {
@@ -222,6 +228,7 @@ impl AgentHost {
             state_dir: config.state_dir,
             legacy_dir: config.legacy_dir,
             sign_ins: Default::default(),
+            app_agents,
         });
         // A GUI's host restores once someone signs in.
         if open {
@@ -328,6 +335,12 @@ impl AgentHost {
                 .sign_in_callback(port, target)
                 .await
                 .map(Response::SignInPage),
+            Request::AppAgent(request) => self
+                .app_agents
+                .serve(request)
+                .await
+                .map(Response::AppAgent)
+                .map_err(RpcError::Failed),
             Request::Defaults => {
                 self.run(|owner| owner.defaults().map(Response::Defaults))
                     .await

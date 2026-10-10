@@ -10,6 +10,9 @@ use buzz_host_rpc::Protocol;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod app_agent;
+pub use app_agent::*;
+
 pub struct HostProtocol;
 
 impl Protocol for HostProtocol {
@@ -194,6 +197,9 @@ pub enum Request {
         owner: String,
         entries: Vec<MemoryRestore>,
     },
+    // Agents2 custody
+    /// An Agents2 agent's key, held by this host: see [`AppAgentRequest`].
+    AppAgent(AppAgentRequest),
 }
 
 // Responses are moved once, from the wire to their caller; boxing the
@@ -239,6 +245,8 @@ pub enum Response {
         published: Vec<RestoredMemory>,
         errors: Vec<String>,
     },
+    // Agents2 custody
+    AppAgent(AppAgentResponse),
 }
 
 /// What an install did (buzz-app's `InstallReport`).

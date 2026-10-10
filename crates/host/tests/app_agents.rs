@@ -1,0 +1,376 @@
+//! Agents2 custody over host-rpc, and how a host without it answers.
+
+use buzz_host::api::*;
+use buzz_host::credentials::FileCredentials;
+use buzz_host::{AgentHost, HostConfig, RpcHandler};
+use buzz_host_rpc::{
+    ClientHandler, ConnectionState, EventSource, HostClient, HostClientOptions, HostHandler,
+    HostInfo, Peer, Protocol, RpcError, ServerOptions, serve, transport,
+};
+use buzz_identity::Identity;
+use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
+
+struct NoAsks;
+
+impl ClientHandler<HostProtocol> for NoAsks {
+    fn handle(&self, _: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
+        Box::pin(async { Err(RpcError::Failed("unexpected ask".into())) })
+    }
+}
+
+fn info() -> HostInfo {
+    HostInfo {
+        id: "laptop".into(),
+        name: "This laptop".into(),
+        platform: "linux".into(),
+        version: "test".into(),
+    }
+}
+
+async fn connected(client: &HostClient<HostProtocol>) {
+    client
+        .state()
+        .wait_for(|s| matches!(s, ConnectionState::Connected { .. }))
+        .await
+        .unwrap();
+}
+
+async fn ask(
+    client: &HostClient<HostProtocol>,
+    request: AppAgentRequest,
+) -> Result<AppAgentResponse, RpcError> {
+    match client.request(Request::AppAgent(request)).await? {
+        Response::AppAgent(response) => Ok(response),
+        other => panic!("expected an app agent response, got {other:?}"),
+    }
+}
+
+async fn list(client: &HostClient<HostProtocol>) -> Vec<AppAgentSummary> {
+    match ask(client, AppAgentRequest::List).await.unwrap() {
+        AppAgentResponse::Agents(agents) => agents,
+        other => panic!("expected agents, got {other:?}"),
+    }
+}
+
+fn failed(result: Result<AppAgentResponse, RpcError>) -> String {
+    match result {
+        Err(RpcError::Failed(message)) => message,
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn custody_over_rpc() {
+    let state = tempfile::tempdir().unwrap();
+    let host = AgentHost::start(HostConfig {
+        info: info(),
+        state_dir: state.path().join("state"),
+        workspace: state.path().join("workspace"),
+        credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
+        watch_interval: Duration::from_millis(100),
+        legacy_dir: None,
+    })
+    .unwrap();
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve(
+        listener,
+        Arc::new(RpcHandler(host)),
+        ServerOptions::default(),
+    ));
+    let client = HostClient::<HostProtocol>::spawn(
+        &tokio::runtime::Handle::current(),
+        Arc::new(connector),
+        Arc::new(NoAsks),
+        HostClientOptions::default(),
+    );
+    connected(&client).await;
+    assert!(list(&client).await.is_empty());
+
+    let owner = Identity::ephemeral();
+    let prepare = |name: &str| AppAgentRequest::CreatePrepare {
+        request_id: "create-1".into(),
+        destination: "wss://Relay.Example.com/".into(),
+        owner: owner.pubkey_hex(),
+        agent_type: "test/echo".into(),
+        name: name.into(),
+    };
+    let AppAgentResponse::Prepared { pubkey } = ask(&client, prepare("Ada")).await.unwrap() else {
+        panic!("expected prepared");
+    };
+    let AppAgentResponse::Prepared { pubkey: again } = ask(&client, prepare("Ada")).await.unwrap()
+    else {
+        panic!("expected prepared");
+    };
+    assert_eq!(pubkey, again, "a retried prepare reuses the key");
+    assert_eq!(
+        failed(ask(&client, prepare("Grace")).await),
+        "Create destination or owner changed"
+    );
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::CreatePrepare {
+                    request_id: "create-2".into(),
+                    destination: "wss://relay.example.com".into(),
+                    owner: owner.pubkey_hex(),
+                    agent_type: "test/echo".into(),
+                    name: "two\nlines".into(),
+                },
+            )
+            .await
+        ),
+        "Name the agent in one line"
+    );
+
+    // An attestation by someone else is refused, and the key is gone with it.
+    let stranger = Identity::ephemeral();
+    let refused = ask(
+        &client,
+        AppAgentRequest::CreateCommit {
+            request_id: "create-1".into(),
+            auth: stranger.attest_agent(&pubkey).unwrap(),
+        },
+    )
+    .await;
+    assert!(matches!(refused, Err(RpcError::Failed(_))), "{refused:?}");
+    assert!(list(&client).await.is_empty(), "nothing is saved");
+
+    let AppAgentResponse::Prepared { pubkey } = ask(&client, prepare("Ada")).await.unwrap() else {
+        panic!("expected prepared");
+    };
+    let AppAgentResponse::Created(created) = ask(
+        &client,
+        AppAgentRequest::CreateCommit {
+            request_id: "create-1".into(),
+            auth: owner.attest_agent(&pubkey).unwrap(),
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("expected created");
+    };
+    assert_eq!(
+        created,
+        AppAgentSummary {
+            pubkey: pubkey.clone(),
+            relay: "wss://relay.example.com".into(),
+            owner: owner.pubkey_hex(),
+            agent_type: "test/echo".into(),
+            name: "Ada".into(),
+            deleted: false,
+        }
+    );
+    assert_eq!(list(&client).await, vec![created.clone()]);
+    assert!(
+        state.path().join("state/agents2/identities.json").exists(),
+        "identities live under the host's state"
+    );
+
+    ask(
+        &client,
+        AppAgentRequest::Rename {
+            pubkey: pubkey.clone(),
+            name: "  Ada Lovelace ".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(list(&client).await[0].name, "Ada Lovelace");
+
+    // Bounds checked before anything is sent.
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::Publish {
+                    pubkey: pubkey.clone(),
+                    event: AppAgentEvent {
+                        kind: 1,
+                        content: "hi".into(),
+                        tags: vec![],
+                    },
+                },
+            )
+            .await
+        ),
+        "Agents can sign messages, edits, reactions and deletions only"
+    );
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::Publish {
+                    pubkey: pubkey.clone(),
+                    event: AppAgentEvent {
+                        kind: 9,
+                        content: "x".repeat(64 * 1024 + 1),
+                        tags: vec![],
+                    },
+                },
+            )
+            .await
+        ),
+        "Agent event is too large"
+    );
+    for filters in ["[]", &format!("[{}]", ["{}"; 9].join(","))] {
+        assert_eq!(
+            failed(
+                ask(
+                    &client,
+                    AppAgentRequest::Query {
+                        pubkey: pubkey.clone(),
+                        filters: filters.into(),
+                    },
+                )
+                .await
+            ),
+            "Agents read with one to eight filters"
+        );
+    }
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::Upload {
+                    pubkey: pubkey.clone(),
+                    data: "AAAA".into(),
+                    mime: "text/html".into(),
+                    staged: None,
+                },
+            )
+            .await
+        ),
+        "Agents upload images or MP4 video up to 50 MB"
+    );
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::Upload {
+                    pubkey: pubkey.clone(),
+                    data: String::new(),
+                    mime: "image/png".into(),
+                    staged: Some("never-started".into()),
+                },
+            )
+            .await
+        ),
+        "Upload expired; try again"
+    );
+
+    ask(
+        &client,
+        AppAgentRequest::Delete {
+            pubkey: pubkey.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let deleted = list(&client).await;
+    assert!(deleted[0].deleted, "the row stays until it is forgotten");
+    assert_eq!(
+        std::fs::read_dir(state.path().join("keys"))
+            .unwrap()
+            .count(),
+        0,
+        "the key is deleted"
+    );
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::PublishProfile {
+                    pubkey: pubkey.clone(),
+                },
+            )
+            .await
+        ),
+        "No such agent on this device"
+    );
+    ask(
+        &client,
+        AppAgentRequest::Delete {
+            pubkey: pubkey.clone(),
+        },
+    )
+    .await
+    .expect("deleting again is a success");
+    ask(&client, AppAgentRequest::Forget { pubkey })
+        .await
+        .unwrap();
+    assert!(list(&client).await.is_empty());
+}
+
+/// A host from before Agents2: the same protocol without the new variants.
+mod old {
+    use super::*;
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub enum Request {
+        Agents,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub enum Response {
+        Agents(AgentsSnapshot),
+    }
+
+    pub struct OldProtocol;
+
+    impl Protocol for OldProtocol {
+        type ClientRequest = Request;
+        type ClientResponse = Response;
+        type HostRequest = HostAsk;
+        type HostResponse = HostAnswer;
+        type Event = HostEvent;
+    }
+
+    pub struct OldHost(pub tokio::sync::broadcast::Sender<(u64, HostEvent)>);
+
+    impl HostHandler<OldProtocol> for OldHost {
+        fn info(&self) -> HostInfo {
+            info()
+        }
+
+        fn events(&self) -> EventSource<OldProtocol> {
+            self.0.subscribe()
+        }
+
+        fn handle(
+            &self,
+            _: Peer<OldProtocol>,
+            Request::Agents: Request,
+        ) -> BoxFuture<'static, Result<Response, RpcError>> {
+            Box::pin(async { Ok(Response::Agents(AgentsSnapshot::default())) })
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn old_hosts_answer_app_agent_requests_as_unsupported() {
+    let (events, _) = tokio::sync::broadcast::channel(4);
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve(
+        listener,
+        Arc::new(old::OldHost(events)),
+        ServerOptions::default(),
+    ));
+    let client = HostClient::<HostProtocol>::spawn(
+        &tokio::runtime::Handle::current(),
+        Arc::new(connector),
+        Arc::new(NoAsks),
+        HostClientOptions::default(),
+    );
+    connected(&client).await;
+    let message = failed(ask(&client, AppAgentRequest::List).await);
+    assert!(message.contains("does not support"), "{message}");
+    // The connection survives, and the requests the old host knows work.
+    assert!(matches!(
+        client.request(Request::Agents).await,
+        Ok(Response::Agents(_))
+    ));
+}
