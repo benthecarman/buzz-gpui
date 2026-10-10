@@ -153,3 +153,79 @@ async fn mentions_outsiders_as_references_or_invites_them() {
         [carol]
     );
 }
+
+/// A real PNG: the relay decodes uploads and refuses anything else.
+const PNG: &[u8] = include_bytes!("../../../assets/icons/buzz-128.png");
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adds_custom_emoji_to_the_viewer_set() {
+    let Some(fixture) = fixture() else {
+        eprintln!("BUZZ_TEST_RELAY not set; skipping");
+        return;
+    };
+    let bob = fixture.session("bob").await;
+    let viewer = bob.viewer().to_owned();
+    let identity = {
+        let nsec = fixture.identities["identities"]["bob"]["nsec"]
+            .as_str()
+            .unwrap();
+        Arc::new(Identity::from_nsec(nsec).unwrap())
+    };
+    let http = RelayHttp::new(fixture.origin.clone(), identity.clone());
+    let filter = emoji::own_set_filter(&viewer);
+    let before = http.query(std::slice::from_ref(&filter)).await.unwrap();
+    let before = before.iter().max_by_key(|event| event.created_at).cloned();
+
+    let image = upload::upload(
+        bob.media(),
+        UploadFile {
+            name: "wave.png".into(),
+            mime: "image/png".into(),
+            bytes: PNG.to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    let code = format!("test-wave-{}", std::process::id());
+    bob.add_emoji(&code, &image.url).await.unwrap();
+    let mut snapshot = bob.snapshot();
+    until(&mut snapshot, "the new emoji", |s| {
+        s.emoji.mine.iter().any(|e| e.shortcode == code)
+    })
+    .await;
+    // Replacing keeps one entry per code, now last.
+    bob.add_emoji(&format!(":{code}:"), &image.url)
+        .await
+        .unwrap();
+    let after = http.query(std::slice::from_ref(&filter)).await.unwrap();
+    let after = after.iter().max_by_key(|event| event.created_at).unwrap();
+    let entries = emoji::set_entries(after);
+    assert_eq!(entries.iter().filter(|e| e.shortcode == code).count(), 1);
+    assert_eq!(entries.last().unwrap().shortcode, code);
+    if let Some(before) = &before {
+        for kept in emoji::set_entries(before) {
+            assert!(entries.contains(&kept), "kept {}", kept.shortcode);
+        }
+    }
+
+    // Put bob's set back as it was.
+    let tags = match &before {
+        Some(event) => event.tags.iter().map(|t| t.as_slice().to_vec()).collect(),
+        None => vec![vec!["d".to_owned(), emoji::EMOJI_SET.to_owned()]],
+    };
+    let unsigned = identity
+        .template(
+            buzz_identity::Purpose::Content,
+            kinds::CUSTOM_EMOJI,
+            after.created_at.as_secs() + 1,
+            tags,
+            String::new(),
+        )
+        .unwrap();
+    let restored = identity
+        .sign(buzz_identity::Purpose::Content, unsigned)
+        .unwrap();
+    http.post("/events", serde_json::to_string(&restored).unwrap())
+        .await
+        .unwrap();
+}

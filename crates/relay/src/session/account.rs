@@ -4,6 +4,7 @@
 
 use super::{Message, Session};
 use crate::account::{self, LeaveOutcome, ProfileEdit};
+use crate::emoji;
 use crate::event::{Verified, Verifier};
 use crate::http::RelayHttp;
 use crate::messages::EventTemplate;
@@ -18,6 +19,8 @@ use std::time::Duration;
 /// A status save gives up after this long (`user-status.ts`).
 const STATUS_TIMEOUT: Duration = Duration::from_secs(12);
 const PROFILE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Adding an emoji gives up after this long (`emoji-directory.ts`).
+const EMOJI_TIMEOUT: Duration = Duration::from_secs(12);
 
 pub(super) struct Direct {
     pub http: RelayHttp,
@@ -25,6 +28,8 @@ pub(super) struct Direct {
     pub identity: Arc<Identity>,
     /// One status save at a time.
     pub status: tokio::sync::Mutex<()>,
+    /// Emoji additions run one after another, so none is lost.
+    pub emoji: tokio::sync::Mutex<()>,
 }
 
 fn now() -> u64 {
@@ -182,6 +187,55 @@ impl Session {
                 .unwrap_or_else(|_| Err("Saving your status timed out. Try again.".into()))
         })
         .await
+    }
+
+    /// Adds `code` to the viewer's custom emoji set, or gives it a new
+    /// image (§5k.3): reads the set fresh, keeps every other entry, and
+    /// publishes the replacement. The catalog shows it once accepted.
+    pub async fn add_emoji(&self, code: &str, url: &str) -> Result<(), String> {
+        let reader = self.direct.reader.clone();
+        let http = self.direct.http.clone();
+        let identity = self.direct.identity.clone();
+        let commands = self.commands.clone();
+        let viewer = self.viewer.clone();
+        let (code, url) = (code.to_owned(), url.to_owned());
+        let lock = self.direct.emoji.lock().await;
+        let work = async move {
+            let events = reader
+                .read(
+                    vec![emoji::own_set_filter(&viewer)],
+                    ReadOptions {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| error.message)?;
+            let current = emoji::own_set(&events, &viewer);
+            let template = emoji::add_template(current.map(|set| &**set), &code, &url, now())?;
+            let event = sign(&identity, template)?;
+            let verified = Verifier::default()
+                .verify(event.clone())
+                .map_err(|error| error.to_string())?;
+            accept_publish(post(&http, &event).await, &event.id).map_err(|error| match error {
+                PublishError::Rejected(message) | PublishError::Uncertain(message) => message,
+            })?;
+            let _ = commands.send(Message::With(Box::new(move |actor| {
+                if actor.emoji.accept(&[verified]) {
+                    actor.publish();
+                }
+            })));
+            Ok(())
+        };
+        let result = self
+            .run(async move {
+                tokio::time::timeout(EMOJI_TIMEOUT, work)
+                    .await
+                    .unwrap_or_else(|_| Err("Timed out while adding emoji.".into()))
+            })
+            .await;
+        drop(lock);
+        result
     }
 
     /// Asks the relay to end the viewer's membership (NIP-43, §1.8).

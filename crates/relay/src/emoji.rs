@@ -9,7 +9,7 @@
 //! until the next full read.
 
 use crate::event::{Verified, is_newer, kinds};
-use crate::messages::{CustomEmoji, EmojiCatalog, normalize_shortcode};
+use crate::messages::{CustomEmoji, EmojiCatalog, EventTemplate, normalize_shortcode};
 use crate::socket::Filter;
 use nostr::prelude::Event;
 use serde_json::json;
@@ -81,6 +81,82 @@ pub fn catalog_filter() -> Filter {
         serde_json::Value::Object(map) => map,
         _ => unreachable!("filters are objects"),
     }
+}
+
+/// The viewer's own set, read fresh before changing it (§5k.3).
+pub fn own_set_filter(viewer: &str) -> Filter {
+    match json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": [EMOJI_SET], "authors": [viewer], "limit": 1})
+    {
+        serde_json::Value::Object(map) => map,
+        _ => unreachable!("filters are objects"),
+    }
+}
+
+/// The newest of `viewer`'s sets among `events`.
+pub fn own_set<'a>(events: &'a [Verified], viewer: &str) -> Option<&'a Verified> {
+    events
+        .iter()
+        .filter(|event| is_set(event) && event.pubkey_hex() == viewer)
+        .fold(None, |best: Option<&Verified>, event| match best {
+            Some(current) if !is_newer(event, current) => Some(current),
+            _ => Some(event),
+        })
+}
+
+pub const INVALID_NAME: &str = "Invalid emoji name. Use letters, numbers, hyphen, or underscore.";
+const INVALID_URL: &str = "Choose an image file for custom emoji.";
+const MAX_URL: usize = 2048;
+
+/// The set that adds `code` (or replaces its image): every current entry
+/// except `code`, then `code` last, dated after the current set
+/// (`emoji-directory.ts:155-227`).
+pub fn add_template(
+    current: Option<&Event>,
+    code: &str,
+    url: &str,
+    now: u64,
+) -> Result<EventTemplate, &'static str> {
+    let code = normalize_shortcode(code).ok_or(INVALID_NAME)?;
+    let url_ok = !url.is_empty()
+        && url.trim() == url
+        && url.len() <= MAX_URL
+        && (url.starts_with("https://") || url.starts_with("http://"));
+    if !url_ok {
+        return Err(INVALID_URL);
+    }
+    let mut tags = vec![vec!["d".to_owned(), EMOJI_SET.to_owned()]];
+    for entry in current.map(set_entries).unwrap_or_default() {
+        if entry.shortcode != code {
+            tags.push(vec!["emoji".to_owned(), entry.shortcode, entry.url]);
+        }
+    }
+    tags.push(vec!["emoji".to_owned(), code, url.to_owned()]);
+    let created_at = current.map_or(now, |event| now.max(event.created_at.as_secs() + 1));
+    Ok(EventTemplate {
+        kind: kinds::CUSTOM_EMOJI,
+        created_at,
+        tags,
+        content: String::new(),
+    })
+}
+
+/// `suggestShortcode`: the file name without its directory and extension,
+/// lowercase, invalid runs as one `_`, trimmed of `_` and `-`.
+pub fn suggest_shortcode(file_name: &str) -> Option<String> {
+    let name = file_name.trim();
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let stem = name.rfind('.').map_or(name, |dot| &name[..dot]);
+    let mut code = String::new();
+    for c in stem.to_lowercase().chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+            if !(c == '_' && code.ends_with('_')) {
+                code.push(c);
+            }
+        } else if !code.ends_with('_') {
+            code.push('_');
+        }
+    }
+    normalize_shortcode(code.trim_matches(|c| c == '_' || c == '-'))
 }
 
 /// `emojiTags`: the set's `["emoji", code, url]` entries, codes normalized,
@@ -267,6 +343,56 @@ mod tests {
             .finalize(keys)
             .unwrap();
         Verifier::default().verify(event).unwrap()
+    }
+
+    #[test]
+    fn adds_or_replaces_one_entry_in_the_viewer_set() {
+        let alice = Keys::generate();
+        let current = set(
+            &alice,
+            500,
+            &[
+                ("party", "https://x.test/p.gif"),
+                ("ship", "https://x.test/s.png"),
+            ],
+        );
+        let template =
+            add_template(Some(&current), ":Party:", "https://x.test/p2.gif", 100).unwrap();
+        assert_eq!(template.kind, kinds::CUSTOM_EMOJI);
+        assert_eq!(template.content, "");
+        // Dated after the set it replaces, even with a slow clock.
+        assert_eq!(template.created_at, 501);
+        assert_eq!(
+            template.tags,
+            [
+                vec!["d", EMOJI_SET],
+                vec!["emoji", "ship", "https://x.test/s.png"],
+                vec!["emoji", "party", "https://x.test/p2.gif"],
+            ]
+        );
+        let first = add_template(None, "wave", "https://x.test/w.png", 900).unwrap();
+        assert_eq!(first.created_at, 900);
+        assert_eq!(first.tags.len(), 2);
+        assert_eq!(
+            add_template(None, "no spaces", "https://x.test/w.png", 900),
+            Err(INVALID_NAME)
+        );
+        assert!(add_template(None, "ok", " https://x.test/w.png", 900).is_err());
+        assert!(add_template(None, "ok", "data:image/png;base64,AA", 900).is_err());
+    }
+
+    #[test]
+    fn suggests_shortcodes_from_file_names_like_the_reference() {
+        assert_eq!(
+            suggest_shortcode("Party Parrot!.GIF").as_deref(),
+            Some("party_parrot")
+        );
+        assert_eq!(
+            suggest_shortcode("/tmp/shots/ship-it.v2.png").as_deref(),
+            Some("ship-it_v2")
+        );
+        assert_eq!(suggest_shortcode("__done__.webp").as_deref(), Some("done"));
+        assert_eq!(suggest_shortcode("日本.png"), None);
     }
 
     fn codes(snapshot: &EmojiSnapshot) -> Vec<(String, String)> {

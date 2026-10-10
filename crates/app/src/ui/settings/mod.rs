@@ -7,6 +7,7 @@ mod agents;
 mod appearance;
 mod avatar;
 mod communities;
+mod emoji;
 mod notifications;
 mod profile;
 mod shortcuts;
@@ -43,6 +44,7 @@ const TOAST_DURATION: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Profile,
+    CustomEmoji,
     Communities,
     Appearance,
     Notifications,
@@ -55,6 +57,7 @@ impl Section {
     fn label(self) -> &'static str {
         match self {
             Self::Profile => "Profile",
+            Self::CustomEmoji => "Custom emoji",
             Self::Communities => "Communities",
             Self::Appearance => "Appearance",
             Self::Notifications => "Notifications",
@@ -67,6 +70,7 @@ impl Section {
     fn icon(self) -> IconName {
         match self {
             Self::Profile => IconName::User,
+            Self::CustomEmoji => IconName::Smiley,
             Self::Communities => IconName::Globe,
             Self::Appearance => IconName::Palette,
             Self::Notifications => IconName::Bell,
@@ -109,6 +113,8 @@ pub struct SettingsPage {
     modal: Option<Modal>,
     toast: Option<(SharedString, usize)>,
     toasts: usize,
+    /// Made on first visit; its saves raise this page's toast.
+    custom_emoji: Option<(Entity<emoji::CustomEmojiSettings>, Subscription)>,
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -129,6 +135,7 @@ impl SettingsPage {
             modal: None,
             toast: None,
             toasts: 0,
+            custom_emoji: None,
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -209,7 +216,10 @@ impl SettingsPage {
         let mut groups = Vec::new();
         let mut app = Vec::new();
         match community {
-            Some(name) => groups.push(group(name.into(), vec![item(Section::Profile, cx)])),
+            Some(name) => groups.push(group(
+                name.into(),
+                vec![item(Section::Profile, cx), item(Section::CustomEmoji, cx)],
+            )),
             None => app.push(item(Section::Profile, cx)),
         }
         groups.push(group(
@@ -259,6 +269,16 @@ impl SettingsPage {
     fn detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.section {
             Section::Profile => self.profile_section(window, cx),
+            Section::CustomEmoji => {
+                let (settings, _) = self.custom_emoji.get_or_insert_with(|| {
+                    let settings = cx.new(|cx| emoji::CustomEmojiSettings::new(window, cx));
+                    let added = cx.subscribe(&settings, |this, _, emoji::EmojiAdded(code), cx| {
+                        this.show_toast(format!("Added :{code}:"), cx)
+                    });
+                    (settings, added)
+                });
+                settings.clone().into_any_element()
+            }
             Section::Communities => self.communities_section(cx),
             Section::Appearance => appearance::render(cx),
             Section::Notifications => notifications::render(cx),

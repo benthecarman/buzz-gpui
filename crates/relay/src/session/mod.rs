@@ -208,6 +208,7 @@ impl Session {
             reader: reader.clone(),
             identity: identity.clone(),
             status: tokio::sync::Mutex::new(()),
+            emoji: tokio::sync::Mutex::new(()),
         };
         let actor = Actor {
             runtime: runtime.clone(),
