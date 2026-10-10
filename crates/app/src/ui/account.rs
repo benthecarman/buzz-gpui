@@ -357,25 +357,18 @@ impl Account {
         let status_row = profile.community.then(|| {
             let hover = c.affordance_subtle_hover;
             let content: Vec<AnyElement> = match &status {
-                Some(status) => vec![
-                    {
-                        let value = if status.emoji.is_empty() {
-                            "💬"
-                        } else {
-                            status.emoji.as_str()
-                        };
-                        match AppState::current(cx) {
-                            Some(community) => super::status::emoji(value, px(20.), &community, cx),
-                            None => div().child(value.to_string()).into_any_element(),
-                        }
-                    },
-                    div()
+                Some(status) => AppState::current(cx)
+                    .and_then(|community| {
+                        super::status::emoji(&status.emoji, px(20.), &community, cx)
+                    })
+                    .into_iter()
+                    .chain([div()
                         .min_w_0()
                         .truncate()
                         .text_body_sm()
                         .child(status.text.clone())
-                        .into_any_element(),
-                ],
+                        .into_any_element()])
+                    .collect(),
                 None => vec![
                     Icon::new(IconName::Smiley).size(16.).into_any_element(),
                     div()

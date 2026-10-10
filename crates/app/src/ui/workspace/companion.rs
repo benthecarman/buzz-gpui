@@ -75,6 +75,9 @@ impl Workspace {
             pubkey: &pubkey,
             profile: snapshot.profiles.get(&pubkey).map(|p| &**p),
             media: &media,
+            status: self.community.as_ref().and_then(|community| {
+                crate::ui::status::display(snapshot.statuses.get(&pubkey), community, cx)
+            }),
             on_message,
         }
         .panel(cx);

@@ -673,10 +673,13 @@ impl ChannelSidebar {
             let value = format!("group:{}", group.id);
             let leading = match &group.icon {
                 Some(icon) => crate::ui::status::emoji(icon, px(13.), &self.community, cx),
-                None => Icon::new(IconName::FolderSimple)
+                None => None,
+            }
+            .unwrap_or_else(|| {
+                Icon::new(IconName::FolderSimple)
                     .size(14.)
-                    .into_any_element(),
-            };
+                    .into_any_element()
+            });
             menu = menu.child(
                 choice(
                     SharedString::from(format!("to-{value}")),

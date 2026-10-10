@@ -1,5 +1,5 @@
-//! The card a clicked mention opens: avatar, name, key, about and a way
-//! to message the person.
+//! The card a clicked mention opens: avatar, name, key, status, about and
+//! a way to message the person.
 
 use super::media;
 use buzz_relay_client::{Media, Profile};
@@ -21,6 +21,8 @@ pub struct ProfileCard<'a> {
     pub pubkey: &'a str,
     pub profile: Option<&'a Profile>,
     pub media: &'a Media,
+    /// The person's status (`UserStatusDisplay`), if they have one.
+    pub status: Option<AnyElement>,
     /// Opens the direct message with this person; `None` when there is
     /// none to open.
     pub on_message: Option<OnMessage>,
@@ -112,6 +114,10 @@ impl ProfileCard<'_> {
             )
             .into_any_element()]
         .into_iter()
+        .chain(
+            self.status
+                .map(|status| div().mt(px(12.)).child(status).into_any_element()),
+        )
         .chain(about)
         .chain([div().mt(px(16.)).child(message).into_any_element()])
         .collect()

@@ -1,10 +1,12 @@
 //! The "Set a status" dialog (`StatusEditor.tsx`, relay.md §5j): text, an
-//! emoji, and how long the status lasts.
+//! emoji, and how long the status lasts. Also how statuses are shown
+//! (`StatusEmoji.tsx`, `StatusDisplay.tsx`).
 
 use crate::community::Community;
 use crate::ui::emoji_picker::{self, EmojiPicker, Picked};
 use crate::ui::media;
 use crate::ui::overlay::{self, Align, Dismiss};
+use buzz_relay_client::user_status::TEXT_LIMIT;
 use buzz_relay_client::{Session, StatusInput, UserStatus};
 use buzz_ui::{
     ActiveTheme, Button, Dialog, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
@@ -150,7 +152,10 @@ impl StatusEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let text = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("What’s your status?");
+            // `maxLength`, which counts UTF-16 units.
+            let mut state = InputState::new(window, cx)
+                .placeholder("What’s your status?")
+                .validate(|text, _| within_limit(text));
             if let Some(current) = &current {
                 state = state.default_value(current.text.clone());
             }
@@ -554,37 +559,91 @@ fn month_days(month: NaiveDate) -> Vec<NaiveDate> {
     start.iter_days().take_while(|day| *day <= end).collect()
 }
 
-/// A status emoji: a custom `:shortcode:` as its catalog image, matched
-/// case-insensitively (`StatusEmoji.tsx`); anything else, or an unknown
-/// shortcode, as text.
-pub fn emoji(value: &str, size: Pixels, community: &Entity<Community>, cx: &App) -> AnyElement {
-    let custom = value
+/// Whether status text fits the input (`STATUS_TEXT_LIMIT`, UTF-16 units).
+fn within_limit(text: &str) -> bool {
+    text.encode_utf16().count() <= TEXT_LIMIT
+}
+
+/// The code of a custom `:shortcode:` emoji (`/^:([^:\s]+):$/`).
+fn shortcode(value: &str) -> Option<&str> {
+    value
         .strip_prefix(':')
         .and_then(|rest| rest.strip_suffix(':'))
-        .filter(|code| !code.is_empty() && !code.contains([':', ' ', '\t', '\n']))
-        .and_then(|code| {
-            let community = community.read(cx);
-            community
-                .snapshot
-                .emoji
-                .entries
-                .iter()
-                .find(|entry| entry.shortcode.eq_ignore_ascii_case(code))
-                .map(|entry| media::image(&entry.url, community.session.media()))
-        });
-    match custom {
+        .filter(|code| !code.is_empty() && !code.contains(':'))
+        .filter(|code| !code.chars().any(char::is_whitespace))
+}
+
+/// A status emoji (`StatusEmoji.tsx`): a custom `:shortcode:` as its
+/// catalog image, matched case-insensitively; anything else, an unknown
+/// shortcode or an image that fails to load, as text. Nothing for an
+/// empty value.
+pub fn emoji(
+    value: &str,
+    size: Pixels,
+    community: &Entity<Community>,
+    cx: &App,
+) -> Option<AnyElement> {
+    if value.is_empty() {
+        return None;
+    }
+    let code = shortcode(value);
+    let text = {
+        let value = SharedString::from(value.to_string());
+        let custom = code.is_some();
+        move || {
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(size)
+                .line_height(size)
+                // An unresolved shortcode can be long.
+                .when(custom, |this| this.flex_shrink(1.).min_w_0().truncate())
+                .child(value.clone())
+                .into_any_element()
+        }
+    };
+    let source = code.and_then(|code| {
+        let community = community.read(cx);
+        community
+            .snapshot
+            .emoji
+            .entries
+            .iter()
+            .find(|entry| entry.shortcode.eq_ignore_ascii_case(code))
+            .map(|entry| media::image(&entry.url, community.session.media()))
+    });
+    Some(match source {
         Some(source) => img(source)
             .flex_none()
             .size(size)
             .object_fit(ObjectFit::Contain)
+            .with_fallback(text)
             .into_any_element(),
-        None => div()
-            .flex_none()
-            .text_size(size)
-            .line_height(size)
-            .child(value.to_string())
+        None => text(),
+    })
+}
+
+/// Someone's status in full (`StatusDisplay`): emoji and text in subtle
+/// body-sm. Nothing without a status.
+pub fn display(
+    status: Option<&UserStatus>,
+    community: &Entity<Community>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let status = status.filter(|status| !status.emoji.is_empty() || !status.text.is_empty())?;
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(rems(0.25))
+            .min_w_0()
+            .max_w_full()
+            .text_body_sm()
+            .text_color(cx.colors().text_subtle)
+            .children(emoji(&status.emoji, px(20.), community, cx))
+            .child(div().min_w_0().truncate().child(status.text.clone()))
             .into_any_element(),
-    }
+    )
 }
 
 fn time_label(hour: u32, minute: u32) -> String {
@@ -611,9 +670,10 @@ impl Render for StatusEditor {
                     .disabled(self.busy)
                     .icon_size(22.)
                     .tooltip("Choose a status emoji")
-                    .when(!effective.is_empty(), |this| {
-                        this.child(emoji(&effective, px(20.), &self.community, cx))
-                    })
+                    .when_some(
+                        emoji(&effective, px(20.), &self.community, cx),
+                        |this, emoji| this.child(emoji),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if !emoji_open {
                             this.emoji_picker.update(cx, |picker, cx| {
@@ -868,5 +928,25 @@ mod tests {
         assert_eq!(february.first(), Some(&day(2, 1)));
         assert_eq!(february.len(), 28);
         assert_eq!(first_of_month(day(12, 31)), day(12, 1));
+    }
+
+    #[test]
+    fn caps_text_in_utf16_units() {
+        assert!(within_limit(&"x".repeat(100)));
+        assert!(!within_limit(&"x".repeat(101)));
+        // Each of these takes two UTF-16 units, as `maxLength` counts.
+        assert!(within_limit(&"🧪".repeat(50)));
+        assert!(!within_limit(&format!("{}x", "🧪".repeat(50))));
+    }
+
+    #[test]
+    fn recognizes_custom_shortcodes() {
+        assert_eq!(shortcode(":party_parrot:"), Some("party_parrot"));
+        assert_eq!(shortcode("🎉"), None);
+        assert_eq!(shortcode("::"), None);
+        assert_eq!(shortcode(":a:b:"), None);
+        assert_eq!(shortcode(":a b:"), None);
+        assert_eq!(shortcode(":a\u{a0}b:"), None);
+        assert_eq!(shortcode(":code"), None);
     }
 }

@@ -28,6 +28,11 @@ impl Tooltip {
 
     /// The bubble as an element, for custom placement and the gallery.
     pub fn bubble(text: impl Into<SharedString>, cx: &App) -> gpui_kit::Div {
+        Self::surface(cx).child(text.into())
+    }
+
+    /// An empty bubble, for tooltips with more than text.
+    pub fn surface(cx: &App) -> gpui_kit::Div {
         let c = cx.colors();
         div()
             .max_w(rems(24.))
@@ -38,17 +43,17 @@ impl Tooltip {
             .text_color(c.text_inverse)
             .shadow(shadow::sm())
             .text_caption()
-            .child(text.into())
+    }
+
+    /// Tooltip content offset from the pointer: GPUI places tooltips at
+    /// the pointer, and the margin keeps the bubble clear of the cursor.
+    pub fn placed(content: impl IntoElement) -> gpui_kit::Div {
+        div().pl(rems(0.5)).pt(rems(1.25)).child(content)
     }
 }
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // GPUI places tooltips at the pointer; the margin keeps the bubble
-        // clear of the cursor.
-        div()
-            .pl(rems(0.5))
-            .pt(rems(1.25))
-            .child(Self::bubble(self.text.clone(), cx))
+        Self::placed(Self::bubble(self.text.clone(), cx))
     }
 }

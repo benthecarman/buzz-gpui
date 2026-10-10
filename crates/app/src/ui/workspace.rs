@@ -92,6 +92,8 @@ pub struct Workspace {
     failure: Option<Failed>,
     /// The person whose card a mention opened, and where.
     profile: Option<(String, Point<Pixels>)>,
+    /// Keeps the card's person's status current.
+    profile_status: Option<buzz_relay_client::StatusWatch>,
     dialog: Option<dialogs::OpenDialog>,
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
@@ -148,6 +150,7 @@ impl Workspace {
             resolving: None,
             failure: None,
             profile: None,
+            profile_status: None,
             dialog: None,
             _page_events: None,
             route: None,
@@ -822,6 +825,7 @@ impl Workspace {
         self.resolving = None;
         self.failure = None;
         self.attempts += 1;
+        self.profile_status = None;
         if let Some(origin) = &target.community {
             let state = cx.global::<AppState>();
             let index = state
@@ -1129,6 +1133,12 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.profile_status = self.community.as_ref().map(|community| {
+            community
+                .read(cx)
+                .session
+                .watch_statuses(std::slice::from_ref(&pubkey))
+        });
         self.profile = Some((pubkey, at));
         cx.notify();
     }
@@ -1170,15 +1180,20 @@ impl Workspace {
                 Some(Rc::new(move |window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         this.profile = None;
+                        this.profile_status = None;
                         this.message_person(pubkey.clone(), window, cx);
                     });
                 }))
             }
         };
+        let status = self.community.as_ref().and_then(|community| {
+            super::status::display(snapshot.statuses.get(&pubkey), community, cx)
+        });
         let card = ProfileCard {
             pubkey: &pubkey,
             profile: snapshot.profiles.get(&pubkey).map(|p| &**p),
             media: &media,
+            status,
             on_message,
         }
         .render(cx);
@@ -1198,6 +1213,7 @@ impl Workspace {
                             .occlude()
                             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                 this.profile = None;
+                                this.profile_status = None;
                                 cx.notify();
                             }))
                             .child(card),

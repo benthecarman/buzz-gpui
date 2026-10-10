@@ -39,6 +39,7 @@ pub struct NavigationItem {
     icon: Option<IconName>,
     icon_stroke: Option<f32>,
     leading: Option<AnyElement>,
+    name_accessory: Option<AnyElement>,
     trailing: Option<AnyElement>,
     selected: bool,
     unread: bool,
@@ -57,6 +58,7 @@ impl NavigationItem {
             icon: None,
             icon_stroke: None,
             leading: None,
+            name_accessory: None,
             trailing: None,
             selected: false,
             unread: false,
@@ -97,6 +99,13 @@ impl NavigationItem {
     /// Leading element instead of an icon (DM avatar).
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
+        self
+    }
+
+    /// Shown right after the label, which truncates first (a DM's status
+    /// emoji).
+    pub fn name_accessory(mut self, element: impl IntoElement) -> Self {
+        self.name_accessory = Some(element.into_any_element());
         self
     }
 
@@ -238,9 +247,8 @@ impl RenderOnce for NavigationItem {
                         .child(leading),
                 )
             })
-            .child(
-                div()
-                    .flex_1()
+            .map(|this| {
+                let label = div()
                     .min_w_0()
                     .truncate()
                     .when_some(label_color, |this, color| {
@@ -249,8 +257,21 @@ impl RenderOnce for NavigationItem {
                     .map(|this| match self.styled_label {
                         Some(styled) => this.child(styled),
                         None => this.child(self.label),
-                    }),
-            )
+                    });
+                match self.name_accessory {
+                    None => this.child(label.flex_1()),
+                    Some(accessory) => this.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(rems(0.5))
+                            .child(label)
+                            .child(div().flex().flex_none().child(accessory)),
+                    ),
+                }
+            })
             .when_some(self.trailing, |this, trailing| {
                 this.child(
                     div()

@@ -194,7 +194,7 @@ impl ChannelSidebar {
                     .justify_center()
                     .size(px(16.))
                     .mr(px(4.))
-                    .child(crate::ui::status::emoji(icon, px(13.), &self.community, cx)),
+                    .children(crate::ui::status::emoji(icon, px(13.), &self.community, cx)),
             );
         }
         // A closed section stands in for its rows at the sidebar's edges.
@@ -495,7 +495,7 @@ impl ChannelSidebar {
                     .items_center()
                     .ml(px(8.))
                     .tooltip(Tooltip::text(label))
-                    .child(crate::ui::status::emoji(
+                    .children(crate::ui::status::emoji(
                         &value,
                         px(13.),
                         &self.community,

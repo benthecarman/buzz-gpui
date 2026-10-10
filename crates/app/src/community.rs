@@ -344,8 +344,9 @@ impl Community {
         community
     }
 
-    /// Follows the viewer's presence, for the account menu, and that of
-    /// everyone with a one-to-one DM, for the sidebar's avatar dots.
+    /// Follows the viewer's presence, for the account menu, and the
+    /// presence and status of everyone with a one-to-one DM, for the
+    /// sidebar's avatar dots and status emoji.
     fn follow_presence(&mut self) {
         let viewer = self.session.viewer().to_string();
         let mut demand: Vec<String> = std::iter::once(viewer)

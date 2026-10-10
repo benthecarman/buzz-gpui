@@ -139,10 +139,10 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Custom expiry date via a calendar popover (past days disabled) | `src/features/user-status/StatusExpiration.tsx:33-84` | IN PROGRESS. The port currently offers a 31-day menu (`ui/status.rs:369-396`). | Another agent is adding it. | — |
-| Status text capped at 100 characters in the input | `src/features/user-status/StatusEditor.tsx:186-194` | PARTIAL: the relay validates the limit (`crates/relay/src/user_status.rs:11,46`), but the input is not capped (`ui/status.rs:476-479`). | Cap the input. | S |
-| Custom-emoji statuses (`:code:`) render the emoji image, with a text fallback | `src/features/user-status/StatusEmoji.tsx:1-52` | PARTIAL: emoji are rendered as text in the editor trigger and the account menu (`ui/status.rs:452-454`; `ui/account.rs:307-310`), so a custom emoji shows as `:code:`. | Resolve custom emoji to images. | S |
-| Other people's statuses: compact emoji with a tooltip on 1:1 DM rows, full status in the profile panel (`UserStatusDisplay`, `useUserStatus` watch) | `src/features/user-status/StatusDisplay.tsx:1-75`; `src/features/user-status/useUserStatus.ts:1-18` | MISSING: there is no status watch for other users in the relay crate (only `own_status`, `crates/relay/src/session/account.rs:136`), and no display in `ui/sidebar.rs`. | Status subscriptions for other users and the display component. | M |
+| Custom expiry date via a calendar popover (past days disabled) | `src/features/user-status/StatusExpiration.tsx:33-84` | DONE (`ui/status.rs` `date_menu`) | — | — |
+| Status text capped at 100 characters in the input | `src/features/user-status/StatusEditor.tsx:186-194` | DONE (`ui/status.rs` `within_limit`) | — | — |
+| Custom-emoji statuses (`:code:`) render the emoji image, with a text fallback | `src/features/user-status/StatusEmoji.tsx:1-52` | DONE (`ui/status.rs` `emoji`) | — | — |
+| Other people's statuses: compact emoji with a tooltip on 1:1 DM rows, full status in the profile panel (`UserStatusDisplay`, `useUserStatus` watch) | `src/features/user-status/StatusDisplay.tsx:1-75`; `src/features/user-status/useUserStatus.ts:1-18` | DONE (`crates/relay/src/session/statuses.rs`, `ui/status.rs` `compact`/`display`; the profile card stands in for the profile panel) | — | — |
 
 ## 10. Identity names and profile targets (features/identity-names, features/profiles)
 
