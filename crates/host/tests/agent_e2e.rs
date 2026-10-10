@@ -208,6 +208,36 @@ async fn lifecycle(f: Fixture, scratch: &Path) {
     assert_eq!(reply.pubkey.to_hex(), pubkey);
     assert!(reply.content.starts_with(&format!("echo: ping {nonce}-")));
 
+    // Saving a running agent's launch settings restarts it with them.
+    let running = agent_until(&host, &id, &log(&id), "the agent runs", |a| {
+        a.status == ProcessStatus::Running
+    })
+    .await;
+    let Response::Agents(saved) = host
+        .request(Request::Save {
+            id: id.clone(),
+            revision: running.revision,
+            edit: AgentEdit {
+                name: running.name.clone(),
+                system_prompt: "Echo every mention, again.".into(),
+                workspace: running.workspace.clone(),
+                harness: HarnessEdit {
+                    command: running.harness.command.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected agents");
+    };
+    assert_eq!(saved.restarted, Some(1), "{}", read_log(&log(&id)));
+    assert_eq!(saved.restart_failures, Some(0));
+    let restarted = saved.agents.iter().find(|a| a.id == id).unwrap();
+    assert_eq!(restarted.running_revision, Some(restarted.revision));
+
     host.request(Request::Action {
         id: id.clone(),
         action: AgentAction::Stop,

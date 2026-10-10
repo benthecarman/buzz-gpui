@@ -91,16 +91,40 @@ pub enum Request {
         token: String,
         ids: Vec<String>,
     },
+    /// Sends one short prompt through the draft's harness, provider and
+    /// model (Pi and Goose only). `id` and `revision` resolve the draft as
+    /// in [`Request::Models`].
+    TestConnection {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        revision: u64,
+        edit: AgentEdit,
+    },
+    /// Removes this host's cached Databricks sign-in for `workspace`, an
+    /// HTTPS origin. Empty means the workspace agent defaults set.
+    DisconnectDatabricks {
+        workspace: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
     Agents(AgentsSnapshot),
     Harnesses(Vec<Harness>),
-    Prepared { id: String, pubkey: String },
+    Prepared {
+        id: String,
+        pubkey: String,
+    },
     Models(ModelCatalog),
     Defaults(AgentDefaults),
     ImportPreview(ImportPreview),
+    /// The connection test got a reply. `model` is `provider/model`, absent
+    /// when a saved environment override picked it.
+    Tested {
+        model: Option<String>,
+    },
+    Disconnected,
 }
 
 /// Requests the host makes of the GUI, which holds the human key.
@@ -143,6 +167,10 @@ pub struct AgentsSnapshot {
     /// Where new agents work when the create request leaves the workspace
     /// empty.
     pub default_workspace: String,
+    /// Set on the reply to a save: running agents whose launch settings the
+    /// save changed, restarted with them, and those that did not restart.
+    pub restarted: Option<u32>,
+    pub restart_failures: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -185,6 +213,16 @@ pub struct HarnessSettings {
     pub model: String,
     pub provider: String,
     pub environment_keys: Vec<String>,
+    pub databricks: Option<DatabricksSettings>,
+}
+
+/// Mirrors the controller's `DatabricksSettings`: Buzz Agent's Databricks
+/// workspace origin and its comma-separated model ID globs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DatabricksSettings {
+    pub host: String,
+    pub filter: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,15 +253,36 @@ pub struct AgentEdit {
     pub picture: Option<String>,
     pub system_prompt: String,
     /// `None` leaves the saved choice; `Some(None)` clears it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub session_policy: Option<Option<SessionPolicy>>,
     pub workspace: String,
     pub harness: HarnessEdit,
     /// `None` values remove a saved variable. Values are write-only: the
     /// host never sends them back.
     pub environment: BTreeMap<String, Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    /// `None` leaves the agent's own effort; `Some(None)` clears it, so the
+    /// agent follows its defaults again. Hosts before clearing existed read
+    /// `Some(None)` as `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub effort: Option<Option<String>>,
+}
+
+/// Tells a missing field (`None`, by `default`) from an explicit null
+/// (`Some(None)`), which plain `Option<Option<_>>` reads as `None`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -233,6 +292,10 @@ pub struct HarnessEdit {
     pub args: Vec<String>,
     pub model: String,
     pub provider: String,
+    /// Buzz Agent's Databricks settings. `None` clears them, so an edit
+    /// sends back what it does not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub databricks: Option<DatabricksSettings>,
 }
 
 /// A harness this host can run, as detected on its PATH.
@@ -285,6 +348,9 @@ pub struct AgentDefaults {
     pub effort: String,
     pub session_policy: Option<SessionPolicy>,
     pub environment_keys: Vec<String>,
+    /// Set on the reply to a save, as in [`AgentsSnapshot`].
+    pub restarted: Option<u32>,
+    pub restart_failures: Option<u32>,
 }
 
 /// Mirrors the controller's `AgentDefaultsEdit`.

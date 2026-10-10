@@ -188,11 +188,63 @@ async fn create_save_and_delete_over_rpc() {
         })
         .await;
     assert!(stale.is_err(), "a stale revision must not overwrite");
+    assert_eq!(
+        (saved.restarted, saved.restart_failures),
+        (Some(0), Some(0)),
+        "a stopped agent is not restarted"
+    );
+
+    // An agent's own effort and conversation context can be set, then
+    // cleared back to its defaults, over the wire.
+    let save = |revision: u64, effort, session_policy| Request::Save {
+        id: id.clone(),
+        revision,
+        edit: AgentEdit {
+            workspace: agent.workspace.clone(),
+            effort,
+            session_policy,
+            ..edit("Scout II")
+        },
+    };
+    let Response::Agents(set) = client
+        .request(save(
+            saved.agents[0].revision,
+            Some(Some("high".into())),
+            Some(Some(SessionPolicy::Channel)),
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("expected agents");
+    };
+    assert_eq!(set.agents[0].launch_effort.as_deref(), Some("high"));
+    assert_eq!(set.agents[0].session_policy, Some(SessionPolicy::Channel));
+    let Response::Agents(kept) = client
+        .request(save(set.agents[0].revision, None, None))
+        .await
+        .unwrap()
+    else {
+        panic!("expected agents");
+    };
+    assert_eq!(kept.agents[0].launch_effort.as_deref(), Some("high"));
+    assert_eq!(kept.agents[0].session_policy, Some(SessionPolicy::Channel));
+    let Response::Agents(cleared) = client
+        .request(save(kept.agents[0].revision, Some(None), Some(None)))
+        .await
+        .unwrap()
+    else {
+        panic!("expected agents");
+    };
+    let agent = &cleared.agents[0];
+    assert_eq!(agent.launch_effort, None);
+    assert_eq!(agent.session_policy, None);
+    assert_eq!(agent.harness.command, "goose", "the harness is put back");
+    assert_eq!(agent.name, "Scout II");
 
     let Response::Agents(deleted) = client
         .request(Request::Delete {
             id,
-            revision: saved.agents[0].revision,
+            revision: agent.revision,
         })
         .await
         .unwrap()

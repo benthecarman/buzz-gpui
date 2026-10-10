@@ -183,8 +183,31 @@ impl AgentHost {
                     let edit: buzz_agent_controller::AgentDefaultsEdit =
                         serde_json::from_value(json)
                             .map_err(|error| format!("Invalid agent defaults: {error}"))?;
-                    owner.controller.save_defaults(edit)?;
-                    owner.defaults().map(Response::Defaults)
+                    // Agents that inherit a changed default restart with it.
+                    let (restarted, failures) = owner
+                        .save_and_restart(|owner| owner.controller.save_defaults(edit).map(drop))?;
+                    let mut defaults = owner.defaults()?;
+                    defaults.restarted = Some(restarted);
+                    defaults.restart_failures = Some(failures);
+                    Ok(Response::Defaults(defaults))
+                })
+                .await
+            }
+            Request::TestConnection { id, revision, edit } => self
+                .test_connection(id, revision, edit)
+                .await
+                .map(|model| Response::Tested { model }),
+            Request::DisconnectDatabricks { workspace } => {
+                self.run(move |owner| {
+                    let workspace = match workspace.as_str() {
+                        "" => owner
+                            .controller
+                            .inherited_workspace()?
+                            .ok_or("Agent defaults no longer set a Databricks workspace")?,
+                        _ => workspace,
+                    };
+                    owner.controller.disconnect(&workspace)?;
+                    Ok(Response::Disconnected)
                 })
                 .await
             }
@@ -225,10 +248,12 @@ impl AgentHost {
             }
             Request::Save { id, revision, edit } => {
                 self.run(move |owner| {
-                    owner
-                        .controller
-                        .save(&id, revision, controller_edit(&edit)?)?;
-                    owner.snapshot().map(Response::Agents)
+                    let (restarted, failures) =
+                        owner.save_and_restart(|owner| owner.save(&id, revision, &edit))?;
+                    let mut snapshot = owner.snapshot()?;
+                    snapshot.restarted = Some(restarted);
+                    snapshot.restart_failures = Some(failures);
+                    Ok(Response::Agents(snapshot))
                 })
                 .await
             }
@@ -370,56 +395,101 @@ impl AgentHost {
         revision: u64,
         edit: api::AgentEdit,
     ) -> Result<api::ModelCatalog, RpcError> {
-        let lookup = models::lookup(&edit.harness.command);
-        match lookup {
-            models::Lookup::Databricks => {
-                return Err(failed(
-                    "Buzz Agent lists models only for Databricks, which needs a sign-in this \
-                     host cannot run yet. Enter a model ID.",
-                ));
-            }
-            models::Lookup::None => {
-                return Err(failed(
-                    "This harness does not list its models. Enter a model ID.",
-                ));
-            }
-            models::Lookup::Goose | models::Lookup::Pi => {}
-        }
-        // Login-shell PATH discovery blocks for up to ~15 s, once.
-        tokio::task::spawn_blocking(buzz_agent_controller::prepare_tools_path)
-            .await
-            .map_err(|_| failed("Could not find installed tools"))?;
-        match lookup {
+        match models::lookup(&edit.harness.command) {
+            models::Lookup::Databricks => Err(failed(
+                "Buzz Agent lists models only for Databricks, which needs a sign-in this \
+                 host cannot run yet. Enter a model ID.",
+            )),
+            models::Lookup::None => Err(failed(
+                "This harness does not list its models. Enter a model ID.",
+            )),
             models::Lookup::Goose => {
-                let context = self
-                    .run(move |owner| {
-                        let edit = owner.draft(&edit)?;
-                        match id {
-                            Some(id) => owner.controller.goose_model_context(&id, revision, edit),
-                            None => {
-                                let edit = owner.controller.effective_draft(edit)?;
-                                owner.controller.draft_goose_model_context(edit)
-                            }
-                        }
-                    })
-                    .await?;
+                let context = self.goose_context(id, revision, edit).await?;
                 models::goose(context).await.map_err(RpcError::Failed)
             }
-            _ => {
-                let context = self
-                    .run(move |owner| {
-                        let edit = owner.draft(&edit)?;
-                        match id {
-                            Some(id) => owner.controller.pi_model_context(&id, revision, edit),
-                            None => Controller::draft_pi_model_context(
-                                owner.controller.effective_draft(edit)?,
-                            ),
-                        }
-                    })
-                    .await?;
+            models::Lookup::Pi => {
+                let context = self.pi_context(id, revision, edit).await?;
                 models::pi(context).await.map_err(RpcError::Failed)
             }
         }
+    }
+
+    /// Sends one prompt through the draft's Pi or Goose setup. Returns the
+    /// model that answered, unless a saved override chose it: override
+    /// values never leave the host.
+    async fn test_connection(
+        &self,
+        id: Option<String>,
+        revision: u64,
+        edit: api::AgentEdit,
+    ) -> Result<Option<String>, RpcError> {
+        match models::lookup(&edit.harness.command) {
+            models::Lookup::Goose => {
+                let context = self.goose_context(id, revision, edit).await?;
+                let overridden =
+                    context.model_overridden || context.environment.contains_key("GOOSE_PROVIDER");
+                let model = models::goose_test(context)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                Ok((!overridden).then_some(model))
+            }
+            models::Lookup::Pi => {
+                let provider = edit.harness.provider.clone();
+                let model = edit.harness.model.clone();
+                let context = self.pi_context(id, revision, edit).await?;
+                models::pi_test(context, &provider, &model)
+                    .await
+                    .map(Some)
+                    .map_err(RpcError::Failed)
+            }
+            _ => Err(failed(
+                "Connection tests are only available for Pi and Goose",
+            )),
+        }
+    }
+
+    /// Login-shell PATH discovery blocks for up to ~15 s, once.
+    async fn tools_path() -> Result<(), RpcError> {
+        tokio::task::spawn_blocking(buzz_agent_controller::prepare_tools_path)
+            .await
+            .map_err(|_| failed("Could not find installed tools"))
+    }
+
+    async fn goose_context(
+        &self,
+        id: Option<String>,
+        revision: u64,
+        edit: api::AgentEdit,
+    ) -> Result<buzz_agent_controller::GooseModelContext, RpcError> {
+        Self::tools_path().await?;
+        self.run(move |owner| {
+            let edit = owner.draft(&edit)?;
+            match id {
+                Some(id) => owner.controller.goose_model_context(&id, revision, edit),
+                None => {
+                    let edit = owner.controller.effective_draft(edit)?;
+                    owner.controller.draft_goose_model_context(edit)
+                }
+            }
+        })
+        .await
+    }
+
+    async fn pi_context(
+        &self,
+        id: Option<String>,
+        revision: u64,
+        edit: api::AgentEdit,
+    ) -> Result<buzz_agent_controller::pi::PiContext, RpcError> {
+        Self::tools_path().await?;
+        self.run(move |owner| {
+            let edit = owner.draft(&edit)?;
+            match id {
+                Some(id) => owner.controller.pi_model_context(&id, revision, edit),
+                None => Controller::draft_pi_model_context(owner.controller.effective_draft(edit)?),
+            }
+        })
+        .await
     }
 
     /// Imports from the previewed source. Candidates without an owner
@@ -534,6 +604,94 @@ impl Drop for AgentHost {
 }
 
 impl Owner {
+    /// Saves an agent. The controller keeps an agent's own effort until its
+    /// harness kind changes, and has no other way to clear it; so a clear
+    /// saves twice more, through a stand-in harness of another kind and
+    /// back, with nothing else changed. The edit itself is saved first, so
+    /// a draft the controller refuses changes nothing.
+    fn save(&mut self, id: &str, revision: u64, edit: &api::AgentEdit) -> Result<(), String> {
+        self.controller.save(id, revision, controller_edit(edit)?)?;
+        if edit.effort != Some(None) {
+            return Ok(());
+        }
+        let unchanged = api::AgentEdit {
+            picture: None,
+            session_policy: None,
+            environment: BTreeMap::new(),
+            effort: None,
+            ..edit.clone()
+        };
+        let detour = api::AgentEdit {
+            harness: api::HarnessEdit {
+                command: effort_detour(&edit.harness.command).into(),
+                ..unchanged.harness.clone()
+            },
+            ..unchanged.clone()
+        };
+        let revision = self.revision(id)?;
+        self.controller
+            .save(id, revision, controller_edit(&detour)?)?;
+        let revision = self.revision(id)?;
+        self.controller
+            .save(id, revision, controller_edit(&unchanged)?)?;
+        Ok(())
+    }
+
+    fn revision(&mut self, id: &str) -> Result<u64, String> {
+        self.controller
+            .snapshot()?
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .map(|agent| agent.revision)
+            .ok_or_else(|| "Agent no longer exists".into())
+    }
+
+    /// The agent is running, and runs (`Some(true)`) or does not run yet
+    /// (`Some(false)`) its saved settings. `None` when it is not running.
+    fn current(&mut self, id: &str) -> Result<Option<bool>, String> {
+        Ok(self
+            .controller
+            .snapshot()?
+            .agents
+            .into_iter()
+            .find(|agent| {
+                agent.id == id
+                    && agent.enabled
+                    && agent.status == buzz_agent_controller::ProcessStatus::Running
+            })
+            .map(|agent| agent.restart_diff.is_empty()))
+    }
+
+    /// Runs a save, then restarts running agents whose launch settings it
+    /// changed (buzz-app's `save_and_restart`). Stopped agents stay
+    /// stopped. Returns how many restarted and how many did not.
+    fn save_and_restart(
+        &mut self,
+        save: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(u32, u32), String> {
+        let before = self.controller.running_settings()?;
+        save(self)?;
+        let after = self.controller.running_settings()?;
+        let (mut restarted, mut failures) = (0, 0);
+        for id in changed_running(&before, &after) {
+            if self.current(&id)? != Some(false) {
+                continue;
+            }
+            let outcome = self.controller.action(&id, Action::Restart);
+            match (outcome, self.current(&id)) {
+                (Ok(_), Ok(Some(true))) => restarted += 1,
+                (outcome, _) => {
+                    if let Err(error) = outcome {
+                        tracing::warn!(agent = %id, %error, "agent did not restart after a save");
+                    }
+                    failures += 1;
+                }
+            }
+        }
+        Ok((restarted, failures))
+    }
+
     /// A form draft as the controller takes it; an empty workspace means
     /// the host's default, as on create.
     fn draft(&self, edit: &api::AgentEdit) -> Result<buzz_agent_controller::AgentEdit, String> {
@@ -626,6 +784,33 @@ impl Owner {
             self.last = Some(snapshot.clone());
             let _ = self.events.send((self.seq, HostEvent::Agents(snapshot)));
         }
+    }
+}
+
+/// Agents running both before and after a save whose launch settings
+/// differ.
+fn changed_running(
+    before: &BTreeMap<String, serde_json::Value>,
+    after: &BTreeMap<String, serde_json::Value>,
+) -> Vec<String> {
+    after
+        .iter()
+        .filter(|(id, settings)| before.get(*id).is_some_and(|old| old != *settings))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// A harness command of another kind than `command` that accepts the same
+/// environment: Pi and Goose take behavior overrides, the rest do not.
+fn effort_detour(command: &str) -> &'static str {
+    match std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.trim_end_matches(".exe"))
+    {
+        Some("goose" | "goose-acp") => "buzz-pi-acp",
+        Some("buzz-pi-acp") => "goose",
+        _ => "buzz-effort-reset",
     }
 }
 
