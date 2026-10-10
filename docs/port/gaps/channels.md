@@ -795,8 +795,8 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Feedback event (`category`, text, attachments, limits) | product-feedback.ts:1-28 | MISSING | Kind allowed (crates/identity/src/lib.rs:139), never built | M |
-| Durable outbox send, availability gate, diagnostics upload | FeedbackDialog.tsx:60-140; session.ts:1723-1743 | MISSING | - | M |
+| Feedback event (`category`, text, attachments, limits) | product-feedback.ts:1-28 | DONE (crates/relay/src/feedback.rs) | - | - |
+| Durable outbox send, availability gate, diagnostics upload | FeedbackDialog.tsx:60-140; session.ts:1723-1743 | DONE (crates/relay/src/session/feedback.rs, crates/app/src/ui/feedback.rs) | - | - |
 | 42000 excluded from views | session.ts:292, 355, 461, 541 | DONE (threads.rs:111-112, 495) | - | - |
 
 ### Identity archives (13535)

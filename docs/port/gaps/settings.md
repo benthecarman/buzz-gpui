@@ -156,7 +156,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Plugin account actions in the profile menu, for example "Send feedback" (feedback dialog) | `src/features/account-actions/service.ts:1-41`; `src/app/shell/ProfileButton.tsx:421-430`; `src/bundled/feedback/index.tsx:1-14` | MISSING: the menu has only Settings and Sign out (`ui/account.rs:388-420`). | At least the Send feedback action and its dialog. | M |
+| Plugin account actions in the profile menu, for example "Send feedback" (feedback dialog) | `src/features/account-actions/service.ts:1-41`; `src/app/shell/ProfileButton.tsx:421-430`; `src/bundled/feedback/index.tsx:1-14` | DONE (crates/app/src/ui/account.rs, crates/app/src/ui/feedback.rs) | - | - |
 | A "Sign out" row in the account menu | Not in buzz-app (sign-out is only in Settings → Profile) | DONE (ui/account.rs: removed; sign-out is in Settings → Profile) | Remove it, or keep it as a deliberate addition. | S |
 
 ## 12. Plugins (Settings.tsx Plugins section, PluginImport.tsx) and plugin-dependent pieces
