@@ -1,0 +1,744 @@
+//! Turns Agents2 deliveries into Claude turns, a port of buzz-app's
+//! `runtime.ts`. Each agent of this type has its own sessions; a delivery
+//! becomes a prompt in the harness format, sent to the session for its
+//! conversation. The run returns once the turn is handed over, so one agent
+//! works in several conversations at once. Claude acts in Buzz with the
+//! in-process Buzz tools, signed by the agent's host-held key; the runtime
+//! only reports a turn that fails.
+
+use super::claude::{Launch, Settled, ToolServer};
+use super::client::{AgentActions, AppClient};
+use super::prompt::{
+    CONTEXT_LIMIT, Channel, Scope, Thread, steer_prompt, system_prompt, timer_prompt, turn_prompt,
+};
+use super::sessions::{
+    AgentSessions, DeliverOptions, FileSessions, SessionStore, SessionView, SessionsOptions,
+};
+use crate::agent_plugins::process::Spawner;
+use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template, rpc, tools::hex};
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
+
+/// The type's config, as buzz-app saves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Config {
+    /// A Claude model or alias; empty uses Claude Code's own default.
+    pub model: String,
+    pub instructions: String,
+    /// The agent's working directory, absolute or `~/…`.
+    pub workspace: String,
+    /// `thread` or `channel`: whether each thread is its own session, or
+    /// the whole channel is one.
+    pub scope: String,
+    /// `owner` or `anyone`: whose messages it acts on. Claude runs commands
+    /// as you, so by default only yours, as harness agents do.
+    pub respond_to: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            instructions: String::new(),
+            workspace: "~/.buzz".into(),
+            scope: "thread".into(),
+            respond_to: "owner".into(),
+        }
+    }
+}
+
+impl Config {
+    /// The saved config over the defaults, field by field.
+    pub fn read(value: &Value) -> Self {
+        let mut config = Self::default();
+        let field = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_string);
+        if let Some(model) = field("model") {
+            config.model = model;
+        }
+        if let Some(instructions) = field("instructions") {
+            config.instructions = instructions;
+        }
+        if let Some(workspace) = field("workspace") {
+            config.workspace = workspace;
+        }
+        if let Some(scope) = field("scope") {
+            config.scope = scope;
+        }
+        if let Some(respond_to) = field("respondTo") {
+            config.respond_to = respond_to;
+        }
+        config
+    }
+
+    pub fn value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    pub fn scope(&self) -> Scope {
+        if self.scope == "channel" {
+            Scope::Channel
+        } else {
+            Scope::Thread
+        }
+    }
+
+    /// What a running process fixed when it started.
+    fn fingerprint(&self) -> String {
+        json!([self.model, self.workspace, self.instructions, self.scope]).to_string()
+    }
+}
+
+/// How long a read of the agent's core memory is reused.
+const MEMORY_TTL: Duration = Duration::from_secs(5 * 60);
+const MEMORY_TIMEOUT: Duration = Duration::from_secs(5);
+const NAMES_TIMEOUT: Duration = Duration::from_secs(2);
+const CHAT: [u32; 2] = [9, 40002];
+
+/// A channel as the owner's session sees it.
+#[derive(Clone, Debug, Default)]
+pub struct ChannelInfo {
+    pub name: Option<String>,
+    pub dm: bool,
+    pub members: Vec<String>,
+}
+
+/// What the runtime reads as the owner: the selected community's session.
+pub trait OwnerRelay: Send + Sync {
+    fn channel(&self, id: &str) -> Option<ChannelInfo>;
+    /// Reads the community as the owner.
+    fn read(&self, filters: Vec<Value>) -> BoxFuture<'static, Result<Vec<BuzzEvent>, String>>;
+    /// Display names of `pubkeys`, waiting briefly for profiles not yet
+    /// known.
+    fn names(
+        &self,
+        pubkeys: Vec<String>,
+        members: Vec<String>,
+    ) -> BoxFuture<'static, HashMap<String, String>>;
+    /// The agent's memory, read back with the owner's key: it is encrypted
+    /// to the owner, so no agent key is needed to read it.
+    fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>>;
+}
+
+/// Why an agent woke, as this type needs it.
+#[derive(Clone, Debug)]
+pub enum Wake {
+    Mention {
+        event: BuzzEvent,
+    },
+    Watch {
+        event: BuzzEvent,
+        /// The matched watch's Interest instructions.
+        interest: Option<String>,
+    },
+    Timer {
+        slug: String,
+        prompt: String,
+        interest: Option<String>,
+    },
+}
+
+/// One delivery.
+pub struct Run {
+    pub wake: Wake,
+    /// The live route's channel.
+    pub channel: Option<String>,
+    pub agent: Arc<dyn AgentActions>,
+    pub config: Value,
+    /// Where the agent's processes run: the host that holds it.
+    pub spawn: Spawner,
+}
+
+/// One agent, as `sync` describes it.
+pub struct Synced {
+    pub pubkey: String,
+    pub config: Value,
+    pub spawn: Spawner,
+}
+
+type MemoryRead = Shared<BoxFuture<'static, Result<Vec<Memory>, String>>>;
+
+struct EntryState {
+    config: Config,
+    /// The core memory and when it was read: `None` when it could not be.
+    memory: Option<(Option<Option<String>>, Instant)>,
+    /// The agent's handle from its latest delivery, for the tools to act
+    /// with.
+    handle: Option<Arc<dyn AgentActions>>,
+    /// Where each conversation's tools default to: its latest turn's
+    /// thread.
+    contexts: HashMap<String, Context>,
+}
+
+struct Entry {
+    sessions: AgentSessions,
+    state: Arc<Mutex<EntryState>>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+struct Inner {
+    agents: Mutex<HashMap<String, Arc<Entry>>>,
+    reading: Mutex<HashMap<String, MemoryRead>>,
+    relay: Mutex<Option<Arc<dyn OwnerRelay>>>,
+    changes: watch::Sender<u64>,
+    /// Where each agent's saved sessions are kept.
+    store: Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>,
+}
+
+/// Every Claude Code agent's sessions. Cheap to clone.
+#[derive(Clone)]
+pub struct ClaudeRuntime {
+    inner: Arc<Inner>,
+}
+
+impl ClaudeRuntime {
+    /// Saved sessions go to `path`, a JSON file shared by all agents.
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self::with_store(Arc::new(move |agent: &str| -> Arc<dyn SessionStore> {
+            let path = path
+                .clone()
+                .or_else(FileSessions::default_path)
+                .unwrap_or_else(|| PathBuf::from("claude-code-sessions.json"));
+            Arc::new(FileSessions::new(path, agent))
+        }))
+    }
+
+    pub fn with_store(store: Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                agents: Mutex::default(),
+                reading: Mutex::default(),
+                relay: Mutex::default(),
+                changes: watch::Sender::new(0),
+                store,
+            }),
+        }
+    }
+
+    /// The selected community, as its owner reads it.
+    pub fn set_relay(&self, relay: Option<Arc<dyn OwnerRelay>>) {
+        *locked(&self.inner.relay) = relay;
+    }
+    fn relay(&self) -> Option<Arc<dyn OwnerRelay>> {
+        locked(&self.inner.relay).clone()
+    }
+
+    /// Bumps whenever a session starts, stops or settles.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.inner.changes.subscribe()
+    }
+    fn notify(&self) {
+        self.inner.changes.send_modify(|count| *count += 1);
+    }
+
+    /// Brings the runtime in line with this type's agents: new ones get a
+    /// warm session, changed settings restart idle sessions, removed agents
+    /// stop. Must run inside tokio.
+    pub fn sync(&self, agents: Vec<Synced>) {
+        let current: HashSet<&str> = agents.iter().map(|agent| agent.pubkey.as_str()).collect();
+        // Out of view (another community, offline) or deleted: either way
+        // its processes stop. Saved sessions stay so it resumes when it is
+        // back.
+        let gone: Vec<Arc<Entry>> = {
+            let mut entries = locked(&self.inner.agents);
+            let gone = entries
+                .iter()
+                .filter(|(pubkey, _)| !current.contains(pubkey.as_str()))
+                .map(|(_, entry)| entry.clone())
+                .collect();
+            entries.retain(|pubkey, _| current.contains(pubkey.as_str()));
+            gone
+        };
+        for entry in gone {
+            entry.sessions.dispose();
+        }
+        for agent in agents {
+            let next = Config::read(&agent.config);
+            let existing = locked(&self.inner.agents).get(&agent.pubkey).cloned();
+            match existing {
+                None => self.entry(&agent.pubkey, next, agent.spawn).sessions.warm(),
+                Some(entry) => {
+                    let changed = {
+                        let mut state = locked(&entry.state);
+                        let changed = state.config != next;
+                        state.config = next;
+                        changed
+                    };
+                    if changed {
+                        entry.sessions.reconfigure();
+                    }
+                }
+            }
+        }
+        self.notify();
+    }
+
+    /// Conversations each agent has running, for its status view.
+    pub fn sessions(&self, pubkey: &str) -> Vec<SessionView> {
+        locked(&self.inner.agents)
+            .get(pubkey)
+            .map(|entry| entry.sessions.snapshot())
+            .unwrap_or_default()
+    }
+
+    pub fn dispose(&self) {
+        let entries: Vec<Arc<Entry>> = locked(&self.inner.agents)
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect();
+        for entry in entries {
+            entry.sessions.dispose();
+        }
+    }
+
+    /// Hands one delivery to its conversation's session. Resolves once it
+    /// is handed over, not when Claude has answered.
+    pub async fn run(&self, run: Run) {
+        let settings = Config::read(&run.config);
+        let pubkey = run.agent.pubkey();
+        if let Wake::Mention { event } | Wake::Watch { event, .. } = &run.wake
+            && settings.respond_to != "anyone"
+            && event.pubkey != run.agent.owner()
+        {
+            return;
+        }
+        let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone());
+        locked(&entry.state).handle = Some(run.agent.clone());
+        let (event, label, interest) = match run.wake {
+            Wake::Timer {
+                slug,
+                prompt,
+                interest,
+            } => {
+                let done = entry.sessions.deliver(
+                    format!("timer/{slug}"),
+                    timer_prompt(&slug, &prompt, interest.as_deref()),
+                    0,
+                    DeliverOptions::default(),
+                );
+                self.watch(done, None);
+                return;
+            }
+            Wake::Mention { event } => (event, "@mention", None),
+            Wake::Watch { event, interest } => (event, "watch", interest),
+        };
+        let Some(channel) = run.channel.or_else(|| tag(&event, "h")) else {
+            return;
+        };
+        let (key, text) = self
+            .prompt(
+                &entry,
+                &pubkey,
+                &event,
+                &channel,
+                false,
+                label,
+                interest.as_deref(),
+            )
+            .await;
+        // A conversation's tools default to its thread; a session shared by
+        // several threads is told which to reply in instead.
+        let root = thread_reference(&event).map_or(event.id.clone(), |thread| thread.root_id);
+        locked(&entry.state).contexts.insert(
+            key.clone(),
+            Context {
+                channel: Some(channel.clone()),
+                root: (key != channel).then_some(root),
+            },
+        );
+        let fresh = {
+            let (this, entry, event, channel) =
+                (self.clone(), entry.clone(), event.clone(), channel.clone());
+            let interest = interest.clone();
+            async move {
+                this.prompt(
+                    &entry,
+                    &pubkey,
+                    &event,
+                    &channel,
+                    true,
+                    label,
+                    interest.as_deref(),
+                )
+                .await
+                .1
+            }
+            .boxed()
+        };
+        let done = entry.sessions.deliver(
+            key,
+            text.clone(),
+            event.created_at,
+            DeliverOptions {
+                steer: Some(steer_prompt(&text)),
+                fresh: Some(fresh),
+            },
+        );
+        self.notify();
+        self.watch(done, Some((run.agent, channel, event)));
+    }
+
+    /// Notes when a turn settles, and says in the thread when it failed.
+    fn watch(
+        &self,
+        done: BoxFuture<'static, Settled>,
+        report: Option<(Arc<dyn AgentActions>, String, BuzzEvent)>,
+    ) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let settled = done.await;
+            if let (false, Some((agent, channel, event))) = (settled.ok, report) {
+                let error = settled.error.unwrap_or_default();
+                if let Err(failure) = Self::report(agent.as_ref(), &channel, &event, &error).await {
+                    tracing::warn!(%failure, "Claude Code could not report a failed turn");
+                }
+            }
+            this.notify();
+        });
+    }
+
+    /// Says in the thread that a turn failed, so nobody waits on it.
+    async fn report(
+        agent: &dyn AgentActions,
+        channel: &str,
+        event: &BuzzEvent,
+        error: &str,
+    ) -> Result<(), String> {
+        let root = thread_reference(event).map_or(event.id.clone(), |thread| thread.root_id);
+        let mut tags = vec![vec!["h".to_string(), channel.to_string()]];
+        if root != event.id {
+            tags.push(vec!["e".into(), root, String::new(), "root".into()]);
+        }
+        tags.push(vec![
+            "e".into(),
+            event.id.clone(),
+            String::new(),
+            "reply".into(),
+        ]);
+        tags.push(vec!["p".into(), event.pubkey.clone()]);
+        let error: String = error.chars().take(500).collect();
+        agent
+            .publish(Template {
+                kind: 9,
+                content: format!("⚠️ I couldn't finish that: {error}"),
+                tags,
+            })
+            .await
+            .map(drop)
+    }
+
+    /// Where the event's turn goes, and its prompt. `fresh` is for a
+    /// session that has been shown nothing yet.
+    #[allow(clippy::too_many_arguments)]
+    async fn prompt(
+        &self,
+        entry: &Entry,
+        own: &str,
+        event: &BuzzEvent,
+        channel_id: &str,
+        fresh: bool,
+        label: &str,
+        interest: Option<&str>,
+    ) -> (String, String) {
+        let relay = self.relay();
+        let summary = relay.as_ref().and_then(|relay| relay.channel(channel_id));
+        let dm = summary.as_ref().is_some_and(|summary| summary.dm);
+        let thread = thread_reference(event);
+        let root_id = thread
+            .as_ref()
+            .map_or(event.id.clone(), |thread| thread.root_id.clone());
+        let scope = locked(&entry.state).config.scope();
+        let key = if dm || scope == Scope::Channel {
+            channel_id.to_string()
+        } else {
+            format!("{channel_id}/{root_id}")
+        };
+        let seen = if fresh { 0 } else { entry.sessions.seen(&key) };
+        let mut earlier: Vec<BuzzEvent> = Vec::new();
+        if let Some(relay) = &relay
+            && (thread.is_some() || dm)
+        {
+            let filters = if thread.is_some() {
+                vec![
+                    json!({ "ids": [root_id], "limit": 1 }),
+                    json!({ "kinds": CHAT, "#h": [channel_id], "#e": [root_id], "limit": 200 }),
+                ]
+            } else {
+                vec![json!({ "kinds": CHAT, "#h": [channel_id], "limit": CONTEXT_LIMIT + 1 })]
+            };
+            match tokio::time::timeout(NAMES_TIMEOUT * 2, relay.read(filters)).await {
+                Ok(Ok(events)) => {
+                    let mut ids = HashSet::new();
+                    earlier = events
+                        .into_iter()
+                        .filter(|item| {
+                            CHAT.contains(&item.kind)
+                                && item.id != event.id
+                                && item.created_at <= event.created_at
+                                && ids.insert(item.id.clone())
+                        })
+                        .collect();
+                    earlier.sort_by_key(|item| item.created_at);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Claude Code could not read the conversation")
+                }
+                Err(_) => tracing::warn!("Claude Code timed out reading the conversation"),
+            }
+        }
+        // A session already has its own replies; a new one is shown them too.
+        let unseen: Vec<BuzzEvent> = earlier
+            .iter()
+            .filter(|item| item.created_at > seen && (seen == 0 || item.pubkey != own))
+            .cloned()
+            .collect();
+        let mut pubkeys: Vec<String> = Vec::new();
+        for key in std::iter::once(event.pubkey.clone())
+            .chain(unseen.iter().map(|item| item.pubkey.clone()))
+            .chain(
+                event
+                    .tags
+                    .iter()
+                    .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+                    .filter_map(|tag| tag.get(1).cloned()),
+            )
+        {
+            if !key.is_empty() && !pubkeys.contains(&key) {
+                pubkeys.push(key);
+            }
+        }
+        let members = summary
+            .as_ref()
+            .map(|summary| summary.members.clone())
+            .unwrap_or_default();
+        let names = match &relay {
+            Some(relay) => tokio::time::timeout(NAMES_TIMEOUT, relay.names(pubkeys, members))
+                .await
+                .unwrap_or_default(),
+            None => HashMap::new(),
+        };
+        let channel = Channel {
+            id: channel_id.to_string(),
+            name: summary
+                .and_then(|summary| summary.name)
+                .filter(|name| !name.is_empty()),
+            dm,
+        };
+        let name = |pubkey: &str| names.get(pubkey).cloned();
+        let text = turn_prompt(&super::prompt::TurnInput {
+            event,
+            channel: &channel,
+            scope,
+            thread: thread.as_ref(),
+            context: &unseen,
+            total: earlier.len() + 1,
+            label,
+            interest,
+            name: &name,
+        });
+        (key, text)
+    }
+
+    fn entry(&self, pubkey: &str, initial: Config, spawn: Spawner) -> Arc<Entry> {
+        let mut agents = locked(&self.inner.agents);
+        if let Some(existing) = agents.get(pubkey) {
+            return existing.clone();
+        }
+        let state = Arc::new(Mutex::new(EntryState {
+            config: initial,
+            memory: None,
+            handle: None,
+            contexts: HashMap::new(),
+        }));
+        let launch = {
+            let (this, state, pubkey, spawn) = (
+                self.clone(),
+                state.clone(),
+                pubkey.to_string(),
+                spawn.clone(),
+            );
+            Arc::new(move || {
+                let (this, state, pubkey, spawn) =
+                    (this.clone(), state.clone(), pubkey.clone(), spawn.clone());
+                async move {
+                    let config = locked(&state).config.clone();
+                    let memory = this.memory(&pubkey, &state).await;
+                    let model = config.model.trim();
+                    Ok(Launch {
+                        cwd: config.workspace.clone(),
+                        tools: Some(this.tools(&pubkey, &state, &spawn, &config.workspace)),
+                        model: (!model.is_empty()).then(|| model.to_string()),
+                        system_prompt: system_prompt(
+                            config.scope(),
+                            &config.workspace,
+                            &config.instructions,
+                            memory.as_ref().map(|memory| memory.as_deref()),
+                        ),
+                        ..Default::default()
+                    })
+                }
+                .boxed()
+            })
+        };
+        let fingerprint = {
+            let state = state.clone();
+            Arc::new(move || locked(&state).config.fingerprint())
+        };
+        let mut options =
+            SessionsOptions::new(spawn, (self.inner.store)(pubkey), launch, fingerprint);
+        let changes = self.clone();
+        options.on_change = Arc::new(move || changes.notify());
+        let entry = Arc::new(Entry {
+            sessions: AgentSessions::new(options),
+            state,
+        });
+        agents.insert(pubkey.to_string(), entry.clone());
+        entry
+    }
+
+    /// The tool server for processes started in `cwd`, which read files
+    /// where they were started until they are replaced.
+    fn tools(
+        &self,
+        pubkey: &str,
+        state: &Arc<Mutex<EntryState>>,
+        spawn: &Spawner,
+        cwd: &str,
+    ) -> ToolServer {
+        let (this, state, pubkey, spawn, cwd) = (
+            self.clone(),
+            state.clone(),
+            pubkey.to_string(),
+            spawn.clone(),
+            cwd.to_string(),
+        );
+        Arc::new(move |conversation: Option<String>, message: Value| {
+            // A spare starts before any delivery: it can list the tools,
+            // and has a handle to call them with by the time it is given a
+            // turn.
+            let (handle, context) = {
+                let state = locked(&state);
+                let context = conversation
+                    .as_ref()
+                    .and_then(|conversation| state.contexts.get(conversation).cloned())
+                    .unwrap_or_default();
+                (state.handle.clone(), context)
+            };
+            let client: Option<Arc<dyn BuzzClient>> = handle.map(|agent| {
+                let memories = {
+                    let (this, pubkey) = (this.clone(), pubkey.clone());
+                    Arc::new(move || this.memories(&pubkey).boxed()) as super::client::Memories
+                };
+                let remembered = {
+                    let state = state.clone();
+                    Arc::new(move |slug: &str| {
+                        if slug == "core" {
+                            locked(&state).memory = None;
+                        }
+                    }) as super::client::Remembered
+                };
+                Arc::new(AppClient {
+                    agent,
+                    spawn: spawn.clone(),
+                    cwd: cwd.clone(),
+                    memories,
+                    remembered,
+                }) as Arc<dyn BuzzClient>
+            });
+            async move { Ok(rpc::respond(client, &context, &message).await) }.boxed()
+        })
+    }
+
+    /// The agent's `core` memory, as the harness injects it into a new
+    /// session: its text, `Some(None)` when it has none, or `None` when it
+    /// could not be read.
+    async fn memory(&self, pubkey: &str, state: &Arc<Mutex<EntryState>>) -> Option<Option<String>> {
+        if let Some((value, at)) = &locked(state).memory
+            && at.elapsed() < MEMORY_TTL
+        {
+            return value.clone();
+        }
+        let value = match self.memories(pubkey).await {
+            Ok(memories) => Some(
+                memories
+                    .into_iter()
+                    .find(|memory| memory.slug == "core")
+                    .map(|memory| memory.body),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "Claude Code could not read the agent's memory");
+                None
+            }
+        };
+        locked(state).memory = Some((value.clone(), Instant::now()));
+        value
+    }
+
+    /// The agent's memory, read back by the owner. Calls at once share one
+    /// read.
+    fn memories(
+        &self,
+        pubkey: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<Memory>, String>> + Send + 'static {
+        let mut reading = locked(&self.inner.reading);
+        let read = reading
+            .entry(pubkey.to_string())
+            .or_insert_with(|| {
+                let (this, pubkey) = (self.clone(), pubkey.to_string());
+                async move {
+                    let relay = this.relay().ok_or("Buzz is not connected")?;
+                    let result = tokio::time::timeout(MEMORY_TIMEOUT, relay.memories(&pubkey))
+                        .await
+                        .unwrap_or_else(|_| Err("Memory read timed out".into()));
+                    locked(&this.inner.reading).remove(&pubkey);
+                    result
+                }
+                .boxed()
+                .shared()
+            })
+            .clone();
+        read
+    }
+}
+
+/// NIP-10 as relay ingest reads it: the last valid marked root and reply
+/// win; a lone root is not a reply.
+pub fn thread_reference(event: &BuzzEvent) -> Option<Thread> {
+    let (mut root, mut reply) = (None, None);
+    for tag in &event.tags {
+        let (Some(name), Some(value)) = (tag.first(), tag.get(1)) else {
+            continue;
+        };
+        let value = value.to_lowercase();
+        if name != "e" || !hex(&value) {
+            continue;
+        }
+        match tag.get(3).map(String::as_str) {
+            Some("root") => root = Some(value),
+            Some("reply") => reply = Some(value),
+            _ => {}
+        }
+    }
+    let reply = reply?;
+    Some(Thread {
+        root_id: root.unwrap_or_else(|| reply.clone()),
+        parent_id: reply,
+    })
+}
+
+fn tag(event: &BuzzEvent, name: &str) -> Option<String> {
+    crate::buzz_mcp::tools::tag(event, name)
+}
+
+#[cfg(test)]
+mod tests;

@@ -44,7 +44,7 @@ mod notice;
 mod onboarding;
 mod outbox_ops;
 mod outbox_status;
-mod overlay;
+pub(crate) mod overlay;
 pub mod pages;
 mod panels;
 mod profile_card;

@@ -77,6 +77,7 @@ fn main() {
         appearance::init(cx);
         idle::Idle::init(cx);
         agents2::init(cx);
+        agent_plugins::claude_code::init(cx);
         ui::pages::init(cx);
         ui::agent_activity::init(cx);
         ui::channel_panels::dev_sample(cx);
