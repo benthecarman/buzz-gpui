@@ -2769,8 +2769,10 @@ fn relay_info(info: &serde_json::Value) -> Result<RelayInfo, String> {
     };
     Ok(RelayInfo {
         name: text("name"),
-        icon: text("icon")
-            .filter(|icon| icon.starts_with("https://") || icon.starts_with("data:image/")),
+        icon: info
+            .get("icon")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::community_icon::community_icon),
         authority: authority.to_string(),
         supports_channel_creation: info
             .get("supported_nips")

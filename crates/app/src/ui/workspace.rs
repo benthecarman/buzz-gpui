@@ -23,7 +23,7 @@ use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
 use buzz_relay_client::{ChannelSummary, RosterStatus};
-use buzz_ui::{ActiveTheme, Avatar, AvatarSize, IconButton, IconName, ShellBackground, TypeStyled};
+use buzz_ui::{ActiveTheme, ShellBackground, TypeStyled};
 use gpui_kit::component::window_border;
 use gpui_kit::*;
 use nostr::prelude::EventId;
@@ -523,43 +523,7 @@ impl Workspace {
     }
 
     fn rail(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let menu = super::rail_menu::state(window, cx);
-        let state = cx.global::<AppState>();
-        let selected = state.selected;
-        let mut rail = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(rems(0.5))
-            .w(rems(3.))
-            .py(rems(0.5));
-        for (index, community) in state.communities.iter().enumerate() {
-            let name = community.read(cx).name();
-            let menu = menu.clone();
-            rail = rail.child(
-                div()
-                    .on_mouse_down(MouseButton::Right, move |event, _, cx| {
-                        super::rail_menu::open(&menu, index, event.position, cx)
-                    })
-                    .child(
-                        IconButton::new(
-                            SharedString::from(format!("community-{index}")),
-                            IconName::Globe,
-                        )
-                        .selected(selected == Some(index))
-                        .child(Avatar::new(name).squircle().size(AvatarSize::Small))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.select_community(index, window, cx),
-                        )),
-                    ),
-            );
-        }
-        let menu = super::rail_menu::render(&menu, cx);
-        rail.children(menu).child(
-            IconButton::new("add-community", IconName::Plus)
-                .tooltip("Add a community")
-                .on_click(cx.listener(|this, _, window, cx| this.open_add_community(window, cx))),
-        )
+        super::rail_menu::rail(window, cx)
     }
 }
 
@@ -795,7 +759,12 @@ impl Workspace {
 
     /// Selecting a community in the rail is a visit to its Messages page,
     /// except while an outside link waits to be retried there.
-    fn select_community(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_community(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let recovering = self
             .failure
             .as_ref()
@@ -815,6 +784,20 @@ impl Workspace {
                 cx,
             ),
             _ => AppState::select(index, cx),
+        }
+    }
+
+    /// Personal space: no community, on the Messages page, except while an
+    /// outside link waits to be retried.
+    pub(crate) fn select_personal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let recovering = self
+            .failure
+            .as_ref()
+            .is_some_and(|failed| failed.ingress && failed.retryable());
+        AppState::select_personal(cx);
+        self.sync(window, cx);
+        if !recovering {
+            self.select_page(Page::MESSAGES, window, cx);
         }
     }
 

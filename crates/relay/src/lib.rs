@@ -6,6 +6,7 @@ pub mod budget;
 pub mod canvas;
 pub mod catalog;
 pub mod community;
+pub mod community_icon;
 pub mod discovery;
 pub mod dm;
 pub mod emoji;

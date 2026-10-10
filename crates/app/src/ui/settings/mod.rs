@@ -9,6 +9,7 @@ mod archive;
 mod avatar;
 pub mod cards;
 mod communities;
+pub(crate) use communities::left_text;
 mod emoji;
 mod notifications;
 pub mod pairing;

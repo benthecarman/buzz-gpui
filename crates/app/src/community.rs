@@ -18,6 +18,9 @@ use std::sync::Arc;
 const SAVED: &str = "communities";
 /// View state key for the channel last open in a community.
 const SELECTED_CHANNEL: &str = "selected-channel";
+/// View state key for the community's last NIP-11 icon, shown before the
+/// relay answers (buzz-app saves it on the membership).
+const ICON: &str = "community-icon";
 /// Viewer preference holding the availability choice (`buzz-presence.v1`).
 const PRESENCE_MODE: &str = "presence-mode";
 
@@ -25,6 +28,9 @@ const PRESENCE_MODE: &str = "presence-mode";
 struct Saved {
     origins: Vec<String>,
     selected: Option<String>,
+    /// Personal space is selected: no community, though some are saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    personal: bool,
 }
 
 pub enum IdentityState {
@@ -119,7 +125,7 @@ impl AppState {
         state.selected = saved
             .selected
             .and_then(|selected| saved.origins.iter().position(|o| *o == selected))
-            .or((!communities.is_empty()).then_some(0));
+            .or((!communities.is_empty() && !saved.personal).then_some(0));
         state.communities = communities;
         state.identity = IdentityState::Ready(identity);
         state.presence_mode = mode;
@@ -146,6 +152,7 @@ impl AppState {
             .collect();
         let saved = Saved {
             selected: self.selected.and_then(|index| origins.get(index).cloned()),
+            personal: self.selected.is_none() && !origins.is_empty(),
             origins,
         };
         let json = serde_json::to_string(&saved).expect("saved communities serialize");
@@ -188,6 +195,12 @@ impl AppState {
             state.selected = Some(index);
             cx.global::<Self>().save(cx);
         }
+    }
+
+    /// Selects Personal space: no community.
+    pub fn select_personal(cx: &mut App) {
+        cx.global_mut::<Self>().selected = None;
+        cx.global::<Self>().save(cx);
     }
 
     /// Sets the availability every community publishes, and remembers it.
@@ -246,7 +259,8 @@ impl AppState {
         state.selected = match state.selected {
             _ if remaining == 0 => None,
             Some(selected) if selected > index => Some(selected - 1),
-            Some(selected) if selected == index => Some(index.min(remaining - 1)),
+            // Leaving the selected community lands on Personal space.
+            Some(selected) if selected == index => None,
             other => other,
         };
         cx.global::<Self>().save(cx);
@@ -305,6 +319,9 @@ pub struct Community {
     presence_rows: Vec<String>,
     /// People open profile panels show, counted per panel.
     presence_profiles: Vec<String>,
+    /// The icon last saved for the rail.
+    icon: Option<String>,
+    store: Store,
     _watch: Task<()>,
     _notifications: Option<Task<()>>,
 }
@@ -321,8 +338,17 @@ impl Community {
             &Runtime::handle(cx),
             origin.clone(),
             identity.clone(),
-            store,
+            store.clone(),
         ));
+        let icon = store
+            .view_state(
+                &buzz_relay_client::Partition::new(&origin, session.viewer()),
+                ICON,
+            )
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<String>(&json).ok())
+            .and_then(|icon| buzz_relay_client::community_icon::community_icon(&icon));
         if cx.try_global::<Idle>().is_some_and(|idle| idle.idle) {
             session.set_idle(true);
         }
@@ -339,6 +365,7 @@ impl Community {
                 _watch: mirror(snapshot, cx, |this: &mut Self, value| {
                     this.snapshot = value;
                     this.follow_presence();
+                    this.remember_icon();
                 }),
                 origin,
                 session,
@@ -348,6 +375,8 @@ impl Community {
                 presence_extra: Vec::new(),
                 presence_rows: Vec::new(),
                 presence_profiles: Vec::new(),
+                icon,
+                store,
                 _notifications: None,
             }
         });
@@ -476,6 +505,39 @@ impl Community {
         if let Err(error) = saved {
             tracing::warn!(%error, "could not remember the selected channel");
         }
+    }
+
+    /// The rail icon: the relay's NIP-11 icon, else the one saved from an
+    /// earlier connection; `None` shows initials.
+    pub fn icon(&self) -> Option<&str> {
+        self.snapshot
+            .relay
+            .as_ref()
+            .and_then(|relay| relay.icon.as_deref())
+            .or(self.icon.as_deref())
+    }
+
+    /// Saves a new NIP-11 icon for the next launch.
+    fn remember_icon(&mut self) {
+        let Some(icon) = self
+            .snapshot
+            .relay
+            .as_ref()
+            .and_then(|relay| relay.icon.clone())
+        else {
+            return;
+        };
+        if self.icon.as_ref() == Some(&icon) {
+            return;
+        }
+        let json = serde_json::to_string(&icon).expect("strings serialize");
+        if let Err(error) = self
+            .store
+            .set_view_state(&self.partition(), ICON, Some(&json))
+        {
+            tracing::warn!(%error, "could not save the community icon");
+        }
+        self.icon = Some(icon);
     }
 
     /// Display name: the relay's NIP-11 name, else its host.

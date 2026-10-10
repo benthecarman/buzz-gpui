@@ -149,7 +149,7 @@ impl Workspace {
         self.show(dialog, false, cx);
     }
 
-    pub(super) fn open_add_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_add_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| AddCommunity::new(false, window, cx));
         self.show(dialog, false, cx);
     }

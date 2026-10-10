@@ -183,6 +183,9 @@ pub enum LeaveOutcome {
     Revoked,
 }
 
+/// The leave error when the viewer owns the relay.
+pub const OWNER_CANNOT_LEAVE: &str = "You own this community, so you can't leave it.";
+
 /// Maps a `POST /events` answer to a leave request. `Err` keeps the
 /// membership so the user can retry.
 pub fn leave_outcome(
@@ -205,9 +208,7 @@ pub fn leave_outcome(
         | "invalid: relay membership is not enabled"
         | "relay_membership_required" => Ok(LeaveOutcome::AlreadyAbsent),
         "blocked: you are banned from this community" => Ok(LeaveOutcome::Revoked),
-        "invalid: relay owner cannot leave" => {
-            Err("You own this community, so you can't leave it.".into())
-        }
+        "invalid: relay owner cannot leave" => Err(OWNER_CANNOT_LEAVE.into()),
         "community writes are temporarily unavailable" => {
             Err("This community isn't accepting changes right now. Try again later.".into())
         }

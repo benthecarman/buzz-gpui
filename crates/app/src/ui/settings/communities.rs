@@ -142,7 +142,7 @@ impl SettingsPage {
 }
 
 /// buzz-app's `leftText`: what the leave did.
-fn left_text(name: &str, outcome: LeaveOutcome) -> (String, ToastTone) {
+pub(crate) fn left_text(name: &str, outcome: LeaveOutcome) -> (String, ToastTone) {
     match outcome {
         LeaveOutcome::Left => (format!("Left {name}."), ToastTone::Success),
         LeaveOutcome::AlreadyAbsent => (
