@@ -2,8 +2,9 @@
 
 use crate::{ActiveTheme, Icon, IconName, TypeStyled, tokens::TextRole};
 use gpui_kit::{
-    AnyElement, App, Hsla, ImageSource, IntoElement, ParentElement, Rems, RenderOnce, SharedString,
-    Styled, StyledImage, Window, div, img, prelude::FluentBuilder, rems, svg,
+    AnyElement, App, ElementId, Hsla, ImageSource, InteractiveElement, IntoElement, ParentElement,
+    Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window,
+    div, img, prelude::FluentBuilder, rems, svg,
 };
 
 const SQUIRCLE: &str = "icons/custom/avatar-squircle.svg";
@@ -62,6 +63,8 @@ pub struct Avatar {
     fallback_icon: Option<(IconName, f32)>,
     profile_disc: bool,
     cutout_color: Option<Hsla>,
+    thinking: Option<(ElementId, bool)>,
+    alt: Option<SharedString>,
 }
 
 impl Avatar {
@@ -76,6 +79,8 @@ impl Avatar {
             fallback_icon: None,
             profile_disc: false,
             cutout_color: None,
+            thinking: None,
+            alt: None,
         }
     }
 
@@ -122,6 +127,21 @@ impl Avatar {
         self
     }
 
+    /// An agent's thinking badge (`AgentAvatar`): while `thinking`, the
+    /// online corner badge morphs into a pill of pulsing dots under the
+    /// portrait. `id` keeps the morph's progress across frames.
+    pub fn thinking(mut self, id: impl Into<ElementId>, thinking: bool) -> Self {
+        self.thinking = Some((id.into(), thinking));
+        self
+    }
+
+    /// The accessible name: an image labelled `alt`, with ", thinking",
+    /// ", available" or the presence appended (`AgentAvatar`).
+    pub fn alt(mut self, alt: impl Into<SharedString>) -> Self {
+        self.alt = Some(alt.into());
+        self
+    }
+
     /// The first code point of the trimmed name, uppercased, or `?`.
     pub fn initial(name: &str) -> String {
         name.trim()
@@ -137,7 +157,39 @@ fn rem(px: f32) -> Rems {
 }
 
 impl RenderOnce for Avatar {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let label = self.alt.take().map(|alt| {
+            let state = match (self.thinking.as_ref().is_some_and(|t| t.1), self.presence) {
+                (true, _) => ", thinking",
+                (false, Some(Presence::Online)) => ", available",
+                (false, Some(Presence::Away)) => ", away",
+                (false, Some(Presence::Offline)) => ", offline",
+                (false, None) => "",
+            };
+            let id = match &self.thinking {
+                Some((id, _)) => id.clone(),
+                None => ElementId::Name(alt.clone()),
+            };
+            (id, SharedString::from(format!("{alt}{state}")))
+        });
+        // The thinking badge replaces an online dot and morphs from it.
+        let badge = self.thinking.take().and_then(|(id, thinking)| {
+            let online = self.presence == Some(Presence::Online);
+            if !thinking && !online {
+                return None;
+            }
+            // The badge stands in for the presence dot.
+            self.presence = None;
+            let cutout = self.cutout_color;
+            Some(super::thinking::badge(
+                id,
+                thinking,
+                self.size.px(),
+                cutout,
+                window,
+                cx,
+            ))
+        });
         let c = cx.colors();
         let size = self.size.px();
         let (fill, ink) = if self.profile_disc {
@@ -233,13 +285,22 @@ impl RenderOnce for Avatar {
                 .bg(cutout_color)
         });
 
-        div()
+        let root = div()
             .relative()
             .flex_none()
             .size(rem(size))
             .child(body)
             .children(ring)
             .children(dot)
+            .children(badge);
+        match label {
+            Some((id, label)) => root
+                .id(id)
+                .role(Role::Image)
+                .aria_label(label)
+                .into_any_element(),
+            None => root.into_any_element(),
+        }
     }
 }
 

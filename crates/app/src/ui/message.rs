@@ -433,17 +433,16 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         if agent {
             avatar = avatar
                 .squircle()
-                .presence(presence_badge(rows.presence.get(&author)));
+                .presence(presence_badge(rows.presence.get(&author)))
+                .thinking(
+                    SharedString::from(format!("thinking-{id}")),
+                    rows.working.contains(&author),
+                )
+                .alt(name.clone());
         }
         if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
             avatar = avatar.image(media::avatar(picture, &rows.directory.media));
         }
-        let thinking = agent && rows.working.contains(&author);
-        let size = match avatar_size {
-            AvatarSize::Large => 40.,
-            AvatarSize::Small => 24.,
-            _ => 32.,
-        };
         let target = author.clone();
         div()
             .flex_none()
@@ -457,7 +456,6 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
                     .rounded_full()
                     .cursor_pointer()
                     .child(avatar)
-                    .when(thinking, |d| d.child(thinking_badge(size, &c)))
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
                         navigation::show_profile(target.clone(), event.position(), window, cx)
@@ -720,51 +718,6 @@ fn workflow_info(
             )
         })
         .into_any_element()
-}
-
-/// The agent "thinking" pill over an avatar's corner: three dots pulsing
-/// on the online green (`ThinkingBadge.tsx`, an 88px design scaled to the
-/// avatar).
-fn thinking_badge(size: f32, c: &buzz_ui::Colors) -> impl IntoElement {
-    let scale = size / 88.;
-    let (width, height) = (64. * scale, 32. * scale);
-    let center = 74.8 * scale;
-    let dot = 7. * scale;
-    let color = c.text_inverse;
-    div()
-        .absolute()
-        .left(px(center - height / 2.))
-        .top(px(center - height / 2.))
-        .w(px(width))
-        .h(px(height))
-        .rounded_full()
-        .border_1()
-        .border_color(c.surface_panel)
-        .bg(c.status_online)
-        .flex()
-        .items_center()
-        .justify_center()
-        .with_animation(
-            "thinking-dots",
-            Animation::new(Duration::from_millis(1200)).repeat(),
-            move |pill, delta| {
-                pill.gap(px(4. * scale)).children((0..3).map(|n| {
-                    // 0–40% and 100%: 40% opacity; 20%: full and lifted.
-                    let phase = (delta - n as f32 * 80. / 1200.).rem_euclid(1.);
-                    let lift = if phase < 0.4 {
-                        1. - ((phase - 0.2).abs() / 0.2)
-                    } else {
-                        0.
-                    };
-                    div()
-                        .size(px(dot))
-                        .rounded_full()
-                        .bg(color)
-                        .opacity(0.4 + 0.6 * lift)
-                        .mt(px(-2. * scale * lift))
-                }))
-            },
-        )
 }
 
 /// The row's laid-out width, measured each frame.

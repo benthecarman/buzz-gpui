@@ -17,6 +17,7 @@ mod select;
 mod switch;
 mod tabs;
 mod text_field;
+mod thinking;
 mod toast;
 mod tooltip;
 

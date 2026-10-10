@@ -431,6 +431,12 @@ impl MessageActions {
             None => snapshot.typing.get(&self.channel).cloned(),
         }
         .unwrap_or_default();
+        rows.working
+            .extend(crate::agent_activity::observer::thinking(
+                &self.community,
+                &self.channel,
+                cx,
+            ));
         rows.quick_reactions = quick;
         rows.actions = self.actions(this);
     }
