@@ -553,13 +553,36 @@ impl SettingsPage {
             ),
         ];
         // One key widget at a time; the sign-out dialog brings its own.
+        // The key and the Sign out row share one `mt-6` wrapper, so they
+        // stack with no gap, as in buzz-app.
         let signing_out = matches!(self.modal, Some(Modal::SignOut { .. }));
         let private_key = (!signing_out).then(|| {
-            div().mt(rems(1.5)).child(form_group(
+            form_group(
                 vec![self.profile.private_key.clone().into_any_element()],
                 cx,
-            ))
+            )
         });
+        let sign_out = rows_group(
+            vec![
+                preference_row(
+                    None,
+                    "Sign out of Buzz",
+                    // buzz-app adds that Builderlab and hosted community
+                    // logins end too; neither exists here.
+                    Some("Remove your private key from this device.".into_any_element()),
+                    vec![
+                        button("sign-out", "Sign out of Buzz")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_sign_out(window, cx)),
+                            )
+                            .into_any_element(),
+                    ],
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            cx,
+        );
         parts.push(
             div()
                 .flex()
@@ -574,33 +597,13 @@ impl SettingsPage {
                     cx,
                 ))
                 .child(rows_group(rows, cx))
-                .children(private_key)
                 .child(
-                    div().mt(rems(1.5)).child(rows_group(
-                        vec![
-                            preference_row(
-                                None,
-                                "Sign out of Buzz",
-                                // buzz-app adds that Builderlab and hosted
-                                // community logins end too; neither exists
-                                // here.
-                                Some(
-                                    "Remove your private key from this device."
-                                        .into_any_element(),
-                                ),
-                                vec![
-                                    button("sign-out", "Sign out of Buzz")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_sign_out(window, cx)
-                                        }))
-                                        .into_any_element(),
-                                ],
-                                cx,
-                            )
-                            .into_any_element(),
-                        ],
-                        cx,
-                    )),
+                    div()
+                        .mt(rems(1.5))
+                        .flex()
+                        .flex_col()
+                        .children(private_key)
+                        .child(sign_out),
                 )
                 .into_any_element(),
         );
