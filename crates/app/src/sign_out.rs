@@ -790,6 +790,8 @@ pub fn sign_out(choices: Choices, cx: &mut App) -> Task<Result<(), String>> {
         // Committed: the key is removed at the next launch, so nothing more
         // is signed with it.
         cx.update(AppState::close_sessions);
+        // A pairing attempt holds a copy of the key until it sends it.
+        cx.update(crate::ui::settings::close_pairing);
         let stopped = cx
             .background_spawn(async move { host.map_or(Ok(()), |host| host.shutdown()) })
             .await;

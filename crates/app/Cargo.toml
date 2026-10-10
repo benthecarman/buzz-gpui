@@ -22,6 +22,7 @@ buzz-desktop.workspace = true
 buzz-host = { path = "../host" }
 buzz-host-rpc = { path = "../host-rpc" }
 buzz-identity = { path = "../identity" }
+buzz-pair-mobile = { path = "../pair-mobile" }
 buzz-relay-client = { path = "../relay" }
 serde_json = "1"
 buzz-ui = { path = "../ui" }

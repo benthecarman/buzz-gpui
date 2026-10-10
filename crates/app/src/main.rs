@@ -90,6 +90,7 @@ fn main() {
         ui::projects::init(cx);
         ui::moderation::init(cx);
         ui::settings::personal_groups::init(cx);
+        ui::settings::pairing::init(cx);
         ui::templates::init(cx);
         ui::channel_panels::dev_sample(cx);
         ui::terminal::init(cx);
