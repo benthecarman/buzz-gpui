@@ -460,6 +460,56 @@ impl Identity {
     }
 }
 
+/// Owner-key decoding of agent records with buzz-app's native decoders
+/// (`buzz_desktop::relay::agent`). Each opens only what agents address to
+/// this identity; the secret never leaves this crate.
+impl Identity {
+    fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.keys.secret_key().secret_bytes())
+    }
+
+    /// The newest memory per slug an agent wrote to this owner (kind 30174),
+    /// from the records of a `memory_query` read: `{entries, partial}`.
+    pub fn decode_agent_memories(
+        &self,
+        agent: &str,
+        records: &[Option<serde_json::Value>],
+    ) -> Result<serde_json::Value, String> {
+        let viewer = self.pubkey_hex();
+        buzz_desktop::relay::agent::decode_memories(
+            &self.secret_bytes(),
+            &viewer,
+            &viewer,
+            agent,
+            records,
+        )
+    }
+
+    /// The plaintext of an agent's observer frame (kind 24200) or saved
+    /// frame (44200). `history` accepts frames up to 90 days old instead of
+    /// five minutes: `{id, agent, createdAt, plaintext}`.
+    pub fn decode_agent_frame(
+        &self,
+        event: &buzz_desktop::relay::agent::AgentEvent,
+        history: bool,
+    ) -> Result<serde_json::Value, String> {
+        buzz_desktop::relay::agent::decode_archive(
+            &self.secret_bytes(),
+            &self.pubkey_hex(),
+            event,
+            history,
+        )
+    }
+
+    /// Decrypts a page read from the local activity archive.
+    pub fn decode_archive_page(
+        &self,
+        page: buzz_desktop::archive::Page,
+    ) -> Result<serde_json::Value, String> {
+        page.decode(&self.secret_bytes(), &self.pubkey_hex())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum MediaVerb {
     Upload,

@@ -1082,6 +1082,7 @@ dependencies = [
  "blurhash",
  "buzz-agent-controller",
  "buzz-credential-store",
+ "buzz-desktop",
  "buzz-host",
  "buzz-host-rpc",
  "buzz-identity",
@@ -1168,6 +1169,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "buzz-credential-store",
+ "buzz-desktop",
  "nostr",
  "secp256k1 0.31.1",
  "serde_json",

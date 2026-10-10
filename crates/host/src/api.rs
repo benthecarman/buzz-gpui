@@ -413,6 +413,10 @@ pub struct Agent {
     pub restart_diff: Vec<RestartDiffEntry>,
     /// Imported provider backend; local agents have none.
     pub backend: Option<String>,
+    /// Why a snapshot export would not be faithful, as fixed reason names
+    /// ("team instructions", "idle timeout", ...). `None` from hosts that
+    /// predate snapshots.
+    pub snapshot_export_limitations: Option<Vec<String>>,
 }
 
 fn yes() -> bool {

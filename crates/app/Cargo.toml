@@ -15,6 +15,7 @@ anyhow.workspace = true
 blurhash = "0.2"
 buzz-agent-controller.workspace = true
 buzz-credential-store.workspace = true
+buzz-desktop.workspace = true
 buzz-host = { path = "../host" }
 buzz-host-rpc = { path = "../host-rpc" }
 buzz-identity = { path = "../identity" }
