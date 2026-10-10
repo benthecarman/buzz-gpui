@@ -44,6 +44,7 @@ mod message_actions;
 mod message_copy;
 mod message_edit;
 mod modal;
+pub mod moderation;
 pub mod navigation;
 mod new_channel;
 mod new_message;
