@@ -27,18 +27,33 @@ pub const ACCOUNT: &str = "human";
 /// Largest event this app signs, as serialized JSON.
 pub const MAX_EVENT_BYTES: usize = 64 * 1024;
 
+/// Storage messages are buzz-app's (`src-tauri/src/identity.rs`), so both
+/// apps explain the shared keyring the same way.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdentityError {
-    #[error("Secure storage access was denied. Allow access and try again.")]
+    #[error("Secure storage access was denied. Allow access and retry; no identity was created.")]
     Denied,
     #[error("Another Buzz app is accessing secure storage. Retry shortly.")]
     Busy,
-    #[error("Secure storage is unavailable on this system.")]
+    #[error(
+        "Your identity could not be accessed in secure storage. Unlock your credential store \
+         and retry without changing keys."
+    )]
     Unavailable,
-    #[error("The saved identity is malformed.")]
+    #[error(
+        "Saved identity is malformed; nothing was changed. Keep your key backup and contact \
+         support before changing secure storage."
+    )]
     Malformed,
-    #[error("An identity is already saved; nothing was overwritten.")]
+    /// A key was found before saving, so nothing was generated or written.
+    #[error("An identity is already saved; nothing was overwritten")]
+    AlreadySaved,
+    /// Another process saved a key between the read and the write.
+    #[error("An identity is already saved; nothing was overwritten. Restart to restore it.")]
     Occupied,
+    /// The key was deleted, but a fresh read still finds it.
+    #[error("Your key is still saved in secure storage")]
+    StillSaved,
     #[error("Enter a valid nsec private key")]
     InvalidKey,
     #[error("This app does not sign that kind of event.")]
@@ -90,6 +105,7 @@ pub fn load() -> Result<Option<Identity>, IdentityError> {
 
 /// Saves a new random identity. Refuses if one is already saved.
 pub fn create() -> Result<Identity, IdentityError> {
+    ensure_absent()?;
     save(Identity {
         keys: Keys::generate(),
     })
@@ -97,7 +113,17 @@ pub fn create() -> Result<Identity, IdentityError> {
 
 /// Saves an imported `nsec`. Refuses if one is already saved.
 pub fn import(nsec: &str) -> Result<Identity, IdentityError> {
+    ensure_absent()?;
     save(Identity::from_nsec(nsec)?)
+}
+
+/// buzz-app restores before it saves: a saved key, or one that can't be
+/// read, stops the save before a key is generated or written.
+fn ensure_absent() -> Result<(), IdentityError> {
+    match load()? {
+        Some(_) => Err(IdentityError::AlreadySaved),
+        None => Ok(()),
+    }
 }
 
 /// Deletes the saved identity (sign out), then confirms a fresh read finds
@@ -109,7 +135,7 @@ pub fn forget() -> Result<(), IdentityError> {
     }
     match buzz_credential_store::read(SERVICE, ACCOUNT) {
         Err(StoreError::Absent) => Ok(()),
-        Ok(_) => Err(IdentityError::Unavailable),
+        Ok(_) => Err(IdentityError::StillSaved),
         Err(error) => Err(store_error(error)),
     }
 }
