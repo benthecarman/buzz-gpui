@@ -11,13 +11,13 @@ use url::Url;
 
 pub(super) type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-// Other app clients enable a second Rustls provider. Choose ours per
-// connection, rather than relying on process-global feature inference or
-// changing other clients.
+// Choose the Rustls provider per connection, rather than relying on
+// process-global feature inference, as buzz-app does. This app's other
+// clients use aws-lc-rs, so pairing does too.
 pub(super) fn tls_connector() -> Result<tokio_tungstenite::Connector, String> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|_| "Couldn’t initialize the secure pairing connection.")?

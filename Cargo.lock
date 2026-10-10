@@ -1126,6 +1126,7 @@ dependencies = [
  "buzz-host",
  "buzz-host-rpc",
  "buzz-identity",
+ "buzz-pair-mobile",
  "buzz-relay-client",
  "buzz-ui",
  "buzzodz-plugins",
