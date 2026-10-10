@@ -174,6 +174,9 @@ fn dev_open(window: &Window, cx: &mut App) {
 // ---------------------------------------------------------------------------
 // Shared pieces
 
+/// A menu pick or button action that needs the window.
+pub(super) type WindowAction = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// A `<p>` at body size.
 pub(super) fn paragraph(text: impl Into<SharedString>) -> Div {
     div().text_body().child(text.into())
@@ -258,7 +261,7 @@ pub(super) fn inline_select(
     value: SharedString,
     open: bool,
     disabled: bool,
-    options: Vec<(SharedString, bool, Rc<dyn Fn(&mut Window, &mut App)>)>,
+    options: Vec<(SharedString, bool, WindowAction)>,
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     dismiss: Dismiss,
     window: &Window,
@@ -395,7 +398,7 @@ pub(super) fn read_memories(
     let origin = RelayOrigin::parse(&agent.relay_url);
     let identity = identity(cx);
     let pubkey = agent.pubkey.clone();
-    let read = on_tokio(cx, async move {
+    on_tokio(cx, async move {
         if level == MemoryLevel::None {
             return Ok(Vec::new());
         }
@@ -411,8 +414,7 @@ pub(super) fn read_memories(
                 body: entry.body,
             })
             .collect())
-    });
-    read
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +666,7 @@ impl Render for ExportDialog {
                     this.open = None;
                     cx.notify();
                 });
-            }) as Rc<dyn Fn(&mut Window, &mut App)>
+            }) as WindowAction
         };
         let pick_format = |next: Format| {
             let weak = entity.clone();
@@ -674,7 +676,7 @@ impl Render for ExportDialog {
                     this.open = None;
                     cx.notify();
                 });
-            }) as Rc<dyn Fn(&mut Window, &mut App)>
+            }) as WindowAction
         };
         let memories = inline_select(
             "export-memories",
@@ -1368,7 +1370,7 @@ impl ImportDialog {
                 let checked = self.host.as_ref().map(Entity::entity_id) == Some(host.entity_id());
                 let weak = cx.entity().downgrade();
                 let pick = host.clone();
-                let action: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                let action: WindowAction = Rc::new(move |_, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         this.host_open = false;
                         this.set_host(pick.clone(), cx);

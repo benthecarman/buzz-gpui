@@ -8,8 +8,8 @@
 //! interrupted by a restart comes back as "Retry send".
 
 use super::snapshots::{
-    self, LEVELS, LayerDialog, alert, checked, inline_select, level_label, paragraph, pre,
-    read_memories, summary,
+    self, LEVELS, LayerDialog, WindowAction, alert, checked, inline_select, level_label, paragraph,
+    pre, read_memories, summary,
 };
 use crate::community::{AppState, Community};
 use crate::hosts::{HostConnection, Hosts};
@@ -35,6 +35,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The portable configuration to review, or why there is none.
+pub type Review = Rc<dyn Fn(&App) -> Result<String, String>>;
+
 /// Encodes the shared file at a memory level.
 pub type Encode = Rc<dyn Fn(MemoryLevel, &mut App) -> Task<Result<EncodedSnapshot, String>>>;
 
@@ -50,10 +53,10 @@ pub struct ShareSource {
     pub excluded: Vec<String>,
     pub encode: Encode,
     /// "Export {kind}".
-    pub on_export: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub on_export: WindowAction,
     /// The portable configuration to review before sharing, or why it
     /// cannot be shared. Agents have one; teams do not.
-    pub review: Option<Rc<dyn Fn(&App) -> Result<String, String>>>,
+    pub review: Option<Review>,
     /// The "Share to catalog" controls, from the community catalog.
     pub catalog: Option<AnyView>,
 }
@@ -109,7 +112,7 @@ pub(crate) fn open_agent(
         Rc::new(move |cx: &App| {
             let agent = current(&host, &id, cx).ok_or("This agent no longer exists.")?;
             snapshots::review(&agent, &host, cx).map(|review| review.pretty())
-        }) as Rc<dyn Fn(&App) -> Result<String, String>>
+        }) as Review
     };
     let encode: Encode = {
         let (host, id) = (host.clone(), id.clone());
@@ -1091,7 +1094,7 @@ impl Render for ShareDialog {
             .iter()
             .map(|&next| {
                 let weak = entity.clone();
-                let pick: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                let pick: WindowAction = Rc::new(move |_, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         this.level_open = false;
                         this.edit(move |this| this.level = next, cx);
