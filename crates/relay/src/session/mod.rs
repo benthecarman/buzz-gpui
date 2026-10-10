@@ -20,6 +20,7 @@ mod incoming;
 mod messaging;
 mod observer;
 mod presence;
+mod sidebar;
 mod threads;
 mod timeline;
 mod unread;
@@ -117,6 +118,9 @@ pub struct SessionSnapshot {
     pub hidden_dms: Arc<[String]>,
     /// The community's custom emoji. Replaced only when it changes.
     pub emoji: Arc<EmojiSnapshot>,
+    /// Sidebar preferences and local hidden DMs. Replaced only when they
+    /// change.
+    pub sidebar: Arc<crate::sidebar_store::SidebarState>,
 }
 
 pub struct Session {
@@ -193,6 +197,7 @@ impl Session {
             thread_typing: Arc::default(),
             hidden_dms: Arc::new([]),
             emoji: Arc::default(),
+            sidebar: Arc::default(),
         }));
         let (incoming, _) = broadcast::channel(64);
         let receiver = snapshot.subscribe();
@@ -249,6 +254,7 @@ impl Session {
             incoming: incoming::Incoming::default(),
             incoming_sender: incoming.clone(),
             hidden_dms: Arc::new([]),
+            sidebar: sidebar::SidebarPrefs::new(runtime),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -461,6 +467,12 @@ impl Session {
         self.mark(Mark::MessageUnread(channel.to_string(), id))
             .await
     }
+
+    /// Shows the channel as unread on this device until it is next read.
+    /// Never synced.
+    pub async fn mark_channel_unread(&self, channel: &str) -> Result<(), String> {
+        self.mark(Mark::ChannelUnread(channel.to_string())).await
+    }
 }
 
 enum Write {
@@ -626,10 +638,12 @@ struct Actor {
     incoming: incoming::Incoming,
     incoming_sender: broadcast::Sender<IncomingMessage>,
     hidden_dms: Arc<[String]>,
+    sidebar: sidebar::SidebarPrefs,
 }
 
 impl Actor {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
+        self.sidebar_restore();
         self.connect();
         loop {
             let deadline = [self.reads_deadline(), self.presence_deadline()]
@@ -754,7 +768,15 @@ impl Actor {
                 }
             },
             Message::Write { write, reply } => {
-                let _ = reply.send(self.write(write));
+                let sending = match &write {
+                    Write::Send { channel, .. } => self.sidebar_sending(channel),
+                    _ => None,
+                };
+                let result = self.write(write);
+                if result.is_ok() {
+                    self.sidebar_sent(sending);
+                }
+                let _ = reply.send(result);
             }
             Message::ScanRead { epoch, result } => {
                 if epoch == self.epoch {
@@ -894,6 +916,7 @@ impl Actor {
         self.outbox = Some(outbox);
         self.open_reads();
         self.set_status(SessionStatus::Ready);
+        self.sidebar_connected();
         self.start_scan(ScanOptions::default());
         self.read_emoji();
     }
@@ -995,6 +1018,7 @@ impl Actor {
         self.reads_channels(true);
         self.ensure_profiles(self.channel_people());
         self.refresh_visibility();
+        self.sidebar_probe();
         self.publish();
         if let Some(options) = self.rescan.take() {
             self.start_scan(options);
@@ -1083,7 +1107,12 @@ impl Actor {
                     self.accept(&events);
                 }
                 self.typing_accept(&[events, pulses].concat());
+                let arrived: Vec<String> = candidates
+                    .iter()
+                    .filter_map(|event| event.channel().map(str::to_owned))
+                    .collect();
                 self.admit_incoming(candidates);
+                self.sidebar_arrived(&arrived);
             }
             LiveUpdate::Presence(events) => self.presence_live(&events),
             LiveUpdate::Observer(events) => self.observed(events),
@@ -1546,6 +1575,8 @@ impl Actor {
             .map(|discovery| Arc::<[ChannelSummary]>::from(discovery.channels()))
             .unwrap_or_else(|| Arc::new([]));
         let unread = self.unread_counts();
+        self.sidebar_check_heads();
+        self.sidebar_state();
         let next = SessionSnapshot {
             status: self.snapshot.borrow().status.clone(),
             live: self.live.as_ref().is_some_and(Live::is_connected),
@@ -1559,6 +1590,7 @@ impl Actor {
             thread_typing: self.typing.snapshot().threads.clone(),
             hidden_dms: self.hidden_dms.clone(),
             emoji: self.emoji.snapshot(),
+            sidebar: self.sidebar.snapshot(),
         };
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
@@ -1572,6 +1604,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.thread_typing, &next.thread_typing)
                 && Arc::ptr_eq(&current.hidden_dms, &next.hidden_dms)
                 && Arc::ptr_eq(&current.emoji, &next.emoji)
+                && Arc::ptr_eq(&current.sidebar, &next.sidebar)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);

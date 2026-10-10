@@ -25,6 +25,7 @@ pub mod reader;
 pub mod search;
 pub mod session;
 pub mod sidebar;
+pub mod sidebar_store;
 pub mod socket;
 pub mod store;
 pub mod threads;

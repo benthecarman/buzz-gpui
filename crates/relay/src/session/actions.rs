@@ -716,6 +716,7 @@ impl Ops {
                 if confirmed {
                     // The relay unhides a reopened DM.
                     actor.unhide(&channel);
+                    actor.sidebar_opened(&channel);
                 }
                 confirmed
             })

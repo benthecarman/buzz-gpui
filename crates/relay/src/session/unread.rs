@@ -95,6 +95,8 @@ pub(super) enum Mark {
     All,
     MessageRead(String, EventId),
     MessageUnread(String, EventId),
+    /// The sidebar's "Mark as Unread": this device only.
+    ChannelUnread(String),
 }
 
 struct RepairRun {
@@ -812,6 +814,9 @@ impl Actor {
                 .map(drop),
             Mark::MessageUnread(channel, id) => unread
                 .mark_message_unread(sync, &channel, &id.to_hex(), now)
+                .map(drop),
+            Mark::ChannelUnread(channel) => unread
+                .mark_unread_local(sync, &ReadTarget::channel(channel), now)
                 .map(drop),
         };
         self.publish();
