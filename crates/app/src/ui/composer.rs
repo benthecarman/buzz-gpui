@@ -784,6 +784,15 @@ impl Composer {
         let content = state.value().trim().to_string();
         let _ = window;
         let chosen = self.recipients(cx);
+        if self.editing.is_none()
+            && chosen
+                .iter()
+                .any(|(key, _)| super::archives::hides(&self.community, key, cx))
+        {
+            self.error = Some("A selected recipient is archived. Remove it before sending.".into());
+            cx.notify();
+            return;
+        }
         let mentioned: Vec<String> = chosen.iter().map(|(key, _)| key.clone()).collect();
         // Agents among the recipients, for the next draft.
         let profiles = self.community.read(cx).snapshot.profiles.clone();
@@ -1471,6 +1480,35 @@ impl Composer {
         })
     }
 
+    /// `mentionAdmission`: whether this draft may still address `pubkey`.
+    /// Archived and read-only channels admit no one, archived identities
+    /// are never admitted, and a session admits only its members and the
+    /// viewer's agents.
+    fn admits(&self, pubkey: &str, cx: &App) -> bool {
+        let community = self.community.read(cx);
+        let channel = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|c| c.id == self.channel);
+        let Some(channel) = channel.filter(|c| !c.archived && !c.read_only) else {
+            return false;
+        };
+        let hex = pubkey.len() == 64
+            && pubkey
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !hex || super::archives::hides(&self.community, pubkey, cx) {
+            return false;
+        }
+        mentions::searches_directory(Some(channel))
+            || channel.members.iter().any(|m| m == pubkey)
+            || crate::ui::identity::AgentLibrary::from_hosts(cx)
+                .agents
+                .iter()
+                .any(|(key, _, _)| key == pubkey)
+    }
+
     /// The `@` choices for `text`, ranked, with the directory search's state.
     fn mention_choices(&self, text: &str, cx: &App) -> mentions::Completion {
         let community = self.community.read(cx);
@@ -1792,6 +1830,13 @@ impl Composer {
         if let Some(Suggestion::Person { pubkey, .. }) = completion.items.get(index)
             && self.editing.is_none()
         {
+            if !self.admits(pubkey, cx) {
+                self.error = Some(
+                    "This recipient is no longer available. Remove it or refresh choices.".into(),
+                );
+                cx.notify();
+                return;
+            }
             let recipients = self.recipients(cx);
             if recipients.len() >= 32 && !recipients.iter().any(|(key, _)| key == pubkey) {
                 self.error = Some("Choose at most 32 recipients".into());
