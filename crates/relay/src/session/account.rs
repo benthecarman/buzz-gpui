@@ -259,6 +259,8 @@ impl Session {
         let commands = self.commands.clone();
         let viewer = self.viewer.clone();
         let (code, url) = (code.to_owned(), url.to_owned());
+        // The name (and image link) are checked before anything is read.
+        emoji::add_template(None, &code, &url, 0)?;
         let lock = self.direct.emoji.lock().await;
         let work = async move {
             let events = reader
@@ -271,8 +273,33 @@ impl Session {
                 )
                 .await
                 .map_err(|error| error.message)?;
-            let current = emoji::own_set(&events, &viewer);
-            let template = emoji::add_template(current.map(|set| &**set), &code, &url, now())?;
+            let fresh: Vec<Verified> = emoji::own_set(&events, &viewer)
+                .into_iter()
+                .cloned()
+                .collect();
+            // A capped or refused catalog must not hide the latest own
+            // set from replacement: the newer of it and the fresh read.
+            let (reply, cached) = tokio::sync::oneshot::channel();
+            let _ = commands.send(Message::With(Box::new(move |actor| {
+                if actor.emoji.accept(&fresh) {
+                    actor.publish();
+                }
+                let _ = reply.send(actor.emoji.own());
+            })));
+            let cached = cached.await.ok().flatten();
+            let fresh = emoji::own_set(&events, &viewer).cloned();
+            let current = match (cached, fresh) {
+                (Some(cached), Some(fresh)) => Some(if crate::event::is_newer(&fresh, &cached) {
+                    fresh
+                } else {
+                    cached
+                }),
+                (cached, fresh) => cached.or(fresh),
+            };
+            let template = emoji::add_template(current.as_deref(), &code, &url, now())?;
+            if !emoji::valid_set_template(&template, now()) {
+                return Err("Refusing to sign an invalid emoji set".to_owned());
+            }
             let event = sign(&identity, template)?;
             let verified = Verifier::default()
                 .verify(event.clone())
@@ -285,13 +312,19 @@ impl Session {
                     actor.publish();
                 }
             })));
-            Ok(())
+            Ok::<(), String>(())
         };
         let result = self
             .run(async move {
-                tokio::time::timeout(EMOJI_TIMEOUT, work)
-                    .await
-                    .unwrap_or_else(|_| Err("Timed out while adding emoji.".into()))
+                match tokio::time::timeout(EMOJI_TIMEOUT, work).await {
+                    Ok(Ok(())) => Ok(()),
+                    // The reference shows one message for every failure.
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "adding emoji failed");
+                        Err("Failed to add emoji.".into())
+                    }
+                    Err(_) => Err("Timed out while adding emoji.".into()),
+                }
             })
             .await;
         drop(lock);

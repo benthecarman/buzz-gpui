@@ -109,6 +109,17 @@ async fn writes_follow_participation_provenance_and_reports() {
     })
     .await;
     let root = echoed(&view, &first).await;
+    // An earlier first message confirms from the outbox; another
+    // session, without it, confirms from the relay.
+    alice.dm_delivered(root.id, &channel).await.unwrap();
+    let bob = fixture.session("bob").await;
+    bob.dm_delivered(root.id, &channel).await.unwrap_err();
+    let unknown = nostr::prelude::EventId::from_byte_array([7; 32]);
+    assert_eq!(
+        alice.dm_delivered(unknown, &channel).await,
+        Err("The earlier send could not be confirmed. Reconnect and retry.".into())
+    );
+    drop(bob);
 
     // Edits keep the folded media provenance.
     alice

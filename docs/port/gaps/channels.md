@@ -595,7 +595,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Participant policy: 1–8 unique valid keys, not viewer; "Choose between one and eight other people." | src/features/relay/direct-message-policy.ts:2-12; src/features/relay/direct-messages.ts:66-70 | DONE (crates/relay/src/dm.rs; crates/app/src/ui/new_message.rs:22) | - | - |
 | People search paging (15 first browse page, 30 otherwise, prefix search, exact key, viewer excluded, `hasMore`) | src/features/relay/direct-messages.ts:27-65 | DONE (crates/relay/src/dm.rs:56-100; crates/relay/src/session/actions.rs:213-224) | - | - |
 | Open DM (41010), strong 39000/39002 confirm, participants check, unhide | src/features/relay/direct-messages.ts:66-102 | DONE (crates/relay/src/session/actions.rs:676-702) | - | - |
-| `delivered(id, channelId)`: confirm an earlier first message from journal or relay read, retry failed/unknown, wait on outbox | src/features/relay/direct-messages.ts:103-184 | PARTIAL: generic outbox wait exists (crates/relay/src/session/actions.rs:331); no relay read for a missing journal entry, no "earlier send" recovery | Port the recovery path | S |
+| `delivered(id, channelId)`: confirm an earlier first message from journal or relay read, retry failed/unknown, wait on outbox | src/features/relay/direct-messages.ts:103-184 | DONE (`Session::dm_delivered`; dm.rs `sent_filter`) | - | - |
 | New message as a full page (not a dialog) with composer (mentions, attachments) | src/features/direct-messages/NewMessage.tsx:363-440 | DIFFERENT: modal dialog with plain textarea (crates/app/src/ui/new_message.rs:303-380) | Page with full composer | M |
 | Persist recipients and draft per scope; restore after restart ("Could not restore the message.") | src/features/direct-messages/NewMessage.tsx:20-110, 160-205 | MISSING | View-state persistence | S |
 | Pending send recovery ("Retry the earlier message to confirm its delivery before editing.", retry button) | src/features/direct-messages/NewMessage.tsx:270-410 | MISSING | Durable pending record and retry UI | M |
@@ -731,15 +731,15 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | "may be incomplete" at ≥500 sets | emoji-directory.ts:134-137 | DONE (emoji.rs:234-250) | - | - |
 | Merge: newest set per shortcode, tie smaller URL; `mine` | emoji-directory.ts:89-110 | DONE (emoji.rs:288-313) | - | - |
 | Live set replacements | live.ts | DONE (live.rs:485; session/mod.rs:1190) | - | - |
-| Lazy `ensure()` load | emoji-directory.ts:151-154, 292-303 | DIFFERENT | Read eagerly at session ready (session/mod.rs:892) | S |
+| Lazy `ensure()` load | emoji-directory.ts:151-154, 292-303 | DONE (session/mod.rs `ensure_emoji`; `Session::ensure_emoji`, called when a community is shown) | - | - |
 | Reconnect aborts in-flight read and restarts | emoji-directory.ts:285-291 | DONE (session/mod.rs `emoji_reconnect`) | - | - |
 | Re-read after cache clear | emoji-directory.ts:262-280 | DONE (session/mod.rs `emoji_clear`) | - | - |
 | Send-time `emoji` tags (errors, skip links, first match) | emoji-directory.ts:292-311; emoji.ts:81-113 | DONE (messages.rs:178-255) | - | - |
-| Add emoji (fresh own-set read, `created_at = max(now, prev+1)`, 12 s, serialized, "Failed to add emoji." / "Timed out while adding emoji.") | emoji-directory.ts:156-227, 242-259 | PARTIAL | Base on `newer(cached, fresh)`; collapse error text; port also rejects non-http(s) URLs (session/account.rs:195-239; emoji.rs:113-141) | S |
+| Add emoji (fresh own-set read, `created_at = max(now, prev+1)`, 12 s, serialized, "Failed to add emoji." / "Timed out while adding emoji.") | emoji-directory.ts:156-227, 242-259 | DONE (session/account.rs `add_emoji`: newer of cached and fresh, reference error copy; the image link check is kept as input validation) | - | - |
 | `suggestShortcode` | emoji.ts:19-30 | DONE (emoji.rs:145-160) | - | - |
 | Reaction content rule | emoji.ts:6-10 | DONE (messages.rs:722-746) | - | - |
 | Render custom emoji, never inside links | emoji.ts:81-100 | DONE (crates/app/src/ui/markdown.rs:168, 432) | - | - |
-| Signer-side `validEmojiSetTemplate` | emoji.ts:32-67 | DIFFERENT | Identity signs any 30030 (crates/identity/src/lib.rs:137-140) | S |
+| Signer-side `validEmojiSetTemplate` | emoji.ts:32-67 | DONE (emoji.rs `valid_set_template`, checked before signing) | - | - |
 
 ### GIFs
 

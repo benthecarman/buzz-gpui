@@ -69,9 +69,15 @@ impl CustomEmojiSettings {
                 // Another community: start over.
                 this.chosen = None;
                 this.error = None;
+                if let Some(community) = Self::community(cx) {
+                    community.read(cx).session.ensure_emoji();
+                }
                 cx.notify();
             }),
         ];
+        if let Some(community) = Self::community(cx) {
+            community.read(cx).session.ensure_emoji();
+        }
         Self {
             view: None,
             name,

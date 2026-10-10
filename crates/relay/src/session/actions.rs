@@ -461,6 +461,65 @@ impl Session {
         self.run(async move { ops.open_dm(pubkeys).await }).await
     }
 
+    /// Confirms an earlier first message of a new conversation
+    /// (`directMessages.delivered`): from the outbox when it still holds
+    /// it (retrying a failed or unknown send), else from a fresh relay
+    /// read. The outbox owns delivery deadlines; this only follows them.
+    pub async fn dm_delivered(&self, id: EventId, channel: &str) -> Result<(), String> {
+        let (ops, channel) = (self.ops(), channel.to_owned());
+        self.runtime
+            .spawn(async move {
+                let ctx = ops.context().await?;
+                let Some(previous) = ctx.outbox.get(&id) else {
+                    let events =
+                        read(&ctx, vec![dm::sent_filter(&id, &ctx.viewer, &channel)]).await?;
+                    return if events.iter().any(|event| {
+                        event.id == id
+                            && event.kind_u16() == kinds::CHAT
+                            && event.pubkey_hex() == ctx.viewer
+                            && event.has_tag("h", &channel)
+                    }) {
+                        Ok(())
+                    } else {
+                        Err("The earlier send could not be confirmed. Reconnect and retry.".into())
+                    };
+                };
+                if previous.kind() != kinds::CHAT
+                    || !previous
+                        .event
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_slice() == ["h".to_owned(), channel.clone()])
+                {
+                    return Err("The saved message does not belong to this conversation.".into());
+                }
+                if matches!(previous.delivery, Delivery::Failed | Delivery::Unknown) {
+                    ctx.outbox
+                        .retry(&id, None)
+                        .map_err(|error| error.to_string())?;
+                }
+                let mut changes = ctx.outbox.changes();
+                loop {
+                    match ctx
+                        .outbox
+                        .get(&id)
+                        .map(|op| (op.delivery, op.error.clone()))
+                    {
+                        Some((Delivery::Accepted | Delivery::Seen, _)) => return Ok(()),
+                        Some((Delivery::Failed | Delivery::Unknown, error)) => {
+                            return Err(error.unwrap_or_else(|| {
+                                "The message could not be confirmed. Retry to continue.".into()
+                            }));
+                        }
+                        _ => {}
+                    }
+                    changes.changed().await.map_err(|_| CLOSED.to_owned())?;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(CLOSED.to_owned()))
+    }
+
     /// Exact relay resolution of channels the viewer has not joined:
     /// readable ones come back, others are dropped.
     pub async fn resolve_channels(&self, ids: Vec<String>) -> Result<Vec<ChannelSummary>, String> {

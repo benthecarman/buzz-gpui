@@ -451,6 +451,7 @@ impl Session {
             emoji: EmojiDirectory::new(viewer.clone()),
             emoji_reading: false,
             statuses: StatusDirectory::new(viewer.clone()),
+            emoji_requested: false,
             incoming: incoming::Incoming::default(),
             incoming_sender: incoming.clone(),
             hidden_dms: Arc::new([]),
@@ -700,6 +701,15 @@ impl Session {
     /// Reads the custom emoji catalog again, e.g. after an error.
     pub fn refresh_emoji(&self) {
         let _ = self.commands.send(Message::RefreshEmoji);
+    }
+
+    /// Loads the custom emoji catalog the first time something needs it
+    /// (`emoji.ensure`): the picker, a shortcode search or a draft that
+    /// names a code. Nothing reads it before.
+    pub fn ensure_emoji(&self) {
+        let _ = self.commands.send(Message::With(Box::new(|actor| {
+            actor.ensure_emoji();
+        })));
     }
 
     pub async fn edit(&self, channel: &str, id: EventId, content: &str) -> Result<(), String> {
@@ -1065,6 +1075,8 @@ struct Actor {
     /// The catalog read is in flight.
     emoji_reading: bool,
     statuses: StatusDirectory,
+    /// Something asked for the catalog; until then it is not read.
+    emoji_requested: bool,
     /// Bumped when the catalog is cleared or re-read; fences old reads.
     emoji_generation: u64,
     incoming: incoming::Incoming,
@@ -1327,7 +1339,10 @@ impl Actor {
                 outcome,
             } => self.presence_published(publication, outcome),
             Message::With(run) => run(self),
-            Message::RefreshEmoji => self.read_emoji(),
+            Message::RefreshEmoji => {
+                self.emoji_requested = true;
+                self.read_emoji();
+            }
             Message::EmojiRead { generation, result } => {
                 if generation != self.emoji_generation {
                     return;
@@ -2217,6 +2232,14 @@ impl Actor {
             .outbox
             .clone()
             .ok_or("Not connected to the relay yet")?;
+        // A draft naming a code needs the catalog (`emoji.tags`).
+        let content = match &write {
+            Write::Send { content, .. } | Write::Edit { content, .. } => Some(content),
+            _ => None,
+        };
+        if content.is_some_and(|content| !messages::referenced_emoji(content).is_empty()) {
+            self.ensure_emoji();
+        }
         let viewer = self.identity.pubkey_hex();
         let authority = self.relay.as_ref().map(|relay| relay.authority.clone());
         let author = Author {
@@ -2517,9 +2540,10 @@ impl Actor {
 
     // ----- custom emoji -----
 
-    /// Reads every member's emoji set at background priority.
+    /// Reads every member's emoji set at background priority, once the
+    /// catalog was asked for.
     fn read_emoji(&mut self) {
-        if self.relay.is_none() || self.emoji_reading {
+        if !self.emoji_requested || self.relay.is_none() || self.emoji_reading {
             return;
         }
         self.emoji_reading = true;
@@ -2535,6 +2559,15 @@ impl Actor {
                 .await;
             let _ = commands.send(Message::EmojiRead { generation, result });
         });
+    }
+
+    /// The first use reads the catalog; later ones wait for it, and an
+    /// error stays until a refresh.
+    fn ensure_emoji(&mut self) {
+        self.emoji_requested = true;
+        if self.emoji.snapshot().status == crate::emoji::CatalogStatus::Idle {
+            self.read_emoji();
+        }
     }
 
     /// The stream was re-established: an in-flight catalog read is

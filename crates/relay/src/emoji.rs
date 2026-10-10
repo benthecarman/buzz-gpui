@@ -140,6 +140,31 @@ pub fn add_template(
     })
 }
 
+/// `validEmojiSetTemplate`: what the viewer's key signs as an emoji set —
+/// one coordinate, canonical unique codes, bounded links, and a date at
+/// most five minutes ahead.
+pub fn valid_set_template(template: &EventTemplate, now: u64) -> bool {
+    if template.kind != kinds::CUSTOM_EMOJI
+        || !template.content.is_empty()
+        || template.created_at > now + 300
+        || template.tags.first().map(Vec::as_slice) != Some(&["d".to_owned(), EMOJI_SET.to_owned()])
+    {
+        return false;
+    }
+    let mut codes = std::collections::HashSet::new();
+    template.tags[1..].iter().all(|tag| {
+        let [name, code, url] = tag.as_slice() else {
+            return false;
+        };
+        name == "emoji"
+            && crate::messages::normalize_shortcode(code).as_deref() == Some(code.as_str())
+            && codes.insert(code.clone())
+            && !url.is_empty()
+            && url.trim() == url
+            && url.len() <= MAX_URL
+    })
+}
+
 /// `suggestShortcode`: the file name without its directory and extension,
 /// lowercase, invalid runs as one `_`, trimmed of `_` and `-`.
 pub fn suggest_shortcode(file_name: &str) -> Option<String> {
@@ -217,6 +242,11 @@ impl EmojiDirectory {
 
     pub fn snapshot(&self) -> Arc<EmojiSnapshot> {
         self.snapshot.clone()
+    }
+
+    /// The viewer's newest set the directory holds.
+    pub fn own(&self) -> Option<Verified> {
+        self.sets.get(&self.viewer).map(|(event, _)| event.clone())
     }
 
     /// A full read is starting. An over-budget catalog starts over, and is
@@ -379,6 +409,18 @@ mod tests {
         );
         assert!(add_template(None, "ok", " https://x.test/w.png", 900).is_err());
         assert!(add_template(None, "ok", "data:image/png;base64,AA", 900).is_err());
+        // What the key signs: canonical unique codes, dated near now.
+        assert!(valid_set_template(&template, 201));
+        assert!(
+            !valid_set_template(&template, 200),
+            "over five minutes ahead"
+        );
+        let mut twice = first.clone();
+        twice.tags.push(twice.tags[1].clone());
+        assert!(!valid_set_template(&twice, 900));
+        let mut loud = first;
+        loud.tags[1][1] = "Wave".into();
+        assert!(!valid_set_template(&loud, 900));
     }
 
     #[test]

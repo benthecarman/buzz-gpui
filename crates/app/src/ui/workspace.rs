@@ -267,6 +267,11 @@ impl Workspace {
             self.channel = None;
             self.leave_channel_tabs();
             self.companion = None;
+            // The shown community's custom emoji load once it is shown
+            // (`ChannelsPage` `emoji.ensure`).
+            if let Some(community) = &current {
+                community.read(cx).session.ensure_emoji();
+            }
             self._community_observer = current.as_ref().map(|community| {
                 cx.observe_in(community, window, |this, _, window, cx| {
                     this.restore_selection(window, cx);

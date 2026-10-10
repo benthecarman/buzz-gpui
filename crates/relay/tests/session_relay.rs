@@ -400,6 +400,8 @@ async fn uploads_an_image_and_sends_it_with_a_mention() {
         alice,
         Store::in_memory().unwrap(),
     );
+    // The catalog loads only once something asks for it.
+    session.ensure_emoji();
     let mut snapshot = session.snapshot();
     let ready = until(&mut snapshot, "the roster and emoji", |s| {
         s.roster == RosterStatus::Ready && s.live && s.emoji.status == CatalogStatus::Ready

@@ -37,6 +37,18 @@ pub fn confirm_filter(relay_author: &str, channel: &str) -> Filter {
     }))
 }
 
+/// The viewer's earlier message `id` in `channel`, when the outbox no
+/// longer holds it.
+pub fn sent_filter(id: &nostr::prelude::EventId, viewer: &str, channel: &str) -> Filter {
+    filter(json!({
+        "ids": [id.to_hex()],
+        "kinds": [kinds::CHAT],
+        "authors": [viewer],
+        "#h": [channel],
+        "limit": 1,
+    }))
+}
+
 /// The confirmed channel is a live DM of exactly the viewer and `pubkeys`.
 pub fn confirmed(channel: Option<&ChannelSummary>, viewer: &str, pubkeys: &[String]) -> bool {
     let Some(channel) = channel else {
