@@ -6,6 +6,8 @@
 
 pub mod claude;
 pub mod client;
+#[cfg(debug_assertions)]
+mod dev;
 #[cfg(test)]
 mod e2e;
 pub mod prompt;
@@ -67,6 +69,12 @@ pub fn init(cx: &mut App) {
         if let Some(agents) = Agents2::global(cx) {
             subscriptions.push(cx.observe(&agents, |this, _, cx| this.sync(cx)));
         }
+        // Quitting stops every session's process, as buzz-app does on exit.
+        subscriptions.push(cx.on_app_quit(|this: &mut ClaudeCode, cx| {
+            let _runtime = Runtime::handle(cx).enter();
+            this.runtime.dispose();
+            async {}
+        }));
         let mut this = ClaudeCode {
             runtime: ClaudeRuntime::new(None),
             setups: HashMap::new(),
@@ -77,6 +85,8 @@ pub fn init(cx: &mut App) {
         this
     });
     cx.set_global(ClaudeCodeGlobal(state));
+    #[cfg(debug_assertions)]
+    dev::init(cx);
 }
 
 fn key() -> String {
@@ -225,6 +235,7 @@ impl AgentType for ClaudeCodeType {
     }
 
     fn run(&self, delivery: Delivery, cx: &mut App) -> Task<Result<(), String>> {
+        tracing::debug!(agent = %delivery.agent.pubkey, "Claude Code delivery");
         let Some(state) = ClaudeCode::global(cx) else {
             return Task::ready(Err("Claude Code is not running".into()));
         };

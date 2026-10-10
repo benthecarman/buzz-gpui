@@ -47,10 +47,6 @@ impl Process {
     pub async fn write(&self, data: String) -> Result<(), String> {
         self.0.write(data, false).await
     }
-    /// Writes any final `data`, then closes stdin.
-    pub async fn end(&self, data: String) -> Result<(), String> {
-        self.0.write(data, true).await
-    }
     pub async fn kill(&self) -> Result<(), String> {
         self.0.kill().await
     }

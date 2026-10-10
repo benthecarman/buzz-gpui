@@ -163,6 +163,9 @@ pub struct Synced {
     pub spawn: Spawner,
 }
 
+/// Where an agent's saved sessions are kept, by agent pubkey.
+pub type StoreFn = Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>;
+
 type MemoryRead = Shared<BoxFuture<'static, Result<Vec<Memory>, String>>>;
 
 struct EntryState {
@@ -192,7 +195,7 @@ struct Inner {
     relay: Mutex<Option<Arc<dyn OwnerRelay>>>,
     changes: watch::Sender<u64>,
     /// Where each agent's saved sessions are kept.
-    store: Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>,
+    store: StoreFn,
 }
 
 /// Every Claude Code agent's sessions. Cheap to clone.
@@ -213,7 +216,7 @@ impl ClaudeRuntime {
         }))
     }
 
-    pub fn with_store(store: Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>) -> Self {
+    pub fn with_store(store: StoreFn) -> Self {
         Self {
             inner: Arc::new(Inner {
                 agents: Mutex::default(),
@@ -690,24 +693,26 @@ impl ClaudeRuntime {
         &self,
         pubkey: &str,
     ) -> impl std::future::Future<Output = Result<Vec<Memory>, String>> + Send + 'static {
-        let mut reading = locked(&self.inner.reading);
-        let read = reading
+        locked(&self.inner.reading)
             .entry(pubkey.to_string())
             .or_insert_with(|| {
                 let (this, pubkey) = (self.clone(), pubkey.to_string());
                 async move {
-                    let relay = this.relay().ok_or("Buzz is not connected")?;
-                    let result = tokio::time::timeout(MEMORY_TIMEOUT, relay.memories(&pubkey))
-                        .await
-                        .unwrap_or_else(|_| Err("Memory read timed out".into()));
+                    let result = match this.relay() {
+                        Some(relay) => {
+                            tokio::time::timeout(MEMORY_TIMEOUT, relay.memories(&pubkey))
+                                .await
+                                .unwrap_or_else(|_| Err("Memory read timed out".into()))
+                        }
+                        None => Err("Buzz is not connected".into()),
+                    };
                     locked(&this.inner.reading).remove(&pubkey);
                     result
                 }
                 .boxed()
                 .shared()
             })
-            .clone();
-        read
+            .clone()
     }
 }
 

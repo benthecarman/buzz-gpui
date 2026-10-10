@@ -10,7 +10,7 @@ use crate::runtime::Runtime;
 use crate::ui::overlay::{self, Align};
 use buzz_ui::{
     ActiveTheme, Button, Colors, Menu, MenuItem, Select, Surface, TextArea, TextField, TypeStyled,
-    tokens::space,
+    tokens::{font, space},
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
@@ -158,7 +158,7 @@ impl ClaudeTab {
 
 /// `curl … | bash`, `claude` and `~/.local/bin` in code type.
 fn installer_note(c: &Colors) -> Div {
-    let code = |text: &'static str| div().text_mono().child(text);
+    let code = |text: &'static str| div().font_family(font::MONO).child(text);
     div()
         .flex()
         .flex_wrap()
@@ -281,7 +281,7 @@ impl Render for ClaudeTab {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .text_mono()
+                                .font_family(font::MONO)
                                 .child(session.key.clone()),
                         )
                         .child(div().flex_none().child(if session.busy {
@@ -562,7 +562,7 @@ impl Render for SettingsTab {
                     .map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
             )
             .child(
-                div().child(
+                div().flex().child(
                     Button::new("claude-code-save", "Save")
                         .prominent()
                         .loading(self.saving)
