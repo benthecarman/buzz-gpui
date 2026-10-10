@@ -35,7 +35,8 @@ pub fn init(cx: &mut App) {
             title: "Terminal",
             icon: IconName::TerminalWindow,
             matches: |_| false,
-            tool: false,
+            // Offered under Tools in the New tab picker (`isChannelTabTool`).
+            tool: true,
             launcher: Some(Launcher {
                 icon: IconName::TerminalWindow,
                 label: "Toggle channel terminal",
