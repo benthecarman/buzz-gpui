@@ -25,6 +25,7 @@ mod inbox;
 mod incoming;
 mod kit;
 mod live_feed;
+mod me_kit;
 mod members;
 mod memories;
 mod messaging;
@@ -40,6 +41,7 @@ mod teams;
 mod threads;
 mod timeline;
 mod unread;
+mod work_sessions;
 
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use catalog::CommunityCatalog;
@@ -48,6 +50,7 @@ pub use inbox::{EXPIRED as INBOX_EXPIRED, InboxFeed, InboxFeedStatus, InboxState
 pub use incoming::IncomingMessage;
 pub use kit::{CreationSnapshot, KitSnapshot, KitStatus};
 pub use live_feed::LiveBatch;
+pub use me_kit::{MeKit, MeKitSnapshot, MeKitStatus};
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
 pub use memories::{MemoryEntry, MemoryError, MemoryListing};
 pub use observer::{ActivityFeed, FeedStatus};
@@ -59,6 +62,7 @@ pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{
     ChannelUnread, READING_DWELL_MS, ThreadUnread, UnreadCounts, UnreadDetail, UnreadWatch,
 };
+pub use work_sessions::{AgentRules, Expected, create_draft, session_description, session_title};
 
 use crate::budget::ByteLru;
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
@@ -308,6 +312,8 @@ pub struct Session {
     details: std::sync::Mutex<HashMap<String, crate::lifecycle::DetailsAttempt>>,
     /// The channel kit and channel creation with setup.
     kit: Arc<kit::KitShared>,
+    /// The private recipe catalog, Me groups and placement.
+    me_kit: me_kit::MeKit,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -419,6 +425,7 @@ impl Session {
             ReaderOptions::default(),
         );
         let viewer = identity.pubkey_hex();
+        let kit = me_kit::MeKit::new(commands.clone(), runtime.clone(), origin.http());
         let media = Media::new(runtime.clone(), origin.clone(), identity.clone());
         let direct = account::Direct {
             http: http.clone(),
@@ -483,6 +490,7 @@ impl Session {
             incoming_sender: incoming.clone(),
             hidden_dms: Arc::new([]),
             sidebar: sidebar::SidebarPrefs::new(runtime),
+            me_kit: kit.clone(),
             watches: HashMap::new(),
             view_reports: HashMap::new(),
             dm_visibility: DmVisibilityStatus::Idle,
@@ -507,6 +515,7 @@ impl Session {
             inbox: inbox_view,
             details: Default::default(),
             kit: Arc::default(),
+            me_kit: kit,
             task,
         }
     }
@@ -1115,6 +1124,8 @@ struct Actor {
     incoming_sender: broadcast::Sender<IncomingMessage>,
     hidden_dms: Arc<[String]>,
     sidebar: sidebar::SidebarPrefs,
+    /// The recipe catalog, shared with [`Session::kit`].
+    me_kit: me_kit::MeKit,
     /// Open [`UnreadWatch`]es by id.
     watches: HashMap<u64, unread::WatchState>,
     /// What each open channel view last reported it shows.

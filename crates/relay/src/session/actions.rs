@@ -108,20 +108,20 @@ pub struct PeoplePage {
 
 /// What an operation needs from the actor to work on its own.
 #[derive(Clone)]
-struct Context {
-    reader: Reader,
-    http: RelayHttp,
-    identity: Arc<Identity>,
-    viewer: String,
-    relay: String,
-    epoch: u64,
-    outbox: Outbox,
+pub(super) struct Context {
+    pub(super) reader: Reader,
+    pub(super) http: RelayHttp,
+    pub(super) identity: Arc<Identity>,
+    pub(super) viewer: String,
+    pub(super) relay: String,
+    pub(super) epoch: u64,
+    pub(super) outbox: Outbox,
 }
 
 /// The cheap, cloneable half of a session that operations run against.
 #[derive(Clone)]
-struct Ops {
-    commands: mpsc::UnboundedSender<Message>,
+pub(super) struct Ops {
+    pub(super) commands: mpsc::UnboundedSender<Message>,
 }
 
 fn now() -> u64 {
@@ -131,7 +131,7 @@ fn now() -> u64 {
 }
 
 impl Session {
-    fn ops(&self) -> Ops {
+    pub(super) fn ops(&self) -> Ops {
         Ops {
             commands: self.commands.clone(),
         }
@@ -572,7 +572,7 @@ impl Session {
     }
 }
 
-async fn read(ctx: &Context, filters: Vec<Filter>) -> Result<Vec<Verified>, String> {
+pub(super) async fn read(ctx: &Context, filters: Vec<Filter>) -> Result<Vec<Verified>, String> {
     ctx.reader
         .read(
             filters,
@@ -645,31 +645,9 @@ macro_rules! confirm {
     }};
 }
 
-/// Waits until the outbox delivered `id`: accepted or seen.
-async fn delivered(outbox: &Outbox, id: EventId) -> Result<(), String> {
-    let mut changes = outbox.changes();
-    loop {
-        match outbox.get(&id) {
-            Some(op) => match op.delivery {
-                Delivery::Accepted | Delivery::Seen => return Ok(()),
-                Delivery::Failed => {
-                    return Err(op
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "The relay refused this change.".into()));
-                }
-                Delivery::Unknown => return Err(UNCONFIRMED.into()),
-                Delivery::Sending => {}
-            },
-            None => return Err("The change was dismissed.".into()),
-        }
-        changes.changed().await.map_err(|_| CLOSED.to_owned())?;
-    }
-}
-
 impl Ops {
     /// Runs `f` on the actor and returns its result.
-    async fn with<R: Send + 'static>(
+    pub(super) async fn with<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Actor) -> R + Send + 'static,
     ) -> Result<R, String> {
@@ -682,12 +660,12 @@ impl Ops {
         answer.await.map_err(|_| CLOSED.to_owned())
     }
 
-    async fn context(&self) -> Result<Context, String> {
+    pub(super) async fn context(&self) -> Result<Context, String> {
         self.with(|actor| actor.context()).await?
     }
 
     /// Feeds relay-signed discovery events read at `epoch` to the actor.
-    async fn adopt(&self, epoch: u64, events: Vec<Verified>) -> Result<(), String> {
+    pub(super) async fn adopt(&self, epoch: u64, events: Vec<Verified>) -> Result<(), String> {
         self.with(move |actor| {
             if actor.epoch == epoch {
                 actor.accept(&events);
@@ -954,17 +932,9 @@ impl Ops {
             .outbox
             .send(draft, SendOptions::default())
             .map_err(|error| error.to_string())?;
-        if let Err(error) = delivered(&ctx.outbox, op).await {
-            // An uncertain delivery may still have created the channel.
-            let receipt = read(
-                &ctx,
-                vec![lifecycle::creation_receipt_filter(&op, &ctx.viewer)],
-            )
-            .await?;
-            if !receipt.iter().any(|event| event.id == op) {
-                return Err(error);
-            }
-        }
+        // Gives up after 15 seconds; an uncertain delivery may still have
+        // created the channel, which its exact receipt confirms.
+        super::work_sessions::delivered(&ctx, op, false, true).await?;
         let filters = lifecycle::created_filters(&ctx.relay, &ctx.viewer, &id);
         let events = confirm!({
             let events = read(&ctx, filters.clone()).await?;
@@ -1010,7 +980,7 @@ impl Ops {
 
     // ----- channels and search -----
 
-    async fn resolve(
+    pub(super) async fn resolve(
         &self,
         ctx: &Context,
         ids: Vec<String>,
@@ -1227,7 +1197,7 @@ impl Ops {
 }
 
 impl Actor {
-    fn context(&self) -> Result<Context, String> {
+    pub(super) fn context(&self) -> Result<Context, String> {
         // A saved snapshot reads nothing (`cachedOnly`).
         let unavailable = if self.cached {
             super::channels::RECONNECT_TO_UPDATE

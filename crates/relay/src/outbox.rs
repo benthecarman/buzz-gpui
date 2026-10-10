@@ -162,7 +162,7 @@ impl Operation {
         self.tag("h")
     }
 
-    fn has_tag(&self, name: &str, value: &str) -> bool {
+    pub fn has_tag(&self, name: &str, value: &str) -> bool {
         self.event.tags.iter().any(|tag| {
             let tag = tag.as_slice();
             tag.first().map(String::as_str) == Some(name)

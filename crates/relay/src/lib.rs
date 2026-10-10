@@ -18,6 +18,7 @@ pub mod kit;
 pub mod lifecycle;
 pub mod links;
 pub mod live;
+pub mod me_kit;
 pub mod media;
 pub mod members;
 pub mod messages;

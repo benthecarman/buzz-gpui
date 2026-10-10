@@ -90,6 +90,10 @@ struct Writer {
     http: RelayHttp,
     identity: Arc<Identity>,
     viewer: String,
+    /// Personal groups replace the legacy groups once that record exists.
+    me_kit: super::me_kit::MeKit,
+    /// Where the groups shown came from.
+    source: crate::sidebar::GroupSource,
 }
 
 fn now_ms() -> u64 {
@@ -115,9 +119,10 @@ impl Writer {
             .read(preference_filters(&self.viewer), ReadOptions::default())
             .await
             .map_err(|error| format!("Preference query: {}", error.message))?;
-        decode_records(&self.identity, &events)
+        let legacy = decode_records(&self.identity, &events)
             .and_then(|decoded| decoded.preferences())
-            .map_err(|error| format!("Preference decode: {error}"))
+            .map_err(|error| format!("Preference decode: {error}"))?;
+        self.me_kit.active_groups(legacy).await
     }
 
     async fn head(&self, write: &SidebarWrite) -> Result<SidebarHead, String> {
@@ -196,9 +201,12 @@ impl Writer {
             }),
         };
         let groups = match groups {
-            Some(intent) => match self.write(SidebarWrite::Assign(intent)).await? {
-                WriteResult::Groups(groups) => Some(groups),
-                _ => None,
+            Some(intent) => match self.me_kit.personal_assign(&intent, self.source).await? {
+                Some(groups) => Some(groups),
+                None => match self.write(SidebarWrite::Assign(intent)).await? {
+                    WriteResult::Groups(groups) => Some(groups),
+                    _ => None,
+                },
             },
             None => None,
         };
@@ -423,15 +431,20 @@ impl Session {
                     .await;
                 let (sort, groups) = match sort {
                     Ok(WriteResult::Sort(sort)) => {
-                        let groups = writer
-                            .write(SidebarWrite::RemoveSection {
-                                section_id: section,
-                            })
-                            .await
-                            .and_then(|result| match result {
-                                WriteResult::Groups(groups) => Ok(groups),
-                                _ => Err("Invalid sidebar groups".into()),
-                            });
+                        let groups =
+                            match writer.me_kit.personal_remove(&section, writer.source).await {
+                                Ok(Some(groups)) => Ok(groups),
+                                Err(error) => Err(error),
+                                Ok(None) => writer
+                                    .write(SidebarWrite::RemoveSection {
+                                        section_id: section,
+                                    })
+                                    .await
+                                    .and_then(|result| match result {
+                                        WriteResult::Groups(groups) => Ok(groups),
+                                        _ => Err("Invalid sidebar groups".into()),
+                                    }),
+                            };
                         (Some(sort), groups)
                     }
                     Ok(_) => (None, Err("Invalid sidebar sort".into())),
@@ -498,6 +511,13 @@ impl Actor {
             http: self.http.clone(),
             identity: self.identity.clone(),
             viewer: self.identity.pubkey_hex(),
+            me_kit: self.me_kit.clone(),
+            source: self
+                .sidebar
+                .store
+                .confirmed()
+                .map(|data| data.group_source)
+                .unwrap_or_default(),
         }
     }
 
