@@ -72,6 +72,8 @@ pub struct ChannelActions {
     /// Registered channel panels' entries, set by the page each frame.
     pub menu_panels: Vec<MenuPanel>,
     open_settings: Option<OpenSettings>,
+    /// "Save as template…", made when the menu first opens.
+    save_as: Option<Entity<super::templates::SaveAsTemplate>>,
 }
 
 impl ChannelActions {
@@ -90,6 +92,7 @@ impl ChannelActions {
             on_removed,
             menu_panels: Vec::new(),
             open_settings: None,
+            save_as: None,
         }
     }
 
@@ -177,6 +180,11 @@ impl ChannelActions {
 
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = true;
+        if self.save_as.is_none() && super::templates::provider(cx).is_some() {
+            let (community, channel) = (self.community.clone(), self.channel.id.clone());
+            self.save_as =
+                Some(cx.new(|cx| super::templates::SaveAsTemplate::menu(community, channel, cx)));
+        }
         if self.lifecycle_shown() {
             self.load_permissions(window, cx);
         }
@@ -279,6 +287,15 @@ impl ChannelActions {
                 )
             })
             .children(panels)
+            .children(self.save_as.clone().map(|save_as| {
+                MenuItem::new("save-as-template", "Save as template…")
+                    .disabled(save_as.read(cx).disabled(cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.menu_open = false;
+                        save_as.update(cx, |save_as, cx| save_as.copy(window, cx));
+                        cx.notify();
+                    }))
+            }))
             .when(!shared.is_empty(), |menu| {
                 menu.child(MenuSeparator::new()).children(shared)
             });
@@ -491,6 +508,7 @@ impl Render for ChannelActions {
                     )
                     .children(menu),
             )
+            .children(self.save_as.clone())
             .children(modal)
     }
 }
