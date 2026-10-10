@@ -87,11 +87,7 @@ impl ChannelPage {
         let model = community.update(cx, |community, cx| community.open_channel(&channel.id, cx));
         let list = ListState::new(1, ListAlignment::Bottom, px(1000.));
         list.set_follow_mode(FollowMode::Tail);
-        let placeholder: SharedString = match channel.channel_type {
-            Some(buzz_relay_client::ChannelType::Dm) => format!("Message {}", channel.name),
-            _ => format!("Message #{}", channel.name),
-        }
-        .into();
+        let placeholder = composer_placeholder(&channel, &community.read(cx).snapshot.profiles);
         let composer = cx.new(|cx| {
             Composer::new(
                 community.clone(),
@@ -108,7 +104,7 @@ impl ChannelPage {
             cx.observe_in(&model, window, |this, _, window, cx| {
                 this.sync_items(window, cx)
             }),
-            cx.observe(&community, |this, community, cx| {
+            cx.observe_in(&community, window, |this, community, window, cx| {
                 // Joining, leaving or editing changes the summary.
                 if let Some(current) = community
                     .read(cx)
@@ -119,6 +115,13 @@ impl ChannelPage {
                 {
                     this.channel = current.clone();
                 }
+                // A DM is named after its people, whose profiles may arrive
+                // later.
+                let placeholder =
+                    composer_placeholder(&this.channel, &community.read(cx).snapshot.profiles);
+                this.composer.update(cx, |composer, cx| {
+                    composer.set_placeholder(placeholder, window, cx)
+                });
                 cx.notify()
             }),
             cx.subscribe_in(
@@ -652,6 +655,22 @@ fn copy_text(row: &MessageRow) -> String {
         .join("\n\n")
 }
 
+/// `MessageComposer`'s label: `Message #<name>`, where a DM's name is its
+/// people (or "Notes to self"), still with the `#` as in buzz-app.
+fn composer_placeholder(
+    channel: &ChannelSummary,
+    profiles: &buzz_relay_client::Profiles,
+) -> SharedString {
+    match channel.channel_type {
+        Some(buzz_relay_client::ChannelType::Session) => "Message this session".into(),
+        _ => format!(
+            "Message #{}",
+            super::sidebar::channel_label(channel, profiles)
+        )
+        .into(),
+    }
+}
+
 impl Render for ChannelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
@@ -677,7 +696,7 @@ impl Render for ChannelPage {
             .joined(true)
             .label(
                 Some(message::channel_icon(&self.channel)),
-                self.channel.name.clone(),
+                super::sidebar::channel_label(&self.channel, &community.snapshot.profiles),
             )
             .action(self.actions.clone());
 
@@ -850,5 +869,48 @@ mod tests {
             preview_url: None,
         }];
         assert_eq!(copy_text(&row), "Look\n\nhttps://x.test/media/a.png");
+    }
+
+    #[test]
+    fn dms_are_named_after_their_people() {
+        use buzz_relay_client::{ChannelType, Profile};
+        use std::collections::HashMap;
+        let (bob, carol) = ("b".repeat(64), "c".repeat(64));
+        let named = |name: &str| {
+            Arc::new(Profile {
+                name: name.into(),
+                ..Default::default()
+            })
+        };
+        let profiles: buzz_relay_client::Profiles = Arc::new(HashMap::from([
+            (bob.clone(), named("Bob")),
+            (carol.clone(), named("Carol")),
+        ]));
+        let channel = |kind, participants: Option<Vec<String>>| ChannelSummary {
+            name: "DM".into(),
+            channel_type: Some(kind),
+            participants,
+            ..Default::default()
+        };
+        let group = channel(ChannelType::Dm, Some(vec![bob, carol]));
+        assert_eq!(
+            composer_placeholder(&group, &profiles),
+            "Message #Bob, Carol"
+        );
+        let notes = channel(ChannelType::Dm, Some(Vec::new()));
+        assert_eq!(
+            composer_placeholder(&notes, &profiles),
+            "Message #Notes to self"
+        );
+        let stream = ChannelSummary {
+            name: "general".into(),
+            ..channel(ChannelType::Stream, None)
+        };
+        assert_eq!(composer_placeholder(&stream, &profiles), "Message #general");
+        let session = channel(ChannelType::Session, None);
+        assert_eq!(
+            composer_placeholder(&session, &profiles),
+            "Message this session"
+        );
     }
 }

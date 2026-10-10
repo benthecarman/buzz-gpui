@@ -241,9 +241,11 @@ impl Workspace {
             cx.new(|cx| ChannelPage::new(community, channel.clone(), open_thread, window, cx));
         let composer = page.read(cx).composer();
         composer.update(cx, |state, cx| state.focus(window, cx));
-        self._page_events = Some(cx.subscribe(&page, |this, _, _: &ChannelClosed, cx| {
-            this.close_channel(cx)
-        }));
+        self._page_events = Some(cx.subscribe_in(
+            &page,
+            window,
+            |this, _, _: &ChannelClosed, window, cx| this.close_channel(window, cx),
+        ));
         self.channel = Some(page);
         if let Some(root) = thread::dev_open_thread() {
             self.open_thread(root, window, cx);

@@ -53,6 +53,26 @@ fn active(channel: &ChannelSummary) -> bool {
     !channel.archived && (!channel.hidden || channel.channel_type == Some(ChannelType::Dm))
 }
 
+/// The first sidebar row other than `except`, in the order [`render`]
+/// draws them: channels, forums, then direct messages, each by name.
+pub fn first_row(snapshot: &SessionSnapshot, except: &str) -> Option<ChannelSummary> {
+    let section = |channel: &ChannelSummary| match channel.channel_type {
+        Some(ChannelType::Dm) => 2,
+        Some(ChannelType::Forum) => 1,
+        _ => 0,
+    };
+    snapshot
+        .channels
+        .iter()
+        .filter(|c| active(c) && !snapshot.hidden_dms.contains(&c.id) && c.id != except)
+        .map(|c| {
+            let label = channel_label(c, &snapshot.profiles).to_lowercase();
+            ((section(c), label, c.id.clone()), c)
+        })
+        .min_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, channel)| channel.clone())
+}
+
 pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyElement {
     let c = *cx.colors();
     let profiles = &snapshot.profiles;

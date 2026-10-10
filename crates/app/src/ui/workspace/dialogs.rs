@@ -8,7 +8,7 @@ use crate::ui::new_channel::NewChannelDialog;
 use crate::ui::new_message::NewMessageDialog;
 use crate::ui::overlay::{self, Dismiss};
 use crate::ui::search::SearchDialog;
-use crate::ui::sidebar::Page;
+use crate::ui::sidebar::{self, Page};
 use buzz_relay_client::{ChannelSummary, EventId};
 use gpui_kit::*;
 use std::rc::Rc;
@@ -116,12 +116,23 @@ impl Workspace {
         self.show(dialog, false, cx);
     }
 
-    /// The page closed itself (the viewer left or hid the channel).
-    pub(super) fn close_channel(&mut self, cx: &mut Context<Self>) {
-        self.channel = None;
+    /// The page closed itself (the viewer left, hid or deleted the
+    /// channel): the first other sidebar row opens instead, as in
+    /// buzz-app's sidebar, or nothing when there is none.
+    pub(super) fn close_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let closed = self
+            .channel
+            .take()
+            .map(|page| page.read(cx).channel_id().to_string());
         self.thread = None;
-        if let Some(community) = &self.community {
-            community.read(cx).session.select(None);
+        let Some(community) = &self.community else {
+            cx.notify();
+            return;
+        };
+        let snapshot = community.read(cx).snapshot.clone();
+        match sidebar::first_row(&snapshot, closed.as_deref().unwrap_or_default()) {
+            Some(next) => self.select_channel(&next, window, cx),
+            None => community.read(cx).session.select(None),
         }
         cx.notify();
     }
