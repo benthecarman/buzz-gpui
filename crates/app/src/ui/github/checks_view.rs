@@ -393,7 +393,7 @@ impl Render for ChecksView {
             .child(self.summary(cx))
             .when(retry, |d| {
                 d.child(
-                    div().px(px(16.)).pb(px(12.)).child(
+                    div().flex().px(px(16.)).pb(px(12.)).child(
                         Button::new("retry-checks", "Retry")
                             .variant(ButtonVariant::Link)
                             .size(ButtonSize::Xs)
