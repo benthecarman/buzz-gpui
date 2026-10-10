@@ -1,5 +1,6 @@
 //! The app's views.
 
+mod account;
 mod add_community;
 mod agents;
 mod channel;
@@ -18,7 +19,9 @@ mod onboarding;
 mod overlay;
 mod profile_card;
 mod search;
+pub mod settings;
 mod sidebar;
+mod status;
 mod thread;
 mod time;
 mod typing;

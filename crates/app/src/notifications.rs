@@ -63,7 +63,6 @@ impl Preferences {
             .unwrap_or_default()
     }
 
-    #[allow(dead_code)] // Settings will call this.
     pub fn save(&self, store: &Store, partition: &Partition) {
         let json = serde_json::to_string(self).expect("preferences serialize");
         if let Err(error) = store.set_view_state(partition, PREFERENCES, Some(&json)) {

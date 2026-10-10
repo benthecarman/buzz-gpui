@@ -6,7 +6,8 @@ use crate::notifications;
 use crate::runtime::Runtime;
 use buzz_identity::Identity;
 use buzz_relay_client::{
-    ChannelType, ChannelView, RelayOrigin, Session, SessionSnapshot, Store, TimelineSnapshot,
+    ChannelType, ChannelView, LeaveOutcome, PresenceMode, RelayOrigin, Session, SessionSnapshot,
+    Store, TimelineSnapshot,
 };
 use gpui_kit::{App, AppContext, Context, Entity, Global, Task};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,8 @@ use std::sync::Arc;
 const SAVED: &str = "communities";
 /// View state key for the channel last open in a community.
 const SELECTED_CHANNEL: &str = "selected-channel";
+/// Viewer preference holding the availability choice (`buzz-presence.v1`).
+const PRESENCE_MODE: &str = "presence-mode";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Saved {
@@ -36,6 +39,8 @@ pub struct AppState {
     pub store: Store,
     pub communities: Vec<Entity<Community>>,
     pub selected: Option<usize>,
+    /// The availability the user chose, applied to every community.
+    pub presence_mode: PresenceMode,
 }
 
 impl Global for AppState {}
@@ -53,15 +58,23 @@ impl AppState {
             store,
             communities: Vec::new(),
             selected: None,
+            presence_mode: PresenceMode::Auto,
         };
         if let IdentityState::Ready(identity) = &state.identity {
+            state.presence_mode = load_presence_mode(&state.store, &identity.pubkey_hex());
             let saved = state.saved(&identity.pubkey_hex());
             for origin in saved
                 .origins
                 .iter()
                 .filter_map(|o| RelayOrigin::parse(o).ok())
             {
-                let community = Community::new(origin, identity.clone(), state.store.clone(), cx);
+                let community = Community::new(
+                    origin,
+                    identity.clone(),
+                    state.store.clone(),
+                    state.presence_mode,
+                    cx,
+                );
                 state.communities.push(community);
             }
             state.selected = saved
@@ -78,16 +91,18 @@ impl AppState {
         let identity = Arc::new(identity);
         let store = cx.global::<Self>().store.clone();
         let saved = cx.global::<Self>().saved(&identity.pubkey_hex());
+        let mode = load_presence_mode(&store, &identity.pubkey_hex());
         let communities: Vec<Entity<Community>> = saved
             .origins
             .iter()
             .filter_map(|origin| RelayOrigin::parse(origin).ok())
-            .map(|origin| Community::new(origin, identity.clone(), store.clone(), cx))
+            .map(|origin| Community::new(origin, identity.clone(), store.clone(), mode, cx))
             .collect();
         let state = cx.global_mut::<Self>();
         state.selected = (!communities.is_empty()).then_some(0);
         state.communities = communities;
         state.identity = IdentityState::Ready(identity);
+        state.presence_mode = mode;
     }
 
     fn saved(&self, viewer: &str) -> Saved {
@@ -138,7 +153,7 @@ impl AppState {
             return Ok(());
         }
         let (identity, store) = (identity.clone(), state.store.clone());
-        let community = Community::new(origin, identity, store, cx);
+        let community = Community::new(origin, identity, store, state.presence_mode, cx);
         let state = cx.global_mut::<Self>();
         state.communities.push(community);
         state.selected = Some(state.communities.len() - 1);
@@ -152,6 +167,97 @@ impl AppState {
             state.selected = Some(index);
             cx.global::<Self>().save(cx);
         }
+    }
+
+    /// Sets the availability every community publishes, and remembers it.
+    pub fn set_presence_mode(mode: PresenceMode, cx: &mut App) {
+        cx.global_mut::<Self>().presence_mode = mode;
+        let state = cx.global::<Self>();
+        for community in &state.communities {
+            community.read(cx).session.set_presence_mode(mode);
+        }
+        let IdentityState::Ready(identity) = &state.identity else {
+            return;
+        };
+        let value = match mode {
+            PresenceMode::Auto => "\"auto\"",
+            PresenceMode::Away => "\"away\"",
+            PresenceMode::Offline => "\"offline\"",
+        };
+        let saved = state
+            .store
+            .set_viewer_pref(&identity.pubkey_hex(), PRESENCE_MODE, value);
+        if let Err(error) = saved {
+            tracing::warn!(%error, "could not save the availability choice");
+        }
+    }
+
+    /// Leaves a community (NIP-43, relay.md §1.8). On success the
+    /// community is dropped from this device and, unless the relay says
+    /// access was revoked, its local data is purged. Any failure keeps the
+    /// membership so the user can retry.
+    pub fn leave(community: Entity<Community>, cx: &mut App) -> Task<Result<(), String>> {
+        let session = community.read(cx).session.clone();
+        cx.spawn(async move |cx| {
+            let outcome = session.leave().await?;
+            let purge = outcome != LeaveOutcome::Revoked;
+            cx.update(|cx| Self::remove(&community, purge, cx));
+            Ok(())
+        })
+    }
+
+    /// Drops a community from this device: another community becomes
+    /// selected, the session stops, then its local data is purged.
+    fn remove(community: &Entity<Community>, purge: bool, cx: &mut App) {
+        let id = community.entity_id();
+        let state = cx.global_mut::<Self>();
+        let Some(index) = state
+            .communities
+            .iter()
+            .position(|other| other.entity_id() == id)
+        else {
+            return;
+        };
+        state.communities.remove(index);
+        let remaining = state.communities.len();
+        state.selected = match state.selected {
+            _ if remaining == 0 => None,
+            Some(selected) if selected > index => Some(selected - 1),
+            Some(selected) if selected == index => Some(index.min(remaining - 1)),
+            other => other,
+        };
+        cx.global::<Self>().save(cx);
+        let (session, partition) = {
+            let community = community.read(cx);
+            (community.session.clone(), community.partition())
+        };
+        let store = cx.global::<Self>().store.clone();
+        Runtime::handle(cx).spawn(async move {
+            session.dispose().await;
+            if purge && let Err(error) = store.purge(&partition) {
+                tracing::error!(%error, "could not purge the community's local data");
+            }
+        });
+    }
+
+    /// Signs out (relay.md §2.4, adapted): deletes the identity from the
+    /// keyring, which buzz-app shares, and closes every community. Local
+    /// data stays, as in buzz-app's sign-out without a wipe.
+    pub fn sign_out(cx: &mut App) -> Result<(), String> {
+        if std::env::var_os("BUZZ_DEV_NSEC_FILE").is_some() {
+            tracing::warn!("development identity from a file; the keyring is left alone");
+        } else {
+            buzz_identity::forget().map_err(|error| error.to_string())?;
+        }
+        let state = cx.global_mut::<Self>();
+        let communities = std::mem::take(&mut state.communities);
+        state.selected = None;
+        state.identity = IdentityState::Missing;
+        for community in communities {
+            let session = community.read(cx).session.clone();
+            Runtime::handle(cx).spawn(async move { session.dispose().await });
+        }
+        Ok(())
     }
 
     pub fn current(cx: &App) -> Option<Entity<Community>> {
@@ -182,6 +288,7 @@ impl Community {
         origin: RelayOrigin,
         identity: Arc<Identity>,
         store: Store,
+        presence_mode: PresenceMode,
         cx: &mut App,
     ) -> Entity<Self> {
         let session = Arc::new(Session::open(
@@ -192,6 +299,9 @@ impl Community {
         ));
         if cx.try_global::<Idle>().is_some_and(|idle| idle.idle) {
             session.set_idle(true);
+        }
+        if presence_mode != PresenceMode::Auto {
+            session.set_presence_mode(presence_mode);
         }
         let community = cx.new(|cx| {
             let snapshot = session.snapshot();
@@ -217,18 +327,23 @@ impl Community {
         community
     }
 
-    /// Follows the presence of everyone with a one-to-one DM, for the
-    /// sidebar's avatar dots.
+    /// Follows the viewer's presence, for the account menu, and that of
+    /// everyone with a one-to-one DM, for the sidebar's avatar dots.
     fn follow_presence(&mut self) {
-        let mut demand: Vec<String> = self
-            .snapshot
-            .channels
-            .iter()
-            .filter(|channel| channel.channel_type == Some(ChannelType::Dm) && !channel.archived)
-            .filter_map(|channel| match channel.participants.as_deref() {
-                Some([other]) => Some(other.clone()),
-                _ => None,
-            })
+        let viewer = self.session.viewer().to_string();
+        let mut demand: Vec<String> = std::iter::once(viewer)
+            .chain(
+                self.snapshot
+                    .channels
+                    .iter()
+                    .filter(|channel| {
+                        channel.channel_type == Some(ChannelType::Dm) && !channel.archived
+                    })
+                    .filter_map(|channel| match channel.participants.as_deref() {
+                        Some([other]) => Some(other.clone()),
+                        _ => None,
+                    }),
+            )
             .collect();
         for person in &self.presence_extra {
             if !demand.contains(person) {
@@ -327,6 +442,19 @@ pub struct ChannelModel {
 impl ChannelModel {
     pub fn load_older(&self) {
         self.view.load_older();
+    }
+}
+
+fn load_presence_mode(store: &Store, viewer: &str) -> PresenceMode {
+    match store
+        .viewer_pref(viewer, PRESENCE_MODE)
+        .ok()
+        .flatten()
+        .as_deref()
+    {
+        Some("\"away\"") => PresenceMode::Away,
+        Some("\"offline\"") => PresenceMode::Offline,
+        _ => PresenceMode::Auto,
     }
 }
 

@@ -13,6 +13,8 @@ use std::sync::Arc;
 pub enum Page {
     Messages,
     Agents,
+    /// Settings replaces this sidebar with its own (ui.md §5b.1).
+    Settings,
 }
 
 pub struct SidebarProps {

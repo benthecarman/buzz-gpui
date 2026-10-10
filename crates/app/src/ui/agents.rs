@@ -4,12 +4,17 @@
 mod defaults;
 mod editor;
 mod form;
-mod harness;
+pub(crate) mod harness;
 mod host_dialog;
 mod import;
 
+pub(crate) use defaults::DefaultsDialog;
+pub(crate) use editor::Dismissed;
+pub(crate) use host_dialog::AddHost;
+
 use crate::hosts::{HostConnection, Hosts};
 use crate::ui::overlay::{self, Align, Dismiss};
+use crate::ui::settings::OpenHostSettings;
 use buzz_host::api::{Agent, AgentAction, Harness, ProcessStatus, Request};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
@@ -17,11 +22,9 @@ use buzz_ui::{
     Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, MenuSize,
     PanelHeader, Presence, Surface, TypeStyled, tokens::radius,
 };
-use defaults::DefaultsDialog;
-use editor::{AgentEditor, Dismissed};
+use editor::AgentEditor;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use host_dialog::AddHost;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -41,10 +44,6 @@ enum Modal {
         editor: Entity<AgentEditor>,
         _subscription: Subscription,
     },
-    AddHost {
-        dialog: Entity<AddHost>,
-        _subscription: Subscription,
-    },
     Defaults {
         dialog: Entity<DefaultsDialog>,
         _subscription: Subscription,
@@ -54,10 +53,6 @@ enum Modal {
         host: Entity<HostConnection>,
         id: String,
         busy: bool,
-        error: Option<SharedString>,
-    },
-    RemoveHost {
-        host: Entity<HostConnection>,
         error: Option<SharedString>,
     },
 }
@@ -184,17 +179,6 @@ impl AgentsPage {
         self.open_editor(editor, cx);
     }
 
-    fn add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = cx.new(|cx| AddHost::new(window, cx));
-        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx));
-        self.menu = None;
-        self.modal = Some(Modal::AddHost {
-            dialog,
-            _subscription: subscription,
-        });
-        cx.notify();
-    }
-
     fn agent_defaults(
         &mut self,
         host: Entity<HostConnection>,
@@ -241,18 +225,6 @@ impl AgentsPage {
             });
         })
         .detach();
-        cx.notify();
-    }
-
-    fn remove_host(&mut self, cx: &mut Context<Self>) {
-        let Some(Modal::RemoveHost { host, error }) = &mut self.modal else {
-            return;
-        };
-        let host = host.clone();
-        match Hosts::remove(&host, cx) {
-            Ok(()) => self.modal = None,
-            Err(message) => *error = Some(message.into()),
-        }
         cx.notify();
     }
 
@@ -347,7 +319,10 @@ impl AgentsPage {
                 Button::new("add-host", "Add host")
                     .size(ButtonSize::Sm)
                     .icon(IconName::Plug)
-                    .on_click(cx.listener(|this, _, window, cx| this.add_host(window, cx))),
+                    .on_click(|_, window, cx| {
+                        // Hosts are managed in Settings → Agents.
+                        window.dispatch_action(Box::new(OpenHostSettings), cx)
+                    }),
             )
             .action(
                 Button::new("add-agent", "Add agent")
@@ -448,7 +423,6 @@ impl AgentsPage {
                     .when(menu_open, |this| {
                         let reconnect = host.clone();
                         let refresh = host.clone();
-                        let remove = host.clone();
                         let defaults = host.clone();
                         let mut menu = Menu::new()
                             .child(
@@ -482,17 +456,12 @@ impl AgentsPage {
                             );
                         if remote.is_some() {
                             menu = menu.child(MenuSeparator::new()).child(
-                                MenuItem::new("host-remove", "Remove host")
-                                    .icon(IconName::Trash)
+                                MenuItem::new("host-settings", "Manage hosts")
+                                    .icon(IconName::Gear)
                                     .icon_size(14.)
-                                    .danger()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.menu = None;
-                                        this.modal = Some(Modal::RemoveHost {
-                                            host: remove.clone(),
-                                            error: None,
-                                        });
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.set_menu(None, cx);
+                                        window.dispatch_action(Box::new(OpenHostSettings), cx);
                                     })),
                             );
                         }
@@ -553,7 +522,7 @@ impl AgentsPage {
                     )
                     .child(div().text_body_sm().text_color(c.text_subtle).child(
                         "Check the token with `buzzd token` on that machine, then \
-                                 remove and add the host again.",
+                                 remove and add the host again in Settings → Agents.",
                     ))
                     .child(
                         div().flex().child(
@@ -1161,22 +1130,21 @@ impl AgentsPage {
         let close: Dismiss = Rc::new(move |_, cx| {
             let _ = page.update(cx, |this, cx| this.close_modal(cx));
         });
-        let (content, dismiss): (AnyElement, Option<Dismiss>) =
-            match self.modal.as_ref()? {
-                Modal::Editor { editor, .. } => (editor.clone().into_any_element(), None),
-                Modal::AddHost { dialog, .. } => (dialog.clone().into_any_element(), None),
-                Modal::Defaults { dialog, .. } => (dialog.clone().into_any_element(), None),
-                Modal::Manage(host, id) => (self.manage_dialog(host, id, cx)?, Some(close)),
-                Modal::Delete {
-                    host,
-                    id,
-                    busy,
-                    error,
-                } => {
-                    let name = find(host, id, cx)
-                        .map(|agent| agent.name.clone())
-                        .unwrap_or_else(|| "this agent".into());
-                    let dialog = AlertDialog::new(format!("Delete {name}?"))
+        let (content, dismiss): (AnyElement, Option<Dismiss>) = match self.modal.as_ref()? {
+            Modal::Editor { editor, .. } => (editor.clone().into_any_element(), None),
+            Modal::Defaults { dialog, .. } => (dialog.clone().into_any_element(), None),
+            Modal::Manage(host, id) => (self.manage_dialog(host, id, cx)?, Some(close)),
+            Modal::Delete {
+                host,
+                id,
+                busy,
+                error,
+            } => {
+                let name = find(host, id, cx)
+                    .map(|agent| agent.name.clone())
+                    .unwrap_or_else(|| "this agent".into());
+                let dialog =
+                    AlertDialog::new(format!("Delete {name}?"))
                         .description(
                             "This stops the agent and removes its settings and app credential \
                          from its host. Its relay identity and past messages remain visible. \
@@ -1197,42 +1165,18 @@ impl AgentsPage {
                                 .loading(*busy)
                                 .on_click(cx.listener(|this, _, _, cx| this.delete_agent(cx))),
                         );
-                    (dialog.into_any_element(), (!*busy).then_some(close))
-                }
-                Modal::RemoveHost { host, error } => {
-                    let state = host.read(cx);
-                    let label = state.label.clone();
-                    let address = state
-                        .remote
-                        .as_ref()
-                        .map(|remote| remote.address.clone())
-                        .unwrap_or_default();
-                    let dialog = AlertDialog::new(format!("Remove {label}?"))
-                        .description(format!(
-                            "This disconnects from {address} and forgets its token. Agents on \
-                         that host keep running, and you can add it again later."
-                        ))
-                        .children(error.clone().map(|error| {
-                            div().text_body_sm().text_color(c.text_danger).child(error)
-                        }))
-                        .action(
-                            Button::new("cancel-remove", "Cancel")
-                                .surface(Surface::Floating)
-                                .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx))),
-                        )
-                        .action(
-                            Button::new("confirm-remove", "Remove host")
-                                .destructive()
-                                .on_click(cx.listener(|this, _, _, cx| this.remove_host(cx))),
-                        );
-                    (dialog.into_any_element(), Some(close))
-                }
-            };
+                (dialog.into_any_element(), (!*busy).then_some(close))
+            }
+        };
         Some(overlay::modal(window, content, dismiss).into_any_element())
     }
 }
 
-fn harness_row(harness: &Harness, divided: bool, c: &buzz_ui::Colors) -> impl IntoElement {
+pub(crate) fn harness_row(
+    harness: &Harness,
+    divided: bool,
+    c: &buzz_ui::Colors,
+) -> impl IntoElement {
     let ready = harness.missing.is_empty();
     div()
         .flex()

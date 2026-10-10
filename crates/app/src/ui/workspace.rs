@@ -3,19 +3,21 @@
 
 mod dialogs;
 
+use super::account::Account;
 use super::agents::AgentsPage;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::navigation::{History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::profile_card::{self, ProfileCard};
+use super::settings::{CloseSettings, OpenHostSettings, OpenSettings, Section, SettingsPage};
 use super::sidebar::{self, Page, SidebarProps};
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
 use buzz_relay_client::{ChannelSummary, ChannelType, RosterStatus};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonShape, IconButtonSize,
-    IconName, MaterialStyled, ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, IconButton, IconButtonSize, IconName, MaterialStyled,
+    ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
 };
 use gpui_kit::*;
 use nostr::prelude::EventId;
@@ -29,6 +31,8 @@ pub struct Workspace {
     channel: Option<Entity<ChannelPage>>,
     thread: Option<Entity<ThreadPanel>>,
     agents: Option<Entity<AgentsPage>>,
+    settings: Option<Entity<SettingsPage>>,
+    account: Entity<Account>,
     onboarding: Option<(Step, Entity<Onboarding>)>,
     _community_observer: Option<Subscription>,
     /// Places visited, for Back and Forward.
@@ -59,6 +63,8 @@ impl Workspace {
             channel: None,
             thread: None,
             agents: None,
+            settings: None,
+            account: cx.new(Account::new),
             onboarding: None,
             _community_observer: None,
             history: History::default(),
@@ -70,8 +76,67 @@ impl Workspace {
             dialog: None,
             _page_events: None,
         };
+        workspace.handle_settings_actions(window, cx);
         workspace.sync(window, cx);
         workspace
+    }
+
+    /// Settings actions come from menus, other pages and Mod+, (bound in
+    /// `main`), whatever has focus, so they are handled app-wide. They are
+    /// dispatched while the window is borrowed, so the work is deferred.
+    fn handle_settings_actions(&self, window: &Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        let weak = cx.entity().downgrade();
+        let run = move |cx: &mut App, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            let weak = weak.clone();
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| f(this, window, cx));
+                });
+            });
+        };
+        let (open_host, close) = (run.clone(), run.clone());
+        let app: &mut App = cx;
+        app.on_action(move |_: &OpenSettings, cx| {
+            run(cx, |this, window, cx| this.open_settings(None, window, cx))
+        });
+        app.on_action(move |_: &OpenHostSettings, cx| {
+            open_host(cx, |this, window, cx| {
+                this.open_settings(Some(Section::Agents), window, cx)
+            })
+        });
+        // Settings' Back row returns to the previous view.
+        app.on_action(move |_: &CloseSettings, cx| {
+            close(cx, |this, window, cx| {
+                if this.history.can_go_back() {
+                    this.go_back(window, cx);
+                } else {
+                    this.go_home(window, cx);
+                }
+            })
+        });
+    }
+
+    fn open_settings(
+        &mut self,
+        section: Option<Section>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.is_some() {
+            return;
+        }
+        match &self.settings {
+            Some(settings) => {
+                if let Some(section) = section {
+                    settings.update(cx, |settings, cx| settings.open(section, cx));
+                }
+            }
+            None => self.settings = Some(cx.new(|cx| SettingsPage::new(section, window, cx))),
+        }
+        if self.page != Page::Settings {
+            self.select_page(Page::Settings, cx);
+        }
     }
 
     /// Follows the selected community and the onboarding state.
@@ -85,6 +150,11 @@ impl Workspace {
         if self.onboarding.as_ref().map(|(s, _)| *s) != step {
             self.onboarding =
                 step.map(|step| (step, cx.new(|cx| Onboarding::new(step, window, cx))));
+            // Signed out: start over on Messages after the next sign-in.
+            if step == Some(Step::Identity) {
+                self.page = Page::Messages;
+                self.settings = None;
+            }
         }
         let current = AppState::current(cx);
         if current.as_ref().map(Entity::entity_id) != self.community.as_ref().map(Entity::entity_id)
@@ -243,6 +313,9 @@ impl Workspace {
         if page == Page::Agents && self.agents.is_none() {
             self.agents = Some(cx.new(AgentsPage::new));
         }
+        if page != Page::Settings {
+            self.settings = None;
+        }
         if page != Page::Messages
             && let Some(community) = &self.community
         {
@@ -257,20 +330,9 @@ impl Workspace {
                 .size(IconButtonSize::Sm)
                 .surface(Surface::Header)
         };
-        let viewer = match &cx.global::<AppState>().identity {
-            IdentityState::Ready(identity) => identity.pubkey_hex(),
-            _ => String::new(),
-        };
-        let me = self
-            .community
-            .as_ref()
-            .and_then(|community| community.read(cx).snapshot.profiles.get(&viewer).cloned());
-        let mut avatar = Avatar::new(me.as_ref().map_or("?".to_string(), |p| p.name.clone()))
-            .size(AvatarSize::Px(32.))
-            .profile_disc();
-        if let Some(picture) = me.and_then(|p| p.picture.clone()) {
-            avatar = avatar.image(picture);
-        }
+        let settings_open = self.page == Page::Settings;
+        self.account
+            .update(cx, |account, _| account.settings_open = settings_open);
         div()
             .relative()
             .flex()
@@ -329,13 +391,7 @@ impl Workspace {
                                 cx.listener(|this, _, window, cx| this.open_search(window, cx)),
                             ),
                     )
-                    .child(
-                        IconButton::new("me", IconName::User)
-                            .size(IconButtonSize::Sm)
-                            .variant(ButtonVariant::Avatar)
-                            .shape(IconButtonShape::Round)
-                            .child(avatar),
-                    ),
+                    .child(self.account.clone()),
             )
     }
 
@@ -382,6 +438,18 @@ impl Render for Workspace {
                     .clone()
                     .map(IntoElement::into_any_element)
                     .unwrap_or_else(|| div().into_any_element()),
+                // Settings draws its own sidebar in the channel sidebar's
+                // place, following the header toggle. History can return
+                // here after the page was closed, so it is made on demand.
+                Page::Settings => {
+                    let show = self.sidebar_open;
+                    let settings = self
+                        .settings
+                        .get_or_insert_with(|| cx.new(|cx| SettingsPage::new(None, window, cx)))
+                        .clone();
+                    settings.update(cx, |settings, _| settings.show_sidebar = show);
+                    settings.into_any_element()
+                }
                 Page::Messages => match &self.channel {
                     Some(channel) => {
                         thread::board(channel.clone().into_any_element(), self.thread.clone(), cx)
@@ -398,7 +466,9 @@ impl Render for Workspace {
                 },
             }
         };
-        let sidebar = (self.sidebar_open && self.onboarding.is_none())
+        let sidebar = (self.sidebar_open
+            && self.onboarding.is_none()
+            && self.page != Page::Settings)
             .then(|| self.community.clone())
             .flatten()
             .map(|community| {

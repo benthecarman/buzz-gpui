@@ -1,3 +1,4 @@
+mod appearance;
 mod community;
 mod config;
 mod deep_links;
@@ -50,6 +51,7 @@ fn main() {
         )));
         Hosts::init(&config, cx);
         community::AppState::init(cx);
+        appearance::init(cx);
         idle::Idle::init(cx);
         let requests = navigation::init(cx);
         if let Some(link) = link {
@@ -65,6 +67,11 @@ fn main() {
                 let _ = requests.unbounded_send(request);
             });
         }
+        cx.bind_keys([KeyBinding::new(
+            "secondary-,",
+            ui::settings::OpenSettings,
+            None,
+        )]);
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let (window, workspace) = gpui_kit::open_window(
             WindowOptions {
