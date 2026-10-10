@@ -788,15 +788,11 @@ impl ChannelSidebar {
         &mut self,
         channel: ChannelSummary,
         action: Action,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_menus(cx);
-        self.dialog = Some(dialogs::Dialog::Lifecycle {
-            channel,
-            action,
-            busy: false,
-            error: None,
-        });
+        self.dialog = Some(dialogs::Dialog::lifecycle(channel, action, window, cx));
         cx.notify();
     }
 }

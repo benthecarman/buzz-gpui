@@ -1,20 +1,27 @@
 //! The channel header's actions (ui.md §4.2): "Channel members", the
-//! "Channel actions" menu with channel details and the lifecycle actions
-//! (`ChannelHeaderMenu.tsx`, `ChannelLifecycleMenu.tsx`,
-//! `ChannelLifecycleDialog.tsx`, `ChannelDetailsEditor.tsx`), and the
+//! "Channel actions" menu with "View channel details" and the lifecycle
+//! actions (`ChannelHeaderMenu.tsx`, `ChannelLifecycleMenu.tsx`), and the
 //! read-only preview's join notice (§4.12, `ChannelJoinNotice.tsx`).
+//!
+//! "View channel details" opens "Channel settings" through
+//! [`OpenSettings`]. Without one set, the settings panel shows in a modal
+//! here, until the channel's tab pane hosts it.
 
+use super::channel_settings::{
+    Callback, ChannelRemoved, ChannelSettingsPanel, LifecycleDialog, LifecycleOutcome,
+    lifecycle_modal,
+};
 use super::members::MembersDialog;
-use super::modal::{Dismissed, error};
+use super::modal::Dismissed;
 use super::overlay::{self, Align, Dismiss};
 use crate::community::Community;
-use buzz_relay_client::lifecycle::{Action, ChannelDetails, DetailsDraft, LifecyclePermissions};
+use buzz_relay_client::lifecycle::{Action, LifecyclePermissions};
 use buzz_relay_client::{ChannelSummary, ChannelType, Visibility};
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Button, ButtonSize, Dialog, IconButton, IconButtonSize, IconName,
-    Menu, MenuItem, MenuSeparator, Spinner, Surface, Switch, TextArea, TextField, TypeStyled,
+    ActiveTheme, Button, ButtonSize, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
+    MenuLabel, MenuSeparator, TypeStyled,
+    tokens::{radius, shadow, size, space},
 };
-use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -26,48 +33,24 @@ pub type OnRemoved = Rc<dyn Fn(&mut Window, &mut App)>;
 /// A channel panel the menu opens as a tab, such as "View channel usage".
 pub type MenuPanel = (SharedString, Rc<dyn Fn(&mut Window, &mut App)>);
 
+/// Opens "Channel settings" for a channel id. The channel's tab pane sets
+/// this to open its settings tab; until then the header shows the panel
+/// in a modal.
+pub type OpenSettings = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 enum Modal {
     Members {
         dialog: Entity<MembersDialog>,
         _subscription: Subscription,
     },
-    Details {
-        dialog: Entity<DetailsDialog>,
+    Settings {
+        panel: Entity<ChannelSettingsPanel>,
+        _subscriptions: [Subscription; 1],
+    },
+    Confirm {
+        dialog: Entity<LifecycleDialog>,
         _subscription: Subscription,
     },
-    Confirm(Action),
-}
-
-/// A lifecycle confirmation's button label and description
-/// (`ChannelLifecycleDialog.tsx`).
-pub fn lifecycle_text(action: Action) -> (&'static str, &'static str) {
-    match action {
-        Action::Archive => (
-            "Archive channel",
-            "Archive this channel for everyone and remove it from the sidebar. Messages are \
-             kept. Find it in search and open Settings to unarchive it later.",
-        ),
-        Action::Unarchive => (
-            "Unarchive channel",
-            "Unarchive this channel for everyone and return it to the sidebar. Members can \
-             send messages again.",
-        ),
-        Action::Leave => (
-            "Leave channel",
-            "Leave this channel and remove it from your sidebar. You may need an invitation \
-             to rejoin a private channel.",
-        ),
-        Action::Hide => (
-            "Hide conversation",
-            "Hide this conversation from your sidebar only. Messages and membership are \
-             kept; other participants are not removed.",
-        ),
-        Action::Delete => (
-            "Delete channel",
-            "Delete this channel for everyone. You cannot undo this action from Buzz.",
-        ),
-        Action::Join => ("Join channel", ""),
-    }
 }
 
 /// The header's "Channel members" and "Channel actions" buttons, with the
@@ -78,12 +61,12 @@ pub struct ChannelActions {
     menu_open: bool,
     /// Lifecycle permissions, read when the menu opens.
     permissions: Option<Result<LifecyclePermissions, String>>,
+    permissions_generation: u64,
     modal: Option<Modal>,
-    busy: bool,
-    error: Option<SharedString>,
     on_removed: OnRemoved,
     /// Registered channel panels' entries, set by the page each frame.
     pub menu_panels: Vec<MenuPanel>,
+    open_settings: Option<OpenSettings>,
 }
 
 impl ChannelActions {
@@ -97,12 +80,18 @@ impl ChannelActions {
             channel,
             menu_open: false,
             permissions: None,
+            permissions_generation: 0,
             modal: None,
-            busy: false,
-            error: None,
             on_removed,
             menu_panels: Vec::new(),
+            open_settings: None,
         }
+    }
+
+    /// Routes "View channel details" to the host's settings tab.
+    #[allow(dead_code, reason = "the channel tab pane routes settings here")]
+    pub fn set_open_settings(&mut self, open: OpenSettings) {
+        self.open_settings = Some(open);
     }
 
     /// Opens the members dialog, as the header button does.
@@ -119,62 +108,103 @@ impl ChannelActions {
 
     fn open_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
-        let dialog = cx
-            .new(|cx| DetailsDialog::new(self.community.clone(), self.channel.clone(), window, cx));
-        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close(cx));
-        self.modal = Some(Modal::Details {
-            dialog,
-            _subscription: subscription,
+        if let Some(open) = self.open_settings.clone() {
+            open(&self.channel.id, window, cx);
+            cx.notify();
+            return;
+        }
+        let page = cx.entity().downgrade();
+        let on_close: Callback = Rc::new(move |_, cx| {
+            let _ = page.update(cx, |this, cx| this.close(cx));
+        });
+        let page = cx.entity().downgrade();
+        let open_members: Callback = Rc::new(move |window, cx| {
+            let _ = page.update(cx, |this, cx| this.open_members(window, cx));
+        });
+        let (community, channel) = (self.community.clone(), self.channel.clone());
+        let panel = cx.new(|cx| {
+            ChannelSettingsPanel::new(
+                community,
+                channel.id.clone(),
+                on_close,
+                open_members,
+                window,
+                cx,
+            )
+            .with_channel(channel, window, cx)
+        });
+        panel.read(cx).focus_handle(cx).focus(window, cx);
+        let removed = cx.subscribe_in(&panel, window, |this, _, _: &ChannelRemoved, window, cx| {
+            this.close(cx);
+            (this.on_removed)(window, cx);
+        });
+        self.modal = Some(Modal::Settings {
+            panel,
+            _subscriptions: [removed],
         });
         cx.notify();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
-        self.error = None;
         self.community
             .update(cx, |community, _| community.set_presence_extra(Vec::new()));
         cx.notify();
     }
 
+    /// The menu offers lifecycle actions only for joined, live channels.
+    fn lifecycle_shown(&self) -> bool {
+        !self.channel.read_only && !self.channel.cached && !self.channel.archived
+    }
+
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = true;
+        if self.lifecycle_shown() {
+            self.load_permissions(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn load_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.permissions = None;
+        self.permissions_generation += 1;
+        let generation = self.permissions_generation;
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.id.clone();
         cx.spawn_in(window, async move |this, cx| {
             let permissions = session.channel_permissions(&channel).await;
             let _ = this.update(cx, |this, cx| {
-                this.permissions = Some(permissions);
-                cx.notify();
+                if this.permissions_generation == generation {
+                    this.permissions = Some(permissions);
+                    cx.notify();
+                }
             });
         })
         .detach();
         cx.notify();
     }
 
-    fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
-        self.busy = true;
-        self.error = None;
-        let session = self.community.read(cx).session.clone();
-        let channel = self.channel.id.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = session.channel_action(action, &channel).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.busy = false;
-                match result {
-                    Ok(()) => {
-                        this.modal = None;
-                        if matches!(action, Action::Leave | Action::Hide | Action::Delete) {
-                            (this.on_removed)(window, cx);
-                        }
-                    }
-                    Err(error) => this.error = Some(error.to_string().into()),
+    fn confirm(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        let dialog = cx.new(|cx| {
+            LifecycleDialog::new(self.community.clone(), &self.channel, action, window, cx)
+        });
+        let subscription = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, outcome: &LifecycleOutcome, window, cx| {
+                this.close(cx);
+                if let LifecycleOutcome::Completed(Action::Leave | Action::Hide | Action::Delete) =
+                    outcome
+                {
+                    (this.on_removed)(window, cx);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
+        self.modal = Some(Modal::Confirm {
+            dialog,
+            _subscription: subscription,
+        });
         cx.notify();
     }
 
@@ -217,41 +247,43 @@ impl ChannelActions {
         );
         let mut menu = Menu::new()
             .child(
-                item("view-details", "View channel details", IconName::Info)
+                MenuItem::new("view-details", "View channel details")
+                    .icon(IconName::Info)
+                    .icon_size(16.)
                     .on_click(cx.listener(|this, _, window, cx| this.open_details(window, cx))),
             )
             .children(panels)
             .when(!shared.is_empty(), |menu| {
                 menu.child(MenuSeparator::new()).children(shared)
             });
+        if !self.lifecycle_shown() {
+            return menu;
+        }
         let confirm = |action: Action| {
-            cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx| {
-                this.menu_open = false;
-                this.modal = Some(Modal::Confirm(action));
-                cx.notify();
+            cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
+                this.confirm(action, window, cx)
+            })
+        };
+        let retry = || {
+            cx.listener(|this: &mut Self, _: &ClickEvent, window, cx| {
+                this.load_permissions(window, cx)
             })
         };
         match &self.permissions {
-            None => {
-                menu = menu.child(MenuSeparator::new()).child(
-                    item(
-                        "checking",
-                        "Checking channel actions…",
-                        IconName::CircleNotch,
-                    )
-                    .disabled(true),
-                );
-            }
-            Some(Err(_)) if self.channel.read_only => {}
+            // `ChannelLifecycleMenu`: nothing until the permissions arrive.
+            None => {}
             Some(Err(_)) => {
-                menu = menu.child(MenuSeparator::new()).child(
-                    item(
-                        "unavailable",
-                        "Channel actions unavailable",
-                        IconName::WarningCircle,
-                    )
-                    .disabled(true),
-                );
+                menu = menu
+                    .child(MenuSeparator::new())
+                    .child(MenuLabel::new("Channel actions unavailable"))
+                    .child(
+                        item(
+                            "retry-permissions",
+                            "Retry channel permissions",
+                            IconName::ArrowClockwise,
+                        )
+                        .on_click(retry()),
+                    );
             }
             Some(Ok(permissions)) => {
                 let any = permissions.can_hide
@@ -260,11 +292,12 @@ impl ChannelActions {
                     || permissions.can_unarchive
                     || permissions.can_delete
                     || permissions.delete_unavailable;
-                if any {
-                    menu = menu.child(MenuSeparator::new());
+                if !any {
+                    return menu;
                 }
+                menu = menu.child(MenuSeparator::new());
                 if permissions.can_hide {
-                    menu = menu.child(
+                    return menu.child(
                         item("hide", "Hide conversation", IconName::EyeSlash)
                             .on_click(confirm(Action::Hide)),
                     );
@@ -275,29 +308,34 @@ impl ChannelActions {
                             .on_click(confirm(Action::Leave)),
                     );
                 }
-                if permissions.can_archive {
-                    menu = menu.child(
-                        item("archive", "Archive channel", IconName::Archive)
-                            .on_click(confirm(Action::Archive)),
-                    );
+                if permissions.can_archive || permissions.can_unarchive {
+                    let (label, action) = if permissions.can_unarchive {
+                        ("Unarchive channel", Action::Unarchive)
+                    } else {
+                        ("Archive channel", Action::Archive)
+                    };
+                    menu = menu
+                        .child(item("archive", label, IconName::Archive).on_click(confirm(action)));
                 }
-                if permissions.can_unarchive {
-                    menu = menu.child(
-                        item("unarchive", "Unarchive channel", IconName::Archive)
-                            .on_click(confirm(Action::Unarchive)),
-                    );
-                }
-                // An owner agent's check could not be read; reopening the
-                // menu reads it again.
+                // An owner agent's check could not be read.
                 if permissions.delete_unavailable {
-                    menu = menu.child(
-                        item(
-                            "delete-unavailable",
-                            "Delete check unavailable",
-                            IconName::WarningCircle,
+                    menu = menu
+                        .child(
+                            item(
+                                "delete-unavailable",
+                                "Delete check unavailable",
+                                IconName::WarningCircle,
+                            )
+                            .disabled(true),
                         )
-                        .disabled(true),
-                    );
+                        .child(
+                            item(
+                                "retry-delete",
+                                "Retry Delete check",
+                                IconName::ArrowClockwise,
+                            )
+                            .on_click(retry()),
+                        );
                 }
                 if permissions.can_delete {
                     menu = menu.child(
@@ -311,33 +349,57 @@ impl ChannelActions {
         menu
     }
 
-    fn confirmation(&self, action: Action, cx: &mut Context<Self>) -> AnyElement {
-        let (label, description) = lifecycle_text(action);
-        // `ChannelLifecycleDialog.tsx`: only Delete is destructive.
-        let destructive = action == Action::Delete;
-        let profiles = &self.community.read(cx).snapshot.profiles;
-        let name = super::sidebar::channel_label(&self.channel, profiles);
-        AlertDialog::new(format!("{label}: {name}"))
-            .description(description)
-            .children(self.error.clone().map(|message| error(message, cx)))
-            .action(
-                Button::new("lifecycle-cancel", "Cancel")
-                    .surface(Surface::Floating)
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+    /// The settings panel in a modal, with the tab's header.
+    fn settings_modal(
+        &self,
+        panel: &Entity<ChannelSettingsPanel>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = *cx.colors();
+        let height = (window.viewport_size().height - px(48.)).min(px(760.));
+        div()
+            .flex()
+            .flex_col()
+            .w(rems(26.))
+            .h(height)
+            .bg(c.surface_panel)
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(radius::PANEL)
+            .shadow(shadow::sm())
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .h(size::PANEL_HEADER)
+                    .px(space::S2)
+                    .mt(space::S2)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S2)
+                            .px(space::S3)
+                            .h(size::CONTROL_SM)
+                            .rounded(radius::ICON_BUTTON)
+                            .bg(c.affordance_selected)
+                            .text_label_sm()
+                            .text_color(c.text_standard)
+                            .child(Icon::new(IconName::Gear).size(16.))
+                            .child("Channel settings"),
+                    )
+                    .child(
+                        IconButton::new("close-settings", IconName::X)
+                            .size(IconButtonSize::Sm)
+                            .tooltip("Close channel settings")
+                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                    ),
             )
-            .action(
-                Button::new("lifecycle-confirm", label)
-                    .map(|b| {
-                        if destructive {
-                            b.destructive()
-                        } else {
-                            b.prominent()
-                        }
-                    })
-                    .loading(self.busy)
-                    .on_click(cx.listener(move |this, _, window, cx| this.run(action, window, cx))),
-            )
+            .child(div().flex_1().min_h_0().child(panel.clone()))
             .into_any_element()
     }
 }
@@ -357,21 +419,21 @@ impl Render for ChannelActions {
         let menu = self
             .menu_open
             .then(|| overlay::dropdown(window, Align::End, self.menu(cx), Self::dismiss_menu(cx)));
-        let modal = self.modal.as_ref().map(|modal| {
-            let page = cx.entity().downgrade();
-            let close: Dismiss = Rc::new(move |_, cx| {
-                let _ = page.update(cx, |this, cx| this.close(cx));
-            });
-            let (content, dismiss) = match modal {
-                Modal::Members { dialog, .. } => (dialog.clone().into_any_element(), Some(close)),
-                Modal::Details { dialog, .. } => (dialog.clone().into_any_element(), Some(close)),
-                Modal::Confirm(action) => (
-                    self.confirmation(*action, cx),
-                    (!self.busy).then_some(close),
-                ),
-            };
-            overlay::modal(window, content, dismiss)
+        let page = cx.entity().downgrade();
+        let close: Dismiss = Rc::new(move |_, cx| {
+            let _ = page.update(cx, |this, cx| this.close(cx));
         });
+        let modal = match &self.modal {
+            Some(Modal::Members { dialog, .. }) => {
+                Some(overlay::modal(window, dialog.clone(), Some(close)).into_any_element())
+            }
+            Some(Modal::Settings { panel, .. }) => {
+                let content = self.settings_modal(panel, window, cx);
+                Some(overlay::modal(window, content, Some(close)).into_any_element())
+            }
+            Some(Modal::Confirm { dialog, .. }) => Some(lifecycle_modal(dialog, window)),
+            None => None,
+        };
         div()
             .flex()
             .items_center()
@@ -397,215 +459,6 @@ impl Render for ChannelActions {
                     .children(menu),
             )
             .children(modal)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Channel details
-
-/// "View channel details": name, description and privacy, editable by the
-/// channel's owners and admins.
-pub struct DetailsDialog {
-    community: Entity<Community>,
-    channel: ChannelSummary,
-    details: Option<Result<ChannelDetails, String>>,
-    name: Entity<InputState>,
-    description: Entity<TextareaState>,
-    private: bool,
-    saving: bool,
-    error: Option<SharedString>,
-}
-
-impl EventEmitter<Dismissed> for DetailsDialog {}
-
-impl DetailsDialog {
-    pub fn new(
-        community: Entity<Community>,
-        channel: ChannelSummary,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("release-notes"));
-        let description = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("What this channel is for")
-                .auto_grow(3, 8)
-        });
-        let session = community.read(cx).session.clone();
-        let id = channel.id.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let details = session.channel_details(&id).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if let Ok(details) = &details {
-                    let draft = &details.draft;
-                    this.name
-                        .update(cx, |s, cx| s.set_value(draft.name.clone(), window, cx));
-                    this.description.update(cx, |s, cx| {
-                        s.set_value(draft.description.clone(), window, cx)
-                    });
-                    this.private = draft.private;
-                }
-                this.details = Some(details);
-                cx.notify();
-            });
-        })
-        .detach();
-        Self {
-            private: channel.visibility == Some(Visibility::Private),
-            community,
-            channel,
-            details: None,
-            name,
-            description,
-            saving: false,
-            error: None,
-        }
-    }
-
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Ok(details)) = &self.details else {
-            return;
-        };
-        let draft = DetailsDraft {
-            name: buzz_relay_client::lifecycle::canonical_name(&self.name.read(cx).value()),
-            description: self.description.read(cx).value().trim().to_string(),
-            private: self.private,
-            ttl: details.draft.ttl,
-        };
-        if draft == details.draft {
-            cx.emit(Dismissed);
-            return;
-        }
-        let (version, channel) = (details.version, details.channel.clone());
-        let session = self.community.read(cx).session.clone();
-        self.saving = true;
-        self.error = None;
-        cx.spawn_in(window, async move |this, cx| {
-            let result = session.save_channel_details(&channel, version, draft).await;
-            let _ = this.update(cx, |this, cx| {
-                this.saving = false;
-                match result {
-                    Ok(()) => cx.emit(Dismissed),
-                    Err(error) => this.error = Some(error.into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-}
-
-impl Render for DetailsDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = *cx.colors();
-        let weak = cx.entity().downgrade();
-        let editable = matches!(&self.details, Some(Ok(details)) if details.can_edit);
-        let dm = self.channel.channel_type == Some(ChannelType::Dm);
-        let label = |text: &'static str| div().text_label_sm().child(text);
-        let body: AnyElement = match &self.details {
-            None => div()
-                .flex()
-                .justify_center()
-                .py(rems(2.))
-                .child(Spinner::new().size(24.))
-                .into_any_element(),
-            Some(Err(message)) => error(message.clone(), cx).into_any_element(),
-            Some(Ok(details)) => {
-                let name_len = self.name.read(cx).value().chars().count();
-                let about_len = self.description.read(cx).value().chars().count();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(rems(1.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(rems(0.5))
-                            .child(
-                                div().flex().justify_between().child(label("Name")).child(
-                                    div()
-                                        .text_body_sm()
-                                        .text_color(c.text_subtle)
-                                        .child(format!("{name_len}/120")),
-                                ),
-                            )
-                            .child(
-                                TextField::new(&self.name)
-                                    .surface(Surface::Floating)
-                                    .disabled(!editable),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(rems(0.5))
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .child(label("Description"))
-                                    .child(
-                                        div()
-                                            .text_body_sm()
-                                            .text_color(c.text_subtle)
-                                            .child(format!("{about_len}/1000")),
-                                    ),
-                            )
-                            .child(
-                                TextArea::new(&self.description)
-                                    .surface(Surface::Floating)
-                                    .disabled(!editable),
-                            ),
-                    )
-                    .when(!dm, |this| {
-                        this.child(
-                            Switch::new("details-private", self.private)
-                                .label("Private")
-                                .disabled(!editable)
-                                .on_change(move |checked, _, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.private = checked;
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                    })
-                    .when(!editable, |this| {
-                        this.child(div().text_body_sm().text_color(c.text_subtle).child(if dm {
-                            "Direct message details can’t be changed."
-                        } else if details.draft.ttl.is_some() || self.channel.archived {
-                            "This channel’s details can’t be changed now."
-                        } else {
-                            "Only channel owners and admins can change these details."
-                        }))
-                    })
-                    .children(self.error.clone().map(|message| error(message, cx)))
-                    .into_any_element()
-            }
-        };
-        let mut dialog = Dialog::new("channel-details", "Channel details")
-            .description(self.channel.name.clone())
-            .compact_header_gap()
-            .on_close(cx.listener(|_, _, _, cx| cx.emit(Dismissed)))
-            .child(body);
-        if editable {
-            dialog = dialog
-                .footer(
-                    Button::new("details-cancel", "Cancel")
-                        .surface(Surface::Floating)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
-                )
-                .footer(
-                    Button::new("details-save", "Save")
-                        .prominent()
-                        .loading(self.saving)
-                        .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
-                );
-        }
-        dialog
     }
 }
 

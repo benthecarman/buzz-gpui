@@ -500,8 +500,8 @@ impl ChannelSidebar {
         let busy = self.dialog.is_some();
         let choose = |action: Action, cx: &mut Context<Self>| {
             let channel = channel.clone();
-            listen(cx, move |this, _: &ClickEvent, _, cx| {
-                this.choose_lifecycle(channel.clone(), action, cx)
+            listen(cx, move |this, _: &ClickEvent, window, cx| {
+                this.choose_lifecycle(channel.clone(), action, window, cx)
             })
         };
         let retry = |cx: &mut Context<Self>| {

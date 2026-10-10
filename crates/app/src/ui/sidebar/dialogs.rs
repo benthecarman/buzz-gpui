@@ -3,16 +3,14 @@
 //! confirmation of a row action (`ChannelLifecycleDialog.tsx`).
 
 use super::{ChannelSidebar, SidebarProps};
-use crate::ui::channel_menu::lifecycle_text;
+use crate::ui::channel_settings::{LifecycleDialog, LifecycleOutcome, lifecycle_modal};
 use crate::ui::modal::error;
 use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::lifecycle::Action;
 use buzz_relay_client::sidebar::NewSection;
 use buzz_relay_client::sidebar_store::PreferencesStatus;
 use buzz_relay_client::{ChannelSummary, SessionSnapshot};
-use buzz_ui::{
-    ActiveTheme, AlertDialog, Button, Dialog as DialogBox, Surface, TextField, TypeStyled,
-};
+use buzz_ui::{ActiveTheme, Button, Dialog as DialogBox, Surface, TextField, TypeStyled};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -38,11 +36,11 @@ pub(super) enum Dialog {
         busy: bool,
         error: Option<SharedString>,
     },
+    /// The confirmation shared with the header and settings panel, which
+    /// keeps its action disabled after an unconfirmed result.
     Lifecycle {
-        channel: ChannelSummary,
-        action: Action,
-        busy: bool,
-        error: Option<SharedString>,
+        dialog: Entity<LifecycleDialog>,
+        _subscription: Subscription,
     },
 }
 
@@ -69,6 +67,37 @@ impl Dialog {
             input,
             id: None,
             blocked: false,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Dialog {
+    pub(super) fn lifecycle(
+        channel: ChannelSummary,
+        action: Action,
+        window: &mut Window,
+        cx: &mut Context<ChannelSidebar>,
+    ) -> Self {
+        let community = cx.entity().read(cx).community.clone();
+        let dialog = cx.new(|cx| LifecycleDialog::new(community, &channel, action, window, cx));
+        let id = channel.id.clone();
+        let subscription = cx.subscribe_in(
+            &dialog,
+            window,
+            move |this: &mut ChannelSidebar, _, outcome: &LifecycleOutcome, window, cx| {
+                this.dialog = None;
+                if let LifecycleOutcome::Completed(action) = outcome
+                    && matches!(action, Action::Leave | Action::Hide | Action::Delete)
+                    && let Some(removed) = this.props.as_ref().map(|p| p.on_channel_removed.clone())
+                {
+                    removed(&id, window, cx);
+                }
+                cx.notify();
+            },
+        );
+        Self::Lifecycle {
+            dialog,
             _subscription: subscription,
         }
     }
@@ -142,50 +171,6 @@ impl ChannelSidebar {
                         if let Some(Dialog::RemoveSection { busy, error, .. }) = &mut this.dialog {
                             *busy = false;
                             *error = Some(message.into());
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn run_lifecycle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Dialog::Lifecycle {
-            channel,
-            action,
-            busy,
-            error,
-        }) = &mut self.dialog
-        else {
-            return;
-        };
-        if *busy {
-            return;
-        }
-        *busy = true;
-        *error = None;
-        let (id, action) = (channel.id.clone(), *action);
-        let removed = self.props.as_ref().map(|p| p.on_channel_removed.clone());
-        let session = self.session(cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let result = session.channel_action(action, &id).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(()) => {
-                        this.dialog = None;
-                        if matches!(action, Action::Leave | Action::Hide | Action::Delete)
-                            && let Some(removed) = removed
-                        {
-                            removed(&id, window, cx);
-                        }
-                    }
-                    Err(message) => {
-                        if let Some(Dialog::Lifecycle { busy, error, .. }) = &mut this.dialog {
-                            *busy = false;
-                            *error = Some(message.to_string().into());
                         }
                     }
                 }
@@ -301,39 +286,7 @@ impl ChannelSidebar {
                     );
                 (dialog.into_any_element(), (!busy).then_some(close))
             }
-            Dialog::Lifecycle {
-                channel,
-                action,
-                busy,
-                error: message,
-            } => {
-                let (label, description) = lifecycle_text(*action);
-                let busy = *busy;
-                let dialog = AlertDialog::new(format!("{label}: {}", channel.name))
-                    .description(description)
-                    .children(message.clone().map(|m| error(m, cx)))
-                    .action(
-                        Button::new("lifecycle-cancel", "Cancel")
-                            .surface(Surface::Floating)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.close_dialog(cx))),
-                    )
-                    .action(
-                        Button::new("lifecycle-confirm", label)
-                            .map(|b| {
-                                if *action == Action::Delete {
-                                    b.destructive()
-                                } else {
-                                    b.prominent()
-                                }
-                            })
-                            .loading(busy)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.run_lifecycle(window, cx)),
-                            ),
-                    );
-                (dialog.into_any_element(), (!busy).then_some(close))
-            }
+            Dialog::Lifecycle { dialog, .. } => return Some(lifecycle_modal(dialog, window)),
         };
         Some(overlay::modal(window, content, dismiss).into_any_element())
     }
