@@ -293,6 +293,19 @@ async fn discovers_and_loads_repositories_projects_and_items() {
             .git_authorization(&format!("http://127.0.0.1:53000/git/{alice}/{repo_d}"))
             .is_err()
     );
+
+    // Leave nothing announced behind.
+    let leftovers = [
+        address.clone(),
+        home_address.clone(),
+        format!("30621:{alice}:{home_project}"),
+    ];
+    // The relay takes one deletion target per event.
+    for address in &leftovers {
+        fixture.publish("alice", 5, "", &[&["a", address]]).await;
+    }
+    let list = projects.list().await.unwrap();
+    assert!(!list.iter().any(|e| e.dtag == repo_d || e.dtag == home_repo));
 }
 
 /// A UUID-shaped channel id no channel has.

@@ -222,4 +222,19 @@ async fn reads_repository_history_files_and_changes() {
             .unwrap_err(),
         EntityFailure::Unavailable
     );
+
+    // Leave nothing announced behind.
+    let address = format!("30617:{owner}:{dtag}");
+    let deletion = EventBuilder::new(Kind::from_u16(5), "")
+        .tags([Tag::parse(["a", address.as_str()]).unwrap()])
+        .custom_created_at(Timestamp::now())
+        .finalize(&Keys::parse(&tls.nsec).unwrap())
+        .unwrap();
+    RelayHttp::new(
+        tls.origin.clone(),
+        Arc::new(Identity::from_nsec(&tls.nsec).unwrap()),
+    )
+    .post("/events", serde_json::to_string(&deletion).unwrap())
+    .await
+    .unwrap();
 }

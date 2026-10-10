@@ -666,10 +666,13 @@ impl<R: ProjectReads> Destinations<R> {
     }
 
     async fn read(&self, filters: Vec<Value>) -> Result<Vec<Verified>, EntityFailure> {
-        Ok(self
-            .read
+        self.read
             .read(filters.into_iter().map(filter).collect())
-            .await?)
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, status = ?error.status, "projects read failed");
+                EntityFailure::from(error)
+            })
     }
 
     /// Drops entities their owner deleted, by id or by address at or after
