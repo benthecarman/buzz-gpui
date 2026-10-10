@@ -41,6 +41,8 @@ pub struct AppState {
     pub selected: Option<usize>,
     /// The availability the user chose, applied to every community.
     pub presence_mode: PresenceMode,
+    /// The saved availability could not be read or saved (`activity.ts`).
+    pub presence_error: Option<String>,
 }
 
 impl Global for AppState {}
@@ -59,9 +61,11 @@ impl AppState {
             communities: Vec::new(),
             selected: None,
             presence_mode: PresenceMode::Auto,
+            presence_error: None,
         };
         if let IdentityState::Ready(identity) = &state.identity {
-            state.presence_mode = load_presence_mode(&state.store, &identity.pubkey_hex());
+            (state.presence_mode, state.presence_error) =
+                load_presence_mode(&state.store, &identity.pubkey_hex());
             let saved = state.saved(&identity.pubkey_hex());
             for origin in saved
                 .origins
@@ -91,7 +95,7 @@ impl AppState {
         let identity = Arc::new(identity);
         let store = cx.global::<Self>().store.clone();
         let saved = cx.global::<Self>().saved(&identity.pubkey_hex());
-        let mode = load_presence_mode(&store, &identity.pubkey_hex());
+        let (mode, presence_error) = load_presence_mode(&store, &identity.pubkey_hex());
         let communities: Vec<Entity<Community>> = saved
             .origins
             .iter()
@@ -103,6 +107,7 @@ impl AppState {
         state.communities = communities;
         state.identity = IdentityState::Ready(identity);
         state.presence_mode = mode;
+        state.presence_error = presence_error;
     }
 
     fn saved(&self, viewer: &str) -> Saved {
@@ -187,9 +192,11 @@ impl AppState {
         let saved = state
             .store
             .set_viewer_pref(&identity.pubkey_hex(), PRESENCE_MODE, value);
-        if let Err(error) = saved {
+        let error = saved.err().map(|error| {
             tracing::warn!(%error, "could not save the availability choice");
-        }
+            "Could not save your status. It applies to this window until you close it.".to_string()
+        });
+        cx.global_mut::<Self>().presence_error = error;
     }
 
     /// Leaves a community (NIP-43, relay.md §1.8). On success the
@@ -304,6 +311,9 @@ impl Community {
         ));
         if cx.try_global::<Idle>().is_some_and(|idle| idle.idle) {
             session.set_idle(true);
+        }
+        if cx.try_global::<Idle>().is_some_and(|idle| !idle.visible) {
+            session.set_visible(false);
         }
         if presence_mode != PresenceMode::Auto {
             session.set_presence_mode(presence_mode);
@@ -461,16 +471,25 @@ impl ChannelModel {
     }
 }
 
-fn load_presence_mode(store: &Store, viewer: &str) -> PresenceMode {
-    match store
-        .viewer_pref(viewer, PRESENCE_MODE)
-        .ok()
-        .flatten()
-        .as_deref()
-    {
-        Some("\"away\"") => PresenceMode::Away,
-        Some("\"offline\"") => PresenceMode::Offline,
-        _ => PresenceMode::Auto,
+/// The saved availability; an unreadable one is Auto with the error the
+/// account menu shows.
+fn load_presence_mode(store: &Store, viewer: &str) -> (PresenceMode, Option<String>) {
+    match store.viewer_pref(viewer, PRESENCE_MODE) {
+        Ok(saved) => (
+            match saved.as_deref() {
+                Some("\"away\"") => PresenceMode::Away,
+                Some("\"offline\"") => PresenceMode::Offline,
+                _ => PresenceMode::Auto,
+            },
+            None,
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the availability choice");
+            (
+                PresenceMode::Auto,
+                Some("Could not read your saved status. Changes apply to this window.".into()),
+            )
+        }
     }
 }
 

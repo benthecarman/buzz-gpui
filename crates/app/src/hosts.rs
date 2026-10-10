@@ -30,6 +30,8 @@ pub struct Hosts {
     pub hosts: Vec<Entity<HostConnection>>,
     /// Owns the embedded host's server; dropping it stops local agents.
     _embedded: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    /// The embedded host, for stopping its agents on quit.
+    local: Option<Arc<AgentHost>>,
 }
 
 impl Global for Hosts {}
@@ -53,8 +55,10 @@ impl Hosts {
     pub fn init(config: &Config, cx: &mut App) {
         let runtime = Runtime::handle(cx);
         let mut hosts = Vec::new();
+        let mut local = None;
         let embedded = match start_embedded(config, &runtime) {
-            Ok((connector, server)) => {
+            Ok((connector, server, host)) => {
+                local = Some(host);
                 hosts.push(HostConnection::new(
                     "This computer".into(),
                     None,
@@ -87,7 +91,20 @@ impl Hosts {
         cx.set_global(Self {
             hosts,
             _embedded: embedded,
+            local,
         });
+    }
+
+    /// Stops this computer's agents and confirms it, before quitting.
+    /// Agents on remote hosts keep running.
+    pub fn shutdown_local(cx: &App) -> Result<(), String> {
+        match cx
+            .try_global::<Self>()
+            .and_then(|hosts| hosts.local.clone())
+        {
+            Some(host) => host.shutdown(),
+            None => Ok(()),
+        }
     }
 
     fn remotes(&self, cx: &App) -> Vec<RemoteHost> {
@@ -178,16 +195,14 @@ fn store_token(address: &str, token: &str) -> Result<(), buzz_credential_store::
     buzz_credential_store::add(HOST_TOKEN_SERVICE, address, token.as_bytes())
 }
 
-fn start_embedded(
-    config: &Config,
-    runtime: &tokio::runtime::Handle,
-) -> Result<
-    (
-        transport::MemoryConnector,
-        tokio::task::JoinHandle<std::io::Result<()>>,
-    ),
-    String,
-> {
+/// The embedded host: how to reach it, its server task and the host.
+type Embedded = (
+    transport::MemoryConnector,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    Arc<AgentHost>,
+);
+
+fn start_embedded(config: &Config, runtime: &tokio::runtime::Handle) -> Result<Embedded, String> {
     let data = dirs::data_dir()
         .ok_or("No data directory")?
         .join("buzz-gpui");
@@ -220,11 +235,11 @@ fn start_embedded(
     let (connector, listener) = transport::memory();
     let server = runtime.spawn(buzz_host_rpc::serve(
         listener,
-        Arc::new(RpcHandler(host)),
+        Arc::new(RpcHandler(host.clone())),
         // In-process only, so there is nobody to authenticate.
         ServerOptions::default(),
     ));
-    Ok((connector, server))
+    Ok((connector, server, host))
 }
 
 fn remote_connector(host: &RemoteHost) -> Result<Arc<dyn Connector>, String> {

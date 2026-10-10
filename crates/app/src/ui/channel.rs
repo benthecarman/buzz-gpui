@@ -294,6 +294,11 @@ impl ChannelPage {
         self.input.clone()
     }
 
+    /// The first page has not arrived yet (the launch surface waits).
+    pub fn first_page_loading(&self, cx: &App) -> bool {
+        self.model.read(cx).snapshot.status == TimelineStatus::Loading
+    }
+
     /// Scrolls a top-level message into view and tints it briefly, paging in
     /// older history while it may still be there. A reply is not revealed
     /// here; there is no "around message" query (relay.md §5c.5).

@@ -555,6 +555,33 @@ impl Render for Workspace {
 
 // Navigation: history, links and requests from outside the window.
 impl Workspace {
+    /// What the launch surface waits for (`data-buzz-launch-pending`):
+    /// the channel list and the open channel's first page. Onboarding,
+    /// other pages and a failed connection show at once.
+    pub fn launch_content(&self, cx: &App) -> super::launch::Content {
+        use super::launch::Content;
+        use buzz_relay_client::SessionStatus;
+        if self.onboarding.is_some() || self.page != Page::MESSAGES {
+            return Content::Ready;
+        }
+        let Some(community) = &self.community else {
+            return Content::Ready;
+        };
+        let snapshot = &community.read(cx).snapshot;
+        if matches!(snapshot.status, SessionStatus::Failed(_)) {
+            return Content::Ready;
+        }
+        if snapshot.roster == RosterStatus::Loading {
+            return Content::Required;
+        }
+        match &self.channel {
+            Some(channel) if channel.read(cx).first_page_loading(cx) => Content::Required,
+            // Live updates are still connecting under a usable view.
+            _ if !snapshot.live => Content::Settling,
+            _ => Content::Ready,
+        }
+    }
+
     /// Where the window is now, as history records it.
     fn here(&self, cx: &App) -> Option<Target> {
         if self.onboarding.is_some() {

@@ -18,6 +18,7 @@ mod form_fields;
 mod gif_picker;
 mod identity;
 mod jump;
+pub mod launch;
 mod link_preview;
 mod links;
 mod markdown;

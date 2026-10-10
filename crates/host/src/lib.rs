@@ -592,6 +592,31 @@ impl AgentHost {
     }
 }
 
+impl AgentHost {
+    /// Stops every agent now and waits for the controller to confirm it,
+    /// as quitting buzz-app does (`AgentHost::shutdown`). Blocks the
+    /// caller; the host keeps serving afterwards.
+    pub fn shutdown(&self) -> Result<(), String> {
+        let (done, confirmed) = mpsc::channel();
+        self.jobs
+            .send(Box::new(move |owner: &mut Owner| {
+                let _ = done.send(
+                    owner
+                        .controller
+                        .shutdown()
+                        .map_err(|error| error.to_string()),
+                );
+            }))
+            .map_err(|_| "Agent host shutdown could not be confirmed".to_string())?;
+        confirmed
+            .recv_timeout(SHUTDOWN_TIMEOUT)
+            .map_err(|_| "Agent host shutdown could not be confirmed".to_string())?
+    }
+}
+
+/// How long [`AgentHost::shutdown`] waits for the agents to stop.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl Drop for AgentHost {
     /// Stops every agent this host started.
     fn drop(&mut self) {
