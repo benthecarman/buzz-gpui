@@ -101,6 +101,7 @@ async fn mentions_outsiders_as_references_or_invites_them() {
             name: format!("#outsiders-{}", std::process::id()),
             description: "Created by a test".into(),
             private: false,
+            ttl: None,
         })
         .await
         .unwrap();

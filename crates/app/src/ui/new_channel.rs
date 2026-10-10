@@ -65,6 +65,7 @@ impl NewChannelDialog {
             name: self.name.read(cx).value().to_string(),
             description: self.description.read(cx).value().to_string(),
             private: self.private,
+            ttl: None,
         }
     }
 

@@ -284,6 +284,7 @@ fn creates_a_stream_in_relay_tag_order() {
             name: "  #release-notes ".into(),
             description: " Notes ".into(),
             private: true,
+            ttl: None,
         },
         CHANNEL,
     )
@@ -303,6 +304,7 @@ fn creates_a_stream_in_relay_tag_order() {
         name: "x".into(),
         description: String::new(),
         private: false,
+        ttl: None,
     };
     let draft = create(&bare, CHANNEL).unwrap();
     assert_eq!(draft.tags.len(), 4, "no empty about");
@@ -319,9 +321,47 @@ fn creates_a_stream_in_relay_tag_order() {
     assert!(create(&long, CHANNEL).is_err());
     let session = NewChannel {
         description: "Buzz session (buzz.sessions/v1)".into(),
-        ..bare
+        ..bare.clone()
     };
     assert!(create(&session, CHANNEL).is_err());
+    let temporary = NewChannel {
+        description: "Notes".into(),
+        ttl: Some(DEFAULT_TEMPORARY_TTL),
+        ..bare.clone()
+    };
+    let draft = create(&temporary, CHANNEL).unwrap();
+    assert_eq!(draft.tags[4], vec!["about", "Notes"]);
+    assert_eq!(draft.tags[5], vec!["ttl", "604800"], "ttl last");
+    for ttl in [0, 2_147_483_648] {
+        let invalid = NewChannel {
+            ttl: Some(ttl),
+            ..bare.clone()
+        };
+        assert!(create(&invalid, CHANNEL).is_err());
+    }
+}
+
+#[test]
+fn draft_errors_match_the_field_feedback() {
+    assert!(!draft_errors("general", "", None).any());
+    assert!(!draft_errors(&"x".repeat(120), &"y".repeat(1000), Some(1)).any());
+    let errors = draft_errors("", &"y".repeat(1001), Some(0));
+    assert_eq!(errors.name, Some(NAME_ERROR));
+    assert_eq!(errors.description, Some(ABOUT_LENGTH_ERROR));
+    assert_eq!(errors.lifetime, Some(TTL_ERROR));
+    // Code points, not bytes or UTF-16 units.
+    assert!(draft_errors(&"é".repeat(120), "", None).name.is_none());
+    assert!(draft_errors(&"😀".repeat(121), "", None).name.is_some());
+    assert!(draft_errors("#general", "", None).name.is_some());
+    assert_eq!(
+        draft_errors("general", "a Buzz session (x)", None).description,
+        Some(ABOUT_SESSION_ERROR)
+    );
+    assert!(
+        draft_errors("g", "", Some(2_147_483_648))
+            .lifetime
+            .is_some()
+    );
 }
 
 #[test]

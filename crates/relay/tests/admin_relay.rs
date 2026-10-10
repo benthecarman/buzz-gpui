@@ -107,6 +107,7 @@ async fn creates_edits_and_administers_a_channel() {
             name: format!("#{name}"),
             description: "Created by a test".into(),
             private: false,
+            ttl: None,
         })
         .await
         .unwrap();
@@ -228,6 +229,7 @@ async fn previews_joins_and_leaves_a_public_channel() {
             name: name.clone(),
             description: String::new(),
             private: false,
+            ttl: None,
         })
         .await
         .unwrap();
@@ -496,6 +498,7 @@ async fn owners_delete_a_channel() {
             name: unique("delete"),
             description: String::new(),
             private: false,
+            ttl: None,
         })
         .await
         .unwrap();
@@ -542,6 +545,7 @@ async fn an_agents_owner_removes_it_and_deletes_its_channel() {
             name: unique("owned-agent"),
             description: String::new(),
             private: false,
+            ttl: None,
         })
         .await
         .unwrap();
@@ -565,6 +569,7 @@ async fn an_agents_owner_removes_it_and_deletes_its_channel() {
             name: unique("agent-made"),
             description: String::new(),
             private: false,
+            ttl: None,
         })
         .await
         .unwrap();

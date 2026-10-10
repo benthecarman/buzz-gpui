@@ -509,6 +509,7 @@ mod tests {
                     name: format!("#voice-{}", std::process::id()),
                     description: "Created by a test".into(),
                     private: false,
+                    ttl: None,
                 })
                 .await
                 .unwrap();

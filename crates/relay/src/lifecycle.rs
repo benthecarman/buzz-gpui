@@ -33,10 +33,33 @@ pub const RUN_TIMEOUT: Duration = Duration::from_secs(20);
 pub const MAX_NAME_CHARS: usize = 120;
 pub const MAX_ABOUT_CHARS: usize = 1000;
 const MAX_TTL: u64 = 2_147_483_647;
+/// A new temporary channel cleans up after a week without activity
+/// (`DEFAULT_TEMPORARY_CHANNEL_TTL_SECONDS`).
+pub const DEFAULT_TEMPORARY_TTL: u64 = 7 * 24 * 60 * 60;
+
+const NAME_ERROR: &str = "Enter a channel name of 1–120 characters without a leading #.";
+const ABOUT_LENGTH_ERROR: &str = "Use a description of at most 1,000 characters.";
+const ABOUT_SESSION_ERROR: &str =
+    "Remove \"Buzz session (\" from the description; that text is used by Buzz for work sessions.";
+const TTL_ERROR: &str = "Channel duration could not be verified.";
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct LifecycleError(pub String);
+
+/// Why a lifecycle command failed (`ChannelLifecycleUnconfirmed`).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ActionError {
+    /// Nothing was published, or the relay refused it.
+    #[error("{0}")]
+    Failed(String),
+    /// The command may have reached the relay. Resending could repeat it,
+    /// so the dialog that sent it stays unable to send it again.
+    #[error(
+        "The request may have taken effect. Close this dialog and refresh channels before trying again. {0}"
+    )]
+    Unconfirmed(String),
+}
 
 fn error(message: impl Into<String>) -> LifecycleError {
     LifecycleError(message.into())
@@ -610,23 +633,57 @@ pub fn canonical_name(name: &str) -> String {
         .to_owned()
 }
 
+/// Inline field feedback for a draft as typed (`detailsDraftErrors`). The
+/// command validators stay the write boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DraftErrors {
+    pub name: Option<&'static str>,
+    pub description: Option<&'static str>,
+    pub lifetime: Option<&'static str>,
+}
+
+impl DraftErrors {
+    pub fn any(&self) -> bool {
+        self.name.is_some() || self.description.is_some() || self.lifetime.is_some()
+    }
+}
+
+/// `detailsDraftErrors`. Pass the [`canonical_name`] of what was typed.
+pub fn draft_errors(name: &str, description: &str, ttl: Option<u64>) -> DraftErrors {
+    DraftErrors {
+        name: validate_name(name).err().map(|_| NAME_ERROR),
+        description: if description.chars().count() > MAX_ABOUT_CHARS {
+            Some(ABOUT_LENGTH_ERROR)
+        } else if description.contains("Buzz session (") {
+            Some(ABOUT_SESSION_ERROR)
+        } else {
+            None
+        },
+        lifetime: validate_ttl(ttl).err().map(|_| TTL_ERROR),
+    }
+}
+
 fn validate_name(name: &str) -> Result<(), LifecycleError> {
     if name.is_empty() || name != canonical_name(name) || name.chars().count() > MAX_NAME_CHARS {
-        return Err(error(
-            "Enter a channel name of 1–120 characters without a leading #.",
-        ));
+        return Err(error(NAME_ERROR));
     }
     Ok(())
 }
 
 fn validate_about(about: &str) -> Result<(), LifecycleError> {
     if about.chars().count() > MAX_ABOUT_CHARS {
-        return Err(error("Use a description of at most 1,000 characters."));
+        return Err(error(ABOUT_LENGTH_ERROR));
     }
     if about.contains("Buzz session (") {
-        return Err(error(
-            "Remove \"Buzz session (\" from the description; that text is used by Buzz for work sessions.",
-        ));
+        return Err(error(ABOUT_SESSION_ERROR));
+    }
+    Ok(())
+}
+
+/// A TTL must be a positive i32; `None` is ongoing.
+fn validate_ttl(ttl: Option<u64>) -> Result<(), LifecycleError> {
+    if ttl.is_some_and(|ttl| ttl == 0 || ttl > MAX_TTL) {
+        return Err(error(TTL_ERROR));
     }
     Ok(())
 }
@@ -637,16 +694,20 @@ pub struct NewChannel {
     pub name: String,
     pub description: String,
     pub private: bool,
+    /// Seconds without activity before the relay cleans the channel up;
+    /// `None` is ongoing.
+    pub ttl: Option<u64>,
 }
 
 /// A 9007 stream for the outbox, with the client-chosen `id`. Tag order is
-/// enforced by the relay: `h, name, visibility, channel_type[, about]`.
+/// enforced by the relay: `h, name, visibility, channel_type[, about][, ttl]`.
 pub fn create(channel: &NewChannel, id: &str) -> Result<Draft, LifecycleError> {
     let id = channel_id(id)?;
     let name = canonical_name(&channel.name);
     validate_name(&name)?;
     let about = channel.description.trim();
     validate_about(about)?;
+    validate_ttl(channel.ttl)?;
     let mut tags = vec![
         vec!["h".to_owned(), id.to_owned()],
         vec!["name".to_owned(), name],
@@ -658,6 +719,9 @@ pub fn create(channel: &NewChannel, id: &str) -> Result<Draft, LifecycleError> {
     ];
     if !about.is_empty() {
         tags.push(vec!["about".to_owned(), about.to_owned()]);
+    }
+    if let Some(ttl) = channel.ttl {
+        tags.push(vec!["ttl".to_owned(), ttl.to_string()]);
     }
     Ok(Draft {
         kind: kinds::CREATE_CHANNEL,
@@ -695,6 +759,26 @@ pub struct DetailsDraft {
     pub ttl: Option<u64>,
 }
 
+/// A details save the session owns (`DetailsAttempt`). It outlives the
+/// panel that started it, so reopening still shows an uncertain save.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailsAttempt {
+    pub draft: DetailsDraft,
+    pub status: AttemptStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptStatus {
+    Saving,
+    /// Published, but the relay did not show it. Only a check clears it;
+    /// nothing is resent.
+    Unconfirmed,
+}
+
+/// An uncertain details save (`channel-details.ts`).
+pub const UNCERTAIN_SAVE: &str =
+    "The change may have been saved. Check its status before trying again.";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelDetails {
     pub channel: String,
@@ -715,9 +799,7 @@ pub fn edit_details(
     let channel = channel_id(channel)?;
     validate_name(&draft.name)?;
     validate_about(&draft.description)?;
-    if draft.ttl.is_some_and(|ttl| ttl == 0 || ttl > MAX_TTL) {
-        return Err(error("Channel duration could not be verified."));
-    }
+    validate_ttl(draft.ttl)?;
     let mut tags = vec![
         vec!["h".to_owned(), channel.to_owned()],
         vec!["name".to_owned(), draft.name.clone()],
