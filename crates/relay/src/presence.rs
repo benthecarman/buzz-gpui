@@ -189,7 +189,12 @@ pub struct PresenceDirectory {
     viewer: String,
     evidence: HashMap<String, Evidence>,
     revisions: HashMap<String, u64>,
+    /// Observing: the socket is connected and the window is shown.
     connected: bool,
+    socket: bool,
+    /// The app's window is on screen (`activity.visible()`); while it is
+    /// hidden nothing is observed and everyone is unknown.
+    visible: bool,
     /// Bumped on disconnect; fences reads started before.
     generation: u64,
     reading: bool,
@@ -207,6 +212,8 @@ impl PresenceDirectory {
             evidence: HashMap::new(),
             revisions: HashMap::new(),
             connected: false,
+            socket: false,
+            visible: true,
             generation: 0,
             reading: false,
             next_read: None,
@@ -259,6 +266,19 @@ impl PresenceDirectory {
     /// The live socket's state. Either way all evidence becomes unknown:
     /// nothing tells us what changed while it was down.
     pub fn set_connected(&mut self, connected: bool, now: u64) {
+        self.socket = connected;
+        self.observe(now);
+    }
+
+    /// The window was shown or hidden: hidden stops observation and clears
+    /// what was observed; shown reads again soon.
+    pub fn set_visible(&mut self, visible: bool, now: u64) {
+        self.visible = visible;
+        self.observe(now);
+    }
+
+    fn observe(&mut self, now: u64) {
+        let connected = self.socket && self.visible;
         if connected == self.connected {
             return;
         }
@@ -723,6 +743,28 @@ mod tests {
         );
         assert!(directory.snapshot().is_empty());
         assert_eq!(directory.deadline(), Some(190_100));
+    }
+
+    #[test]
+    fn a_hidden_window_observes_nobody() {
+        let a = hex(1);
+        let mut directory = connected(&hex(0), std::slice::from_ref(&a));
+        let read = directory.due(100).unwrap();
+        directory.finish(
+            read,
+            SnapshotResult::Statuses(HashMap::from([(a.clone(), Some(PresenceState::Online))])),
+            200,
+        );
+        assert!(!directory.snapshot().is_empty());
+        directory.set_visible(false, 300);
+        assert!(directory.snapshot().is_empty());
+        assert_eq!(directory.due(400_000), None);
+        // Reconnecting while hidden still reads nothing.
+        directory.set_connected(false, 500);
+        directory.set_connected(true, 600);
+        assert_eq!(directory.due(400_000), None);
+        directory.set_visible(true, 700);
+        assert!(directory.due(400_000).is_some());
     }
 
     #[test]

@@ -400,6 +400,15 @@ impl Session {
         let _ = self.commands.send(Message::SetPresenceMode(mode));
     }
 
+    /// Whether the app's window is on screen. While it is hidden, other
+    /// people's presence is not observed and reads as unknown
+    /// (`activity.visible()` in `presence.ts`).
+    pub fn set_visible(&self, visible: bool) {
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            actor.presence_visible(visible)
+        })));
+    }
+
     /// New messages from others that should notify: mentions, direct
     /// messages and replies in the viewer's conversations, still unread and
     /// not in view, each sent once. Lagging receivers lose old items.

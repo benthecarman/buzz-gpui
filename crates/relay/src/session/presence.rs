@@ -72,6 +72,14 @@ impl Actor {
         self.publish_activity();
     }
 
+    pub(super) fn presence_visible(&mut self, visible: bool) {
+        self.presence.set_visible(visible, now_ms());
+        if !visible && let Some(live) = &mut self.live {
+            live.watch_presence(Vec::new());
+        }
+        self.publish_activity();
+    }
+
     pub(super) fn watch_presence(&mut self, authors: Vec<String>) {
         self.presence.set_demand(authors, now_ms());
         if self.presence.demand().is_empty()
