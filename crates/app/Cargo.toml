@@ -23,6 +23,7 @@ buzz-identity = { path = "../identity" }
 buzz-relay-client = { path = "../relay" }
 serde_json = "1"
 buzz-ui = { path = "../ui" }
+buzzodz-plugins.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Draws emoji avatars from the bundled emoji font; GPUI already uses it.
 cosmic-text = "0.19"

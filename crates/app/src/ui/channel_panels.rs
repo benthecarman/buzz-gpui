@@ -79,10 +79,14 @@ pub fn register(panel: ChannelPanel, cx: &mut App) {
     panels.push(panel);
 }
 
+/// The registered panels whose plugin is on.
 pub fn all(cx: &App) -> Vec<ChannelPanel> {
     cx.try_global::<ChannelPanels>()
         .map(|panels| panels.0.clone())
         .unwrap_or_default()
+        .into_iter()
+        .filter(|panel| crate::plugins::enabled_key(panel.key))
+        .collect()
 }
 
 pub fn get(key: &str, cx: &App) -> Option<ChannelPanel> {

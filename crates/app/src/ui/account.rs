@@ -435,16 +435,19 @@ impl Account {
             .children(self.status_error.clone().map(error))
             .children(status_row)
             .child(MenuSeparator::new())
-            .child(
-                Self::row(
-                    "account-feedback",
-                    IconName::ChatCircle,
-                    "Send feedback",
-                    None,
-                    cx,
+            // The Feedback plugin's account action.
+            .when(crate::plugins::enabled("buzz.feedback"), |this| {
+                this.child(
+                    Self::row(
+                        "account-feedback",
+                        IconName::ChatCircle,
+                        "Send feedback",
+                        None,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.send_feedback(window, cx))),
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.send_feedback(window, cx))),
-            )
+            })
             .child(
                 Self::row(
                     "account-settings",

@@ -112,6 +112,17 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe_global_in::<AppState>(window, |this, window, cx| this.sync(window, cx))
             .detach();
+        // A page whose plugin was turned off leaves for Messages.
+        cx.observe_global_in::<crate::plugins::Plugins>(window, |this, window, cx| {
+            if this.page != Page::SETTINGS
+                && this.page != Page::MESSAGES
+                && pages::spec(this.page, cx).is_none()
+            {
+                this.select_page(Page::MESSAGES, window, cx);
+            }
+            cx.notify();
+        })
+        .detach();
         let mut workspace = Self {
             page: Page::MESSAGES,
             sidebar_open: true,

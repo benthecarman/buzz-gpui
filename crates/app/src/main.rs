@@ -15,6 +15,7 @@ mod mirror;
 mod network;
 mod notifications;
 mod oauth;
+mod plugins;
 mod runtime;
 mod shortcuts;
 mod sign_out;
@@ -76,6 +77,7 @@ fn main() {
         notifications::Notifications::init(cx);
         appearance::init(cx);
         idle::Idle::init(cx);
+        plugins::Plugins::init(cx);
         agents2::init(cx);
         ui::agents::init(cx);
         agent_plugins::claude_code::init(cx);

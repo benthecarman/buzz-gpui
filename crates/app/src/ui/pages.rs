@@ -130,20 +130,24 @@ pub fn register(spec: PageSpec, cx: &mut App) {
     pages.push(spec);
 }
 
+/// A registered page whose plugin is on.
 pub fn spec(page: Page, cx: &App) -> Option<PageSpec> {
     cx.try_global::<Pages>()?
         .0
         .iter()
-        .find(|spec| spec.page == page)
+        .find(|spec| spec.page == page && crate::plugins::enabled_key(page.key()))
         .cloned()
 }
 
-/// Every registered page in host order.
+/// Every registered page whose plugin is on, in host order.
 pub fn all(cx: &App) -> Vec<PageSpec> {
-    let mut pages = cx
+    let mut pages: Vec<PageSpec> = cx
         .try_global::<Pages>()
         .map(|pages| pages.0.clone())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|spec| crate::plugins::enabled_key(spec.page.key()))
+        .collect();
     pages.sort_by(|a, b| order(a.page, a.label, b.page, b.label));
     pages
 }

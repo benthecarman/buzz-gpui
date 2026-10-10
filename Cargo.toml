@@ -19,6 +19,8 @@ anyhow = "1"
 buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a" }
 buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a" }
 buzz-desktop = { git = "https://github.com/benthecarman/buzz-app", rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a" }
+# The plugin enable switches, saved as buzz-app saves them.
+buzzodz-plugins = { git = "https://github.com/benthecarman/buzz-app", rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a" }
 gpui-kit = "=0.7.1"
 
 # GPUI's Linux platform and gpui-kit's base crate with this app's patches;

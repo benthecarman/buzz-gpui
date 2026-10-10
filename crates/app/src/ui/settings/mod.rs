@@ -10,6 +10,7 @@ mod avatar;
 mod communities;
 mod emoji;
 mod notifications;
+mod plugins;
 mod profile;
 mod shortcuts;
 mod updates;
@@ -54,6 +55,7 @@ pub enum Section {
     Notifications,
     Shortcuts,
     Agents,
+    Plugins,
     Updates,
     About,
 }
@@ -89,6 +91,7 @@ impl Section {
             Self::Notifications => "Notifications",
             Self::Shortcuts => "Shortcuts",
             Self::Agents => "Agents",
+            Self::Plugins => "Plugins",
             Self::Updates => "Updates",
             Self::About => "About",
         }
@@ -103,6 +106,7 @@ impl Section {
             Self::Notifications => IconName::Bell,
             Self::Shortcuts => IconName::Keyboard,
             Self::Agents => IconName::Robot,
+            Self::Plugins => IconName::SquaresFour,
             Self::Updates => IconName::Download,
             Self::About => IconName::Info,
         }
@@ -315,6 +319,7 @@ impl SettingsPage {
             Section::Notifications,
             Section::Shortcuts,
             Section::Agents,
+            Section::Plugins,
             Section::Updates,
             Section::About,
         ] {
@@ -369,6 +374,7 @@ impl SettingsPage {
                 .clone()
                 .into_any_element(),
             Section::Agents => self.agents_section(window, cx),
+            Section::Plugins => self.plugins_section(cx),
             Section::Updates => self.updates_section(cx),
             Section::About => about::render(cx),
         }

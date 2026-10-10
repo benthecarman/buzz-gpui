@@ -132,6 +132,7 @@ pub fn register_action(action: Rc<dyn MessageAction>) {
 pub fn actions(row: &MessageRow) -> Vec<Rc<dyn MessageAction>> {
     let all = REGISTRY.with_borrow(|r| r.actions.clone());
     all.into_iter()
+        .filter(|a| on(a.key()))
         .filter(|a| catch_unwind(AssertUnwindSafe(|| a.matches(row))).unwrap_or(false))
         .collect()
 }
@@ -152,6 +153,11 @@ pub fn markers(row: &MessageRow, cx: &App) -> Vec<AnyElement> {
         .into_iter()
         .filter_map(|a| guarded(a.key(), || a.marker(row, cx)))
         .collect()
+}
+
+/// Whether the plugin that contributed `key` (`plugin/id`) is on.
+fn on(key: &str) -> bool {
+    crate::plugins::enabled_key(key)
 }
 
 /// Runs a contribution; a panic counts as declining.
@@ -183,8 +189,13 @@ fn resolve<T: ?Sized>(
 
 /// A row's body: the winning message renderer, else Markdown.
 pub fn message_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElement {
-    let candidates =
-        REGISTRY.with_borrow(|r| resolve(&r.messages, |m| m.matches(row), |m| m.order(row)));
+    let candidates = REGISTRY.with_borrow(|r| {
+        resolve(
+            &r.messages,
+            |m| on(m.key()) && m.matches(row),
+            |m| m.order(row),
+        )
+    });
     for renderer in candidates {
         if let Some(element) = guarded(renderer.key(), || renderer.render(row, directory, cx)) {
             return element;
@@ -195,8 +206,13 @@ pub fn message_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> A
 
 /// A contributed link chip, when one outranks the bundled links.
 pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
-    let candidates =
-        REGISTRY.with_borrow(|r| resolve(&r.links, |l| l.matches(url), |l| l.order(url)));
+    let candidates = REGISTRY.with_borrow(|r| {
+        resolve(
+            &r.links,
+            |l| on(l.key()) && l.matches(url),
+            |l| l.order(url),
+        )
+    });
     // The bundled links renderer sits at 0 for known kinds, 100 for the web.
     let bundled = match super::links::link_kind(url) {
         Some(super::links::LinkKind::Web) => 100,
@@ -214,6 +230,7 @@ pub fn inline(text: &str, emoji: &[CustomEmoji], media: &Media, cx: &App) -> Opt
     let renderers = REGISTRY.with_borrow(|r| r.inline.clone());
     renderers
         .into_iter()
+        .filter(|renderer| on(renderer.key()))
         .find_map(|renderer| guarded(renderer.key(), || renderer.render(text, emoji, media, cx)))
 }
 
@@ -227,7 +244,7 @@ pub fn attachment(
     let renderers = REGISTRY.with_borrow(|r| r.attachments.clone());
     renderers
         .into_iter()
-        .filter(|renderer| renderer.matches(attachment))
+        .filter(|renderer| on(renderer.key()) && renderer.matches(attachment))
         .find_map(|renderer| {
             guarded(renderer.key(), || {
                 renderer.render(attachment, id.clone(), media, cx)
@@ -242,7 +259,7 @@ struct Diffs;
 
 impl MessageRenderer for Diffs {
     fn key(&self) -> &str {
-        "diffs"
+        "buzz.diffs/diffs"
     }
 
     fn matches(&self, row: &MessageRow) -> bool {
@@ -258,7 +275,7 @@ struct VoiceNotes;
 
 impl AttachmentRenderer for VoiceNotes {
     fn key(&self) -> &str {
-        "voice-notes"
+        "buzz.voice-notes/voice-notes"
     }
 
     fn matches(&self, attachment: &Attachment) -> bool {
@@ -281,7 +298,7 @@ struct Emoji;
 
 impl InlineRenderer for Emoji {
     fn key(&self) -> &str {
-        "emoji"
+        "buzz.emoji/emoji"
     }
 
     fn render(
