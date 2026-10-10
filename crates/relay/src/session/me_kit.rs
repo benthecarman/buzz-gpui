@@ -2,8 +2,9 @@
 //! (`channel-templates/capability.ts`, `relay/me-preferences.ts`,
 //! `relay/sidebar-personal-groups.ts`).
 //!
-//! [`MeKit`] reads the viewer's private recipe records, at most one read at
-//! a time, and saves one record at a time through the outbox with the
+//! [`MeKit`] is the session's one reader of the viewer's private recipe
+//! records: templates and teams ([`Session::kit`]) are the same read,
+//! decoded as typed records. It reads at most one at a time, and saves one record at a time through the outbox with the
 //! same revision checks as buzz-app: the head must be the one the caller
 //! saw, no earlier save of the coordinate may be unresolved, and the new
 //! record must be the one the relay selects afterwards.
@@ -13,10 +14,12 @@
 //! replace the legacy sidebar sections once that record exists.
 
 use super::actions::{Context, Ops};
+use super::kit::{KitSnapshot, KitStatus};
 use super::work_sessions::delivered;
 use super::{Message, Session};
 use crate::event::Verified;
-use crate::me_kit::{self as kit, GroupsId, KitEntry};
+use crate::kit::me::{self as kit, KitEntry};
+use crate::kit::{self as recipes, GroupsId};
 use crate::outbox::{Delivery, SendOptions};
 use crate::reader::ReadOptions;
 use crate::sidebar::{
@@ -110,6 +113,8 @@ struct Inner {
     runtime: tokio::runtime::Handle,
     community: String,
     snapshot: watch::Sender<Arc<MeKitSnapshot>>,
+    /// The same catalog as typed templates and teams ([`Session::kit`]).
+    typed: watch::Sender<Arc<KitSnapshot>>,
     refreshing: Mutex<Option<Shared<BoxFuture<'static, ()>>>>,
     /// Bumped by [`MeKit::clear`]; a read started before is dropped.
     epoch: AtomicU64,
@@ -146,6 +151,7 @@ impl MeKit {
                 runtime,
                 community,
                 snapshot: watch::Sender::new(Arc::default()),
+                typed: watch::Sender::new(Arc::default()),
                 refreshing: Mutex::new(None),
                 epoch: AtomicU64::new(0),
                 saving: AtomicBool::new(false),
@@ -179,6 +185,11 @@ impl MeKit {
         self.inner.snapshot.subscribe()
     }
 
+    /// The catalog as typed templates and teams.
+    pub(super) fn typed(&self) -> watch::Receiver<Arc<KitSnapshot>> {
+        self.inner.typed.subscribe()
+    }
+
     fn set(&self, status: MeKitStatus, entries: Option<Arc<[KitEntry]>>) {
         self.inner.snapshot.send_modify(|snapshot| {
             *snapshot = Arc::new(MeKitSnapshot {
@@ -186,6 +197,8 @@ impl MeKit {
                 entries: entries.unwrap_or_else(|| snapshot.entries.clone()),
             });
         });
+        let typed = typed(&self.inner.snapshot.borrow(), &self.inner.community);
+        self.inner.typed.send_replace(Arc::new(typed));
         // Me placement takes conversations out of the Messages sidebar.
         let _ = self
             .inner
@@ -228,14 +241,14 @@ impl MeKit {
 
     async fn read_catalog(&self) -> Result<Vec<KitEntry>, String> {
         let ctx = self.context().await?;
-        let events = fresh(&ctx, vec![kit::catalog_filter(&ctx.viewer)]).await?;
-        if events.len() >= kit::CATALOG_LIMIT {
+        let events = fresh(&ctx, vec![recipes::catalog_filter(&ctx.viewer)]).await?;
+        if events.len() >= recipes::CATALOG_LIMIT {
             return Err(
                 "Recipe catalog reached its read limit; no partial catalog will be used".into(),
             );
         }
-        kit::heads(&events, &self.inner.community)
-            .iter()
+        recipes::catalog_heads(&events, &self.inner.community)
+            .into_iter()
             .map(|event| kit::decode(&ctx.identity, event, &self.inner.community))
             .collect()
     }
@@ -251,8 +264,9 @@ impl MeKit {
 
     async fn read_head(&self, ctx: &Context, record: &Value) -> Result<Option<Verified>, String> {
         let coordinate = kit::coordinate(record, &self.inner.community)?;
-        let events = fresh(ctx, vec![kit::head_filter(&ctx.viewer, &coordinate)]).await?;
-        Ok(kit::selected_head(&events).cloned())
+        let filter = recipes::record_filter(&ctx.viewer, &coordinate, false);
+        let events = fresh(ctx, vec![filter]).await?;
+        Ok(recipes::selected_head(&events).cloned())
     }
 
     /// Saves `value` (a record's `value`) if the relay's head is still
@@ -391,7 +405,7 @@ impl MeKit {
         filter.insert("limit".into(), json!(1));
         filter.insert("consistency".into(), json!("strong"));
         let events = fresh(ctx, vec![filter]).await?;
-        Ok(kit::selected_head(&events).cloned())
+        Ok(recipes::selected_head(&events).cloned())
     }
 
     /// Saves Canvas if its head is still `expected` (`canvas.save`), and
@@ -997,6 +1011,46 @@ fn removal_error(message: &str) -> String {
         )
     }
 }
+
+/// The typed view of a catalog snapshot (`channelKit.snapshot`). Before
+/// the relay answers there is nothing to read yet, so that error leaves
+/// the catalog idle for the next `kit_ensure`.
+fn typed(snapshot: &MeKitSnapshot, community: &str) -> KitSnapshot {
+    let (status, error) = match &snapshot.status {
+        MeKitStatus::Idle => (KitStatus::Idle, None),
+        MeKitStatus::Loading => (KitStatus::Loading, None),
+        MeKitStatus::Ready => (KitStatus::Ready, None),
+        MeKitStatus::Unavailable => (KitStatus::Unavailable, None),
+        MeKitStatus::Error(error) if error == NOT_CONNECTED => (KitStatus::Idle, None),
+        MeKitStatus::Error(error) => (KitStatus::Error, Some(error.clone())),
+    };
+    let entries = snapshot
+        .entries
+        .iter()
+        .map(|entry| {
+            Ok(recipes::KitEntry {
+                record: recipes::parse_kit_record(&entry.record, community)?,
+                event_id: EventId::from_hex(&entry.event_id)
+                    .map_err(|_| "Invalid channel recipe".to_owned())?,
+                created_at: entry.created_at,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>();
+    match entries {
+        Ok(entries) => KitSnapshot {
+            status,
+            entries: entries.into(),
+            error,
+        },
+        Err(error) => KitSnapshot {
+            status: KitStatus::Error,
+            entries: Arc::new([]),
+            error: Some(error),
+        },
+    }
+}
+
+const NOT_CONNECTED: &str = "Not connected to the relay yet";
 
 async fn fresh(ctx: &Context, filters: Vec<Filter>) -> Result<Vec<Verified>, String> {
     ctx.reader

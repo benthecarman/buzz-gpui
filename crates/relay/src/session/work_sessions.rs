@@ -44,7 +44,7 @@ pub fn session_description(parent: Option<&str>) -> String {
 }
 
 fn uuid(value: &str) -> bool {
-    crate::me_kit::uuid(value)
+    crate::kit::me::uuid(value)
 }
 
 fn hex_key(value: &str) -> bool {

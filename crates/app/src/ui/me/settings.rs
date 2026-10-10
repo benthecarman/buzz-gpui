@@ -18,7 +18,7 @@ use super::workspace::{
 use crate::community::{AppState, Community};
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::Session;
-use buzz_relay_client::me_kit::{self as kit, GroupsId, KitEntry, REMOVED_SECTION};
+use buzz_relay_client::kit::me::{self as kit, GroupsId, KitEntry, REMOVED_SECTION};
 use buzz_relay_client::session::AgentRules;
 use buzz_relay_client::sidebar_store::PreferencesStatus;
 use buzz_ui::{

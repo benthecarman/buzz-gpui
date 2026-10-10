@@ -6,7 +6,7 @@
 //! group's defaults are published (`parseLineup`, `parseKitRecord`), so a
 //! save fails with the same message as in buzz-app.
 
-use buzz_relay_client::me_kit::{CANVAS_BYTES, KitEntry, RECORD_BYTES};
+use buzz_relay_client::kit::me::{CANVAS_BYTES, KitEntry, RECORD_BYTES};
 use serde::Serialize;
 use serde_json::{Value, json};
 

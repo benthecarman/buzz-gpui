@@ -5,7 +5,7 @@
 use super::overlay::{self, Align, Dismiss};
 use crate::community::Community;
 use crate::mirror::mirror;
-use buzz_relay_client::me_kit::{self as kit, GroupsId};
+use buzz_relay_client::kit::me::{self as kit, GroupsId};
 use buzz_relay_client::session::MeKitSnapshot;
 use buzz_ui::{ActiveTheme, Menu, MenuItem, Select, Surface, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;

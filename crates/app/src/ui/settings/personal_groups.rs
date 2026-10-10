@@ -11,7 +11,7 @@ use super::{button, header, section};
 use crate::community::{AppState, Community};
 use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::SessionStatus;
-use buzz_relay_client::me_kit::{self as kit, GroupsId};
+use buzz_relay_client::kit::me::{self as kit, GroupsId};
 use buzz_relay_client::session::{MeKitSnapshot, MeKitStatus};
 use buzz_relay_client::sidebar::{PersonalGroup, SidebarPreferences};
 use buzz_relay_client::sidebar_store::PreferencesStatus;

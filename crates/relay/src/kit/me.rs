@@ -1,56 +1,28 @@
-//! The viewer's private recipe catalog (`channel-templates/model.ts`,
-//! `capability.ts`): kind-30078 records encrypted to the viewer, one per
-//! coordinate. Teams and templates live here, and so do the two group
-//! records: `personal` (Messages groups that replace the legacy sidebar
-//! sections) and `me` (the Me page's groups and which conversations are
-//! placed in Me, `me-preferences.ts`).
+//! The Me and Messages group records of the recipe catalog
+//! (`relay/me-preferences.ts`, `relay/sidebar-personal-groups.ts`): the
+//! `personal` record (Messages groups that replace the legacy sidebar
+//! sections) and the `me` record (the Me page's groups and which
+//! conversations are placed in Me).
 //!
-//! Pure data. [`crate::session`] reads and saves through the outbox.
-//! buzz-app's native admission (`buzz_desktop::relay::kit`) fixes each
-//! record's coordinate and tags, so both apps accept the same records.
+//! The catalog itself is read once, by the session's recipe reader, with
+//! [`super::catalog_filter`] and [`decode`]; these entries keep each
+//! record's raw JSON for the Me settings that edit it in place.
 
+use super::KitRecord;
 use crate::event::Verified;
 use crate::sidebar::{PersonalGroup, PersonalGroups};
-use crate::socket::Filter;
-use buzz_desktop::relay::kit;
+use buzz_desktop::relay::kit as native;
 use buzz_identity::Identity;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-pub use kit::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG};
+pub use super::{
+    CANVAS_BYTES, CATALOG_LIMIT, GroupsId, KIT_RECORD_BYTES as RECORD_BYTES, ME_CAPACITY,
+};
+pub use native::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG};
 
-/// `KIT_RECORD_BYTES`: a record's plaintext JSON.
-pub const RECORD_BYTES: usize = 16 * 1024;
-/// `CANVAS_BYTES`.
-pub const CANVAS_BYTES: usize = 24 * 1024;
-/// `parseKitRecord`'s limit on records (the read refuses a full page).
-pub const CATALOG_LIMIT: usize = 500;
-/// `meCapacityMessage`.
-pub const ME_CAPACITY: &str =
-    "Me storage is full. Move a conversation from Me to Messages, then try again.";
 /// `removedSectionMessage` (`sessions/workspace.ts`).
 pub const REMOVED_SECTION: &str = "The section was removed. Continue without a section to retry.";
-/// Larger ciphertexts are refused before decrypting (`validate_ciphertext`).
-const MAX_CIPHERTEXT: usize = 64 * 1024;
-const MAX_PLAINTEXT: usize = 48 * 1024;
-
-/// Which group record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GroupsId {
-    /// Messages groups (`personal`).
-    Personal,
-    /// Me groups and placement (`me`).
-    Me,
-}
-
-impl GroupsId {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Personal => "personal",
-            Self::Me => "me",
-        }
-    }
-}
 
 /// One decoded record, as the relay's head of its coordinate.
 #[derive(Clone, Debug, PartialEq)]
@@ -224,127 +196,18 @@ pub fn fits(record: &Value) -> bool {
 
 /// The `d` coordinate of a record, after validating it for `community`.
 pub fn coordinate(record: &Value, community: &str) -> Result<String, String> {
-    kit::coordinate(record, community)
+    native::coordinate(record, community)
 }
 
 /// The `t` tag a record is filed under (`kitTag`).
 pub fn tag(record: &Value) -> &'static str {
-    let value = &record["value"];
-    if value["type"] == "team-payload" {
-        PAYLOAD_TAG
-    } else if record["version"] == 2 {
-        MANIFEST_TAG
-    } else if (value["type"] == "groups" && value["id"] == "me")
-        || (value["type"] == "template"
-            && value["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("me-section-")))
-    {
-        ME_KIT_TAG
-    } else {
-        KIT_TAG
-    }
+    serde_json::from_value::<KitRecord>(record.clone()).map_or(PAYLOAD_TAG, |record| record.tag())
 }
 
-/// `encodeURIComponent` of a community origin.
-pub fn encode_community(community: &str) -> String {
-    community
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
-
-/// Whether a coordinate belongs to `community`'s catalog.
-pub fn in_catalog(d: &str, community: &str) -> bool {
-    let encoded = encode_community(community);
-    [KIT_TAG, MANIFEST_TAG, ME_KIT_TAG]
-        .iter()
-        .any(|tag| d.starts_with(&format!("{tag}:{encoded}:")))
-}
-
-/// The catalog read: every recipe record of the viewer.
-pub fn catalog_filter(viewer: &str) -> Filter {
-    let mut filter = Filter::new();
-    filter.insert("kinds".into(), json!([30078]));
-    filter.insert("authors".into(), json!([viewer]));
-    filter.insert("#t".into(), json!([KIT_TAG, MANIFEST_TAG, ME_KIT_TAG]));
-    filter.insert("limit".into(), json!(CATALOG_LIMIT));
-    filter
-}
-
-/// The head of one coordinate (`readRecord`).
-pub fn head_filter(viewer: &str, coordinate: &str) -> Filter {
-    let mut filter = Filter::new();
-    filter.insert("kinds".into(), json!([30078]));
-    filter.insert("authors".into(), json!([viewer]));
-    filter.insert("#d".into(), json!([coordinate]));
-    filter.insert("limit".into(), json!(1));
-    filter
-}
-
-/// `selectedHead`: newest, then lowest id.
-pub fn selected_head(events: &[Verified]) -> Option<&Verified> {
-    events.iter().min_by(|a, b| {
-        b.created_at_secs()
-            .cmp(&a.created_at_secs())
-            .then_with(|| a.id_hex().cmp(&b.id_hex()))
-    })
-}
-
-/// The newest record per coordinate of `community`.
-pub fn heads(events: &[Verified], community: &str) -> Vec<Verified> {
-    let mut heads: BTreeMap<String, Verified> = BTreeMap::new();
-    for event in events {
-        let Some(d) = event.tag("d").filter(|d| in_catalog(d, community)) else {
-            continue;
-        };
-        let replace = match heads.get(d) {
-            None => true,
-            Some(old) => {
-                selected_head(&[event.clone(), old.clone()]).map(Verified::id_hex)
-                    == Some(event.id_hex())
-            }
-        };
-        if replace {
-            heads.insert(d.to_owned(), event.clone());
-        }
-    }
-    heads.into_values().collect()
-}
-
-/// Opens one record (`relay_kit_decode`): ours, kind 30078, bounded,
-/// decrypted, and admitted under its exact coordinate and tag.
+/// Opens one catalog head (`relay_kit_decode`) with the kit cipher, and
+/// checks a groups record's value as `parseKitRecord` does.
 pub fn decode(identity: &Identity, event: &Verified, community: &str) -> Result<KitEntry, String> {
-    let invalid = || "Invalid channel recipe".to_owned();
-    if event.kind_u16() != 30078 || event.pubkey_hex() != identity.pubkey_hex() {
-        return Err(invalid());
-    }
-    if event.event().content.len() > MAX_CIPHERTEXT {
-        return Err(invalid());
-    }
-    let plaintext = identity
-        .decrypt_from_self(event.event())
-        .map_err(|_| invalid())?;
-    if plaintext.len() > MAX_PLAINTEXT {
-        return Err(invalid());
-    }
-    let raw: Value = serde_json::from_str(&plaintext).map_err(|_| invalid())?;
-    let tags: Vec<Value> = event
-        .event()
-        .tags
-        .iter()
-        .map(|tag| json!(tag.as_slice()))
-        .collect();
-    kit::admission(&json!({ "tags": tags }), &raw, community)?;
-    if raw["version"] == 2 && raw["value"]["portable"]["owner"] != identity.pubkey_hex() {
-        return Err("Portable team belongs to another viewer".into());
-    }
+    let raw = super::open(identity, event, community)?;
     if raw["value"]["type"] == "groups" {
         parse_groups(&raw["value"])?;
     }
@@ -371,10 +234,7 @@ pub fn prepare(
             },
         );
     }
-    let text = serde_json::to_string(record).map_err(|_| "Invalid channel recipe")?;
-    let content = identity
-        .encrypt_to_self(&text)
-        .map_err(|_| "Invalid channel recipe".to_owned())?;
+    let content = super::seal(identity, record, community)?;
     Ok((
         content,
         vec![
@@ -463,8 +323,6 @@ mod tests {
             "{ME_KIT_TAG}:https%3A%2F%2Fcommunity.test:groups:me"
         )));
         assert_eq!(tag(&record), ME_KIT_TAG);
-        assert!(in_catalog(&d, COMMUNITY));
-        assert!(!in_catalog(&d, "https://other.test"));
         let parsed = parse_groups(&record["value"]).unwrap();
         assert_eq!(parsed.channels, [CHANNEL]);
     }

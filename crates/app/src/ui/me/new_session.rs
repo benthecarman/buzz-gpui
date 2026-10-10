@@ -513,7 +513,7 @@ impl Render for NewSession {
                 .text_color(c.text_subtle)
                 .child(text.to_owned())
         };
-        let removed = self.error.as_deref() == Some(buzz_relay_client::me_kit::REMOVED_SECTION)
+        let removed = self.error.as_deref() == Some(buzz_relay_client::kit::me::REMOVED_SECTION)
             && self.pending.as_ref().is_some_and(|p| {
                 p.setup.as_ref().is_some_and(|s| s.section_id.is_some())
                     && !p.setup_done

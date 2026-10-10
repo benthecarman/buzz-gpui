@@ -8,6 +8,7 @@
 //! TypeScript layer's messages and its 16 KiB record budget. Reading and
 //! writing the records belongs to the session (`session/kit.rs`).
 
+pub mod me;
 pub mod payload;
 pub mod setup;
 
@@ -31,8 +32,6 @@ pub const KIT_RECORD_BYTES: usize = 16 * 1024;
 pub const CANVAS_BYTES: usize = 24 * 1024;
 /// A full catalog read; reaching it fails rather than show a partial one.
 pub const CATALOG_LIMIT: usize = 500;
-/// Records decoded per batch (`relay_kit_decode` takes at most 16).
-pub const DECODE_BATCH: usize = 16;
 /// Ciphertext and plaintext bounds of the native decoder.
 const CIPHERTEXT_BYTES: usize = 64 * 1024;
 const PLAINTEXT_BYTES: usize = 48 * 1024;
@@ -124,6 +123,15 @@ pub enum GroupsId {
     Me,
 }
 
+impl GroupsId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Me => "me",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Groups {
     pub id: GroupsId,
@@ -155,10 +163,7 @@ impl KitValue {
         match self {
             Self::Team(team) => &team.id,
             Self::Template(template) => &template.id,
-            Self::Groups(groups) => match groups.id {
-                GroupsId::Personal => "personal",
-                GroupsId::Me => "me",
-            },
+            Self::Groups(groups) => groups.id.as_str(),
         }
     }
 

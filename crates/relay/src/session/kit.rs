@@ -2,10 +2,10 @@
 //! (`channel-templates/capability.ts` `createChannelKit`, `setup.ts`
 //! `createChannelSetup`, `relay/session.ts` `channelCreation`).
 //!
-//! The kit reads the viewer's private recipes and saves them through the
-//! outbox with an expected head, as buzz-app does: a save is refused when
-//! the record changed, when an earlier save is unresolved, or within the
-//! same second as the head. Channel creation freezes its intent in a
+//! The kit is the typed view of the session's one recipe reader
+//! ([`super::MeKit`]), which saves through the outbox with an expected
+//! head, as buzz-app does: a save is refused when the record changed, when
+//! an earlier save is unresolved, or within the same second as the head. Channel creation freezes its intent in a
 //! device receipt before anything is sent, returns once the channel is
 //! confirmed (admission), and finishes its setup on its own afterwards
 //! (completion), leaving a notice when setup could not finish.
@@ -16,7 +16,7 @@ use crate::kit::setup::{
     ChannelCreationInput, PendingCreation, Progress, Receipts, SETUP_NOT_CONTINUED, SetupNotice,
     TEMPLATE_NOT_CONTINUED, pending_creation,
 };
-use crate::kit::{self, DECODE_BATCH, KitEntry, KitRecord, KitValue, Team, payload};
+use crate::kit::{self, KitEntry, KitRecord, KitValue, Team, payload};
 use crate::lifecycle::{self, Action, CONFIRM_DELAYS};
 use crate::outbox::{Delivery, Outbox, SendOptions};
 use crate::reader::{ReadOptions, Reader};
@@ -25,7 +25,7 @@ use crate::store::{Partition, Store};
 use buzz_identity::Identity;
 use nostr::prelude::EventId;
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
 
@@ -63,12 +63,7 @@ pub struct CreationSnapshot {
 
 #[derive(Default)]
 pub(super) struct KitShared {
-    kit: watch::Sender<Arc<KitSnapshot>>,
     creation: watch::Sender<Arc<CreationSnapshot>>,
-    /// Refreshes run one at a time; a caller during one joins its result.
-    refreshing: tokio::sync::Mutex<()>,
-    saving: AtomicBool,
-    epoch: AtomicU64,
     /// The creation in this session whose Create is unconfirmed.
     running: Mutex<Option<Progress>>,
     /// A creation is being admitted now.
@@ -76,14 +71,6 @@ pub(super) struct KitShared {
 }
 
 impl KitShared {
-    fn set_kit(&self, f: impl FnOnce(&mut KitSnapshot)) {
-        self.kit.send_modify(|snapshot| {
-            let mut next = (**snapshot).clone();
-            f(&mut next);
-            *snapshot = Arc::new(next);
-        });
-    }
-
     fn set_creation(&self) {
         let pending = self
             .running
@@ -215,15 +202,6 @@ impl Kit {
         }
         Ok(())
     }
-
-    /// An unresolved earlier send for this coordinate.
-    fn unresolved(&self, coordinate: &str) -> bool {
-        self.outbox.visible().iter().any(|op| {
-            op.kind() == kinds::APP_DATA
-                && op.tag("d") == Some(coordinate)
-                && !matches!(op.delivery, Delivery::Accepted | Delivery::Seen)
-        })
-    }
 }
 
 const TOO_OLD: &str = "This operation could not be confirmed and is too old to replay. Keep your draft and inspect the current result before making a new save.";
@@ -257,28 +235,28 @@ impl Session {
 
     /// The recipe catalog as last read (`channelKit.snapshot`).
     pub fn kit(&self) -> watch::Receiver<Arc<KitSnapshot>> {
-        self.kit.kit.subscribe()
+        self.me_kit.typed()
     }
 
     /// Reads the catalog once (`ensure`).
     pub fn kit_ensure(&self) {
-        if self.kit.kit.borrow().status != KitStatus::Idle {
-            return;
+        if self.me_kit.typed().borrow().status == KitStatus::Idle {
+            drop(self.me_kit.refresh());
         }
-        let (commands, shared) = (self.commands.clone(), self.kit.clone());
-        self.runtime.spawn(async move {
-            let _ = refresh(&commands, &shared).await;
-        });
     }
 
     /// Reads the viewer's recipes in this community again (`refresh`). A
     /// call during a refresh waits for it.
     pub async fn kit_refresh(&self) -> Result<(), String> {
-        let (commands, shared) = (self.commands.clone(), self.kit.clone());
-        self.runtime
-            .spawn(async move { refresh(&commands, &shared).await })
-            .await
-            .unwrap_or_else(|_| Err(CLOSED.into()))
+        self.me_kit.refresh().await;
+        let snapshot = self.me_kit.typed().borrow().clone();
+        match snapshot.status {
+            KitStatus::Ready => Ok(()),
+            _ => Err(snapshot
+                .error
+                .clone()
+                .unwrap_or_else(|| NOT_CONNECTED.into())),
+        }
     }
 
     /// Saves a recipe over `expected`, the head it was edited from (`None`
@@ -290,11 +268,7 @@ impl Session {
         expected: Option<EventId>,
         deleted: bool,
     ) -> Result<EventId, String> {
-        let (commands, shared) = (self.commands.clone(), self.kit.clone());
-        self.runtime
-            .spawn(async move { save(&commands, &shared, value, expected, deleted).await })
-            .await
-            .unwrap_or_else(|_| Err(CLOSED.into()))
+        save(&self.me_kit, &self.origin.http(), value, expected, deleted).await
     }
 
     /// The portable definition of a version 2 team (`loadTeam`): its
@@ -320,7 +294,7 @@ impl Session {
         expected: Option<EventId>,
         revision: String,
     ) -> Result<EventId, String> {
-        let (commands, shared) = (self.commands.clone(), self.kit.clone());
+        let (commands, kit) = (self.commands.clone(), self.me_kit.clone());
         self.runtime
             .spawn(async move {
                 let ctx = with(&commands, |actor| actor.kit_context()).await??;
@@ -382,7 +356,7 @@ impl Session {
                 };
                 // The whole payload must load before the manifest moves.
                 load_team(&ctx, &team).await?;
-                save(&commands, &shared, KitValue::Team(team), expected, false).await
+                save(&kit, &ctx.community, KitValue::Team(team), expected, false).await
             })
             .await
             .unwrap_or_else(|_| Err(CLOSED.into()))
@@ -512,108 +486,26 @@ fn restored(actor: &Actor, running: Option<String>) -> Option<PendingCreation> {
         .map(|(_, pending)| pending)
 }
 
-async fn refresh(
-    commands: &tokio::sync::mpsc::UnboundedSender<Message>,
-    shared: &Arc<KitShared>,
-) -> Result<(), String> {
-    let _guard = shared.refreshing.lock().await;
-    let generation = shared.epoch.load(Ordering::SeqCst);
-    shared.set_kit(|s| {
-        s.status = KitStatus::Loading;
-        s.error = None;
-    });
-    let result = async {
-        let ctx = with(commands, |actor| actor.kit_context()).await??;
-        let events = ctx.read(vec![kit::catalog_filter(&ctx.viewer)]).await?;
-        if events.len() >= kit::CATALOG_LIMIT {
-            return Err(
-                "Recipe catalog reached its read limit; no partial catalog will be used".into(),
-            );
-        }
-        let heads = kit::catalog_heads(&events, &ctx.community);
-        let mut entries = Vec::with_capacity(heads.len());
-        for batch in heads.chunks(DECODE_BATCH) {
-            for event in batch {
-                entries.push(kit::decode_entry(&ctx.identity, event, &ctx.community)?);
-            }
-        }
-        Ok::<_, String>(entries)
-    }
-    .await;
-    if shared.epoch.load(Ordering::SeqCst) != generation {
-        return Ok(());
-    }
-    match result {
-        Ok(entries) => {
-            shared.set_kit(|s| {
-                s.status = KitStatus::Ready;
-                s.entries = entries.into();
-                s.error = None;
-            });
-            Ok(())
-        }
-        Err(error) => {
-            // Before the relay answers there is nothing to read yet: the
-            // next `kit_ensure` reads again.
-            let waiting = error == NOT_CONNECTED;
-            shared.set_kit(|s| {
-                s.status = if waiting {
-                    KitStatus::Idle
-                } else {
-                    KitStatus::Error
-                };
-                s.error = (!waiting).then(|| error.clone());
-            });
-            Err(error)
-        }
-    }
-}
-
+/// Saves a typed recipe through the session's one recipe writer.
 async fn save(
-    commands: &tokio::sync::mpsc::UnboundedSender<Message>,
-    shared: &Arc<KitShared>,
+    kit: &super::MeKit,
+    community: &str,
     value: KitValue,
     expected: Option<EventId>,
     deleted: bool,
 ) -> Result<EventId, String> {
-    let ctx = with(commands, |actor| actor.kit_context()).await??;
     let record = kit::parse_kit_record(
-        &KitRecord::new(value, &ctx.community, deleted).to_json(),
-        &ctx.community,
+        &KitRecord::new(value, community, deleted).to_json(),
+        community,
     )?;
-    if shared.saving.swap(true, Ordering::SeqCst) {
-        return Err("Recipe saving is unavailable or already in progress".into());
-    }
-    let result = async {
-        ctx.outbox.ready().await.map_err(|e| e.to_string())?;
-        let coordinate = record.coordinate();
-        let head = ctx.head(&coordinate, false).await?;
-        if head.as_ref().map(|head| head.id) != expected {
-            return Err("This saved recipe changed. Refresh the catalog and review your draft before replacing it.".into());
-        }
-        if ctx.unresolved(&coordinate) {
-            return Err("A save for this recipe is unresolved. Inspect Outbox and refresh before replacing it.".into());
-        }
-        // Replaceable records use seconds: no ambiguous equal-time replacement.
-        if head.is_some_and(|head| head.created_at_secs() >= now()) {
-            return Err("Please wait a second before saving this recipe again".into());
-        }
-        let draft = kit::draft(&ctx.identity, &record)?;
-        let id = ctx
-            .outbox
-            .send(draft, SendOptions::default())
-            .map_err(|e| e.to_string())?;
-        ctx.confirm(id).await?;
-        if ctx.head(&coordinate, false).await?.map(|head| head.id) != Some(id) {
-            return Err("Another recipe save is selected. Your draft is kept; refresh and review before saving again.".into());
-        }
-        Ok::<_, String>(id)
-    }
-    .await;
-    shared.saving.store(false, Ordering::SeqCst);
-    let id = result?;
-    let _ = refresh(commands, shared).await;
-    Ok(id)
+    let id = kit
+        .save(
+            record.to_json()["value"].take(),
+            expected.map(|id| id.to_hex()),
+            deleted,
+        )
+        .await?;
+    EventId::from_hex(&id).map_err(|error| error.to_string())
 }
 
 async fn load_team(ctx: &Kit, team: &Team) -> Result<Value, String> {
@@ -981,7 +873,6 @@ mod tests {
     #[test]
     fn snapshots_start_idle_and_empty() {
         let shared = KitShared::default();
-        assert_eq!(shared.kit.borrow().status, KitStatus::Idle);
         assert!(shared.creation.borrow().pending.is_none());
         shared.notice(SetupNotice {
             id: "a".into(),
