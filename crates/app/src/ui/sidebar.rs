@@ -2,6 +2,7 @@
 
 use super::message::{channel_icon, display_name};
 use super::pages::{self, Page, Placement};
+use crate::community::{AppState, Community};
 use buzz_relay_client::{ChannelSummary, ChannelType, PresenceState, Profiles, SessionSnapshot};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonSize, IconName, NavigationItem,
@@ -275,16 +276,54 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
             }
             channel_row(channel, label.clone(), Some(avatar.into_any_element()))
         })));
+    // The shell's navigation column sets the width and the divider.
     div()
         .flex()
         .flex_col()
-        .flex_none()
-        .w(px(260.))
-        .h_full()
+        .size_full()
         .px(rems(0.5))
         .py(rems(0.5))
-        .border_r_1()
-        .border_color(c.border_standard)
         .child(list)
         .into_any_element()
+}
+
+/// View state key for the channel sidebar (`buzz-view.v1:[scope,
+/// "channel-sidebar"]`), per community and viewer.
+const SIDEBAR_VIEW: &str = "channel-sidebar";
+
+/// The channel sidebar's saved view: its width, the collapsed sections and
+/// where the list was scrolled (`useSidebarView.ts`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SidebarView {
+    /// `None` is the default width.
+    pub width: Option<f32>,
+    /// Section keys collapsed by the user.
+    pub collapsed: Vec<String>,
+    pub scroll_top: f32,
+}
+
+impl SidebarView {
+    /// The saved view for `community`, or the default one.
+    pub fn load(community: &Community, cx: &App) -> Self {
+        cx.global::<AppState>()
+            .store
+            .view_state(&community.partition(), SIDEBAR_VIEW)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, community: &Community, cx: &App) {
+        let json = serde_json::to_string(self).expect("the view serializes");
+        let saved = cx.global::<AppState>().store.set_view_state(
+            &community.partition(),
+            SIDEBAR_VIEW,
+            Some(&json),
+        );
+        if let Err(error) = saved {
+            tracing::warn!(%error, "could not save the sidebar view");
+        }
+    }
 }

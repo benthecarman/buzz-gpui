@@ -537,6 +537,15 @@ impl Render for Workspace {
                     },
                     cx,
                 )
+            })
+            .map(|sidebar| {
+                div()
+                    .flex_none()
+                    .w(px(260.))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(c.border_standard)
+                    .child(sidebar)
             });
         let profile = self.profile_card(window, cx);
         // No shadow around the frame: that needs a translucent surface,
