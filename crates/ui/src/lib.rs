@@ -64,7 +64,8 @@ pub const DIALOG_CONTEXT: &str = "BuzzDialog";
 ///
 /// Registers the bundled fonts, installs the [`Theme`] global (following
 /// the system appearance), projects it onto gpui-kit's theme, binds the
-/// interface size shortcuts and keeps every window's appearance in sync.
+/// interface size shortcuts (an app may rebind them) and keeps every
+/// window's appearance in sync.
 pub fn init(cx: &mut App) {
     fonts::register(cx);
     // buzz-app sets `-webkit-font-smoothing: antialiased`: grayscale AA.
@@ -77,6 +78,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-=", IncreaseInterfaceSize, None),
         KeyBinding::new("secondary-+", IncreaseInterfaceSize, None),
+        KeyBinding::new("secondary-shift-=", IncreaseInterfaceSize, None),
+        KeyBinding::new("secondary-shift-+", IncreaseInterfaceSize, None),
         KeyBinding::new("secondary--", DecreaseInterfaceSize, None),
         KeyBinding::new("secondary-0", ResetInterfaceSize, None),
         KeyBinding::new("escape", Cancel, Some(DIALOG_CONTEXT)),
