@@ -537,31 +537,31 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Section layout: Starred, personal groups, Channels, Forums, Direct messages; empty Starred/Forums hidden | src/bundled/channels/sidebar-sections.ts:13-117 | PARTIAL: pure function ported (crates/relay/src/sidebar.rs:98-200) but UI renders fixed Channels/Forums/DMs only (crates/app/src/ui/sidebar.rs:79-93) | Load preferences and render through `sidebar_sections` | M |
-| Per-section sort (A–Z / Recent by last activity) | src/bundled/channels/sidebar-sections.ts:40-55; src/bundled/channels/SidebarSection.tsx:160-195 | MISSING in UI (sort logic at crates/relay/src/sidebar.rs:76-95; UI always sorts by name, crates/app/src/ui/sidebar.rs:90-93) | Section "More actions" menu with Sort submenu, write `channel-sort`, show sort errors | M |
-| Read sidebar preferences (4 coordinates of kind 30078, foreground read, error prefixes "Preference query:" / "Preference decode:") | src/features/relay/sidebar-preferences.ts:199-238 | PARTIAL: filters and decoder exist (crates/relay/src/sidebar.rs:1767-1866), session never reads them | Add a session-owned preferences store with ensure/refresh | M |
+| Section layout: Starred, personal groups, Channels, Forums, Direct messages; empty Starred/Forums hidden | src/bundled/channels/sidebar-sections.ts:13-117 | DONE (crates/app/src/ui/sidebar.rs) | Load preferences and render through `sidebar_sections` | M |
+| Per-section sort (A–Z / Recent by last activity) | src/bundled/channels/sidebar-sections.ts:40-55; src/bundled/channels/SidebarSection.tsx:160-195 | DONE (crates/app/src/ui/sidebar/menus.rs, crates/app/src/ui/sidebar.rs) | Section "More actions" menu with Sort submenu, write `channel-sort`, show sort errors | M |
+| Read sidebar preferences (4 coordinates of kind 30078, foreground read, error prefixes "Preference query:" / "Preference decode:") | src/features/relay/sidebar-preferences.ts:199-238 | DONE (crates/relay/src/session/sidebar.rs) | Add a session-owned preferences store with ensure/refresh | M |
 | Preference projection and validation budgets (100 sections, 1000 assignments, 500 stars/mutes, 104 sort keys) | src/features/relay/sidebar-preferences.ts:78-197 | DONE (crates/relay/src/sidebar.rs:1478-1534) | - | - |
 | LWW register metadata (`meta`), legacy import, tombstones, 128 KiB budget, device id | src/features/relay/sidebar-registers.ts:1-300 | DONE (crates/relay/src/sidebar.rs:860-1310) | - | - |
 | Pure edits: section removal, assignment, create-and-assign, sort, star/mute toggle | src/features/relay/sidebar-edits.ts:1-153 | DONE (crates/relay/src/sidebar.rs:1590-1760) | - | - |
-| Native writer: strong head read, sign, publish, readback confirm, conflict error | src/features/relay/native-sidebar.ts:40-298 | PARTIAL: `SidebarWrite::prepare`/`confirms` exist (crates/relay/src/sidebar.rs:2062-2208); no publish path | Session action to read head, sign 30078 (NIP-44 to self), publish, read back | M |
-| Preferences store: serialized write queue, optimistic pending moves, failed-move retry/dismiss, sort failures, cached-state guards | src/features/relay/sidebar-preferences-store.ts:39-719 | MISSING | Port the store (pending/failed maps, generation, clear/dispose) | L |
-| Star / unstar channel ("Move to… Starred") | src/features/channel-navigation/ChannelSidebar.tsx:583-592, 640-660 | MISSING | Row menu item + star write | M |
-| Move channel/conversation to a group, "Create new…", "Remove from <group>" | src/features/channel-navigation/ChannelSidebar.tsx:600-720 | MISSING | Move submenu and assignment writes | M |
-| Create new section dialog ("Create new section", "Section name") | src/bundled/channels/CreateSidebarSection.tsx:39-80 | MISSING | Dialog that calls create-and-assign | S |
-| Remove section with confirm ("…will move back to Channels…") | src/bundled/channels/SidebarSection.tsx:212-260 | MISSING | Section menu item, confirm dialog, removal write | S |
-| Collapse / expand section, persisted per scope | src/bundled/channels/SidebarSection.tsx:126-210; src/bundled/channels/useSidebarView.ts:15-47 | MISSING (caret drawn but inert, crates/app/src/ui/sidebar.rs:105) | Toggle state saved in view state | S |
-| Drag and drop channels between sections | src/features/channel-navigation/ChannelSidebarDnd.tsx:1-117 | MISSING | Drag sources and drop targets per section key | M |
-| Section group icons (emoji / custom emoji) | src/bundled/channels/SidebarGroupIcon.tsx:1-79 | MISSING | Render group icon in header and menus | S |
-| Personal groups dialog ("Personal groups", "Group name", add/remove/save) | src/bundled/channels/ChannelGroupsDialog.tsx:13-237; src/features/relay/sidebar-personal-groups.ts:42-172 | MISSING (data layer: see Me preferences) | Dialog and removal/assignment flows with their Outbox-guidance error texts | M |
-| Mute / Unmute with optimistic intent | src/features/channel-navigation/ChannelSidebar.tsx:728-744; src/bundled/channels/useOptimisticMute.ts:13-72 | MISSING | Row/header menu item, mute write, optimistic state, muted unread suppression input | M |
-| Sidebar row context menu (right click, ContextMenu key, Shift+F10) | src/bundled/channels/ChannelSidebarItem.tsx:272-344; src/bundled/channels/useChannelRowMenu.ts:1-41 | MISSING | Context menu with move, mute, read, copy link, lifecycle, remove-from-Messages | M |
-| Row menu "Copy link" (`buzz://channel/<encoded id>`, toast "Link copied." / "Couldn't copy the link.") | src/bundled/channels/ChannelCopyLinkMenuItem.tsx:5-24 | PARTIAL: only in header menu, no toast and no URI encoding (crates/app/src/ui/channel_menu.rs:157-170) | Add to row menu, encode id, show toasts | S |
-| Row menu lifecycle actions | src/features/channel-navigation/ChannelSidebar.tsx:763-772 | PARTIAL: only in header menu (crates/app/src/ui/channel_menu.rs:180-255) | Reuse in row menu | S |
-| Startup reveal latch (1500 ms budget, wait for prefs/names/activity/unread) and "updating" state | src/bundled/channels/useSidebarStartup.ts:11-87 | MISSING (port shows whatever is loaded; `startup_cache_usable` unused, crates/relay/src/sidebar.rs:856) | Latch the first reveal | S |
-| Channel sidebar width resize (220–520, default 260, double-click reset, persisted) | src/bundled/channels/useSidebarView.ts:4-13; src/features/channel-navigation/ChannelSidebarResizeHandle.tsx:1-27 | MISSING (fixed 260 px, crates/app/src/ui/sidebar.rs:276) | Resize handle and persisted width | S |
-| Scroll position restore and reveal current row | src/bundled/channels/useSidebarView.ts:54-228 | MISSING | Save scroll per scope; scroll selected row into view | S |
-| Sidebar connection states: "Connecting to your relay…", error + "Retry channels", "Choose a community to see channels.", "No channels yet.", "Retry connection", error boundary "Channels couldn't open." | src/features/channel-navigation/ChannelSidebar.tsx:100-185, 1229-1236 | MISSING (sidebar is just empty, crates/app/src/ui/workspace.rs:476-516) | Render status and retry | S |
-| "Saving…" status and move error notes | src/features/channel-navigation/ChannelSidebar.tsx:1195-1210 | MISSING | Comes with the preferences store | S |
+| Native writer: strong head read, sign, publish, readback confirm, conflict error | src/features/relay/native-sidebar.ts:40-298 | DONE (crates/relay/src/session/sidebar.rs) | Session action to read head, sign 30078 (NIP-44 to self), publish, read back | M |
+| Preferences store: serialized write queue, optimistic pending moves, failed-move retry/dismiss, sort failures, cached-state guards | src/features/relay/sidebar-preferences-store.ts:39-719 | DONE (crates/relay/src/sidebar_store.rs) | Port the store (pending/failed maps, generation, clear/dispose) | L |
+| Star / unstar channel ("Move to… Starred") | src/features/channel-navigation/ChannelSidebar.tsx:583-592, 640-660 | DONE (crates/app/src/ui/sidebar/menus.rs) | Row menu item + star write | M |
+| Move channel/conversation to a group, "Create new…", "Remove from <group>" | src/features/channel-navigation/ChannelSidebar.tsx:600-720 | DONE (crates/app/src/ui/sidebar/menus.rs) | Move submenu and assignment writes | M |
+| Create new section dialog ("Create new section", "Section name") | src/bundled/channels/CreateSidebarSection.tsx:39-80 | DONE (crates/app/src/ui/sidebar/dialogs.rs) | Dialog that calls create-and-assign | S |
+| Remove section with confirm ("…will move back to Channels…") | src/bundled/channels/SidebarSection.tsx:212-260 | DONE (crates/app/src/ui/sidebar/dialogs.rs) | Section menu item, confirm dialog, removal write | S |
+| Collapse / expand section, persisted per scope | src/bundled/channels/SidebarSection.tsx:126-210; src/bundled/channels/useSidebarView.ts:15-47 | DONE (crates/app/src/ui/sidebar.rs, crates/app/src/ui/sidebar/rows.rs) | Toggle state saved in view state | S |
+| Drag and drop channels between sections | src/features/channel-navigation/ChannelSidebarDnd.tsx:1-117 | DONE (crates/app/src/ui/sidebar/rows.rs; GPUI starts a drag after 2px, not 6px) | Drag sources and drop targets per section key | M |
+| Section group icons (emoji / custom emoji) | src/bundled/channels/SidebarGroupIcon.tsx:1-79 | DONE (crates/app/src/ui/sidebar/rows.rs, crates/app/src/ui/sidebar/menus.rs) | Render group icon in header and menus | S |
+| Personal groups dialog ("Personal groups", "Group name", add/remove/save) | src/bundled/channels/ChannelGroupsDialog.tsx:13-237; src/features/relay/sidebar-personal-groups.ts:42-172 | MISSING: needs the channel-kit (Me preferences) record, which the relay layer cannot read or write yet | Dialog and removal/assignment flows with their Outbox-guidance error texts | M |
+| Mute / Unmute with optimistic intent | src/features/channel-navigation/ChannelSidebar.tsx:728-744; src/bundled/channels/useOptimisticMute.ts:13-72 | DONE (crates/app/src/ui/sidebar.rs, crates/app/src/ui/sidebar/menus.rs) | Row/header menu item, mute write, optimistic state, muted unread suppression input | M |
+| Sidebar row context menu (right click, ContextMenu key, Shift+F10) | src/bundled/channels/ChannelSidebarItem.tsx:272-344; src/bundled/channels/useChannelRowMenu.ts:1-41 | DONE (crates/app/src/ui/sidebar/rows.rs, crates/app/src/ui/sidebar/menus.rs) | Context menu with move, mute, read, copy link, lifecycle, remove-from-Messages | M |
+| Row menu "Copy link" (`buzz://channel/<encoded id>`, toast "Link copied." / "Couldn't copy the link.") | src/bundled/channels/ChannelCopyLinkMenuItem.tsx:5-24 | DONE (crates/app/src/ui/sidebar/menus.rs; GPUI's clipboard write cannot fail, so there is no failure toast) | Add to row menu, encode id, show toasts | S |
+| Row menu lifecycle actions | src/features/channel-navigation/ChannelSidebar.tsx:763-772 | DONE (crates/app/src/ui/sidebar/menus.rs, crates/app/src/ui/channel_settings.rs `LifecycleDialog`) | Reuse in row menu | S |
+| Startup reveal latch (1500 ms budget, wait for prefs/names/activity/unread) and "updating" state | src/bundled/channels/useSidebarStartup.ts:11-87 | DONE (crates/app/src/ui/sidebar.rs; waits for the live socket rather than profile names) | Latch the first reveal | S |
+| Channel sidebar width resize (220–520, default 260, double-click reset, persisted) | src/bundled/channels/useSidebarView.ts:4-13; src/features/channel-navigation/ChannelSidebarResizeHandle.tsx:1-27 | DONE (crates/app/src/ui/resize_handle.rs, crates/app/src/ui/workspace/shell.rs) | Resize handle and persisted width | S |
+| Scroll position restore and reveal current row | src/bundled/channels/useSidebarView.ts:54-228 | DONE (crates/app/src/ui/sidebar.rs) | Save scroll per scope; scroll selected row into view | S |
+| Sidebar connection states: "Connecting to your relay…", error + "Retry channels", "Choose a community to see channels.", "No channels yet.", "Retry connection", error boundary "Channels couldn't open." | src/features/channel-navigation/ChannelSidebar.tsx:100-185, 1229-1236 | DONE (crates/app/src/ui/sidebar.rs; no community or error boundary state applies) | Render status and retry | S |
+| "Saving…" status and move error notes | src/features/channel-navigation/ChannelSidebar.tsx:1195-1210 | DONE (crates/app/src/ui/sidebar.rs, crates/app/src/ui/sidebar/menus.rs) | Comes with the preferences store | S |
 
 ### Sidebar rows
 
@@ -571,22 +571,22 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Channel icon: lock for private, hash otherwise; DM icon | src/features/channels/channel-icon.ts:4-8 | DONE (crates/app/src/ui/message.rs:1035-1042) | - | - |
 | DM label from participant names, "Notes to self", label profile demand capped at 1024 | src/bundled/channels/useChannelLabels.ts:9-77 | DONE (crates/app/src/ui/sidebar.rs:37-50; crates/relay/src/session/mod.rs:1030) | - | - |
 | 1:1 DM avatar with presence badge | src/bundled/channels/ChannelSidebarItem.tsx:186-200 | DONE (crates/app/src/ui/sidebar.rs:243-270) | - | - |
-| Agent avatars use squircle shape | src/bundled/channels/ChannelSidebarItem.tsx:197 | MISSING | Shape by `isAgent` | S |
-| Group DM shows participant count badge ("N other participants") | src/bundled/channels/ChannelSidebarItem.tsx:202-212 | DIFFERENT: port shows an initials avatar of the joined label | Count badge | S |
-| User status shown next to 1:1 DM name (compact) | src/bundled/channels/ChannelSidebarItem.tsx:219-228 | MISSING | Render user status accessory | S |
-| DM typing badge ("X is typing...", remote humans, incl. threads) | src/bundled/channels/DmTypingBadge.tsx:8-94 | MISSING | Typing badge on the DM avatar | S |
-| Working-agents indicator (turns + channel-level typing, label "<agents> working in <channel>") | src/bundled/channels/working-agents.ts:7-99; src/bundled/channels/ChannelSidebarItem.tsx:238-250 | MISSING | Agent activity feed and three-dot indicator | M |
-| Sessions nested under parent channel with collapse, "New session" draft row | src/bundled/channels/ChannelSidebarRow.tsx:96-190; src/features/channel-navigation/ChannelNavigationState.tsx:100-185 | DIFFERENT: session channels render as flat rows among channels | Nest by `parent_channel_id`, collapse state, drafts persisted as `sessions:channel-drafts` | M |
-| DM "Remove from Messages" (X button and menu), local viewer-scoped hide with probes that restore on new messages | src/bundled/channels/useHiddenDms.ts:1-237; src/bundled/channels/ChannelSidebarRow.tsx:130-160 | PARTIAL: `LocalHiddenDms` + probe backoff exist (crates/relay/src/sidebar.rs:287-540) but unused; only relay 30622 hides are applied | Wire local hides, X button, focus move, probe loop | M |
-| Header menu shares row actions (mute/read/copy link) via navigation state | src/features/channel-navigation/ChannelNavigationState.tsx:20-60 | MISSING | Shared action provider for header menu | S |
+| Agent avatars use squircle shape | src/bundled/channels/ChannelSidebarItem.tsx:197 | DONE (crates/app/src/ui/sidebar/rows.rs) | Shape by `isAgent` | S |
+| Group DM shows participant count badge ("N other participants") | src/bundled/channels/ChannelSidebarItem.tsx:202-212 | DONE (crates/app/src/ui/sidebar/rows.rs) | Count badge | S |
+| User status shown next to 1:1 DM name (compact) | src/bundled/channels/ChannelSidebarItem.tsx:219-228 | DONE (crates/app/src/ui/sidebar/rows.rs; read in batches every 2 minutes, not live) | Render user status accessory | S |
+| DM typing badge ("X is typing...", remote humans, incl. threads) | src/bundled/channels/DmTypingBadge.tsx:8-94 | DONE (crates/app/src/ui/sidebar/rows.rs) | Typing badge on the DM avatar | S |
+| Working-agents indicator (turns + channel-level typing, label "<agents> working in <channel>") | src/bundled/channels/working-agents.ts:7-99; src/bundled/channels/ChannelSidebarItem.tsx:238-250 | PARTIAL (crates/app/src/ui/sidebar/rows.rs): the viewer's own agents typing at the top level show; agent turns need the session to decrypt agent activity | Agent activity feed and three-dot indicator | M |
+| Sessions nested under parent channel with collapse, "New session" draft row | src/bundled/channels/ChannelSidebarRow.tsx:96-190; src/features/channel-navigation/ChannelNavigationState.tsx:100-185 | DONE (crates/app/src/ui/sidebar.rs; buzz-app's sidebar also renders them flat) | Nest by `parent_channel_id`, collapse state, drafts persisted as `sessions:channel-drafts` | M |
+| DM "Remove from Messages" (X button and menu), local viewer-scoped hide with probes that restore on new messages | src/bundled/channels/useHiddenDms.ts:1-237; src/bundled/channels/ChannelSidebarRow.tsx:130-160 | DONE (crates/app/src/ui/sidebar/menus.rs, crates/relay/src/session/mod.rs) | Wire local hides, X button, focus move, probe loop | M |
+| Header menu shares row actions (mute/read/copy link) via navigation state | src/features/channel-navigation/ChannelNavigationState.tsx:20-60 | DONE (crates/app/src/ui/sidebar/menus.rs `header_actions`, crates/app/src/ui/channel_menu.rs) | Shared action provider for header menu | S |
 
 ### Navigation and links
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Routes: `new-message`, `empty`, `{kind:"new-session", parentId}` | src/features/channel-navigation/routes.ts:3-25 | PARTIAL: new message is a dialog, no new-session route (crates/app/src/ui/navigation.rs) | Add new-session route | S |
+| Routes: `new-message`, `empty`, `{kind:"new-session", parentId}` | src/features/channel-navigation/routes.ts:3-25 | DONE (crates/app/src/ui/navigation.rs `ChannelRoute`, crates/app/src/ui/workspace/routes.rs) | Add new-session route | S |
 | Prepare DM: select the new DM once discovery admits it | src/features/channel-navigation/ChannelNavigationState.tsx:111-130 | DONE (crates/app/src/ui/workspace.rs:721-757) | - | - |
-| Public channel search for Cmd-K / `#` completion (180 ms debounce, keep still-matching results while loading, readOnly filter, error text "Public channel search couldn't finish…", retry, partial flag) | src/features/channels/usePublicChannelSearch.ts:26-96 | PARTIAL: search with 180 ms debounce exists (crates/app/src/ui/search.rs:30, 251, 706); no partial flag, no retry, no kept results | Partial/err/retry handling | S |
+| Public channel search for Cmd-K / `#` completion (180 ms debounce, keep still-matching results while loading, readOnly filter, error text "Public channel search couldn't finish…", retry, partial flag) | src/features/channels/usePublicChannelSearch.ts:26-96 | DONE (crates/app/src/ui/search.rs, crates/app/src/ui/composer/channels.rs, crates/relay/src/session/actions.rs `search_public_channel_page`) | Partial/err/retry handling | S |
 
 ### Direct messages
 
@@ -896,37 +896,37 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Toggle tab pane" button, tab close with fallback and focus return | BC/ChannelsPage.tsx:1406-1426; BC/useConversationTabs.tsx:297-321 | MISSING | Tab pane workspace | M |
-| Tab state per session and channel kept across visits | BC/useChannelTabState.ts:1-164 | PARTIAL | One thread panel per workspace, cleared on channel switch (A/workspace.rs:233, 257-308; A/thread.rs:556-587) | M |
-| "New tab" picker (Channels/DMs/Tools, fuzzy, usage-ranked, keyboard) | BC/ChannelTabPicker.tsx:49-229 | MISSING | - | L |
-| Secondary conversation tabs and thread tabs ("This conversation is no longer available.") | BC/ConversationTab.tsx:1-181; BC/useConversationTabs.tsx:322-379, 430-486 | MISSING | - | L |
-| Plugin channel launchers, drawer and side panel | BC/useChannelPanels.tsx:1-141 | MISSING | Plugin panel host | L |
-| Channel-menu plugin panels (e.g. "View channel usage") as tabs | BC/ChannelsPage.tsx:1357-1404; BC/useConversationTabs.tsx:153-170, 487-504 | MISSING | - | M |
-| Link routing into panels; legacy session links into a tab | BC/ChannelsPage.tsx:955-1050 | PARTIAL | `buzz://` navigation only (A/workspace.rs:789-817) | M |
+| "Toggle tab pane" button, tab close with fallback and focus return | BC/ChannelsPage.tsx:1406-1426; BC/useConversationTabs.tsx:297-321 | DONE (crates/app/src/ui/channel.rs, crates/app/src/ui/workspace/board.rs, crates/app/src/ui/channel_tabs.rs) | Tab pane workspace | M |
+| Tab state per session and channel kept across visits | BC/useChannelTabState.ts:1-164 | DONE (crates/app/src/ui/channel_tabs.rs, crates/app/src/ui/workspace/board.rs) | One thread panel per workspace, cleared on channel switch (A/workspace.rs:233, 257-308; A/thread.rs:556-587) | M |
+| "New tab" picker (Channels/DMs/Tools, fuzzy, usage-ranked, keyboard) | BC/ChannelTabPicker.tsx:49-229 | DONE (crates/app/src/ui/channel_tab_picker.rs) | - | L |
+| Secondary conversation tabs and thread tabs ("This conversation is no longer available.") | BC/ConversationTab.tsx:1-181; BC/useConversationTabs.tsx:322-379, 430-486 | DONE (crates/app/src/ui/workspace/board.rs) | - | L |
+| Plugin channel launchers, drawer and side panel | BC/useChannelPanels.tsx:1-141 | DONE (crates/app/src/ui/channel_panels.rs, crates/app/src/ui/workspace/board.rs; slices register their panels) | Plugin panel host | L |
+| Channel-menu plugin panels (e.g. "View channel usage") as tabs | BC/ChannelsPage.tsx:1357-1404; BC/useConversationTabs.tsx:153-170, 487-504 | DONE (crates/app/src/ui/channel_panels.rs, crates/app/src/ui/channel_menu.rs, crates/app/src/ui/workspace/board.rs) | - | M |
+| Link routing into panels; legacy session links into a tab | BC/ChannelsPage.tsx:955-1050 | DONE (crates/app/src/ui/workspace/board.rs `route_link_to_tab`) | `buzz://` navigation only (A/workspace.rs:789-817) | M |
 
 ### Channel settings panel and details editor
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Channel settings" tab (identity, Escape closes, "Editing is unavailable on this connection.") | BC/ChannelSettingsPanel.tsx:31-224; BC/ChannelsPage.tsx:1561-1585 | DIFFERENT | Modal "Channel details" dialog (A/channel_menu.rs:379-581) | M |
-| Description and Visibility rows (hidden for DM/session), click to edit | BC/ChannelSettingsPanel.tsx:103-181 | PARTIAL | Fields shown directly, disabled for non-editors; Description shown for DMs (A/channel_menu.rs:485-546) | S |
-| Members row with count; Channel ID row with copy ("Channel ID copied") | BC/ChannelSettingsPanel.tsx:182-192, 308-356 | MISSING | Port has "Copy link" instead (A/channel_menu.rs:157-171) | S |
-| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | MISSING | - | M |
-| Personal groups settings card ("Manage personal groups", "Reload groups") | BC/ChannelSetupSettings.tsx:1-105 | MISSING | - | M |
-| Fresh load, reload keeping explicit choices, "Reload details" on error | BC/ChannelDetailsEditor.tsx:122-168, 292-301 | PARTIAL | Loads once; error replaces body, no reload (A/channel_menu.rs:405-423, 484) | S |
-| Save gating (dirty and valid) and inline field errors | BC/ChannelDetailsEditor.tsx:173-197, 492-521; FR/channel-details-protocol.ts:45-76 | PARTIAL | Save always enabled; errors only after submit (A/channel_menu.rs:436-449, 565-577; R/lifecycle.rs:613-633) | S |
-| "Discard changes?" (Keep editing / Discard changes) | BC/ChannelDetailsEditor.tsx:218-234, 384-395 | MISSING | - | S |
-| Privacy change confirmation ("Make channel private?/public?") | BC/ChannelDetailsEditor.tsx:396-441, 474-479 | MISSING | - | S |
-| Uncertain save survives reopen ("Check save status", "Check the previous change before saving again.") | FR/channel-details.ts:31-32, 142-153, 162-163, 206-211; BC/ChannelDetailsEditor.tsx:258-303, 450-458 | MISSING | Port returns UNCONFIRMED and allows immediate resave (R/session/actions.rs:511-540) | M |
-| Normalization and copy | BC/ChannelDetailsEditor.tsx:173-176 | DIFFERENT | Port trims description (A/channel_menu.rs:442); shows "This channel's details can't be changed now." for any TTL channel even when the reason is role (A/channel_menu.rs:547-555) | S |
+| "Channel settings" tab (identity, Escape closes, "Editing is unavailable on this connection.") | BC/ChannelSettingsPanel.tsx:31-224; BC/ChannelsPage.tsx:1561-1585 | DONE (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/workspace/board.rs; every port session can sign, so "Editing is unavailable on this connection." never applies) | Modal "Channel details" dialog (A/channel_menu.rs:379-581) | M |
+| Description and Visibility rows (hidden for DM/session), click to edit | BC/ChannelSettingsPanel.tsx:103-181 | DONE (crates/app/src/ui/channel_settings.rs) | Fields shown directly, disabled for non-editors; Description shown for DMs (A/channel_menu.rs:485-546) | S |
+| Members row with count; Channel ID row with copy ("Channel ID copied") | BC/ChannelSettingsPanel.tsx:182-192, 308-356 | DONE (crates/app/src/ui/channel_settings.rs) | Port has "Copy link" instead (A/channel_menu.rs:157-171) | S |
+| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | PARTIAL (crates/app/src/ui/channel_settings.rs): lifecycle buttons done; Save as template belongs to the templates slice, and the Personal group select needs the Me preferences record | - | M |
+| Personal groups settings card ("Manage personal groups", "Reload groups") | BC/ChannelSetupSettings.tsx:1-105 | MISSING: needs the Me preferences (channel-kit) record, which the relay layer cannot read or write yet | - | M |
+| Fresh load, reload keeping explicit choices, "Reload details" on error | BC/ChannelDetailsEditor.tsx:122-168, 292-301 | DONE (crates/app/src/ui/channel_settings.rs) | Loads once; error replaces body, no reload (A/channel_menu.rs:405-423, 484) | S |
+| Save gating (dirty and valid) and inline field errors | BC/ChannelDetailsEditor.tsx:173-197, 492-521; FR/channel-details-protocol.ts:45-76 | DONE (crates/app/src/ui/channel_settings.rs) | Save always enabled; errors only after submit (A/channel_menu.rs:436-449, 565-577; R/lifecycle.rs:613-633) | S |
+| "Discard changes?" (Keep editing / Discard changes) | BC/ChannelDetailsEditor.tsx:218-234, 384-395 | DONE (crates/app/src/ui/channel_settings.rs) | - | S |
+| Privacy change confirmation ("Make channel private?/public?") | BC/ChannelDetailsEditor.tsx:396-441, 474-479 | DONE (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/form_fields.rs) | - | S |
+| Uncertain save survives reopen ("Check save status", "Check the previous change before saving again.") | FR/channel-details.ts:31-32, 142-153, 162-163, 206-211; BC/ChannelDetailsEditor.tsx:258-303, 450-458 | DONE (crates/app/src/ui/channel_settings.rs, crates/relay/src/session/actions.rs) | Port returns UNCONFIRMED and allows immediate resave (R/session/actions.rs:511-540) | M |
+| Normalization and copy | BC/ChannelDetailsEditor.tsx:173-176 | DONE (crates/app/src/ui/channel_settings.rs) | Port trims description (A/channel_menu.rs:442); shows "This channel's details can't be changed now." for any TTL channel even when the reason is role (A/channel_menu.rs:547-555) | S |
 
 ### Shared form fields
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| ChannelTextField (counter at ≥90 %, input bounded by code points, SR count) | BC/ChannelTextField.tsx:22-34, 81-98 | DIFFERENT | Always shows N/limit and allows overflow (A/new_channel.rs:121-136; A/channel_menu.rs:486-525) | S |
-| ChannelDurationField (Ongoing/Temporary, 1d/1w/2w steps) | BC/ChannelDurationField.tsx:8-131 | MISSING | - | M |
-| ChannelPrivacyConfirmation with "Don't show me this again" per scope | BC/ChannelPrivacyConfirmation.tsx:6-49 | MISSING | - | S |
+| ChannelTextField (counter at ≥90 %, input bounded by code points, SR count) | BC/ChannelTextField.tsx:22-34, 81-98 | DONE (crates/app/src/ui/form_fields.rs) | Always shows N/limit and allows overflow (A/new_channel.rs:121-136; A/channel_menu.rs:486-525) | S |
+| ChannelDurationField (Ongoing/Temporary, 1d/1w/2w steps) | BC/ChannelDurationField.tsx:8-131 | DONE (crates/app/src/ui/form_fields.rs) | - | M |
+| ChannelPrivacyConfirmation with "Don't show me this again" per scope | BC/ChannelPrivacyConfirmation.tsx:6-49 | DONE (crates/app/src/ui/form_fields.rs) | - | S |
 
 ### Details protocol
 
@@ -944,10 +944,10 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Header lifecycle menu (Hide / Leave / Archive / Unarchive / Delete check unavailable / Delete) | BC/ChannelLifecycleMenu.tsx:22-168 | PARTIAL | Items there (A/channel_menu.rs:102-116, 179-255); missing "Retry channel permissions" / "Retry Delete check" and "unavailable on this connection"; port shows "Checking…" | S |
-| Settings-panel lifecycle buttons with retry, "No channel actions available." | BC/ChannelLifecycleActions.tsx:15-162 | MISSING | - | S |
+| Header lifecycle menu (Hide / Leave / Archive / Unarchive / Delete check unavailable / Delete) | BC/ChannelLifecycleMenu.tsx:22-168 | DONE (crates/app/src/ui/channel_menu.rs) | Items there (A/channel_menu.rs:102-116, 179-255); missing "Retry channel permissions" / "Retry Delete check" and "unavailable on this connection"; port shows "Checking…" | S |
+| Settings-panel lifecycle buttons with retry, "No channel actions available." | BC/ChannelLifecycleActions.tsx:15-162 | DONE (crates/app/src/ui/channel_settings.rs) | - | S |
 | Confirmation dialog copy, Delete destructive, no close while busy | BC/ChannelLifecycleDialog.tsx:10-36, 82-118 | DONE (A/channel_menu.rs:259-313, 331-345) | - | - |
-| After unconfirmed result, confirm stays disabled | BC/ChannelLifecycleDialog.tsx:56-76, 104 | MISSING | Confirm stays enabled, action can be resent (A/channel_menu.rs:300-310) | S |
+| After unconfirmed result, confirm stays disabled | BC/ChannelLifecycleDialog.tsx:56-76, 104 | DONE (crates/app/src/ui/channel_settings.rs `LifecycleDialog`, crates/relay/src/lifecycle.rs `ActionError::Unconfirmed`) | Confirm stays enabled, action can be resent (A/channel_menu.rs:300-310) | S |
 
 ### Lifecycle protocol
 
@@ -966,12 +966,12 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Name/description, canonical name, Private switch, Create disabled when invalid | BC/CreateChannelDialog.tsx:133-184, 379-412, 446-465 | PARTIAL | Works (A/new_channel.rs:63-113, 168-185); no inline errors or "Buzz session (" pre-check | S |
-| Temporary duration (ttl) | BC/CreateChannelDialog.tsx:135-138, 225, 550-560 | MISSING | NewChannel has no ttl (R/lifecycle.rs:636-668) | M |
-| Privacy confirmation and "Discard changes?" | BC/CreateChannelDialog.tsx:186-199, 341-399 | MISSING | (A/new_channel.rs:140-144, 168-178) | S |
-| Pending creation recovery ("Retry channel", restore after restart) | BC/CreateChannelDialog.tsx:157-175, 411, 434-439; FT/setup.ts:130-190 | MISSING | Waits inside dialog only (R/session/actions.rs:542-572) | M |
-| Group destination ("Create a channel in <group>") | BC/CreateChannelDialog.tsx:142-145, 207-216, 311-327 | MISSING | - | M |
-| Template/teams editor and setup summary | BC/CreateChannelDialog.tsx:253-282, 466-549, 562 | MISSING | - | L |
+| Name/description, canonical name, Private switch, Create disabled when invalid | BC/CreateChannelDialog.tsx:133-184, 379-412, 446-465 | DONE (crates/app/src/ui/new_channel.rs) | Works (A/new_channel.rs:63-113, 168-185); no inline errors or "Buzz session (" pre-check | S |
+| Temporary duration (ttl) | BC/CreateChannelDialog.tsx:135-138, 225, 550-560 | DONE (crates/app/src/ui/new_channel.rs, crates/relay/src/lifecycle.rs) | NewChannel has no ttl (R/lifecycle.rs:636-668) | M |
+| Privacy confirmation and "Discard changes?" | BC/CreateChannelDialog.tsx:186-199, 341-399 | DONE (crates/app/src/ui/new_channel.rs) | (A/new_channel.rs:140-144, 168-178) | S |
+| Pending creation recovery ("Retry channel", restore after restart) | BC/CreateChannelDialog.tsx:157-175, 411, 434-439; FT/setup.ts:130-190 | MISSING: part of the channel templates setup receipts (`FT/setup.ts`), owned by the templates slice | Waits inside dialog only (R/session/actions.rs:542-572) | M |
+| Group destination ("Create a channel in <group>") | BC/CreateChannelDialog.tsx:142-145, 207-216, 311-327 | MISSING: needs personal groups (the Me preferences record) and the templates setup placement | - | M |
+| Template/teams editor and setup summary | BC/CreateChannelDialog.tsx:253-282, 466-549, 562 | MISSING: owned by the templates slice | - | L |
 | 9007 via outbox, receipt, roster confirm, open channel; gated on relay support | docs/port/relay.md §5m.1 | DONE (R/session/actions.rs:542-572; A/new_channel.rs:79-113; A/workspace.rs:486-489) | - | - |
 
 ### Canvas
@@ -987,9 +987,9 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Joined-channel completion (tiered match, limit 20, escaped link, "Private channel") | BC/ChannelCompletion.tsx:11-37, 48-55, 124-145 | PARTIAL | Mostly done (A/composer.rs:805-845, 1379-1391); missing newline-name filter, membership/cached check, id tiebreak | S |
-| Open unjoined channels ("Not joined", 5 rows reserved) | BC/ChannelCompletion.tsx:38-41, 67-117 | MISSING | - | M |
-| Status/retry lines, duplicate-name id detail, canSelect recheck | BC/ChannelCompletion.tsx:87-92, 119-176 | MISSING | - | S |
+| Joined-channel completion (tiered match, limit 20, escaped link, "Private channel") | BC/ChannelCompletion.tsx:11-37, 48-55, 124-145 | DONE (crates/app/src/ui/composer/channels.rs) | Mostly done (A/composer.rs:805-845, 1379-1391); missing newline-name filter, membership/cached check, id tiebreak | S |
+| Open unjoined channels ("Not joined", 5 rows reserved) | BC/ChannelCompletion.tsx:38-41, 67-117 | DONE (crates/app/src/ui/composer/channels.rs) | - | M |
+| Status/retry lines, duplicate-name id detail, canSelect recheck | BC/ChannelCompletion.tsx:87-92, 119-176 | DONE (crates/app/src/ui/composer/channels.rs) | - | S |
 
 ### Live status and relay timings
 
