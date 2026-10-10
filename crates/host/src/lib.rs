@@ -80,12 +80,35 @@ struct Owner {
     last: Option<AgentsSnapshot>,
     seq: u64,
     events: broadcast::Sender<(u64, HostEvent)>,
+    gate: Gate,
+}
+
+/// Whose agents may start here.
+enum Gate {
+    /// buzzd has no human key: any agent starts.
+    Open,
+    /// A GUI's host before it knows who signed in: nothing starts.
+    Waiting,
+    /// Kept agents answer only to the owner who authorized them, not to
+    /// whoever signs in next.
+    SignedIn(String),
 }
 
 impl AgentHost {
     /// Opens the store, starts agents marked to start with the host, and
     /// retries agent profiles left unpublished. Must run inside tokio.
     pub fn start(config: HostConfig) -> Result<Arc<Self>, String> {
+        Self::start_gated(config, Gate::Open)
+    }
+
+    /// As [`Self::start`], for a host inside a GUI: no agent starts until
+    /// [`Self::set_owner`] names the signed-in key, and then only agents
+    /// that key authorized (buzz-app's `check_owner`).
+    pub fn start_for_owner(config: HostConfig) -> Result<Arc<Self>, String> {
+        Self::start_gated(config, Gate::Waiting)
+    }
+
+    fn start_gated(config: HostConfig, gate: Gate) -> Result<Arc<Self>, String> {
         buzz_agent_controller::warm_tools_path();
         std::fs::create_dir_all(&config.workspace)
             .map_err(|_| "Could not create the agent workspace")?;
@@ -113,13 +136,16 @@ impl AgentHost {
             last: None,
             seq: 0,
             events: events.clone(),
+            gate,
         };
         let interval = config.watch_interval;
         let app_data = owner.state_dir.clone();
         let thread = std::thread::Builder::new()
             .name("agent-host".into())
             .spawn(move || {
-                if let Err(error) = owner.controller.restore() {
+                if matches!(owner.gate, Gate::Open)
+                    && let Err(error) = owner.controller.restore()
+                {
                     tracing::warn!(%error, "could not restore agents");
                 }
                 owner.publish();
@@ -148,6 +174,27 @@ impl AgentHost {
         });
         host.publish_pending_profiles();
         Ok(host)
+    }
+
+    /// Names the key signed in to the GUI. The first call starts that key's
+    /// agents marked to start with the host.
+    pub fn set_owner(&self, viewer: String) {
+        let _ = self.jobs.send(Box::new(move |owner| owner.sign_in(viewer)));
+    }
+
+    /// Stops every agent this host runs and waits until they have stopped
+    /// (sign-out before Buzz restarts, and quitting, as buzz-app's
+    /// `AgentHost::shutdown`). Their launch settings stay.
+    pub fn shutdown(&self) -> Result<(), String> {
+        let (sender, receiver) = mpsc::channel();
+        self.jobs
+            .send(Box::new(move |owner| {
+                let _ = sender.send(owner.controller.shutdown());
+            }))
+            .map_err(|_| "Agent host shutdown could not be confirmed".to_string())?;
+        receiver
+            .recv_timeout(SHUTDOWN_TIMEOUT)
+            .map_err(|_| "Agent host shutdown could not be confirmed".to_string())?
     }
 
     async fn run<T: Send + 'static>(
@@ -252,6 +299,9 @@ impl AgentHost {
                         AgentAction::Stop => Action::Stop,
                         AgentAction::Restart => Action::Restart,
                     };
+                    if !matches!(action, Action::Stop) {
+                        owner.may_start(&id)?;
+                    }
                     owner.controller.action(&id, action)?;
                     owner.snapshot().map(Response::Agents)
                 })
@@ -610,28 +660,6 @@ impl AgentHost {
     }
 }
 
-impl AgentHost {
-    /// Stops every agent now and waits for the controller to confirm it,
-    /// as quitting buzz-app does (`AgentHost::shutdown`). Blocks the
-    /// caller; the host keeps serving afterwards.
-    pub fn shutdown(&self) -> Result<(), String> {
-        let (done, confirmed) = mpsc::channel();
-        self.jobs
-            .send(Box::new(move |owner: &mut Owner| {
-                let _ = done.send(
-                    owner
-                        .controller
-                        .shutdown()
-                        .map_err(|error| error.to_string()),
-                );
-            }))
-            .map_err(|_| "Agent host shutdown could not be confirmed".to_string())?;
-        confirmed
-            .recv_timeout(SHUTDOWN_TIMEOUT)
-            .map_err(|_| "Agent host shutdown could not be confirmed".to_string())?
-    }
-}
-
 /// How long [`AgentHost::shutdown`] waits for the agents to stop.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -765,6 +793,39 @@ impl Drop for AgentHost {
 }
 
 impl Owner {
+    /// Whether this agent may start for whoever is signed in.
+    fn may_start(&self, id: &str) -> Result<(), String> {
+        match &self.gate {
+            Gate::Open => Ok(()),
+            Gate::Waiting => Err("Set up your identity first".into()),
+            Gate::SignedIn(viewer) => self.controller.check_owner(id, Some(viewer)),
+        }
+    }
+
+    /// The first sign-in restores the agents marked to start with the
+    /// host, as `Controller::restore` does, refusing other owners' agents.
+    fn sign_in(&mut self, viewer: String) {
+        let first = matches!(self.gate, Gate::Waiting);
+        self.gate = Gate::SignedIn(viewer);
+        if !first {
+            return;
+        }
+        let ids = match self.controller.launch_ids() {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "could not restore agents");
+                return;
+            }
+        };
+        for id in ids {
+            if let Err(error) = self.may_start(&id) {
+                self.controller.record_error(&id, error);
+            } else if let Err(error) = self.controller.action(&id, Action::Start) {
+                tracing::warn!(agent = %id, %error, "could not restore agent");
+            }
+        }
+    }
+
     /// Saves an agent. The controller keeps an agent's own effort until its
     /// harness kind changes, and has no other way to clear it; so a clear
     /// saves twice more, through a stand-in harness of another kind and
