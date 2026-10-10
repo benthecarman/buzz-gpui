@@ -60,11 +60,27 @@ pub fn extends_name(name: &str, query: &str) -> bool {
 /// The tier at which `name` matches `query`: 0 equal, 1 prefix, 2 a word
 /// equals it, 3 a word starts with it. An empty query matches at 0.
 pub fn match_tier(name: &str, query: &str) -> Option<u8> {
+    match_person(name, query).map(|(tier, _)| tier)
+}
+
+/// [`match_tier`] with the char indexes of `name` that matched, for
+/// underlining (`matchPerson`). A folded-away accent joins its letter.
+pub fn match_person(name: &str, query: &str) -> Option<(u8, Vec<usize>)> {
     let needle: Vec<char> = normalize_name(query).chars().collect();
-    let chars: Vec<char> = name
-        .chars()
-        .flat_map(|c| fold_point(c).chars().collect::<Vec<_>>())
-        .collect();
+    let mut chars: Vec<char> = Vec::new();
+    let mut origin: Vec<Vec<usize>> = Vec::new();
+    for (index, c) in name.chars().enumerate() {
+        let pieces: Vec<char> = fold_point(c).chars().collect();
+        if pieces.is_empty()
+            && let Some(last) = origin.last_mut()
+        {
+            last.push(index);
+        }
+        for piece in pieces {
+            chars.push(piece);
+            origin.push(vec![index]);
+        }
+    }
     let (mut start, mut end) = (0, chars.len());
     while start < end && chars[start].is_whitespace() {
         start += 1;
@@ -73,30 +89,39 @@ pub fn match_tier(name: &str, query: &str) -> Option<u8> {
         end -= 1;
     }
     if needle.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
     let at =
         |from: usize| from + needle.len() <= end && chars[from..from + needle.len()] == needle[..];
+    let found = |tier: u8, from: usize| {
+        let mut positions: Vec<usize> = origin[from..from + needle.len()]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        positions.dedup();
+        Some((tier, positions))
+    };
     if end - start == needle.len() && at(start) {
-        return Some(0);
+        return found(0, start);
     }
     if end - start > needle.len() && at(start) {
-        return Some(1);
+        return found(1, start);
     }
     if needle.iter().any(|c| c.is_whitespace()) {
         return None;
     }
-    let mut prefix = false;
+    let mut prefix = None;
     for from in start + 1..end {
         if !is_word(Some(chars[from])) || is_word(Some(chars[from - 1])) || !at(from) {
             continue;
         }
         if !is_word(chars.get(from + needle.len()).copied()) {
-            return Some(2);
+            return found(2, from);
         }
-        prefix = true;
+        prefix.get_or_insert(from);
     }
-    prefix.then_some(3)
+    prefix.and_then(|from| found(3, from))
 }
 
 /// One key the user can mention (`MentionChoice`).
@@ -365,6 +390,19 @@ mod tests {
                 exact_mention(&choices, case["query"].as_str().unwrap()).map(|c| c.key.as_str());
             assert_eq!(got, case["expected"].as_str(), "{}", case["name"]);
         }
+    }
+
+    #[test]
+    fn match_positions_cover_letters_and_their_accents() {
+        assert_eq!(
+            match_person("Mary-Jane", "jane"),
+            Some((2, vec![5, 6, 7, 8]))
+        );
+        assert_eq!(
+            match_person("Jose\u{301}", "jose"),
+            Some((0, vec![0, 1, 2, 3, 4]))
+        );
+        assert_eq!(match_person("Honey", "oney"), None);
     }
 
     #[test]

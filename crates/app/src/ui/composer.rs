@@ -14,6 +14,7 @@ mod clipboard;
 mod format;
 mod link;
 mod live_markdown;
+mod mention_picker;
 mod mention_rules;
 mod mentions;
 mod poof;
@@ -169,6 +170,9 @@ pub struct Composer {
     recent_people: Vec<String>,
     /// A query a complete search found no one for; longer ones can't match.
     refuted: Option<String>,
+    /// The @ button's picker, and when a press outside last closed it.
+    mention_picker: Option<mention_picker::Picker>,
+    mention_picker_closed: Option<std::time::Instant>,
     /// The last open channels found, kept while the next search runs.
     recent_public: Vec<ChannelSummary>,
     /// The query start Escape dismissed, until the text moves on.
@@ -425,6 +429,8 @@ impl Composer {
             directory_attempt: 0,
             recent_people: Vec::new(),
             refuted: None,
+            mention_picker: None,
+            mention_picker_closed: None,
             recent_public: Vec::new(),
             dismissed: None,
             completion_key: None,
@@ -1385,6 +1391,39 @@ impl Composer {
     /// `@` rows, status line, retry and the Space pick (`MentionCompletion`).
     /// `None` when the query is prose, not a search.
     fn mention_suggestions(&self, query: &Query, cx: &App) -> Option<MentionRows> {
+        let found = self.mention_choices(&query.text, cx);
+        if found.closed {
+            return None;
+        }
+        let community = self.community.read(cx);
+        let channel = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|c| c.id == self.channel);
+        let dm = channel.is_some_and(|c| c.channel_type == Some(ChannelType::Dm));
+        Some(MentionRows {
+            items: found
+                .people
+                .into_iter()
+                .map(|person| Suggestion::Person {
+                    pubkey: person.pubkey,
+                    name: person.name.into(),
+                    label: person.label.into(),
+                    picture: person.picture,
+                    agent: person.agent,
+                    member: person.member,
+                    dm,
+                })
+                .collect(),
+            status: found.status.map(SharedString::from),
+            retry: found.retry.then_some(channels::Retry::People),
+            space: found.space,
+        })
+    }
+
+    /// The `@` choices for `text`, ranked, with the directory search's state.
+    fn mention_choices(&self, text: &str, cx: &App) -> mentions::Completion {
         let community = self.community.read(cx);
         let snapshot = &community.snapshot;
         let channel = snapshot.channels.iter().find(|c| c.id == self.channel);
@@ -1421,29 +1460,7 @@ impl Composer {
             presence: &snapshot.presence,
             history: &history,
         };
-        let found = mentions::complete(&inputs, &query.text, directory);
-        if found.closed {
-            return None;
-        }
-        let dm = channel.is_some_and(|c| c.channel_type == Some(ChannelType::Dm));
-        Some(MentionRows {
-            items: found
-                .people
-                .into_iter()
-                .map(|person| Suggestion::Person {
-                    pubkey: person.pubkey,
-                    name: person.name.into(),
-                    label: person.label.into(),
-                    picture: person.picture,
-                    agent: person.agent,
-                    member: person.member,
-                    dm,
-                })
-                .collect(),
-            status: found.status.map(SharedString::from),
-            retry: found.retry.then_some(channels::Retry::People),
-            space: found.space,
-        })
+        mentions::complete(&inputs, text, directory)
     }
 
     /// Starts the open-channel lookup for `#query` after a typing pause,
@@ -2580,6 +2597,12 @@ fn large_emoji(text: &str, entries: &[buzz_relay_client::CustomEmoji]) -> bool {
     crate::ui::markdown::is_emoji_only(text, &entries)
 }
 
+/// A spring with a little bounce (`type: "spring", bounce: 0.15`).
+fn spring(t: f32) -> f32 {
+    let (c1, c3) = (0.7f32, 1.7f32);
+    1. + c3 * (t - 1.).powi(3) + c1 * (t - 1.).powi(2)
+}
+
 /// The toolbar's reveal: 140ms ease-out, or none (`reveal`).
 fn reveal(instant: bool) -> Animation {
     Animation::new(Duration::from_millis(if instant { 1 } else { 140 }))
@@ -3611,6 +3634,7 @@ impl Composer {
         let community = self.community.read(cx);
         let media = community.session.media().clone();
         let disabled = self.sending;
+        let reduce = cx.reduce_motion();
         let buttons = recipients
             .iter()
             .enumerate()
@@ -3678,6 +3702,21 @@ impl Composer {
                                 this.remove_recipient(&key, window, cx)
                             }))
                     })
+                    // A new recipient's avatar springs in from 0.9 scale
+                    // (240ms, bounce 0.15), about its centre.
+                    .with_animation(
+                        SharedString::from(format!("recipient-in-{pubkey}")),
+                        Animation::new(Duration::from_millis(if reduce { 1 } else { 240 }))
+                            .with_easing(spring),
+                        move |button, t| {
+                            let size = 28. * (0.9 + 0.1 * t);
+                            let inset = (28. - size) / 2.;
+                            button
+                                .size(px(size))
+                                .top(px(inset))
+                                .left(px(index as f32 * 22. + inset))
+                        },
+                    )
             });
         let has_recipients = !recipients.is_empty();
         let count = recipients.len();
@@ -3694,17 +3733,11 @@ impl Composer {
                 IconButton::new("mention", IconName::At)
                     .size(IconButtonSize::Sm)
                     .tooltip("Mention a member")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let (text, caret) = {
-                            let state = this.input.read(cx);
-                            (state.value().to_string(), state.selected_range().start)
-                        };
-                        let spaced = text[..caret]
-                            .chars()
-                            .next_back()
-                            .is_none_or(|c| c.is_whitespace() || "([{".contains(c));
-                        this.insert_text(if spaced { "@" } else { " @" }, window, cx);
-                    })),
+                    .selected(self.mention_picker.is_some())
+                    .disabled(self.input_disabled(cx))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_mention_picker(window, cx)),
+                    ),
             )
             .when(has_recipients, |d| {
                 d.child(
@@ -4053,7 +4086,15 @@ impl Composer {
                         .p(px(8.))
                         .child(avatar)
                         .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                        .child(div().flex_none().text_caption().child(detail))
+                        .child(
+                            div()
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .max_w(px(200.))
+                                .truncate()
+                                .text_caption()
+                                .child(detail),
+                        )
                         .into_any_element()
                 }
                 Suggestion::Channel {
@@ -4248,6 +4289,21 @@ impl Render for Composer {
                 &community.snapshot.emoji.entries,
             )
         };
+        let chip_names = {
+            let community = self.community.read(cx);
+            let mut scope: Vec<String> = self
+                .summary(cx)
+                .map(|channel| channel.members.clone())
+                .unwrap_or_default();
+            scope.extend(self.recipients(cx).into_iter().map(|(key, _)| key));
+            crate::ui::identity::names(
+                &community.snapshot.profiles,
+                &crate::ui::identity::AgentLibrary::from_hosts(cx),
+                community.session.viewer(),
+                Some(&community.origin),
+                Some(&scope),
+            )
+        };
         let textarea = Textarea::new(&self.input)
             .appearance(false)
             .disabled(self.input_disabled(cx))
@@ -4255,6 +4311,14 @@ impl Render for Composer {
             // (`data-single-emoji`).
             .when(large_emoji, |t| t.text_size(px(42.)).line_height(px(48.)))
             .token(move |token: &InlineTokenContext, _, _| {
+                // A recipient chip names its key in context: a namesake that
+                // joins later qualifies it (`RichComposerInput`).
+                let label: SharedString = match token.token().text().strip_prefix('@') {
+                    Some(_) if token.token().id().len() == 64 => {
+                        format!("@{}", chip_names.display(token.token().id())).into()
+                    }
+                    _ => token.token().label().clone(),
+                };
                 div()
                     .flex()
                     .items_center()
@@ -4269,7 +4333,7 @@ impl Render for Composer {
                     })
                     .text_color(token_colors.text_standard)
                     .overflow_hidden()
-                    .child(token.token().label().clone())
+                    .child(label)
             })
             .on_paste(move |item, window, cx| {
                 weak.update(cx, |this, cx| this.paste(item, window, cx))
@@ -4499,6 +4563,7 @@ impl Render for Composer {
             .mx(px(16.))
             .mb(px(16.))
             .children(self.completion_popup(cx))
+            .children(self.mention_picker_popup(cx))
             .children(picker)
             .child(shell)
             .children(self.toasts(window, cx))
