@@ -443,6 +443,11 @@ impl Timeline {
             .cloned()
     }
 
+    /// The folded row shown for `id`.
+    pub fn row(&self, id: &EventId) -> Option<Arc<MessageRow>> {
+        self.current.rows.iter().find(|row| row.id == *id).cloned()
+    }
+
     /// The newest verified top-level message: the bottom of the channel, as
     /// a reading catch-up sees it. Unsent local rows do not count.
     pub fn bottom(&self) -> Option<String> {

@@ -43,7 +43,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 | 8 s connect deadline "Relay connection timed out. Try again." | service.ts:187-197 | DONE (session/mod.rs:836-840) | - | - |
 | A failed connect waits for user retry (or online/visible while cached) | service.ts:165-302 | DONE (session/mod.rs; app network.rs, main_window.rs) | - | - |
 | OS `online` retries a cached session; becoming visible runs `refreshList()` | service.ts:341-363 | DONE (session/mod.rs `online`/`visible`; app network.rs, main_window.rs) | - | - |
-| Native origin must be HTTPS without credentials/path/query/fragment | src-tauri/src/relay.rs:58-72 | DIFFERENT | Port also accepts `ws://`/`http://` (origin.rs:270-291); decide for non-dev builds | S |
+| Native origin must be HTTPS without credentials/path/query/fragment | src-tauri/src/relay.rs:58-72 | DONE (origin.rs: secure origins only; plain ws/http is kept for loopback development relays) | - | - |
 
 ### Socket open and NIP-42 AUTH
 
@@ -237,7 +237,7 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 | Edits by author/displayed author, latest wins, 40002 unwrap, `edited` | fold.ts:318-328 | DONE (fold/mod.rs:342-360) | - | - |
 | Attachments/emoji from newest edit, mentions from original, `attachmentSourceId` | fold.ts:329-419 | DONE (fold/mod.rs:362-425) | - | - |
 | Reaction grouping by (content, emoji URL), first-reaction order | fold.ts:432-487 | DONE (fold/mod.rs:470-517) | - | - |
-| Thread summary 39005 tie-break | fold.ts:167-197, 261-266 | DIFFERENT | Same-second tie: larger count wins before lower id (fold/mod.rs:625-632); intentional per spec §9.3 #14 | S |
+| Thread summary 39005 tie-break | fold.ts:167-197, 261-266 | DONE (fold/mod.rs: the reference's lower-id tie-break) | - | - |
 | 40099 membership rows | membership.ts:12-37; fold.ts:297-317 | DONE (fold/membership.rs:26-52) | - | - |
 | Displayed author (`actor` / leading `p`), signer, workflow owner | fold.ts:199-219 | DONE (fold/mod.rs:175-195, 551-573) | - | - |
 | Diff metadata, sent-from-thread excerpt, agent envelope, `mentionReferences` | fold.ts:352-411 | DONE (fold/mod.rs:401-440) | - | - |
@@ -261,12 +261,12 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Send and reply tags (`h`, ≤32 `p`, `mention`, `emoji`, `imeta`, NIP-10) | messages.ts:75-99, 179-207 | DONE (messages.rs:462-517; session/mod.rs:1371-1406) | - | - |
-| Every write kind requires "can participate" | messages.ts:42-48 | PARTIAL | Only Send checks it (session/mod.rs:1378-1384); Edit/React/Remove do not | S |
-| Edit copies `imeta` from folded `attachmentSourceId` | messages.ts:209-244 | PARTIAL | session/mod.rs:1408-1417 passes the original event; pass the row's `attachment_source_id` | S |
+| Every write kind requires "can participate" | messages.ts:42-48 | DONE (session/mod.rs `write`) | - | - |
+| Edit copies `imeta` from folded `attachmentSourceId` | messages.ts:209-244 | DONE (session/mod.rs `write`; session/timeline.rs `row`) | - | - |
 | React (custom emoji tag only for `:code:`) | messages.ts:245-264 | DONE (messages.rs:724-760) | - | - |
-| Remove own messages/reactions with `k`; agent owner removes agent's messages | messages.ts:265-314 | PARTIAL | Agent-owner case gets `None` (session/mod.rs:1438) | S |
-| Report (1984, NIP-56) | messages.ts:316-335 | PARTIAL | Builder exists (messages.rs:887); no session/UI caller | S |
-| Send thread reply to channel (sent-from-thread copy) | messages.ts:101-178 | PARTIAL | Builder exists (messages.rs:584); no session/UI caller | S |
+| Remove own messages/reactions with `k`; agent owner removes agent's messages | messages.ts:265-314 | DONE (session/actions.rs `removal_agent`; session/mod.rs) | - | - |
+| Report (1984, NIP-56) | messages.ts:316-335 | DONE (`Session::report`, session/actions.rs) | - | - |
+| Send thread reply to channel (sent-from-thread copy) | messages.ts:101-178 | DONE (`Session::send_to_channel`, session/mod.rs) | - | - |
 
 ### Persistence, caching and partitions
 
@@ -320,8 +320,8 @@ Key findings:
 | Retry reuses saved signature; refusal rules | outbox.ts:767-794 | DONE (outbox.rs:849-886) | - | - |
 | dismiss / recover / acknowledge rules and texts | outbox.ts:587-636, 795-815, 117-122 | DONE (outbox.rs:891-1000, 1339-1353) | - | - |
 | Workflow receipt callback | session.ts:293-294 | PARTIAL | Session passes `on_receipt: None` (session/mod.rs:878-886) | S |
-| preparePublish: fresh mention roster check, canvas/workflow validation, re-check at publish start | session.ts:296-315 | PARTIAL | `Publisher::prepare` not overridden (outbox.rs:333-335); mentions checked once against cached discovery (session/mod.rs:1385-1391) | M |
-| `observeSend` hook (mention-wake, unhide DM on outgoing send) | outbox.ts:48-50, 153-177 | MISSING | Hook and consumers | S |
+| preparePublish: fresh mention roster check, canvas/workflow validation, re-check at publish start | session.ts:296-315 | DONE (session/publisher.rs; canvas and workflow checks come with those features) | - | - |
+| `observeSend` hook (mention-wake, unhide DM on outgoing send) | outbox.ts:48-50, 153-177 | DONE (outbox.rs `observe_send`; `Session::observe_send`; its consumers are agent mention-wake and local DM hides) | - | - |
 | Serialized journal commits; confirmed LRU 2048 / 8 MiB; "Outbox storage is full" over 2 MiB | outbox.ts:205-276, 127 | DONE (outbox.rs:45-49, 1065-1153; store.rs:136, 512-660) | - | - |
 | Hydration budgets, batches, checks, no automatic replay, load error blocks sends | outbox.ts:292-379 | DONE (outbox.rs:1170-1258) | - | - |
 | Migration from localStorage / IndexedDB v1 journal | outbox-storage.ts:57-95 | DIFFERENT | Not needed (no earlier native journal) | - |

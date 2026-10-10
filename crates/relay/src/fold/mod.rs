@@ -291,8 +291,7 @@ impl<'a> Fold<'a> {
                 {
                     let summary = Summary::parse(event);
                     match summaries.get(&target) {
-                        Some((current, current_summary))
-                            if !summary_wins(event, &summary, current, current_summary) => {}
+                        Some((current, _)) if !summary_wins(event, current) => {}
                         _ => {
                             summaries.insert(target, (event, summary));
                         }
@@ -626,18 +625,13 @@ impl Summary {
     }
 }
 
-/// Spec §9.3 #14: the reference keeps the newer 39005 and breaks a
-/// same-second tie on the lower id, which can pick a stale count. The port
-/// breaks that tie on the larger count first (`descendant_count`, else
-/// `reply_count`); thread counters only grow within a second unless a
-/// delete lands in the same second, and a too-high count self-corrects with
-/// the next summary while a too-low one hides replies. The lower id still
-/// decides between equal counts, so arrival order never flips the result.
-fn summary_wins(candidate: &Event, ours: &Summary, current: &Event, theirs: &Summary) -> bool {
+/// The newer 39005 wins, and a same-second tie goes to the lower id, as in
+/// the reference (`newer`, `fold.ts:257-273`). Spec §9.3 #14 notes this
+/// can keep a stale count for a second; the next summary corrects it.
+fn summary_wins(candidate: &Event, current: &Event) -> bool {
     candidate
         .created_at
         .cmp(&current.created_at)
-        .then(ours.reply_count.cmp(&theirs.reply_count))
         .then(current.id.cmp(&candidate.id))
         .is_gt()
 }

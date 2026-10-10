@@ -464,6 +464,12 @@ pub type Gate = Arc<dyn Fn() -> bool + Send + Sync>;
 /// Receives a command's relay message, or `None` when it could not be
 /// confirmed. Called for workflow operations only.
 pub type ReceiptListener = Arc<dyn Fn(EventId, Option<String>) + Send + Sync>;
+/// Work a send observer wants done once that send is delivered, with the
+/// other observed sends still undelivered.
+pub type DeliveryWork = Box<dyn FnOnce(&[UnsignedEvent]) + Send>;
+/// Sees every fresh send as it is queued (`observeSend`), never a restored
+/// one, and may return work for its delivery. It cannot affect delivery.
+pub type SendObserver = Arc<dyn Fn(&UnsignedEvent) -> Option<DeliveryWork> + Send + Sync>;
 type Keep = Arc<dyn Fn(&Operation) -> bool + Send + Sync>;
 type SharedResult = Shared<BoxFuture<'static, Result<(), OutboxError>>>;
 
@@ -515,6 +521,25 @@ struct Inner {
     /// `true` once hydration finished, either way.
     hydration: watch::Sender<bool>,
     changes: watch::Sender<u64>,
+    observers: Mutex<Vec<(u64, SendObserver)>>,
+}
+
+/// Stops a send observer when dropped.
+pub struct SendObservation {
+    inner: std::sync::Weak<Inner>,
+    id: u64,
+}
+
+impl Drop for SendObservation {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner
+                .observers
+                .lock()
+                .expect("observer lock")
+                .retain(|(id, _)| *id != self.id);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -534,6 +559,9 @@ struct State {
     revision: u64,
     pending_view: Arc<[Arc<Operation>]>,
     visible_view: Arc<[Arc<Operation>]>,
+    /// Observer work waiting for each observed send's delivery.
+    delivery_work: HashMap<EventId, (UnsignedEvent, Vec<DeliveryWork>)>,
+    next_observer: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -689,6 +717,7 @@ impl Outbox {
             durable: tokio::sync::Mutex::new(()),
             hydration: watch::Sender::new(false),
             changes: watch::Sender::new(0),
+            observers: Mutex::new(Vec::new()),
         });
         tokio::spawn(inner.clone().hydrate());
         Self { inner }
@@ -724,6 +753,26 @@ impl Outbox {
     /// Bumps on every change to [`Self::pending`] or [`Self::visible`].
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.inner.changes.subscribe()
+    }
+
+    /// Calls `observer` for each fresh send (`observeSend`), such as a
+    /// mention that should wake an agent; the work it returns runs once
+    /// that send is accepted or echoed. Dropping the handle stops it.
+    pub fn observe_send(&self, observer: SendObserver) -> SendObservation {
+        let id = {
+            let mut state = self.inner.lock();
+            state.next_observer += 1;
+            state.next_observer
+        };
+        self.inner
+            .observers
+            .lock()
+            .expect("observer lock")
+            .push((id, observer));
+        SendObservation {
+            inner: Arc::downgrade(&self.inner),
+            id,
+        }
     }
 
     /// Dates and identifies the draft, shows it as `sending`, and queues
@@ -834,6 +883,26 @@ impl Outbox {
         let id = unsigned.id.expect("templates carry their ID");
         if let Some(gate) = &options.gate {
             state.gates.insert(id, gate.clone());
+        }
+        // Observers see the intent before any delivery can start; one
+        // failing observer never touches the others or the send.
+        let observers: Vec<SendObserver> = inner
+            .observers
+            .lock()
+            .expect("observer lock")
+            .iter()
+            .map(|(_, observer)| observer.clone())
+            .collect();
+        let work: Vec<DeliveryWork> = observers
+            .iter()
+            .filter_map(|observer| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(&unsigned)))
+                    .ok()
+                    .flatten()
+            })
+            .collect();
+        if !work.is_empty() {
+            state.delivery_work.insert(id, (unsigned.clone(), work));
         }
         state.pending.push(Arc::new(Operation {
             event: unsigned,
@@ -1460,7 +1529,9 @@ impl Inner {
                     updated.error = None;
                     self.save_status(&mut state, updated);
                 }
+                let work = Self::take_work(&mut state, &id);
                 drop(state);
+                Self::run_work(work);
                 if workflow {
                     self.receipt(id, Some(receipt));
                 }
@@ -1652,9 +1723,42 @@ impl Inner {
                 state.gates.remove(&id);
             }
         }
+        let work: Vec<_> = confirmed
+            .iter()
+            .map(|(op, _)| Self::take_work(&mut state, &op.id()))
+            .collect();
         self.notify(&mut state);
         self.persist_detached();
         self.kick(&mut state);
+        drop(state);
+        for work in work {
+            Self::run_work(work);
+        }
+    }
+
+    /// The observer work for a delivered send, with the observed sends
+    /// still waiting.
+    fn take_work(
+        state: &mut State,
+        id: &EventId,
+    ) -> Option<(Vec<DeliveryWork>, Vec<UnsignedEvent>)> {
+        let (_, work) = state.delivery_work.remove(id)?;
+        let pending = state
+            .delivery_work
+            .values()
+            .map(|(event, _)| event.clone())
+            .collect();
+        Some((work, pending))
+    }
+
+    fn run_work(work: Option<(Vec<DeliveryWork>, Vec<UnsignedEvent>)>) {
+        let Some((work, pending)) = work else {
+            return;
+        };
+        for run in work {
+            // Observers own their errors; delivery evidence never changes.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&pending)));
+        }
     }
 }
 

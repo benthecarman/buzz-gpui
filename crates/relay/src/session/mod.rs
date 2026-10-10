@@ -22,6 +22,7 @@ mod incoming;
 mod messaging;
 mod observer;
 mod presence;
+mod publisher;
 mod sidebar;
 mod statuses;
 mod threads;
@@ -42,7 +43,7 @@ use crate::budget::ByteLru;
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
 use crate::emoji::{EmojiDirectory, EmojiSnapshot, catalog_filter};
 use crate::event::{Verified, Verifier, kinds};
-use crate::fold::{LocalDelivery, MessageClock};
+use crate::fold::{LocalDelivery, MessageClock, MessageRow};
 use crate::http::RelayHttp;
 use crate::live::{
     Live, LiveConnection, LiveOptions, LiveRoute, LiveRouteStatus, LiveSnapshot, LiveUpdate,
@@ -328,6 +329,23 @@ impl ChannelView {
     }
 }
 
+/// Stops a session send observer when dropped.
+pub struct SendObserverHandle {
+    id: u64,
+    commands: mpsc::UnboundedSender<Message>,
+}
+
+impl Drop for SendObserverHandle {
+    fn drop(&mut self) {
+        let id = self.id;
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            actor
+                .send_observers
+                .retain(|(observer, _, _)| *observer != id);
+        })));
+    }
+}
+
 impl Drop for ChannelView {
     fn drop(&mut self) {
         let _ = self.commands.send(Message::Close(self.channel.clone()));
@@ -412,6 +430,7 @@ impl Session {
             emoji_generation: 0,
             access_revision: 0,
             known_channels: std::collections::HashSet::new(),
+            send_observers: Vec::new(),
             store,
             clock: Arc::new(MessageClock::new()),
             outbox: None,
@@ -568,6 +587,27 @@ impl Session {
             .send(Message::RefreshChannel(channel.to_string()));
     }
 
+    /// Sees every fresh send of this session (`outbox.observeSend`), such as
+    /// a mention that should wake a local agent or a message to a DM the
+    /// viewer hid; the work it returns runs once that send is accepted or
+    /// echoed. Observes until the returned handle drops.
+    pub fn observe_send(&self, observer: crate::outbox::SendObserver) -> SendObserverHandle {
+        let id = self
+            .next_thread
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            let handle = actor
+                .outbox
+                .as_ref()
+                .map(|outbox| outbox.observe_send(observer.clone()));
+            actor.send_observers.push((id, observer, handle));
+        })));
+        SendObserverHandle {
+            id,
+            commands: self.commands.clone(),
+        }
+    }
+
     /// Forgets every cached head, tail and saved conversation of this
     /// community, here and on disk (Developer settings "Clear cache").
     /// Open channels load again; a session that had not connected tries
@@ -668,13 +708,42 @@ impl Session {
         .await
     }
 
-    /// Deletes our own message or reaction.
+    /// Deletes our own message or reaction, or a message of an agent the
+    /// viewer owns: ownership is the NIP-OA attestation on the agent's
+    /// newest signed profile, read fresh.
     pub async fn remove(&self, channel: &str, id: EventId) -> Result<(), String> {
+        let agent = self.removal_agent(channel, id).await?;
         self.write(Write::Remove {
             channel: channel.to_string(),
             id,
+            agent,
         })
         .await
+    }
+
+    /// Reports a loaded message (NIP-56 kind 1984). Reports are never
+    /// echoed, so they go straight to the relay rather than the outbox;
+    /// resolves on the relay's acceptance.
+    pub async fn report(
+        &self,
+        channel: &str,
+        id: EventId,
+        kind: messages::ReportType,
+        note: &str,
+    ) -> Result<(), String> {
+        self.report_message(channel, id, kind, note).await
+    }
+
+    /// Copies the viewer's own thread reply into the channel as a new
+    /// top-level message ("Also send to channel"), with a provenance tag
+    /// naming the thread. `root` is the thread's folded root, for the
+    /// excerpt.
+    pub async fn send_to_channel(
+        &self,
+        row: Arc<MessageRow>,
+        root: Option<Arc<MessageRow>>,
+    ) -> Result<(), String> {
+        self.write(Write::SendToChannel { row, root }).await
     }
 
     /// Republishes the exact signed bytes of a failed or unknown send.
@@ -765,6 +834,12 @@ enum Write {
     Remove {
         channel: String,
         id: EventId,
+        /// The agent whose message the viewer removes as its owner.
+        agent: Option<String>,
+    },
+    SendToChannel {
+        row: Arc<MessageRow>,
+        root: Option<Arc<MessageRow>>,
     },
     Retry(EventId),
     Dismiss(EventId),
@@ -953,6 +1028,12 @@ struct Actor {
     access_revision: u64,
     /// Channels readable at the last access check.
     known_channels: std::collections::HashSet<String>,
+    /// Send observers, attached to the outbox once it exists.
+    send_observers: Vec<(
+        u64,
+        crate::outbox::SendObserver,
+        Option<crate::outbox::SendObservation>,
+    )>,
 }
 
 impl Actor {
@@ -1282,9 +1363,20 @@ impl Actor {
             self.store.clone(),
             Partition::new(&self.origin, &self.identity.pubkey_hex()),
         );
+        let publisher = publisher::SessionPublisher {
+            http: HttpPublisher::new(self.http.clone(), self.reader.clone()),
+            reader: self.reader.clone(),
+            commands: self.commands.clone(),
+            relay: self
+                .relay
+                .as_ref()
+                .map(|relay| relay.authority.clone())
+                .unwrap_or_default(),
+            viewer: self.identity.pubkey_hex(),
+        };
         let outbox = Outbox::new(
             self.identity.clone(),
-            Arc::new(HttpPublisher::new(self.http.clone(), self.reader.clone())),
+            Arc::new(publisher),
             Arc::new(journal),
             OutboxOptions {
                 message_clock: self.clock.clone(),
@@ -1292,6 +1384,9 @@ impl Actor {
             },
         );
         self.outbox_changes = Some(outbox.changes());
+        for (_, observer, handle) in &mut self.send_observers {
+            *handle = Some(outbox.observe_send(observer.clone()));
+        }
         self.outbox = Some(outbox);
         self.open_reads();
         self.set_status(SessionStatus::Ready);
@@ -2060,6 +2155,23 @@ impl Actor {
                 .and_then(|timeline| timeline.find(id))
                 .ok_or_else(|| "Load the message first".to_string())
         };
+        // Every write needs a channel the viewer may post in (`writer`).
+        let channel = match &write {
+            Write::Send { channel, .. }
+            | Write::Edit { channel, .. }
+            | Write::React { channel, .. }
+            | Write::Remove { channel, .. } => Some(channel.clone()),
+            Write::SendToChannel { row, .. } => Some(row.channel.to_string()),
+            Write::Retry(_) | Write::Dismiss(_) => None,
+        };
+        if let Some(channel) = channel
+            && !self
+                .discovery
+                .as_ref()
+                .is_some_and(|d| d.can_participate(&channel))
+        {
+            return Err("Join the conversation before posting".into());
+        }
         let emoji = self.emoji.snapshot();
         let drafts = match write {
             Write::Send {
@@ -2069,13 +2181,6 @@ impl Actor {
                 attachments,
                 thread,
             } => {
-                if !self
-                    .discovery
-                    .as_ref()
-                    .is_some_and(|d| d.can_participate(&channel))
-                {
-                    return Err("You can't post in this channel".into());
-                }
                 if let Some(discovery) = &self.discovery {
                     crate::members::validate_mentions(
                         discovery.get(&channel).as_ref(),
@@ -2105,8 +2210,19 @@ impl Actor {
                 content,
             } => {
                 let original = find(&channel, &id)?;
+                // The folded row says where its media came from: the
+                // original or the latest own edit carrying `imeta`.
+                let source = self
+                    .timelines
+                    .get(&channel)
+                    .and_then(|timeline| timeline.row(&id))
+                    .and_then(|row| row.attachment_source_id)
+                    .unwrap_or(id);
+                let source = self
+                    .find_event(&source)
+                    .ok_or("Reload the message before editing its attachments.")?;
                 vec![
-                    messages::edit(&author, &original, &original, &content, emoji.catalog())
+                    messages::edit(&author, &original, &source, &content, emoji.catalog())
                         .map_err(|error| error.to_string())?,
                 ]
             }
@@ -2126,11 +2242,81 @@ impl Actor {
                         .map_err(|error| error.to_string())?,
                 ]
             }
-            Write::Remove { channel, id } => {
+            Write::Remove { channel, id, agent } => {
                 let target = find(&channel, &id)?;
                 let ids = vec![id.to_hex()];
-                messages::remove(&author, &ids, |_| Some(target.event()), None)
+                let authorization = agent.as_deref().map(|agent_id| messages::AgentOwner {
+                    agent_id,
+                    owner_id: &viewer,
+                });
+                messages::remove(&author, &ids, |_| Some(target.event()), authorization)
                     .map_err(|error| error.to_string())?
+            }
+            Write::SendToChannel { row, root } => {
+                if row.author.to_hex() != viewer {
+                    return Err("Only your own messages can be sent to the channel".into());
+                }
+                let reply = self
+                    .find_event(&row.id)
+                    .ok_or("Load a thread reply before sending it to the channel")?;
+                if crate::fold::thread_reference(&reply)
+                    .is_none_or(|thread| Some(thread.root_id) != row.thread_root_id)
+                    || reply.channel() != Some(&*row.channel)
+                {
+                    return Err("Reload the thread reply before sending it to the channel".into());
+                }
+                let source = self
+                    .find_event(&row.attachment_source_id.unwrap_or(row.id))
+                    .ok_or("Reload the message attachments before sending")?;
+                let urls: Vec<String> = row.attachments.iter().map(|a| a.url.clone()).collect();
+                let mentions: Vec<String> = row
+                    .mentions
+                    .iter()
+                    .chain(&row.mention_references)
+                    .map(|key| key.to_hex())
+                    .collect();
+                let emoji_list: Vec<messages::CustomEmoji> = row
+                    .emoji
+                    .iter()
+                    .map(|emoji| messages::CustomEmoji {
+                        shortcode: emoji.shortcode.clone(),
+                        url: emoji.url.clone(),
+                    })
+                    .collect();
+                let root_id = root.as_ref().map(|root| root.id.to_hex());
+                let thread_root =
+                    root.as_ref()
+                        .zip(root_id.as_deref())
+                        .map(|(root, id)| messages::ThreadRoot {
+                            id,
+                            channel_id: &root.channel,
+                            content: &root.content,
+                        });
+                let delivery = row.delivery.as_ref().map(|delivery| match delivery.status {
+                    crate::fold::Delivery::Sending => crate::outbox::Delivery::Sending,
+                    crate::fold::Delivery::Accepted => crate::outbox::Delivery::Accepted,
+                    crate::fold::Delivery::Unknown => crate::outbox::Delivery::Unknown,
+                    crate::fold::Delivery::Failed => crate::outbox::Delivery::Failed,
+                    crate::fold::Delivery::Seen => crate::outbox::Delivery::Seen,
+                });
+                let content = row.source_content.as_deref().unwrap_or(&row.content);
+                vec![
+                    messages::sent_from_thread(
+                        &author,
+                        &messages::SentFromThread {
+                            reply: reply.event(),
+                            attachment_source: source.event(),
+                            content,
+                            attachment_urls: &urls,
+                            mentions: &mentions,
+                            edited: row.edited,
+                            emoji: &emoji_list,
+                            delivery,
+                            root: thread_root,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?,
+                ]
             }
             Write::Retry(id) => return outbox.retry(&id, None).map_err(|error| error.to_string()),
             Write::Dismiss(_) => unreachable!("dismissals finish asynchronously"),
@@ -2141,6 +2327,21 @@ impl Actor {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    /// Any retained event: windows, open threads, recent traffic or the
+    /// outbox.
+    fn find_event(&self, id: &EventId) -> Option<Verified> {
+        self.timelines
+            .values()
+            .find_map(|timeline| timeline.find(id))
+            .or_else(|| self.thread_event(id))
+            .or_else(|| self.recent.peek(&id.to_hex()).cloned())
+            .or_else(|| {
+                self.local_events()
+                    .into_iter()
+                    .find(|event| event.id == *id)
+            })
     }
 
     /// Shows the outbox's operations in their timelines.

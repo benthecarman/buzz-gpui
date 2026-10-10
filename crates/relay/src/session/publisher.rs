@@ -1,0 +1,227 @@
+//! The session's outbox publisher: HTTP delivery with the mention preflight
+//! of `session.ts` (`prepareMentionPublication`). A message that mentions
+//! people is only dispatched after a fresh, strong read of the channel
+//! roster proves every recipient is still a member, and only if nothing
+//! about access changed while it was read.
+
+use super::{Actor, Message};
+use crate::event::{Verified, kinds};
+use crate::http::HttpError;
+use crate::outbox::{HttpPublisher, PublishError, Publisher};
+use crate::reader::{Priority, ReadOptions, Reader};
+use futures::future::BoxFuture;
+use nostr::prelude::{Event, EventId};
+use serde_json::json;
+use tokio::sync::{mpsc, oneshot};
+
+const CHANGED: &str = "Channel membership changed during mention verification; retry";
+const UNVERIFIED: &str = "Could not verify current channel membership; refresh and retry";
+
+pub(super) struct SessionPublisher {
+    pub http: HttpPublisher,
+    pub reader: Reader,
+    pub commands: mpsc::UnboundedSender<Message>,
+    pub relay: String,
+    pub viewer: String,
+}
+
+/// What a preflight compares before and after its read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fence {
+    epoch: u64,
+    live: u64,
+}
+
+impl SessionPublisher {
+    async fn on_actor<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Actor) -> R + Send + 'static,
+    ) -> Result<R, PublishError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Message::With(Box::new(move |actor| {
+                let _ = reply.send(f(actor));
+            })))
+            .map_err(|_| PublishError::Rejected("The session has closed".into()))?;
+        answer
+            .await
+            .map_err(|_| PublishError::Rejected("The session has closed".into()))
+    }
+
+    /// Checks the mention against the session's roster and returns the
+    /// fence to compare after the read.
+    async fn check(&self, event: Event) -> Result<Fence, PublishError> {
+        self.on_actor(move |actor| {
+            actor
+                .validate_mention_event(&event)
+                .map(|()| Fence {
+                    epoch: actor.epoch,
+                    live: actor.channels.live_generation,
+                })
+                .map_err(PublishError::Rejected)
+        })
+        .await?
+    }
+}
+
+impl Publisher for SessionPublisher {
+    fn post_event(&self, event: &Event) -> BoxFuture<'static, Result<Vec<u8>, HttpError>> {
+        self.http.post_event(event)
+    }
+
+    fn find_event(&self, event: &Event) -> BoxFuture<'static, Result<bool, String>> {
+        self.http.find_event(event)
+    }
+
+    fn read_echo(&self, id: EventId, priority: Priority) -> BoxFuture<'static, Vec<Verified>> {
+        self.http.read_echo(id, priority)
+    }
+
+    fn prepare(&self, event: &Event) -> BoxFuture<'static, Result<(), PublishError>> {
+        let mentions =
+            event.kind.as_u16() == kinds::CHAT && event.tags.iter().any(|tag| tag.kind() == "p");
+        if !mentions {
+            return Box::pin(async { Ok(()) });
+        }
+        let this = SessionPublisher {
+            http: self.http.clone(),
+            reader: self.reader.clone(),
+            commands: self.commands.clone(),
+            relay: self.relay.clone(),
+            viewer: self.viewer.clone(),
+        };
+        let event = event.clone();
+        Box::pin(async move {
+            let fence = this.check(event.clone()).await?;
+            let channel = event
+                .tags
+                .iter()
+                .find(|tag| tag.kind() == "h")
+                .and_then(|tag| tag.as_slice().get(1))
+                .cloned()
+                .ok_or_else(|| PublishError::Rejected("A channel is required".into()))?;
+            let filter = json!({
+                "kinds": [kinds::CHANNEL_MEMBERS],
+                "consistency": "strong",
+                "authors": [this.relay],
+                "#d": [channel],
+                "limit": 1,
+            });
+            let filter = match filter {
+                serde_json::Value::Object(map) => map,
+                _ => unreachable!("filters are objects"),
+            };
+            let options = ReadOptions {
+                priority: Priority::Foreground,
+                fresh: true,
+            };
+            // An empty or failed read is unknown, never permission.
+            let events = this
+                .reader
+                .read(vec![filter], options)
+                .await
+                .map_err(|_| PublishError::Rejected(UNVERIFIED.into()))?;
+            let roster = match &events[..] {
+                [roster]
+                    if roster.kind_u16() == kinds::CHANNEL_MEMBERS
+                        && roster.pubkey_hex() == this.relay
+                        && roster.tags_named("d").count() == 1
+                        && roster
+                            .tags_named("d")
+                            .all(|tag| tag.len() == 2 && tag[1] == channel) =>
+                {
+                    roster.clone()
+                }
+                _ => return Err(PublishError::Rejected(UNVERIFIED.into())),
+            };
+            let (viewer, event_check) = (this.viewer.clone(), event.clone());
+            this.on_actor(move |actor| {
+                let now = Fence {
+                    epoch: actor.epoch,
+                    live: actor.channels.live_generation,
+                };
+                if now != fence {
+                    return Err(PublishError::Rejected(CHANGED.into()));
+                }
+                actor.accept(std::slice::from_ref(&roster));
+                // A newer live removal beats an older read result.
+                actor
+                    .validate_mention_event(&event_check)
+                    .map_err(PublishError::Rejected)?;
+                let members = |key: &str| roster.has_tag("p", key);
+                if !members(&viewer)
+                    || event_check
+                        .tags
+                        .iter()
+                        .filter(|tag| tag.kind() == "p")
+                        .any(|tag| tag.as_slice().get(1).is_none_or(|key| !members(key)))
+                {
+                    return Err(PublishError::Rejected(
+                        "A selected recipient is no longer a channel member; remove them or refresh membership"
+                            .into(),
+                    ));
+                }
+                Ok(())
+            })
+            .await?
+        })
+    }
+}
+
+impl Actor {
+    /// `validateMentionEvent`: a mentioning message names at most 32 valid
+    /// recipients, one channel, and only current members of a channel the
+    /// viewer may post in, while live updates are connected.
+    pub(super) fn validate_mention_event(&self, event: &Event) -> Result<(), String> {
+        if event.kind.as_u16() != kinds::CHAT {
+            return Ok(());
+        }
+        let recipients: Vec<&[String]> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind() == "p")
+            .map(|tag| tag.as_slice())
+            .collect();
+        if recipients.is_empty() {
+            return Ok(());
+        }
+        let valid = |value: &String| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        if recipients.len() > 32
+            || recipients
+                .iter()
+                .any(|tag| tag.len() != 2 || !valid(&tag[1]))
+        {
+            return Err("Invalid mention recipients".into());
+        }
+        let destinations: Vec<&String> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind() == "h")
+            .filter_map(|tag| tag.as_slice().get(1))
+            .collect();
+        let [channel] = destinations[..] else {
+            return Err("A channel is required".into());
+        };
+        if channel.is_empty() {
+            return Err("A channel is required".into());
+        }
+        let discovery = self
+            .discovery
+            .as_ref()
+            .ok_or("Refresh channel membership before mentioning anyone")?;
+        if self.live.as_ref().is_some_and(|live| !live.is_connected()) {
+            return Err("Refresh channel membership before mentioning anyone".into());
+        }
+        let keys: Vec<String> = recipients.iter().map(|tag| tag[1].clone()).collect();
+        crate::members::validate_mentions(
+            discovery.get(channel).as_ref(),
+            discovery.can_participate(channel),
+            &keys,
+        )
+    }
+}

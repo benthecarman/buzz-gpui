@@ -1784,3 +1784,57 @@ fn operations_round_trip_through_json() {
     assert!(json.get("acknowledged").is_none());
     assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), op);
 }
+
+// ---------------------------------------------------------------------------
+// Send observers (`observeSend`)
+
+#[tokio::test(start_paused = true)]
+async fn send_observers_see_fresh_sends_and_run_after_delivery() {
+    let h = Harness::new(Mode::Hold);
+    h.outbox.ready().await.unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let delivered: Arc<Mutex<Vec<(String, usize)>>> = Arc::default();
+    let (log, done) = (seen.clone(), delivered.clone());
+    let observation = h
+        .outbox
+        .observe_send(Arc::new(move |event: &UnsignedEvent| {
+            log.lock().unwrap().push(event.content.clone());
+            let done = done.clone();
+            let content = event.content.clone();
+            (content != "ignored").then(|| -> DeliveryWork {
+                Box::new(move |pending: &[UnsignedEvent]| {
+                    done.lock().unwrap().push((content, pending.len()));
+                })
+            })
+        }));
+    // An observer that panics never touches the send or the others.
+    let _broken = h
+        .outbox
+        .observe_send(Arc::new(|_: &UnsignedEvent| panic!("observer bug")));
+    let first = h.send("first");
+    h.send("second");
+    h.send("ignored");
+    assert_eq!(*seen.lock().unwrap(), ["first", "second", "ignored"]);
+    flush().await;
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "nothing delivered yet"
+    );
+
+    // Accepted: the work runs with the other observed send still waiting.
+    h.relay.take().accept();
+    flush().await;
+    assert_eq!(*delivered.lock().unwrap(), [("first".to_string(), 1)]);
+    assert_eq!(h.delivery(&first), Delivery::Accepted);
+
+    // An echo is delivery too.
+    let held = h.relay.take();
+    h.outbox.observe(&[verified(&held.event)]);
+    flush().await;
+    assert_eq!(delivered.lock().unwrap().len(), 2);
+
+    // Dropping the handle stops observing.
+    drop(observation);
+    h.send("after");
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}

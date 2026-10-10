@@ -56,8 +56,8 @@ pub use messages::{Attachment, CustomEmoji, Draft, EventTemplate, Mentions, Mess
 pub use nostr::prelude::{EventId, PublicKey};
 pub use origin::RelayOrigin;
 pub use outbox::{
-    Delivery, HttpPublisher, Journal, MemoryJournal, Operation, Outbox, OutboxError, OutboxOptions,
-    Publisher, Recovery, SendOptions,
+    Delivery, DeliveryWork, HttpPublisher, Journal, MemoryJournal, Operation, Outbox, OutboxError,
+    OutboxOptions, Publisher, Recovery, SendObservation, SendObserver, SendOptions,
 };
 pub use presence::{PresenceMode, PresenceState};
 pub use profiles::{Profile, ProfileDirectory, Profiles};
@@ -70,9 +70,9 @@ pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader
 pub use session::{
     CatchUpState, ChannelUnread, ChannelView, FeedbackState, HeadCatchUp, IncomingMessage,
     LiveView, MessageSearch, PendingFeedback, PeoplePage, PublicChannels, READING_DWELL_MS,
-    RelayInfo, RosterRefresh, RosterStatus, SearchOutcome, Session, SessionSnapshot, SessionStatus,
-    StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus, UnreadCounts, UnreadDetail,
-    UnreadWatch,
+    RelayInfo, RosterRefresh, RosterStatus, SearchOutcome, SendObserverHandle, Session,
+    SessionSnapshot, SessionStatus, StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus,
+    UnreadCounts, UnreadDetail, UnreadWatch,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,

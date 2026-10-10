@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn persists_per_community_and_viewer() {
         let store = Store::in_memory().expect("store");
-        let origin = buzz_relay_client::RelayOrigin::parse("ws://a.test").expect("origin");
+        let origin = buzz_relay_client::RelayOrigin::parse("wss://a.test").expect("origin");
         let mine = Partition::new(&origin, &"a".repeat(64));
         let theirs = Partition::new(&origin, &"b".repeat(64));
         update(&store, &mine, |stored| {

@@ -465,7 +465,7 @@ fn falls_back_to_a_validated_direct_count() {
 }
 
 #[test]
-fn newer_summary_wins_and_same_second_ties_go_to_the_larger_count() {
+fn newer_summary_wins_and_same_second_ties_go_to_the_lower_id() {
     let p = people();
     let root = message(&p.alice, CHANNEL, "root", 10, &[]);
     let count = |n: u64| json!({"descendant_count": n, "participants": []});
@@ -474,13 +474,14 @@ fn newer_summary_wins_and_same_second_ties_go_to_the_larger_count() {
     let rows = fold(&p.relay, &[root.clone(), new.clone(), old.clone()]);
     assert_eq!(rows[0].reply_count, 3);
 
-    let low = summary(&p.relay, &root, count(4), 30);
-    let high = summary(&p.relay, &root, count(5), 30);
+    let four = summary(&p.relay, &root, count(4), 30);
+    let five = summary(&p.relay, &root, count(5), 30);
+    let lower = if four.id < five.id { 4 } else { 5 };
     for events in [
-        [root.clone(), low.clone(), high.clone()],
-        [root.clone(), high, low],
+        [root.clone(), four.clone(), five.clone()],
+        [root.clone(), five, four],
     ] {
-        assert_eq!(fold(&p.relay, &events)[0].reply_count, 5);
+        assert_eq!(fold(&p.relay, &events)[0].reply_count, lower);
     }
 }
 

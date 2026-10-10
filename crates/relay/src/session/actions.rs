@@ -134,6 +134,105 @@ impl Session {
         })));
     }
 
+    /// The agent whose message the viewer may remove as its owner: when
+    /// the loaded message is not the viewer's own, the newer of the
+    /// retained and a fresh signed profile of its author must attest the
+    /// viewer (`useAgentOwnerEvidence`).
+    pub(super) async fn removal_agent(
+        &self,
+        channel: &str,
+        id: EventId,
+    ) -> Result<Option<String>, String> {
+        let ops = self.ops();
+        let channel = channel.to_owned();
+        let viewer = self.viewer.clone();
+        self.run(async move {
+            let target = ops
+                .with(move |actor| {
+                    let author = actor.relay.as_ref().map(|relay| relay.authority.clone());
+                    actor
+                        .timelines
+                        .get(&channel)
+                        .and_then(|timeline| timeline.find(&id))
+                        .map(|event| {
+                            let signing =
+                                author.and_then(|a| nostr::prelude::PublicKey::from_hex(&a).ok());
+                            let shown =
+                                crate::fold::message_author(event.event(), signing.as_ref());
+                            let retained = actor.profiles.event(&shown.to_hex()).cloned();
+                            (event.kind_u16(), shown.to_hex(), retained)
+                        })
+                })
+                .await?;
+            let Some((kind, author, retained)) = target else {
+                return Ok(None);
+            };
+            if kind == kinds::REACTION || author == viewer {
+                return Ok(None);
+            }
+            let ctx = ops.context().await?;
+            let events = read(&ctx, vec![members::owner_filter(&author)]).await?;
+            let fresh = crate::account::newest_profile(&events, &author).cloned();
+            let newest = match (fresh, retained) {
+                (Some(fresh), Some(retained)) => {
+                    if crate::event::is_newer(&fresh, &retained) {
+                        Some(fresh)
+                    } else {
+                        Some(retained)
+                    }
+                }
+                (fresh, retained) => fresh.or(retained),
+            };
+            Ok(newest
+                .and_then(|event| crate::profiles::attested_owner(&event))
+                .filter(|owner| *owner == viewer)
+                .map(|_| author))
+        })
+        .await
+    }
+
+    /// Signs and posts a NIP-56 report of a loaded message
+    /// (`messages.report`).
+    pub(super) async fn report_message(
+        &self,
+        channel: &str,
+        id: EventId,
+        kind: crate::messages::ReportType,
+        note: &str,
+    ) -> Result<(), String> {
+        let ops = self.ops();
+        let (channel, note) = (channel.to_owned(), note.to_owned());
+        self.run(async move {
+            let original = ops
+                .with(move |actor| {
+                    actor
+                        .timelines
+                        .get(&channel)
+                        .and_then(|timeline| timeline.find(&id))
+                        .or_else(|| actor.thread_event(&id))
+                })
+                .await?
+                .ok_or("Load the message before reporting it")?;
+            let template = crate::messages::report(original.event(), kind, &note, now())
+                .map_err(|error| error.to_string())?;
+            let ctx = ops.context().await?;
+            // Published directly within 10 seconds (§5d.10).
+            let publish = async {
+                let (event, result) = post(&ctx, template).await?;
+                match accept_publish(result, &event.id) {
+                    Ok(_) => Ok(()),
+                    Err(PublishError::Rejected(message) | PublishError::Uncertain(message)) => {
+                        Err(message)
+                    }
+                }
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(10), publish)
+                .await
+                .unwrap_or_else(|_| Err("The report timed out.".into()))
+        })
+        .await
+    }
+
     /// The channel's validated relay state: roles, permissions and details.
     pub async fn channel_state(&self, channel: &str) -> Result<ChannelState, String> {
         let (ops, channel) = (self.ops(), channel.to_owned());
