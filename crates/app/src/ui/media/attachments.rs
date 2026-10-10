@@ -294,9 +294,20 @@ fn image_group(
                     .p(px(4.))
                     .overflow_x_scroll()
                     .track_scroll(&scroll)
-                    .children(items.iter().zip(focus).zip(hidden.iter()).map(
-                        |(((index, attachment), focus), hidden)| {
-                            image_tile(&row, *index, attachment, &rows, focus, *hidden, &c)
+                    .children(items.iter().zip(focus).zip(hidden.iter()).enumerate().map(
+                        |(position, (((index, attachment), focus), hidden))| {
+                            let label: SharedString = if items.len() > 1 {
+                                format!("Open image {} of {}", position + 1, items.len()).into()
+                            } else {
+                                "Open image attachment".into()
+                            };
+                            let tile = Tile {
+                                index: *index,
+                                focus,
+                                hidden: *hidden,
+                                label,
+                            };
+                            image_tile(&row, attachment, &rows, tile, &c)
                         },
                     ))
                     .into_any_element()
@@ -314,15 +325,28 @@ fn image_group(
         .into_any_element()
 }
 
-fn image_tile(
-    row: &Arc<MessageRow>,
+/// One thumbnail's place in its strip.
+struct Tile {
     index: usize,
-    attachment: &Attachment,
-    rows: &Rc<Rows>,
     focus: FocusHandle,
     hidden: bool,
+    /// "Open image N of M" (`aria-label`).
+    label: SharedString,
+}
+
+fn image_tile(
+    row: &Arc<MessageRow>,
+    attachment: &Attachment,
+    rows: &Rc<Rows>,
+    tile: Tile,
     c: &buzz_ui::Colors,
 ) -> AnyElement {
+    let Tile {
+        index,
+        focus,
+        hidden,
+        label,
+    } = tile;
     let id = SharedString::from(format!("image-{}-{index}", row.id.to_hex()));
     // A URL that cannot load at all says so; one that fails keeps its fill.
     if attachment.insecure {
@@ -351,6 +375,8 @@ fn image_tile(
         .bg(c.surface_inset)
         .cursor_pointer()
         .track_focus(&focus)
+        .role(Role::Link)
+        .aria_label(label)
         .focus_visible(|s| s.border_2().border_color(c.border_focus))
         .when(hidden, |d| d.opacity(0.))
         .child(track_tile(&attachment.url))

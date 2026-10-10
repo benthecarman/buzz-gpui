@@ -75,6 +75,11 @@ impl Asset for RemoteImage {
                 .map_err(|error| SharedString::from(error.to_string()))?,
             };
             let format = image_format(&bytes).ok_or("Not a supported image")?;
+            // Relay media never renders SVG (`media_type`); other hosts'
+            // images render as a browser would.
+            if format == ImageFormat::Svg && source.media.is_relay_media(&source.url) {
+                return Err("Not a supported image".into());
+            }
             Ok(Arc::new(Image::from_bytes(format, bytes.to_vec())))
         }
     }
