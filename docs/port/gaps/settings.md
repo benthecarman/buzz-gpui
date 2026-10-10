@@ -76,8 +76,8 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Save-failure toasts: "Appearance wasn’t saved" / "Interface size wasn’t saved", each with a Retry button | `src/app/AppearanceSettings.tsx:104-128` | MISSING: failures are only logged (`appearance.rs:31-35`). | Surface the store errors as toasts with retry. | S |
-| System tray rows (Show in tray, Minimize to tray, Close to tray) | None | DIFFERENT: the port adds them (`ui/settings/appearance.rs:88-140`). | Port-only addition. Keep it. | S |
+| Save-failure toasts: "Appearance wasn’t saved" / "Interface size wasn’t saved", each with a Retry button | `src/app/AppearanceSettings.tsx:104-128` | DONE (appearance.rs, ui/settings/appearance.rs) | Surface the store errors as toasts with retry. | S |
+| System tray rows (Show in tray, Minimize to tray, Close to tray) | None | DONE (port addition, kept) | Port-only addition. Keep it. | S |
 
 ## 6. Notifications (NotificationSettings.tsx)
 

@@ -5,6 +5,7 @@ mod deep_links;
 mod hosts;
 mod http;
 mod idle;
+mod image_clipboard;
 mod main_window;
 mod mirror;
 mod notifications;

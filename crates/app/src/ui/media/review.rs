@@ -158,6 +158,12 @@ pub struct Review {
     /// Once the reader toggles the sidebar, loading no longer opens it.
     toggled: bool,
     _comments: Option<Subscription>,
+    /// "Copy image" is running.
+    copying: bool,
+    /// The last copy's outcome, shown for a few seconds, with the image
+    /// it was for.
+    copied: Option<(usize, bool, u64)>,
+    copies: u64,
 }
 
 impl Review {
@@ -187,7 +193,60 @@ impl Review {
             show_comments: false,
             toggled: false,
             _comments: None,
+            copying: false,
+            copied: None,
+            copies: 0,
         }
+    }
+
+    /// "Copy image" (`ImageReviewStage.tsx`): the selected image goes to
+    /// the clipboard; "Image copied" or "Couldn't copy image" shows for 4
+    /// or 6 seconds.
+    fn copy_image(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.items.get(self.index) else {
+            return;
+        };
+        if self.copying {
+            return;
+        }
+        self.copying = true;
+        self.copied = None;
+        let (url, media, index) = (selected.url.clone(), self.media.clone(), self.index);
+        cx.spawn(async move |this, cx| {
+            let result = match media.fetch(&url).await {
+                Ok(bytes) => {
+                    cx.background_executor()
+                        .spawn(async move { crate::image_clipboard::write(&bytes) })
+                        .await
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = &result {
+                tracing::warn!(%error, "could not copy the image");
+            }
+            let ok = result.is_ok();
+            let generation = this
+                .update(cx, |this, cx| {
+                    this.copying = false;
+                    this.copies += 1;
+                    this.copied = Some((index, ok, this.copies));
+                    cx.notify();
+                    this.copies
+                })
+                .ok();
+            let linger = if ok { 4000 } else { 6000 };
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(linger))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied.is_some_and(|(_, _, g)| Some(g) == generation) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Opens on the sidebar when the message had replies, and once they
@@ -604,6 +663,24 @@ impl Review {
                                                 )
                                             })),
                                     ),
+                            )
+                            .child(
+                                IconButton::new("copy-image", IconName::Copy)
+                                    .size(IconButtonSize::Sm)
+                                    .tooltip("Copy image")
+                                    .disabled(self.copying)
+                                    .on_click(cx.listener(|this, _, _, cx| this.copy_image(cx))),
+                            )
+                            .children(
+                                self.copied
+                                    .filter(|(index, _, _)| *index == self.index)
+                                    .map(|(_, ok, _)| {
+                                        div().text_body_sm().child(if ok {
+                                            "Image copied"
+                                        } else {
+                                            "Couldn't copy image"
+                                        })
+                                    }),
                             )
                             .when(relay, |this| {
                                 this.child(
