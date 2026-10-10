@@ -544,7 +544,7 @@ impl Session {
 
     /// Re-reads one channel's roster and returns it as listed
     /// (`refreshMembership`).
-    async fn refresh_membership(&self, id: &str) -> Result<ChannelSummary, String> {
+    pub async fn refresh_membership(&self, id: &str) -> Result<ChannelSummary, String> {
         let ops = self.work_ops();
         let ctx = ops.context().await.map_err(|_| MEMBERSHIP_UNAVAILABLE)?;
         let events = foreground(&ctx, vec![roster_filter(&ctx.relay, id)]).await?;

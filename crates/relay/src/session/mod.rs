@@ -35,6 +35,7 @@ mod presence;
 mod projects;
 mod publisher;
 mod reminders;
+pub mod share;
 mod sidebar;
 mod statuses;
 mod teams;
@@ -316,6 +317,8 @@ pub struct Session {
     /// The private recipe catalog, Me groups and placement.
     me_kit: me_kit::MeKit,
     workflows: crate::workflows::Workflows,
+    /// Submitted shares by source conversation (`share-attempt.ts`).
+    shares: std::sync::Mutex<HashMap<String, Arc<share::ShareAttempt>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -526,6 +529,7 @@ impl Session {
             kit: Arc::default(),
             me_kit: kit,
             workflows,
+            shares: Default::default(),
             task,
         }
     }
