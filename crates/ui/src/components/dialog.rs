@@ -87,6 +87,7 @@ pub struct Dialog {
     compact_header_gap: bool,
     compact_footer_gap: bool,
     heading_title: bool,
+    title_icon: Option<IconName>,
     on_close: Option<ClickHandler>,
 }
 
@@ -104,8 +105,15 @@ impl Dialog {
             compact_header_gap: false,
             compact_footer_gap: false,
             heading_title: false,
+            title_icon: None,
             on_close: None,
         }
+    }
+
+    /// A 16px icon before the title, 8px from it.
+    pub fn title_icon(mut self, icon: IconName) -> Self {
+        self.title_icon = Some(icon);
+        self
     }
 
     /// Title in `text-heading` (24px) instead of `text-label`, as the
@@ -210,12 +218,18 @@ impl RenderOnce for Dialog {
                             .min_w_0()
                             .child(
                                 div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(rems(0.5))
                                     .map(|this| {
                                         if heading {
                                             this.text_heading()
                                         } else {
                                             this.text_label()
                                         }
+                                    })
+                                    .when_some(self.title_icon, |this, icon| {
+                                        this.child(crate::Icon::new(icon).size(16.))
                                     })
                                     .child(self.title),
                             )

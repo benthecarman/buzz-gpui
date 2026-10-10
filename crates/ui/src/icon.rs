@@ -19,6 +19,8 @@ macro_rules! tabler_icons {
             NotificationFilled,
             /// Block Goose harness mark (monochrome).
             GooseLogo,
+            /// buzz-app's outline Microsoft OneDrive mark, for links.
+            OneDriveLogo,
         }
 
         impl IconName {
@@ -28,6 +30,7 @@ macro_rules! tabler_icons {
                 IconName::HashArrowIn,
                 IconName::NotificationFilled,
                 IconName::GooseLogo,
+                IconName::OneDriveLogo,
             ];
 
             /// The embedded asset path.
@@ -37,6 +40,7 @@ macro_rules! tabler_icons {
                     IconName::HashArrowIn => "icons/custom/hash-arrow-in.svg",
                     IconName::NotificationFilled => "icons/custom/notification-filled.svg",
                     IconName::GooseLogo => "icons/brand/goose.svg",
+                    IconName::OneDriveLogo => "icons/custom/onedrive-logo.svg",
                 }
             }
 
@@ -47,6 +51,7 @@ macro_rules! tabler_icons {
                     IconName::HashArrowIn => "HashArrowIn",
                     IconName::NotificationFilled => "NotificationFilled",
                     IconName::GooseLogo => "GooseLogo",
+                    IconName::OneDriveLogo => "OneDriveLogo",
                 }
             }
         }
