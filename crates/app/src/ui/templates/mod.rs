@@ -57,7 +57,8 @@ pub fn register_provider(provider: TemplateProvider, cx: &mut App) {
 /// The one active provider, if exactly one is registered.
 pub fn provider(cx: &App) -> Option<TemplateProvider> {
     match cx.try_global::<Providers>().map(|p| p.0.as_slice()) {
-        Some([provider]) => Some(*provider),
+        // Off while Templates & teams is switched off in Settings → Plugins.
+        Some([provider]) if crate::plugins::enabled_key(provider.key) => Some(*provider),
         _ => None,
     }
 }
@@ -94,15 +95,6 @@ pub fn pending_notice(cx: &App) -> Div {
         cx,
     )
     .text_body()
-}
-
-/// The teams on the Agents page (`AgentTeams`), when the provider is on.
-pub fn teams_slot(cx: &mut App) -> Option<AnyView> {
-    provider(cx)?;
-    Some(
-        cx.new(|cx| library::TemplateLibrary::new(library::Section::Team, cx))
-            .into(),
-    )
 }
 
 /// "Channel setup couldn’t finish" notices (`ChannelSidebar.tsx`), raised
@@ -266,6 +258,16 @@ pub(crate) fn agent_choices(
         .filter(|c| c.channel_type != Some(ChannelType::Dm))
         .flat_map(|c| c.members.iter())
         .collect();
+    // Ownership comes from each member's signed profile: read the unknown.
+    let unknown: Vec<String> = members
+        .iter()
+        .filter(|key| snapshot.profiles.get(key.as_str()).is_none())
+        .map(|key| (*key).clone())
+        .collect();
+    if !unknown.is_empty() {
+        complete = false;
+        community.session.want_profiles(unknown);
+    }
     let mut owned: Vec<AgentChoice> = members
         .into_iter()
         .filter(|key| !choices.iter().any(|c| c.pubkey == **key))
@@ -294,9 +296,18 @@ pub(crate) fn watch_kit<V: 'static>(
     let session = community.read(cx).session.clone();
     session.kit_ensure();
     let mut kit = session.kit();
+    let mut connection = session.snapshot();
     cx.spawn(async move |this, cx| {
-        while kit.changed().await.is_ok() {
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
+        loop {
+            // A read asked for before the relay answered waits for it.
+            let (open, changed) = futures::select_biased! {
+                kit = futures::FutureExt::fuse(kit.changed()) => (kit.is_ok(), true),
+                live = futures::FutureExt::fuse(connection.changed()) => {
+                    session.kit_ensure();
+                    (live.is_ok(), false)
+                }
+            };
+            if !open || (changed && this.update(cx, |_, cx| cx.notify()).is_err()) {
                 break;
             }
         }

@@ -558,9 +558,16 @@ async fn refresh(
             Ok(())
         }
         Err(error) => {
+            // Before the relay answers there is nothing to read yet: the
+            // next `kit_ensure` reads again.
+            let waiting = error == NOT_CONNECTED;
             shared.set_kit(|s| {
-                s.status = KitStatus::Error;
-                s.error = Some(error.clone());
+                s.status = if waiting {
+                    KitStatus::Idle
+                } else {
+                    KitStatus::Error
+                };
+                s.error = (!waiting).then(|| error.clone());
             });
             Err(error)
         }
