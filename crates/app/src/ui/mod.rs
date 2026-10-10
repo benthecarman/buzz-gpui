@@ -25,6 +25,7 @@ mod feedback;
 mod form_fields;
 
 mod gif_picker;
+pub mod github;
 mod identity;
 mod inbox;
 mod jump;

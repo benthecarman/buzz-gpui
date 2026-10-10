@@ -38,6 +38,10 @@ gpui-base = "=0.7.1"
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
+# Parses GitHub body HTML inertly, as buzz-app's `<template>` does;
+# already built for GPUI's Markdown view.
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
 # The frame type inside GPUI's RenderImage, at GPUI's version.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 markdown = "1"

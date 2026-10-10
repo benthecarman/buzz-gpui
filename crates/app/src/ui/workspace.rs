@@ -402,6 +402,9 @@ impl Workspace {
         if let Some(root) = thread::dev_open_thread() {
             self.open_thread(root, window, cx);
         }
+        if let Some(link) = crate::ui::github::dev_open_link() {
+            self.route_link_to_tab(&link, window, cx);
+        }
         cx.notify();
     }
 
