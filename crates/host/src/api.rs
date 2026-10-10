@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 mod app_agent;
 pub use app_agent::*;
 
+pub use crate::terminal::{TerminalContext, TerminalOutput};
+
 pub struct HostProtocol;
 
 impl Protocol for HostProtocol {
@@ -272,6 +274,45 @@ pub enum Request {
     ProcessKill {
         handle: u64,
     },
+    /// Registers a terminal owner. Its sessions end when it closes or the
+    /// connection that made it does. Answered with
+    /// [`Response::TerminalOwner`].
+    TerminalOwner,
+    /// Starts the host user's login shell. Answered with
+    /// [`Response::TerminalSession`].
+    TerminalSpawn {
+        owner: String,
+        context: TerminalContext,
+        cols: u16,
+        rows: u16,
+    },
+    /// The session's output since the last read, waiting up to `wait_ms`
+    /// for some to arrive. Answered with [`Response::TerminalOutput`].
+    TerminalRead {
+        owner: String,
+        id: String,
+        #[serde(default)]
+        wait_ms: u32,
+    },
+    TerminalWrite {
+        owner: String,
+        id: String,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    TerminalResize {
+        owner: String,
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
+    TerminalClose {
+        owner: String,
+        id: String,
+    },
+    TerminalCloseOwner {
+        owner: String,
+    },
 }
 
 // Responses are moved once, from the wire to their caller; boxing the
@@ -330,6 +371,9 @@ pub enum Response {
     // claude code
     /// A process request succeeded.
     ProcessDone,
+    TerminalOwner(String),
+    TerminalSession(String),
+    TerminalOutput(TerminalOutput),
 }
 
 /// What an install did (buzz-app's `InstallReport`).

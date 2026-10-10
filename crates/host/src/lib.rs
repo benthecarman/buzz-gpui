@@ -21,6 +21,7 @@ mod setup;
 mod snapshot;
 mod start;
 mod teams;
+pub mod terminal;
 
 use api::{
     AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
@@ -83,6 +84,7 @@ pub struct AgentHost {
     sign_ins: std::sync::Mutex<BTreeMap<u16, std::time::Instant>>,
     app_agents: app_agents::AppAgentHost,
     processes: processes::Processes,
+    terminals: terminal::Terminals,
 }
 
 struct Owner {
@@ -233,6 +235,7 @@ impl AgentHost {
             sign_ins: Default::default(),
             app_agents,
             processes: processes::Processes::default(),
+            terminals: Default::default(),
         });
         // A GUI's host restores once someone signs in.
         if open {
@@ -313,6 +316,13 @@ impl AgentHost {
         asker: Option<Arc<dyn Asker>>,
     ) -> Result<Response, RpcError> {
         match request {
+            request @ (Request::TerminalOwner
+            | Request::TerminalSpawn { .. }
+            | Request::TerminalRead { .. }
+            | Request::TerminalWrite { .. }
+            | Request::TerminalResize { .. }
+            | Request::TerminalClose { .. }
+            | Request::TerminalCloseOwner { .. }) => self.terminals.handle(request, asker).await,
             Request::Models { id, revision, edit } => self
                 .legacy_models(id, revision, edit, asker)
                 .await

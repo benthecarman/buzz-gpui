@@ -1150,6 +1150,7 @@ dependencies = [
  "rmp-serde",
  "secp256k1 0.31.1",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

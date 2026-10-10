@@ -19,12 +19,23 @@ use std::path::{Path, PathBuf};
 /// Asks the GUI on the other end of a connection.
 pub trait Asker: Send + Sync {
     fn ask(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>>;
+
+    /// Resolves when the GUI behind this asker disconnects; never, for a
+    /// caller without a connection.
+    fn closed(&self) -> BoxFuture<'static, ()> {
+        Box::pin(std::future::pending())
+    }
 }
 
 impl Asker for buzz_host_rpc::Peer<crate::api::HostProtocol> {
     fn ask(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
         let peer = self.clone();
         Box::pin(async move { peer.request(ask).await })
+    }
+
+    fn closed(&self) -> BoxFuture<'static, ()> {
+        let peer = self.clone();
+        Box::pin(async move { peer.closed().await })
     }
 }
 
