@@ -108,6 +108,7 @@ impl RemindersPage {
                 channel: target.channel_id.clone(),
                 message: EventId::from_hex(&target.event_id).ok(),
                 thread: None,
+                members: false,
             },
         };
         with_workspace(cx, move |workspace, window, cx| {

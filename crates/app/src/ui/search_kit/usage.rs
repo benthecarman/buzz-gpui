@@ -423,6 +423,7 @@ mod tests {
             channel: "c1".into(),
             message: None,
             thread: None,
+            members: false,
         };
         assert_eq!(visit_key(&channel), "channel:c1");
         assert_eq!(visit_key(&Place::Page(Page::SETTINGS)), "settings");

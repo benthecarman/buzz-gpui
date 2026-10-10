@@ -224,6 +224,7 @@ impl Hub {
                     channel: message.channel_id.clone(),
                     message: EventId::from_hex(&message.event_id).ok(),
                     thread: None,
+                    members: false,
                 },
                 None => Place::Page(PAGE),
             };

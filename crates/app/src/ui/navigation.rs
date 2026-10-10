@@ -55,6 +55,9 @@ pub enum Place {
         channel: String,
         message: Option<EventId>,
         thread: Option<EventId>,
+        /// The members dialog is open over it (`panel: "members"`), so
+        /// Back closes it. Sessions have no members surface.
+        members: bool,
     },
     /// Messages without a conversation of its own (`routes.ts`).
     Channels(ChannelRoute),
@@ -111,6 +114,7 @@ impl Target {
                 channel: channel.into(),
                 message: None,
                 thread: None,
+                members: false,
             },
         }
     }
@@ -379,6 +383,7 @@ mod tests {
                 channel: "a".into(),
                 message: Some(EventId::from_byte_array([1; 32])),
                 thread: Some(EventId::from_byte_array([1; 32])),
+                members: false,
             },
         };
         assert!(history.push(thread));

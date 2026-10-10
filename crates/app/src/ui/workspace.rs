@@ -400,11 +400,16 @@ impl Workspace {
         ));
         // "View channel details" opens the Channel settings tab.
         let weak = cx.entity().downgrade();
+        let members = weak.clone();
         let actions = page.read(cx).header_actions();
         actions.update(cx, |actions, _| {
             actions.set_open_settings(Rc::new(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| this.open_channel_settings(window, cx));
-            }))
+            }));
+            // Opening or closing members is a visit (`panel: "members"`).
+            actions.set_on_members(Rc::new(move |cx| {
+                let _ = members.update(cx, |this, cx| this.record(cx));
+            }));
         });
         self.channel = Some(page);
         self.restore_channel_tabs(window, cx);
@@ -708,6 +713,7 @@ impl Workspace {
                     channel,
                     message: thread,
                     thread: thread.filter(|_| !self.thread_exact),
+                    members: self.members_open(cx),
                 }
             }
             (Page::SETTINGS, _) => match &self.settings {
@@ -955,6 +961,7 @@ impl Workspace {
                 ref channel,
                 message,
                 thread,
+                members,
             } => {
                 let Some(community) = &self.community else {
                     return;
@@ -973,7 +980,7 @@ impl Workspace {
                     cx.notify();
                     return;
                 };
-                self.open_place(summary, message, thread, window, cx);
+                self.open_place(summary, (message, thread, members), window, cx);
             }
         }
         cx.notify();
@@ -983,8 +990,7 @@ impl Workspace {
     fn open_place(
         &mut self,
         summary: &ChannelSummary,
-        message: Option<EventId>,
-        thread: Option<EventId>,
+        (message, thread, members): (Option<EventId>, Option<EventId>, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -996,6 +1002,17 @@ impl Workspace {
             (Some(message), _) => self.reveal(message, window, cx),
             (None, _) => self.close_thread(window, cx),
         }
+        if let Some(channel) = &self.channel {
+            let actions = channel.read(cx).header_actions();
+            actions.update(cx, |actions, cx| actions.show_members(members, window, cx));
+        }
+    }
+
+    /// The open channel's members dialog is showing.
+    fn members_open(&self, cx: &App) -> bool {
+        self.channel
+            .as_ref()
+            .is_some_and(|channel| channel.read(cx).header_actions().read(cx).members_open())
     }
 
     /// Looks up a routed channel the viewer has not joined
@@ -1019,7 +1036,10 @@ impl Workspace {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.resolving = None;
                     let Place::Conversation {
-                        message, thread, ..
+                        message,
+                        thread,
+                        members,
+                        ..
                     } = target.place
                     else {
                         return;
@@ -1028,7 +1048,9 @@ impl Workspace {
                         .ok()
                         .and_then(|list| list.into_iter().find(|c| c.id == id))
                     {
-                        Some(summary) => this.open_place(&summary, message, thread, window, cx),
+                        Some(summary) => {
+                            this.open_place(&summary, (message, thread, members), window, cx)
+                        }
                         None => {
                             tracing::warn!(channel = %id, "that channel is not available here");
                             this.failure = Some(Failed {
@@ -1195,6 +1217,7 @@ impl Workspace {
                         channel,
                         message,
                         thread,
+                        members: false,
                     },
                 };
                 self.navigate(target, window, cx);

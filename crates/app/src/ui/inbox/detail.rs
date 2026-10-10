@@ -135,6 +135,7 @@ impl InboxDetail {
                             channel: row.channel.to_string(),
                             message: Some(row.thread_root_id.unwrap_or(row.id)),
                             thread: Some(row.thread_root_id.unwrap_or(row.id)),
+                            members: false,
                         },
                     };
                     with_workspace(cx, move |workspace, window, cx| {
@@ -197,6 +198,7 @@ impl InboxDetail {
                 channel: self.item.channel_id.clone(),
                 message: EventId::from_hex(&self.item.message_id).ok(),
                 thread: root,
+                members: false,
             },
         };
         with_workspace(cx, move |workspace, window, cx| {

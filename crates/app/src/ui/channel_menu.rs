@@ -39,6 +39,10 @@ pub type MenuPanel = (SharedString, Rc<dyn Fn(&mut Window, &mut App)>);
 /// in a modal.
 pub type OpenSettings = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
+/// Told after the members dialog opens or closes, so the visit records
+/// it (`panel: "members"`).
+pub type OnMembers = Rc<dyn Fn(&mut App)>;
+
 enum Modal {
     Members {
         dialog: Entity<MembersDialog>,
@@ -72,6 +76,7 @@ pub struct ChannelActions {
     /// Registered channel panels' entries, set by the page each frame.
     pub menu_panels: Vec<MenuPanel>,
     open_settings: Option<OpenSettings>,
+    on_members: Option<OnMembers>,
     /// "Save as template…", made when the menu first opens.
     save_as: Option<Entity<super::templates::SaveAsTemplate>>,
     /// Only the members button: a Me conversation has its own menu.
@@ -94,6 +99,7 @@ impl ChannelActions {
             on_removed,
             menu_panels: Vec::new(),
             open_settings: None,
+            on_members: None,
             save_as: None,
             members_only: false,
         }
@@ -105,6 +111,28 @@ impl ChannelActions {
         self.open_settings = Some(open);
     }
 
+    pub fn set_on_members(&mut self, on_members: OnMembers) {
+        self.on_members = Some(on_members);
+    }
+
+    /// The members dialog is open. Sessions have no members surface.
+    pub fn members_open(&self) -> bool {
+        self.channel.channel_type != Some(ChannelType::Session)
+            && matches!(self.modal, Some(Modal::Members { .. }))
+    }
+
+    /// Opens or closes the members dialog for a visited place.
+    pub fn show_members(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if open == self.members_open() {
+            return;
+        }
+        if open {
+            self.open_members(window, cx);
+        } else {
+            self.close(cx);
+        }
+    }
+
     /// Opens the members dialog, as the header button does.
     pub fn open_members(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx
@@ -114,7 +142,14 @@ impl ChannelActions {
             dialog,
             _subscription: subscription,
         });
+        self.members_changed(cx);
         cx.notify();
+    }
+
+    fn members_changed(&self, cx: &mut Context<Self>) {
+        if let Some(on_members) = self.on_members.clone() {
+            cx.defer(move |cx| on_members(cx));
+        }
     }
 
     fn open_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -170,6 +205,9 @@ impl ChannelActions {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Members { .. })) {
+            self.members_changed(cx);
+        }
         self.modal = None;
         self.community
             .update(cx, |community, _| community.set_presence_extra(Vec::new()));

@@ -245,6 +245,7 @@ mod tests {
                 channel: channel.into(),
                 message: None,
                 thread: None,
+                members: false,
             },
         }
     }

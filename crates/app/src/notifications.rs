@@ -341,6 +341,7 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
                 .thread_root
                 .as_deref()
                 .and_then(|root| buzz_relay_client::EventId::from_hex(root).ok()),
+            members: false,
         },
     };
     if !cx.default_global::<Shown>().admit(key, Instant::now()) {

@@ -568,6 +568,7 @@ impl DraftDetail {
                                 channel: row.channel.to_string(),
                                 message: Some(root),
                                 thread: Some(root),
+                                members: false,
                             },
                         };
                         with_workspace(cx, move |workspace, window, cx| {
@@ -626,6 +627,7 @@ impl DraftDetail {
                 channel: channel.id.clone(),
                 message: root,
                 thread: root,
+                members: false,
             },
         };
         with_workspace(cx, move |workspace, window, cx| {
