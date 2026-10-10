@@ -22,6 +22,10 @@ uses (`dev.local.buzz.foundation.identity`). If you have never used buzz-app on
 this machine, import your `nsec` or create a new identity. Then add your
 community by its relay origin, for example `wss://relay.example.com`.
 
+Settings → Appearance → System tray puts a Buzz icon in the panel and can
+keep Buzz running there when its window is minimized or closed. GNOME shows
+tray icons through the AppIndicator extension, which Ubuntu turns on.
+
 Agents on the laptop run inside the app. Their keys are kept in the system
 keyring, and they stop when the app quits.
 

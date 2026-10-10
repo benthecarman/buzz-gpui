@@ -22,6 +22,7 @@ if [[ ${1:-} != --inside ]]; then
   rm -rf "$OUT" && mkdir -p "$OUT"
   export GS=$(build gnome-shell) MESA=$(build mesa) FOOT=$(build foot)
   export GLIB=$(build glib.bin) DBUS=$(build dbus) SQLITE=$(build sqlite.bin)
+  export APPINDICATOR=$(build gnomeExtensions.appindicator)
   export OUT APP RELAY_DIR
   # The app needs the dev shell's libraries; everything else runs on a
   # private session bus.
@@ -51,12 +52,16 @@ export default class BuzzTest extends Extension {
 EOF
 cat > "$XDG_CONFIG_HOME/glib-2.0/settings/keyfile" <<'EOF'
 [org/gnome/shell]
-enabled-extensions=['buzz-test@local']
+enabled-extensions=['buzz-test@local', 'appindicatorsupport@rgcjonas.gmail.com']
 welcome-dialog-last-shown-version='999'
 
 [org/gnome/desktop/interface]
 enable-hot-corners=false
 EOF
+
+# Ubuntu turns on its AppIndicator extension, which shows tray icons.
+ln -s "$APPINDICATOR/share/gnome-shell/extensions/appindicatorsupport@rgcjonas.gmail.com" \
+  "$XDG_DATA_HOME/gnome-shell/extensions/"
 
 # Installed as the .deb installs them, so banners carry Buzz's name and icon.
 mkdir -p "$XDG_DATA_HOME/applications" "$XDG_DATA_HOME/icons/hicolor/256x256/apps"
@@ -109,6 +114,10 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 shell_eval 'Main.overview.hide(); true' > /dev/null
+# GNOME warns, and keeps warning, that the test put it in unsafe mode; the
+# warning would hold up the banners behind it.
+sleep 2
+shell_eval 'Main.messageTray.getSources().forEach(s => s.destroy()); true' > /dev/null
 
 # The app as alice, on #general of the plain test relay.
 ALICE_NSEC=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['identities']['alice']['nsec'])" "$RELAY_DIR/identities.json")
@@ -126,9 +135,11 @@ export VK_ICD_FILENAMES=$MESA/share/vulkan/icd.d/lvp_icd.x86_64.json
 sleep 4 && kill $SEED && wait $SEED 2>/dev/null || true
 "$SQLITE/bin/sqlite3" "$XDG_DATA_HOME/buzz-gpui/buzz.sqlite3" \
   "INSERT OR REPLACE INTO viewer_prefs VALUES ('$ALICE','communities','{\"origins\":[\"ws://127.0.0.1:53000\"],\"selected\":\"ws://127.0.0.1:53000\"}');
-   INSERT OR REPLACE INTO view_state VALUES ('http://127.0.0.1:53000','$ALICE','selected-channel','\"$GENERAL\"',0);"
+   INSERT OR REPLACE INTO view_state VALUES ('http://127.0.0.1:53000','$ALICE','selected-channel','\"$GENERAL\"',0);
+   INSERT OR REPLACE INTO device_prefs VALUES ('tray','{\"show_icon\":true,\"minimize_to_tray\":true,\"close_to_tray\":true}');"
 
-"$APP" > "$OUT/app.log" 2>&1 & PIDS+=($!)
+"$APP" > "$OUT/app.log" 2>&1 & APP_PID=$!
+PIDS+=($APP_PID)
 wait_for "the Buzz window" 'global.get_window_actors().some(a => a.meta_window.get_wm_class() === "buzz-gpui")'
 sleep 3
 "$FOOT/bin/foot" > "$OUT/foot.log" 2>&1 & PIDS+=($!)
@@ -161,15 +172,38 @@ check "a second launch with a token comes to the front" buzz-gpui
 screenshot second-launch
 
 # 3. A direct message from bob notifies; clicking the banner opens it.
+send_dm() {
+  STAMP=$(date +%s%N)
+  BUZZ_RELAY_URL=http://127.0.0.1:53000 BUZZ_PRIVATE_KEY=$BOB_NSEC \
+    "$RELAY_DIR/buzz/target/debug/buzz" messages send --channel "$DM" \
+    --content "activation test $STAMP" >> "$OUT/send.log"
+}
 focus_terminal
-STAMP=$(date +%s%N)
-BUZZ_RELAY_URL=http://127.0.0.1:53000 BUZZ_PRIVATE_KEY=$BOB_NSEC \
-  "$RELAY_DIR/buzz/target/debug/buzz" messages send --channel "$DM" \
-  --content "activation test $STAMP" > "$OUT/send.log"
+send_dm
 wait_for "the banner" 'Main.messageTray.getSources().some(s => s.notifications.some(n => /sent you a direct message/.test(n.title)))'
 screenshot banner
-# A real click on the banner, through a virtual pointer: GNOME takes the
-# token's time from the input event it is handling.
+# Real clicks, through a virtual pointer: GNOME takes a token's time from
+# the input event it is handling.
+click() { # JS for an actor, [clicks]
+  shell_eval "
+    const {Clutter, GLib} = imports.gi;
+    const actor = $1;
+    const [x, y] = actor.get_transformed_position();
+    const [w, h] = actor.get_transformed_size();
+    const seat = global.stage.context.get_backend().get_default_seat();
+    globalThis.buzzPointer ??= seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+    buzzPointer.notify_absolute_motion(GLib.get_monotonic_time(), x + w / 3, y + h / 2);
+    true" > /dev/null
+  sleep 0.3
+  for _ in $(seq 1 "${2:-1}"); do
+    shell_eval '
+      const {Clutter, GLib} = imports.gi;
+      buzzPointer.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.PRESSED);
+      buzzPointer.notify_button(GLib.get_monotonic_time() + 20000, Clutter.BUTTON_PRIMARY, Clutter.ButtonState.RELEASED);
+      true' > /dev/null
+    sleep 0.1
+  done
+}
 click_banner() {
   # Unread messages from earlier runs notify too and queue ahead of it.
   wait_for "this message's banner" "Main.messageTray._banner?.notification?.body?.includes('$STAMP') === true" 120
@@ -180,21 +214,7 @@ click_banner() {
     const settled = at !== "" && at === globalThis.buzzBannerAt;
     globalThis.buzzBannerAt = at;
     settled'
-  shell_eval '
-    const {Clutter, GLib} = imports.gi;
-    const banner = Main.messageTray._banner;
-    const [x, y] = banner.get_transformed_position();
-    const [w, h] = banner.get_transformed_size();
-    const seat = global.stage.context.get_backend().get_default_seat();
-    globalThis.buzzPointer ??= seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
-    buzzPointer.notify_absolute_motion(GLib.get_monotonic_time(), x + w / 3, y + h / 2);
-    true' > /dev/null
-  sleep 0.3
-  shell_eval '
-    const {Clutter, GLib} = imports.gi;
-    buzzPointer.notify_button(GLib.get_monotonic_time(), Clutter.BUTTON_PRIMARY, Clutter.ButtonState.PRESSED);
-    buzzPointer.notify_button(GLib.get_monotonic_time() + 50000, Clutter.BUTTON_PRIMARY, Clutter.ButtonState.RELEASED);
-    true' > /dev/null
+  click 'Main.messageTray._banner'
 }
 click_banner
 sleep 2
@@ -225,5 +245,69 @@ key Control_L pressed; key v pressed; key v released; key Control_L released
 sleep 2
 screenshot pasted
 echo "   look at $OUT/pasted.png: the composer should hold copied-file.png as an attachment"
+
+# 5. The tray icon, in Ubuntu's AppIndicator extension.
+TRAY='Object.values(Main.panel.statusArea).find(b => b._indicator?.id === "buzz-gpui")'
+wait_for "the tray icon" "Boolean($TRAY)"
+echo "ok: the tray icon is up"
+screenshot tray
+
+# 6. With close-to-tray chosen, closing the window keeps Buzz running.
+BUZZ_GONE='!global.get_window_actors().some(a => a.meta_window.get_wm_class() === "buzz-gpui")'
+close_window() {
+  shell_eval 'global.get_window_actors().map(a => a.meta_window).find(w => w.get_wm_class() === "buzz-gpui").delete(global.get_current_time()); true' > /dev/null
+  wait_for "the window to close" "$BUZZ_GONE"
+  sleep 1
+}
+close_window
+if kill -0 "$APP_PID" 2> /dev/null; then
+  echo "ok: closing the window keeps Buzz running in the tray"
+else
+  echo "FAIL: Buzz quit when its window closed"
+  exit 1
+fi
+
+# 7. "Open Buzz" in the tray menu brings the window back, in front.
+open_menu() {
+  click "$TRAY"
+  wait_for "the tray menu" "$TRAY.menu.isOpen === true"
+  sleep 0.5
+}
+menu_item() { echo "$TRAY.menu._getMenuItems().find(i => i.label?.text === '$1')"; }
+focus_terminal
+open_menu
+click "$(menu_item 'Open Buzz')"
+wait_for "the window to come back" "!($BUZZ_GONE)"
+sleep 2
+check "Open Buzz in the tray menu brings it back in front" buzz-gpui
+
+# 8. Hidden, a notification click opens it on the message.
+close_window
+focus_terminal
+send_dm
+click_banner
+wait_for "the window to come back" "!($BUZZ_GONE)"
+sleep 2
+check "a notification click while hidden brings it back in front" buzz-gpui
+screenshot reopened-on-message
+
+# 9. Double-clicking the icon opens it too.
+close_window
+focus_terminal
+click "$TRAY" 2
+wait_for "the window to come back" "!($BUZZ_GONE)"
+sleep 2
+check "double-clicking the tray icon brings it back in front" buzz-gpui
+
+# 10. Quit Buzz in the tray menu quits.
+open_menu
+click "$(menu_item 'Quit Buzz')"
+for _ in $(seq 1 20); do kill -0 "$APP_PID" 2> /dev/null || break; sleep 0.5; done
+if kill -0 "$APP_PID" 2> /dev/null; then
+  echo "FAIL: Quit Buzz left it running"
+  fail=1
+else
+  echo "ok: Quit Buzz in the tray menu quits"
+fi
 
 exit $fail

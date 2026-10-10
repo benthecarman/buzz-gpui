@@ -184,6 +184,8 @@ pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
     cx.spawn(async move |cx| {
         while let Some(arrival) = arrivals.next().await {
             cx.update(|cx| {
+                // Hidden to the tray: open it again first.
+                crate::main_window::open(cx);
                 with_workspace(cx, move |workspace, window, cx| {
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                     if let Some(token) = arrival.activation_token {

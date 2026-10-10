@@ -5,11 +5,14 @@ mod deep_links;
 mod hosts;
 mod http;
 mod idle;
+mod main_window;
 mod mirror;
 mod notifications;
 mod runtime;
 #[cfg(unix)]
 mod single_instance;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod tray;
 mod ui;
 
 use gpui_kit::*;
@@ -81,18 +84,7 @@ fn main() {
             ui::settings::OpenSettings,
             None,
         )]);
-        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
-        let (window, workspace) = gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(480.), px(400.))),
-                app_id: Some("buzz-gpui".into()),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| ui::workspace::Workspace::new(window, cx)),
-        )
-        .expect("open main window");
-        navigation::install(window, &workspace, cx);
+        main_window::init(cx);
+        main_window::open(cx);
     });
 }

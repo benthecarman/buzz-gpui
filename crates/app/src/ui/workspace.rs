@@ -12,6 +12,7 @@ use super::profile_card::{self, ProfileCard};
 use super::settings::{CloseSettings, OpenHostSettings, OpenSettings, Section, SettingsPage};
 use super::sidebar::{self, Page, SidebarProps};
 use super::thread::{self, ThreadPanel};
+use super::window_controls;
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
 use buzz_relay_client::{ChannelSummary, ChannelType, RosterStatus};
@@ -19,6 +20,7 @@ use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, IconButton, IconButtonSize, IconName, MaterialStyled,
     ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
 };
+use gpui_kit::component::window_border;
 use gpui_kit::*;
 use nostr::prelude::EventId;
 use std::rc::Rc;
@@ -324,7 +326,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let header_button = |id: &'static str, icon: IconName| {
             IconButton::new(id, icon)
                 .size(IconButtonSize::Sm)
@@ -333,66 +335,69 @@ impl Workspace {
         let settings_open = self.page == Page::Settings;
         self.account
             .update(cx, |account, _| account.settings_open = settings_open);
-        div()
-            .relative()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(rems(3.))
-            .pl(rems(1.))
-            .pr(rems(1.))
-            .child(
-                div()
-                    .flex()
-                    .pl(rems(1.))
-                    .child(header_button("toggle-sidebar", IconName::Sidebar).on_click(
-                        cx.listener(|this, _, _, cx| {
+        window_controls::title_bar(
+            div()
+                .id("title-bar")
+                .relative()
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(rems(3.))
+                .pl(rems(1.))
+                .pr(rems(1.)),
+        )
+        .child(
+            window_controls::not_title_bar(div().flex().ml(rems(1.)))
+                .child(
+                    header_button("toggle-sidebar", IconName::Sidebar).on_click(cx.listener(
+                        |this, _, _, cx| {
                             this.sidebar_open = !this.sidebar_open;
                             cx.notify();
-                        }),
-                    ))
-                    .child(
-                        header_button("back", IconName::ArrowLeft)
-                            .tooltip("Go back")
-                            .disabled(!self.history.can_go_back())
-                            .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
-                    )
-                    .child(
-                        header_button("forward", IconName::ArrowRight)
-                            .tooltip("Go forward")
-                            .disabled(!self.history.can_go_forward())
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.go_forward(window, cx)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(rems(0.25))
-                    .left_0()
-                    .right_0()
-                    .flex()
-                    .justify_center()
-                    .child(
+                        },
+                    )),
+                )
+                .child(
+                    header_button("back", IconName::ArrowLeft)
+                        .tooltip("Go back")
+                        .disabled(!self.history.can_go_back())
+                        .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
+                )
+                .child(
+                    header_button("forward", IconName::ArrowRight)
+                        .tooltip("Go forward")
+                        .disabled(!self.history.can_go_forward())
+                        .on_click(cx.listener(|this, _, window, cx| this.go_forward(window, cx))),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(rems(0.25))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    window_controls::not_title_bar(div()).child(
                         Tabs::new(TabVariant::Chrome)
                             .tab(Tab::new("me", "Me"))
                             .tab(Tab::new("messages", "Messages").selected(true)),
                     ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(rems(0.5))
-                    .child(
-                        header_button("search", IconName::MagnifyingGlass)
-                            .tooltip("Search Buzz (Ctrl+K)")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_search(window, cx)),
-                            ),
-                    )
-                    .child(self.account.clone()),
-            )
+                ),
+        )
+        .child(
+            window_controls::not_title_bar(div().flex().items_center().gap(rems(0.5)))
+                .child(
+                    header_button("search", IconName::MagnifyingGlass)
+                        .tooltip("Search Buzz (Ctrl+K)")
+                        .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
+                )
+                .child(self.account.clone())
+                .child(window_controls::render(
+                    window_controls::Policy::current(),
+                    window,
+                )),
+        )
     }
 
     fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -510,46 +515,50 @@ impl Render for Workspace {
                 )
             });
         let profile = self.profile_card(window, cx);
-        ShellBackground::new().child(
-            div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .on_mouse_down(
-                    MouseButton::Navigate(NavigationDirection::Back),
-                    cx.listener(|this, _, window, cx| this.go_back(window, cx)),
-                )
-                .on_mouse_down(
-                    MouseButton::Navigate(NavigationDirection::Forward),
-                    cx.listener(|this, _, window, cx| this.go_forward(window, cx)),
-                )
-                .children(profile)
-                .font_family("Inter")
-                .emoji_fallback()
-                .text_color(c.text_standard)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    let keys = &event.keystroke;
-                    if keys.key == "k" && keys.modifiers.secondary() && this.dialog.is_none() {
-                        cx.stop_propagation();
-                        this.open_search(window, cx);
-                    }
-                }))
-                .child(self.header(cx))
-                .child(
-                    div().flex().flex_1().min_h_0().child(self.rail(cx)).child(
-                        div().flex_1().min_w_0().pr(rems(1.)).pb(rems(1.)).child(
-                            div()
-                                .flex()
-                                .size_full()
-                                .overflow_hidden()
-                                .panel_surface(&c)
-                                .children(sidebar)
-                                .child(main),
+        // No shadow around the frame: that needs a translucent surface,
+        // which not every GPU path gives; edges resize from just inside.
+        window_border().shadow_size(px(0.)).child(
+            ShellBackground::new().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Navigate(NavigationDirection::Back),
+                        cx.listener(|this, _, window, cx| this.go_back(window, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Navigate(NavigationDirection::Forward),
+                        cx.listener(|this, _, window, cx| this.go_forward(window, cx)),
+                    )
+                    .children(profile)
+                    .font_family("Inter")
+                    .emoji_fallback()
+                    .text_color(c.text_standard)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        let keys = &event.keystroke;
+                        if keys.key == "k" && keys.modifiers.secondary() && this.dialog.is_none() {
+                            cx.stop_propagation();
+                            this.open_search(window, cx);
+                        }
+                    }))
+                    .child(self.header(window, cx))
+                    .child(
+                        div().flex().flex_1().min_h_0().child(self.rail(cx)).child(
+                            div().flex_1().min_w_0().pr(rems(1.)).pb(rems(1.)).child(
+                                div()
+                                    .flex()
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .panel_surface(&c)
+                                    .children(sidebar)
+                                    .child(main),
+                            ),
                         ),
-                    ),
-                )
-                .children(dialog)
-                .children(super::media::review_overlay(cx)),
+                    )
+                    .children(dialog)
+                    .children(super::media::review_overlay(cx)),
+            ),
         )
     }
 }

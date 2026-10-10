@@ -25,4 +25,5 @@ mod status;
 mod thread;
 mod time;
 mod typing;
+mod window_controls;
 pub mod workspace;

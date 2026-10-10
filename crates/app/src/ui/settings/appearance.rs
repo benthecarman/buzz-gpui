@@ -1,10 +1,11 @@
 //! Settings → Appearance (§1.1, §5b.5 item 2): color mode thumbnails and
-//! the interface size stepper.
+//! the interface size stepper, and this port's system tray choices.
 
-use super::{button, header, preference_row, rows_group, section};
+use super::{button, header, inline_header, note, preference_row, rows_group, section};
+use crate::main_window;
 use buzz_ui::{
     ActiveTheme, Appearance, AppearancePreference, ButtonSize, Colors, INTERFACE_SCALE_MAX,
-    INTERFACE_SCALE_MIN, IconButton, IconButtonSize, IconName, Theme, TypeStyled,
+    INTERFACE_SCALE_MIN, IconButton, IconButtonSize, IconName, Switch, Theme, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -80,7 +81,81 @@ pub(super) fn render(cx: &App) -> AnyElement {
             cx,
         )
         .into_any_element(),
+        tray(cx),
     ])
+}
+
+/// The tray icon and whether the window hides to it.
+fn tray(cx: &App) -> AnyElement {
+    let preferences = main_window::preferences(cx);
+    let toggle = |id: &'static str,
+                  title: &'static str,
+                  description: &'static str,
+                  checked: bool,
+                  enabled: bool,
+                  apply: fn(&mut main_window::Preferences, bool)| {
+        preference_row(
+            None,
+            title,
+            Some(description.into_any_element()),
+            vec![
+                Switch::new(id, checked)
+                    .disabled(!enabled)
+                    .on_change(move |value, window, cx| {
+                        let mut next = main_window::preferences(cx);
+                        apply(&mut next, value);
+                        main_window::set_preferences(next, cx);
+                        window.refresh();
+                    })
+                    .into_any_element(),
+            ],
+            cx,
+        )
+        .into_any_element()
+    };
+    let shown = preferences.show_icon;
+    let rows = vec![
+        toggle(
+            "tray-icon",
+            "Show Buzz in the system tray",
+            "The icon opens Buzz and shows when mentions or direct messages are unread.",
+            shown,
+            true,
+            |p, v| p.show_icon = v,
+        ),
+        toggle(
+            "tray-minimize",
+            "Minimize to the tray",
+            "The minimize button hides the window instead.",
+            preferences.minimize_to_tray,
+            shown,
+            |p, v| p.minimize_to_tray = v,
+        ),
+        toggle(
+            "tray-close",
+            "Close to the tray",
+            "Closing the window keeps Buzz running, so notifications keep arriving.",
+            preferences.close_to_tray,
+            shown,
+            |p, v| p.close_to_tray = v,
+        ),
+    ];
+    // Without a panel showing the icon, hiding to it would strand the app.
+    let unseen = (shown && !main_window::tray_shown(cx)).then(|| {
+        note(
+            "No panel is showing the icon, so the window doesn't hide to it. On GNOME, \
+             turn on the AppIndicator extension.",
+            cx,
+        )
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(rems(0.5))
+        .child(inline_header("System tray", None, Vec::new(), cx))
+        .child(rows_group(rows, cx))
+        .children(unseen)
+        .into_any_element()
 }
 
 /// One `ThemePicker` radio: an 80×56 preview, the system one split down
