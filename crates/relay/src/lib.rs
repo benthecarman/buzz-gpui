@@ -24,6 +24,7 @@ pub mod origin;
 pub mod outbox;
 pub mod presence;
 pub mod profiles;
+pub mod projects;
 pub mod read_state;
 pub mod reader;
 pub mod reminders;
