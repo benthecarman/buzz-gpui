@@ -87,6 +87,7 @@ pub struct Dialog {
     compact_header_gap: bool,
     compact_footer_gap: bool,
     heading_title: bool,
+    stable_height: bool,
     title_icon: Option<IconName>,
     on_close: Option<ClickHandler>,
 }
@@ -105,6 +106,7 @@ impl Dialog {
             compact_header_gap: false,
             compact_footer_gap: false,
             heading_title: false,
+            stable_height: false,
             title_icon: None,
             on_close: None,
         }
@@ -125,6 +127,13 @@ impl Dialog {
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// `height="stable"`: `min(36rem, 100dvh - 48px)` whatever the body
+    /// holds, so switching views inside does not resize the dialog.
+    pub fn stable_height(mut self) -> Self {
+        self.stable_height = true;
         self
     }
 
@@ -204,6 +213,9 @@ impl RenderOnce for Dialog {
                 })
             })
             .max_h(max_height)
+            .when(self.stable_height, |this| {
+                this.h((window.rem_size() * 36.).min(max_height))
+            })
             .child(
                 div()
                     .flex()
