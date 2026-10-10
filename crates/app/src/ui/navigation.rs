@@ -45,6 +45,9 @@ pub enum Place {
     /// A page with no conversation of its own: Messages before a channel
     /// is chosen, Agents, Settings.
     Page(Page),
+    /// Settings at a section (`kind: "settings", section`): each section
+    /// is a visit.
+    Settings(super::settings::Section),
     /// A channel, optionally revealing a message. `thread` equal to
     /// `message` opens that thread; any other value is a hint only, as the
     /// root is re-derived from signed ancestry.

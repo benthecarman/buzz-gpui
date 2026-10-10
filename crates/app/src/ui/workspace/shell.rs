@@ -322,7 +322,7 @@ impl Workspace {
             return None;
         }
         if self.page == Page::SETTINGS {
-            let settings = self.settings_page(window, cx);
+            let settings = self.settings_page(None, window, cx);
             return Some(
                 settings.update(cx, |settings, cx| settings.sidebar(cx).into_any_element()),
             );
@@ -330,7 +330,21 @@ impl Workspace {
         if let Some(own) = self.own_sidebars.get(&self.page) {
             return Some(own.clone().into_any_element());
         }
-        let community = self.community.clone()?;
+        let Some(community) = self.community.clone() else {
+            // The personal space: the page rows, and no channels.
+            let page = self.page;
+            return Some(super::channel_states::personal_sidebar(
+                buzz_ui::NavigationItem::new("page-agents", "Agents")
+                    .sidebar()
+                    .icon(IconName::Robot)
+                    .icon_stroke(2.5)
+                    .selected(page == Page::AGENTS)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_page(Page::AGENTS, window, cx)
+                    })),
+                cx,
+            ));
+        };
         let weak = cx.entity().downgrade();
         let weak_page = weak.clone();
         let (weak_create, weak_message) = (weak.clone(), weak.clone());

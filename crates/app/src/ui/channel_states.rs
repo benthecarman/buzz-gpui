@@ -1,16 +1,33 @@
-//! What the Messages page shows without an open channel
-//! (`ChannelsPage.tsx`, `App.tsx`): the connection splash, a destination
-//! being checked or one that failed, and the empty selection.
+//! What the page shows when a destination isn't open (`App.tsx`,
+//! `ChannelsPage.tsx`, `ChannelSidebar.tsx`, `navigation/controller.ts`):
+//! - "Opening destination…" while a place waits for its channel list;
+//! - "Checking conversation access…" while an unjoined channel is looked
+//!   up;
+//! - "This destination couldn’t open", with the reason, Retry navigation
+//!   and Open Settings;
+//! - the "Your channels, one conversation." splash without a connected
+//!   community, and the personal space's sidebar;
+//! - the empty selection.
 
+use super::navigation::Target;
 use buzz_relay_client::{ChannelSummary, ChannelType, SessionSnapshot, SessionStatus};
-use buzz_ui::{ActiveTheme, Button, ButtonSize, Icon, IconName, TypeStyled};
+use buzz_ui::{ActiveTheme, Button, ButtonSize, Icon, IconName, NavigationItem, TypeStyled};
 use gpui_kit::*;
+use std::time::Duration;
 
-/// What fills the page.
+/// A navigation that still waits after this fails as unavailable
+/// (`controller.ts`, the 15 s open timeout).
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What fills the Messages page without an open channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Empty {
+    /// No community is selected: the personal space.
+    NoCommunity,
     /// The community is not connected and nothing is saved to show.
     Splash,
+    /// A place waits for the channel list (`route.waiting`).
+    Opening,
     /// A routed channel is being looked up.
     Checking,
     /// Nothing is selected.
@@ -19,27 +36,31 @@ pub enum Empty {
 
 /// The splash shows while the session is not ready and has no channels
 /// to show (`session.status !== "ready" && !session.cached`).
-pub fn empty(snapshot: Option<&SessionSnapshot>, checking: bool) -> Empty {
+pub fn empty(snapshot: Option<&SessionSnapshot>, opening: bool, checking: bool) -> Empty {
     if checking {
         return Empty::Checking;
     }
+    if opening {
+        return Empty::Opening;
+    }
     match snapshot {
+        None => Empty::NoCommunity,
         Some(snapshot)
             if snapshot.status != SessionStatus::Ready && snapshot.channels.is_empty() =>
         {
             Empty::Splash
         }
-        _ => Empty::Select,
+        Some(_) => Empty::Select,
     }
 }
 
-/// The empty page: "Your channels, one conversation." while the community
-/// is not connected, else a status line in the page's corner; `select` is
-/// what the page says with nothing selected.
+/// The empty page: "Your channels, one conversation." without a
+/// connected community, else a status line in the page's corner; `select`
+/// is what the page says with nothing selected.
 pub fn render(empty: Empty, select: &'static str, cx: &App) -> AnyElement {
     let c = cx.colors();
     match empty {
-        Empty::Splash => div()
+        Empty::NoCommunity | Empty::Splash => div()
             .flex_1()
             .flex()
             .flex_col()
@@ -47,6 +68,7 @@ pub fn render(empty: Empty, select: &'static str, cx: &App) -> AnyElement {
             .justify_center()
             .p(px(32.))
             .bg(c.surface_panel)
+            .text_center()
             .child(
                 div()
                     .p(px(20.))
@@ -68,20 +90,23 @@ pub fn render(empty: Empty, select: &'static str, cx: &App) -> AnyElement {
                     .mt(px(8.))
                     .text_body()
                     .text_color(c.text_subtle)
-                    .text_center()
-                    .child(
+                    .child(if empty == Empty::NoCommunity {
+                        "Use the left community rail to choose or add a community. Your profile \
+                         and settings work without a community."
+                    } else {
                         "Connection details and retry are in the sidebar. Your profile and \
-                         settings work without a community.",
-                    ),
+                         settings work without a community."
+                    }),
             )
             .into_any_element(),
-        Empty::Checking | Empty::Select => div()
+        Empty::Opening | Empty::Checking | Empty::Select => div()
             .flex_1()
             .py(px(32.))
             .px(px(16.))
             .text_body_sm()
             .text_color(c.text_subtle)
             .child(match empty {
+                Empty::Opening => "Opening destination…",
                 Empty::Checking => "Checking conversation access…",
                 _ => select,
             })
@@ -89,9 +114,52 @@ pub fn render(empty: Empty, select: &'static str, cx: &App) -> AnyElement {
     }
 }
 
-/// "This destination couldn’t open" (`App.tsx`), with Retry navigation and
-/// Open Settings.
+/// Why a destination could not open (`OpenFailure`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// The target needs another account or a community not joined here.
+    Denied,
+    /// An outside link that cannot be parsed.
+    Invalid,
+    /// Not there, or it timed out; kept for retry.
+    Unavailable,
+}
+
+/// A navigation that could not open, kept for Retry navigation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Failed {
+    pub target: Option<Target>,
+    pub reason: Reason,
+    /// It came from outside the window: a link from the OS, another
+    /// launch or a notification.
+    pub ingress: bool,
+}
+
+impl Failed {
+    /// Outside links retry only when they may succeed later.
+    pub fn retryable(&self) -> bool {
+        !self.ingress || (self.reason != Reason::Invalid && self.target.is_some())
+    }
+
+    /// The notice's explanation.
+    pub fn explanation(&self) -> &'static str {
+        match self.reason {
+            Reason::Denied => {
+                "This target needs its original account and an already joined community."
+            }
+            _ if self.ingress && !self.retryable() => "This link is invalid or unsupported.",
+            _ => {
+                "The destination is unavailable or isn’t supported yet. Your target has been \
+                 kept for retry."
+            }
+        }
+    }
+}
+
+/// "This destination couldn’t open" (`App.tsx`), with Retry navigation
+/// when the target may still open, and Open Settings.
 pub fn failure(
+    failed: &Failed,
     on_retry: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
@@ -115,25 +183,44 @@ pub fn failure(
                 .text_body_sm()
                 .text_color(c.text_warning)
                 .child(div().text_heading().child("This destination couldn’t open"))
-                .child(
-                    "The destination is unavailable or isn’t supported yet. Your target has been \
-                 kept for retry.",
-                )
+                .child(failed.explanation())
                 .child(
                     div()
                         .flex()
                         .gap(px(8.))
-                        .child(
+                        .children(failed.retryable().then(|| {
                             Button::new("retry-navigation", "Retry navigation")
                                 .size(ButtonSize::Md)
-                                .on_click(on_retry),
-                        )
+                                .on_click(on_retry)
+                        }))
                         .child(
                             Button::new("failure-settings", "Open Settings")
                                 .size(ButtonSize::Md)
                                 .on_click(on_settings),
                         ),
                 ),
+        )
+        .into_any_element()
+}
+
+/// The channel sidebar with no community: the page rows, then "Choose a
+/// community to see channels."
+pub fn personal_sidebar(agents: NavigationItem, cx: &App) -> AnyElement {
+    let c = cx.colors();
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .px(rems(0.5))
+        .py(rems(0.5))
+        .child(div().flex().flex_col().mb(rems(0.75)).child(agents))
+        .child(
+            div()
+                .py(rems(2.))
+                .px(rems(1.))
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child("Choose a community to see channels."),
         )
         .into_any_element()
 }
@@ -174,15 +261,41 @@ mod tests {
         };
         assert_eq!(default_channel(&snapshot).unwrap().id, "g");
         // Saved channels still show while connecting.
-        assert_eq!(empty(Some(&snapshot), false), Empty::Select);
-        assert_eq!(empty(Some(&snapshot), true), Empty::Checking);
+        assert_eq!(empty(Some(&snapshot), false, false), Empty::Select);
+        assert_eq!(empty(Some(&snapshot), true, false), Empty::Opening);
+        assert_eq!(empty(Some(&snapshot), true, true), Empty::Checking);
         let offline = test_snapshot();
-        assert_eq!(empty(Some(&offline), false), Empty::Splash);
+        assert_eq!(empty(Some(&offline), false, false), Empty::Splash);
         let ready = SessionSnapshot {
             status: SessionStatus::Ready,
             ..offline
         };
-        assert_eq!(empty(Some(&ready), false), Empty::Select);
+        assert_eq!(empty(Some(&ready), false, false), Empty::Select);
+        assert_eq!(empty(None, false, false), Empty::NoCommunity);
+    }
+
+    fn failed(reason: Reason, ingress: bool, target: bool) -> Failed {
+        Failed {
+            target: target.then(|| Target::channel(None, "general")),
+            reason,
+            ingress,
+        }
+    }
+
+    #[test]
+    fn failure_copy_follows_the_reason() {
+        let denied = failed(Reason::Denied, false, true);
+        assert!(denied.explanation().starts_with("This target needs"));
+        assert!(denied.retryable());
+        let invalid = failed(Reason::Invalid, true, false);
+        assert_eq!(
+            invalid.explanation(),
+            "This link is invalid or unsupported."
+        );
+        assert!(!invalid.retryable());
+        let kept = failed(Reason::Unavailable, true, true);
+        assert!(kept.explanation().ends_with("kept for retry."));
+        assert!(kept.retryable());
     }
 
     fn test_snapshot() -> SessionSnapshot {

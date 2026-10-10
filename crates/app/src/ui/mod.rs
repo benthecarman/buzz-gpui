@@ -12,9 +12,11 @@ mod channel_states;
 mod channel_tab_picker;
 mod channel_tabs;
 mod composer;
+
 mod diff;
 pub(crate) mod emoji_picker;
 mod form_fields;
+
 mod gif_picker;
 mod identity;
 mod jump;

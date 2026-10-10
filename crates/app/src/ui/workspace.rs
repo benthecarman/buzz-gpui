@@ -10,12 +10,15 @@ mod shell;
 
 use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
+use super::channel_states::{self, Failed, Reason};
 use super::channel_tabs::{TabState, ThreadTarget};
 use super::navigation::{ChannelRoute, History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
 use super::profile_card::{self, ProfileCard};
-use super::settings::{CloseSettings, OpenHostSettings, OpenSettings, Section, SettingsPage};
+use super::settings::{
+    CloseSettings, OpenHostSettings, OpenSettings, Section, SectionChanged, SettingsPage,
+};
 use super::sidebar::SidebarView;
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
@@ -86,13 +89,21 @@ pub struct Workspace {
     /// A routed channel the viewer has not joined, being looked up.
     resolving: Option<(Target, Task<()>)>,
     /// A place that could not open, kept for Retry navigation.
-    failure: Option<Target>,
+    failure: Option<Failed>,
     /// The person whose card a mention opened, and where.
     profile: Option<(String, Point<Pixels>)>,
     dialog: Option<dialogs::OpenDialog>,
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
     route: Option<ChannelRoute>,
+    /// Bumped by every navigation, so a stale open timeout does nothing.
+    attempts: u64,
+    /// A link that arrived before an identity or a community was ready,
+    /// with the viewer it arrived for (`deep-links.ts`).
+    held: Option<(String, Option<String>)>,
+    /// The last place outside Settings, where its Back row returns.
+    outside_settings: Option<Target>,
+    _settings_events: Option<Subscription>,
 }
 
 impl Workspace {
@@ -140,6 +151,10 @@ impl Workspace {
             dialog: None,
             _page_events: None,
             route: None,
+            attempts: 0,
+            held: None,
+            outside_settings: None,
+            _settings_events: None,
         };
         workspace.handle_settings_actions(window, cx);
         workspace.sync(window, cx);
@@ -170,16 +185,38 @@ impl Workspace {
                 this.open_settings(Some(Section::Agents), window, cx)
             })
         });
-        // Settings' Back row returns to the previous view.
+        // Settings' Back row opens the last place outside Settings as a
+        // new visit, or Messages (`leaveSettings`).
         app.on_action(move |_: &CloseSettings, cx| {
-            close(cx, |this, window, cx| {
-                if this.history.can_go_back() {
-                    this.go_back(window, cx);
-                } else {
-                    this.go_home(window, cx);
-                }
+            close(cx, |this, window, cx| match this.outside_settings.clone() {
+                Some(target) => this.navigate(target, window, cx),
+                None => this.go_home(window, cx),
             })
         });
+    }
+
+    /// The Settings page, made on demand (history can return to it after it
+    /// closed); its section changes are visits.
+    fn settings_page(
+        &mut self,
+        section: Option<Section>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SettingsPage> {
+        if let Some(settings) = &self.settings {
+            if let Some(section) = section {
+                settings.update(cx, |settings, cx| settings.open(section, cx));
+            }
+            return settings.clone();
+        }
+        let settings = cx.new(|cx| SettingsPage::new(section, window, cx));
+        self._settings_events = Some(cx.subscribe(&settings, |this, _, _: &SectionChanged, cx| {
+            if this.page == Page::SETTINGS {
+                this.record(cx);
+            }
+        }));
+        self.settings = Some(settings.clone());
+        settings
     }
 
     fn open_settings(
@@ -193,38 +230,24 @@ impl Workspace {
         if matches!(self.onboarding, Some((Step::Identity, _))) {
             return;
         }
-        match &self.settings {
-            Some(settings) => {
-                if let Some(section) = section {
-                    settings.update(cx, |settings, cx| settings.open(section, cx));
-                }
-            }
-            None => self.settings = Some(cx.new(|cx| SettingsPage::new(section, window, cx))),
-        }
+        self.settings_page(section, window, cx);
         if self.page != Page::SETTINGS {
             self.select_page(Page::SETTINGS, window, cx);
         }
     }
 
-    /// History can return to Settings after the page was closed, so it is
-    /// made on demand.
-    fn settings_page(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<SettingsPage> {
-        self.settings
-            .get_or_insert_with(|| cx.new(|cx| SettingsPage::new(None, window, cx)))
-            .clone()
-    }
-
     /// Follows the selected community and the onboarding state.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = cx.global::<AppState>();
+        // Signed in with no community is the personal space, not
+        // onboarding: Settings and the agents work without one.
         let step = match &state.identity {
-            IdentityState::Ready(_) if state.communities.is_empty() => Some(Step::Community),
             IdentityState::Ready(_) => None,
             _ => Some(Step::Identity),
+        };
+        let viewer = match &state.identity {
+            IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+            _ => None,
         };
         if self.onboarding.as_ref().map(|(s, _)| *s) != step {
             self.onboarding =
@@ -249,6 +272,23 @@ impl Workspace {
             });
             self.community = current;
             self.load_sidebar_view(cx);
+        }
+        // A link held for an identity is dropped if another one arrived,
+        // and opened once a community is ready.
+        if let Some((_, held_for)) = &self.held
+            && held_for.is_some()
+            && *held_for != viewer
+        {
+            self.held = None;
+        }
+        if viewer.is_some()
+            && let Some((url, _)) = self.held.clone()
+            && (self.community.is_some()
+                || matches!(deep_links::parse(&url), Some(Link::Join { .. })))
+        {
+            self.held = None;
+            let ingress = true;
+            self.open_link(&url, ingress, window, cx);
         }
         cx.notify();
     }
@@ -446,15 +486,18 @@ impl Workspace {
             .py(rems(0.5));
         for (index, community) in state.communities.iter().enumerate() {
             let name = community.read(cx).name();
-            rail = rail.child(
-                IconButton::new(
-                    SharedString::from(format!("community-{index}")),
-                    IconName::Globe,
-                )
-                .selected(selected == Some(index))
-                .child(Avatar::new(name).squircle().size(AvatarSize::Small))
-                .on_click(move |_, _, cx| AppState::select(index, cx)),
-            );
+            rail =
+                rail.child(
+                    IconButton::new(
+                        SharedString::from(format!("community-{index}")),
+                        IconName::Globe,
+                    )
+                    .selected(selected == Some(index))
+                    .child(Avatar::new(name).squircle().size(AvatarSize::Small))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_community(index, window, cx)
+                    })),
+                );
         }
         rail.child(
             IconButton::new("add-community", IconName::Plus)
@@ -472,18 +515,19 @@ impl Render for Workspace {
             && self.page != Page::SETTINGS
         {
             onboarding.clone().into_any_element()
+        } else if let Some(failed) = &self.failure {
+            channel_states::failure(
+                failed,
+                cx.listener(|this, _, window, cx| this.retry_navigation(window, cx)),
+                cx.listener(|this, _, window, cx| {
+                    this.failure = None;
+                    this.open_settings(None, window, cx)
+                }),
+                cx,
+            )
         } else {
             match self.page {
-                Page::SETTINGS => self.settings_page(window, cx).into_any_element(),
-                Page::MESSAGES if self.failure.is_some() => super::channel_states::failure(
-                    cx.listener(|this, _, window, cx| {
-                        if let Some(target) = this.failure.clone() {
-                            this.apply(target, window, cx);
-                        }
-                    }),
-                    cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
-                    cx,
-                ),
+                Page::SETTINGS => self.settings_page(None, window, cx).into_any_element(),
                 Page::MESSAGES => match &self.channel {
                     Some(_) => self.board(window, cx),
                     None => {
@@ -491,10 +535,11 @@ impl Render for Workspace {
                             .community
                             .as_ref()
                             .map(|community| community.read(cx).snapshot.clone());
-                        super::channel_states::render(
-                            super::channel_states::empty(
+                        channel_states::render(
+                            channel_states::empty(
                                 snapshot.as_deref(),
-                                self.resolving.is_some() || self.pending.is_some(),
+                                self.pending.is_some(),
+                                self.resolving.is_some(),
                             ),
                             self.route_placeholder(),
                             cx,
@@ -556,13 +601,17 @@ impl Render for Workspace {
 // Navigation: history, links and requests from outside the window.
 impl Workspace {
     /// What the launch surface waits for (`data-buzz-launch-pending`):
-    /// the channel list and the open channel's first page. Onboarding,
-    /// other pages and a failed connection show at once.
+    /// the channel list, a linked channel being looked up and the open
+    /// channel's first page. Onboarding, other pages, a failed destination
+    /// and a failed connection show at once.
     pub fn launch_content(&self, cx: &App) -> super::launch::Content {
         use super::launch::Content;
         use buzz_relay_client::SessionStatus;
-        if self.onboarding.is_some() || self.page != Page::MESSAGES {
+        if self.onboarding.is_some() || self.page != Page::MESSAGES || self.failure.is_some() {
             return Content::Ready;
+        }
+        if self.resolving.is_some() {
+            return Content::Required;
         }
         let Some(community) = &self.community else {
             return Content::Ready;
@@ -610,6 +659,10 @@ impl Workspace {
                     thread: thread.filter(|_| !self.thread_exact),
                 }
             }
+            (Page::SETTINGS, _) => match &self.settings {
+                Some(settings) => Place::Settings(settings.read(cx).section()),
+                None => Place::Page(Page::SETTINGS),
+            },
             (page, _) => Place::Page(page),
         };
         Some(Target { community, place })
@@ -643,12 +696,99 @@ impl Workspace {
         cx.notify();
     }
 
+    fn remember_outside_settings(&mut self, target: &Target) {
+        if !matches!(
+            target.place,
+            Place::Settings(_) | Place::Page(Page::SETTINGS)
+        ) {
+            self.outside_settings = Some(target.clone());
+        }
+    }
+
     /// Goes to `target` as a new visit.
     pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_outside_settings(&target);
         self.history.push(target.clone());
         let place = target.place.clone();
         self.apply(target, window, cx);
         super::search_kit::record_visit(self.community.as_ref(), &place, false, cx);
+    }
+
+    /// Selecting a community in the rail is a visit to its Messages page,
+    /// except while an outside link waits to be retried there.
+    fn select_community(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let recovering = self
+            .failure
+            .as_ref()
+            .is_some_and(|failed| failed.ingress && failed.retryable());
+        let origin = cx
+            .global::<AppState>()
+            .communities
+            .get(index)
+            .map(|community| community.read(cx).origin.to_string());
+        match origin {
+            Some(origin) if !recovering => self.navigate(
+                Target {
+                    community: Some(origin),
+                    place: Place::Page(Page::MESSAGES),
+                },
+                window,
+                cx,
+            ),
+            _ => AppState::select(index, cx),
+        }
+    }
+
+    /// "Retry navigation": the kept target again, reconnecting its
+    /// community if the connection failed.
+    fn retry_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(failed) = self.failure.take() else {
+            return;
+        };
+        if let Some(community) = &self.community {
+            let community = community.read(cx);
+            if matches!(
+                community.snapshot.status,
+                buzz_relay_client::SessionStatus::Failed(_)
+            ) {
+                community.session.retry();
+            }
+        }
+        match failed.target {
+            Some(target) => self.apply(target, window, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// Fails the place still waiting for its channel list, or still being
+    /// looked up, after [`OPEN_TIMEOUT`] (`controller.ts`).
+    ///
+    /// [`OPEN_TIMEOUT`]: channel_states::OPEN_TIMEOUT
+    fn arm_open_timeout(&mut self, ingress: bool, cx: &mut Context<Self>) {
+        let attempt = self.attempts;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(channel_states::OPEN_TIMEOUT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let waiting = match this.resolving.take() {
+                    Some((target, _)) => Some(target),
+                    None => this.pending.take(),
+                };
+                if this.attempts == attempt
+                    && let Some(target) = waiting
+                {
+                    this.pending_listing = false;
+                    this.failure = Some(Failed {
+                        target: Some(target),
+                        reason: Reason::Unavailable,
+                        ingress,
+                    });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -681,6 +821,7 @@ impl Workspace {
         self.profile = None;
         self.resolving = None;
         self.failure = None;
+        self.attempts += 1;
         if let Some(origin) = &target.community {
             let state = cx.global::<AppState>();
             let index = state
@@ -690,7 +831,11 @@ impl Workspace {
             let Some(index) = index else {
                 tracing::warn!(%origin, "that community is no longer saved");
                 self.page = Page::MESSAGES;
-                self.failure = Some(target);
+                self.failure = Some(Failed {
+                    target: Some(target.clone()),
+                    reason: Reason::Denied,
+                    ingress: false,
+                });
                 cx.notify();
                 return;
             };
@@ -707,6 +852,13 @@ impl Workspace {
                     self.restore_selection(window, cx);
                 }
             }
+            Place::Settings(section) => {
+                if matches!(self.onboarding, Some((Step::Identity, _))) {
+                    return;
+                }
+                self.settings_page(Some(section), window, cx);
+                self.show_page(Page::SETTINGS, window, cx);
+            }
             Place::Conversation {
                 ref channel,
                 message,
@@ -722,7 +874,9 @@ impl Workspace {
                     if snapshot.roster == RosterStatus::Ready {
                         self.resolve(target.clone(), window, cx);
                     } else {
+                        self.page = Page::MESSAGES;
                         self.pending = Some(target.clone());
+                        self.arm_open_timeout(false, cx);
                     }
                     cx.notify();
                     return;
@@ -785,7 +939,11 @@ impl Workspace {
                         Some(summary) => this.open_place(&summary, message, thread, window, cx),
                         None => {
                             tracing::warn!(channel = %id, "that channel is not available here");
-                            this.failure = Some(target);
+                            this.failure = Some(Failed {
+                                target: Some(target),
+                                reason: Reason::Unavailable,
+                                ingress: false,
+                            });
                         }
                     }
                     cx.notify();
@@ -793,6 +951,7 @@ impl Workspace {
             }
         });
         self.resolving = Some((target, task));
+        self.arm_open_timeout(false, cx);
     }
 
     /// Applies a place that was waiting for its channel list. True while
@@ -819,9 +978,9 @@ impl Workspace {
         if !known && (snapshot.roster != RosterStatus::Ready || self.pending_listing) {
             return true;
         }
-        // Either opens it or gives up on it.
+        // Either opens it or gives up on it, keeping it for retry.
         self.apply(target, window, cx);
-        known
+        known || self.failure.is_some()
     }
 
     /// Opens a conversation the session has just made or joined, once the
@@ -836,8 +995,10 @@ impl Workspace {
         if listed {
             self.navigate(target, window, cx);
         } else {
+            self.attempts += 1;
             self.pending = Some(target);
             self.pending_listing = true;
+            self.arm_open_timeout(false, cx);
         }
     }
 
@@ -898,19 +1059,32 @@ impl Workspace {
         if self.route_link_to_tab(url, window, cx) {
             return;
         }
-        self.open_link(url, window, cx);
+        self.open_link(url, false, window, cx);
     }
 
-    /// A link from outside the window, or one no tab takes.
-    fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// A link from outside the window, or one no tab takes. With
+    /// `ingress` (from outside) an invalid link says so instead of being
+    /// ignored.
+    fn open_link(&mut self, url: &str, ingress: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let viewer = match &cx.global::<AppState>().identity {
+            IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+            _ => None,
+        };
         match deep_links::parse(url) {
+            // Held until there is an identity, and for a conversation a
+            // community to bind it to.
+            Some(Link::Join { .. }) if viewer.is_none() => {
+                self.held = Some((url.to_string(), None));
+            }
+            Some(Link::Conversation { .. }) if viewer.is_none() || self.community.is_none() => {
+                self.held = Some((url.to_string(), viewer));
+            }
             Some(Link::Conversation {
                 channel,
                 message,
                 thread,
             }) => {
                 let Some(community) = &self.community else {
-                    tracing::warn!("select a community before opening a Buzz link");
                     return;
                 };
                 let community = Some(community.read(cx).origin.to_string());
@@ -926,6 +1100,15 @@ impl Workspace {
             }
             Some(Link::Join { .. }) => self.open_invite(url, window, cx),
             None if url.starts_with("https://") || url.starts_with("http://") => cx.open_url(url),
+            None if ingress => {
+                self.failure = Some(Failed {
+                    target: None,
+                    reason: Reason::Invalid,
+                    ingress,
+                });
+                self.page = Page::MESSAGES;
+                cx.notify();
+            }
             None => tracing::warn!("ignored a link this app cannot open"),
         }
     }
@@ -934,7 +1117,7 @@ impl Workspace {
     pub fn handle(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
         match request {
             Request::Focus => {}
-            Request::Url(url) => self.open_link(&url, window, cx),
+            Request::Url(url) => self.open_link(&url, true, window, cx),
             Request::Open(target) => self.navigate(target, window, cx),
         }
     }
