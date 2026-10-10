@@ -6,7 +6,9 @@
 
 use super::form_fields::{self, Bounded, TextKind};
 use super::modal::{Dismissed, OpenChannel, error};
+use super::templates::{self, TemplateEditor};
 use crate::community::Community;
+use buzz_relay_client::kit::setup::{ChannelCreationInput, CreationVisibility};
 use buzz_relay_client::lifecycle::{
     DEFAULT_TEMPORARY_TTL, DraftErrors, NewChannel, canonical_name, draft_errors,
 };
@@ -30,6 +32,10 @@ pub struct NewChannelDialog {
     busy: bool,
     error: Option<SharedString>,
     on_open: OpenChannel,
+    /// The template selector, while Templates & teams is on.
+    template: Option<Entity<TemplateEditor>>,
+    /// A creation awaiting "Retry channel"; the form shows it frozen.
+    pending: Option<ChannelCreationInput>,
     /// Holds focus on the privacy and discard steps, so Escape steps back.
     step_focus: FocusHandle,
     _bounds: [Bounded; 2],
@@ -96,7 +102,26 @@ impl NewChannelDialog {
                 }
             }),
         ];
+        let template = templates::provider(cx)
+            .map(|_| cx.new(|cx| TemplateEditor::new(community.clone(), cx)));
+        let mut subscriptions = subscriptions;
+        subscriptions.extend(template.as_ref().map(|editor| {
+            cx.subscribe(editor, |this, _, _: &templates::Changed, cx| {
+                this.error = None;
+                cx.notify();
+            })
+        }));
+        let session = community.read(cx).session.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(pending) = session.pending_creation().await else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| this.restore(pending, window, cx));
+        })
+        .detach();
         Self {
+            template,
+            pending: None,
             community,
             name,
             description,
@@ -115,6 +140,27 @@ impl NewChannelDialog {
         }
     }
 
+    /// Shows a creation awaiting confirmation, frozen, for "Retry channel".
+    fn restore(
+        &mut self,
+        pending: ChannelCreationInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.name.update(cx, |state, cx| {
+            state.set_value(pending.name.clone(), window, cx)
+        });
+        let description = pending.description.clone().unwrap_or_default();
+        self.description
+            .update(cx, |state, cx| state.set_value(description, window, cx));
+        self.private = pending.visibility == CreationVisibility::Private;
+        self.temporary = pending.ttl_seconds.is_some();
+        self.temporary_ttl = pending.ttl_seconds.unwrap_or(DEFAULT_TEMPORARY_TTL);
+        self.pending = Some(pending);
+        self.error = None;
+        cx.notify();
+    }
+
     fn draft(&self, cx: &App) -> Draft {
         Draft {
             name: self.name.read(cx).value().to_string(),
@@ -126,7 +172,10 @@ impl NewChannelDialog {
 
     /// The form takes edits only on its own step and while idle.
     fn editing(&self) -> bool {
-        !self.busy && self.privacy_choice.is_none() && !self.confirm_discard
+        !self.busy
+            && self.privacy_choice.is_none()
+            && !self.confirm_discard
+            && self.pending.is_none()
     }
 
     /// Focus follows the step: the name field, or the step for Escape.
@@ -148,7 +197,10 @@ impl NewChannelDialog {
             self.privacy_choice = None;
         } else if self.confirm_discard {
             self.confirm_discard = false;
-        } else if self.draft(cx).dirty() {
+        } else if self.pending.is_none()
+            && (self.draft(cx).dirty()
+                || self.template.as_ref().is_some_and(|t| t.read(cx).dirty()))
+        {
             self.confirm_discard = true;
         } else {
             cx.emit(Dismissed);
@@ -200,20 +252,37 @@ impl NewChannelDialog {
 
     fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.draft(cx);
-        if draft.errors().any() || !self.editing() {
+        let retry = self.pending.is_some() && !self.busy;
+        if !retry && (draft.errors().any() || !self.editing()) {
             return;
         }
-        let channel = NewChannel {
-            name: canonical_name(&draft.name),
-            description: draft.description.trim().to_owned(),
-            private: self.private,
-            ttl: self.temporary.then_some(self.temporary_ttl),
+        // Recovery keeps the original frozen request.
+        let input = match &self.pending {
+            Some(pending) => pending.clone(),
+            None => {
+                let setup = match self.template.as_ref().map(|t| t.read(cx).setup()) {
+                    Some(Err(problem)) => {
+                        self.error = Some(problem.into());
+                        cx.notify();
+                        return;
+                    }
+                    Some(Ok(setup)) => setup,
+                    None => None,
+                };
+                let channel = NewChannel {
+                    name: canonical_name(&draft.name),
+                    description: draft.description.trim().to_owned(),
+                    private: self.private,
+                    ttl: self.temporary.then_some(self.temporary_ttl),
+                };
+                ChannelCreationInput::from_new(&channel, setup)
+            }
         };
         let session = self.community.read(cx).session.clone();
         self.busy = true;
         self.error = None;
         cx.spawn_in(window, async move |this, cx| {
-            let result = session.create_channel(channel).await;
+            let result = session.create_channel_with(input).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
@@ -231,7 +300,24 @@ impl NewChannelDialog {
                         }
                         cx.emit(Dismissed);
                     }
-                    Err(message) => this.error = Some(message.into()),
+                    Err(message) => {
+                        this.error = Some(message.into());
+                        let session = this.community.read(cx).session.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            let pending = session.pending_creation().await;
+                            let _ = this.update_in(cx, |this, window, cx| {
+                                // An unconfirmed Create becomes "Retry channel".
+                                let error = this.error.take();
+                                match pending {
+                                    Some(pending) => this.restore(pending, window, cx),
+                                    None => this.pending = None,
+                                }
+                                this.error = error;
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
                 }
                 cx.notify();
             });
@@ -306,6 +392,17 @@ impl NewChannelDialog {
             let _ = weak.update(cx, |this, cx| this.set_duration(ttl, cx));
         });
         let weak = cx.entity().downgrade();
+        let pending = self.pending.is_some();
+        let summary = self
+            .pending
+            .as_ref()
+            .and_then(|p| p.setup.as_ref())
+            .map(|setup| templates::setup_summary(setup.agents.len(), cx));
+        let problem = self
+            .template
+            .as_ref()
+            .filter(|_| !pending)
+            .and_then(|t| t.read(cx).draft().and_then(|d| d.problem.clone()));
         Dialog::new("create-channel", "Create a channel")
             .compact_header_gap()
             .on_close(close)
@@ -314,42 +411,54 @@ impl NewChannelDialog {
                     .flex()
                     .flex_col()
                     .gap(space::S4)
+                    .children(pending.then(|| templates::pending_notice(cx)))
                     // A name error waits until there is a name.
                     .child(form_fields::name_field(
                         &self.name,
-                        errors.name.filter(|_| !draft.name.is_empty()),
-                        false,
+                        errors.name.filter(|_| !draft.name.is_empty() && !pending),
+                        pending,
                         cx,
                     ))
                     .child(form_fields::description_field(
                         &self.description,
-                        errors.description,
-                        false,
+                        errors.description.filter(|_| !pending),
+                        pending,
                         cx,
                     ))
+                    .children(self.template.clone().filter(|_| !pending))
                     .child(form_fields::duration_field(
                         self.temporary,
                         self.temporary_ttl,
-                        false,
+                        pending,
                         None,
                         on_duration,
                         cx,
                     ))
+                    .children(problem.map(|message| error(message, cx)))
+                    .children(summary)
                     .children(self.error.clone().map(|message| error(message, cx))),
             )
             .footer_leading(
                 Switch::new("create-private", self.private)
                     .label("Private")
+                    .disabled(pending)
                     .on_change(move |checked, window, cx| {
                         let _ = weak.update(cx, |this, cx| this.set_private(checked, window, cx));
                     }),
             )
             .footer(
-                Button::new("create-channel-submit", "Create channel")
-                    .prominent()
-                    .loading(self.busy)
-                    .disabled(errors.any())
-                    .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
+                Button::new(
+                    "create-channel-submit",
+                    if pending {
+                        "Retry channel"
+                    } else {
+                        "Create channel"
+                    },
+                )
+                .prominent()
+                .loading(self.busy)
+                .disabled(errors.any() && !pending)
+                .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
             )
     }
 }
