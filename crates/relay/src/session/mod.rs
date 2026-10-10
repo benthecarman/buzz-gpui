@@ -27,6 +27,7 @@ mod messaging;
 mod observer;
 mod presence;
 mod publisher;
+mod reminders;
 mod sidebar;
 mod statuses;
 mod teams;
@@ -291,6 +292,7 @@ pub struct Session {
     next_thread: std::sync::atomic::AtomicU64,
     media: Media,
     direct: account::Direct,
+    reminders: Arc<reminders::Shared>,
     /// Details saves by channel, kept through panel close and reopen.
     details: std::sync::Mutex<HashMap<String, crate::lifecycle::DetailsAttempt>>,
     task: tokio::task::JoinHandle<()>,
@@ -413,7 +415,9 @@ impl Session {
             emoji: tokio::sync::Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
         };
+        let (reminder_owner, reminders) = reminders::new();
         let actor = Actor {
+            reminders: reminder_owner,
             runtime: runtime.clone(),
             origin: origin.clone(),
             identity,
@@ -484,6 +488,7 @@ impl Session {
             next_thread: std::sync::atomic::AtomicU64::new(1),
             media,
             direct,
+            reminders,
             details: Default::default(),
             task,
         }
@@ -1111,6 +1116,8 @@ struct Actor {
     known_channels: std::collections::HashSet<String>,
     /// Channel activity for the "recent" sidebar order.
     activity: activity::Activity,
+    /// The viewer's reminders (kind 30300).
+    reminders: reminders::Owner,
     /// Send observers, attached to the outbox once it exists.
     send_observers: Vec<(
         u64,
@@ -1869,6 +1876,7 @@ impl Actor {
                 let (pulses, events): (Vec<Verified>, Vec<Verified>) = events
                     .into_iter()
                     .partition(|event| event.kind_u16() == kinds::TYPING);
+                self.reminders_live(&events);
                 let candidates = if phase == crate::live::Phase::Live {
                     self.incoming_candidates(&events, channel.as_deref())
                 } else {
@@ -1941,6 +1949,7 @@ impl Actor {
             LiveUpdate::Connected => {
                 self.set_live(true);
                 self.observer_status();
+                self.reminders_recover();
                 self.presence_connected(true);
                 self.start_scan(ScanOptions::default());
                 self.reads_reconnected();
@@ -1948,6 +1957,7 @@ impl Actor {
             LiveUpdate::Disconnected => {
                 self.set_live(false);
                 self.observer_status();
+                self.reminders_stale();
                 self.presence_connected(false);
                 self.channels_disconnected();
                 self.activity_cancel();

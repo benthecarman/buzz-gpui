@@ -25,6 +25,7 @@ pub mod presence;
 pub mod profiles;
 pub mod read_state;
 pub mod reader;
+pub mod reminders;
 pub mod search;
 pub mod session;
 pub mod sidebar;
@@ -69,6 +70,7 @@ pub use read_state::{
     ReadSyncSnapshot, ReadSyncStatus, ReadTarget, ReadUpdate, SnapshotDescriptor,
 };
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
+pub use reminders::{Reminder, ReminderStatus, ReminderTarget, RemindersState, RemindersStatus};
 pub use session::{
     CatchUpState, ChannelUnread, ChannelView, FeedbackState, HeadCatchUp, IncomingMessage,
     LiveBatch, LiveView, MessageSearch, PendingFeedback, PeoplePage, PublicChannels,

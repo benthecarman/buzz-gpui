@@ -18,6 +18,9 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use zeroize::Zeroizing;
 
+mod reminders;
+pub use reminders::{DecodedReminder, ReminderIntent};
+
 /// buzz-app's release keyring entry. Debug builds of buzz-app use a
 /// `.debug` service; this app always uses the release one so it shares the
 /// identity the user actually signs in with.
