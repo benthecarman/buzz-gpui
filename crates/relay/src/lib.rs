@@ -45,6 +45,7 @@ pub mod upload;
 pub mod usage;
 pub mod user_status;
 pub mod window;
+pub mod workflows;
 
 #[cfg(test)]
 mod testing;

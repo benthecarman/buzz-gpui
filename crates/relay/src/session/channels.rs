@@ -1563,6 +1563,7 @@ impl Actor {
     /// open windows load again.
     pub(super) fn clear_cache(&mut self) -> tokio::task::JoinHandle<()> {
         self.epoch += 1;
+        self.workflows.clear();
         self.channels.catchups.clear();
         self.channels.queue.clear();
         self.channels.running.clear();

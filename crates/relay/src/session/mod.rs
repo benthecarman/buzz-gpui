@@ -42,6 +42,7 @@ mod threads;
 mod timeline;
 mod unread;
 mod work_sessions;
+mod workflows;
 
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use catalog::CommunityCatalog;
@@ -314,6 +315,7 @@ pub struct Session {
     kit: Arc<kit::KitShared>,
     /// The private recipe catalog, Me groups and placement.
     me_kit: me_kit::MeKit,
+    workflows: crate::workflows::Workflows,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -426,6 +428,12 @@ impl Session {
         );
         let viewer = identity.pubkey_hex();
         let kit = me_kit::MeKit::new(commands.clone(), runtime.clone(), origin.http());
+        let workflows = crate::workflows::Workflows::new(
+            runtime.clone(),
+            viewer.clone(),
+            reader.clone(),
+            http.clone(),
+        );
         let media = Media::new(runtime.clone(), origin.clone(), identity.clone());
         let direct = account::Direct {
             http: http.clone(),
@@ -499,6 +507,7 @@ impl Session {
             members: members::Members::default(),
             roster_refresh: RosterRefresh::Idle,
             live_view: Arc::default(),
+            workflows: workflows.clone(),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -516,6 +525,7 @@ impl Session {
             details: Default::default(),
             kit: Arc::default(),
             me_kit: kit,
+            workflows,
             task,
         }
     }
@@ -1148,6 +1158,7 @@ struct Actor {
     reminders: reminders::Owner,
     /// The inbox and its history read.
     inbox: inbox::Owner,
+    workflows: crate::workflows::Workflows,
     /// Send observers, attached to the outbox once it exists.
     send_observers: Vec<(
         u64,
@@ -1496,6 +1507,7 @@ impl Actor {
                 .map(|relay| relay.authority.clone())
                 .unwrap_or_default(),
             viewer: self.identity.pubkey_hex(),
+            workflows: self.workflows.clone(),
         };
         let outbox = Outbox::new(
             self.identity.clone(),
@@ -1503,9 +1515,11 @@ impl Actor {
             Arc::new(journal),
             OutboxOptions {
                 message_clock: self.clock.clone(),
+                on_receipt: Some(self.workflows.receipt_listener()),
                 ..Default::default()
             },
         );
+        self.workflows.attach(outbox.clone());
         self.outbox_changes = Some(outbox.changes());
         for (_, observer, handle) in &mut self.send_observers {
             *handle = Some(outbox.observe_send(observer.clone()));
@@ -1790,6 +1804,7 @@ impl Actor {
     /// then load again.
     fn revoke_access(&mut self, lost: &[String]) {
         self.epoch += 1;
+        self.workflows.clear();
         self.typing.clear();
         let revoked: Vec<String> = {
             let all: Vec<Verified> = self.recent.iter().map(|(_, event)| event.clone()).collect();
@@ -1990,6 +2005,7 @@ impl Actor {
                 self.observer_status();
                 self.reminders_stale();
                 self.inbox_stale();
+                self.workflows.interrupt();
                 self.presence_connected(false);
                 self.channels_disconnected();
                 self.activity_cancel();
@@ -2668,6 +2684,7 @@ impl Actor {
             })
             .unwrap_or_else(|| Arc::new([]));
         let unread = self.unread_counts();
+        self.workflows_access();
         self.sidebar_check_heads();
         self.sidebar_state();
         let next = SessionSnapshot {

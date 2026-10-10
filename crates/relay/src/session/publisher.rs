@@ -23,6 +23,7 @@ pub(super) struct SessionPublisher {
     pub commands: mpsc::UnboundedSender<Message>,
     pub relay: String,
     pub viewer: String,
+    pub workflows: crate::workflows::Workflows,
 }
 
 /// What a preflight compares before and after its read.
@@ -151,12 +152,24 @@ impl Publisher for SessionPublisher {
     }
 
     fn prepare(&self, event: &Event) -> BoxFuture<'static, Result<(), PublishError>> {
+        // Workflow commands are checked again at publish start: access may
+        // have changed since they were queued.
+        let tags: Vec<&[String]> = event.tags.iter().map(|tag| tag.as_slice()).collect();
+        if let Err(error) = self.workflows.validate(
+            event.kind.as_u16(),
+            &event.pubkey.to_hex(),
+            &event.content,
+            &tags,
+        ) {
+            return Box::pin(async move { Err(PublishError::Rejected(error)) });
+        }
         let this = SessionPublisher {
             http: self.http.clone(),
             reader: self.reader.clone(),
             commands: self.commands.clone(),
             relay: self.relay.clone(),
             viewer: self.viewer.clone(),
+            workflows: self.workflows.clone(),
         };
         if event.kind.as_u16() == kinds::CANVAS {
             let event = event.clone();

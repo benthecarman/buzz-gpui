@@ -345,6 +345,7 @@ impl Session {
     /// Stops the session for good: pending sends end and nothing writes
     /// local storage afterwards, so it can be purged.
     pub async fn dispose(&self) {
+        self.workflows.dispose();
         let (reply, done) = tokio::sync::oneshot::channel();
         if self.commands.send(Message::Dispose(reply)).is_ok() {
             let _ = done.await;

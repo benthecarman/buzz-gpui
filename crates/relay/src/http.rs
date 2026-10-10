@@ -374,6 +374,40 @@ impl RelayHttp {
         result
     }
 
+    /// A NIP-98 signed `GET` of a fixed route, such as workflow run
+    /// history. Bodies over `limit` bytes are refused.
+    pub async fn get(&self, path: &str, limit: usize) -> Result<Vec<u8>, HttpError> {
+        let _slot = self.lane.admit(Priority::Foreground).await?;
+        let url = self.origin.endpoint(path);
+        let auth = self
+            .identity
+            .http_auth(&url, "GET", None)
+            .map_err(|error| HttpError::Invalid(error.to_string()))?;
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| HttpError::Transport(error.to_string()))?;
+        let result = read(response).await;
+        if let Err(HttpError::Status {
+            status: 429,
+            message,
+            ..
+        }) = &result
+            && let Some(seconds) = api_quota(message)
+        {
+            self.lane.pause(seconds);
+        }
+        let bytes = result?;
+        if bytes.len() > limit {
+            return Err(HttpError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
     /// `GET /` as NIP-11 relay information.
     pub async fn information(&self) -> Result<serde_json::Value, HttpError> {
         self.get_public("/").await
