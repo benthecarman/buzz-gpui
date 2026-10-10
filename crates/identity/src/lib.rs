@@ -313,6 +313,25 @@ impl Identity {
         Ok(header(&event))
     }
 
+    /// NIP-98 for one Buzz Git repository (`relay_git_authorization`):
+    /// kind 27235 with exactly `u` and `method GET`, no nonce or payload,
+    /// which the relay accepts for 60 seconds on every Git route of that
+    /// repository. `repository` must be the canonical
+    /// `https://<host>/git/<owner hex>/<name>` URL; the caller binds it to
+    /// its community's origin. Never a general signing capability.
+    pub fn git_auth(&self, repository: &str) -> Result<Event, IdentityError> {
+        if !git_repository_url(repository) {
+            return Err(IdentityError::NotAllowed);
+        }
+        EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::custom("u", [repository]),
+                Tag::custom("method", ["GET"]),
+            ])
+            .finalize(&self.keys)
+            .map_err(|error| IdentityError::Signing(error.to_string()))
+    }
+
     /// Blossom (kind 24242) authorization for one media request, valid for
     /// 60 seconds. `server` is the relay's `host[:port]`.
     pub fn media_auth(
@@ -579,6 +598,41 @@ fn check_catalog(
         .map_err(|_| IdentityError::NotAllowed)
 }
 
+/// A canonical Buzz Git repository URL, `https://<host>/git/<owner>/<name>`
+/// (`git_repository` in buzz-app's `relay.rs`): lowercase hex owner, and a
+/// name of 1-64 of `[A-Za-z0-9._-]` after one optional `.git`, with no
+/// leading dot and no `..`.
+fn git_repository_url(repository: &str) -> bool {
+    let Ok(url) = url::Url::parse(repository) else {
+        return false;
+    };
+    let segments: Vec<&str> = url.path().split('/').skip(1).collect();
+    let name = |value: &str| {
+        let value = value.strip_suffix(".git").unwrap_or(value);
+        !value.is_empty()
+            && value.len() <= 64
+            && !value.starts_with('.')
+            && !value.contains("..")
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    url.as_str() == repository
+        && url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && segments.len() == 3
+        && segments[0] == "git"
+        && segments[1].len() == 64
+        && segments[1]
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && name(segments[2])
+}
+
 fn header(event: &Event) -> String {
     let json = serde_json::to_vec(event).expect("events serialize");
     format!(
@@ -767,6 +821,42 @@ mod tests {
             .unwrap();
         let event = identity.sign(Purpose::AppData, unsigned).unwrap();
         assert_eq!(identity.decrypt_from_self(&event).unwrap(), "{\"v\":1}");
+    }
+
+    #[test]
+    fn git_auth_signs_only_repository_urls() {
+        let identity = Identity::ephemeral();
+        let owner = "a".repeat(64);
+        let url = format!("https://relay.example.com/git/{owner}/demo.git");
+        let event = identity.git_auth(&url).unwrap();
+        assert_eq!(event.kind, Kind::HttpAuth);
+        assert!(event.content.is_empty());
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.clone().to_vec()).collect();
+        assert_eq!(
+            tags,
+            [
+                vec!["u".to_string(), url],
+                vec!["method".into(), "GET".into()]
+            ]
+        );
+        for bad in [
+            format!("http://relay.example.com/git/{owner}/demo"),
+            format!("https://relay.example.com/git/{owner}/demo?x=1"),
+            format!("https://relay.example.com/git/{owner}/demo#x"),
+            format!("https://me@relay.example.com/git/{owner}/demo"),
+            format!("https://relay.example.com/git/{owner}/.demo"),
+            format!("https://relay.example.com/git/{owner}/a..b"),
+            format!("https://relay.example.com/git/{owner}/demo/info/refs"),
+            format!("https://relay.example.com/git/{}/demo", "A".repeat(64)),
+            "https://relay.example.com/query".to_string(),
+            format!("https://RELAY.example.com/git/{owner}/demo"),
+        ] {
+            assert_eq!(
+                identity.git_auth(&bad).unwrap_err(),
+                IdentityError::NotAllowed,
+                "{bad}"
+            );
+        }
     }
 
     #[test]
