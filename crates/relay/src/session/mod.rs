@@ -40,6 +40,7 @@ pub use feedback::{FeedbackState, PendingFeedback};
 pub use incoming::IncomingMessage;
 pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
+pub use observer::{ActivityFeed, FeedStatus};
 pub use statuses::StatusWatch;
 pub use teams::{TeamKit, TeamsStatus, TeamsView};
 pub use threads::ThreadView;
@@ -1895,7 +1896,10 @@ impl Actor {
             }
             LiveUpdate::Presence(events) => self.presence_live(&events),
             LiveUpdate::Observer(events) => self.observed(events),
-            LiveUpdate::Status => self.publish_live(),
+            LiveUpdate::Status => {
+                self.publish_live();
+                self.observer_status();
+            }
             LiveUpdate::Recover => {
                 // A repair hint, not evidence: re-read the roster and unread.
                 self.start_scan(ScanOptions::default());
@@ -1936,12 +1940,14 @@ impl Actor {
             }),
             LiveUpdate::Connected => {
                 self.set_live(true);
+                self.observer_status();
                 self.presence_connected(true);
                 self.start_scan(ScanOptions::default());
                 self.reads_reconnected();
             }
             LiveUpdate::Disconnected => {
                 self.set_live(false);
+                self.observer_status();
                 self.presence_connected(false);
                 self.channels_disconnected();
                 self.activity_cancel();
