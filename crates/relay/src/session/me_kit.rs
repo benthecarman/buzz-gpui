@@ -186,6 +186,11 @@ impl MeKit {
                 entries: entries.unwrap_or_else(|| snapshot.entries.clone()),
             });
         });
+        // Me placement takes conversations out of the Messages sidebar.
+        let _ = self
+            .inner
+            .commands
+            .send(Message::With(Box::new(|actor| actor.publish())));
     }
 
     /// Reads the catalog once, if it never was.

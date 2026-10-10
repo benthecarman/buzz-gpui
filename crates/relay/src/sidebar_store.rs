@@ -73,6 +73,8 @@ pub struct SidebarState {
     pub moves: Vec<MoveState>,
     /// DMs the viewer removed from Messages on this device.
     pub hidden_dms: Vec<String>,
+    /// Conversations placed in Me, which leave the Messages sidebar.
+    pub me_channels: Vec<String>,
 }
 
 impl SidebarState {
@@ -458,6 +460,7 @@ impl PreferencesStore {
             sort_errors: self.failed_sorts.values().cloned().collect(),
             moves,
             hidden_dms,
+            me_channels: Vec::new(),
         }
     }
 }

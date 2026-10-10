@@ -81,6 +81,8 @@ fn labelled(snapshot: &SessionSnapshot) -> Vec<ChannelSummary> {
     snapshot
         .channels
         .iter()
+        // Conversations placed in Me leave Messages.
+        .filter(|channel| !snapshot.sidebar.me_channels.contains(&channel.id))
         .map(|channel| {
             let mut channel = channel.clone();
             if channel.channel_type == Some(ChannelType::Dm) {

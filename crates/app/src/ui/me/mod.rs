@@ -37,6 +37,9 @@ use std::sync::Arc;
 pub const SESSIONS: Page = Page::new("buzz.sessions/sessions");
 
 pub fn register(cx: &mut App) {
+    // Me placement is read with the channel list even before Me opens:
+    // placed conversations leave the Messages sidebar.
+    MeModel::global(cx);
     pages::register(
         PageSpec {
             page: Page::ME,

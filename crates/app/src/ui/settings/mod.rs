@@ -11,6 +11,7 @@ pub mod cards;
 mod communities;
 mod emoji;
 mod notifications;
+pub mod personal_groups;
 mod plugins;
 mod profile;
 mod shortcuts;

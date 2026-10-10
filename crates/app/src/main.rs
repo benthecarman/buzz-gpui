@@ -89,6 +89,7 @@ fn main() {
         ui::github::init(cx);
         ui::projects::init(cx);
         ui::moderation::init(cx);
+        ui::settings::personal_groups::init(cx);
         ui::templates::init(cx);
         ui::channel_panels::dev_sample(cx);
         network::init(cx);

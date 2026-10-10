@@ -712,16 +712,23 @@ impl MeSidebar {
             Sub::Move => Some(self.move_menu(menu, cx)),
             Sub::Copy => Some(self.copy_menu(menu, cx)),
         };
-        // The submenu opens beside its trigger row.
+        // The submenu opens beside its trigger row, outside the menu's
+        // own box so the menu keeps its place.
         let offset = match sub {
             Sub::Copy => px(112.),
             _ => px(76.),
         };
         div()
-            .flex()
-            .items_start()
+            .relative()
             .child(main)
-            .children(submenu.map(|submenu| div().mt(offset).child(submenu)))
+            .children(submenu.map(|submenu| {
+                div()
+                    .absolute()
+                    .left_full()
+                    .top(offset)
+                    .pl(px(4.))
+                    .child(submenu)
+            }))
             .into_any_element()
     }
 

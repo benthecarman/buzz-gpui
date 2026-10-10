@@ -554,10 +554,11 @@ impl Actor {
 
     /// Recomputes the published sidebar state.
     pub(super) fn sidebar_state(&mut self) {
-        let next = self
+        let mut next = self
             .sidebar
             .store
             .state(self.sidebar.hidden.ids().collect());
+        next.me_channels = self.me_kit.snapshot().me_channels();
         if *self.sidebar.state != next {
             self.sidebar.state = Arc::new(next);
         }
