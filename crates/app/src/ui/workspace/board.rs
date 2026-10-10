@@ -600,9 +600,9 @@ impl Workspace {
                 .child("This conversation is no longer available.")
                 .into_any_element()
         };
-        let closer = |this: &mut Self, id: String, cx: &mut Context<Self>| -> Close {
-            let weak = cx.entity().downgrade();
-            let _ = this;
+        let weak = cx.entity().downgrade();
+        let closer = |id: String| -> Close {
+            let weak = weak.clone();
             Rc::new(move |window, cx| {
                 let id = id.clone();
                 let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
@@ -618,7 +618,7 @@ impl Workspace {
                 label: "Channel settings".into(),
                 icon: IconName::Gear,
                 content: panel.clone().into_any_element(),
-                close: closer(self, channel_tabs::SETTINGS.to_string(), cx),
+                close: closer(channel_tabs::SETTINGS.to_string()),
             });
         }
         if state.thread.is_some()
@@ -640,7 +640,7 @@ impl Workspace {
             });
         }
         for tab in &state.tabs {
-            let close = closer(self, tab.id.clone(), cx);
+            let close = closer(tab.id.clone());
             let (label, icon): (SharedString, IconName) = match &tab.kind {
                 TabKind::New => ("New tab".into(), IconName::Browser),
                 TabKind::Conversation { channel } => match usable(&community, channel, cx) {
@@ -682,7 +682,7 @@ impl Workspace {
                 Some(TabView::Panel(view)) => view.clone().into_any_element(),
                 _ => div().into_any_element(),
             };
-            let close = closer(self, id.clone(), cx);
+            let close = closer(id.clone());
             items.push(TabItem {
                 id: id.into(),
                 label: panel.title.into(),
