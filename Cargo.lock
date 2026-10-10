@@ -1092,6 +1092,7 @@ dependencies = [
  "dirs 6.0.0",
  "emojis",
  "futures",
+ "gpui-base",
  "gpui-kit",
  "gpui-pre-linux",
  "gstreamer",

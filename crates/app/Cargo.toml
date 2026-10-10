@@ -29,6 +29,9 @@ emojis = "0.9"
 futures = "0.3"
 libc = "0.2"
 gpui-kit.workspace = true
+# For what gpui-kit does not re-export: the vendored text field's
+# concealed ranges (third_party/README.md).
+gpui-base = "=0.7.1"
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"

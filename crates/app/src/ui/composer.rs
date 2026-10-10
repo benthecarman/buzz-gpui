@@ -9,6 +9,7 @@
 
 pub mod attachments;
 mod channels;
+mod format;
 mod live_markdown;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
@@ -32,6 +33,7 @@ use buzz_ui::{
     IconButtonShape, IconButtonSize, IconName, Spinner, Surface, Toast, ToastTone, Tooltip,
     TypeStyled,
 };
+use format::Format;
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent, InputEvent,
     MoveDown, MoveUp, Textarea, TextareaState,
@@ -157,6 +159,12 @@ pub struct Composer {
     previewing: Option<String>,
     /// Why the last send failed (`error`), under the tools.
     error: Option<SharedString>,
+    /// Formats toggled at a collapsed caret, outermost first: their empty
+    /// delimiters wait, hidden, around `pending_at` for text.
+    pending: Vec<PendingFormat>,
+    pending_at: usize,
+    /// A formatting edit is being applied, so its changes are not typing.
+    applying_format: bool,
     drag_over: bool,
     notice: Option<SharedString>,
     save_draft: Option<Task<()>>,
@@ -170,6 +178,15 @@ pub struct Composer {
     /// chip text)`, kept for the next draft ("Remember mentioned agents").
     followup: Vec<(String, String)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A format toggled with a collapsed caret, waiting for text (ProseMirror's
+/// stored marks). `removes` is a split of a span the caret was in: its
+/// text will have the format off.
+struct PendingFormat {
+    marker: &'static str,
+    kind: live_markdown::Kinds,
+    removes: bool,
 }
 
 /// Voice note capture (`VoiceCapture.tsx`).
@@ -348,6 +365,9 @@ impl Composer {
             attach_error: None,
             previewing: None,
             error: None,
+            pending: Vec::new(),
+            pending_at: 0,
+            applying_format: false,
             drag_over: false,
             notice: None,
             save_draft: None,
@@ -784,6 +804,9 @@ impl Composer {
     }
 
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.applying_format {
+            self.settle_pending(window, cx);
+        }
         self.restyle(cx);
         if self.input.read(cx).value().chars().count() > MAX_CHARS {
             self.notice = Some(format!("Messages hold up to {MAX_CHARS} characters.").into());
@@ -801,7 +824,139 @@ impl Composer {
     /// Styles the Markdown in the text. `set_value` reports no change, so
     /// the places that call it restyle here too.
     fn restyle(&mut self, cx: &mut Context<Self>) {
-        self.markdown.restyle(&self.input, cx);
+        let pending = self.pending_ranges();
+        self.markdown.restyle(&self.input, &pending, cx);
+    }
+
+    // ----- pending formats -----
+
+    /// The pending delimiters around the caret: openings outermost first,
+    /// then closings innermost first.
+    fn pending_text(&self) -> (String, String) {
+        let open: String = self.pending.iter().map(|p| p.marker).collect();
+        let close: String = self.pending.iter().rev().map(|p| p.marker).collect();
+        (open, close)
+    }
+
+    /// Each pending delimiter's range, to keep hidden.
+    fn pending_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+        let (open, _) = self.pending_text();
+        let mut at = self.pending_at.saturating_sub(open.len());
+        for pending in &self.pending {
+            ranges.push(at..at + pending.marker.len());
+            at += pending.marker.len();
+        }
+        for pending in self.pending.iter().rev() {
+            ranges.push(at..at + pending.marker.len());
+            at += pending.marker.len();
+        }
+        ranges
+    }
+
+    /// Whether the pending delimiters still sit, empty, around `caret`.
+    fn pending_holds(&self, text: &str, caret: usize) -> bool {
+        let (open, close) = self.pending_text();
+        caret >= open.len()
+            && text.get(caret - open.len()..caret) == Some(open.as_str())
+            && text.get(caret..caret + close.len()) == Some(close.as_str())
+    }
+
+    /// After an edit: text typed at the caret fills the pending formats,
+    /// which then style it; a deletion that moved the caret off them drops
+    /// them, as ProseMirror drops stored marks.
+    fn settle_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let (text, caret) = {
+            let state = self.input.read(cx);
+            (state.value().to_string(), state.selected_range().end)
+        };
+        if self.pending_holds(&text, caret) {
+            self.pending_at = caret;
+            return;
+        }
+        let (open, close) = self.pending_text();
+        let both = format!("{open}{close}");
+        if text.get(caret..caret + both.len()) == Some(both.as_str()) {
+            let range = caret..caret + both.len();
+            self.pending.clear();
+            self.applying_format = true;
+            self.input.update(cx, |state, cx| {
+                state.set_selected_range(range, cx);
+                state.replace("", window, cx);
+            });
+            self.applying_format = false;
+        }
+        self.pending.clear();
+    }
+
+    /// The caret left the pending formats without typing: they go away.
+    fn leave_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, selection) = {
+            let state = self.input.read(cx);
+            (state.value().to_string(), state.selected_range())
+        };
+        if self.pending.is_empty() || (selection.is_empty() && selection.end == self.pending_at) {
+            return;
+        }
+        let at = self.pending_at;
+        let holds = self.pending_holds(&text, at);
+        let (open, close) = self.pending_text();
+        self.pending.clear();
+        if holds {
+            let range = at - open.len()..at + close.len();
+            let removed = range.len();
+            let map = |offset: usize| {
+                if offset >= range.end {
+                    offset - removed
+                } else {
+                    offset.min(range.start)
+                }
+            };
+            let next = map(selection.start)..map(selection.end);
+            self.applying_format = true;
+            self.input.update(cx, |state, cx| {
+                state.set_selected_range(range, cx);
+                state.replace("", window, cx);
+                state.set_selected_range(next, cx);
+            });
+            self.applying_format = false;
+        }
+        self.restyle(cx);
+    }
+
+    /// The formats pressed in the toolbar: those at the caret, with the
+    /// pending ones on and the ones a pending split turns off.
+    fn active_formats(&self, cx: &App) -> live_markdown::Active {
+        let state = self.input.read(cx);
+        let (add, remove) = self.pending.iter().fold((0, 0), |(add, remove), p| {
+            if p.removes {
+                (add, remove | p.kind)
+            } else {
+                (add | p.kind, remove)
+            }
+        });
+        let mut active = self
+            .markdown
+            .active(state.selected_range(), state.value().as_ref(), add);
+        if remove & live_markdown::STRONG != 0 {
+            active.bold = false;
+        }
+        if remove & live_markdown::EMPHASIS != 0 {
+            active.italic = false;
+        }
+        if remove & live_markdown::STRIKE != 0 {
+            active.strike = false;
+        }
+        if remove & live_markdown::CODE != 0 {
+            active.code = false;
+        }
+        if remove & live_markdown::SPOILER != 0 {
+            active.spoiler = false;
+        }
+        active
     }
 
     fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1289,11 +1444,106 @@ impl Composer {
     // ----- formatting -----
 
     fn format(&mut self, format: Format, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending || self.edit_status.locked {
+            return;
+        }
         let (text, selection) = {
             let state = self.input.read(cx);
             (state.value().to_string(), state.selected_range())
         };
-        let edit = format::apply(&text, selection, format);
+        let Some(kind) = format.kind() else {
+            self.leave_pending(window, cx);
+            let (text, selection) = {
+                let state = self.input.read(cx);
+                (state.value().to_string(), state.selected_range())
+            };
+            let edit = format::apply(&text, selection, format);
+            self.apply_edit(edit, window, cx);
+            return;
+        };
+        // Code stays literal for every other format (`markdownRanges`).
+        if kind != live_markdown::CODE
+            && self.markdown.pairs(live_markdown::CODE).iter().any(|pair| {
+                pair.open.start < selection.end.max(selection.start + 1)
+                    && pair.close.end > selection.start
+            })
+        {
+            return;
+        }
+        let active = self.active_formats(cx);
+        let has = |active: &live_markdown::Active| match format {
+            Format::Bold => active.bold,
+            Format::Italic => active.italic,
+            Format::Strike => active.strike,
+            Format::Code => active.code,
+            _ => active.spoiler,
+        };
+        if selection.is_empty() && format == Format::Spoiler && !text.trim().is_empty() {
+            // A collapsed caret puts the whole draft behind a spoiler.
+            self.leave_pending(window, cx);
+            let state = self.input.read(cx);
+            let (text, caret) = (state.value().to_string(), state.selected_range().end);
+            let whole = 0..text.len();
+            let all = self.markdown.active(whole.clone(), &text, 0).spoiler;
+            let edit = format::toggle_range(&text, whole, format, &self.markdown.pairs(kind), all);
+            let caret = format::map_offset(caret, &edit.changes);
+            self.apply_edit(
+                format::Edit {
+                    changes: edit.changes,
+                    selection: caret..caret,
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+        if selection.is_empty() {
+            if let Some(index) = self.pending.iter().position(|p| p.kind == kind) {
+                // Toggling a pending format again takes it back.
+                let ranges = self.pending_ranges();
+                let open = ranges[index].clone();
+                let close = ranges[ranges.len() - 1 - index].clone();
+                self.pending.remove(index);
+                let caret = self.pending_at - open.len();
+                self.pending_at = caret;
+                self.apply_edit(
+                    format::Edit {
+                        changes: vec![(open, String::new()), (close, String::new())],
+                        selection: caret..caret,
+                    },
+                    window,
+                    cx,
+                );
+                return;
+            }
+            if !self.pending.is_empty() && !self.pending_holds(&text, selection.end) {
+                self.pending.clear();
+            }
+            let inside = has(&self.markdown.active(selection.clone(), &text, 0));
+            let (edit, marker) = format::pending_pair(&text, selection.end, format, inside);
+            self.pending.push(PendingFormat {
+                marker,
+                kind,
+                removes: inside,
+            });
+            self.pending_at = edit.selection.end;
+            self.apply_edit(edit, window, cx);
+            return;
+        }
+        self.leave_pending(window, cx);
+        let edit = format::toggle_range(
+            &text,
+            selection,
+            format,
+            &self.markdown.pairs(kind),
+            has(&active),
+        );
+        self.apply_edit(edit, window, cx);
+    }
+
+    /// Applies a formatting edit as one change to the field.
+    fn apply_edit(&mut self, edit: format::Edit, window: &mut Window, cx: &mut Context<Self>) {
+        self.applying_format = true;
         self.input.update(cx, |state, cx| {
             for (range, replacement) in edit.changes.iter().rev() {
                 state.set_selected_range(range.clone(), cx);
@@ -1302,6 +1552,8 @@ impl Composer {
             state.set_selected_range(edit.selection, cx);
             state.focus(window, cx);
         });
+        self.applying_format = false;
+        self.restyle(cx);
         cx.notify();
     }
 
@@ -2407,6 +2659,7 @@ impl Composer {
     fn tools(&self, cx: &mut Context<Self>) -> AnyElement {
         let c = *cx.colors();
         if self.formatting {
+            let active = self.active_formats(cx);
             let state = self.input.read(cx);
             let (text, selection) = (state.value().to_string(), state.selected_range());
             let button = |format: Format, cx: &mut Context<Self>| {
@@ -2415,7 +2668,15 @@ impl Composer {
                     format.icon(),
                 )
                 .size(IconButtonSize::Sm)
-                .selected(format::active(&text, selection.clone(), format))
+                .selected(match format {
+                    Format::Bold => active.bold,
+                    Format::Italic => active.italic,
+                    Format::Strike => active.strike,
+                    Format::Code => active.code,
+                    Format::Spoiler => active.spoiler,
+                    Format::Link => false,
+                    _ => format::active(&text, selection.clone(), format),
+                })
                 .tooltip(format.tooltip())
                 .on_click(cx.listener(move |this, _, window, cx| this.format(format, window, cx)))
             };
@@ -2522,7 +2783,7 @@ impl Composer {
             .child(
                 IconButton::new("format", IconName::TextAa)
                     .size(IconButtonSize::Sm)
-                    .tooltip("Toggle formatting")
+                    .tooltip("Formatting")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.formatting = true;
                         this.focus(window, cx);
@@ -3152,6 +3413,14 @@ impl Render for Composer {
             (state.value().len(), state.selected_range().end)
         };
         if self.completion_key != Some(key) {
+            if !self.pending.is_empty() && self.completion_key.is_some_and(|(len, _)| len == key.0)
+            {
+                self.leave_pending(window, cx);
+            }
+            if self.completion_key.is_some_and(|(len, _)| len == key.0) {
+                // The caret moved: the toolbar follows it.
+                self.restyle(cx);
+            }
             self.refresh_completion(cx);
         }
         if self.drag_over && !cx.has_active_drag() {
@@ -3377,288 +3646,6 @@ impl Render for Composer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Formatting
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Format {
-    Bold,
-    Italic,
-    Strike,
-    Code,
-    CodeBlock,
-    Link,
-    Bullet,
-    Ordered,
-    Quote,
-    Spoiler,
-}
-
-impl Format {
-    /// The toolbar's order (§4.8).
-    const ALL: [Format; 10] = [
-        Format::Bold,
-        Format::Italic,
-        Format::Strike,
-        Format::Code,
-        Format::CodeBlock,
-        Format::Link,
-        Format::Bullet,
-        Format::Ordered,
-        Format::Quote,
-        Format::Spoiler,
-    ];
-
-    fn icon(self) -> IconName {
-        match self {
-            Format::Bold => IconName::TextB,
-            Format::Italic => IconName::TextItalic,
-            Format::Strike => IconName::TextStrikethrough,
-            Format::Code => IconName::Code,
-            Format::CodeBlock => IconName::CodeBlock,
-            Format::Link => IconName::Link,
-            Format::Bullet => IconName::ListBullets,
-            Format::Ordered => IconName::ListNumbers,
-            Format::Quote => IconName::Quotes,
-            Format::Spoiler => IconName::Detective,
-        }
-    }
-
-    fn tooltip(self) -> &'static str {
-        match self {
-            Format::Bold => "Bold (Ctrl+B)",
-            Format::Italic => "Italic (Ctrl+I)",
-            Format::Strike => "Strikethrough (Ctrl+Shift+X)",
-            Format::Code => "Code (Ctrl+E)",
-            Format::CodeBlock => "Code block (Ctrl+Alt+C)",
-            Format::Link => "Link",
-            Format::Bullet => "Bullet list (Ctrl+Shift+8)",
-            Format::Ordered => "Ordered list (Ctrl+Shift+7)",
-            Format::Quote => "Quote (Ctrl+Shift+B)",
-            Format::Spoiler => "Spoiler (Ctrl+Shift+P)",
-        }
-    }
-}
-
-/// Markdown edits for the formatting toolbar. Edits are insertions and
-/// deletions in the original text's offsets, so chips elsewhere survive.
-mod format {
-    use super::Format;
-    use std::ops::Range;
-
-    pub struct Edit {
-        /// Ascending, non-overlapping; apply from the last.
-        pub changes: Vec<(Range<usize>, String)>,
-        pub selection: Range<usize>,
-    }
-
-    fn marker(format: Format, text: &str, selection: &Range<usize>) -> Option<&'static str> {
-        Some(match format {
-            Format::Bold => "**",
-            Format::Italic => {
-                // `_` inside a word is literal; `*` binds there (§5d.3).
-                let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric());
-                if word(text[..selection.start].chars().next_back())
-                    || word(text[selection.end..].chars().next())
-                {
-                    "*"
-                } else {
-                    "_"
-                }
-            }
-            Format::Strike => "~~",
-            Format::Code => "`",
-            Format::Spoiler => "||",
-            _ => return None,
-        })
-    }
-
-    fn line_start(text: &str, at: usize) -> usize {
-        text[..at].rfind('\n').map_or(0, |i| i + 1)
-    }
-
-    fn line_end(text: &str, at: usize) -> usize {
-        text[at..].find('\n').map_or(text.len(), |i| at + i)
-    }
-
-    /// The selected lines' start offsets and the length of their list or
-    /// quote prefix, if they have this format's.
-    fn lines(text: &str, selection: &Range<usize>, format: Format) -> Vec<(usize, Option<usize>)> {
-        let start = line_start(text, selection.start);
-        let end = line_end(text, selection.end.max(selection.start));
-        let mut out = Vec::new();
-        let mut at = start;
-        for line in text[start..end].split('\n') {
-            let prefix = match format {
-                Format::Bullet => ["- ", "* "]
-                    .iter()
-                    .find(|p| line.starts_with(**p))
-                    .map(|p| p.len()),
-                Format::Quote => line
-                    .starts_with("> ")
-                    .then_some(2)
-                    .or(line.starts_with('>').then_some(1)),
-                Format::Ordered => {
-                    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-                    (digits > 0 && line[digits..].starts_with(". ")).then_some(digits + 2)
-                }
-                _ => None,
-            };
-            out.push((at, prefix));
-            at += line.len() + 1;
-        }
-        out
-    }
-
-    pub fn active(text: &str, selection: Range<usize>, format: Format) -> bool {
-        if selection.end > text.len() {
-            return false;
-        }
-        match format {
-            Format::Bullet | Format::Ordered | Format::Quote => lines(text, &selection, format)
-                .iter()
-                .all(|(_, prefix)| prefix.is_some()),
-            Format::CodeBlock => {
-                text[..selection.start].ends_with("```\n")
-                    && text[selection.end..].starts_with("\n```")
-            }
-            Format::Link => false,
-            _ => {
-                let Some(m) = marker(format, text, &selection) else {
-                    return false;
-                };
-                text[..selection.start].ends_with(m) && text[selection.end..].starts_with(m)
-            }
-        }
-    }
-
-    pub fn apply(text: &str, selection: Range<usize>, format: Format) -> Edit {
-        let selection = selection.start.min(text.len())..selection.end.min(text.len());
-        match format {
-            Format::Bullet | Format::Ordered | Format::Quote => {
-                let lines = lines(text, &selection, format);
-                let remove = lines.iter().all(|(_, prefix)| prefix.is_some());
-                let mut changes = Vec::new();
-                let mut shift_start = 0isize;
-                let mut shift_end = 0isize;
-                for (index, (at, prefix)) in lines.iter().enumerate() {
-                    let delta = if remove {
-                        let length = prefix.expect("every line has the prefix");
-                        changes.push((*at..*at + length, String::new()));
-                        -(length as isize)
-                    } else {
-                        let insert = match format {
-                            Format::Bullet => "- ".to_string(),
-                            Format::Quote => "> ".to_string(),
-                            _ => format!("{}. ", index + 1),
-                        };
-                        let length = insert.len() as isize;
-                        changes.push((*at..*at, insert));
-                        length
-                    };
-                    if *at <= selection.start {
-                        shift_start += delta;
-                    }
-                    if *at <= selection.end {
-                        shift_end += delta;
-                    }
-                }
-                let start = (selection.start as isize + shift_start).max(0) as usize;
-                let end = (selection.end as isize + shift_end).max(start as isize) as usize;
-                Edit {
-                    changes,
-                    selection: start..end,
-                }
-            }
-            Format::CodeBlock => {
-                if active(text, selection.clone(), format) {
-                    return Edit {
-                        changes: vec![
-                            (selection.start - 4..selection.start, String::new()),
-                            (selection.end..selection.end + 4, String::new()),
-                        ],
-                        selection: selection.start - 4..selection.end - 4,
-                    };
-                }
-                let open = if selection.start == 0 || text[..selection.start].ends_with('\n') {
-                    "```\n"
-                } else {
-                    "\n```\n"
-                };
-                let close =
-                    if selection.end == text.len() || text[selection.end..].starts_with('\n') {
-                        "\n```"
-                    } else {
-                        "\n```\n"
-                    };
-                Edit {
-                    selection: selection.start + open.len()..selection.end + open.len(),
-                    changes: vec![
-                        (selection.start..selection.start, open.into()),
-                        (selection.end..selection.end, close.into()),
-                    ],
-                }
-            }
-            Format::Link => {
-                const URL: &str = "https://";
-                let label = selection.end - selection.start;
-                let url_at = selection.start + 1 + label + 2;
-                Edit {
-                    changes: vec![
-                        (selection.start..selection.start, "[".into()),
-                        (selection.end..selection.end, format!("]({URL})")),
-                    ],
-                    selection: if label == 0 {
-                        selection.start + 1..selection.start + 1
-                    } else {
-                        url_at..url_at + URL.len()
-                    },
-                }
-            }
-            _ => {
-                let m = marker(format, text, &selection).expect("an inline format");
-                let n = m.len();
-                if active(text, selection.clone(), format) {
-                    return Edit {
-                        changes: vec![
-                            (selection.start - n..selection.start, String::new()),
-                            (selection.end..selection.end + n, String::new()),
-                        ],
-                        selection: selection.start - n..selection.end - n,
-                    };
-                }
-                let inner = &text[selection.clone()];
-                if inner.len() >= 2 * n && inner.starts_with(m) && inner.ends_with(m) {
-                    return Edit {
-                        changes: vec![
-                            (selection.start..selection.start + n, String::new()),
-                            (selection.end - n..selection.end, String::new()),
-                        ],
-                        selection: selection.start..selection.end - 2 * n,
-                    };
-                }
-                Edit {
-                    changes: vec![
-                        (selection.start..selection.start, m.into()),
-                        (selection.end..selection.end, m.into()),
-                    ],
-                    selection: selection.start + n..selection.end + n,
-                }
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub fn run(text: &str, selection: Range<usize>, format: Format) -> (String, Range<usize>) {
-        let edit = apply(text, selection, format);
-        let mut out = text.to_string();
-        for (range, replacement) in edit.changes.iter().rev() {
-            out.replace_range(range.clone(), replacement);
-        }
-        (out, edit.selection)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3787,59 +3774,6 @@ mod tests {
         assert_eq!(
             channel_reference("0e9d-1", "general_chat"),
             "[\\#general\\_chat](buzz://channel/0e9d-1)"
-        );
-    }
-
-    #[test]
-    fn wraps_and_unwraps_inline_formats() {
-        use format::run;
-        assert_eq!(
-            run("say hi", 4..6, Format::Bold),
-            ("say **hi**".into(), 6..8)
-        );
-        assert_eq!(
-            run("say **hi**", 6..8, Format::Bold),
-            ("say hi".into(), 4..6)
-        );
-        assert_eq!(
-            run("say **hi**", 4..10, Format::Bold),
-            ("say hi".into(), 4..6)
-        );
-        assert_eq!(run("", 0..0, Format::Code), ("``".into(), 1..1));
-        assert_eq!(run("a b", 2..3, Format::Italic), ("a _b_".into(), 3..4));
-        assert_eq!(run("ab", 1..2, Format::Italic), ("a*b*".into(), 2..3));
-        assert_eq!(run("x", 0..1, Format::Strike), ("~~x~~".into(), 2..3));
-        assert_eq!(run("x", 0..1, Format::Spoiler), ("||x||".into(), 2..3));
-        assert_eq!(
-            run("see docs", 4..8, Format::Link),
-            ("see [docs](https://)".into(), 11..19)
-        );
-    }
-
-    #[test]
-    fn prefixes_and_unprefixes_lines() {
-        use format::run;
-        assert_eq!(run("a\nb", 0..3, Format::Bullet), ("- a\n- b".into(), 2..7));
-        assert_eq!(run("- a\n- b", 2..7, Format::Bullet), ("a\nb".into(), 0..3));
-        assert_eq!(
-            run("a\nb", 0..3, Format::Ordered),
-            ("1. a\n2. b".into(), 3..9)
-        );
-        assert_eq!(
-            run("x\nquote", 3..3, Format::Quote),
-            ("x\n> quote".into(), 5..5)
-        );
-        assert_eq!(
-            run("code", 0..4, Format::CodeBlock),
-            ("```\ncode\n```".into(), 4..8)
-        );
-        assert_eq!(
-            run("```\ncode\n```", 4..8, Format::CodeBlock),
-            ("code".into(), 0..4)
-        );
-        assert_eq!(
-            run("see code here", 4..8, Format::CodeBlock),
-            ("see \n```\ncode\n```\n here".into(), 9..13)
         );
     }
 }

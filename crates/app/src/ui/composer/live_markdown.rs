@@ -3,13 +3,17 @@
 //!
 //! buzz-app's composer is a rich-text editor: a closed `**bold**` turns
 //! into bold text and its markers disappear. This composer edits the
-//! Markdown source, so the markers stay, subdued, and the text between
-//! them takes the style. The scanner runs on every edit, over the field's
+//! Markdown source instead, and gets the same look by hiding the syntax:
+//! the text between markers takes the style, and the markers are
+//! concealed ranges of the text field (third_party/README.md), which the
+//! caret steps over as if they were not there. A bullet shows as a dot and
+//! a quote's `>` as a bar. The scanner runs on every edit, over the field's
 //! text only, in one pass that keeps its buffers between edits. It follows
 //! CommonMark and GFM closely enough for chat; anything it misreads only
 //! looks different here and still sends as typed.
 
 use buzz_ui::{ActiveTheme, Colors};
+use gpui_base::input::Concealment;
 use gpui_kit::component::input::{
     TextDecoration, TextDecorationCollection, TextareaMode, TextareaState,
 };
@@ -18,14 +22,14 @@ use gpui_kit::{StrikethroughStyle, UnderlineStyle, px};
 use std::ops::Range;
 
 /// What a run of text is. Spans nest, so each kind is a bit.
-type Kinds = u16;
-const STRONG: Kinds = 1;
-const EMPHASIS: Kinds = 1 << 1;
-const STRIKE: Kinds = 1 << 2;
+pub type Kinds = u16;
+pub const STRONG: Kinds = 1;
+pub const EMPHASIS: Kinds = 1 << 1;
+pub const STRIKE: Kinds = 1 << 2;
 /// A code span or the lines of a fenced code block.
-const CODE: Kinds = 1 << 3;
-const LINK: Kinds = 1 << 4;
-const SPOILER: Kinds = 1 << 5;
+pub const CODE: Kinds = 1 << 3;
+pub const LINK: Kinds = 1 << 4;
+pub const SPOILER: Kinds = 1 << 5;
 /// Inline syntax: delimiters, backticks, brackets, link destinations,
 /// escapes, fences and rules.
 const MARKER: Kinds = 1 << 6;
@@ -35,7 +39,20 @@ const BLOCK: Kinds = 1 << 7;
 const QUOTE: Kinds = 1 << 8;
 /// A chip: never styled.
 const CHIP: Kinds = 1 << 9;
-const KINDS: usize = 10;
+/// A thematic break, which stays as typed.
+const RULE: Kinds = 1 << 10;
+const KINDS: usize = 11;
+
+/// What the toolbar shows as pressed at the caret.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Active {
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub code: bool,
+    pub spoiler: bool,
+    pub link: bool,
+}
 
 const NONE: usize = usize::MAX;
 
@@ -45,6 +62,10 @@ pub struct LiveMarkdown {
     scanner: Scanner,
     /// The text, with chips blanked out.
     bytes: Vec<u8>,
+    /// The styled runs of the last scan, for the toolbar's state.
+    runs: Vec<(Range<usize>, Kinds)>,
+    /// The pending delimiters of the last scan.
+    last_pending: Vec<Range<usize>>,
     /// The colours of the theme the composer last rendered in, which may
     /// be a scope's (the media viewer's comments are always dark).
     palette: Option<Palette>,
@@ -59,12 +80,21 @@ impl LiveMarkdown {
             collection,
             scanner: Scanner::default(),
             bytes: Vec::new(),
+            runs: Vec::new(),
+            last_pending: Vec::new(),
             palette: None,
         }
     }
 
-    /// Styles the text again, after it changed.
-    pub fn restyle(&mut self, input: &Entity<TextareaState>, cx: &mut App) {
+    /// Styles the text again, after it changed. `pending` are the empty
+    /// delimiters a collapsed-caret toggle left around the caret, which
+    /// stay hidden until text fills them.
+    pub fn restyle(
+        &mut self,
+        input: &Entity<TextareaState>,
+        pending: &[Range<usize>],
+        cx: &mut App,
+    ) {
         let palette = *self
             .palette
             .get_or_insert_with(|| Palette::new(cx.colors()));
@@ -82,20 +112,109 @@ impl LiveMarkdown {
             return;
         };
         let mut decorations = Vec::new();
+        let mut runs = std::mem::take(&mut self.runs);
+        runs.clear();
         self.scanner.scan(
             text,
             state.tokens().iter().map(|span| span.range()),
-            |range, kinds| decorations.push(TextDecoration::new(range, palette.style(kinds))),
+            |range, kinds| {
+                runs.push((range.clone(), kinds));
+                decorations.push(TextDecoration::new(range, palette.style(kinds)))
+            },
         );
+        self.runs = runs;
+        let concealed = self.scanner.concealments(text, pending);
+        self.last_pending = pending.to_vec();
         self.collection.set(decorations, cx);
+        input.update(cx, |state, cx| state.set_concealed_ranges(concealed, cx));
     }
 
+    /// The matched spans of `kind` in `text`, for tests.
+    #[cfg(test)]
+    pub fn scan_pairs(text: &str, kind: Kinds) -> Vec<Pair> {
+        let mut scanner = Scanner::default();
+        scanner.scan(text, None, |_, _| {});
+        scanner
+            .pairs
+            .into_iter()
+            .filter(|pair| pair.kind & kind != 0)
+            .collect()
+    }
+
+    /// The matched spans of `kind`, by their markers.
+    pub fn pairs(&self, kind: Kinds) -> Vec<Pair> {
+        self.scanner
+            .pairs
+            .iter()
+            .filter(|pair| pair.kind & kind != 0)
+            .cloned()
+            .collect()
+    }
+
+    /// The formats at the caret or over all of a selection. `pending`
+    /// formats wait at the caret.
+    pub fn active(&self, selection: Range<usize>, text: &str, pending: Kinds) -> Active {
+        active_in(&self.runs, selection, text, pending)
+    }
+}
+
+/// [`LiveMarkdown::active`] over the styled runs of a scan.
+fn active_in(
+    runs: &[(Range<usize>, Kinds)],
+    selection: Range<usize>,
+    text: &str,
+    pending: Kinds,
+) -> Active {
+    let mut kinds: Kinds = pending;
+    if selection.is_empty() {
+        // The formats of the character before the caret, as a mark's.
+        let at = selection.start;
+        for (range, k) in runs {
+            if range.start < at && at <= range.end && k & (MARKER | BLOCK | RULE) == 0 {
+                kinds |= k;
+            }
+        }
+    } else {
+        let mut all: Option<Kinds> = None;
+        let mut covered = selection.start;
+        for (range, k) in runs {
+            if range.end <= selection.start || range.start >= selection.end {
+                continue;
+            }
+            if range.start > covered && !text[covered..range.start].trim().is_empty() {
+                all = Some(0);
+            }
+            // Hidden syntax is no text of its own.
+            if k & (MARKER | BLOCK | RULE) != 0 {
+                covered = covered.max(range.end);
+                continue;
+            }
+            all = Some(all.map_or(*k, |all| all & k));
+            covered = covered.max(range.end);
+        }
+        if covered < selection.end && !text[covered..selection.end].trim().is_empty() {
+            all = Some(0);
+        }
+        kinds |= all.unwrap_or(0);
+    }
+    Active {
+        bold: kinds & STRONG != 0,
+        italic: kinds & EMPHASIS != 0,
+        strike: kinds & STRIKE != 0,
+        code: kinds & CODE != 0,
+        spoiler: kinds & SPOILER != 0,
+        link: kinds & LINK != 0,
+    }
+}
+
+impl LiveMarkdown {
     /// Restyles when the composer renders in other colours than before.
     pub fn follow_theme(&mut self, input: &Entity<TextareaState>, colors: &Colors, cx: &mut App) {
         let palette = Some(Palette::new(colors));
         if self.palette != palette {
             self.palette = palette;
-            self.restyle(input, cx);
+            let pending = std::mem::take(&mut self.last_pending);
+            self.restyle(input, &pending, cx);
         }
     }
 }
@@ -105,7 +224,6 @@ struct Palette {
     marker: Hsla,
     code: Hsla,
     code_fill: Hsla,
-    link: Hsla,
     subtle: Hsla,
     spoiler_fill: Hsla,
 }
@@ -117,7 +235,6 @@ impl Palette {
             marker: c.border_prominent,
             code: c.text_accent,
             code_fill: c.affordance_selected,
-            link: c.text_link,
             subtle: c.text_subtle,
             spoiler_fill: c.affordance_subtle,
         }
@@ -129,14 +246,12 @@ impl Palette {
     /// subtle in place of the composer's bar.
     fn style(&self, kinds: Kinds) -> HighlightStyle {
         let has = |kind| kinds & kind != 0;
-        let color = if has(MARKER | BLOCK) {
+        let color = if has(BLOCK) {
+            Some(self.subtle)
+        } else if has(MARKER | RULE) {
             Some(self.marker)
         } else if has(CODE) {
             Some(self.code)
-        } else if has(LINK) {
-            Some(self.link)
-        } else if has(QUOTE) {
-            Some(self.subtle)
         } else {
             None
         };
@@ -153,11 +268,20 @@ impl Palette {
             } else {
                 has(SPOILER).then_some(self.spoiler_fill)
             },
-            underline: has(SPOILER).then_some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(self.subtle),
-                wavy: false,
-            }),
+            // Links keep the text's colour, underlined (`.input a`).
+            underline: if has(LINK) {
+                Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: None,
+                    wavy: false,
+                })
+            } else {
+                has(SPOILER).then_some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(self.subtle),
+                    wavy: false,
+                })
+            },
             ..Default::default()
         }
     }
@@ -178,10 +302,20 @@ struct Delim {
     prev: usize,
 }
 
+/// A styled span's markers: `**` and `**`, or `[` and `](url)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pair {
+    pub open: Range<usize>,
+    pub close: Range<usize>,
+    pub kind: Kinds,
+}
+
 /// The parser, with buffers reused from one edit to the next.
 #[derive(Default)]
 struct Scanner {
     spans: Vec<(Range<usize>, Kinds)>,
+    /// Each matched span's opening and closing markers, for formatting.
+    pairs: Vec<Pair>,
     delims: Vec<Delim>,
     pipes: Vec<usize>,
     /// Each `[` of the paragraph with the `]` that closes it, by `[`, and
@@ -202,6 +336,7 @@ impl Scanner {
         mut emit: impl FnMut(Range<usize>, Kinds),
     ) {
         self.spans.clear();
+        self.pairs.clear();
         self.blocks(text);
         for chip in chips {
             self.push(chip, CHIP);
@@ -220,8 +355,8 @@ impl Scanner {
             if at > pos {
                 // Markers stay plain inside the spans they delimit, apart
                 // from a code span's fill.
-                let shown = if kinds & (MARKER | BLOCK) != 0 {
-                    kinds & (MARKER | BLOCK | CODE | CHIP)
+                let shown = if kinds & (MARKER | BLOCK | RULE) != 0 {
+                    kinds & (MARKER | BLOCK | RULE | CODE | CHIP)
                 } else {
                     kinds
                 };
@@ -252,6 +387,55 @@ impl Scanner {
         if let Some((range, k)) = run {
             emit(range, k);
         }
+    }
+
+    /// What the field hides after a scan: every marker, plus `pending`;
+    /// a bullet shows as a dot and a quote's `>` as a bar.
+    fn concealments(&self, text: &str, pending: &[Range<usize>]) -> Vec<Concealment> {
+        let mut ranges: Vec<(Range<usize>, Option<&'static str>)> = self
+            .spans
+            .iter()
+            .filter_map(|(range, kind)| match *kind {
+                MARKER => Some((range.clone(), None)),
+                BLOCK => match &text[range.clone()] {
+                    "-" | "*" | "+" => Some((range.clone(), Some("•"))),
+                    ">" => Some((range.clone(), Some("▎"))),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        ranges.extend(
+            pending
+                .iter()
+                .filter(|range| range.end <= text.len())
+                .map(|range| (range.clone(), None)),
+        );
+        ranges.sort_by_key(|(range, _)| (range.start, range.end));
+        let mut out: Vec<Concealment> = Vec::new();
+        for (range, replacement) in ranges {
+            match out.last_mut() {
+                // Overlapping hidden runs merge; touching ones stay apart so
+                // the caret can rest between them.
+                Some(last)
+                    if last.replacement.is_none()
+                        && replacement.is_none()
+                        && range.start < last.range.end =>
+                {
+                    last.range.end = last.range.end.max(range.end);
+                }
+                Some(last) if range.start < last.range.end => {}
+                _ => out.push(match replacement {
+                    Some(replacement) => Concealment::new(range).with_replacement(replacement),
+                    None => Concealment::new(range),
+                }),
+            }
+        }
+        out
+    }
+
+    fn pair(&mut self, open: Range<usize>, close: Range<usize>, kind: Kinds) {
+        self.pairs.push(Pair { open, close, kind });
     }
 
     fn push(&mut self, range: Range<usize>, kind: Kinds) {
@@ -305,7 +489,7 @@ impl Scanner {
                         at = at.min(end);
                         quotes += 1;
                     } else if is_rule(bytes, first, end) {
-                        self.push(first..end, MARKER);
+                        self.push(first..end, RULE);
                         at = end;
                         rule = true;
                         break;
@@ -392,6 +576,7 @@ impl Scanner {
                         self.push(i..close + n, CODE);
                         self.push(i..i + n, MARKER);
                         self.push(close..close + n, MARKER);
+                        self.pair(i..i + n, close..close + n, CODE);
                         i = close + n;
                     } else {
                         i += n;
@@ -469,6 +654,7 @@ impl Scanner {
                 self.push(open + 2..close, SPOILER);
                 self.push(open..open + 2, MARKER);
                 self.push(close..close + 2, MARKER);
+                self.pair(open..open + 2, close..close + 2, SPOILER);
             }
             k += 2;
         }
@@ -491,6 +677,7 @@ impl Scanner {
         self.inline(text, open + 1..close, true);
         if start == open {
             self.push(open + 1..close, LINK);
+            self.pair(start..open + 1, close..paren + 1, LINK);
         }
         self.push(close..paren + 1, MARKER);
         Some(paren + 1)
@@ -617,6 +804,7 @@ impl Scanner {
             let inner = opener.pos + opener.len..closer.pos;
             self.push(inner.start - n..inner.start, MARKER);
             self.push(inner.end..inner.end + n, MARKER);
+            self.pair(inner.start - n..inner.start, inner.end..inner.end + n, kind);
             self.push(inner, kind);
             self.delims[o].len -= n;
             self.delims[c].pos += n;
@@ -835,6 +1023,12 @@ mod tests {
             let prefix = &text[..at];
             let mut reused = Vec::new();
             scanner.scan(prefix, None, |range, kinds| reused.push((range, kinds)));
+            assert!(
+                scanner
+                    .pairs
+                    .iter()
+                    .all(|pair| pair.open.end <= pair.close.start)
+            );
             let fresh: Vec<_> = runs(prefix)
                 .into_iter()
                 .map(|(run, kinds)| {
@@ -1019,7 +1213,7 @@ mod tests {
                 ("1.", BLOCK),
                 ("-", BLOCK),
                 ("[x]", BLOCK),
-                ("---", MARKER),
+                ("---", RULE),
             ]
         );
         // A new item or a blank line ends the paragraph.
@@ -1062,6 +1256,40 @@ mod tests {
         );
         // Three backticks with more on the line are a code span.
         assert_eq!(runs("```a```")[1], ("a", CODE));
+    }
+
+    fn active(text: &str, selection: Range<usize>) -> Active {
+        let mut runs = Vec::new();
+        Scanner::default().scan(text, None, |range, kinds| runs.push((range, kinds)));
+        active_in(&runs, selection, text, 0)
+    }
+
+    #[test]
+    fn toolbar_state_follows_the_caret_and_selection() {
+        // A caret takes the formats of the character before it.
+        assert!(active("a **bold** b", 7..7).bold);
+        assert!(!active("a **bold** b", 2..2).bold);
+        // A selection is pressed only when all of its text has the format;
+        // hidden markers inside it don't count as text.
+        let text = "_start **strong** plain_";
+        let all = active(text, 0..text.len());
+        assert!(all.italic && !all.bold);
+        assert!(!active("x _y_", 0..5).italic);
+        assert!(active("[a link](https://x.y)", 1..7).link);
+    }
+
+    #[test]
+    fn styles_intraword_strong_in_quotes() {
+        assert_eq!(
+            runs("> a quote**now**"),
+            vec![
+                (">", BLOCK),
+                (" a quote", QUOTE),
+                ("**", MARKER),
+                ("now", QUOTE | STRONG),
+                ("**", MARKER),
+            ]
+        );
     }
 
     #[test]
