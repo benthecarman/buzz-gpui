@@ -10,8 +10,8 @@ days, and L is a week or more.
 |---|---|---:|---:|---:|---:|
 | App shell, navigation, windows, updates, notifications | [gaps/shell.md](gaps/shell.md) | 47 | 12 | 12 | 71 |
 | Settings, profile, identity | [gaps/settings.md](gaps/settings.md) | 50 | 14 | 28 | 92 |
-| Messages, composer, media, search | [gaps/messages.md](gaps/messages.md) | 198 | 87 | 66 | 351 |
-| Channels, communities, relay layer | [gaps/channels.md](gaps/channels.md) | 189 | 93 | 56 | 338 |
+| Messages, composer, media, search | [gaps/messages.md](gaps/messages.md) | 90 | 42 | 28 | 160 |
+| Channels, communities, relay layer | [gaps/channels.md](gaps/channels.md) | 186 | 93 | 53 | 332 |
 | Agents, sessions, workflows, terminal | [gaps/agents.md](gaps/agents.md) | 289 | 35 | 39 | 363 |
 | Bundled plugins and the rest | [gaps/plugins.md](gaps/plugins.md) | 30 | 6 | 2 | 38 |
 
@@ -57,9 +57,8 @@ in the composer, with its markers visible rather than hidden.
   - a companion dock;
   - a resizable sidebar;
   - a narrow-window drawer.
-- **Relay reliability:** a disk cache of channel heads and profiles, an
-  offline resume that shows saved conversations, and ranged media reads
-  through a block cache.
+- **Relay reliability:** a disk cache of channel heads and profiles, and an
+  offline resume that shows saved conversations.
 - **Media:** HEIC to JPEG and video to MP4 conversion before upload. Uploads
   are deferred until Send.
 - **Composer:** WYSIWYG formatting with no visible Markdown markers, and

@@ -17,8 +17,8 @@ Audit date: 2026-10-09. Read-only audit of the main checkouts (`.claude/worktree
 | 2. Hover actions, menus, edit/delete/report, reactions, emoji and GIF pickers | 1 | 6 | 1 | 0 | 127 |
 | 3. Timeline, scrolling, unread, jump-to, threads, typing and search | 43 | 13 | 13 | 0 | 61 |
 | 4. Composer, autocomplete, formatting, attachments and voice recording | 42 | 20 | 11 | 4 | 42 |
-| 5. Rendered attachments, media viewer, audio/video and voice-note playback | 33 | 14 | 17 | 0 | 68 |
-| **Total** | **199** | **88** | **66** | **4** | **265** |
+| 5. Rendered attachments, media viewer, audio/video and voice-note playback | 1 | 2 | 2 | 0 | 127 |
+| **Total** | **90** | **42** | **28** | **4** | **458** |
 
 Largest gaps, in short:
 
@@ -27,7 +27,7 @@ Largest gaps, in short:
 - Thread rows have no hover action bar or reaction picker. There is no thread typing indicator, jump-to-latest or read tracking in threads (sections 2 and 3).
 - No per-channel scroll restore, no midnight relabel, and the dock is not resizable or responsive (section 3).
 - Composer: no list continuation or indent, no link dialog, no background (send-then-upload) model, a simplified mention ranking and choice set, no team mentions, no draft conflict handling. WYSIWYG styling is IN PROGRESS (section 4).
-- Media: no inline video playback, no timecoded replies, markers or review reactions, no viewer animations, no copy image, no snapshot attachments (section 5).
+- Media: snapshot imports have no preview to open, AVIF does not decode, and media corners are not smoothed (section 5).
 - Link and message hover cards, channel `#name` references in prose, membership grouping and avatars, workflow bylines, and cross-block text selection are missing (section 1).
 
 ## 1. Message rows, Markdown, links, embeds and diffs
@@ -563,126 +563,126 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 
 Note: Main gaps: no inline video playback (play opens the viewer), no timecoded-reply parsing (no time chips, timeline markers or quick reactions at the current frame), no shared-element open/close or gallery slide animation, no "Copy image", no download error notices, no snapshot attachments, and media keeps playing when the conversation is hidden.
 
-Counts: MISSING 33, PARTIAL 14, DIFFERENT 17, IN PROGRESS 0, DONE 68.
+Counts: MISSING 1, PARTIAL 2, DIFFERENT 2, IN PROGRESS 0, DONE 127 (59 of them closed after the audit and still listed).
 
 ### Attachment layout, thumbnails and placeholders
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| The image strip is one horizontal row that scrolls (`overflow-x:auto`) and never wraps. | src/features/messages/Messages.module.css:434 | DIFFERENT (crates/app/src/ui/message.rs:734) | The port uses `flex_wrap`, so large groups wrap onto more rows. Make it one non-wrapping row that scrolls horizontally (padding 4px, gap 8px). | S |
-| Smooth "squircle" media corners (60% smoothing path clip and SVG outline) on tiles, video previews, inline controls and the voice card | src/features/messages/media-corners.ts:1; use-media-corners.ts:4 | DIFFERENT (crates/app/src/ui/message.rs:782; media/video.rs:127; media/audio.rs:509) | The port uses plain circular-arc `rounded()`. Add a smoothed-corner path paint/clip, or accept the difference. | M |
-| The original replaces the blurhash immediately once it is decoded. | src/features/messages/AttachmentImage.tsx:193-207 | DIFFERENT (crates/app/src/ui/media.rs:184-203) | The port cross-fades over 180ms. This is a cosmetic difference. Either drop the fade or keep it on purpose. | S |
-| If the original fails to load, the tile keeps the blur/placeholder. "Image unavailable" appears only when the URL cannot be resolved. | src/features/messages/AttachmentImage.tsx:61-69, 158 | DIFFERENT (crates/app/src/ui/media.rs:180) | The port shows the "Image unavailable" tile on any fetch or decode error. Match the reference: keep the blurhash or placeholder when loading fails. | S |
-| Thumbnail labels ("Open image N of M"), keyboard focus ring, and the strip scrolls a keyboard-focused tile into view | src/features/messages/MessageRow.tsx:120-140, 719-722; Messages.module.css:449 | MISSING | Make tiles focusable with a focus ring. Scroll the strip so the focused tile is visible. Add the accessible label. | S |
-| Any format the browser decodes renders (for example AVIF and SVG). | src/features/messages/AttachmentImage.tsx:204 | PARTIAL (crates/app/src/ui/media.rs:351-370) | The port sniffs only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO. AVIF and SVG show as unavailable. Add AVIF, and add SVG if wanted. | S |
+| The image strip is one horizontal row that scrolls (`overflow-x:auto`) and never wraps. | src/features/messages/Messages.module.css:434 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
+| Smooth "squircle" media corners (60% smoothing path clip and SVG outline) on tiles, video previews, inline controls and the voice card | src/features/messages/media-corners.ts:1; use-media-corners.ts:4 | DIFFERENT (crates/app/src/ui/media/attachments.rs; video.rs; audio.rs) | Kept on purpose: GPUI can only clip to rounded rectangles, so tiles, previews and cards keep circular-arc corners. | M |
+| The original replaces the blurhash immediately once it is decoded. | src/features/messages/AttachmentImage.tsx:193-207 | DONE (crates/app/src/ui/media.rs) | - | S |
+| If the original fails to load, the tile keeps the blur/placeholder. "Image unavailable" appears only when the URL cannot be resolved. | src/features/messages/AttachmentImage.tsx:61-69, 158 | DONE (crates/app/src/ui/media.rs; crates/app/src/ui/media/attachments.rs) | - | S |
+| Thumbnail labels ("Open image N of M"), keyboard focus ring, and the strip scrolls a keyboard-focused tile into view | src/features/messages/MessageRow.tsx:120-140, 719-722; Messages.module.css:449 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
+| Any format the browser decodes renders (for example AVIF and SVG). | src/features/messages/AttachmentImage.tsx:204 | PARTIAL (crates/app/src/ui/media.rs) | SVG from other hosts renders (relay media never renders SVG, as the reference host refuses it). AVIF still shows as unavailable: GPUI's image decoder has no AVIF support. | S |
 | Non-thumbnail image preview (`MediaAttachment` image mode, min(360, w, 320*w/h)) | src/features/messages/MediaAttachment.tsx:134-189; AttachmentImage.tsx:42-51 | MISSING | This is only used by surfaces outside the timeline (GitHub plugin). It is needed only if those surfaces are ported. | S |
-| Attachment renderer registry: plugins can claim attachments, with a fallback renderer | src/features/conversation/AttachmentView.tsx:8-36; MessageRow.tsx:684 | DIFFERENT (crates/app/src/ui/message.rs:719-723) | The port hard-codes voice-note vs plain audio. Add a renderer registry only if plugin attachment renderers are in scope. | M |
+| Attachment renderer registry: plugins can claim attachments, with a fallback renderer | src/features/conversation/AttachmentView.tsx:8-36; MessageRow.tsx:684 | DONE (crates/app/src/ui/renderers.rs; crates/app/src/ui/media/attachments.rs) | - | M |
 
 ### File attachment card
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Icon is always `file-text` (24px). | src/features/messages/FileAttachment.tsx:51 | DIFFERENT (crates/app/src/ui/message.rs:827-831) | The port uses VideoCamera or SpeakerHigh for audio/video shown as file cards. Use FileText to match. | S |
-| A relay file click saves to Downloads without overwriting (host `media_download`) and does not open the file. | src/features/messages/FileAttachment.tsx:93-98; src-tauri/src/relay.rs:1579-1600 | DIFFERENT (crates/app/src/ui/media.rs:375-401) | The port also opens the saved file with the system handler. Drop `open_with_system`, or show a "Saved to Downloads" notice instead. | S |
-| "Download failed" alert when a download fails | src/features/messages/FileAttachment.tsx:102 | MISSING (crates/app/src/ui/media.rs:381, 397 only log) | Surface the failure inline next to the card. | S |
+| Icon is always `file-text` (24px). | src/features/messages/FileAttachment.tsx:51 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
+| A relay file click saves to Downloads without overwriting (host `media_download`) and does not open the file. | src/features/messages/FileAttachment.tsx:93-98; src-tauri/src/relay.rs:1579-1600 | DONE (crates/app/src/ui/media/attachments.rs; crates/app/src/ui/media.rs) | - | S |
+| "Download failed" alert when a download fails | src/features/messages/FileAttachment.tsx:102 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
 
 ### Snapshot attachments
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Agent/team snapshot attachment: a file card plus an "Add agent" or "Add team" button that opens the snapshot import preview. The button is disabled when the message is cached or has no source. | src/features/messages/SnapshotAttachment.tsx:12-48; MessageRow.tsx:660 | MISSING | Detect snapshot attachments (`snapshotAttachmentKind`) in rows. Render the button and route it into the agents import flow (crates/app/src/ui/agents/import.rs). | M |
-| Snapshot preview error alert (message or "Snapshot preview is unavailable.") | src/features/messages/SnapshotAttachment.tsx:30-38, 47 | MISSING | Show the error inline under the card. | S |
+| Agent/team snapshot attachment: a file card plus an "Add agent" or "Add team" button that opens the snapshot import preview. The button is disabled when the message is cached or has no source. | src/features/messages/SnapshotAttachment.tsx:12-48; MessageRow.tsx:660 | PARTIAL (crates/app/src/ui/media/attachments.rs) | Detection, the card and the "Add agent"/"Add team" button are done. The port has no snapshot import preview yet; the agents page registers it with `media::attachments::set_snapshot_preview`, and until then the button reports the preview unavailable, as buzz-app does without a listener. | M |
+| Snapshot preview error alert (message or "Snapshot preview is unavailable.") | src/features/messages/SnapshotAttachment.tsx:30-38, 47 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
 
 ### Inline video preview (timeline)
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Plays inline in the timeline. A centered play button plays in place, with an inline media-glass control bar (volume, time, timeline, duration, speed). The bar fades while playing unless hovered or focused. | src/features/messages/MediaAttachment.tsx:198-280; VideoPlayer.tsx:63-418; VideoPlayer.module.css:262-330 | DIFFERENT (crates/app/src/ui/media/video.rs:77-195) | In the port, play opens the viewer and the preview shows a duration chip instead of controls. Render engine frames inline and reuse the player controls with the `inline` styling. | M |
-| An expand button (top right) is revealed on hover or focus. It pauses the video and opens the review at the current time. | src/features/messages/MediaAttachment.tsx:281-295; Messages.module.css:1976 | PARTIAL (crates/app/src/ui/media/video.rs:155-168) | Only hover reveals it, and the review always opens at 0. Add focus reveal and the current-time handoff once inline playback exists. | S |
-| "Video unavailable" status when the source is missing or fails to decode | src/features/messages/MediaAttachment.tsx:116-132 | MISSING (crates/app/src/ui/media/video.rs:101) | Probe errors are dropped and the preview stays a blank dark box. Show the unavailable status. | S |
-| Inline video seeks to a timecode when a timecode chip in the thread panel is clicked (`seekTo` / `seekRequest`). | src/features/messages/MediaAttachment.tsx:42-70; ThreadPanel.tsx:1024-1027 | MISSING | Needs inline playback and timecode chips (see below). | M |
-| Inline playback position is reported to the host (`onPlayback`) and synced back from the viewer to the inline element. | src/features/messages/MediaAttachment.tsx:248-252, 318-322 | MISSING | Needs inline playback. | M |
-| Inline video, audio and voice notes pause, and the viewer closes, when the conversation is no longer presented (tab or channel switch). | src/features/messages/MediaAttachment.tsx:56-58, 92; AudioAttachment.tsx:47-49; VoiceNoteCard.tsx:59-65 | MISSING (crates/app/src/ui/media/audio.rs:33-50) | The global audio track keeps playing after you navigate away. Stop or pause the track when the channel/thread view changes. | S |
+| Plays inline in the timeline. A centered play button plays in place, with an inline media-glass control bar (volume, time, timeline, duration, speed). The bar fades while playing unless hovered or focused. | src/features/messages/MediaAttachment.tsx:198-280; VideoPlayer.tsx:63-418; VideoPlayer.module.css:262-330 | DONE (crates/app/src/ui/media/video.rs; crates/app/src/ui/media/controls.rs) | - | M |
+| An expand button (top right) is revealed on hover or focus. It pauses the video and opens the review at the current time. | src/features/messages/MediaAttachment.tsx:281-295; Messages.module.css:1976 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| "Video unavailable" status when the source is missing or fails to decode | src/features/messages/MediaAttachment.tsx:116-132 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| Inline video seeks to a timecode when a timecode chip in the thread panel is clicked (`seekTo` / `seekRequest`). | src/features/messages/MediaAttachment.tsx:42-70; ThreadPanel.tsx:1024-1027 | DONE (crates/app/src/ui/media/attachments.rs; crates/app/src/ui/media/video.rs) | - | M |
+| Inline playback position is reported to the host (`onPlayback`) and synced back from the viewer to the inline element. | src/features/messages/MediaAttachment.tsx:248-252, 318-322 | DONE (crates/app/src/ui/media/video.rs; crates/app/src/ui/media/review.rs) | - | M |
+| Inline video, audio and voice notes pause, and the viewer closes, when the conversation is no longer presented (tab or channel switch). | src/features/messages/MediaAttachment.tsx:56-58, 92; AudioAttachment.tsx:47-49; VoiceNoteCard.tsx:59-65 | DONE (crates/app/src/ui/media/audio.rs; crates/app/src/ui/media/review.rs; hooks in crates/app/src/ui/workspace.rs) | - | S |
 
 ### Video player in the viewer
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Autoplays on open, starting at the time handed off from the inline preview | src/features/messages/VideoPlayer.tsx:461, 468-480 | PARTIAL (crates/app/src/ui/media/video.rs:286-287) | Autoplays, but always from 0. Accept an initial time. | S |
-| Notice "Playback paused. Press play to try again." when play() is rejected | src/features/messages/VideoPlayer.tsx:153-161, 184-188 | MISSING | Show the notice when the engine refuses to play. | S |
-| Error state reads "Media unavailable". | src/features/messages/MediaReviewViewer.tsx:419-430 | DIFFERENT (crates/app/src/ui/media/video.rs:703-722) | The port shows "Can't play this video here" and an "Open externally" button, which the port added for missing codecs. Align the copy or keep it on purpose. | S |
-| Volume: speaker button that opens a hover popover with a vertical slider and a Mute/Unmute button. The icon reflects the muted state. | src/features/messages/VideoPlayer.tsx:197-281; VideoPlayer.module.css:180-260 | DIFFERENT (crates/app/src/ui/media/video.rs:523-548) | The port shows a separate mute button and an always-visible 64px horizontal slider. Move to a hover popover with a vertical slider. | S |
-| Hover time preview bubble above the timeline (mouse only) | src/features/messages/VideoPlayer.tsx:283-329 | MISSING (crates/app/src/ui/media/seek.rs:18-63) | Track the hover position in `seek_area` and draw the time label. | S |
-| Keyboard-operable timeline and volume sliders (focusable, arrow keys) | src/features/messages/VideoPlayer.tsx:242-260, 301-317 | MISSING (crates/app/src/ui/media/seek.rs:18) | Make the seek areas focusable and step them with the arrow keys. | S |
-| Timecoded-comment markers on the timeline (author avatars). Clicking one seeks, opens the comments and selects that comment. | src/features/messages/VideoPlayer.tsx:330-358; MediaReviewViewer.tsx:243-264, 444-447 | MISSING | Parse timecoded replies and overlay avatar buttons on the timeline. | M |
-| Chosen speed is persisted (`buzz.video.playback-speed`) and broadcast to every open player | src/features/messages/VideoPlayer.tsx:47-57, 113-126, 392-404 | MISSING (crates/app/src/ui/media/video.rs:268) | Every player starts at 1x. Persist the speed in settings and share it as a global. | S |
-| Controls hide while playing when the pointer leaves or is idle for 2.2s. Focus or open menus keep them visible. | src/features/messages/use-media-controls.ts:4-35; VideoPlayer.module.css:307-315 | PARTIAL (crates/app/src/ui/media/video.rs:501-504) | The port only hides them when not hovered. Add the idle timer and keep them visible while focused or while a menu is open. | S |
-| On narrow players (<25rem) the timeline wraps to its own row. | src/features/messages/VideoPlayer.module.css:332-340 | MISSING | Add the width-based layout. | S |
-| Press and hold on the right half plays at 2x until release | src/features/messages/use-video-gestures.ts:123-147 | MISSING | Add a hold timer (350ms) on mouse down, set rate 2, and restore on release. | S |
-| Gesture feedback overlay (play/pause icon, rotate-arrow with "10", "2x") fading after 650ms | src/features/messages/VideoPlayer.tsx:484-509; use-video-gestures.ts:29-34 | MISSING | Draw a centered transient badge. | S |
-| Progressive streaming: relay media streams with range reads through a local listener, so playback starts before the download finishes. | src/features/messages/use-media-element-source.ts:1-51 | DIFFERENT (crates/app/src/ui/media/engine.rs:4-7; crates/relay/src/media.rs:22) | The port downloads the whole file into memory (100 MB cap) before decoding, and the inline preview probe also fetches the whole video. Add a range/streaming appsrc. | M |
-| "Fill the window" expand toggle (Escape exits first) | n/a (port only) | DIFFERENT (crates/app/src/ui/media/video.rs:615-631; review.rs:237) | The reference has no such control. Keep it as a deliberate extra or remove it. | S |
+| Autoplays on open, starting at the time handed off from the inline preview | src/features/messages/VideoPlayer.tsx:461, 468-480 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| Notice "Playback paused. Press play to try again." when play() is rejected | src/features/messages/VideoPlayer.tsx:153-161, 184-188 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| Error state reads "Media unavailable". | src/features/messages/MediaReviewViewer.tsx:419-430 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Volume: speaker button that opens a hover popover with a vertical slider and a Mute/Unmute button. The icon reflects the muted state. | src/features/messages/VideoPlayer.tsx:197-281; VideoPlayer.module.css:180-260 | DONE (crates/app/src/ui/media/controls.rs) | - | S |
+| Hover time preview bubble above the timeline (mouse only) | src/features/messages/VideoPlayer.tsx:283-329 | DONE (crates/app/src/ui/media/controls.rs; crates/app/src/ui/media/seek.rs) | - | S |
+| Keyboard-operable timeline and volume sliders (focusable, arrow keys) | src/features/messages/VideoPlayer.tsx:242-260, 301-317 | DONE (crates/app/src/ui/media/controls.rs; crates/app/src/ui/media/seek.rs) | - | S |
+| Timecoded-comment markers on the timeline (author avatars). Clicking one seeks, opens the comments and selects that comment. | src/features/messages/VideoPlayer.tsx:330-358; MediaReviewViewer.tsx:243-264, 444-447 | DONE (crates/app/src/ui/media/controls.rs; crates/app/src/ui/media/review.rs) | - | M |
+| Chosen speed is persisted (`buzz.video.playback-speed`) and broadcast to every open player | src/features/messages/VideoPlayer.tsx:47-57, 113-126, 392-404 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| Controls hide while playing when the pointer leaves or is idle for 2.2s. Focus or open menus keep them visible. | src/features/messages/use-media-controls.ts:4-35; VideoPlayer.module.css:307-315 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| On narrow players (<25rem) the timeline wraps to its own row. | src/features/messages/VideoPlayer.module.css:332-340 | DONE (crates/app/src/ui/media/controls.rs) | - | S |
+| Press and hold on the right half plays at 2x until release | src/features/messages/use-video-gestures.ts:123-147 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| Gesture feedback overlay (play/pause icon, rotate-arrow with "10", "2x") fading after 650ms | src/features/messages/VideoPlayer.tsx:484-509; use-video-gestures.ts:29-34 | DONE (crates/app/src/ui/media/video.rs) | - | S |
+| Progressive streaming: relay media streams with range reads through a local listener, so playback starts before the download finishes. | src/features/messages/use-media-element-source.ts:1-51 | DONE (crates/app/src/ui/media/engine.rs; crates/relay/src/media.rs) | - | M |
+| "Fill the window" expand toggle (Escape exits first) | n/a (port only) | DONE (crates/app/src/ui/media/video.rs) | - | S |
 
 ### Video review reactions and timecoded comments
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Quick reaction bar under the player (😂 😍 😮 🙌 👍 👎). It pauses the video and posts the reply `⏱ m:ss — <emoji>`. | src/features/messages/VideoReviewReactions.tsx:46-77 | MISSING | Add the bar inside the player chrome and send through the thread reply path. | S |
-| Custom emoji picker (ReactionTool) in the same bar | src/features/messages/VideoReviewReactions.tsx:72-82 | MISSING | Reuse the emoji picker. | S |
-| Bar disabled in read-only channels. Error alert "Could not post reaction." | src/features/messages/VideoReviewReactions.tsx:30-33, 44-50, 84 | MISSING | - | S |
-| Timecode stamp format: `formatMediaTime` (m:ss, h:mm:ss from one hour). The time readout next to the checkbox is padded 00:00 with tabular figures. | src/features/messages/media-timecode.ts:9-21; MediaReviewViewer.tsx:517 | DIFFERENT (crates/app/src/ui/media/comments.rs:21-33, 285-289) | The port always writes m:ss (3725s becomes "62:05") and shows the readout as unpadded m:ss in a mono font. Reuse `media_time` and `video_time`. | S |
-| Focusing the comment composer pauses the video | src/features/messages/MediaReviewViewer.tsx:525-530 | MISSING | Pause the player when the composer gains focus. | S |
-| Timecoded replies (`⏱ m:ss — text` and legacy `[m:ss]`) render with the prefix stripped and a mono time chip before the body. | src/features/messages/MessageRow.tsx:257-258, 630-643; media-timecode.ts:23-67; Messages.module.css:1962-1970 | MISSING | The port has no parser, so rows show the raw "⏱ 0:05 — …" text. Add `parse_media_time_reply` and the chip. | S |
-| Clicking a time chip in the viewer comments seeks the video and plays | src/features/messages/MediaReviewViewer.tsx:299-309, 627 | MISSING | Wire the chip click to `VideoPlayer::seek_to` and play. | S |
+| Quick reaction bar under the player (😂 😍 😮 🙌 👍 👎). It pauses the video and posts the reply `⏱ m:ss — <emoji>`. | src/features/messages/VideoReviewReactions.tsx:46-77 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Custom emoji picker (ReactionTool) in the same bar | src/features/messages/VideoReviewReactions.tsx:72-82 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Bar disabled in read-only channels. Error alert "Could not post reaction." | src/features/messages/VideoReviewReactions.tsx:30-33, 44-50, 84 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Timecode stamp format: `formatMediaTime` (m:ss, h:mm:ss from one hour). The time readout next to the checkbox is padded 00:00 with tabular figures. | src/features/messages/media-timecode.ts:9-21; MediaReviewViewer.tsx:517 | DONE (crates/app/src/ui/media/timecode.rs; crates/app/src/ui/media/comments.rs) | - | S |
+| Focusing the comment composer pauses the video | src/features/messages/MediaReviewViewer.tsx:525-530 | DONE (crates/app/src/ui/media/comments.rs) | - | S |
+| Timecoded replies (`⏱ m:ss — text` and legacy `[m:ss]`) render with the prefix stripped and a mono time chip before the body. | src/features/messages/MessageRow.tsx:257-258, 630-643; media-timecode.ts:23-67; Messages.module.css:1962-1970 | DONE (crates/app/src/ui/media/timecode.rs) | - | S |
+| Clicking a time chip in the viewer comments seeks the video and plays | src/features/messages/MediaReviewViewer.tsx:299-309, 627 | DONE (crates/app/src/ui/media/comments.rs) | - | S |
 
 ### Media review viewer: shell, motion, states
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Narrow windows: backdrop padding 12px (<50rem) and comments shown as a bottom sheet (<51.25rem) | src/features/messages/Messages.module.css:2027-2031, 2143-2157 | MISSING | Add width breakpoints to the review layout. | S |
-| Shared-element open animation: the picture flies from the thumbnail with a smooth-corner clip (240ms). Chrome and scrim fade in. Respects reduced motion. | src/features/messages/use-review-entrance.ts:20-340; MediaAttachment.tsx:146 | MISSING | Capture the thumbnail bounds on open and animate the picture's bounds and corner radius. | M |
-| Close animation: the picture flies back to its thumbnail, or fades if the thumbnail is off-screen, zoomed or a different gallery image. Chrome fades in 100ms and the scrim fades out. | src/features/messages/use-review-entrance.ts:341-499 | MISSING | Close is instant now. Add the exit animation. | M |
-| The comments sidebar slides in and out (200ms) while the picture moves smoothly to its new bounds. | src/features/messages/use-review-sidebar-motion.ts:28-103; Messages.module.css:2126-2139 | MISSING | Animate the sidebar width and offset. | S |
-| States: thread loading, thread error with Retry, "Original message unavailable." with Retry, "Attachment unavailable.", stage "Media unavailable" with Retry | src/features/messages/MediaReviewViewer.tsx:133-167, 419-430, 547-549 | PARTIAL (crates/app/src/ui/media/comments.rs:195-206) | Status text appears only in the sidebar. There is no Retry button, no check that the attachment is still in the thread, and the stage never shows thread errors. | S |
+| Narrow windows: backdrop padding 12px (<50rem) and comments shown as a bottom sheet (<51.25rem) | src/features/messages/Messages.module.css:2027-2031, 2143-2157 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Shared-element open animation: the picture flies from the thumbnail with a smooth-corner clip (240ms). Chrome and scrim fade in. Respects reduced motion. | src/features/messages/use-review-entrance.ts:20-340; MediaAttachment.tsx:146 | DONE (crates/app/src/ui/media/review.rs) | - | M |
+| Close animation: the picture flies back to its thumbnail, or fades if the thumbnail is off-screen, zoomed or a different gallery image. Chrome fades in 100ms and the scrim fades out. | src/features/messages/use-review-entrance.ts:341-499 | DONE (crates/app/src/ui/media/review.rs) | - | M |
+| The comments sidebar slides in and out (200ms) while the picture moves smoothly to its new bounds. | src/features/messages/use-review-sidebar-motion.ts:28-103; Messages.module.css:2126-2139 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| States: thread loading, thread error with Retry, "Original message unavailable." with Retry, "Attachment unavailable.", stage "Media unavailable" with Retry | src/features/messages/MediaReviewViewer.tsx:133-167, 419-430, 547-549 | DONE (crates/app/src/ui/media/review.rs; crates/app/src/ui/media/comments.rs) | - | S |
 
 ### Image gallery stage (viewer)
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Gallery holds every image across the thread (root and replies), de-duplicated | src/features/messages/MediaReviewViewer.tsx:267-276 | PARTIAL (crates/app/src/ui/media/review.rs:72-80) | The port uses only the opened message's images. Build the gallery from the thread snapshot. | S |
-| Slide and fade between images (200ms, ±40px). The last decoded image stays visible while the next loads. Respects reduced motion. | src/features/messages/use-image-gallery-motion.ts:15-122 | MISSING | Keep the departing image and animate both images. | S |
-| Only a click on the picture itself zooms (not the letterbox or a second touch) | src/features/messages/ImageReviewStage.tsx:247-253 | PARTIAL (crates/app/src/ui/media/review.rs:428-437) | Any press on the stage counts as a click. Hit-test against the image rect. | S |
-| Trackpad pinch-to-zoom (gesture events) | src/features/messages/use-image-viewport.ts:165-186 | MISSING | Handle pinch/magnify events if GPUI exposes them. | S |
-| Pan is re-clamped on window resize or sidebar toggle | src/features/messages/use-image-viewport.ts:187-193 | PARTIAL (crates/app/src/ui/media/review.rs:277-293) | The offset is clamped only on the next gesture, so it can go stale after a resize. Re-clamp when the stage bounds change. | S |
-| Cursors: zoom-in, grab, grabbing | src/features/messages/Messages.module.css:1192-1200 | DIFFERENT (crates/app/src/ui/media/review.rs:407-413) | The port uses PointingHand, OpenHand and ClosedHand. Use a zoom-in cursor if the platform has one. | S |
-| Toolbar auto-hides after 2.2s of idle pointer and stays visible during copy feedback | src/features/messages/ImageReviewStage.tsx:106-107; use-media-controls.ts:4 | PARTIAL (crates/app/src/ui/media/review.rs:504-505) | The port shows the toolbar only while the stage is hovered. Add the idle timer and keyboard visibility. | S |
-| "Copy image" button copies authenticated PNG bytes to the clipboard, with a spinner and "Image copied" / "Couldn't copy image" notices (4s/6s) | src/features/messages/ImageReviewStage.tsx:117-158, 384-400; image-copy.ts:1-37; native-image-copy.ts:1-6 | MISSING | Fetch through `Media` and write the image to the clipboard. Add the notice. | S |
-| "Download image" for relay media saves to Downloads | src/features/messages/ImageReviewStage.tsx:401-429 | DIFFERENT (crates/app/src/ui/media/review.rs:608-615; media.rs:375-401) | The port also opens the saved file afterwards. Match the reference's silent save, or add a confirmation notice. | S |
-| "Download failed. Try again." alert | src/features/messages/ImageReviewStage.tsx:416-418 | MISSING | Report errors from `media::download`. | S |
+| Gallery holds every image across the thread (root and replies), de-duplicated | src/features/messages/MediaReviewViewer.tsx:267-276 | DONE (crates/app/src/ui/media/comments.rs; crates/app/src/ui/media/review.rs) | - | S |
+| Slide and fade between images (200ms, ±40px). The last decoded image stays visible while the next loads. Respects reduced motion. | src/features/messages/use-image-gallery-motion.ts:15-122 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Only a click on the picture itself zooms (not the letterbox or a second touch) | src/features/messages/ImageReviewStage.tsx:247-253 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Trackpad pinch-to-zoom (gesture events) | src/features/messages/use-image-viewport.ts:165-186 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Pan is re-clamped on window resize or sidebar toggle | src/features/messages/use-image-viewport.ts:187-193 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| Cursors: zoom-in, grab, grabbing | src/features/messages/Messages.module.css:1192-1200 | DIFFERENT (crates/app/src/ui/media/review.rs) | Kept on purpose: GPUI has no zoom-in cursor, so the picture (only the picture) shows the pointing hand; grab and grabbing are the open and closed hands. | S |
+| Toolbar auto-hides after 2.2s of idle pointer and stays visible during copy feedback | src/features/messages/ImageReviewStage.tsx:106-107; use-media-controls.ts:4 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| "Copy image" button copies authenticated PNG bytes to the clipboard, with a spinner and "Image copied" / "Couldn't copy image" notices (4s/6s) | src/features/messages/ImageReviewStage.tsx:117-158, 384-400; image-copy.ts:1-37; native-image-copy.ts:1-6 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| "Download image" for relay media saves to Downloads | src/features/messages/ImageReviewStage.tsx:401-429 | DONE (crates/app/src/ui/media/review.rs) | - | S |
+| "Download failed. Try again." alert | src/features/messages/ImageReviewStage.tsx:416-418 | DONE (crates/app/src/ui/media/review.rs) | - | S |
 
 ### Comments sidebar
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Comments are full message rows (reactions, hover action bar, edit via MessageEditScope, retry, day dividers) | src/features/messages/MediaReviewViewer.tsx:502-514, 601-628 | PARTIAL (crates/app/src/ui/media/comments.rs:175-186) | Rows are built with empty `Actions`, no picker and no quick reactions, so comments cannot be reacted to, edited or retried. | M |
-| Clicking an attachment inside a comment switches the current viewer to that media (same review, seek re-applied) | src/features/messages/MediaReviewViewer.tsx:95-100, 624-626 | DIFFERENT (crates/app/src/ui/message.rs:799; media/review.rs:61-104) | The port opens a new review for the reply message, which replaces the current one. Switch the media inside the same review. | S |
-| The comment selected from a marker is outlined and scrolled into view | src/features/messages/MediaReviewViewer.tsx:581-586, 605; Messages.module.css:2002-2005 | MISSING | Needs the markers. Add selected-comment state, scroll and outline. | S |
+| Comments are full message rows (reactions, hover action bar, edit via MessageEditScope, retry, day dividers) | src/features/messages/MediaReviewViewer.tsx:502-514, 601-628 | DONE (crates/app/src/ui/media/comments.rs) | - | M |
+| Clicking an attachment inside a comment switches the current viewer to that media (same review, seek re-applied) | src/features/messages/MediaReviewViewer.tsx:95-100, 624-626 | DONE (crates/app/src/ui/media/review.rs; crates/app/src/ui/media/comments.rs) | - | S |
+| The comment selected from a marker is outlined and scrolled into view | src/features/messages/MediaReviewViewer.tsx:581-586, 605; Messages.module.css:2002-2005 | DONE (crates/app/src/ui/media/comments.rs) | - | S |
 
 ### Audio attachment player
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Duration is known before play (preload metadata) | src/features/messages/AudioAttachment.tsx:250-253 | PARTIAL (crates/app/src/ui/media/audio.rs:68-86) | Without an imeta duration the port shows "—:—" and disables seeking until playback starts. Probe the metadata lazily. | S |
-| Hover time preview on the seek bar | src/features/messages/AudioAttachment.tsx:310-361 | MISSING (crates/app/src/ui/media/seek.rs:18) | Same work as the video hover preview. | S |
-| Duration is checked (finite, at most the maximum attachment duration). Old voice notes with an overshooting container duration are corrected when they end. | src/features/messages/AudioAttachment.tsx:152-164, 228-240, 266-288 | PARTIAL (crates/app/src/ui/media/audio.rs:310-312) | The port trusts the engine duration. Add the cap and the end-of-clip correction. | S |
+| Duration is known before play (preload metadata) | src/features/messages/AudioAttachment.tsx:250-253 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
+| Hover time preview on the seek bar | src/features/messages/AudioAttachment.tsx:310-361 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
+| Duration is checked (finite, at most the maximum attachment duration). Old voice notes with an overshooting container duration are corrected when they end. | src/features/messages/AudioAttachment.tsx:152-164, 228-240, 266-288 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
 
 ### Voice note card (playback)
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Loading spinner rotates | src/bundled/voice-notes/VoiceNoteCard.tsx:190-194; VoiceNotes.module.css:254 | PARTIAL (crates/app/src/ui/media/audio.rs:481) | The CircleNotch icon is static. Add a rotation animation. | S |
-| Bar count follows the card width (floor((w+2)/5), at most 64) | src/bundled/voice-notes/VoiceNoteCard.tsx:80-91 | PARTIAL (crates/app/src/ui/media/audio.rs:30) | The port always draws 42 bars. Measure the track width. | S |
-| Seeking on the waveform is enabled only after metadata loads (that is, after Play) | src/bundled/voice-notes/VoiceNoteCard.tsx:217-234 | DIFFERENT (crates/app/src/ui/media/audio.rs:166-185, 457-462) | The port lets you seek before playing and loads the clip paused at that time. This is harmless and could stay. | S |
+| Loading spinner rotates | src/bundled/voice-notes/VoiceNoteCard.tsx:190-194; VoiceNotes.module.css:254 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
+| Bar count follows the card width (floor((w+2)/5), at most 64) | src/bundled/voice-notes/VoiceNoteCard.tsx:80-91 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
+| Seeking on the waveform is enabled only after metadata loads (that is, after Play) | src/bundled/voice-notes/VoiceNoteCard.tsx:217-234 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
 
 ## Not counted: absent from buzz-app, or not applicable to a native app
 
@@ -702,6 +702,6 @@ These were checked so that nobody ports them by mistake. In each case the port a
 
 ## DONE count
 
-DONE: **265** features already at parity (section 1: 43, section 2: 51, section 3: 61, section 4: 42, section 5: 68).
+DONE: **458** features at parity (section 1: 101, section 2: 127, section 3: 61, section 4: 42, section 5: 127).
 
-Status counts: MISSING 199, PARTIAL 88, DIFFERENT 66, IN PROGRESS 4, DONE 265.
+Status counts: MISSING 90, PARTIAL 42, DIFFERENT 28, IN PROGRESS 4, DONE 458.

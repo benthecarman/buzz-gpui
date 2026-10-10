@@ -13,12 +13,12 @@
 |---|---|---|---|---|---|
 | Connection, transport, native host, enterprise | 24 | 14 | 16 | 12 | 66 |
 | Session, caching, windows, folding | 39 | 14 | 3 | 14 | 70 |
-| Outbox, publishing, attachments, media | 27 | 10 | 11 | 16 | 64 |
+| Outbox, publishing, attachments, media | 33 | 10 | 8 | 13 | 64 |
 | Read state and unread | 38 | 11 | 6 | 8 | 63 |
 | Sidebar, discovery, navigation, DMs; members, moderation, profiles; communities, hosted, inbox | 46 | 16 | 6 | 67 | 135 |
 | Other relay-layer features | 36 | 12 | 8 | 35 | 91 |
 | Channel page, settings, lifecycle, create, canvas, templates, usage | 13 | 16 | 7 | 37 | 73 |
-| **Total** | **223** | **93** | **57** | **189** | **562** |
+| **Total** | **229** | **93** | **54** | **186** | **562** |
 
 ### Highest-impact findings
 
@@ -28,7 +28,7 @@
 4. **Connection and live status are invisible.** The snapshot exposes only `live: bool`. `Session::retry` has no caller in `crates/app`. There is no "Live updates need attention" toast, no failed-connection banner, and no sidebar connecting or error states.
 5. **Some sends can be invisible.** Only signed outbox ops reach timelines (`crates/relay/src/session/mod.rs:1462-1468`). The outbox exists only after connect. There is no outbox panel, and failed edits, deletes and reactions disappear from the timeline.
 6. **DMs are counted as mentions.** DM entries count as mentions (`crates/relay/src/unread.rs:1536-1538`). DM rows get a numeric pill, and the tray counts DMs twice. The sidebar also shows a numeric pill where buzz-app shows a dot.
-7. **Whole features are absent:** community moderation (Membership card, invites), hosted communities, the inbox page, the profile panel, Canvas, channel templates, channel usage, reminders, identity archives, the tab pane and panels, and HEIC/video preparation and media streaming.
+7. **Whole features are absent:** community moderation (Membership card, invites), hosted communities, the inbox page, the profile panel, Canvas, channel templates, channel usage, reminders, identity archives, the tab pane and panels, and HEIC/video preparation.
 8. **Some writes can be resent.** An unconfirmed lifecycle action can be sent again, and an uncertain channel-details save has no retained state. Renaming a session channel fails because the port always sends `about`. There is no temporary-channel TTL.
 
 ## Connection, transport and native relay host
@@ -390,13 +390,13 @@ Key findings:
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Signed media GET, same-origin path check, no redirects, `.thumb.jpg` for avatars | relay.rs:1641-1717 | DONE (media.rs:98-105, 126-211, 223-244) | - | - |
-| Ranged reads through 1 MiB block cache (32 blocks) | media_blocks.rs:18-174 | MISSING | Whole body before decode (media.rs:126-153) | L |
-| Non-Range origins: video spooled to disk up to 500 MiB | media_spool.rs:1-47, 152-293 | MISSING | Whole-body cap 100 MiB (media.rs:22): videos over 100 MiB fail "The media is too large" | M |
-| Loopback HTTP server for media elements | media_stream.rs:1-200 | DIFFERENT | Not needed natively (GStreamer appsrc) | - |
-| Response type policy and cache headers | relay.rs:1729-1809 | DIFFERENT | In-memory LRU 64 MiB (media.rs:26-27, 246-287) | S |
-| Avatar prefetch/warm | media.ts:37-143 | MISSING | Optional | S |
-| media_download to Downloads, errors returned | relay.rs:1579-1601 | DIFFERENT | Also opens file; failures only logged (crates/app/src/ui/media.rs:375-400) | S |
-| Copy image to clipboard in viewer | relay.rs:1553-1575; ImageReviewStage.tsx:140-150, 392 | MISSING | Add "Copy image" (crates/app/src/ui/media/review.rs:390-397) | S |
+| Ranged reads through 1 MiB block cache (32 blocks) | media_blocks.rs:18-174 | DONE (crates/app/src/ui/media/engine.rs; crates/relay/src/media.rs stream_url) | - | - |
+| Non-Range origins: video spooled to disk up to 500 MiB | media_spool.rs:1-47, 152-293 | DONE (crates/app/src/ui/media/engine.rs; crates/relay/src/media.rs stream_url) | - | - |
+| Loopback HTTP server for media elements | media_stream.rs:1-200 | DONE (crates/app/src/ui/media/engine.rs plays its URLs) | - | - |
+| Response type policy and cache headers | relay.rs:1729-1809 | DONE (players: buzz-desktop's listener; images: crates/app/src/ui/media.rs) | Images are sniffed and relay SVG is refused like the policy; their cache stays the in-memory LRU (64 MiB) standing in for `max-age=3600`. | - |
+| Avatar prefetch/warm | media.ts:37-143 | MISSING | Optional. Needs the channel prefetch path (session and sidebar, not the media module) to hand avatar URLs to a warming queue. | S |
+| media_download to Downloads, errors returned | relay.rs:1579-1601 | DONE (crates/app/src/ui/media.rs save; attachments.rs; review.rs) | - | - |
+| Copy image to clipboard in viewer | relay.rs:1553-1575; ImageReviewStage.tsx:140-150, 392 | DONE (crates/app/src/ui/media/review.rs) | - | - |
 
 ## Read state and unread
 
