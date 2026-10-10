@@ -233,7 +233,7 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
         return;
     };
     let store = Store::in_memory().unwrap();
-    let alice = fixture.session("alice", store.clone()).await;
+    let creator = fixture.session("carol", store.clone()).await;
     let bob = fixture.pubkey("bob");
     let name = unique("setup");
     let input = ChannelCreationInput::from_new(
@@ -249,9 +249,9 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
             ..ChannelSetup::default()
         }),
     );
-    let id = alice.create_channel_with(input).await.unwrap();
+    let id = creator.create_channel_with(input).await.unwrap();
     assert!(
-        alice
+        creator
             .snapshot()
             .borrow()
             .channels
@@ -260,14 +260,14 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
         "admitted once the viewer is in the roster"
     );
     // Completion adds the agent, then retires the receipt.
-    let mut snapshot = alice.snapshot();
+    let mut snapshot = creator.snapshot();
     until(&mut snapshot, "the agent in the roster", |s| {
         s.channels
             .iter()
             .any(|c| c.id == id && c.members.contains(&bob))
     })
     .await;
-    let partition = store::Partition::new(&fixture.origin, alice.viewer());
+    let partition = store::Partition::new(&fixture.origin, creator.viewer());
     for _ in 0..50 {
         if kit::setup::Receipts::load(&store, &partition)
             .unwrap()
@@ -284,8 +284,8 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
             .0
             .is_empty()
     );
-    assert!(alice.creation().borrow().notices.is_empty());
-    assert_eq!(alice.pending_creation().await, None);
+    assert!(creator.creation().borrow().notices.is_empty());
+    assert_eq!(creator.pending_creation().await, None);
 
     // A starting Canvas is seeded through the outbox, then confirmed as
     // the selected document.
@@ -301,19 +301,22 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
             ..ChannelSetup::default()
         }),
     );
-    let seeded = alice.create_channel_with(canvas).await.unwrap();
+    let seeded = creator.create_channel_with(canvas).await.unwrap();
     let mut head = None;
     for _ in 0..50 {
-        head = alice.canvas_read(&seeded, true).await.unwrap();
+        head = creator.canvas_read(&seeded, true).await.unwrap();
         if head.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(head.expect("the seeded Canvas").content, "# Goal");
-    alice.channel_action(Action::Delete, &seeded).await.unwrap();
+    creator
+        .channel_action(Action::Delete, &seeded)
+        .await
+        .unwrap();
 
-    alice.channel_action(Action::Delete, &id).await.unwrap();
+    creator.channel_action(Action::Delete, &id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -324,14 +327,14 @@ async fn retries_a_creation_restored_after_a_restart() {
     };
     use buzz_identity::Purpose;
     use buzz_relay_client::kit::setup::{Progress, Receipts};
-    let nsec = fixture.identities["identities"]["alice"]["nsec"]
+    let nsec = fixture.identities["identities"]["carol"]["nsec"]
         .as_str()
         .unwrap();
-    let alice = Identity::from_nsec(nsec).unwrap();
+    let creator = Identity::from_nsec(nsec).unwrap();
     // The previous run saved its intent and its Create, then stopped
     // before the relay answered.
     let store = Store::in_memory().unwrap();
-    let partition = Partition::new(&fixture.origin, &alice.pubkey_hex());
+    let partition = Partition::new(&fixture.origin, &creator.pubkey_hex());
     let channel = NewChannel {
         name: unique("restored"),
         description: String::new(),
@@ -352,7 +355,7 @@ async fn retries_a_creation_restored_after_a_restart() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let event = alice
+    let event = creator
         .template(Purpose::Content, draft.kind, now, tags, String::new())
         .unwrap();
     progress
@@ -372,7 +375,7 @@ async fn retries_a_creation_restored_after_a_restart() {
         .await
         .unwrap();
 
-    let session = fixture.session("alice", store.clone()).await;
+    let session = fixture.session("carol", store.clone()).await;
     let pending = session.pending_creation().await.expect("restored");
     assert_eq!(pending.name, channel.name);
     // "Retry channel" sends only that Create; the setup is reported, not
