@@ -56,7 +56,7 @@ pub fn resolve(
     for identity in identities {
         let key = (
             identity.pubkey.to_ascii_lowercase(),
-            identity.name.trim().to_string(),
+            js_trim(&identity.name).to_string(),
         );
         let mut row = identity.clone();
         row.owner = row.owner.map(|o| o.to_ascii_lowercase());
@@ -93,7 +93,7 @@ pub fn resolve(
                 (false, _) if viewer.as_deref() == Some(key.as_str()) => 0,
                 (false, _) => 1,
             };
-            let name = identity.name.trim().to_string();
+            let name = js_trim(&identity.name).to_string();
             Row {
                 key,
                 identity,
@@ -146,8 +146,8 @@ pub fn resolve(
                     .owner
                     .as_ref()
                     .and_then(|owner| unique.get(owner))
-                    .map(|owner| owner.name.trim().to_string());
-                let name = row.identity.name.trim();
+                    .map(|owner| js_trim(&owner.name).to_string());
+                let name = js_trim(&row.identity.name);
                 let readable = if row.identity.is_agent && row.length == 0 {
                     match owner {
                         Some(owner) if !row.mine => format!("{owner}’s {name}"),
@@ -186,7 +186,7 @@ pub fn resolve(
         .filter(|row| {
             unique
                 .get(&row.key)
-                .is_some_and(|u| u.name.trim() == row.identity.name.trim())
+                .is_some_and(|u| js_trim(&u.name) == js_trim(&row.identity.name))
         })
         .map(|row| {
             (
@@ -198,6 +198,12 @@ pub fn resolve(
             )
         })
         .collect()
+}
+
+/// JavaScript's `trim()`: Unicode white space and line ends, plus the
+/// byte-order mark, which Rust's `trim` keeps.
+fn js_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
 fn npub(hex: &str) -> String {
@@ -306,11 +312,11 @@ pub fn identities(
             continue;
         }
         let profile = profiles.get(key);
-        let profile_name = profile.map(|p| p.name.trim().to_string());
+        let profile_name = profile.map(|p| js_trim(&p.name).to_string());
         let signed = profile.is_some_and(|p| p.is_agent && !p.name_is_fallback);
         let chosen = match profile_name.filter(|n| !n.is_empty()) {
             Some(profile_name) if signed => profile_name,
-            profile_name => Some(name.trim().to_string())
+            profile_name => Some(js_trim(name).to_string())
                 .filter(|n| !n.is_empty())
                 .or(profile_name)
                 .unwrap_or_else(|| "Agent".into()),
@@ -324,8 +330,8 @@ pub fn identities(
             if !seen.insert(key.clone()) || !same {
                 continue;
             }
-            if !name.trim().is_empty() {
-                names.insert(key.clone(), name.trim().to_string());
+            if !js_trim(name).is_empty() {
+                names.insert(key.clone(), js_trim(name).to_string());
             }
         }
     }
@@ -366,6 +372,8 @@ struct CacheKey {
     viewer: String,
     origin: Option<String>,
     members: Option<Vec<String>>,
+    /// The Identity Naming plugin is on.
+    naming: bool,
 }
 
 /// Names scoped to `members` (a channel's roster), or community-wide.
@@ -387,6 +395,7 @@ pub fn names(
             m.sort();
             m
         }),
+        naming: crate::plugins::enabled("buzz.identity-naming"),
     };
     if let Some(found) = CACHE.with_borrow(|cache| {
         cache
@@ -396,8 +405,15 @@ pub fn names(
     }) {
         return found;
     }
-    let (identities, library_names) = identities(profiles, library, origin);
-    let labels = resolve(&identities, Some(viewer), key.members.as_deref());
+    // Without the Identity Naming plugin there is no policy: public
+    // profile names only (`bindNames` with no provider).
+    let (labels, library_names) = if key.naming {
+        let (identities, library_names) = identities(profiles, library, origin);
+        let labels = resolve(&identities, Some(viewer), key.members.as_deref());
+        (labels, library_names)
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
     let names = Arc::new(Names {
         labels,
         library: library_names,
@@ -486,5 +502,48 @@ mod tests {
         let labels = resolve(&identities, None, Some(std::slice::from_ref(&a)));
         assert_eq!(labels[&a].name, "Lee");
         assert!(!labels.contains_key(&b));
+    }
+
+    /// buzz-app's portable fixtures (`bundled/identity-naming`): every
+    /// case's expected labels, compared as a key-indexed map.
+    #[test]
+    fn conforms_to_the_identity_naming_fixtures() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("identity/identity-names.fixtures.json")).unwrap();
+        let cases = fixtures["cases"].as_array().unwrap();
+        assert!(cases.len() > 20);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let identities: Vec<NamingIdentity> = case["identities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|identity| NamingIdentity {
+                    pubkey: identity["pubkey"].as_str().unwrap().to_owned(),
+                    name: identity["name"].as_str().unwrap_or_default().to_owned(),
+                    is_agent: identity["isAgent"].as_bool().unwrap_or(false),
+                    owner: identity["ownerPubkey"].as_str().map(str::to_owned),
+                })
+                .collect();
+            let candidates: Option<Vec<String>> = case["candidates"].as_array().map(|keys| {
+                keys.iter()
+                    .map(|key| key.as_str().unwrap().to_owned())
+                    .collect()
+            });
+            let labels = resolve(&identities, case["viewer"].as_str(), candidates.as_deref());
+            let expected = case["expected"].as_object().unwrap();
+            for (key, want) in expected {
+                let got = labels
+                    .get(&key.to_ascii_lowercase())
+                    .unwrap_or_else(|| panic!("{name}: no label for {key}"));
+                assert_eq!(got.name, want["name"].as_str().unwrap(), "{name}: {key}");
+                assert_eq!(
+                    got.qualifier.as_deref(),
+                    want["qualifier"].as_str(),
+                    "{name}: {key}"
+                );
+            }
+            assert_eq!(labels.len(), expected.len(), "{name}: extra labels");
+        }
     }
 }
