@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 blurhash = "0.2"
+buzz-agent-controller.workspace = true
 buzz-credential-store.workspace = true
 buzz-host = { path = "../host" }
 buzz-host-rpc = { path = "../host-rpc" }
@@ -43,6 +44,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 toml = "0.9"
 toml_edit = "0.25"
 uuid = { version = "1", features = ["v4"] }
+zeroize = "1.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

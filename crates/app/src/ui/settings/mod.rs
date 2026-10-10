@@ -27,7 +27,7 @@ use buzz_ui::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use profile::ProfileForm;
-pub use profile::{default_profile, remember_profile};
+pub use profile::{SignOutDialog, default_profile, remember_profile};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -129,7 +129,8 @@ enum Modal {
         error: Option<SharedString>,
     },
     SignOut {
-        error: Option<SharedString>,
+        dialog: Entity<SignOutDialog>,
+        _subscription: Subscription,
     },
     /// Shorten retention or clear saved agent activity.
     Archive(archive::Confirm),
@@ -188,7 +189,7 @@ impl SettingsPage {
     /// Shows `section`; a change is a history visit.
     pub fn open(&mut self, section: Section, cx: &mut Context<Self>) {
         if section != self.section {
-            self.quiet();
+            self.quiet(cx);
             self.section = section;
             cx.emit(SectionChanged);
         }
@@ -257,13 +258,12 @@ impl SettingsPage {
 
     /// Closes the sound menu, stops a preview and hides the private key,
     /// on leaving a section.
-    fn quiet(&mut self) {
+    fn quiet(&mut self, cx: &mut App) {
         self.sound_menu = None;
         self.retention_menu = false;
         crate::sounds::stop_preview();
         // Leaving Profile hides the private key, as unmounting it does.
-        self.profile.nsec_revealed = false;
-        self.profile.nsec_message = None;
+        self.profile.hide_private_key(cx);
         // Leaving Shortcuts stops a capture and clears its notice.
         self.shortcuts = None;
     }
@@ -395,7 +395,10 @@ impl SettingsPage {
                     self.leave_dialog(community, *busy, error.clone(), cx),
                     (!*busy).then_some(close),
                 ),
-                Modal::SignOut { error } => (self.sign_out_dialog(error.clone(), cx), Some(close)),
+                Modal::SignOut { dialog, .. } => (
+                    dialog.clone().into_any_element(),
+                    (!dialog.read(cx).pending()).then_some(close),
+                ),
                 Modal::Archive(confirm) => (self.archive_dialog(*confirm, cx), Some(close)),
             };
         Some(overlay::modal(window, content, dismiss).into_any_element())

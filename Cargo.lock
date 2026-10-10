@@ -951,6 +951,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "blurhash",
+ "buzz-agent-controller",
  "buzz-credential-store",
  "buzz-host",
  "buzz-host-rpc",
@@ -983,6 +984,7 @@ dependencies = [
  "url",
  "uuid",
  "zbus 5.19.0",
+ "zeroize",
 ]
 
 [[package]]

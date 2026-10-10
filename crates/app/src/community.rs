@@ -266,17 +266,6 @@ impl AppState {
         });
     }
 
-    /// Signs out: deletes the saved key and closes every community.
-    pub fn sign_out(cx: &mut App) -> Result<(), String> {
-        identity::remove()?;
-        Self::close_sessions(cx);
-        let state = cx.global_mut::<Self>();
-        state.communities.clear();
-        state.selected = None;
-        state.identity = IdentityState::Missing;
-        Ok(())
-    }
-
     /// Sign out's commit point (`IdentityHost::close`): every session
     /// stops, so nothing more is signed with this key before Buzz restarts
     /// and the next launch removes it.

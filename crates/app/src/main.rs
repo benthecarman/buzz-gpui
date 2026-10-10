@@ -11,6 +11,7 @@ mod mirror;
 mod notifications;
 mod runtime;
 mod shortcuts;
+mod sign_out;
 #[cfg(unix)]
 mod single_instance;
 mod sounds;
@@ -28,6 +29,8 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    // A pending sign-out finishes before anything else reads or writes storage.
+    sign_out::boot();
     // A `buzz://` link the OS launched us with (`Exec=buzz-gpui %U`).
     let link = deep_links::from_args(std::env::args().skip(1));
     #[cfg(unix)]

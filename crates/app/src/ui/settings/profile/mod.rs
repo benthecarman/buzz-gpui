@@ -2,6 +2,11 @@
 //! or the default profile new communities start from; identity details,
 //! the private key and sign-out.
 
+mod private_key;
+mod sign_out;
+
+pub use sign_out::{SignOutClosed, SignOutDialog};
+
 use super::avatar::{AvatarDismissed, AvatarDone, AvatarEditor, EDITOR_WIDTH, Preview};
 use super::{
     Modal, SettingsPage, button, field, form_group, header, inline_header, note, preference_row,
@@ -12,13 +17,13 @@ use crate::ui::{media, overlay};
 use buzz_relay_client::account::{ABOUT_LIMIT, picture_error};
 use buzz_relay_client::{ProfileEdit, RelayOrigin};
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonVariant, IconButton,
-    IconButtonSize, IconName, Popover, PopoverWidth, Surface, TextArea, TextField, Toast,
-    ToastTone, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonSize, IconName, Popover,
+    PopoverWidth, TextArea, TextField, Toast, ToastTone, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use private_key::PrivateKey;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
@@ -182,22 +187,17 @@ pub(super) struct ProfileForm {
     baseline: ProfileEdit,
     saving: bool,
     error: Option<SharedString>,
-    /// The private key field: masked until revealed.
-    nsec: Entity<InputState>,
-    pub(super) nsec_revealed: bool,
-    /// The last reveal or copy outcome; `true` when it failed.
-    pub(super) nsec_message: Option<(SharedString, bool)>,
+    /// The private key widget; hidden while the sign-out dialog shows its
+    /// own.
+    private_key: Entity<PrivateKey>,
     _subscriptions: Vec<Subscription>,
 }
-
-/// What the private key field shows while hidden.
-const MASK: &str = "••••••••••••••••";
 
 impl ProfileForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
         let about = cx.new(|cx| TextareaState::new(window, cx));
-        let nsec = cx.new(|cx| InputState::new(window, cx).default_value(MASK));
+        let private_key = cx.new(|cx| PrivateKey::new(true, window, cx));
         let changed = |this: &mut SettingsPage, cx: &mut Context<SettingsPage>| {
             this.profile.error = None;
             cx.notify();
@@ -211,19 +211,6 @@ impl ProfileForm {
             cx.subscribe(&about, move |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     changed(this, cx);
-                }
-            }),
-            // Read-only: the key can be selected and copied, not edited.
-            cx.subscribe_in(&nsec, window, |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.profile.show_nsec(window, cx);
-                }
-            }),
-            // The key hides when the window loses focus (`PrivateKey.tsx`).
-            cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active() && this.profile.nsec_revealed {
-                    this.profile.hide_nsec(window, cx);
-                    cx.notify();
                 }
             }),
         ];
@@ -240,34 +227,14 @@ impl ProfileForm {
             baseline: ProfileEdit::default(),
             saving: false,
             error: None,
-            nsec,
-            nsec_revealed: false,
-            nsec_message: None,
+            private_key,
             _subscriptions,
         }
     }
 
-    /// The private key, or the mask while hidden.
-    fn nsec_text(&self, cx: &App) -> String {
-        match (&cx.global::<AppState>().identity, self.nsec_revealed) {
-            (IdentityState::Ready(identity), true) => identity.nsec().to_string(),
-            _ => MASK.to_string(),
-        }
-    }
-
-    /// Puts the field back to what it shows, undoing any typing.
-    fn show_nsec(&mut self, window: &mut Window, cx: &mut App) {
-        let text = self.nsec_text(cx);
-        if self.nsec.read(cx).value() != text.as_str() {
-            self.nsec
-                .update(cx, |state, cx| state.set_value(text, window, cx));
-        }
-    }
-
-    pub(super) fn hide_nsec(&mut self, window: &mut Window, cx: &mut App) {
-        self.nsec_revealed = false;
-        self.nsec_message = None;
-        self.show_nsec(window, cx);
+    /// Leaving Profile hides the key, as unmounting `PrivateKey` does.
+    pub(super) fn hide_private_key(&self, cx: &mut App) {
+        self.private_key.update(cx, |key, cx| key.hide(cx));
     }
 
     fn values(&self, cx: &App) -> ProfileEdit {
@@ -485,8 +452,6 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let c = *cx.colors();
-        // The key field follows a hide that happened elsewhere.
-        self.profile.show_nsec(window, cx);
         let community = AppState::current(cx);
         let subtitle = if community.is_some() {
             "Update this community’s profile. Other community profiles stay unchanged."
@@ -587,87 +552,14 @@ impl SettingsPage {
                 cx,
             ),
         ];
-        // The private key widget (`PrivateKey.tsx`).
-        let secret = identity.clone();
-        let revealed = self.profile.nsec_revealed;
-        let message = self.profile.nsec_message.clone().map(|(text, failed)| {
-            div()
-                .mt(rems(0.75))
-                .text_body_sm()
-                .text_color(if failed { c.text_danger } else { c.text_subtle })
-                .child(text)
-        });
-        let private_key =
-            form_group(
-                vec![
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .mb(rems(0.5))
-                                .text_label_sm()
-                                .child("Private key (nsec)"),
-                        )
-                        .child(
-                            div()
-                                .text_body_sm()
-                                .text_color(c.text_subtle)
-                                .child("Anyone with this key can act as you. Never share it."),
-                        )
-                        .child(
-                            div().mt(rems(0.75)).child(
-                                TextField::new(&self.profile.nsec).surface(Surface::Floating),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .mt(rems(0.75))
-                                .flex()
-                                .flex_wrap()
-                                .gap(rems(0.75))
-                                .child(
-                                    button(
-                                        "reveal-nsec",
-                                        if revealed {
-                                            "Hide private key"
-                                        } else {
-                                            "Reveal private key"
-                                        },
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            if this.profile.nsec_revealed {
-                                                this.profile.hide_nsec(window, cx);
-                                            } else {
-                                                this.profile.nsec_revealed = true;
-                                                this.profile.nsec_message = None;
-                                                this.profile.show_nsec(window, cx);
-                                            }
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .child(button("copy-nsec", "Copy private key").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            secret.nsec().to_string(),
-                                        ));
-                                        this.profile.nsec_message = Some((
-                                            "Private key copied. Keep it somewhere safe; your \
-                                         clipboard now contains it."
-                                                .into(),
-                                            false,
-                                        ));
-                                        cx.notify();
-                                    }),
-                                )),
-                        )
-                        .children(message)
-                        .into_any_element(),
-                ],
+        // One key widget at a time; the sign-out dialog brings its own.
+        let signing_out = matches!(self.modal, Some(Modal::SignOut { .. }));
+        let private_key = (!signing_out).then(|| {
+            div().mt(rems(1.5)).child(form_group(
+                vec![self.profile.private_key.clone().into_any_element()],
                 cx,
-            );
+            ))
+        });
         parts.push(
             div()
                 .flex()
@@ -682,7 +574,7 @@ impl SettingsPage {
                     cx,
                 ))
                 .child(rows_group(rows, cx))
-                .child(div().mt(rems(1.5)).child(private_key))
+                .children(private_key)
                 .child(
                     div().mt(rems(1.5)).child(rows_group(
                         vec![
@@ -698,9 +590,8 @@ impl SettingsPage {
                                 ),
                                 vec![
                                     button("sign-out", "Sign out of Buzz")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.modal = Some(Modal::SignOut { error: None });
-                                            cx.notify();
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_sign_out(window, cx)
                                         }))
                                         .into_any_element(),
                                 ],
@@ -923,59 +814,21 @@ impl SettingsPage {
             cx,
         )
     }
-    pub(super) fn sign_out_dialog(
-        &self,
-        error: Option<SharedString>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        sign_out_dialog(
-            error,
-            cx.listener(|this, _, _, cx| this.close_modal(cx)),
-            cx.listener(|this, _, _, cx| {
-                if let Err(error) = AppState::sign_out(cx) {
-                    this.modal = Some(Modal::SignOut {
-                        error: Some(error.into()),
-                    });
-                    cx.notify();
-                } else {
-                    this.modal = None;
-                    cx.notify();
-                }
-            }),
-            cx,
-        )
+
+    /// "Sign out of Buzz": the dialog, with its own key widget.
+    fn open_sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile.hide_private_key(cx);
+        let dialog = cx.new(|cx| SignOutDialog::new(window, cx));
+        let _subscription = cx.subscribe(&dialog, |this, _, _: &SignOutClosed, cx| {
+            this.close_modal(cx)
+        });
+        self.modal = Some(Modal::SignOut {
+            dialog,
+            _subscription,
+        });
+        cx.notify();
     }
 }
-
-/// The sign-out confirmation, shared with the account menu. The key is
-/// buzz-app's too, so the copy says that signing out here signs out there.
-pub fn sign_out_dialog(
-    error: Option<SharedString>,
-    on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_confirm: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> AnyElement {
-    let c = cx.colors();
-    AlertDialog::new("Sign out of Buzz?")
-        .description(
-            "This deletes your private key from this computer’s keyring. buzz-app uses the \
-             same key, so it is signed out too. Copy your private key from Settings → \
-             Profile first if you want to sign back in with it.",
-        )
-        .children(error.map(|error| div().text_body_sm().text_color(c.text_danger).child(error)))
-        .action(
-            Button::new("sign-out-cancel", "Cancel")
-                .surface(Surface::Floating)
-                .on_click(on_cancel),
-        )
-        .action(
-            Button::new("sign-out-confirm", "Sign out")
-                .destructive()
-                .on_click(on_confirm),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
