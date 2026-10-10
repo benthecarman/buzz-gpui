@@ -523,6 +523,25 @@ impl TeamKit {
         self.inner.runtime.spawn(self.inner.clone().refresh());
     }
 
+    /// Reads the list again and waits for the result.
+    pub async fn reload(&self) -> Result<Arc<TeamsView>, String> {
+        let inner = self.inner.clone();
+        self.run(async move {
+            inner.clone().refresh().await;
+            let mut view = inner.view.subscribe();
+            let done = view
+                .wait_for(|view| view.status != TeamsStatus::Loading)
+                .await
+                .map_err(|_| CLOSED.to_string())?
+                .clone();
+            match done.status {
+                TeamsStatus::Error => Err(done.error.clone().unwrap_or_default()),
+                _ => Ok(done),
+            }
+        })
+        .await
+    }
+
     /// Reads the list once, if it was never read.
     pub fn ensure(&self) {
         if self.snapshot().status == TeamsStatus::Idle {

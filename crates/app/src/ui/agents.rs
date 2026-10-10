@@ -8,6 +8,7 @@
 //! identities follow the hosts.
 
 mod card;
+pub(crate) mod catalog;
 mod create;
 mod defaults;
 mod dialogs;
@@ -26,6 +27,11 @@ pub(crate) mod review;
 mod share;
 pub(crate) mod snapshot_preview;
 pub(crate) mod snapshots;
+mod team_dialogs;
+mod team_editor;
+mod team_file;
+mod team_ops;
+mod teams;
 pub(crate) mod wake;
 
 pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
@@ -160,6 +166,8 @@ pub struct AgentsPage {
     toasts: usize,
     /// Holds focus inside the page's own dialogs so Escape reaches them.
     modal_focus: FocusHandle,
+    /// Agent teams and the community catalog.
+    teams: Entity<teams::TeamsSection>,
 }
 
 const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
@@ -231,7 +239,12 @@ impl View {
 impl AgentsPage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let discovery = cx.new(Discovery::new);
+        let this = cx.entity().downgrade();
+        let add_agent: catalog::AddAgent = Rc::new(move |entry, window, cx| {
+            let _ = this.update(cx, |this, cx| this.add_catalog_agent(entry, window, cx));
+        });
         let mut page = Self {
+            teams: cx.new(|cx| teams::TeamsSection::new(add_agent, cx)),
             hosts: Vec::new(),
             _observers: vec![cx.observe(&discovery, |_, _, cx| cx.notify())],
             discovery,
@@ -434,6 +447,27 @@ impl AgentsPage {
         cx.notify();
     }
 
+    /// "Add agent" in the Community Catalog: the create form, seeded with
+    /// the entry. The catalog remembers the copy it produced.
+    fn add_catalog_agent(
+        &mut self,
+        entry: buzz_relay_client::catalog::AgentPublication,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hosts = self.hosts.clone();
+        let seed = catalog::CatalogSeed::of(&entry.agent);
+        let state = catalog::CatalogState::current(cx);
+        let on_created: catalog::Created = Rc::new(move |id, cx| {
+            if let Some(state) = &state {
+                let entry = buzz_relay_client::catalog::Publication::Agent(entry.clone());
+                state.read(cx).remember(&entry, id, cx);
+            }
+        });
+        let editor = cx.new(|cx| AgentEditor::create_seeded(hosts, seed, on_created, window, cx));
+        self.open_editor(editor, cx);
+    }
+
     fn add_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_dialog(None, create::Kind::Add, window, cx);
     }
@@ -625,11 +659,22 @@ impl AgentsPage {
                         this.child(overlay::dropdown(
                             window,
                             Align::End,
-                            Menu::new().child(
-                                MenuItem::new("refresh", "Refresh agents")
-                                    .disabled(loading)
-                                    .on_click(cx.listener(|this, _, _, cx| this.refresh_all(cx))),
-                            ),
+                            Menu::new()
+                                .child(
+                                    MenuItem::new("refresh", "Refresh agents")
+                                        .disabled(loading)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.refresh_all(cx)),
+                                        ),
+                                )
+                                .child(
+                                    MenuItem::new("community-catalog", "Community Catalog")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.menu = None;
+                                            this.teams
+                                                .update(cx, |teams, cx| teams.open_catalog(cx));
+                                        })),
+                                ),
                             Self::dismiss(cx),
                         ))
                     }),
@@ -1281,7 +1326,8 @@ impl Render for AgentsPage {
                             .max_w(rems(72.))
                             .mx_auto()
                             .child(measure)
-                            .children(sections),
+                            .children(sections)
+                            .child(self.teams.clone()),
                     ),
             )
             .children(modal)
