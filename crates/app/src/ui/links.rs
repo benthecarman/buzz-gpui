@@ -677,7 +677,11 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         );
     }
     if let Some(at) = menu_at {
-        wrapper = wrapper.child(link_menu(id, url, at, menu_state, &c));
+        let snapshot = directory
+            .session
+            .clone()
+            .filter(|session| super::agents::snapshot_preview::can_preview_link(session, url));
+        wrapper = wrapper.child(link_menu(id, url, at, menu_state, snapshot, &c));
     }
     wrapper.into_any_element()
 }
@@ -729,11 +733,27 @@ fn link_menu(
     url: &str,
     at: Point<Pixels>,
     state: Entity<Option<Point<Pixels>>>,
+    snapshot: Option<std::sync::Arc<buzz_relay_client::Session>>,
     _: &buzz_ui::Colors,
 ) -> AnyElement {
     let close = state.clone();
     let (open, copy) = (url.to_string(), url.to_string());
-    let (close_open, close_copy) = (state.clone(), state);
+    let (close_open, close_preview, close_copy) = (state.clone(), state.clone(), state);
+    let preview = snapshot.map(|session| {
+        let url = url.to_string();
+        MenuItem::new(
+            SharedString::from(format!("{id}-snapshot")),
+            "Preview snapshot",
+        )
+        .size(MenuSize::Compact)
+        .on_click(move |_, window, cx| {
+            close_preview.update(cx, |open, cx| {
+                *open = None;
+                cx.notify();
+            });
+            super::agents::snapshot_preview::preview_link(&session, &url, window, cx);
+        })
+    });
     deferred(
         anchored()
             .position_mode(AnchoredPositionMode::Window)
@@ -766,6 +786,7 @@ fn link_menu(
                                     cx.open_url(&open);
                                 }),
                             )
+                            .children(preview)
                             .child(
                                 MenuItem::new(
                                     SharedString::from(format!("{id}-copy")),

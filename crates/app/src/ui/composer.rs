@@ -2345,6 +2345,31 @@ impl Composer {
         if consumed {
             return true;
         }
+        // A copied snapshot link attaches its file (`snapshot-clipboard.ts`).
+        let session = self.community.read(cx).session.clone();
+        if self.editing.is_none()
+            && let Some(attachment) =
+                super::agents::snapshot_preview::pasted_attachment(item, &session)
+        {
+            if self.attachments.len() >= MAX_FILES {
+                self.notice = Some(format!("Attach at most {MAX_FILES} files per message.").into());
+                cx.notify();
+                return true;
+            }
+            self.next_attachment += 1;
+            self.attachments.push(Pending {
+                id: self.next_attachment,
+                name: attachment.name.clone(),
+                mime: attachment.mime.clone(),
+                size: attachment.size,
+                thumbnail: None,
+                bytes: None,
+                status: Status::Ready(attachment),
+                voice: None,
+            });
+            cx.notify();
+            return true;
+        }
         self.paste_text(item, window, cx)
     }
 

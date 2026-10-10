@@ -1,8 +1,8 @@
 //! What the agent dialogs share: their events and save copy.
 
 use crate::hosts::HostConnection;
-use buzz_host_rpc::ConnectionState;
 use buzz_host::api::{AgentEdit, Request, Response};
+use buzz_host_rpc::ConnectionState;
 use gpui_kit::{App, AppContext, Entity, SharedString, Task};
 
 /// The dialog is done; the page closes it.
