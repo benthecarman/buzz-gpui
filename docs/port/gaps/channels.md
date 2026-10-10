@@ -13,12 +13,12 @@
 |---|---|---|---|---|---|
 | Connection, transport, native host, enterprise | 24 | 14 | 16 | 12 | 66 |
 | Session, caching, windows, folding | 39 | 14 | 3 | 14 | 70 |
-| Outbox, publishing, attachments, media | 33 | 10 | 8 | 13 | 64 |
+| Outbox, publishing, attachments, media | 55 | 2 | 5 | 2 | 64 |
 | Read state and unread | 38 | 11 | 6 | 8 | 63 |
 | Sidebar, discovery, navigation, DMs; members, moderation, profiles; communities, hosted, inbox | 46 | 16 | 6 | 67 | 135 |
 | Other relay-layer features | 36 | 12 | 8 | 35 | 91 |
 | Channel page, settings, lifecycle, create, canvas, templates, usage | 13 | 16 | 7 | 37 | 73 |
-| **Total** | **229** | **93** | **54** | **186** | **562** |
+| **Total** | **251** | **85** | **51** | **175** | **562** |
 
 ### Highest-impact findings
 
@@ -26,9 +26,9 @@
 2. **Nothing is persisted to disk.** No disk heads, startup roster cache or offline resume. `Store::save_head`/`load_head` and the `startup_cache` table have no callers. A community shows Connecting with an empty sidebar until NIP-11 succeeds.
 3. **AUTH and reconnect behaviour differs.** After 1.5 s with no AUTH challenge, the port treats the relay as open and sends REQs (`crates/relay/src/socket.rs:348-351`). AUTH refusals and signing failures are not terminal. Reconnect retries forever with jitter instead of 5 attempts and then a manual retry. `retry()` clears the relay's quota cooldown.
 4. **Connection and live status are invisible.** The snapshot exposes only `live: bool`. `Session::retry` has no caller in `crates/app`. There is no "Live updates need attention" toast, no failed-connection banner, and no sidebar connecting or error states.
-5. **Some sends can be invisible.** Only signed outbox ops reach timelines (`crates/relay/src/session/mod.rs:1462-1468`). The outbox exists only after connect. There is no outbox panel, and failed edits, deletes and reactions disappear from the timeline.
+5. **Some sends can be invisible.** Only signed outbox ops reach timelines (`crates/relay/src/session/mod.rs:1462-1468`). The outbox exists only after connect. (The outbox panel and failed edit, delete and reaction states are now done.)
 6. **DMs are counted as mentions.** DM entries count as mentions (`crates/relay/src/unread.rs:1536-1538`). DM rows get a numeric pill, and the tray counts DMs twice. The sidebar also shows a numeric pill where buzz-app shows a dot.
-7. **Whole features are absent:** community moderation (Membership card, invites), hosted communities, the inbox page, the profile panel, Canvas, channel templates, channel usage, reminders, identity archives, the tab pane and panels, and HEIC/video preparation.
+7. **Whole features are absent:** community moderation (Membership card, invites), hosted communities, the inbox page, the profile panel, Canvas, channel templates, channel usage, reminders, identity archives, and the tab pane and panels.
 8. **Some writes can be resent.** An unconfirmed lifecycle action can be sent again, and an uncertain channel-details save has no retained state. Renaming a session channel fails because the port always sends `about`. There is no temporary-channel TTL.
 
 ## Connection, transport and native relay host
@@ -292,12 +292,12 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 
 ## Outbox, publishing, attachments and media
 
-The outbox engine is a close port. Main gaps: the outbox UI, unsigned sends not shown in timelines, the outbox only existing after connect, ffmpeg media preparation, and streaming playback. Paths: buzz-app `src/features/relay/`, `src/bundled/channels/` or `src-tauri/src/relay/`; port `crates/relay/src/` or `crates/app/src/ui/`.
+The outbox engine is a close port. Main gaps: unsigned sends not shown in timelines and the outbox only existing after connect. The outbox panel, background uploads, ffmpeg media preparation and streaming playback are done. Paths: buzz-app `src/features/relay/`, `src/bundled/channels/` or `src-tauri/src/relay/`; port `crates/relay/src/` or `crates/app/src/ui/`.
 
 Key findings:
 1. Unsigned sends never show in the timeline: only signed ops reach timelines (session/mod.rs:1462-1468, `op.signed.clone()?`). A send queued behind 3 deliveries, failed before signing, or restored unsigned never appears and, with no outbox panel, cannot be retried or dismissed.
 2. The outbox is created only after NIP-11 succeeds (session/mod.rs:846-888); before that every write fails with "Not connected to the relay yet" and restored ops are not shown (buzz-app creates it with the session, session.ts:264-317).
-3. No outbox UI, and failed edits/deletes/reactions are left out of the timeline (session/timeline.rs:246), so they vanish silently.
+3. Done: the outbox panel is in channel settings' Diagnostics, and failed edits, deletes and reactions show their own status and retry.
 
 ### Outbox core
 
@@ -334,13 +334,13 @@ Key findings:
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Outbox panel ("Outbox · N items", Sending/Sent/Unconfirmed/Not sent, 100-char excerpt, "Add agent …", note, RelayTimings) | src/bundled/channels/OutboxStatus.tsx:10-50, 98-99; ChannelsPage.tsx:1196-1200 | MISSING | Build the panel | M |
-| Panel Retry (hidden for workflow/guarded) and guarded hint | OutboxStatus.tsx:52-69 | MISSING | Part of panel | S |
-| "Remove from outbox" with error alert | OutboxStatus.tsx:69-97 | MISSING | `Session::dismiss` exists (session/mod.rs:423), no UI | S |
-| Message delivery notice: 10 s grace, "Couldn't send this message." / "Delivery not yet confirmed.", Retry | src/features/messages/delivery.ts:3-18 | PARTIAL | Only failed/unknown, shown immediately (crates/app/src/ui/message.rs:315-318, 910-946); retry errors ignored (crates/app/src/ui/channel.rs:503-507) | S |
-| Edit/delete/reaction failure UI ("Retry message update", "Discard failed update", "Couldn't update reaction.", "Retry reaction") | MessageManagement.tsx:484-551; ReactionTool.tsx:145-166 | MISSING | Failed non-row ops hidden (session/timeline.rs:246); add status rows | M |
+| Outbox panel ("Outbox · N items", Sending/Sent/Unconfirmed/Not sent, 100-char excerpt, "Add agent …", note, RelayTimings) | src/bundled/channels/OutboxStatus.tsx:10-50, 98-99; ChannelsPage.tsx:1196-1200 | DONE (crates/app/src/ui/outbox_status.rs; crates/app/src/ui/channel_settings.rs Diagnostics) | The panel sits in channel settings' Diagnostics. RelayTimings is left out: the port has no profiler sample ring to capture (see "Relay profiler"). | - |
+| Panel Retry (hidden for workflow/guarded) and guarded hint | OutboxStatus.tsx:52-69 | DONE (crates/app/src/ui/outbox_status.rs) | - | - |
+| "Remove from outbox" with error alert | OutboxStatus.tsx:69-97 | DONE (crates/app/src/ui/outbox_status.rs) | Snapshot-share and session-link receipts are not acknowledged first: the port sends neither. | - |
+| Message delivery notice: 10 s grace, "Couldn't send this message." / "Delivery not yet confirmed.", Retry | src/features/messages/delivery.ts:3-18 | DONE (crates/app/src/ui/message.rs:27, 1704-1722) | - | - |
+| Edit/delete/reaction failure UI ("Retry message update", "Discard failed update", "Couldn't update reaction.", "Retry reaction") | MessageManagement.tsx:484-551; ReactionTool.tsx:145-166 | DONE (crates/app/src/ui/message_actions.rs:981-1003; crates/app/src/ui/message.rs:1613-1620) | - | - |
 | No edit/delete of unconfirmed rows | useMessageEdit.ts:13-38 | DONE (crates/app/src/ui/message.rs:462) | - | - |
-| useComposerSent: reveal sent message; re-select exact-message session channel | src/bundled/channels/useComposerSent.ts:4-19; ChannelsPage.tsx:545-550 | PARTIAL | Tail follow only (crates/app/src/ui/channel.rs:326-329) | S |
+| useComposerSent: reveal sent message; re-select exact-message session channel | src/bundled/channels/useComposerSent.ts:4-19; ChannelsPage.tsx:545-550 | PARTIAL | Sending returns the timeline to its tail, which shows the sent message (crates/app/src/ui/channel.rs:553-556). Re-selecting an exact-message session channel belongs to the Sessions work. | S |
 
 ### Channel writes (src-tauri/src/relay/channel_writes.rs)
 
@@ -354,9 +354,9 @@ Key findings:
 |---|---|---|---|---|
 | Per-type caps (GIF 10 / image 50 / video 500 / other 100 MiB), error text | attachment-limits.ts:1-10; attachments.ts:30-32 | DONE (messages.rs:277-287; upload.rs:20, 29-32; crates/app/src/ui/composer.rs:1062) | - | - |
 | ≤10 files per message | src/features/messages/attachment-draft.ts:34, 189-191 | DONE (crates/app/src/ui/composer.rs:40, 1052-1055) | - | - |
-| 1,000 MiB retained-draft cap | attachment-draft.ts:35, 196-205 | MISSING | Add the check | S |
+| 1,000 MiB retained-draft cap | attachment-draft.ts:35, 196-205 | DONE (crates/app/src/ui/composer/attachments.rs:22-23, 153) | - | - |
 | Upload result validation (MIME, hex, size, same-origin `/media/<sha>`); image type sniffing | attachments.ts:55-97; attachment-limits.ts:12-21 | DONE (upload.rs:60-72, 345-361; messages.rs:295-333) | - | - |
-| Upload response mapping (401/403, 413, 429, 8192-byte cap, JSON `code`) | attachments.ts:220-281 | PARTIAL | Codes `unavailable`, `ffmpeg`, `io`, `video`, `cancelled` fall back to Failed (upload.rs:27-49, 329-389) | S |
+| Upload response mapping (401/403, 413, 429, 8192-byte cap, JSON `code`) | attachments.ts:220-281 | DONE (crates/relay/src/upload.rs:454) | - | - |
 | imeta field order, filename cleaning, label escaping, inline types | attachments.ts:98-106, 284-320 | DONE (messages.rs:348-420) | - | - |
 | Voice imeta `duration` + `waveform` | attachments.ts:312, 322-334 | DIFFERENT | Duration only (messages.rs:271-273, 403-408), deliberate per spec §9.3 #2 | - |
 | Reading blurhash, `dim`, `thumb`/`image`, waveform; blurhash preview | blurhash.ts:1-15 | DONE (fold/attachments.rs:131-152, 273-312; crates/app/src/ui/media.rs:151-170) | - | - |
@@ -367,23 +367,23 @@ Key findings:
 |---|---|---|---|---|
 | Blossom 24242 auth (t=upload, x=sha, server, +60 s, "Upload attachment") | src-tauri/src/relay.rs:820-855 | DONE (crates/identity/src/lib.rs:261-284; media.rs:215-221) | - | - |
 | PUT /upload with Content-Type, X-SHA-256, 600 s timeout | relay.rs:1145-1189 | DONE (upload.rs:307-327; media.rs:66-71) | - | - |
-| Body streamed from disk in 64 KiB chunks | relay.rs:1105-1143 | DIFFERENT | Whole file in RAM and cloned (crates/app/src/ui/composer.rs:1012-1030, 1116-1121; up to 500 MiB × 10); stream from path | M |
-| Upload progress shown on the draft chip | relay.rs:1124-1129; attachment-draft.ts:128-140 | MISSING | Spinner only (composer.rs:1543-1554) | M |
-| Upload timing: queue on attach, upload serially at Send, Send stays enabled | attachment-draft.ts:257-266 | DIFFERENT | Uploads start on attach, Send disabled until done, removed files still upload (composer.rs:400-411, 1083-1141) | M |
-| Removing a file aborts its upload; leaving pauses ("Upload paused. Retry to continue.") | attachment-draft.ts:70-84, 267-271; relay.rs:857-926 | MISSING | Upload keeps running (composer.rs:1269-1282) | S |
-| Spool temp dirs, 4 spool slots, 64 active uploads, "Uploads are busy" | upload_spool.rs:14-15, 149-339 | DIFFERENT | No IPC boundary; uploads serial per composer | S |
+| Body streamed from disk in 64 KiB chunks | relay.rs:1105-1143 | DONE (crates/relay/src/upload.rs:16, 335; buzz-desktop `process_spool`) | - | - |
+| Upload progress shown on the draft chip | relay.rs:1124-1129; attachment-draft.ts:128-140 | DONE (crates/app/src/ui/composer.rs:3216-3271) | - | - |
+| Upload timing: queue on attach, upload serially at Send, Send stays enabled | attachment-draft.ts:257-266 | DONE (crates/app/src/ui/composer/attachments.rs:592; crates/app/src/ui/composer.rs `Submission::attachments`) | - | - |
+| Removing a file aborts its upload; leaving pauses ("Upload paused. Retry to continue.") | attachment-draft.ts:70-84, 267-271; relay.rs:857-926 | DONE (crates/app/src/ui/composer/attachments.rs:205-213, 369, 631; crates/relay/src/upload.rs `cancel`) | - | - |
+| Spool temp dirs, 4 spool slots, 64 active uploads, "Uploads are busy" | upload_spool.rs:14-15, 149-339 | DONE (crates/relay/src/upload.rs:16, 53; buzz-desktop `Spools`/`Uploads`) | - | - |
 | Retry restarts from scratch | attachment-draft.ts:272-276 | DONE (composer.rs:1284-1292) | - | - |
-| Image metadata stripping (JPEG q0.95 + orientation, PNG re-encode, WebP orientation, 25 MP cap) | prepare-attachment.ts:25-101 | PARTIAL | PNG chunk-cleaned not re-encoded, WebP orientation not applied, error text differs (upload.rs:109-270) | S |
+| Image metadata stripping (JPEG q0.95 + orientation, PNG re-encode, WebP orientation, 25 MP cap) | prepare-attachment.ts:25-101 | DONE (crates/relay/src/upload.rs:705) | - | - |
 
 ### Media preparation
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| HEIC/HEIF to JPEG via ffmpeg ≥ 8 | video-preparation.ts:54-67; media_preparation.rs:99-141, 245-300 | MISSING | HEIC uploads raw (upload.rs:6-8, 98-99) | L |
-| Video to MP4 (libx264 crf 23, yuv420p, aac 128k, faststart, metadata stripped; MP4 too) | video-preparation.ts:4-51; attachments.ts:113-121; media_preparation.rs:54-79, 300-345 | MISSING | Raw upload with extension MIME (upload.rs:84-88) | L |
-| Preparation limits (2 concurrent, 60 s / 600 s, 50/500 MiB output, ffmpeg texts) | media_preparation.rs:11-49, 153-189 | MISSING | Comes with the above | S |
+| HEIC/HEIF to JPEG via ffmpeg ≥ 8 | video-preparation.ts:54-67; media_preparation.rs:99-141, 245-300 | DONE (crates/relay/src/upload.rs:239, 255; buzz-desktop preparation) | - | - |
+| Video to MP4 (libx264 crf 23, yuv420p, aac 128k, faststart, metadata stripped; MP4 too) | video-preparation.ts:4-51; attachments.ts:113-121; media_preparation.rs:54-79, 300-345 | DONE (crates/relay/src/upload.rs:240, 255; buzz-desktop preparation) | - | - |
+| Preparation limits (2 concurrent, 60 s / 600 s, 50/500 MiB output, ffmpeg texts) | media_preparation.rs:11-49, 153-189 | DONE (buzz-desktop preparation, through crates/relay/src/upload.rs) | - | - |
 | Voice note MP4 with black 16x16 H.264 + AAC, 24 kHz mono, ≤300 s | media_preparation.rs:65-72, 276-286; voice-media.ts:2-3 | DIFFERENT | Same output via GStreamer (crates/app/src/ui/media/recorder.rs:1-45, 244-350) | - |
-| Recording validation; picked `voice-note-*` audio converted | voice-media.ts:9-24; video-preparation.ts:69-93 | PARTIAL | Picked voice-note file uploads raw (recorder.rs:24-30) | S |
+| Recording validation; picked `voice-note-*` audio converted | voice-media.ts:9-24; video-preparation.ts:69-93 | DONE (crates/relay/src/upload.rs:241, 255) | - | - |
 
 ### Media download and streaming
 
