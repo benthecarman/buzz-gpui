@@ -513,6 +513,31 @@ pub enum Manual {
 pub struct LatestMessage {
     pub id: String,
     pub created_at: u64,
+    /// The message's text, as a channel's last-message preview
+    /// (`messagePreview`).
+    pub preview: String,
+}
+
+/// A channel's last-message preview: the text, or for a diff its file and
+/// description (`membership.ts` `messagePreview`).
+fn latest_preview(event: &Event) -> String {
+    if event.kind.as_u16() != kinds::DIFF {
+        return crate::fold::displayed_text(event, &preview_text(event));
+    }
+    let tag = |name: &str| {
+        event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .find(|tag| tag.len() > 1 && tag[0] == name)
+            .map(|tag| tag[1].clone())
+            .filter(|value| !value.is_empty())
+    };
+    let file = tag("file").unwrap_or_else(|| "patch".into());
+    match tag("description") {
+        Some(description) => format!("Diff: {file} — {description}"),
+        None => format!("Diff: {file}"),
+    }
 }
 
 /// Unread state of one target, for the UI. Counts are `None` when the
@@ -1557,6 +1582,7 @@ impl<F: ThreadFollowStore> Unread<F> {
             latest_message: latest.map(|event| LatestMessage {
                 id: event.id_hex(),
                 created_at: event.created_at_secs(),
+                preview: latest_preview(event),
             }),
             observed_count: evidence.then_some(count),
             attention_count: evidence.then_some(attention),
@@ -3214,6 +3240,42 @@ mod tests {
     use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind, Tag, Timestamp};
 
     const T: u64 = 100_000;
+
+    #[test]
+    fn previews_text_and_diffs() {
+        let event = |kind: u16, content: &str, list: &[&[&str]]| {
+            EventBuilder::new(Kind::from_u16(kind), content)
+                .tags(
+                    list.iter()
+                        .map(|tag| Tag::parse(tag.iter().copied()).unwrap()),
+                )
+                .finalize(&Keys::generate())
+                .unwrap()
+        };
+        assert_eq!(latest_preview(&event(kinds::CHAT, "hi", &[])), "hi");
+        assert_eq!(
+            latest_preview(&event(kinds::AGENT_MESSAGE, r#"{"content":"done"}"#, &[])),
+            "done"
+        );
+        let diff = event(
+            kinds::DIFF,
+            "@@",
+            &[&["file", "src/a.rs"], &["description", "Fix"]],
+        );
+        assert_eq!(latest_preview(&diff), "Diff: src/a.rs — Fix");
+        assert_eq!(
+            latest_preview(&event(kinds::DIFF, "@@", &[])),
+            "Diff: patch"
+        );
+        // Attached images leave the text, as rows show it.
+        let url = "https://x.test/a.png";
+        let image = event(
+            kinds::CHAT,
+            &format!("look ![a.png]({url})"),
+            &[&["imeta", &format!("url {url}"), "m image/png"]],
+        );
+        assert_eq!(latest_preview(&image).trim(), "look");
+    }
 
     fn tags(list: &[&[&str]]) -> Vec<Vec<String>> {
         list.iter()

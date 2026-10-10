@@ -169,6 +169,17 @@ pub struct FoldOptions {
     pub channel_admins: HashSet<PublicKey>,
 }
 
+/// `content` as a row shows it: images the event carries as attachments
+/// leave the text.
+pub(crate) fn displayed_text(event: &Event, content: &str) -> String {
+    let urls = attachments::imeta_urls(event);
+    if content.contains("![") || !urls.is_empty() {
+        attachments::project_markdown(content, &urls).content
+    } else {
+        content.to_owned()
+    }
+}
+
 /// The displayed author (`fold.ts:199-219`). Output signed by the relay's
 /// signing authority names its author in `actor`, else in a leading `p` tag
 /// of a channel event. Any other signer is the author.

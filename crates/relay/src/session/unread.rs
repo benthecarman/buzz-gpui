@@ -63,6 +63,9 @@ pub struct UnreadCounts {
     /// Newest message time per channel in Unix seconds, read or not, from
     /// the same evidence as the counts. For "recent" ordering.
     pub latest: HashMap<String, u64>,
+    /// The newest message's text per channel, from the same evidence. For
+    /// search's "Recent activity" detail.
+    pub previews: HashMap<String, String>,
 }
 
 impl UnreadCounts {
@@ -950,6 +953,7 @@ impl Actor {
                 .snapshot(&ReadTarget::channel(id.as_str()), &reads.sync);
             if let Some(latest) = &snapshot.latest_message {
                 counts.latest.insert(id.clone(), latest.created_at);
+                counts.previews.insert(id.clone(), latest.preview.clone());
             }
             if !snapshot.unread() {
                 continue;
