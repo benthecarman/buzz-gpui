@@ -16,9 +16,9 @@ Audit date: 2026-10-09. Read-only audit of the main checkouts (`.claude/worktree
 | 1. Message rows, Markdown, links, embeds and diffs | 3 | 1 | 1 | 0 | 101 |
 | 2. Hover actions, menus, edit/delete/report, reactions, emoji and GIF pickers | 1 | 6 | 1 | 0 | 127 |
 | 3. Timeline, scrolling, unread, jump-to, threads, typing and search | 43 | 13 | 13 | 0 | 61 |
-| 4. Composer, autocomplete, formatting, attachments and voice recording | 11 | 4 | 3 | 0 | 101 |
+| 4. Composer, autocomplete, formatting, attachments and voice recording | 9 | 1 | 3 | 0 | 106 |
 | 5. Rendered attachments, media viewer, audio/video and voice-note playback | 1 | 2 | 2 | 0 | 127 |
-| **Total** | **59** | **26** | **20** | **0** | **517** |
+| **Total** | **57** | **23** | **20** | **0** | **522** |
 
 Largest gaps, in short:
 
@@ -456,7 +456,7 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Cached channel (offline, not yet confirmed): composer shows the local draft, disabled, with no completion or typing | src/features/messages/MessageComposer.tsx:320-322, 1264-1276 | DONE (crates/app/src/ui/composer.rs, crates/app/src/ui/channel.rs) | A cached summary is `read_only`, so the port shows the "Read-only preview · You haven't joined" join notice. Show the disabled composer with its draft instead. | S |
 | Relay connection that cannot write: "This relay connection supports reading only." | src/features/messages/MessageComposer.tsx:1329-1337 | MISSING | The port's relay connection always writes; there is no read-only connection to report. | S |
 | Composer disabled while a send, admission or edit save is in flight | src/features/messages/MessageComposer.tsx:499-506, 1478 | DONE (crates/app/src/ui/composer.rs) | `sending` blocks Send only. The text stays editable while the send is in flight. Make the input read-only while busy. | S |
-| New-conversation composer (New message) is the full MessageComposer in submission mode, with a draft roster | src/features/messages/MessageComposer.tsx:216-227, 245-260, src/features/messages/draft-mention-roster.ts:5 | PARTIAL (crates/app/src/ui/new_message.rs:51) | The port uses a bare textarea: no formatting, completions, emoji picker or mention chips. Reuse `Composer` with a submission/roster mode. | M |
+| New-conversation composer (New message) is the full MessageComposer in submission mode, with a draft roster | src/features/messages/MessageComposer.tsx:216-227, 245-260, src/features/messages/draft-mention-roster.ts:5 | PARTIAL (crates/app/src/ui/new_message.rs:51) | Not done here: `Composer` is bound to an open channel (draft key, members, outsiders, background uploads to that channel). Reusing it before the DM exists needs a channel-less submission mode with a draft roster and New-message outbox recovery. | M |
 | Composer lab / state gallery (developer specimens: unavailable, read-only, validation) | src/bundled/composer/lab/ComposerStateGallery.tsx:53-78, src/bundled/composer/lab/ComposerCopyPreview.tsx:6-28 | MISSING | Developer-only gallery; optional, not ported. | S |
 
 ### Drafts and send
@@ -545,18 +545,18 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Open (unjoined, public) channels from a search, after joined ones with 5 reserved slots, marked "Not joined" | src/bundled/channels/ChannelCompletion.tsx:96-117, 130-133 | DONE (crates/app/src/ui/composer/channels.rs) | Search public channels and append them. | M |
 | Duplicate channel names show the channel id in the detail; "Private channel" detail; "Enter" hint on the selected row | src/bundled/channels/ChannelCompletion.tsx:130-136, src/features/conversation/ComposerCompletions.tsx:422-426 | DONE (crates/app/src/ui/composer/channels.rs) | "Private channel" and the Enter hint are present; the duplicate-name id is missing. | S |
 | Channel completion statuses (Loading channels…, Searching open channels…, Keep typing to narrow the list.) | src/bundled/channels/ChannelCompletion.tsx:156-175 | DONE (crates/app/src/ui/composer/channels.rs) | Status footer (shared with the mention row). | S |
-| Typing the closing colon accepts an exact shortcode; Space never accepts an emoji; a shortcode inside inline code stays literal | src/features/messages/MessageComposer.tsx:908-920, src/features/messages/MessageComposer.test.tsx:2861-2885 | PARTIAL (crates/app/src/ui/composer.rs:868-908) | The closing colon works. Add protection for code literals (including a Space-accepted mention inside code). | S |
-| Shared shortcodes are labelled "Community emoji" / "Unicode emoji"; catalog error statuses with retry | src/bundled/emoji/EmojiCompletion.tsx:133, 149-177 | MISSING | Detail labels and status lines. | S |
-| Custom emoji shortcodes, links and profile links render inline in the draft (decorations), with Shift+Arrow treating a rendered shortcode as one unit | src/features/messages/RichComposerInput.tsx:114-276, src/features/messages/emoji-selection.ts:2-33 | MISSING | Render the custom-emoji image, link chip and identity chip decorations in the textarea. Related to the live-styling work but separate from it. | M |
+| Typing the closing colon accepts an exact shortcode; Space never accepts an emoji; a shortcode inside inline code stays literal | src/features/messages/MessageComposer.tsx:908-920, src/features/messages/MessageComposer.test.tsx:2861-2885 | DONE (crates/app/src/ui/composer.rs:1690, crates/app/src/ui/composer/live_markdown.rs:161) | The closing colon works. Add protection for code literals (including a Space-accepted mention inside code). | S |
+| Shared shortcodes are labelled "Community emoji" / "Unicode emoji"; catalog error statuses with retry | src/bundled/emoji/EmojiCompletion.tsx:133, 149-177 | DONE (crates/app/src/ui/composer.rs:1300-1310, 4315-4325) | Detail labels and status lines. | S |
+| Custom emoji shortcodes, links and profile links render inline in the draft (decorations), with Shift+Arrow treating a rendered shortcode as one unit | src/features/messages/RichComposerInput.tsx:114-276, src/features/messages/emoji-selection.ts:2-33 | MISSING | Needs inline images and chip decorations inside the vendored text field (gpui-base), which lays out text runs only; concealment can swap text but not draw an image. Not done here. | M |
 | Project resource picker inserts resource atoms ("Resource: …") at the caret | src/features/messages/MessageComposer.tsx:886-896, src/features/messages/EditableInput.tsx:1764-1772 | MISSING | Needs the Projects plugin's resource tool; belongs to the Projects work. | M |
 
 ### Voice notes
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Errors: microphone permission ("Allow Buzz to access your microphone to record a voice note."), unavailable, interrupted, prepare failed; Close button | src/bundled/voice-notes/useVoiceNoteRecorder.ts:73-74, 131-142, 185, 240-250, src/bundled/voice-notes/VoiceCapture.tsx:45-56 | PARTIAL (crates/app/src/ui/media/recorder.rs:32-34, crates/app/src/ui/composer.rs:2210-2226) | The permission-denied copy is missing; every start failure says "Buzz could not start the voice recorder." | S |
-| Waveform strip slides 5 px per new sample (unless reduced motion) | src/bundled/voice-notes/VoiceNoteRecorder.tsx:47-61 | MISSING | Animate the bar strip offset between level ticks. | S |
-| Discard button takes focus on start; Close focuses on error; focus returns to the composer after accept/cancel | src/bundled/voice-notes/VoiceNoteRecorder.tsx:27-29, src/bundled/voice-notes/VoiceCapture.tsx:17-19, src/bundled/voice-notes/index.tsx:25-33 | PARTIAL (crates/app/src/ui/composer.rs:1191-1199) | Only discard refocuses the composer. | S |
+| Errors: microphone permission ("Allow Buzz to access your microphone to record a voice note."), unavailable, interrupted, prepare failed; Close button | src/bundled/voice-notes/useVoiceNoteRecorder.ts:73-74, 131-142, 185, 240-250, src/bundled/voice-notes/VoiceCapture.tsx:45-56 | DONE (crates/app/src/ui/media/recorder.rs:32-34, 186) | The permission-denied copy is missing; every start failure says "Buzz could not start the voice recorder." | S |
+| Waveform strip slides 5 px per new sample (unless reduced motion) | src/bundled/voice-notes/VoiceNoteRecorder.tsx:47-61 | DONE (crates/app/src/ui/composer.rs:4050-4075) | Animate the bar strip offset between level ticks. | S |
+| Discard button takes focus on start; Close focuses on error; focus returns to the composer after accept/cancel | src/bundled/voice-notes/VoiceNoteRecorder.tsx:27-29, src/bundled/voice-notes/VoiceCapture.tsx:17-19, src/bundled/voice-notes/index.tsx:25-33 | DONE (crates/app/src/ui/composer.rs:2174, 3971) | Only discard refocuses the composer. | S |
 | Voice `waveform` written into the imeta tag | src/features/relay/attachments.ts:323-335 | DIFFERENT (crates/relay/src/messages.rs:271-273) | Intentional in the port: the relay refuses the `waveform` key, so only `duration` is written. | S |
 
 ## 5. Rendered attachments, media viewer, audio/video and voice-note playback
