@@ -256,7 +256,9 @@ impl<T: Clone + Send + Sync + 'static> Inner<T> {
                     Some(data)
                 }
                 Ok(_) => None,
-                Err(_) => {
+                Err(error) => {
+                    // Shown only as the generic read error; the cause is for logs.
+                    tracing::debug!(%error, "workflow read failed");
                     self.set(ViewSnapshot {
                         status: ViewStatus::Error,
                         data: self.config.empty.clone(),
