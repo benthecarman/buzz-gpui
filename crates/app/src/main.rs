@@ -10,6 +10,7 @@ mod main_window;
 mod mirror;
 mod network;
 mod notifications;
+mod oauth;
 mod runtime;
 mod shortcuts;
 mod sign_out;

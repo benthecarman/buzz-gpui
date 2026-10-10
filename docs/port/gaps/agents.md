@@ -488,8 +488,8 @@ The port renders workflow-authored messages only (app/src/notifications.rs:180-1
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| `oauth_callback_begin` / `wait` / `cancel`: 127.0.0.1 ephemeral listener, injected `redirect_uri`, 256-bit single-use state, opens browser, timeout | ST/oauth_callback/mod.rs:177-215; ST/oauth_callback/README.md | MISSING | — | M |
-| Callback HTML page "Sign-in callback" with strict headers | ST/oauth_callback/mod.rs:330-349 | MISSING | — | S |
+| `oauth_callback_begin` / `wait` / `cancel`: 127.0.0.1 ephemeral listener, injected `redirect_uri`, 256-bit single-use state, opens browser, timeout | ST/oauth_callback/mod.rs:177-215; ST/oauth_callback/README.md | DONE (crates/app/src/oauth.rs, via buzz_desktop::oauth_callback) | — | M |
+| Callback HTML page "Sign-in callback" with strict headers | ST/oauth_callback/mod.rs:330-349 | DONE (crates/app/src/oauth.rs, via buzz_desktop::oauth_callback) | — | S |
 
 ## 25. Claude Code agent plugin (`src/agent-plugins/claude-code/*` = CC)
 
