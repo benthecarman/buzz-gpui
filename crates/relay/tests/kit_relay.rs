@@ -287,8 +287,8 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
     assert!(alice.creation().borrow().notices.is_empty());
     assert_eq!(alice.pending_creation().await, None);
 
-    // A Canvas seed is refused before anything is sent while Canvas
-    // writes are unavailable.
+    // A starting Canvas is seeded through the outbox, then confirmed as
+    // the selected document.
     let canvas = ChannelCreationInput::from_new(
         &NewChannel {
             name: unique("canvas"),
@@ -301,10 +301,17 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
             ..ChannelSetup::default()
         }),
     );
-    assert_eq!(
-        alice.create_channel_with(canvas).await.unwrap_err(),
-        "Canvas writing is unavailable"
-    );
+    let seeded = alice.create_channel_with(canvas).await.unwrap();
+    let mut head = None;
+    for _ in 0..50 {
+        head = alice.canvas_read(&seeded, true).await.unwrap();
+        if head.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(head.expect("the seeded Canvas").content, "# Goal");
+    alice.channel_action(Action::Delete, &seeded).await.unwrap();
 
     alice.channel_action(Action::Delete, &id).await.unwrap();
 }

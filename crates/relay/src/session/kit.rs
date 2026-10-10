@@ -16,7 +16,7 @@ use crate::kit::setup::{
     ChannelCreationInput, PendingCreation, Progress, Receipts, SETUP_NOT_CONTINUED, SetupNotice,
     TEMPLATE_NOT_CONTINUED, pending_creation,
 };
-use crate::kit::{self, CANVAS_BYTES, DECODE_BATCH, KitEntry, KitRecord, KitValue, Team, payload};
+use crate::kit::{self, DECODE_BATCH, KitEntry, KitRecord, KitValue, Team, payload};
 use crate::lifecycle::{self, Action, CONFIRM_DELAYS};
 use crate::outbox::{Delivery, Outbox, SendOptions};
 use crate::reader::{ReadOptions, Reader};
@@ -34,11 +34,6 @@ const NOT_CONNECTED: &str = "Not connected to the relay yet";
 const UNCONFIRMED: &str = "This may have taken effect, but it is not confirmed yet. Refresh and check before trying again.";
 /// An unconfirmed save older than this is never replayed.
 const REPLAY_SECS: u64 = 15 * 60;
-
-/// Whether this build can seed a starting Canvas (kind 40100). Until the
-/// Canvas write lands, setups with a Canvas are refused before anything is
-/// sent, as buzz-app does on a host without Canvas writes.
-const CANVAS_WRITES: bool = false;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KitStatus {
@@ -659,10 +654,12 @@ async fn canvas_head(ctx: &Kit, channel: &str, strong: bool) -> Result<Option<Ve
 }
 
 /// Seeds a new channel's starting Canvas through the outbox with
-/// `expected-revision: none`, and returns the operation. The Canvas write
-/// itself (kind 40100) lands with the Canvas slice.
-fn seed_canvas(_ctx: &Kit, _channel: &str, _content: &str) -> Result<EventId, String> {
-    Err("Canvas writing is unavailable".into())
+/// `expected-revision: none`, and returns the operation.
+fn seed_canvas(ctx: &Kit, channel: &str, content: &str) -> Result<EventId, String> {
+    let draft = crate::canvas::save_draft(channel, content, None).map_err(|e| e.to_string())?;
+    ctx.outbox
+        .send(draft, SendOptions::default())
+        .map_err(|e| e.to_string())
 }
 
 /// Reads the roster until it lists the viewer in `channel`, then feeds
@@ -747,7 +744,7 @@ async fn start(
 ) -> Result<(), String> {
     input.check()?;
     if let Some(setup) = &input.setup {
-        if !setup.canvas.is_empty() && (!CANVAS_WRITES || setup.canvas.len() > CANVAS_BYTES) {
+        if !setup.canvas.is_empty() && crate::canvas::too_large(&setup.canvas) {
             return Err("Canvas writing is unavailable".into());
         }
         if setup.agents.iter().any(|key| !kit::hex_key(key)) {
@@ -846,7 +843,18 @@ async fn complete(session: &Arc<Session>, ctx: &Kit, mut p: Progress) -> Result<
                     id
                 }
             };
-            ctx.confirm(canvas).await?;
+            if let Err(error) = ctx.confirm(canvas).await {
+                let refused = ctx
+                    .outbox
+                    .get(&canvas)
+                    .is_some_and(|op| crate::canvas::is_definitive_conflict(&op));
+                if refused {
+                    // A refused seed must not fence a later manual Canvas save.
+                    let _ = ctx.outbox.dismiss(&canvas).await;
+                    return Err("Canvas changed before the seed was saved; no agents were added by this attempt.".into());
+                }
+                return Err(error);
+            }
             if canvas_head(ctx, &p.id, true).await?.map(|e| e.id) != Some(canvas) {
                 return Err("The seed Canvas is not the selected document; no agents were added by this attempt.".into());
             }
