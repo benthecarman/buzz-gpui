@@ -156,6 +156,14 @@ impl LiveMarkdown {
             .collect()
     }
 
+    /// Whether any of `range` is code, where a typed Space or closing
+    /// colon stays literal.
+    pub fn in_code(&self, range: Range<usize>) -> bool {
+        self.runs
+            .iter()
+            .any(|(run, kinds)| kinds & CODE != 0 && run.start < range.end && range.start < run.end)
+    }
+
     /// The formats at the caret or over all of a selection. `pending`
     /// formats wait at the caret.
     pub fn active(&self, selection: Range<usize>, text: &str, pending: Kinds) -> Active {

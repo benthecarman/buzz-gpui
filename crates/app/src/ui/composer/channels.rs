@@ -53,6 +53,8 @@ pub enum Retry {
     Search,
     /// The `@` directory search, or the channel's membership.
     People,
+    /// The community's custom emoji catalog.
+    Emoji,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1288,7 +1288,19 @@ impl Composer {
                 space = found.space;
                 (found.items, found.status, found.retry)
             }
-            Trigger::Emoji => (self.suggestions(&query, cx), None, None),
+            Trigger::Emoji => {
+                // Unicode results still show while the community catalog
+                // is unavailable (`EmojiCompletion`).
+                let failed = matches!(
+                    self.community.read(cx).snapshot.emoji.status,
+                    buzz_relay_client::CatalogStatus::Error(_)
+                );
+                (
+                    self.suggestions(&query, cx),
+                    failed.then(|| "Community emoji unavailable; Unicode results shown.".into()),
+                    failed.then_some(channels::Retry::Emoji),
+                )
+            }
         };
         let count = items.len() + usize::from(retry.is_some());
         if count == 0 && status.is_none() {
@@ -1610,6 +1622,7 @@ impl Composer {
                 self.public_attempt += 1;
                 self.public = None;
             }
+            channels::Retry::Emoji => self.community.read(cx).session.refresh_emoji(),
         }
         self.completion_key = None;
         cx.notify();
@@ -1667,6 +1680,10 @@ impl Composer {
         if !typed {
             return false;
         }
+        // A terminator typed in code stays literal.
+        if self.markdown.in_code(query.start..query.end) {
+            return false;
+        }
         if query.trigger == Trigger::Mention {
             // Space selects only the one exact name of a complete choice
             // set (`spaceId`).
@@ -1681,6 +1698,13 @@ impl Composer {
             completion.query.end += 1;
             self.accept(index, window, cx);
             return true;
+        }
+        // Automatic replacement needs both catalogs (`spaceId`).
+        if query.trigger == Trigger::Emoji
+            && self.community.read(cx).snapshot.emoji.status
+                != buzz_relay_client::CatalogStatus::Ready
+        {
+            return false;
         }
         let wanted = query.text.trim().to_lowercase();
         let exact: Vec<usize> = completion
@@ -4112,6 +4136,12 @@ impl Composer {
         let trigger = completion.query.trigger;
         let compact = trigger == Trigger::Emoji;
         let media = self.community.read(cx).session.media().clone();
+        let mut shortcodes: std::collections::HashMap<&str, usize> = Default::default();
+        for item in &completion.items {
+            if let Suggestion::Emoji(candidate) = item {
+                *shortcodes.entry(candidate.shortcode()).or_default() += 1;
+            }
+        }
         let rows = completion.items.iter().enumerate().map(|(index, item)| {
             let selected = index == completion.selected;
             let row = div()
@@ -4220,6 +4250,12 @@ impl Composer {
                     })
                     .into_any_element(),
                 Suggestion::Emoji(candidate) => {
+                    // A shared shortcode says which catalog each row is from.
+                    let detail = (shortcodes.get(candidate.shortcode()).copied().unwrap_or(0) > 1)
+                        .then_some(match candidate {
+                            Candidate::Custom(_) => "Community emoji",
+                            Candidate::Unicode(_) => "Unicode emoji",
+                        });
                     let preview = match candidate {
                         Candidate::Unicode(emoji) => div()
                             .text_size(px(24.))
@@ -4250,6 +4286,13 @@ impl Composer {
                                 .truncate()
                                 .child(format!(":{}:", candidate.shortcode())),
                         )
+                        .children(detail.map(|detail| {
+                            div()
+                                .flex_none()
+                                .text_caption()
+                                .text_color(c.text_subtle)
+                                .child(detail)
+                        }))
                         .into_any_element()
                 }
             }
