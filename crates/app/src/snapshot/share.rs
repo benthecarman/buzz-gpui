@@ -34,17 +34,6 @@ impl EncodedSnapshot {
     }
 }
 
-/// What a file name says it is. Names select a preview only.
-pub fn attachment_kind(name: &str) -> Option<Kind> {
-    if name.ends_with(".agent.png") || name.ends_with(".agent.json") {
-        Some(Kind::Agent)
-    } else if name.ends_with(".team.png") || name.ends_with(".team.json") {
-        Some(Kind::Team)
-    } else {
-        None
-    }
-}
-
 /// The importer's cap for a file of this name, not the sender's claim.
 pub fn file_limit(name: &str) -> usize {
     let json = name.ends_with(".json");
@@ -384,9 +373,6 @@ mod tests {
 
     #[test]
     fn names_and_limits() {
-        assert_eq!(attachment_kind("Scout.agent.png"), Some(Kind::Agent));
-        assert_eq!(attachment_kind("Ops.team.json"), Some(Kind::Team));
-        assert_eq!(attachment_kind("photo.png"), None);
         assert_eq!(file_limit("a.agent.json"), MAX_JSON_BYTES);
         assert_eq!(file_limit("a.team.png"), MAX_TEAM_PNG_BYTES);
         assert_eq!(

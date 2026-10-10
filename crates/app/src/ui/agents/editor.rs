@@ -3,7 +3,7 @@
 use crate::hosts::HostConnection;
 use buzz_host::api::{AgentEdit, Request, Response};
 use buzz_host_rpc::ConnectionState;
-use gpui_kit::{App, AppContext, Entity, SharedString, Task};
+use gpui_kit::{App, Entity, SharedString, Task};
 
 /// The dialog is done; the page closes it.
 pub struct Dismissed;
@@ -52,7 +52,7 @@ pub fn create_agent(
     });
     let host = host.downgrade();
     cx.spawn(async move |cx| match prepare.await {
-        Ok(Response::Prepared { id, pubkey }) => {
+        Ok(Response::Prepared { id, pubkey, .. }) => {
             let auth = identity
                 .attest_agent(&pubkey)
                 .map_err(|error| error.to_string())?;

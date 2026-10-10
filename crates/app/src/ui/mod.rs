@@ -3,7 +3,7 @@
 mod account;
 mod add_community;
 pub mod agent_activity;
-mod agents;
+pub(crate) mod agents;
 pub mod agents2;
 mod channel;
 mod channel_activity;

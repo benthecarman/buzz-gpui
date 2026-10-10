@@ -7,6 +7,7 @@
 //! (`CreateCommit`). Then it starts, and its profile is published. Each step
 //! that fails reads the host again and says what is known.
 
+use super::catalog::{CatalogPane, CatalogSeed, Choose, Created as CatalogCreated};
 use super::draft::{self, Draft, Seed};
 use super::editor::{Dismissed, connected};
 use super::fields::{Fields, Owner};
@@ -16,8 +17,10 @@ use crate::hosts::HostConnection;
 use crate::hosts::control::{Lane, Status};
 use crate::ui::overlay::{self, Align};
 use buzz_host::api::{Agent, AgentAction, ProcessStatus, Request, Response};
+use buzz_host::api::{AgentsSnapshot, SessionPolicy};
 use buzz_ui::{
-    ActiveTheme, Button, Dialog, DialogSize, Menu, MenuItem, MenuSize, Select, Surface, TypeStyled,
+    ActiveTheme, Button, ButtonSize, Dialog, DialogSize, IconName, Menu, MenuItem, MenuSize,
+    NavigationItem, Select, Surface, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -34,6 +37,8 @@ pub enum Kind {
     Duplicate(Box<Agent>),
     /// From an agent's saved name and instructions.
     Clone(Seed),
+    /// From a community catalog entry (`CatalogSeed`).
+    Catalog(Box<CatalogSeed>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,6 +67,12 @@ pub struct CreateDialog {
     next: Step,
     phase: Option<Phase>,
     host_open: bool,
+    /// The community catalog's agents in the sidebar (Add only).
+    catalog: Option<Entity<CatalogPane>>,
+    /// A catalog entry is shown instead of the form.
+    catalog_open: bool,
+    /// Told the new agent's ID, as the catalog remembers its copies.
+    on_created: Option<CatalogCreated>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -95,11 +106,59 @@ fn seeded(host: &Entity<HostConnection>, kind: &Kind, cx: &App) -> Draft {
             system_prompt: seed.system_prompt.clone(),
             ..draft::new_draft(&data)
         },
+        Kind::Catalog(seed) => seeded_draft(draft::new_draft(&data), seed, &data),
         Kind::Add => draft::new_draft(&data),
     };
     // One listener worker by default; editable like any variable.
     draft.environment = [("BUZZ_ACP_AGENTS".to_string(), Some("10".to_string()))].into();
     draft
+}
+
+/// `seededDraft` for a catalog entry: its runtime applies only when this
+/// host offers it, and its model and provider travel with that runtime
+/// alone. A preset harness owns its model and credentials.
+fn seeded_draft(draft: Draft, seed: &CatalogSeed, data: &AgentsSnapshot) -> Draft {
+    let seeded = Draft {
+        name: seed.name.clone(),
+        system_prompt: seed.system_prompt.clone(),
+        session_policy: Some(match seed.session_policy {
+            buzz_relay_client::catalog::SessionPolicy::Channel => SessionPolicy::Channel,
+            buzz_relay_client::catalog::SessionPolicy::Thread => SessionPolicy::Thread,
+        }),
+        picture: seed.picture.clone().or(draft.picture.clone()),
+        ..draft.clone()
+    };
+    let options = data.harness_options.as_deref().unwrap_or_default();
+    let Some(chosen) = seed.runtime.as_deref().and_then(|runtime| {
+        options.iter().find(|option| {
+            option.available && draft::kind(&option.command).as_deref() == Some(runtime)
+        })
+    }) else {
+        return seeded;
+    };
+    let runtime = Draft {
+        command: chosen.command.clone(),
+        args: serde_json::to_string(&chosen.default_args).unwrap_or_else(|_| "[]".into()),
+        ..seeded
+    };
+    if buzz_host::harness::preset(&chosen.command).is_some() {
+        return Draft {
+            model: String::new(),
+            provider: String::new(),
+            ..runtime
+        };
+    }
+    Draft {
+        model: seed.model.clone().unwrap_or_default(),
+        provider: seed.provider.clone().unwrap_or_else(|| {
+            if chosen.command == draft.command {
+                draft.provider.clone()
+            } else {
+                String::new()
+            }
+        }),
+        ..runtime
+    }
 }
 
 impl CreateDialog {
@@ -114,10 +173,17 @@ impl CreateDialog {
         let draft = seeded(&host, &kind, cx);
         let fields = Fields::new(host.clone(), None, Vec::new(), draft, window, cx);
         fields.focus_name(window, cx);
-        let subscriptions = hosts
+        let mut subscriptions: Vec<Subscription> = hosts
             .iter()
             .map(|host| cx.observe(host, |_, _, cx| cx.notify()))
             .collect();
+        // buzz-app lists the catalog only for a plain Add.
+        let catalog = matches!(kind, Kind::Add)
+            .then(|| CatalogPane::current(cx))
+            .flatten();
+        if let Some(pane) = &catalog {
+            subscriptions.push(cx.observe(pane, |_, _, cx| cx.notify()));
+        }
         Self {
             hosts,
             host,
@@ -129,8 +195,105 @@ impl CreateDialog {
             next: Step::Start,
             phase: None,
             host_open: false,
+            catalog,
+            catalog_open: false,
+            on_created: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Tells `created` the new agent's ID once it exists.
+    pub fn on_created(&mut self, created: CatalogCreated) {
+        self.on_created = Some(created);
+    }
+
+    /// "Add agent" on a catalog entry: creates it, seeded from the entry,
+    /// and remembers the copy.
+    fn add_from_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.catalog.clone() else {
+            return;
+        };
+        let Some(entry) = pane.read(cx).publication(cx) else {
+            return;
+        };
+        if self.phase.is_some()
+            || self.saved.is_some()
+            || pane.read(cx).already_added(cx)
+            || pane.read(cx).transport(cx).is_some()
+        {
+            return;
+        }
+        let data = self.host.read(cx).snapshot();
+        let mut draft = seeded_draft(
+            draft::new_draft(&data),
+            &CatalogSeed::of(&entry.agent),
+            &data,
+        );
+        draft.environment = [("BUZZ_ACP_AGENTS".to_string(), Some("10".to_string()))].into();
+        self.fields.reset(draft, window, cx);
+        let remembered = pane.downgrade();
+        self.on_created = Some(Rc::new(move |id, cx| {
+            if let Some(pane) = remembered.upgrade() {
+                pane.read(cx).remember(&entry, id, cx);
+            }
+        }));
+        self.create(cx);
+    }
+
+    /// The sidebar beside the form (`.agent-add-sidebar`): Create agent,
+    /// Import, and the community catalog's agents.
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let c = *cx.colors();
+        let locked = self.phase.is_some() || self.saved.is_some() || self.fields.dirty;
+        let mut sidebar = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(rems(12.))
+            .gap(rems(0.25))
+            .pr(rems(0.75))
+            .border_r_1()
+            .border_color(c.border_standard)
+            .child(
+                NavigationItem::new("create-agent", "Create agent")
+                    .icon(IconName::Plus)
+                    .selected(!self.catalog_open)
+                    .disabled(locked)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.catalog_open = false;
+                        if let Some(pane) = &this.catalog {
+                            pane.update(cx, |pane, _| pane.selected = None);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                // Agent snapshot files (§10).
+                div().pt(rems(0.25)).child(
+                    Button::new("import-snapshot", "Import")
+                        .outline()
+                        .size(ButtonSize::Sm)
+                        .full_width()
+                        .disabled(locked)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let hosts = this.hosts.clone();
+                            cx.emit(Dismissed);
+                            super::snapshots::open_import(hosts, None, window, cx);
+                        })),
+                ),
+            );
+        if let Some(pane) = &self.catalog {
+            let dialog = cx.entity().downgrade();
+            let select: Choose = Rc::new(move |_, cx| {
+                let _ = dialog.update(cx, |this, cx| {
+                    this.catalog_open = true;
+                    this.fields.error = None;
+                    cx.notify();
+                });
+            });
+            sidebar = sidebar.child(pane.read(cx).sidebar(pane.clone(), locked, select, cx));
+        }
+        sidebar
     }
 
     fn set_host(
@@ -260,6 +423,9 @@ impl CreateDialog {
                 Ok((id, _)) => match this.host.read(cx).agent(id.as_str()).cloned() {
                     Some(agent) => {
                         cx.emit(Created(this.host.clone(), agent.id.clone()));
+                        if let Some(created) = this.on_created.clone() {
+                            created(&agent.id, cx);
+                        }
                         this.saved = Some(agent.clone());
                         // Saved values are write-only; they are not kept.
                         this.fields.draft.environment.clear();
@@ -525,7 +691,7 @@ impl Render for CreateDialog {
         let title = match &self.kind {
             Kind::Duplicate(source) => format!("Duplicate {}", source.name),
             Kind::Clone(_) => "Clone agent".into(),
-            Kind::Add => "Add agent".into(),
+            Kind::Add | Kind::Catalog(_) => "Add agent".into(),
         };
         let destination = if self.destination.is_empty() {
             "a connected community".to_string()
@@ -623,6 +789,32 @@ impl Render for CreateDialog {
             );
         }
         body = body.child(messages);
+        let catalog_view = self
+            .catalog
+            .clone()
+            .filter(|_| self.catalog_open && self.saved.is_none());
+        if let Some(pane) = &catalog_view {
+            body = div()
+                .flex()
+                .flex_col()
+                .gap(rems(2.))
+                .child(pane.read(cx).preview(cx))
+                .children(
+                    self.fields
+                        .error
+                        .clone()
+                        .map(|error| div().text_body().text_color(c.text_danger).child(error)),
+                );
+        }
+        let body = if matches!(self.kind, Kind::Add) {
+            div()
+                .flex()
+                .gap(rems(1.5))
+                .child(self.sidebar(cx))
+                .child(div().flex_1().min_w_0().child(body))
+        } else {
+            body
+        };
         let label = if let Some(phase) = self.phase {
             match phase {
                 Phase::Starting => "Starting…",
@@ -640,7 +832,7 @@ impl Render for CreateDialog {
         } else {
             "Create agent"
         };
-        Dialog::new("add-agent", title)
+        let dialog = Dialog::new("add-agent", title)
             .size(DialogSize::Px(860.))
             .heading_title()
             .description(format!(
@@ -652,7 +844,33 @@ impl Render for CreateDialog {
                     this.close(cx)
                 }
             }))
-            .child(body)
+            .child(body);
+        if let Some(pane) = catalog_view {
+            let added = pane.read(cx).already_added(cx);
+            let unavailable =
+                pane.read(cx).publication(cx).is_none() || pane.read(cx).transport(cx).is_some();
+            return dialog
+                .footer(
+                    Button::new("close-catalog", "Close")
+                        .surface(Surface::Floating)
+                        .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                )
+                .footer(
+                    Button::new(
+                        "add-catalog-agent",
+                        if added {
+                            "Added to My Agents"
+                        } else {
+                            "Add agent"
+                        },
+                    )
+                    .prominent()
+                    .loading(busy)
+                    .disabled(added || unavailable || blocked || runtime_blocked || !available)
+                    .on_click(cx.listener(|this, _, window, cx| this.add_from_catalog(window, cx))),
+                );
+        }
+        dialog
             .footer(
                 Button::new(
                     "cancel-agent",

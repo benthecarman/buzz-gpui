@@ -440,7 +440,6 @@ thread_local! {
 /// Lets the agents page preview snapshot imports
 /// (`subscribeSnapshotPreview`). Until one is set, the button reports the
 /// preview unavailable, as buzz-app does without a listener.
-#[allow(dead_code)]
 pub fn set_snapshot_preview(preview: Option<SnapshotPreview>) {
     SNAPSHOT_PREVIEW.with_borrow_mut(|slot| *slot = preview);
 }

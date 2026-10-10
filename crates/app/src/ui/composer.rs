@@ -2351,22 +2351,10 @@ impl Composer {
             && let Some(attachment) =
                 super::agents::snapshot_preview::pasted_attachment(item, &session)
         {
-            if self.attachments.len() >= MAX_FILES {
-                self.notice = Some(format!("Attach at most {MAX_FILES} files per message.").into());
-                cx.notify();
-                return true;
-            }
-            self.next_attachment += 1;
-            self.attachments.push(Pending {
-                id: self.next_attachment,
-                name: attachment.name.clone(),
-                mime: attachment.mime.clone(),
-                size: attachment.size,
-                thumbnail: None,
-                bytes: None,
-                status: Status::Ready(attachment),
-                voice: None,
-            });
+            let added = self
+                .files
+                .update(cx, |draft, cx| draft.add_uploaded(attachment, cx));
+            self.attach_error = added.err().map(Into::into);
             cx.notify();
             return true;
         }

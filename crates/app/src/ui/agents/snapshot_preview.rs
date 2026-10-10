@@ -11,7 +11,7 @@ use super::snapshots::{self, LayerDialog, alert, paragraph};
 use crate::hosts::Hosts;
 use crate::snapshot::{Kind, png, share};
 use buzz_relay_client::{Attachment, Media, Session};
-use buzz_ui::{ActiveTheme, Button, ButtonSize, Dialog, Surface};
+use buzz_ui::{ActiveTheme, Button, Dialog, Surface};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -39,61 +39,32 @@ pub(crate) fn set_team_preview(preview: TeamPreview, cx: &mut App) {
     cx.set_global(TeamHook(preview));
 }
 
-/// Whether a message attachment is a snapshot file, by name
-/// (`snapshotAttachmentKind`). Such attachments show as a file card with
-/// "Add agent" or "Add team", whatever their media kind.
-pub(crate) fn is_snapshot(attachment: &buzz_relay_client::fold::Attachment) -> bool {
-    attachment
-        .name
-        .as_deref()
-        .and_then(share::attachment_kind)
-        .is_some()
-}
-
-/// A snapshot attachment's file card with its "Add agent" / "Add team"
-/// button below.
-pub(crate) fn attachment_card(
-    tile: AnyElement,
-    attachment: &buzz_relay_client::fold::Attachment,
-    id: SharedString,
-    media: &Media,
-) -> AnyElement {
-    let kind = attachment
-        .name
-        .as_deref()
-        .and_then(share::attachment_kind)
-        .unwrap_or(Kind::Agent);
-    let available = !attachment.insecure && media.is_relay_media(&attachment.url);
-    let request = PreviewRequest {
-        url: attachment.url.clone(),
-        name: attachment.name.clone(),
-        kind: Some(kind),
-    };
-    let media = media.clone();
-    div()
-        .flex()
-        .flex_col()
-        .items_start()
-        .gap(px(8.))
-        .child(tile)
-        .child(
-            Button::new(
-                id,
-                if kind == Kind::Team {
-                    "Add team"
-                } else {
-                    "Add agent"
-                },
-            )
-            .size(ButtonSize::Sm)
-            .surface(Surface::Floating)
-            .disabled(!available)
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                open_preview(request.clone(), media.clone(), window, cx)
-            }),
-        )
-        .into_any_element()
+/// Hooks this module into the message list's snapshot cards
+/// (`SnapshotAttachment`): "Add agent" or "Add team" reads the file and
+/// opens its import preview.
+pub(crate) fn register() {
+    crate::ui::media::attachments::set_snapshot_preview(Some(Rc::new(
+        |attachment, kind, window, cx| {
+            let Some(community) = crate::community::AppState::current(cx) else {
+                crate::ui::notice::error("Snapshot preview is unavailable.", cx);
+                return;
+            };
+            let media = community.read(cx).session.media().clone();
+            if !media.is_relay_media(&attachment.url) {
+                crate::ui::notice::error("Snapshot preview is unavailable.", cx);
+                return;
+            }
+            let request = PreviewRequest {
+                url: attachment.url.clone(),
+                name: attachment.name.clone(),
+                kind: Some(match kind {
+                    crate::ui::media::attachments::SnapshotKind::Agent => Kind::Agent,
+                    crate::ui::media::attachments::SnapshotKind::Team => Kind::Team,
+                }),
+            };
+            open_preview(request, media, window, cx);
+        },
+    )));
 }
 
 /// Whether a link's menu offers "Preview snapshot": this community's

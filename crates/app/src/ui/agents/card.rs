@@ -120,7 +120,12 @@ impl AgentsPage {
             } else {
                 AvatarSize::Px(32.)
             })
-            .presence(self.presence_of(&pubkey, cx));
+            .presence(self.presence_of(&pubkey, cx))
+            .thinking(
+                SharedString::from(format!("thinking-{pubkey}")),
+                crate::agent_activity::observer::agent_thinking(&pubkey, cx),
+            )
+            .alt(name.clone());
         if let Some(picture) = self.picture(row, managed.as_ref(), cx) {
             avatar = avatar.image(picture);
         }
@@ -504,7 +509,15 @@ impl AgentsPage {
                             super::create::Kind::Duplicate(Box::new(agent.clone())),
                             window,
                             cx,
-                        )
+                        );
+                    })
+                };
+                let share = {
+                    let host = host.clone();
+                    let id = setup.agent.id.clone();
+                    cx.listener(move |this, _, window, cx| {
+                        this.set_menu(None, cx);
+                        super::share::open_agent(host.clone(), id.clone(), window, cx);
                     })
                 };
                 let launch = {
@@ -564,6 +577,11 @@ impl AgentsPage {
                             .icon_size(14.)
                             .disabled(!connected)
                             .on_click(duplicate),
+                    )
+                    .child(
+                        item(format!("share-{index}").into(), label("Share"))
+                            .disabled(!connected)
+                            .on_click(share),
                     )
                     // The profile panel that holds this switch in buzz-app
                     // is not part of this app.

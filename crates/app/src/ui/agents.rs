@@ -34,6 +34,13 @@ mod team_ops;
 mod teams;
 pub(crate) mod wake;
 
+/// Hooks agent snapshots, teams and the catalog into chat at startup, so
+/// received files open before the Agents page has been visited.
+pub(crate) fn init(cx: &mut App) {
+    snapshot_preview::register();
+    team_dialogs::register(cx);
+}
+
 pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
 pub(crate) use editor::{Dismissed, Saved};
 pub(crate) use host_dialog::AddHost;
@@ -411,17 +418,15 @@ impl AgentsPage {
         kind: create::Kind,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<Entity<create::CreateDialog>> {
         let hosts = self.hosts.clone();
-        let Some(host) = host.or_else(|| {
+        let host = host.or_else(|| {
             hosts
                 .iter()
                 .find(|host| editor::connected(host, cx))
                 .or(hosts.first())
                 .cloned()
-        }) else {
-            return;
-        };
+        })?;
         let destination = self.discovery.read(cx).destination();
         let dialog =
             cx.new(|cx| create::CreateDialog::new(hosts, host, kind, destination, window, cx));
@@ -441,10 +446,11 @@ impl AgentsPage {
         ];
         self.menu = None;
         self.modal = Some(Modal::Create {
-            dialog,
+            dialog: dialog.clone(),
             _subscriptions: subscriptions,
         });
         cx.notify();
+        Some(dialog)
     }
 
     /// "Add agent" in the Community Catalog: the create form, seeded with
@@ -455,7 +461,6 @@ impl AgentsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let hosts = self.hosts.clone();
         let seed = catalog::CatalogSeed::of(&entry.agent);
         let state = catalog::CatalogState::current(cx);
         let on_created: catalog::Created = Rc::new(move |id, cx| {
@@ -464,8 +469,11 @@ impl AgentsPage {
                 state.read(cx).remember(&entry, id, cx);
             }
         });
-        let editor = cx.new(|cx| AgentEditor::create_seeded(hosts, seed, on_created, window, cx));
-        self.open_editor(editor, cx);
+        if let Some(dialog) =
+            self.create_dialog(None, create::Kind::Catalog(Box::new(seed)), window, cx)
+        {
+            dialog.update(cx, |dialog, _| dialog.on_created(on_created));
+        }
     }
 
     fn add_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
