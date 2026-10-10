@@ -5,6 +5,7 @@
 mod about;
 mod agents;
 mod appearance;
+mod archive;
 mod avatar;
 mod communities;
 mod emoji;
@@ -16,6 +17,8 @@ use crate::community::{AppState, Community};
 use crate::hosts::HostConnection;
 use crate::ui::agents::{AddHost, DefaultsDialog};
 use crate::ui::overlay;
+pub use agents::{followup_draft, remember_mentioned_agents};
+pub use archive::capture as capture_agent_activity;
 use buzz_ui::{
     ActiveTheme, Button, ButtonShape, Icon, IconName, NavigationItem, Toast, ToastTone, TypeStyled,
     tokens::radius,
@@ -103,6 +106,8 @@ enum Modal {
     SignOut {
         error: Option<SharedString>,
     },
+    /// Shorten retention or clear saved agent activity.
+    Archive(archive::Confirm),
 }
 
 pub struct SettingsPage {
@@ -118,6 +123,10 @@ pub struct SettingsPage {
     custom_emoji: Option<(Entity<emoji::CustomEmojiSettings>, Subscription)>,
     /// The notification sound select that is open.
     sound_menu: Option<buzz_relay_client::Category>,
+    /// The archive's "Activity retention" select is open.
+    retention_menu: bool,
+    /// The last archive save or clear failed.
+    archive_error: Option<SharedString>,
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -141,6 +150,8 @@ impl SettingsPage {
             toasts: 0,
             custom_emoji: None,
             sound_menu: None,
+            retention_menu: false,
+            archive_error: None,
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -207,6 +218,7 @@ impl SettingsPage {
     /// on leaving a section.
     fn quiet(&mut self) {
         self.sound_menu = None;
+        self.retention_menu = false;
         crate::ui::sounds::stop_preview();
         // Leaving Profile hides the private key, as unmounting it does.
         self.profile.nsec_revealed = false;
@@ -311,7 +323,7 @@ impl SettingsPage {
             Section::Appearance => appearance::render(cx),
             Section::Notifications => self.notifications_section(window, cx),
             Section::Shortcuts => shortcuts::render(cx),
-            Section::Agents => self.agents_section(cx),
+            Section::Agents => self.agents_section(window, cx),
             Section::About => about::render(cx),
         }
     }
@@ -338,6 +350,7 @@ impl SettingsPage {
                     (!*busy).then_some(close),
                 ),
                 Modal::SignOut { error } => (self.sign_out_dialog(error.clone(), cx), Some(close)),
+                Modal::Archive(confirm) => (self.archive_dialog(*confirm, cx), Some(close)),
             };
         Some(overlay::modal(window, content, dismiss).into_any_element())
     }

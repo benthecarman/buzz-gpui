@@ -294,7 +294,7 @@ impl Community {
         let session = Arc::new(Session::open(
             &Runtime::handle(cx),
             origin.clone(),
-            identity,
+            identity.clone(),
             store,
         ));
         if cx.try_global::<Idle>().is_some_and(|idle| idle.idle) {
@@ -324,6 +324,7 @@ impl Community {
         community.update(cx, |community, _| {
             community._notifications = Some(notifications);
         });
+        crate::ui::settings::capture_agent_activity(&community, identity, cx);
         community
     }
 

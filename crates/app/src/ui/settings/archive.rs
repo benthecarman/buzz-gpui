@@ -1,0 +1,466 @@
+//! Settings → Agents → "Saved agent activity" (buzz-app's
+//! `ArchiveSettings.tsx`), and the capture that fills the archive while a
+//! community is connected.
+
+use super::{Modal, SettingsPage, button, form_group, inline_header, preference_row};
+use crate::community::{AppState, Community, IdentityState, data_dir};
+use crate::runtime::Runtime;
+use crate::ui::overlay::{self, Align};
+use buzz_identity::Identity;
+use buzz_relay_client::archive::{self, Archive, ArchiveSettings, RETENTION_DAYS};
+use buzz_ui::{
+    ActiveTheme, AlertDialog, Button, ButtonSize, Menu, MenuItem, Select, Surface, Switch,
+    TypeStyled,
+};
+use gpui_kit::*;
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// The archive file, opened on first use. A failure stays retryable and
+/// never stops the app.
+#[derive(Default)]
+struct ArchiveHost(Option<Arc<Archive>>);
+
+impl Global for ArchiveHost {}
+
+fn open(cx: &mut App) -> Result<Arc<Archive>, String> {
+    if let Some(archive) = &cx.default_global::<ArchiveHost>().0 {
+        return Ok(archive.clone());
+    }
+    let archive = Arc::new(Archive::open(
+        data_dir().join("archive").join("events.sqlite3"),
+    )?);
+    cx.global_mut::<ArchiveHost>().0 = Some(archive.clone());
+    Ok(archive)
+}
+
+/// The viewer's archive key and identity in `community`.
+fn partition(community: &Entity<Community>, cx: &App) -> (String, String) {
+    let community = community.read(cx);
+    (
+        community.session.viewer().to_string(),
+        archive::community_key(&community.origin),
+    )
+}
+
+/// [`capture`] again after the settings changed.
+fn recapture(community: &Entity<Community>, cx: &mut App) {
+    if let IdentityState::Ready(identity) = &cx.global::<AppState>().identity {
+        capture(community, identity.clone(), cx);
+    }
+}
+
+/// Starts, restarts or stops capturing agent activity for `community`
+/// under its current settings. Envelopes are checked (fresh, addressed to
+/// the viewer, decrypting) before they are archived.
+pub fn capture(community: &Entity<Community>, identity: Arc<Identity>, cx: &mut App) {
+    let session = community.read(cx).session.clone();
+    let (viewer, key) = partition(community, cx);
+    let settings = match open(cx).and_then(|archive| {
+        archive
+            .settings(&viewer, &key)
+            .map(|settings| (archive, settings))
+    }) {
+        Ok(found) => found,
+        Err(error) => {
+            tracing::warn!(%error, "agent activity is not archived");
+            session.observe(Vec::new());
+            return;
+        }
+    };
+    let (archive, settings) = settings;
+    let mut frames = session.observe(settings.kinds());
+    if settings.kinds().is_empty() {
+        return;
+    }
+    Runtime::handle(cx).spawn(async move {
+        while let Some(event) = frames.recv().await {
+            let (archive, identity, viewer, key) = (
+                archive.clone(),
+                identity.clone(),
+                viewer.clone(),
+                key.clone(),
+            );
+            let revision = settings.revision;
+            let stored = tokio::task::spawn_blocking(move || {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs());
+                archive::check_envelope(&identity, &event, now)?;
+                archive.ingest(&viewer, &key, &event, revision)
+            })
+            .await;
+            if let Ok(Err(error)) = stored {
+                tracing::debug!(%error, "an agent activity envelope was not archived");
+            }
+        }
+    });
+}
+
+/// What the archive confirmation dialog is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Confirm {
+    /// Shorten retention to this many days.
+    Retention(u32),
+    /// Clear one kind of record.
+    Clear(u16),
+}
+
+fn days(days: u32) -> String {
+    format!("{days} {}", if days == 1 { "day" } else { "days" })
+}
+
+impl SettingsPage {
+    /// The card (`ArchiveCard`) with its content for the selected community.
+    pub(super) fn archive_section(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let c = *cx.colors();
+        let community = AppState::current(cx);
+        let title = match &community {
+            Some(community) => format!("Saved agent activity · {}", community.read(cx).name()),
+            None => "Saved agent activity".into(),
+        };
+        let text = |text: String| {
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child(text)
+                .into_any_element()
+        };
+        let Some(community) = community else {
+            return div()
+                .child(inline_header(title, None, Vec::new(), cx))
+                .child(form_group(
+                    vec![text(
+                        "Select a community to manage its saved agent activity.".into(),
+                    )],
+                    cx,
+                ));
+        };
+        let (viewer, key) = partition(&community, cx);
+        let loaded = open(cx).and_then(|archive| {
+            archive
+                .settings(&viewer, &key)
+                .map(|settings| (archive.path().to_string_lossy().into_owned(), settings))
+        });
+        let mut body = vec![text(
+            "Saved in this app’s local SQLite archive on this device. Records are partitioned \
+             by account and community. Capture runs while this community is connected, even \
+             with Agent Activity disabled."
+                .into(),
+        )];
+        match loaded {
+            Ok((path, settings)) => {
+                body.extend(self.archive_controls(&path, &settings, window, cx));
+            }
+            Err(_) => {
+                body.push(
+                    div()
+                        .text_body_sm()
+                        .text_color(c.text_danger)
+                        .child(
+                            "Could not read archive settings. No capture preference was changed.",
+                        )
+                        .into_any_element(),
+                );
+                body.push(
+                    button("archive-reload", "Reload archive settings")
+                        .size(ButtonSize::Sm)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.archive_error = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        if let Some(error) = self.archive_error.clone() {
+            body.push(
+                div()
+                    .text_body_sm()
+                    .text_color(c.text_danger)
+                    .child(error)
+                    .into_any_element(),
+            );
+        }
+        div()
+            .child(inline_header(title, None, Vec::new(), cx))
+            .child(form_group(body, cx))
+    }
+
+    fn archive_controls(
+        &mut self,
+        path: &str,
+        settings: &ArchiveSettings,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let c = *cx.colors();
+        let note = |text: String| {
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child(text)
+                .into_any_element()
+        };
+        let switch = |id: &'static str,
+                      title: &'static str,
+                      description: &'static str,
+                      checked: bool,
+                      apply: fn(&mut ArchiveSettings, bool),
+                      cx: &mut Context<Self>| {
+            let current = settings.clone();
+            let page = cx.entity().downgrade();
+            preference_row(
+                None,
+                title,
+                Some(description.into_any_element()),
+                vec![
+                    Switch::new(id, checked)
+                        .on_change(move |value, _, cx| {
+                            let mut next = current.clone();
+                            apply(&mut next, value);
+                            let _ = page.update(cx, |this, cx| this.archive_save(next, cx));
+                        })
+                        .into_any_element(),
+                ],
+                cx,
+            )
+            .into_any_element()
+        };
+        let observer = switch(
+            "archive-observer",
+            "Save agent activity",
+            "Keep encrypted owner-only activity. Turning this off leaves saved history intact.",
+            settings.observer,
+            |s, v| s.observer = v,
+            cx,
+        );
+        let metrics = switch(
+            "archive-metrics",
+            "Save agent turn metrics",
+            "Keep encrypted token and cost records for 90 days, up to 64 MiB per community \
+             (16 MiB per agent). A usage dashboard is not included.",
+            settings.metrics,
+            |s, v| s.metrics = v,
+            cx,
+        );
+        // "Activity retention": a field select, shorter values confirmed.
+        let open = self.retention_menu;
+        let mut retention = div().relative().w_full().child(
+            Select::new("archive-retention")
+                .value(days(settings.observer_days))
+                .open(open)
+                .surface(Surface::Floating)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.retention_menu = !this.retention_menu;
+                    cx.notify();
+                })),
+        );
+        if open {
+            let current = settings.clone();
+            let items = RETENTION_DAYS.map(|choice| {
+                let current = current.clone();
+                MenuItem::new(
+                    SharedString::from(format!("retention-{choice}")),
+                    days(choice),
+                )
+                .checked(choice == current.observer_days)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.retention_menu = false;
+                    if choice < current.observer_days {
+                        this.modal = Some(Modal::Archive(Confirm::Retention(choice)));
+                    } else if choice != current.observer_days {
+                        this.archive_save(
+                            ArchiveSettings {
+                                observer_days: choice,
+                                ..current.clone()
+                            },
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                }))
+            });
+            let page = cx.entity().downgrade();
+            retention = retention.child(overlay::dropdown(
+                window,
+                Align::Start,
+                div().min_w(rems(16.)).child(
+                    Menu::new()
+                        .child(
+                            div()
+                                .px(rems(0.75))
+                                .py(rems(0.375))
+                                .text_caption()
+                                .text_color(c.text_subtle)
+                                .child("Maximum age"),
+                        )
+                        .children(items),
+                ),
+                Rc::new(move |_, cx| {
+                    let _ = page.update(cx, |this, cx| {
+                        this.retention_menu = false;
+                        cx.notify();
+                    });
+                }),
+            ));
+        }
+        let mib = settings.bytes as f64 / 1024. / 1024.;
+        vec![
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child(div().child(format!("Archive file: {path}")))
+                .child(format!(
+                    "This account and community: {mib:.1} MiB of encrypted records. SQLite \
+                     indexes and temporary journal files use additional disk space."
+                ))
+                .into_any_element(),
+            observer,
+            metrics,
+            div()
+                .flex()
+                .flex_col()
+                .gap(rems(0.5))
+                .child(div().text_label_sm().child("Activity retention"))
+                .child(retention)
+                .into_any_element(),
+            note(
+                "Activity is limited to 512 MiB per community and 128 MiB per agent. Oldest \
+                 records may be removed sooner at the size limit. Shortening retention deletes \
+                 expired records; turning capture off does not delete them. Budgets apply \
+                 separately to each account and community, not to the entire device."
+                    .into(),
+            ),
+            div()
+                .flex()
+                .gap(rems(0.5))
+                .child(
+                    Button::new("archive-clear-activity", "Clear activity history")
+                        .destructive()
+                        .size(ButtonSize::Sm)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.modal = Some(Modal::Archive(Confirm::Clear(24200)));
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("archive-clear-metrics", "Clear turn metrics")
+                        .destructive()
+                        .size(ButtonSize::Sm)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.modal = Some(Modal::Archive(Confirm::Clear(44200)));
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        ]
+    }
+
+    /// Saves the choices and restarts capture under them.
+    fn archive_save(&mut self, next: ArchiveSettings, cx: &mut Context<Self>) {
+        let Some(community) = AppState::current(cx) else {
+            return;
+        };
+        let (viewer, key) = partition(&community, cx);
+        let saved = open(cx).and_then(|archive| {
+            archive.configure(
+                &viewer,
+                &key,
+                next.observer,
+                next.metrics,
+                next.observer_days,
+                next.revision,
+            )
+        });
+        self.archive_error = saved
+            .err()
+            .map(|_| "Could not save archive settings. Reload settings and retry.".into());
+        recapture(&community, cx);
+        cx.notify();
+    }
+
+    fn archive_clear(&mut self, kind: u16, cx: &mut Context<Self>) {
+        let Some(community) = AppState::current(cx) else {
+            return;
+        };
+        let (viewer, key) = partition(&community, cx);
+        let cleared = open(cx).and_then(|archive| archive.clear(&viewer, &key, Some(kind)));
+        self.archive_error = cleared
+            .err()
+            .map(|_| "Could not clear the archive. Saved records may remain; retry.".into());
+        // Clearing moves the revision; capture follows it.
+        recapture(&community, cx);
+        self.modal = None;
+        cx.notify();
+    }
+
+    pub(super) fn archive_dialog(&self, confirm: Confirm, cx: &mut Context<Self>) -> AnyElement {
+        let community = AppState::current(cx)
+            .map(|community| community.read(cx).name())
+            .unwrap_or_default();
+        let (title, description, action) = match confirm {
+            Confirm::Retention(choice) => (
+                "Shorten activity retention?".to_string(),
+                format!(
+                    "Permanently deletes activity older than {} for this account in \
+                     {community}. This cannot be undone.",
+                    days(choice)
+                ),
+                "Shorten retention",
+            ),
+            Confirm::Clear(kind) => {
+                let what = if kind == 24200 {
+                    "activity"
+                } else {
+                    "turn metrics"
+                };
+                (
+                    if kind == 24200 {
+                        "Clear activity history?".to_string()
+                    } else {
+                        "Clear turn metrics?".to_string()
+                    },
+                    format!(
+                        "Permanently removes this account’s saved {what} in {community}. New \
+                         records can still be captured."
+                    ),
+                    "Clear saved records",
+                )
+            }
+        };
+        AlertDialog::new(title)
+            .description(description)
+            .action(
+                Button::new("archive-cancel", "Cancel")
+                    .surface(Surface::Floating)
+                    .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx))),
+            )
+            .action(
+                Button::new("archive-confirm", action)
+                    .destructive()
+                    .on_click(cx.listener(move |this, _, _, cx| match confirm {
+                        Confirm::Retention(choice) => {
+                            this.modal = None;
+                            let Some(community) = AppState::current(cx) else {
+                                return;
+                            };
+                            let (viewer, key) = partition(&community, cx);
+                            if let Ok(current) =
+                                open(cx).and_then(|archive| archive.settings(&viewer, &key))
+                            {
+                                this.archive_save(
+                                    ArchiveSettings {
+                                        observer_days: choice,
+                                        ..current
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                        Confirm::Clear(kind) => this.archive_clear(kind, cx),
+                    })),
+            )
+            .into_any_element()
+    }
+}
