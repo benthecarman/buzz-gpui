@@ -3,6 +3,7 @@
 pub mod account;
 pub mod archive;
 pub mod budget;
+pub mod canvas;
 pub mod catalog;
 pub mod community;
 pub mod discovery;
@@ -44,6 +45,7 @@ pub mod window;
 mod testing;
 
 pub use account::{LeaveOutcome, ProfileEdit, ProfileError};
+pub use canvas::{CanvasError, HistoryCursor, HistoryPage, Revision};
 pub use discovery::{ChannelSummary, ChannelType, DiscoveryState, RosterScan, Visibility};
 pub use emoji::{CatalogStatus, EmojiSnapshot};
 pub use event::{Verified, Verifier, kinds};

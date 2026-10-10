@@ -16,6 +16,7 @@
 mod account;
 mod actions;
 mod activity;
+mod canvas;
 mod catalog;
 mod channels;
 mod feedback;

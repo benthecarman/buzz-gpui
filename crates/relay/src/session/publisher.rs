@@ -64,6 +64,79 @@ impl SessionPublisher {
     }
 }
 
+const CANVAS_ACCESS: &str = "Canvas access changed; your draft is kept";
+const CANVAS_MEMBERSHIP: &str = "Could not refresh channel membership. Retry to continue.";
+
+impl SessionPublisher {
+    async fn can_participate(&self, channel: &str) -> Result<bool, PublishError> {
+        let channel = channel.to_owned();
+        self.on_actor(move |actor| {
+            actor
+                .discovery
+                .as_ref()
+                .is_some_and(|discovery| discovery.can_participate(&channel))
+        })
+        .await
+    }
+
+    /// A Canvas save is only dispatched after a strong read of the
+    /// channel roster still shows the viewer may write there
+    /// (`session.ts` `preparePublish`, `refreshMembership`).
+    async fn prepare_canvas(&self, event: &Event) -> Result<(), PublishError> {
+        let channel = event
+            .tags
+            .iter()
+            .find(|tag| tag.kind() == "h")
+            .and_then(|tag| tag.as_slice().get(1))
+            .cloned()
+            .ok_or_else(|| PublishError::Rejected("Canvas has no channel".into()))?;
+        if !self.can_participate(&channel).await? {
+            return Err(PublishError::Rejected(CANVAS_ACCESS.into()));
+        }
+        let filter = json!({
+            "kinds": [kinds::CHANNEL_MEMBERS],
+            "consistency": "strong",
+            "authors": [self.relay],
+            "#d": [channel],
+            "limit": 1,
+        });
+        let serde_json::Value::Object(filter) = filter else {
+            unreachable!("filters are objects")
+        };
+        let options = ReadOptions {
+            priority: Priority::Foreground,
+            fresh: true,
+        };
+        let events = self
+            .reader
+            .read(vec![filter], options)
+            .await
+            .map_err(|_| PublishError::Rejected(CANVAS_MEMBERSHIP.into()))?;
+        let roster = events
+            .iter()
+            .find(|event| {
+                event.kind_u16() == kinds::CHANNEL_MEMBERS
+                    && event.pubkey_hex() == self.relay
+                    && event.has_tag("d", &channel)
+            })
+            .cloned()
+            .ok_or_else(|| PublishError::Rejected(CANVAS_MEMBERSHIP.into()))?;
+        let allowed = self
+            .on_actor(move |actor| {
+                actor.accept(std::slice::from_ref(&roster));
+                actor
+                    .discovery
+                    .as_ref()
+                    .is_some_and(|discovery| discovery.can_participate(&channel))
+            })
+            .await?;
+        if !allowed {
+            return Err(PublishError::Rejected(CANVAS_ACCESS.into()));
+        }
+        Ok(())
+    }
+}
+
 impl Publisher for SessionPublisher {
     fn post_event(&self, event: &Event) -> BoxFuture<'static, Result<Vec<u8>, HttpError>> {
         self.http.post_event(event)
@@ -78,11 +151,6 @@ impl Publisher for SessionPublisher {
     }
 
     fn prepare(&self, event: &Event) -> BoxFuture<'static, Result<(), PublishError>> {
-        let mentions =
-            event.kind.as_u16() == kinds::CHAT && event.tags.iter().any(|tag| tag.kind() == "p");
-        if !mentions {
-            return Box::pin(async { Ok(()) });
-        }
         let this = SessionPublisher {
             http: self.http.clone(),
             reader: self.reader.clone(),
@@ -90,6 +158,15 @@ impl Publisher for SessionPublisher {
             relay: self.relay.clone(),
             viewer: self.viewer.clone(),
         };
+        if event.kind.as_u16() == kinds::CANVAS {
+            let event = event.clone();
+            return Box::pin(async move { this.prepare_canvas(&event).await });
+        }
+        let mentions =
+            event.kind.as_u16() == kinds::CHAT && event.tags.iter().any(|tag| tag.kind() == "p");
+        if !mentions {
+            return Box::pin(async { Ok(()) });
+        }
         let event = event.clone();
         Box::pin(async move {
             let fence = this.check(event.clone()).await?;

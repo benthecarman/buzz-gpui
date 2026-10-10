@@ -154,7 +154,7 @@ fn save(identity: Identity) -> Result<Identity, IdentityError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     /// Chat, reactions, edits, deletions, reports, profile, status, emoji,
-    /// channel membership and community requests.
+    /// channel membership, community requests and Canvas saves.
     Content,
     /// NIP-44 self-encrypted app data (read state, sidebar preferences).
     AppData,
@@ -173,7 +173,7 @@ pub const MAX_CATALOG_EVENT_BYTES: usize = buzz_desktop::relay::catalog::MAX_EVE
 /// Kinds the app writes as ordinary content.
 const CONTENT_KINDS: &[u16] = &[
     0, 5, 7, 9, 1984, 9000, 9001, 9002, 9007, 9008, 9021, 9022, 9030, 9031, 9032, 9035, 9036,
-    28936, 30030, 30315, 40003, 41010, 41012, 42000,
+    28936, 30030, 30315, 40003, 40100, 41010, 41012, 42000,
 ];
 
 impl Identity {
