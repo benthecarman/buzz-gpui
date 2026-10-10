@@ -353,11 +353,11 @@ fn plain_anchor(
         .text_color(c.text_standard)
         .underline()
         .when(openable, |d| {
-            d.cursor_pointer().on_click(move |_, window, cx| {
+            d.cursor_pointer().on_click(move |event, window, cx| {
                 if target.starts_with("buzz:") {
                     navigation::open_url(&target, window, cx)
                 } else {
-                    cx.open_url(&target)
+                    navigation::open_web_link(&target, event.modifiers(), window, cx)
                 }
             })
         })
@@ -398,11 +398,11 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             .cursor_pointer()
             .line_height(chip.line_height)
             .child(custom)
-            .on_click(move |_, window, cx| {
+            .on_click(move |event, window, cx| {
                 if target.starts_with("buzz:") {
                     navigation::open_url(&target, window, cx)
                 } else {
-                    cx.open_url(&target)
+                    navigation::open_web_link(&target, event.modifiers(), window, cx)
                 }
             })
             .into_any_element();
@@ -583,7 +583,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             d.tooltip(Tooltip::text(text))
         })
         .child(body)
-        .on_click(move |_, window, cx| {
+        .on_click(move |event, window, cx| {
             cx.stop_propagation();
             if internal {
                 let opened = navigation::try_open_url(&target, window, cx);
@@ -592,7 +592,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
                     cx.notify();
                 });
             } else {
-                cx.open_url(&target)
+                navigation::open_web_link(&target, event.modifiers(), window, cx)
             }
         });
     if internal {

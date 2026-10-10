@@ -277,6 +277,21 @@ pub fn open_url(url: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// A web link clicked in a message (`onOpenLink`): a channel panel that
+/// shows it (GitHub) opens beside the conversation. A click with a
+/// modifier, or a link no panel takes, goes to the browser.
+pub fn open_web_link(url: &str, modifiers: Modifiers, window: &mut Window, cx: &mut App) {
+    let opened = !modifiers.modified()
+        && workspace(cx).is_some_and(|workspace| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_panel_link(url, window, cx)
+            })
+        });
+    if !opened {
+        cx.open_url(url);
+    }
+}
+
 /// [`open_url`] for a `buzz://` link in a message: `false` when this
 /// window cannot take it, so the link can say so.
 pub fn try_open_url(url: &str, window: &mut Window, cx: &mut App) -> bool {

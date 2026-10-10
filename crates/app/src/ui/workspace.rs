@@ -1081,6 +1081,17 @@ impl Workspace {
         self.open_link(url, false, window, cx);
     }
 
+    /// A web link clicked in the window: true when a channel panel took
+    /// it as a tab beside the conversation.
+    pub fn open_panel_link(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.route_link_to_tab(url, window, cx)
+    }
+
     /// A link from outside the window, or one no tab takes. With
     /// `ingress` (from outside) an invalid link says so instead of being
     /// ignored.
