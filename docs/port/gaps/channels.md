@@ -484,8 +484,8 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | Reading lease (≤64, fenced) | unread.ts:1877-1899 | DONE (unread.rs:2962-3001) | - | - |
 | `observe()` writes `msg:` marks; DM observation reads whole DM | unread.ts:1905-1938, 2021-2066 | DONE (unread.rs:3028-3069, 3163-3205) | - | - |
 | Channel `catchUp()` | unread.ts:1956-2020 | DONE (unread.rs:3075-3159; session/unread.rs:905-928) | - | - |
-| Thread-panel reading (`thread-activity:` catch-up, reply observations) | unread.ts:1958-1969; use-reading.ts | MISSING | `fire_dwell` only calls `catch_up(.., None)` (session/unread.rs:916-921); thread.rs reports no viewport | M |
-| Dwell gating (fully visible rows, window focused, document visible, 300 ms, bottom within 1 px) | docs §5i.10; use-reading.ts:29-234 | PARTIAL | 300 ms matches (session/unread.rs:45) but partially visible rows count, only on scroll (crates/app/src/ui/channel.rs:164-179), no focus/visibility gating; new channel assumed at bottom (session/unread.rs:846-851) | M |
+| Thread-panel reading (`thread-activity:` catch-up, reply observations) | unread.ts:1958-1969; use-reading.ts | DONE (crates/app/src/ui/thread.rs, crates/relay/src/session/unread.rs) | `fire_dwell` only calls `catch_up(.., None)` (session/unread.rs:916-921); thread.rs reports no viewport | M |
+| Dwell gating (fully visible rows, window focused, document visible, 300 ms, bottom within 1 px) | docs §5i.10; use-reading.ts:29-234 | DONE (crates/app/src/ui/reading.rs, crates/relay/src/session/unread.rs) | 300 ms matches (session/unread.rs:45) but partially visible rows count, only on scroll (crates/app/src/ui/channel.rs:164-179), no focus/visibility gating; new channel assumed at bottom (session/unread.rs:846-851) | M |
 
 ### Explicit read and unread actions
 
@@ -493,11 +493,11 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 |---|---|---|---|---|
 | `markChannelRead` | unread.ts:1772-1805, 2172-2178 | DONE (unread.rs:2691-2764; session/mod.rs:440-442) | - | - |
 | `markAllChannelsRead` | unread.ts:2179-2233 | DONE (unread.rs:2770-2820; session/mod.rs:445-447) | - | - |
-| `markThrough(target, msg)` | unread.ts:2069-2083 | PARTIAL | Engine done (unread.rs:2656-2670); not in session `Mark` (session/unread.rs:90-95) | S |
+| `markThrough(target, msg)` | unread.ts:2069-2083 | DONE (crates/relay/src/session/unread.rs) | Engine done (unread.rs:2656-2670); not in session `Mark` (session/unread.rs:90-95) | S |
 | `markMessageRead` | unread.ts:2110-2146 | DONE (unread.rs:2824-2857; session/mod.rs:450-452) | - | - |
 | `markMessageUnread` and message menu "Mark unread" | unread.ts:2084-2109 | DONE (unread.rs:2862-2881; crates/app/src/ui/message.rs:485-491; crates/app/src/ui/channel.rs:428-437) | - | - |
-| Message menu toggles "Mark unread" / "Mark read" | src/features/messages/MessageManagement.tsx:252-253 | PARTIAL | Always "Mark unread"; failures only logged (channel.rs:432-434) | S |
-| `markUnreadLocal` / `clearUnreadLocal` | unread.ts:2234-2267 | PARTIAL | Engine done (unread.rs:2902-2924); no session API | S |
+| Message menu toggles "Mark unread" / "Mark read" | src/features/messages/MessageManagement.tsx:252-253 | DONE (crates/app/src/ui/message.rs, crates/app/src/ui/message_actions.rs) | Always "Mark unread"; failures only logged (channel.rs:432-434) | S |
+| `markUnreadLocal` / `clearUnreadLocal` | unread.ts:2234-2267 | DONE (crates/relay/src/session/unread.rs): Mark unread on this device; Mark as Read clears it, and nothing in buzz-app calls clearUnreadLocal. | Engine done (unread.rs:2902-2924); no session API | S |
 | `enterChannel` / `leaveChannel` visit semantics | unread.ts:243-258, 1763-1770, 2147-2171 | DONE (unread.rs:2672-2689, 2927-2957; session/unread.rs:832-845, 915) | - | - |
 
 ### Unread UI
@@ -505,15 +505,15 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Bold label for ordinary backlog | src/bundled/channels/UnreadBadge.tsx:50-56 | DONE (unread.rs:555-563; crates/app/src/ui/sidebar.rs:159-163) | - | - |
-| Priority accent dot, no numerals | UnreadBadge.tsx:57-60, 80-87; docs/port/ui.md:967-969 | DIFFERENT | Numeric mention pill instead (crates/app/src/ui/sidebar.rs:168-184), which ui.md:969 rules out; replace with 6 px dot | S |
-| Thread-activity dot "N unread threads" | UnreadBadge.tsx:57, 63-64, 88-95 | MISSING | Needs activity exposure | S |
-| Accessible/tooltip labels ("…Not an exact total", "Marked unread on this device only", "; may be out of date") | UnreadBadge.tsx:61-64 | MISSING | Labels | S |
-| Off-screen "N unread" edge pills with DM avatar stack; reveal expands section, centres and focuses row | src/bundled/channels/SidebarUnread.tsx:30-239 | MISSING | Implement | M |
-| "Mark as Read" / "Mark as Unread (this device)" in sidebar and header menus, pending/"Saving…"/error | src/bundled/channels/ChannelReadMenuItem.tsx:24-56; useChannelReadAction.ts:1-32 | MISSING | Menu items + action state (needs `markUnreadLocal`) | M |
-| "Mark all as read" in community rail menu with disabled reasons and toasts | src/features/communities/CommunityRailItem.tsx:280-315 | MISSING | Rail context menu (API exists) | S |
-| Channel activity popover (hover 250/150 ms; "Working now" with timers; "Unread threads" rows with per-row "Mark as read"; stale note) | src/bundled/channels/ChannelActivityPopover.tsx:33-357 | MISSING | Needs `activity()` and `markThrough` in session | L |
-| `UnreadOptions` panel (mark unread on device, mark read through loaded, sync status, Refresh, Retry read sync) | UnreadBadge.tsx:100-177 | MISSING | Channel settings panel | M |
-| `channel-activity.ts` values for Recent sort (kinds incl. 45001/45003, limit:1 per channel in batches of 128) | src/features/relay/channel-activity.ts:1-145 | PARTIAL | Model ported (sidebar.rs:541-683), not wired; sidebar sorts by name; search "recent" uses sampled `unread.latest` (crates/app/src/ui/search.rs:541-548) | M |
+| Priority accent dot, no numerals | UnreadBadge.tsx:57-60, 80-87; docs/port/ui.md:967-969 | DONE (crates/app/src/ui/unread_badge.rs) | Numeric mention pill instead (crates/app/src/ui/sidebar.rs:168-184), which ui.md:969 rules out; replace with 6 px dot | S |
+| Thread-activity dot "N unread threads" | UnreadBadge.tsx:57, 63-64, 88-95 | DONE (crates/app/src/ui/unread_badge.rs, crates/relay/src/session/unread.rs) | Needs activity exposure | S |
+| Accessible/tooltip labels ("…Not an exact total", "Marked unread on this device only", "; may be out of date") | UnreadBadge.tsx:61-64 | DONE (crates/app/src/ui/unread_badge.rs) | Labels | S |
+| Off-screen "N unread" edge pills with DM avatar stack; reveal expands section, centres and focuses row | src/bundled/channels/SidebarUnread.tsx:30-239 | DONE (crates/app/src/ui/sidebar_unread.rs): there are no collapsible sections to expand yet. | Implement | M |
+| "Mark as Read" / "Mark as Unread (this device)" in sidebar and header menus, pending/"Saving…"/error | src/bundled/channels/ChannelReadMenuItem.tsx:24-56; useChannelReadAction.ts:1-32 | DONE (crates/app/src/ui/sidebar/menus.rs, crates/app/src/ui/sidebar.rs) | Menu items + action state (needs `markUnreadLocal`) | M |
+| "Mark all as read" in community rail menu with disabled reasons and toasts | src/features/communities/CommunityRailItem.tsx:280-315 | MISSING. Not done here: it needs the rail item's context menu (Communities). The session API exists. | Rail context menu (API exists) | S |
+| Channel activity popover (hover 250/150 ms; "Working now" with timers; "Unread threads" rows with per-row "Mark as read"; stale note) | src/bundled/channels/ChannelActivityPopover.tsx:33-357 | DONE (crates/app/src/ui/channel_activity.rs): working rows show no timer, as the port captures no agent turns. | Needs `activity()` and `markThrough` in session | L |
+| `UnreadOptions` panel (mark unread on device, mark read through loaded, sync status, Refresh, Retry read sync) | UnreadBadge.tsx:100-177 | MISSING. Not done here: the channel settings panel has no unread options yet; the session APIs exist. | Channel settings panel | M |
+| `channel-activity.ts` values for Recent sort (kinds incl. 45001/45003, limit:1 per channel in batches of 128) | src/features/relay/channel-activity.ts:1-145 | PARTIAL. Not done here: Recent is a sidebar section preference (Sidebar sections and preferences). | Model ported (sidebar.rs:541-683), not wired; sidebar sorts by name; search "recent" uses sampled `unread.latest` (crates/app/src/ui/search.rs:541-548) | M |
 
 ## Sidebar, channel discovery, navigation and DMs
 
@@ -881,16 +881,16 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Disconnected/error splash ("Your channels, one conversation.") | BC/ChannelsPage.tsx:128-148 | DIFFERENT | No community goes to onboarding (A/workspace.rs:145-160); no splash for disconnected/failed community | S |
-| Default selection: saved `selected-channel`, else first non-session channel | BC/ChannelsPage.tsx:207-209, 348-356, 1495 | PARTIAL | Only remembered channel restored (A/workspace.rs:179-202); else empty text (A/workspace.rs:459-472) | S |
-| Routed unjoined channel: exact `resolve()` preview, "Checking conversation access…" | BC/ChannelsPage.tsx:258-296, 1486-1497 | PARTIAL | Waits for roster then logs and drops (A/workspace.rs:661-672, 693-718); search already resolves (A/search.rs:692) | M |
+| Disconnected/error splash ("Your channels, one conversation.") | BC/ChannelsPage.tsx:128-148 | DONE (crates/app/src/ui/channel_states.rs): for a community that is not connected. No community still goes to onboarding (shell.md's Personal space row). | No community goes to onboarding (A/workspace.rs:145-160); no splash for disconnected/failed community | S |
+| Default selection: saved `selected-channel`, else first non-session channel | BC/ChannelsPage.tsx:207-209, 348-356, 1495 | DONE (crates/app/src/ui/channel_states.rs, crates/app/src/ui/workspace.rs) | Only remembered channel restored (A/workspace.rs:179-202); else empty text (A/workspace.rs:459-472) | S |
+| Routed unjoined channel: exact `resolve()` preview, "Checking conversation access…" | BC/ChannelsPage.tsx:258-296, 1486-1497 | DONE (crates/app/src/ui/workspace.rs, crates/app/src/ui/channel_states.rs) | Waits for roster then logs and drops (A/workspace.rs:661-672, 693-718); search already resolves (A/search.rs:692) | M |
 | "Loading messages…" placeholder | BC/ChannelBody.tsx:96-105 | DONE | - | - |
-| Timeline error with "Retry messages" | BC/ChannelBody.tsx:81-95 | PARTIAL | Error text only (A/channel.rs:716) | S |
+| Timeline error with "Retry messages" | BC/ChannelBody.tsx:81-95 | DONE (crates/app/src/ui/channel.rs) | Error text only (A/channel.rs:716) | S |
 | Header: channel tab, "Channel members", "Channel actions" | BC/ChannelsPage.tsx:1301-1405 | DONE | - | - |
-| Read-only preview notice and "Join channel" | BC/ChannelJoinNotice.tsx:9-62; BC/ChannelsPage.tsx:1499-1525 | DIFFERENT | Also requires `visibility==Public` (A/channel_menu.rs:631-635); replaces composer instead of sitting above it (A/channel.rs:579-584) | S |
-| Join outcome ("Join may have taken effect… Try again to check.") and composer focus | BC/ChannelJoinNotice.tsx:31-48; BC/ChannelsPage.tsx:363-371 | PARTIAL | Generic UNCONFIRMED text (R/session/actions.rs:35); no composer focus (A/channel_menu.rs:605-626) | S |
+| Read-only preview notice and "Join channel" | BC/ChannelJoinNotice.tsx:9-62; BC/ChannelsPage.tsx:1499-1525 | DONE (crates/app/src/ui/channel.rs, crates/app/src/ui/channel_menu.rs): the composer cannot send; its input stays editable, as the composer has no disabled state. | Also requires `visibility==Public` (A/channel_menu.rs:631-635); replaces composer instead of sitting above it (A/channel.rs:579-584) | S |
+| Join outcome ("Join may have taken effect… Try again to check.") and composer focus | BC/ChannelJoinNotice.tsx:31-48; BC/ChannelsPage.tsx:363-371 | DONE (crates/app/src/ui/channel_menu.rs, crates/app/src/ui/channel.rs) | Generic UNCONFIRMED text (R/session/actions.rs:35); no composer focus (A/channel_menu.rs:605-626) | S |
 | After Leave/Delete/Hide select next row; Archive keeps page | BC/ChannelsPage.tsx:340-347 | DONE (A/channel_menu.rs:127-133; A/workspace/dialogs.rs:126-142) | - | - |
-| Settings "Diagnostics" (UnreadOptions, "Partial roster · N channels", Refresh channels / groups and stars / messages, Outbox, timings) | BC/ChannelsPage.tsx:1163-1200 | MISSING | - | M |
+| Settings "Diagnostics" (UnreadOptions, "Partial roster · N channels", Refresh channels / groups and stars / messages, Outbox, timings) | BC/ChannelsPage.tsx:1163-1200 | MISSING. Not done here: the channel settings panel has no Diagnostics section yet; the session APIs it needs exist. | - | M |
 
 ### Conversation tabs, picker and panels
 
