@@ -556,6 +556,11 @@ impl ChannelPage {
             self.jump.set(false);
         }
         let mentions = submission.mentions.clone();
+        // A mentioned agent of the viewer's that is stopped wakes for it.
+        let wake = (
+            self.community.read(cx).origin.clone(),
+            super::agents::wake::floor(),
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = match &submission.editing {
                 Some(row) => session.edit(&channel, row.id, &submission.content).await,
@@ -575,6 +580,12 @@ impl ChannelPage {
                 match result {
                     Ok(()) => {
                         this.error = None;
+                        super::agents::wake::sent(
+                            &wake.0,
+                            &submission.mentions.recipients,
+                            wake.1,
+                            cx,
+                        );
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
                     }

@@ -118,12 +118,6 @@ impl EditDialog {
         }
     }
 
-    /// Writes wait while `paused`; `banner` explains why.
-    pub fn set_paused(&mut self, paused: bool, banner: Option<(SharedString, bool)>) {
-        self.paused = paused;
-        self.banner = banner;
-    }
-
     fn current(&self, cx: &App) -> Agent {
         self.host
             .read(cx)

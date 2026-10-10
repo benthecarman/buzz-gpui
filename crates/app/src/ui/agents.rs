@@ -22,6 +22,8 @@ mod host_dialog;
 mod import;
 mod inventory;
 mod relay;
+pub(crate) mod review;
+pub(crate) mod wake;
 
 pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
 pub(crate) use editor::{Dismissed, Saved};

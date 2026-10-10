@@ -612,6 +612,7 @@ impl Render for Workspace {
                     .children(dialog)
                     .children(live_notice)
                     .children(super::media::review_overlay(cx))
+                    .children(super::agents::review::render(window, cx))
                     .children(super::toasts::render(window, cx)),
             ),
         )

@@ -34,8 +34,6 @@ pub struct Control {
     /// they still describe the latest action.
     pub action_versions: HashMap<String, u64>,
     generation: u64,
-    /// A mention could not start an agent.
-    pub mention_error: Option<String>,
 }
 
 /// A failed write: the full message, and the host's own reason, if any.
