@@ -550,7 +550,9 @@ impl ChannelSidebar {
     /// The first reveal waits for preferences, names, activity and the
     /// unread sample, at most [`REVEAL_BUDGET`] after the roster arrives.
     fn startup_ready(&mut self, snapshot: &SessionSnapshot, cx: &mut Context<Self>) -> bool {
-        if self.revealed {
+        // Saved conversations show at once (`restored`).
+        if self.revealed || snapshot.channels.iter().any(|channel| channel.cached) {
+            self.revealed = true;
             return true;
         }
         let roster = matches!(
@@ -933,8 +935,10 @@ impl ChannelSidebar {
         let navigation =
             (!page_rows.is_empty()).then(|| rows::row_list().mb(rems(0.75)).children(page_rows));
 
-        // Before the relay is ready: the page rows and a status line.
+        // Before the relay is ready: the page rows and a status line. A
+        // saved snapshot shows its sidebar instead.
         let not_ready = match &snapshot.status {
+            _ if snapshot.cached => None,
             SessionStatus::Connecting => {
                 Some((SharedString::from("Connecting to your relay…"), false))
             }
@@ -1079,6 +1083,19 @@ impl ChannelSidebar {
         let small =
             |id: SharedString, label: &'static str| Button::new(id, label).size(ButtonSize::Sm);
         let mut notices = Vec::new();
+        if snapshot.cached && matches!(snapshot.status, SessionStatus::Failed(_)) {
+            notices.push(
+                notice("offline".into())
+                    .child("Offline · Showing saved conversations.")
+                    .child(
+                        div().child(
+                            small("retry-connection".into(), "Retry connection")
+                                .on_click(cx.listener(|this, _, _, cx| this.session(cx).retry())),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
         // The relay's hidden-DM list could not be read (`refreshVisibility`).
         if !snapshot.cached
             && matches!(
