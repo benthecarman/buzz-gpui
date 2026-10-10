@@ -73,11 +73,12 @@ pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader
 pub use reminders::{Reminder, ReminderStatus, ReminderTarget, RemindersState, RemindersStatus};
 pub use session::{
     CatchUpState, ChannelUnread, ChannelView, FeedbackState, HeadCatchUp, InboxFeed,
-    InboxFeedStatus, InboxState, IncomingMessage, LiveBatch, LiveView, MemoryEntry, MemoryError,
-    MemoryListing, MessageSearch, PendingFeedback, PeoplePage, PublicChannels, READING_DWELL_MS,
-    RelayInfo, RosterRefresh, RosterStatus, SearchOutcome, SendObserverHandle, Session,
-    SessionSnapshot, SessionStatus, StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus,
-    UnreadCounts, UnreadDetail, UnreadWatch,
+    InboxFeedStatus, InboxState, IncomingMessage, LiveBatch, LiveView, MemberAddition,
+    MemberOperation, MemberOperationStatus, MemoryEntry, MemoryError, MemoryListing, MessageSearch,
+    PendingFeedback, PeoplePage, PublicChannels, READING_DWELL_MS, RelayInfo, RosterRefresh,
+    RosterStatus, SearchOutcome, SendObserverHandle, Session, SessionSnapshot, SessionStatus,
+    StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus, UnreadCounts, UnreadDetail,
+    UnreadWatch,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,

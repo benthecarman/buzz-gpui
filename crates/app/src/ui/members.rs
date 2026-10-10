@@ -11,7 +11,10 @@ use super::overlay::{self, Align, Dismiss};
 use crate::community::Community;
 use buzz_relay_client::lifecycle::{ChannelState, MemberRole};
 use buzz_relay_client::members::{self, Change, MemberChange, Person};
-use buzz_relay_client::{ChannelSummary, ChannelType, PeoplePage, PresenceState, Profiles};
+use buzz_relay_client::{
+    ChannelSummary, ChannelType, MemberAddition, MemberOperation, MemberOperationStatus,
+    PeoplePage, PresenceState, Profiles,
+};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonSize, ButtonVariant, Dialog,
     IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, Presence, SearchField,
@@ -20,7 +23,7 @@ use buzz_ui::{
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -80,6 +83,16 @@ pub struct MembersDialog {
     /// People being added, changed or messaged.
     busy: HashSet<String>,
     error: Option<SharedString>,
+    /// Additions the session tracks here: in flight, or failed.
+    additions: Vec<MemberAddition>,
+    /// Added agents that did not start, by key.
+    start_errors: HashMap<String, String>,
+    /// "<name> is in the channel."
+    notice: Option<SharedString>,
+    /// "Send message" is opening the conversation.
+    opening: bool,
+    /// The latest role change or removal here.
+    operation: Option<MemberOperation>,
     menu: Option<String>,
     confirm: Option<MemberChange>,
     /// `None` shows every group.
@@ -118,6 +131,11 @@ impl MembersDialog {
             searching: None,
             busy: HashSet::new(),
             error: None,
+            additions: Vec::new(),
+            start_errors: HashMap::new(),
+            notice: None,
+            opening: false,
+            operation: None,
             menu: None,
             confirm: None,
             filter: None,
@@ -133,8 +151,47 @@ impl MembersDialog {
         self.community.read(cx).session.viewer().to_string()
     }
 
+    /// Reads the additions and the role change the session tracks for
+    /// this channel, which outlive the dialog.
+    fn read_tracked(&mut self, cx: &mut Context<Self>) {
+        let session = self.community.read(cx).session.clone();
+        let channel = self.channel.id.clone();
+        cx.spawn(async move |this, cx| {
+            let additions = session.member_additions(&channel).await;
+            let operation = session.member_operation(&channel).await;
+            let _ = this.update(cx, |this, cx| {
+                this.additions = additions;
+                this.operation = operation;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Refresh member data": the roster and roles again, which also
+    /// settles an uncertain role change the roster now shows.
+    fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading || !self.busy.is_empty() {
+            return;
+        }
+        self.error = None;
+        let session = self.community.read(cx).session.clone();
+        let channel = self.channel.id.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = session.refresh_members(&channel).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Err(error) = result {
+                    this.error = Some(error.into());
+                }
+                this.refresh(window, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Re-reads the roster and roles from the relay.
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_tracked(cx);
         self.loading = true;
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.id.clone();
@@ -209,6 +266,10 @@ impl MembersDialog {
         cx.notify();
     }
 
+    /// Adds someone, then starts an added agent the viewer manages here
+    /// (`memberAdditions.add`). A failure stays with the person, with
+    /// Retry; an agent that was added but did not start retries only its
+    /// start.
     fn add(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
         if super::archives::hides(&self.community, &pubkey, cx) {
             self.error = Some("Archived identities cannot be added. Choose someone else.".into());
@@ -218,18 +279,31 @@ impl MembersDialog {
         if !self.busy.insert(pubkey.clone()) {
             return;
         }
-        self.error = None;
+        self.notice = None;
+        let retry_start = self.start_errors.remove(&pubkey).is_some();
         let session = self.community.read(cx).session.clone();
+        let community = self.community.clone();
         let channel = self.channel.id.clone();
+        self.additions.retain(|addition| addition.pubkey != pubkey);
         cx.spawn_in(window, async move |this, cx| {
-            let result = session.add_member(&channel, &pubkey).await;
+            let added = match retry_start {
+                true => Ok(()),
+                false => session.add_member(&channel, &pubkey).await,
+            };
+            let started = match &added {
+                Ok(()) => start_added_agent(&community, &channel, &pubkey, retry_start, cx).await,
+                Err(_) => Ok(()),
+            };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy.remove(&pubkey);
-                match result {
-                    Ok(()) => this.refresh(window, cx),
-                    Err(error) => this.error = Some(error.into()),
+                if added.is_ok() {
+                    let name = display_name(&this.community.read(cx).snapshot.profiles, &pubkey);
+                    this.notice = Some(format!("{name} is in the channel.").into());
                 }
-                cx.notify();
+                if let Err(error) = started {
+                    this.start_errors.insert(pubkey.clone(), error);
+                }
+                this.refresh(window, cx);
             });
         })
         .detach();
@@ -251,7 +325,10 @@ impl MembersDialog {
                 this.busy.remove(&pubkey);
                 match result {
                     Ok(()) => this.refresh(window, cx),
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => {
+                        this.error = Some(error.into());
+                        this.read_tracked(cx);
+                    }
                 }
                 cx.notify();
             });
@@ -267,11 +344,13 @@ impl MembersDialog {
             return;
         }
         self.error = None;
+        self.opening = true;
         let session = self.community.read(cx).session.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = session.open_dm(vec![pubkey.clone()]).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy.remove(&pubkey);
+                this.opening = false;
                 match result {
                     Ok(id) => {
                         navigation::open_conversation(id, window, cx);
@@ -379,8 +458,16 @@ impl MembersDialog {
                 cx.notify();
             }))
         };
-        let can_edit = state.can_manage_member(&viewer, pubkey);
-        let can_remove = state.can_remove_member(&viewer, pubkey, owner.as_deref());
+        // A change in flight, or one that may have taken effect, blocks
+        // the next until a refresh settles it.
+        let settled = !self.operation.as_ref().is_some_and(|operation| {
+            matches!(
+                operation.status,
+                MemberOperationStatus::Pending | MemberOperationStatus::Uncertain
+            )
+        });
+        let can_edit = settled && state.can_manage_member(&viewer, pubkey);
+        let can_remove = settled && state.can_remove_member(&viewer, pubkey, owner.as_deref());
         if can_edit {
             menu = menu.child(MenuSeparator::new());
             for (id, next, target, label) in [
@@ -499,9 +586,35 @@ impl MembersDialog {
             .into_any_element()
     }
 
+    /// Someone being added here, or a change or message in flight.
+    fn is_busy(&self, pubkey: &str) -> bool {
+        self.busy.contains(pubkey)
+            || self
+                .additions
+                .iter()
+                .any(|addition| addition.pubkey == pubkey && addition.pending)
+    }
+
+    /// Each failed addition with its error, as buzz-app lists them.
+    fn addition_errors(&self) -> Vec<(String, String)> {
+        let mut errors: Vec<(String, String)> = self
+            .additions
+            .iter()
+            .filter(|addition| !self.busy.contains(&addition.pubkey))
+            .filter_map(|addition| Some((addition.pubkey.clone(), addition.error.clone()?)))
+            .collect();
+        for (pubkey, error) in &self.start_errors {
+            if !errors.iter().any(|(key, _)| key == pubkey) {
+                errors.push((pubkey.clone(), error.clone()));
+            }
+        }
+        errors.sort();
+        errors
+    }
+
     fn candidate_row(&self, person: &Person, cx: &mut Context<Self>) -> AnyElement {
         let c = *cx.colors();
-        let busy = self.busy.contains(&person.pubkey);
+        let busy = self.is_busy(&person.pubkey);
         let key = person.pubkey.clone();
         div()
             .id(SharedString::from(format!("candidate-{}", person.pubkey)))
@@ -670,6 +783,8 @@ impl Render for MembersDialog {
                 "DM membership cannot be changed here."
             } else if summary.archived {
                 "Archived channels cannot add members."
+            } else if summary.cached {
+                "Adding members is unavailable in this connection."
             } else {
                 "Join this channel to add people and agents."
             };
@@ -678,8 +793,13 @@ impl Render for MembersDialog {
         if let Some(Err(message)) = &self.state {
             list = list.child(div().px(rems(1.)).child(error(message.clone(), cx)));
         }
-        if let Some(message) = &self.error {
-            list = list.child(div().px(rems(1.)).child(error(message.clone(), cx)));
+        let operation_error = self
+            .operation
+            .as_ref()
+            .filter(|operation| operation.status == MemberOperationStatus::Uncertain)
+            .and_then(|operation| operation.error.clone());
+        if let Some(message) = self.error.clone().or(operation_error.map(Into::into)) {
+            list = list.child(div().px(rems(1.)).child(error(message, cx)));
         }
         if super::archives::status(&self.community, cx) == Some(super::archives::Status::Error) {
             list = list.child(
@@ -794,6 +914,43 @@ impl Render for MembersDialog {
             Some(Err(_)) => {}
         }
 
+        for (index, (pubkey, message)) in self.addition_errors().into_iter().enumerate() {
+            let retrying = self.is_busy(&pubkey);
+            let name = display_name(&profiles, &pubkey);
+            let key = pubkey.clone();
+            list =
+                list.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(rems(0.5))
+                        .px(rems(1.))
+                        .text_body_sm()
+                        .text_color(c.text_danger)
+                        .child(format!("{name}: {message}"))
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("addition-retry-{index}")),
+                                if retrying { "Retrying…" } else { "Retry" },
+                            )
+                            .outline()
+                            .size(ButtonSize::Xs)
+                            .surface(Surface::Floating)
+                            .disabled(retrying || !can_add)
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| this.add(key.clone(), window, cx),
+                            )),
+                        ),
+                );
+        }
+        if self.opening {
+            list = list.child(note("Opening conversation…", cx));
+        }
+        if let Some(notice) = &self.notice {
+            list = list.child(note(notice.clone(), cx));
+        }
+
         Dialog::new("channel-members", "Channel members")
             .description(super::sidebar::channel_label(&summary, &profiles))
             .compact_header_gap()
@@ -803,7 +960,7 @@ impl Render for MembersDialog {
                     .surface(Surface::Floating)
                     .tooltip("Refresh member data")
                     .disabled(self.loading)
-                    .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.refresh_all(window, cx))),
             )
             .on_close(cx.listener(|_, _, _, cx| cx.emit(Dismissed)))
             .child(
@@ -838,6 +995,87 @@ impl Render for MembersDialog {
             .into_any_element()
     }
 }
+
+/// Starts an agent the viewer manages here once it is in the channel
+/// (`startAddedAgent`). Anyone else, or an agent another device manages,
+/// is left alone.
+async fn start_added_agent(
+    community: &Entity<Community>,
+    channel: &str,
+    pubkey: &str,
+    retry_start: bool,
+    cx: &mut AsyncWindowContext,
+) -> Result<(), String> {
+    use buzz_host::api::{AgentAction, ProcessStatus, Response};
+    let (origin, viewer, session) = community.read_with(cx, |community, _| {
+        (
+            community.origin.clone(),
+            community.session.viewer().to_string(),
+            community.session.clone(),
+        )
+    });
+    let find = |cx: &mut AsyncWindowContext| {
+        cx.update(|_, cx| super::profile_panel::community_agents(&origin, pubkey, cx))
+            .unwrap_or_default()
+    };
+    let Some((host, _)) = find(cx).into_iter().next() else {
+        return Ok(());
+    };
+    // A failed start may be retried long after its membership write.
+    if retry_start {
+        let _ = session.refresh_members(channel).await;
+    }
+    host.update(cx, |host, cx| host.refresh_status(cx)).await;
+    let ready = host.read_with(cx, |host, _| {
+        host.status() == crate::hosts::control::Status::Ready
+    });
+    let agent = find(cx).into_iter().next().map(|(_, agent)| agent);
+    let member = community.read_with(cx, |community, _| {
+        community
+            .snapshot
+            .channels
+            .iter()
+            .find(|c| c.id == channel)
+            .is_some_and(|c| c.members.iter().any(|m| m == pubkey))
+    });
+    if retry_start && !member {
+        return Err(MEMBERSHIP_CHANGED.into());
+    }
+    let Some(agent) = agent.filter(|_| ready && member) else {
+        return Err("Added, but the local agent could not be checked. Retry to start it.".into());
+    };
+    let running = |status| {
+        matches!(
+            status,
+            ProcessStatus::Running | ProcessStatus::Waiting | ProcessStatus::Starting
+        )
+    };
+    if running(agent.status) {
+        return Ok(());
+    }
+    let start = host.update(cx, |host, cx| {
+        host.act(&agent.id, AgentAction::Start, Some(viewer), None, cx)
+    });
+    let not_running = || "The agent is not running. Retry to start it.".to_string();
+    let detail = match start.await {
+        Ok(Response::Agents(snapshot)) => {
+            match snapshot.agents.into_iter().find(|a| a.id == agent.id) {
+                Some(started) if running(started.status) => return Ok(()),
+                Some(started) => started.error.unwrap_or_else(not_running),
+                None => not_running(),
+            }
+        }
+        Ok(_) => not_running(),
+        Err(failure) => failure.message,
+    };
+    Err(format!(
+        "Added to the channel, but the agent did not start. {detail}"
+    ))
+}
+
+/// `MembershipChanged`.
+const MEMBERSHIP_CHANGED: &str = "Membership changed. This agent is no longer in the channel and \
+                                  was not started. Select Add to invite it again.";
 
 #[cfg(test)]
 mod tests {

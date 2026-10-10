@@ -262,27 +262,7 @@ impl ProfilePanel {
     /// The viewer's agents with this key on hosts serving this community
     /// (`useRuntimeAgents`).
     fn runtime_agents(&self, cx: &App) -> Vec<(Entity<HostConnection>, Agent)> {
-        let community = self.community.read(cx).origin.http();
-        let Some(hosts) = cx.try_global::<Hosts>() else {
-            return Vec::new();
-        };
-        hosts
-            .hosts
-            .iter()
-            .flat_map(|host| {
-                host.read(cx)
-                    .agents
-                    .agents
-                    .iter()
-                    .filter(|agent| {
-                        agent.pubkey == self.pubkey
-                            && RelayOrigin::parse(&agent.relay_url)
-                                .is_ok_and(|origin| origin.http() == community)
-                    })
-                    .map(|agent| (host.clone(), agent.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        community_agents(&self.community.read(cx).origin, &self.pubkey, cx)
     }
 
     fn can_view_runtime(&self, cx: &App) -> bool {
@@ -1130,6 +1110,36 @@ impl Render for ProfilePanel {
                 ),
             )
     }
+}
+
+/// The viewer's agents with key `pubkey` on hosts serving the community at
+/// `origin` (`sameCommunityAgents`).
+pub fn community_agents(
+    origin: &RelayOrigin,
+    pubkey: &str,
+    cx: &App,
+) -> Vec<(Entity<HostConnection>, Agent)> {
+    let community = origin.http();
+    let Some(hosts) = cx.try_global::<Hosts>() else {
+        return Vec::new();
+    };
+    hosts
+        .hosts
+        .iter()
+        .flat_map(|host| {
+            host.read(cx)
+                .agents
+                .agents
+                .iter()
+                .filter(|agent| {
+                    agent.pubkey == pubkey
+                        && RelayOrigin::parse(&agent.relay_url)
+                            .is_ok_and(|origin| origin.http() == community)
+                })
+                .map(|agent| (host.clone(), agent.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// "Active", "Away" or "Offline".
