@@ -292,48 +292,48 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Agents2" primary page (`buzz.agents2`) | src/bundled/agents2/index.tsx:1-14; src/bundled/index.ts:175-178 | MISSING | Page, nav, and Agents2 service with native key custody | L |
-| Header: "Agents2" or the agent's name; back "All agents"; "New agent" | src/bundled/agents2/Agents2Page.tsx:169-199 | MISSING | — | S |
-| Unavailable, error ("Agents could not load") and empty ("No agents yet", two variants) states | Agents2Page.tsx:88-103, 143-161 | MISSING | — | S |
-| Tile grid (10rem): avatar, name, type summary or "Type unavailable"; dimmed when the type is missing | Agents2Page.tsx:52-60, 263-290 | MISSING | — | M |
-| Listbox keyboard model (arrows by column, Home/End, Enter opens Build, Escape deselects); click selects, double-click opens | Agents2Page.tsx:202-276 | MISSING | — | M |
-| Side panel (22rem, animated, reduced motion respected) | Agents2Page.module.css:2-27, 156-181 | MISSING | — | M |
-| Peek: avatar, "type · summary", Close, "Open", type Peek slot, "Enable the plugin…" note, "Wakes on" summary | Agents2Page.tsx:318-370; src/features/agents2/AttentionPanel.tsx:73-101 | MISSING | — | M |
-| New agent form: Name, Type radio cards, "Create and set up", error copy | Agents2Page.tsx:372-458; src/features/agents2/service.ts:339-363 | MISSING | — | M |
-| Build view: identity rail (avatar, inline rename, Type, Key + copy "Copied"), "Delete agent", tab host (type tabs then "Attention") | Agents2Page.tsx:460-574; src/bundled/agents2/AgentTabs.tsx; src/features/agents2/tabs.tsx | MISSING | — | M |
-| Delete dialog "Delete {name}?" and background cleanup (leave channels, archive, forget; retried on reconnect) | src/features/agents2/AgentManage.tsx:13-75; service.ts:493-597 | MISSING | — | M |
-| Agents2 tabs inside the profile panel and "Delete agent" there | src/bundled/profiles/ProfilePanel.tsx:181-190, 425-492 | MISSING | — | M |
+| "Agents2" primary page (`buzz.agents2`) | src/bundled/agents2/index.tsx:1-14; src/bundled/index.ts:175-178 | DONE (ui/agents2/mod.rs, app/src/agents2/service.rs, host/app_agents.rs) | Page, nav, and Agents2 service with native key custody | L |
+| Header: "Agents2" or the agent's name; back "All agents"; "New agent" | src/bundled/agents2/Agents2Page.tsx:169-199 | DONE (ui/agents2/page.rs) | — | S |
+| Unavailable, error ("Agents could not load") and empty ("No agents yet", two variants) states | Agents2Page.tsx:88-103, 143-161 | DONE (ui/agents2/page.rs) | — | S |
+| Tile grid (10rem): avatar, name, type summary or "Type unavailable"; dimmed when the type is missing | Agents2Page.tsx:52-60, 263-290 | DONE (ui/agents2/page.rs) | — | M |
+| Listbox keyboard model (arrows by column, Home/End, Enter opens Build, Escape deselects); click selects, double-click opens | Agents2Page.tsx:202-276 | DONE (ui/agents2/page.rs) | — | M |
+| Side panel (22rem, animated, reduced motion respected) | Agents2Page.module.css:2-27, 156-181 | DONE (ui/agents2/page.rs) | — | M |
+| Peek: avatar, "type · summary", Close, "Open", type Peek slot, "Enable the plugin…" note, "Wakes on" summary | Agents2Page.tsx:318-370; src/features/agents2/AttentionPanel.tsx:73-101 | DONE (ui/agents2/page.rs) | — | M |
+| New agent form: Name, Type radio cards, "Create and set up", error copy | Agents2Page.tsx:372-458; src/features/agents2/service.ts:339-363 | DONE (ui/agents2/page.rs) | — | M |
+| Build view: identity rail (avatar, inline rename, Type, Key + copy "Copied"), "Delete agent", tab host (type tabs then "Attention") | Agents2Page.tsx:460-574; src/bundled/agents2/AgentTabs.tsx; src/features/agents2/tabs.tsx | DONE (ui/agents2/page.rs, ui/agents2/tabs.rs) | — | M |
+| Delete dialog "Delete {name}?" and background cleanup (leave channels, archive, forget; retried on reconnect) | src/features/agents2/AgentManage.tsx:13-75; service.ts:493-597 | DONE (ui/agents2/manage.rs, app/src/agents2/cleanup.rs) | Cleanup reads a relay with no NIP-IA snapshot yet as "not archived" (buzz-app waits for one). | M |
+| Agents2 tabs inside the profile panel and "Delete agent" there | src/bundled/profiles/ProfilePanel.tsx:181-190, 425-492 | DONE (ui/agents2/mod.rs `profile_sections`, hooked in ui/workspace/companion.rs) | Only the viewer's own profile opens in the companion panel today, so the hook shows once the profile panel (channels.md) opens other people's profiles there. | M |
 
 ### 17-B. Attention editor (`src/features/agents2/AttentionPanel.tsx`, `attention.ts`, `store.ts`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Intro and the always-on "Mentions and replies" row | AttentionPanel.tsx:152-164 | MISSING | — | S |
-| Interest groups: title from slug, instructions, menu Edit/Remove (Remove guarded while used), inline edit, empty copy, "Add watch" / "Add timer" | AttentionPanel.tsx:230-384, 557-583 | MISSING | — | M |
-| Watch rows: icon, title, subtitle, on/off switch, "Edit JSON", Remove | AttentionPanel.tsx:416-515 | MISSING | — | M |
-| Timer rows: next run, ran X of N, until, "Ended", "Done…", "Run again" | AttentionPanel.tsx:386-414, 477-499; attention.ts:388-423 | MISSING | — | M |
-| "Without an interest" and "Skipped" sections | AttentionPanel.tsx:180-212, 517-555; store.ts:43-103 | MISSING | — | M |
-| JSON editor with full spec validation | AttentionPanel.tsx:586-633; attention.ts:68-243 | MISSING | — | M |
-| New interest, watch (Wake on, In, channels, text, replies, advanced filter grammar) and timer (Prompt, Every, Stop after, Until) forms | AttentionPanel.tsx:636-977; attention.ts:245-339 | MISSING | — | M |
-| Limits (100 interests / 100 watches+timers) and persistence `buzz.agents2.v1` | store.ts:38-173 | MISSING | — | S |
+| Intro and the always-on "Mentions and replies" row | AttentionPanel.tsx:152-164 | DONE (ui/agents2/attention.rs) | — | S |
+| Interest groups: title from slug, instructions, menu Edit/Remove (Remove guarded while used), inline edit, empty copy, "Add watch" / "Add timer" | AttentionPanel.tsx:230-384, 557-583 | DONE (ui/agents2/attention.rs) | — | M |
+| Watch rows: icon, title, subtitle, on/off switch, "Edit JSON", Remove | AttentionPanel.tsx:416-515 | DONE (ui/agents2/attention.rs) | — | M |
+| Timer rows: next run, ran X of N, until, "Ended", "Done…", "Run again" | AttentionPanel.tsx:386-414, 477-499; attention.ts:388-423 | DONE (ui/agents2/attention.rs) | — | M |
+| "Without an interest" and "Skipped" sections | AttentionPanel.tsx:180-212, 517-555; store.ts:43-103 | DONE (ui/agents2/attention.rs, app/src/agents2/store.rs) | — | M |
+| JSON editor with full spec validation | AttentionPanel.tsx:586-633; attention.ts:68-243 | DONE (ui/agents2/attention.rs, app/src/agents2/attention.rs) | — | M |
+| New interest, watch (Wake on, In, channels, text, replies, advanced filter grammar) and timer (Prompt, Every, Stop after, Until) forms | AttentionPanel.tsx:636-977; attention.ts:245-339 | DONE (ui/agents2/attention.rs, app/src/agents2/attention.rs) | "Until" is a `YYYY-MM-DD HH:MM` text field: there is no date-time picker in the design system yet. | M |
+| Limits (100 interests / 100 watches+timers) and persistence `buzz.agents2.v1` | store.ts:38-173 | DONE (app/src/agents2/store.rs) | — | S |
 
 ### 17-C. Agents2 runtime (`src/features/agents2/service.ts`, `native.ts`; `ST/app_agents.rs`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Agent-type registry (title, description, defaults, summary, Peek, tabs, run, timeout ≤30 min) | service.ts:135-154, 308-327 | MISSING | Extension mechanism | L |
-| Native custody: `app_agent_list` | ST/app_agents.rs:149-156 | MISSING | — | S |
-| Native custody: `app_agent_create` (generate key, owner attests, save atomically) | ST/app_agents.rs:157-185 | MISSING | — | M |
-| Native custody: `app_agent_rename` | ST/app_agents.rs:186-195 | MISSING | — | S |
-| Native custody: `app_agent_delete` / `app_agent_forget` | ST/app_agents.rs:196-222 | MISSING | — | S |
-| Native custody: `app_agent_publish` (bounded agent-signed event) | ST/app_agents.rs:223-235 | MISSING | — | S |
-| Native custody: `app_agent_publish_profile` | ST/app_agents.rs:236-267 | MISSING | — | S |
-| Native custody: `app_agent_query` (agent-authenticated relay read) | ST/app_agents.rs:268-313 | MISSING | — | S |
-| Native custody: `app_agent_upload` (agent-signed media upload) | ST/app_agents.rs:314-361 | MISSING | — | S |
-| Native custody: `app_agent_remember` (memory write) | ST/app_agents.rs:362-400 | MISSING | — | S |
-| Scoped to the selected community and owner; reload after changes | service.ts:442-488, 603-655 | MISSING | — | M |
-| Wake on mentions, DMs and replies; event watches; timers; never hears itself | attention.ts:341-386; service.ts:680-800 | MISSING | — | M |
-| Run queue (one per agent, queue 32, 60/min, deadline), same-owner loop guard, profile sync retried | service.ts:179-188, 490-597, 722-880 | MISSING | — | M |
+| Agent-type registry (title, description, defaults, summary, Peek, tabs, run, timeout ≤30 min) | service.ts:135-154, 308-327 | DONE (app/src/agents2/registry.rs, app/src/agents2/runtime.rs) | Extension mechanism | L |
+| Native custody: `app_agent_list` | ST/app_agents.rs:149-156 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_create` (generate key, owner attests, save atomically) | ST/app_agents.rs:157-185 | DONE (host/app_agents.rs) | — | M |
+| Native custody: `app_agent_rename` | ST/app_agents.rs:186-195 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_delete` / `app_agent_forget` | ST/app_agents.rs:196-222 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_publish` (bounded agent-signed event) | ST/app_agents.rs:223-235 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_publish_profile` | ST/app_agents.rs:236-267 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_query` (agent-authenticated relay read) | ST/app_agents.rs:268-313 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_upload` (agent-signed media upload) | ST/app_agents.rs:314-361 | DONE (host/app_agents.rs) | — | S |
+| Native custody: `app_agent_remember` (memory write) | ST/app_agents.rs:362-400 | DONE (host/app_agents.rs) | — | S |
+| Scoped to the selected community and owner; reload after changes | service.ts:442-488, 603-655 | DONE (app/src/agents2/service.rs) | — | M |
+| Wake on mentions, DMs and replies; event watches; timers; never hears itself | attention.ts:341-386; service.ts:680-800 | DONE (app/src/agents2/service.rs, app/src/agents2/attention.rs) | — | M |
+| Run queue (one per agent, queue 32, 60/min, deadline), same-owner loop guard, profile sync retried | service.ts:179-188, 490-597, 722-880 | DONE (app/src/agents2/service.rs) | — | M |
 
 ### 17-D/E/F. Agent Activity panel, transcript and data layer (`src/bundled/agent-activity/*`, `FA/activity*.ts`, `FA/observer.ts`)
 
