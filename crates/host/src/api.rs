@@ -183,6 +183,17 @@ pub enum Request {
         port: u16,
         target: String,
     },
+    // snapshots
+    /// Restores snapshot memory under agent `id`, which must be stopped and
+    /// created by this host with `owner`'s attestation. Each entry is
+    /// encrypted to `owner`, signed with the agent's key and published; the
+    /// GUI confirms them by reading the memories back with the owner key.
+    /// An empty `id` only asks whether this host can restore memory.
+    RestoreMemory {
+        id: String,
+        owner: String,
+        entries: Vec<MemoryRestore>,
+    },
 }
 
 // Responses are moved once, from the wire to their caller; boxing the
@@ -221,6 +232,13 @@ pub enum Response {
     Nonce(String),
     Log(String),
     SignInPage(SignInPage),
+    // snapshots
+    /// The memory events published, in entry order, and why the others
+    /// were not.
+    MemoryRestored {
+        published: Vec<RestoredMemory>,
+        errors: Vec<String>,
+    },
 }
 
 /// What an install did (buzz-app's `InstallReport`).
@@ -843,4 +861,23 @@ mod tests {
         let old: OldSnapshot = rmp_serde::from_slice(&wire(&snapshot)).unwrap();
         assert_eq!((old.seq, old.agents.len()), (7, 1));
     }
+}
+
+/// One snapshot memory entry to write.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MemoryRestore {
+    /// `core` or a `mem/...` path.
+    pub slug: String,
+    pub body: String,
+    /// When the agent already holds this slug: its entry's timestamp, so
+    /// the new event supersedes it.
+    pub after: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RestoredMemory {
+    pub slug: String,
+    pub event_id: String,
 }

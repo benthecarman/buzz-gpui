@@ -17,6 +17,7 @@ mod models;
 mod profile;
 mod setup;
 mod start;
+mod snapshot;
 
 use api::{
     AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
@@ -456,6 +457,9 @@ impl AgentHost {
                 edit,
                 auth,
             } => self.create_commit(request_id, edit, auth).await,
+            Request::RestoreMemory { id, owner, entries } => {
+                self.restore_memory(id, owner, entries).await
+            }
             Request::PublishProfile { id } => {
                 self.publish_profile(&id).await.map_err(RpcError::Failed)?;
                 self.run(|owner| owner.snapshot().map(Response::Agents))

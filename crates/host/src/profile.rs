@@ -11,7 +11,7 @@ use serde_json::Value;
 
 type Result<T> = std::result::Result<T, String>;
 
-fn authorization(event: Value) -> Result<String> {
+pub(crate) fn authorization(event: Value) -> Result<String> {
     let json = serde_json::to_vec(&event).map_err(|_| "Could not authorize profile request")?;
     Ok(format!(
         "Nostr {}",
@@ -19,7 +19,7 @@ fn authorization(event: Value) -> Result<String> {
     ))
 }
 
-async fn body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+pub(crate) async fn body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         return Err("Profile request refused; the profile stays pending".into());
     }
