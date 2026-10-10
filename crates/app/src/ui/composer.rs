@@ -109,6 +109,9 @@ pub struct Composer {
     capture: Option<Capture>,
     _capture_task: Option<Task<()>>,
     outsiders_focus: FocusHandle,
+    /// The agents the message being sent mentions as recipients, `(pubkey,
+    /// chip text)`, kept for the next draft ("Remember mentioned agents").
+    followup: Vec<(String, String)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -275,6 +278,7 @@ impl Composer {
             outsiders_focus: cx.focus_handle(),
             capture: None,
             _capture_task: None,
+            followup: Vec::new(),
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
@@ -380,8 +384,25 @@ impl Composer {
             }
         }
         self.completion = None;
-        self.input
-            .update(cx, |state, cx| state.set_value("", window, cx));
+        let followup = std::mem::take(&mut self.followup);
+        let next = if crate::ui::settings::remember_mentioned_agents(cx) {
+            let (text, chips) = crate::ui::settings::followup_draft(&followup);
+            let mut content = InputContent::new(text);
+            for (range, id, chip) in chips {
+                let token = InlineToken::new(id, chip);
+                if let Ok(next) = content.clone().with_token(range, token) {
+                    content = next;
+                }
+            }
+            content
+        } else {
+            InputContent::new(String::new())
+        };
+        let end = next.text().len();
+        self.input.update(cx, |state, cx| {
+            state.set_value(next, window, cx);
+            state.set_selected_range(end..end, cx);
+        });
         self.save_draft = None;
         self.write_draft(cx);
         cx.notify();
@@ -423,10 +444,14 @@ impl Composer {
             self.cancel_edit(window, cx);
             return;
         }
-        let mentioned: Vec<String> = self
-            .recipients(cx)
+        let chosen = self.recipients(cx);
+        let mentioned: Vec<String> = chosen.iter().map(|(key, _)| key.clone()).collect();
+        // Agents among the recipients, for the next draft.
+        let profiles = self.community.read(cx).snapshot.profiles.clone();
+        self.followup = chosen
             .into_iter()
-            .map(|(key, _)| key)
+            .filter(|(key, _)| profiles.get(key).is_some_and(|profile| profile.is_agent))
+            .map(|(key, name)| (key, format!("@{name}")))
             .collect();
         let attachments = if self.editing.is_some() {
             Vec::new()
