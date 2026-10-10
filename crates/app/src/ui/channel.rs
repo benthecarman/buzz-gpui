@@ -996,13 +996,18 @@ impl Render for ChannelPage {
         };
 
         let composer = self.composer_shell(cx);
-        let typing = typing::overlay(
-            &activity.humans,
-            Some(self.activity.clone()),
-            &profiles,
-            narrow,
-            cx,
-        );
+        // A saved conversation shows no one typing (`MessageComposer`).
+        let typing = (!self.channel.cached)
+            .then(|| {
+                typing::overlay(
+                    &activity.humans,
+                    Some(self.activity.clone()),
+                    &profiles,
+                    narrow,
+                    cx,
+                )
+            })
+            .flatten();
 
         let overlays = self
             .message_actions
