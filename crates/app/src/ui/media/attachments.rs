@@ -9,7 +9,7 @@ use super::review::{open_review, tile_hidden, track_tile};
 use super::video::OpenReview;
 use buzz_relay_client::fold::{Attachment, AttachmentKind, MessageRow};
 use buzz_relay_client::{EventId, Media, ThreadSnapshot};
-use buzz_ui::{ActiveTheme, Icon, IconName, Tooltip, TypeStyled};
+use buzz_ui::{ActiveTheme, Button, Icon, IconName, Tooltip, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::RefCell;
@@ -108,14 +108,23 @@ pub fn thread_media(snapshot: &ThreadSnapshot, media: &Media) -> RowMedia {
     }
 }
 
+/// Attachments of one kind in a row, with their index in the message.
+type Members<'a> = Vec<(usize, &'a Attachment)>;
+
 /// Attachments in send order; adjacent images share a strip and adjacent
 /// files a group (§4.7). Videos and audio stand alone.
 pub fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
-    let mut groups: Vec<(AttachmentKind, Vec<(usize, &Attachment)>)> = Vec::new();
+    // Agent and team snapshots stand apart (`kind` `None`).
+    let mut groups: Vec<(Option<AttachmentKind>, Members)> = Vec::new();
     for (index, attachment) in row.attachments.iter().enumerate() {
+        let kind = snapshot_kind(attachment)
+            .is_none()
+            .then_some(attachment.kind);
         match groups.last_mut() {
-            Some((kind, members)) if *kind == attachment.kind => members.push((index, attachment)),
-            _ => groups.push((attachment.kind, vec![(index, attachment)])),
+            Some((group, members)) if *group == kind && kind.is_some() => {
+                members.push((index, attachment))
+            }
+            _ => groups.push((kind, vec![(index, attachment)])),
         }
     }
     let c = *cx.colors();
@@ -124,6 +133,10 @@ pub fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Int
         .flex()
         .flex_col()
         .children(groups.into_iter().map(|(kind, members)| {
+            let Some(kind) = kind else {
+                let (index, attachment) = members[0];
+                return snapshot_card(row, index, attachment, rows, &c);
+            };
             if kind == AttachmentKind::Video {
                 div()
                     .flex()
@@ -371,6 +384,89 @@ fn image_tile(
         .into_any_element()
 }
 
+/// What an agent or team snapshot attachment imports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotKind {
+    Agent,
+    Team,
+}
+
+/// `snapshotAttachmentKind`: by the file name's double extension.
+pub fn snapshot_kind(attachment: &Attachment) -> Option<SnapshotKind> {
+    let name = attachment.name.as_deref()?;
+    if name.ends_with(".agent.png") || name.ends_with(".agent.json") {
+        Some(SnapshotKind::Agent)
+    } else if name.ends_with(".team.png") || name.ends_with(".team.json") {
+        Some(SnapshotKind::Team)
+    } else {
+        None
+    }
+}
+
+/// Opens the import preview for a snapshot attachment.
+pub type SnapshotPreview = Rc<dyn Fn(&Attachment, SnapshotKind, &mut Window, &mut App)>;
+
+thread_local! {
+    static SNAPSHOT_PREVIEW: RefCell<Option<SnapshotPreview>> = const { RefCell::new(None) };
+    static SNAPSHOT_ERRORS: RefCell<HashMap<String, String>> = RefCell::default();
+}
+
+/// Lets the agents page preview snapshot imports
+/// (`subscribeSnapshotPreview`). Until one is set, the button reports the
+/// preview unavailable, as buzz-app does without a listener.
+#[allow(dead_code)]
+pub fn set_snapshot_preview(preview: Option<SnapshotPreview>) {
+    SNAPSHOT_PREVIEW.with_borrow_mut(|slot| *slot = preview);
+}
+
+/// `SnapshotAttachment`: the file card, then "Add agent" or "Add team",
+/// disabled when the file cannot be fetched, and the preview's error.
+fn snapshot_card(
+    row: &Arc<MessageRow>,
+    index: usize,
+    attachment: &Attachment,
+    rows: &Rc<Rows>,
+    c: &buzz_ui::Colors,
+) -> AnyElement {
+    let kind = snapshot_kind(attachment).unwrap_or(SnapshotKind::Agent);
+    let available = !attachment.insecure;
+    let error = SNAPSHOT_ERRORS.with_borrow(|errors| errors.get(&attachment.url).cloned());
+    let item = attachment.clone();
+    div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(8.))
+        .child(file_tile(row, index, attachment, rows, c))
+        .child(
+            Button::new(
+                SharedString::from(format!("snapshot-{}-{index}", row.id.to_hex())),
+                match kind {
+                    SnapshotKind::Agent => "Add agent",
+                    SnapshotKind::Team => "Add team",
+                },
+            )
+            .disabled(!available)
+            .on_click(move |_, window, cx| {
+                SNAPSHOT_ERRORS.with_borrow_mut(|errors| errors.remove(&item.url));
+                match SNAPSHOT_PREVIEW.with_borrow(Clone::clone) {
+                    Some(preview) => preview(&item, kind, window, cx),
+                    None => SNAPSHOT_ERRORS.with_borrow_mut(|errors| {
+                        errors.insert(item.url.clone(), "Snapshot preview is unavailable.".into());
+                    }),
+                }
+                cx.refresh_windows();
+            }),
+        )
+        .children(error.map(|error| {
+            div()
+                .text_body_sm()
+                .text_color(c.text_standard)
+                .child(error)
+        }))
+        .into_any_element()
+}
+
 /// Files, and audio that does not play inline (`FileAttachment`): a card
 /// that saves relay media to Downloads without opening it, or opens other
 /// links. Plain-HTTP media cannot be fetched, so its card only says so.
@@ -523,5 +619,40 @@ mod tests {
             Some("PLAIN file")
         );
         assert_eq!(mime_label(Some("application/vnd.x+y")), None);
+    }
+
+    #[test]
+    fn recognizes_snapshots_by_name() {
+        let named = |name: &str| Attachment {
+            name: Some(name.into()),
+            ..attachment()
+        };
+        assert_eq!(
+            snapshot_kind(&named("Scout.agent.png")),
+            Some(SnapshotKind::Agent)
+        );
+        assert_eq!(
+            snapshot_kind(&named("crew.team.json")),
+            Some(SnapshotKind::Team)
+        );
+        assert_eq!(snapshot_kind(&named("agent.png")), None);
+        assert_eq!(snapshot_kind(&attachment()), None);
+    }
+
+    fn attachment() -> Attachment {
+        Attachment {
+            url: "https://relay.example/media/a.png".into(),
+            kind: AttachmentKind::Image,
+            mime: None,
+            size: None,
+            name: None,
+            duration: None,
+            waveform: None,
+            voice_note: false,
+            dimensions: None,
+            blurhash: None,
+            preview_url: None,
+            insecure: false,
+        }
     }
 }
