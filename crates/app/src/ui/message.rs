@@ -126,6 +126,8 @@ pub enum Command {
     },
     /// Retry a failed outbox operation (a reaction change).
     RetryOperation(EventId),
+    /// A registered message action, by key.
+    Action(String),
 }
 
 /// Which floating element of a row is open.
@@ -608,6 +610,7 @@ fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App)
             .tooltip(time_tooltip(row.created_at))
             .child(time::byline(row.created_at)),
     )
+    .children(renderers::markers(row, cx))
     .into_any_element()
 }
 
@@ -975,8 +978,8 @@ fn lift(glyph: AnyElement, group: SharedString, disabled: bool) -> impl IntoElem
 
 /// One more-menu row: its command, label, icon and whether it is off.
 struct Entry {
-    name: &'static str,
-    label: &'static str,
+    name: String,
+    label: String,
     icon: IconName,
     icon_size: f32,
     command: Command,
@@ -992,8 +995,8 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
     if managed {
         let unread = rows.menu.unread;
         entries.push(Entry {
-            name: "read-state",
-            label: if unread { "Mark read" } else { "Mark unread" },
+            name: "read-state".into(),
+            label: if unread { "Mark read" } else { "Mark unread" }.into(),
             icon: if unread {
                 IconName::EnvelopeOpen
             } else {
@@ -1009,8 +1012,8 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         });
     }
     entries.push(Entry {
-        name: "copy",
-        label: "Copy message",
+        name: "copy".into(),
+        label: "Copy message".into(),
         icon: IconName::Copy,
         icon_size: 16.,
         command: Command::CopyMessage,
@@ -1025,8 +1028,8 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         && delivered
     {
         entries.push(Entry {
-            name: "send-to-channel",
-            label: "Send to channel",
+            name: "send-to-channel".into(),
+            label: "Send to channel".into(),
             icon: IconName::HashArrowIn,
             icon_size: 16.,
             command: Command::SendToChannel,
@@ -1038,8 +1041,8 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         let busy = rows.ops.changing(row.id);
         if own && editable(row) {
             entries.push(Entry {
-                name: "edit",
-                label: "Edit message",
+                name: "edit".into(),
+                label: "Edit message".into(),
                 icon: IconName::PencilSimple,
                 icon_size: 14.,
                 command: Command::Edit,
@@ -1048,8 +1051,8 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         }
         if own || rows.owns_agent(row) {
             entries.push(Entry {
-                name: "delete",
-                label: "Delete message",
+                name: "delete".into(),
+                label: "Delete message".into(),
                 icon: IconName::Trash,
                 icon_size: 14.,
                 command: Command::Delete,
@@ -1059,11 +1062,11 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         if !rows.dm() {
             let following = rows.menu.following;
             entries.push(Entry {
-                name: "follow",
+                name: "follow".into(),
                 label: if following {
-                    "Unfollow thread"
+                    "Unfollow thread".into()
                 } else {
-                    "Follow thread"
+                    "Follow thread".into()
                 },
                 icon: if following {
                     IconName::BellSlash
@@ -1076,10 +1079,22 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
             });
         }
     }
+    if rows.actions.on_command.is_some() {
+        for action in renderers::actions(row) {
+            entries.push(Entry {
+                name: format!("action-{}", action.key()),
+                label: action.title().to_string(),
+                icon: action.icon().unwrap_or(IconName::DotsThree),
+                icon_size: 16.,
+                command: Command::Action(action.key().to_string()),
+                disabled: false,
+            });
+        }
+    }
     if row.membership.is_none() && delivered && rows.actions.on_command.is_some() {
         entries.push(Entry {
-            name: "report",
-            label: "Report",
+            name: "report".into(),
+            label: "Report".into(),
             icon: IconName::Flag,
             icon_size: 16.,
             command: Command::Report,
@@ -1104,7 +1119,7 @@ fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>, _cx: &App) -> AnyElement {
         menu = menu.child(
             MenuItem::new(
                 SharedString::from(format!("{}-{id}", entry.name)),
-                entry.label,
+                entry.label.clone(),
             )
             .icon(entry.icon)
             .icon_size(entry.icon_size)

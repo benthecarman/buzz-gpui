@@ -657,6 +657,7 @@ impl MessageActions {
             }
             Command::Reply => (self.hooks.reply)(row, window, cx),
             Command::React { content, emoji } => self.react(row, content, emoji, window, cx),
+            Command::Action(key) => super::renderers::run_action(&key, &row, window, cx),
             Command::RetryOperation(id) => {
                 cx.foreground_executor()
                     .spawn(async move {

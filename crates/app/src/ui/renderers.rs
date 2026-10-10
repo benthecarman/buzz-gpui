@@ -48,6 +48,21 @@ pub trait InlineRenderer {
     ) -> Option<AnyElement>;
 }
 
+/// A message action (`MessageActionContribution`): a more-menu item, and
+/// optionally a marker after the byline, such as a reminder's.
+pub trait MessageAction {
+    fn key(&self) -> &str;
+    fn title(&self) -> &str;
+    fn icon(&self) -> Option<buzz_ui::IconName> {
+        None
+    }
+    fn matches(&self, row: &MessageRow) -> bool;
+    fn run(&self, row: &Arc<MessageRow>, window: &mut Window, cx: &mut App);
+    fn marker(&self, _: &MessageRow, _: &App) -> Option<AnyElement> {
+        None
+    }
+}
+
 /// Replaces an attachment's player (voice notes use one).
 pub trait AttachmentRenderer {
     fn key(&self) -> &str;
@@ -67,6 +82,7 @@ struct Registry {
     links: Vec<Rc<dyn LinkRenderer>>,
     inline: Vec<Rc<dyn InlineRenderer>>,
     attachments: Vec<Rc<dyn AttachmentRenderer>>,
+    actions: Vec<Rc<dyn MessageAction>>,
 }
 
 thread_local! {
@@ -80,6 +96,7 @@ fn bundled() -> Registry {
         links: Vec::new(),
         inline: vec![Rc::new(Emoji)],
         attachments: vec![Rc::new(VoiceNotes)],
+        actions: Vec::new(),
     }
 }
 
@@ -103,6 +120,38 @@ pub fn register_inline(renderer: Rc<dyn InlineRenderer>) {
 #[allow(dead_code)]
 pub fn register_attachment(renderer: Rc<dyn AttachmentRenderer>) {
     REGISTRY.with_borrow_mut(|r| r.attachments.push(renderer));
+}
+
+#[allow(dead_code)]
+pub fn register_action(action: Rc<dyn MessageAction>) {
+    REGISTRY.with_borrow_mut(|r| r.actions.push(action));
+}
+
+/// The actions that apply to `row`; a matcher that fails leaves the menu
+/// usable.
+pub fn actions(row: &MessageRow) -> Vec<Rc<dyn MessageAction>> {
+    let all = REGISTRY.with_borrow(|r| r.actions.clone());
+    all.into_iter()
+        .filter(|a| catch_unwind(AssertUnwindSafe(|| a.matches(row))).unwrap_or(false))
+        .collect()
+}
+
+/// Runs the action `key` on `row`.
+pub fn run_action(key: &str, row: &Arc<MessageRow>, window: &mut Window, cx: &mut App) {
+    if let Some(action) = actions(row).into_iter().find(|a| a.key() == key) {
+        let _ = guarded(action.key(), || {
+            action.run(row, window, cx);
+            Some(())
+        });
+    }
+}
+
+/// The byline markers actions draw for `row`.
+pub fn markers(row: &MessageRow, cx: &App) -> Vec<AnyElement> {
+    actions(row)
+        .into_iter()
+        .filter_map(|a| guarded(a.key(), || a.marker(row, cx)))
+        .collect()
 }
 
 /// Runs a contribution; a panic counts as declining.
