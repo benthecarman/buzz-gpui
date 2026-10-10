@@ -175,6 +175,9 @@ pub struct SettingsPage {
     update_state: updates::UpdateState,
     /// The open plugin card's view and the community it was made for.
     card: Option<(&'static str, Option<EntityId>, AnyView)>,
+    /// Card visibility checks run while the page shows; a changed answer
+    /// re-lists the sidebar.
+    _card_checks: (Vec<Subscription>, Subscription),
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -198,6 +201,10 @@ impl SettingsPage {
             shortcuts: None,
             update_state: updates::UpdateState::default(),
             card: None,
+            _card_checks: (
+                cards::retain_visibility(cx),
+                cards::observe(window, cx, |this, _, cx| this.fall_back(cx)),
+            ),
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -231,9 +238,13 @@ impl SettingsPage {
             })
         });
         self.sync_profile(window, cx);
-        // A section no longer listed falls back to the default
-        // (`Settings.tsx`), e.g. Custom emoji once no community is chosen.
-        let has_community = community.is_some();
+        self.fall_back(cx);
+    }
+
+    /// A section no longer listed falls back to the default
+    /// (`Settings.tsx`), e.g. Custom emoji once no community is chosen.
+    fn fall_back(&mut self, cx: &mut Context<Self>) {
+        let has_community = AppState::current(cx).is_some();
         if !self.section.listed(has_community, cx) {
             self.open(Section::default_for(has_community), cx);
         }

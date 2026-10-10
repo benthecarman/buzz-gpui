@@ -7,9 +7,6 @@
 //! named account-level group, and lists it only while its visibility says
 //! so.
 
-// Slices that register cards use the rest; until each does, parts are idle.
-#![allow(dead_code)]
-
 use buzz_ui::IconName;
 use gpui_kit::*;
 
@@ -53,11 +50,11 @@ pub struct SettingsCard {
 }
 
 impl SettingsCard {
-    pub fn plugin(&self) -> &'static str {
-        self.key.split('/').next().unwrap_or(self.key)
-    }
-
+    /// Hidden while its plugin is switched off in Settings → Plugins.
     pub fn visibility(&self, cx: &App) -> CardVisibility {
+        if !crate::plugins::enabled_key(self.key) {
+            return CardVisibility::Hidden;
+        }
         self.visibility
             .map_or(CardVisibility::Visible, |visibility| visibility(cx))
     }
@@ -72,8 +69,12 @@ impl SettingsCard {
     }
 }
 
+/// Starts a card's visibility check and holds it until the subscription
+/// drops (`visibility.ensure`).
+pub type EnsureVisibility = fn(&mut App) -> Subscription;
+
 #[derive(Default)]
-struct SettingsCards(Vec<SettingsCard>);
+struct SettingsCards(Vec<SettingsCard>, Vec<(&'static str, EnsureVisibility)>);
 
 impl Global for SettingsCards {}
 
@@ -82,6 +83,41 @@ pub fn register(card: SettingsCard, cx: &mut App) {
     let cards = &mut cx.default_global::<SettingsCards>().0;
     cards.retain(|existing| existing.key != card.key);
     cards.push(card);
+}
+
+/// Gives the card `key` a visibility check that runs while the settings
+/// page shows, such as reading a roster to learn the viewer's role. The
+/// check calls [`changed`] when its answer may have moved.
+pub fn register_check(key: &'static str, ensure: EnsureVisibility, cx: &mut App) {
+    let checks = &mut cx.default_global::<SettingsCards>().1;
+    checks.retain(|(existing, _)| *existing != key);
+    checks.push((key, ensure));
+}
+
+/// Holds every card's visibility check while the settings navigation is
+/// shown (`retainVisibility`).
+pub fn retain_visibility(cx: &mut App) -> Vec<Subscription> {
+    let checks = cx
+        .try_global::<SettingsCards>()
+        .map(|cards| cards.1.clone())
+        .unwrap_or_default();
+    checks.into_iter().map(|(_, ensure)| ensure(cx)).collect()
+}
+
+/// Tells the settings page that a card's visibility may have changed.
+pub fn changed(cx: &mut App) {
+    cx.default_global::<SettingsCards>();
+    cx.update_global::<SettingsCards, _>(|_, _| {});
+}
+
+/// Calls `f` when a card is registered or its visibility may have changed.
+pub fn observe<T: 'static>(
+    window: &mut Window,
+    cx: &mut Context<T>,
+    f: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+) -> Subscription {
+    cx.default_global::<SettingsCards>();
+    cx.observe_global_in::<SettingsCards>(window, f)
 }
 
 /// Every registered card, in registration order.
@@ -95,7 +131,8 @@ pub fn get(key: &str, cx: &App) -> Option<SettingsCard> {
     all(cx).into_iter().find(|card| card.key == key)
 }
 
-/// The cards the sidebar lists now.
+/// The cards the sidebar lists now: their plugin is on and their check
+/// passes.
 pub fn visible(cx: &App) -> Vec<SettingsCard> {
     all(cx)
         .into_iter()
@@ -144,10 +181,9 @@ mod tests {
     }
 
     #[test]
-    fn placement_picks_the_default_icon_and_plugin_comes_from_the_key() {
+    fn placement_picks_the_default_icon() {
         let admin = card("buzz.moderation/membership", CardPlacement::Administration);
         assert_eq!(admin.sidebar_icon(), Some(IconName::Users));
-        assert_eq!(admin.plugin(), "buzz.moderation");
         assert_eq!(
             card("x/y", CardPlacement::Group("Account")).sidebar_icon(),
             None
