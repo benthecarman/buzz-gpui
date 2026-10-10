@@ -321,6 +321,33 @@ pub const HOST: &[HostShortcut] = &[
     },
 ];
 
+/// A shortcut a bundled plugin contributes (`ctx.shortcuts.register`).
+/// Host chords win over these, as buzz-app's dispatcher reserves them.
+pub struct PluginShortcut {
+    /// `pluginId/id`, the contribution key the saved override uses.
+    pub key: &'static str,
+    /// The plugin's name, which Settings groups the row under.
+    pub plugin: &'static str,
+    pub title: &'static str,
+    /// Presentation order within the plugin's group.
+    order: u32,
+    pub defaults: &'static [Binding],
+    action: fn() -> Box<dyn Action>,
+    /// The channel panel it toggles, whose header launcher names the chord.
+    pub panel: Option<&'static str>,
+}
+
+/// The bundled plugins' shortcuts.
+pub const PLUGINS: &[PluginShortcut] = &[PluginShortcut {
+    key: "buzz.terminal/toggle",
+    plugin: "Terminal",
+    title: "Toggle channel terminal",
+    order: 10,
+    defaults: &[Binding::primary("j")],
+    action: || Box::new(crate::ui::terminal::ToggleTerminal),
+    panel: Some(crate::ui::terminal::PANEL),
+}];
+
 /// Copy, paste, cut and select all: a shortcut there would take them
 /// from every field.
 const CLIPBOARD_CHORDS: &[Binding] = &[
@@ -362,9 +389,10 @@ pub struct Row {
     pub effective: Vec<Binding>,
 }
 
-/// Every host shortcut with its override applied, in Settings order.
+/// Every host and plugin shortcut with its override applied, in Settings
+/// order: Buzz's group, then each plugin's by name.
 pub fn rows(overrides: &Overrides, desktop: bool) -> Vec<Row> {
-    let mut rows: Vec<(u32, Row)> = HOST
+    let mut rows: Vec<((&str, u32), Row)> = HOST
         .iter()
         .map(|shortcut| {
             let override_ = overrides.get(shortcut.id).cloned();
@@ -386,9 +414,26 @@ pub fn rows(overrides: &Overrides, desktop: bool) -> Vec<Row> {
                 override_,
                 effective,
             };
-            (shortcut.order, row)
+            (("", shortcut.order), row)
         })
         .collect();
+    rows.extend(PLUGINS.iter().map(|shortcut| {
+        let override_ = overrides.get(shortcut.key).cloned();
+        let effective = match &override_ {
+            Some(binding) => vec![binding.clone()],
+            None => shortcut.defaults.to_vec(),
+        };
+        let row = Row {
+            key: shortcut.key,
+            title: shortcut.title,
+            owner: shortcut.plugin,
+            read_only: false,
+            defaults: shortcut.defaults,
+            override_,
+            effective,
+        };
+        ((shortcut.plugin, shortcut.order), row)
+    }));
     rows.sort_by(|(a, x), (b, y)| a.cmp(b).then(x.key.cmp(y.key)).then(x.title.cmp(y.title)));
     rows.into_iter().map(|(_, row)| row).collect()
 }
@@ -572,11 +617,28 @@ pub fn text(id: &str, cx: &App) -> String {
     let binding = Shortcuts::overrides(cx).get(id).or_else(|| {
         HOST.iter()
             .find(|shortcut| shortcut.id == id)
-            .and_then(|shortcut| shortcut.defaults.first())
+            .map(|shortcut| shortcut.defaults)
+            .or_else(|| {
+                PLUGINS
+                    .iter()
+                    .find(|shortcut| shortcut.key == id)
+                    .map(|shortcut| shortcut.defaults)
+            })
+            .and_then(|defaults| defaults.first())
     });
     binding
         .map(|binding| binding.text(APPLE))
         .unwrap_or_default()
+}
+
+/// The chord that toggles a channel panel, for its launcher's tooltip
+/// ("Terminal (Ctrl+J)").
+pub fn panel_chord(panel: &str, cx: &App) -> Option<String> {
+    PLUGINS
+        .iter()
+        .find(|shortcut| shortcut.panel == Some(panel))
+        .map(|shortcut| text(shortcut.key, cx))
+        .filter(|chord| !chord.is_empty())
 }
 
 fn commit(overrides: Overrides, cx: &mut App) {
@@ -621,7 +683,9 @@ fn keymap_bindings<'a>(
 ) -> Vec<KeyBinding> {
     let host: HashSet<TypeId> = HOST
         .iter()
-        .map(|shortcut| (shortcut.action)().as_any().type_id())
+        .map(|shortcut| shortcut.action)
+        .chain(PLUGINS.iter().map(|shortcut| shortcut.action))
+        .map(|action| action().as_any().type_id())
         .collect();
     let mut bindings: Vec<KeyBinding> = existing
         .filter(|binding| {
@@ -633,7 +697,13 @@ fn keymap_bindings<'a>(
         let action = HOST
             .iter()
             .find(|shortcut| shortcut.id == row.key)
-            .map(|shortcut| shortcut.action);
+            .map(|shortcut| shortcut.action)
+            .or_else(|| {
+                PLUGINS
+                    .iter()
+                    .find(|shortcut| shortcut.key == row.key)
+                    .map(|shortcut| shortcut.action)
+            });
         let Some(action) = action else { continue };
         for binding in &row.effective {
             match KeyBinding::load(
@@ -707,8 +777,12 @@ mod tests {
                 "Search this conversation",
                 "Open Settings",
                 "Close tab or window",
+                "Toggle channel terminal",
             ]
         );
+        let terminal = row(&rows, "buzz.terminal/toggle");
+        assert_eq!(terminal.owner, "Terminal");
+        assert_eq!(terminal.effective[0].text(false), "Ctrl+J");
         let read_only: Vec<_> = rows.iter().filter(|r| r.read_only).map(|r| r.key).collect();
         assert_eq!(read_only, ["close-tab"]);
     }
@@ -961,8 +1035,13 @@ mod tests {
             Some("buzz_ui::IncreaseInterfaceSize")
         );
         assert_eq!(action(&defaults, "ctrl-q"), Some("buzz_ui::Cancel"));
-        // The stale app-wide binding goes; the others stay, beside 13 chords.
-        assert_eq!(defaults.bindings().count(), 2 + 13);
+        assert_eq!(
+            action(&defaults, "ctrl-j"),
+            Some("buzz_terminal::ToggleTerminal")
+        );
+        // The stale app-wide binding goes; the others stay, beside 13 host
+        // chords and the terminal's.
+        assert_eq!(defaults.bindings().count(), 2 + 13 + 1);
         let mut overrides = Overrides::new();
         overrides.insert("settings".into(), Binding::primary(";"));
         let rebound = Keymap::new(keymap_bindings(defaults.bindings(), &overrides));

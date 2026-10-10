@@ -1,5 +1,5 @@
 //! Settings → Shortcuts (§5b.5 item 4; `ShortcutSettings.tsx`): every
-//! host shortcut from the live registry, rebound by pressing a new chord
+//! host and plugin shortcut from the live registry, grouped by owner, rebound by pressing a new chord
 //! (`KeyCaptureControl.tsx`), with per-row and global resets and the
 //! save error's retry.
 
@@ -259,10 +259,15 @@ impl Render for ShortcutSettings {
         let modified = !overrides.is_empty();
         let rows = shortcuts::rows(overrides, DESKTOP);
         let error = Shortcuts::error(cx);
-        let items = rows
-            .iter()
-            .map(|row| self.row(row, &rows, window, cx))
-            .collect();
+        // Rows come grouped by owner: Buzz, then each plugin.
+        let mut groups: Vec<(&'static str, Vec<AnyElement>)> = Vec::new();
+        for row in &rows {
+            let item = self.row(row, &rows, window, cx);
+            match groups.last_mut() {
+                Some((owner, items)) if *owner == row.owner => items.push(item),
+                _ => groups.push((row.owner, vec![item])),
+            }
+        }
         section(vec![
             header("Shortcuts", None, cx).into_any_element(),
             div()
@@ -271,8 +276,14 @@ impl Render for ShortcutSettings {
                 .gap(rems(1.25))
                 .child(
                     div()
-                        .child(inline_header("Buzz", None, Vec::new(), cx))
-                        .child(rows_group(items, cx)),
+                        .flex()
+                        .flex_col()
+                        .gap(rems(2.))
+                        .children(groups.into_iter().map(|(owner, items)| {
+                            div()
+                                .child(inline_header(owner, None, Vec::new(), cx))
+                                .child(rows_group(items, cx))
+                        })),
                 )
                 .child(
                     div()

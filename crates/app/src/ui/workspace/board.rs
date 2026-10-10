@@ -199,10 +199,14 @@ impl Workspace {
             .map(|(panel, launcher)| {
                 let weak = cx.entity().downgrade();
                 let key = panel.key;
+                let label = match crate::shortcuts::panel_chord(key, cx) {
+                    Some(chord) => format!("{} ({chord})", panel.title).into(),
+                    None => launcher.label.into(),
+                };
                 Launcher {
                     key,
                     icon: launcher.icon,
-                    label: launcher.label,
+                    label,
                     pressed: self.drawer.as_ref().is_some_and(|drawer| drawer.key == key),
                     toggle: Rc::new(move |window, cx| {
                         let panel = panel.clone();

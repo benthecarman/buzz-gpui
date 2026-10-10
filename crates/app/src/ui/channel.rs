@@ -117,7 +117,8 @@ pub struct ChannelPage {
 pub struct Launcher {
     pub key: &'static str,
     pub icon: IconName,
-    pub label: &'static str,
+    /// The tooltip, with the panel's shortcut when it has one.
+    pub label: SharedString,
     pub pressed: bool,
     pub toggle: PaneToggle,
 }
@@ -908,7 +909,7 @@ impl Render for ChannelPage {
                 launcher.icon,
             )
             .size(IconButtonSize::Sm)
-            .tooltip(launcher.label)
+            .tooltip(launcher.label.clone())
             .selected(launcher.pressed)
             .on_click(move |_, window, cx| toggle(window, cx))
         });
