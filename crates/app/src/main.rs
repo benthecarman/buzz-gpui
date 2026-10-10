@@ -16,6 +16,7 @@ mod shortcuts;
 mod sign_out;
 #[cfg(unix)]
 mod single_instance;
+mod snapshot;
 mod sounds;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod tray;

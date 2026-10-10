@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 blurhash = "0.2"
 buzz-agent-controller.workspace = true
 buzz-credential-store.workspace = true
@@ -40,10 +41,12 @@ gstreamer-video = "0.25"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 markdown = "1"
 nostr = { version = "=0.45.5", default-features = false, features = ["std"] }
+regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # The launch mark's SMIL tracks.
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 toml = "0.9"
 toml_edit = "0.25"
