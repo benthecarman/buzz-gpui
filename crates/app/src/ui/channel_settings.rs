@@ -9,6 +9,7 @@
 //! Escape inside the panel also calls.
 
 use super::form_fields::{self, Bounded};
+use super::outbox_status::OutboxStatus;
 use super::overlay::{self, Dismiss};
 use super::sidebar::channel_label;
 use crate::community::Community;
@@ -428,6 +429,9 @@ pub struct ChannelSettingsPanel {
     lifecycle: Lifecycle,
     confirm: Option<(Entity<LifecycleDialog>, Subscription)>,
     copied: bool,
+    /// The Diagnostics disclosure and the session outbox inside it.
+    diagnostics: bool,
+    outbox: Entity<OutboxStatus>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -509,6 +513,8 @@ impl ChannelSettingsPanel {
                 this.sync(window, cx)
             }),
         ];
+        let session = community.read(cx).session.clone();
+        let outbox = cx.new(|cx| OutboxStatus::new(session, cx));
         let mut panel = Self {
             community,
             channel_id,
@@ -527,6 +533,8 @@ impl ChannelSettingsPanel {
             lifecycle: Lifecycle::default(),
             confirm: None,
             copied: false,
+            diagnostics: false,
+            outbox,
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -1028,6 +1036,36 @@ impl ChannelSettingsPanel {
         )
     }
 
+    /// "Diagnostics", closed by default, holding the session outbox.
+    fn diagnostics(&self, cx: &mut Context<Self>) -> Div {
+        let c = cx.colors();
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::S4)
+            .pt(space::S6)
+            .child(
+                div()
+                    .id("settings-diagnostics")
+                    .flex()
+                    .items_center()
+                    .gap(space::S1)
+                    .cursor_pointer()
+                    .text_color(c.text_subtle)
+                    .child(Icon::new(if self.diagnostics {
+                        IconName::CaretDown
+                    } else {
+                        IconName::CaretRight
+                    }))
+                    .child("Diagnostics")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.diagnostics = !this.diagnostics;
+                        cx.notify();
+                    })),
+            )
+            .when(self.diagnostics, |this| this.child(self.outbox.clone()))
+    }
+
     fn lifecycle_actions(&self, cx: &mut Context<Self>) -> Div {
         let state = &self.lifecycle;
         let permissions = match &state.permissions {
@@ -1434,6 +1472,7 @@ impl Render for ChannelSettingsPanel {
             .text_body_sm()
             .text_color(c.text_standard)
             .children(content)
+            .child(self.diagnostics(cx))
             .children(editor)
             .children(confirm)
     }

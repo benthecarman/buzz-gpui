@@ -41,6 +41,7 @@ mod new_message;
 mod notice;
 mod onboarding;
 mod outbox_ops;
+mod outbox_status;
 mod overlay;
 pub mod pages;
 mod panels;
