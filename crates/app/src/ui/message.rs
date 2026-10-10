@@ -818,40 +818,51 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
                 });
                 let glyph = match &quick.image {
                     Some(url) => img(media::image(url, &rows.directory.media))
-                        .size(px(16.))
+                        .size_full()
                         .object_fit(ObjectFit::Contain)
                         .into_any_element(),
-                    None => div()
-                        .text_size(px(14.))
-                        .child(content.clone())
-                        .into_any_element(),
+                    None => div().child(content.clone()).into_any_element(),
                 };
                 let (rows2, target) = (rows.clone(), row.clone());
                 let group = SharedString::from(format!("quick-{index}-{id}"));
+                let (hover, down, up) = (group.clone(), group.clone(), group.clone());
                 bar = bar.child(
-                    div().group(group.clone()).child(
-                        IconButton::new(group.clone(), IconName::Smiley)
-                            .size(IconButtonSize::Sm)
-                            .surface(Surface::Floating)
-                            .disabled(busy)
-                            .selected(mine)
-                            .child(lift(glyph, group, busy))
-                            .tooltip(format!(
-                                "{} {content}",
-                                if mine { "Remove" } else { "React with" }
-                            ))
-                            .on_click(move |_, window, cx| {
-                                rows2.command(
-                                    &target,
-                                    Command::React {
-                                        content: content.clone(),
-                                        emoji: custom.clone(),
-                                    },
-                                    window,
-                                    cx,
-                                )
-                            }),
-                    ),
+                    div()
+                        .id(SharedString::from(format!("{group}-pointer")))
+                        .on_hover(move |hovered, window, _| {
+                            // Leaving ends a press as the pointer lets go.
+                            let down = (!*hovered).then_some(false);
+                            set_pose(&hover, Some(*hovered), down, window)
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            set_pose(&down, None, Some(true), window)
+                        })
+                        .on_mouse_up(MouseButton::Left, move |_, window, _| {
+                            set_pose(&up, None, Some(false), window)
+                        })
+                        .child(
+                            IconButton::new(group.clone(), IconName::Smiley)
+                                .size(IconButtonSize::Sm)
+                                .surface(Surface::Floating)
+                                .disabled(busy)
+                                .selected(mine)
+                                .child(lift(glyph, group, busy, cx))
+                                .tooltip(format!(
+                                    "{} {content}",
+                                    if mine { "Remove" } else { "React with" }
+                                ))
+                                .on_click(move |_, window, cx| {
+                                    rows2.command(
+                                        &target,
+                                        Command::React {
+                                            content: content.clone(),
+                                            emoji: custom.clone(),
+                                        },
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                        ),
                 );
             }
         }
@@ -975,17 +986,117 @@ fn measure_top(top: Rc<Cell<f32>>) -> impl IntoElement {
     .inset_0()
 }
 
+/// A quick reaction's pointer state, which its glyph eases toward.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Press {
+    #[default]
+    Rest,
+    Hover,
+    Down,
+}
+
+impl Press {
+    /// `(scale, rise)`: lifted 1px and 12% larger under the pointer,
+    /// 96% while pressed.
+    fn pose(self) -> (f32, f32) {
+        match self {
+            Press::Rest => (1., 0.),
+            Press::Hover => (1.12, 1.),
+            Press::Down => (0.96, 0.),
+        }
+    }
+}
+
+/// Each quick reaction's pose: where its glyph eases from and to, and
+/// which change it is, so a new change starts a new 120ms ease.
+#[derive(Clone, Copy)]
+struct Pose {
+    from: (f32, f32),
+    to: Press,
+    hovered: bool,
+    down: bool,
+    change: u64,
+}
+
+impl Default for Pose {
+    fn default() -> Self {
+        Self {
+            from: Press::Rest.pose(),
+            to: Press::Rest,
+            hovered: false,
+            down: false,
+            change: 0,
+        }
+    }
+}
+
+thread_local! {
+    static POSES: std::cell::RefCell<HashMap<SharedString, Pose>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn pose(group: &SharedString) -> Pose {
+    POSES.with_borrow(|poses| poses.get(group).copied().unwrap_or_default())
+}
+
+/// Eases a glyph toward its new pointer state, from its last target.
+fn set_pose(group: &SharedString, hovered: Option<bool>, down: Option<bool>, window: &mut Window) {
+    POSES.with_borrow_mut(|poses| {
+        if poses.len() > 256 {
+            poses.clear();
+        }
+        let pose = poses.entry(group.clone()).or_default();
+        if let Some(hovered) = hovered {
+            pose.hovered = hovered;
+        }
+        if let Some(down) = down {
+            pose.down = down;
+        }
+        let to = match (pose.hovered, pose.down) {
+            (true, true) => Press::Down,
+            (true, false) => Press::Hover,
+            (false, _) => Press::Rest,
+        };
+        if to != pose.to {
+            pose.from = pose.to.pose();
+            pose.to = to;
+            pose.change += 1;
+            window.refresh();
+        }
+    });
+}
+
 /// A quick reaction's glyph: lifts 1px and grows 12% under the pointer,
-/// presses to 96%, over 120ms.
-fn lift(glyph: AnyElement, group: SharedString, disabled: bool) -> impl IntoElement {
-    div()
+/// presses to 96%, easing over 120ms. Reduced motion keeps it still.
+fn lift(glyph: AnyElement, group: SharedString, disabled: bool, cx: &App) -> AnyElement {
+    let base = div()
+        .relative()
         .flex()
         .items_center()
         .justify_center()
-        .when(!disabled, |d| {
-            d.group_hover(group, |s| s.mt(px(-2.)).text_size(px(15.7)))
-        })
-        .child(glyph)
+        .size(px(16.))
+        .text_size(px(14.))
+        .child(glyph);
+    if disabled || cx.reduce_motion() {
+        return base.into_any_element();
+    }
+    let pose = pose(&group);
+    let (from, to) = (pose.from, pose.to.pose());
+    base.with_animation(
+        ElementId::Name(format!("{group}-pose-{}", pose.change).into()),
+        Animation::new(Duration::from_millis(120)).with_easing(|t| {
+            buzz_ui::tokens::easing::cubic_bezier(buzz_ui::tokens::easing::ENTER, t)
+        }),
+        move |glyph, t| {
+            let scale = from.0 + (to.0 - from.0) * t;
+            let rise = from.1 + (to.1 - from.1) * t;
+            glyph
+                .top(px(-rise))
+                .size(px(16. * scale))
+                .text_size(px(14. * scale))
+        },
+    )
+    .into_any_element()
 }
 
 /// One more-menu row: its command, label, icon and whether it is off.
