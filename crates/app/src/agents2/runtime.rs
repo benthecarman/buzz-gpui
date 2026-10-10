@@ -2,6 +2,9 @@
 //! its custody host, its config and a cancellation signal
 //! (buzz-app's `Delivery`, `AgentHandle` and `Trigger`).
 
+// The type API: agent types compiled in elsewhere use what the app does not.
+#![allow(dead_code)]
+
 use super::attention::{EventData, EventWatch, Interest, TimerWatch};
 use buzz_host::api::{
     AppAgentEvent, AppAgentRequest, AppAgentResponse, HostProtocol, Request, Response,

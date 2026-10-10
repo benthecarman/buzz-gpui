@@ -91,7 +91,6 @@ struct Binding {
     /// Ends work started for this binding when it is replaced.
     generation: u64,
     _events: Task<()>,
-    _observe: Subscription,
 }
 
 struct Job {
@@ -106,6 +105,12 @@ pub(crate) struct CompiledWatch {
     classifier_not_run: bool,
     filter: Option<Predicate>,
 }
+
+/// The watches compiled for one attention set.
+type Compiled = (
+    Arc<BTreeMap<String, AttentionObject>>,
+    Arc<Vec<CompiledWatch>>,
+);
 
 /// One agent's runtime, for as long as its identity exists. Edits do not
 /// replace it: each job reads the agent as it is when the job starts.
@@ -122,10 +127,7 @@ struct Runner {
     /// Events seen, and events it wrote (so replies to it are addressed).
     seen: Bounded,
     wrote: Arc<Mutex<Bounded>>,
-    compiled: Option<(
-        Arc<BTreeMap<String, AttentionObject>>,
-        Arc<Vec<CompiledWatch>>,
-    )>,
+    compiled: Option<Compiled>,
     /// Tells a replaced runner's drain loop to stop.
     serial: u64,
 }
@@ -339,6 +341,8 @@ pub struct Agents2 {
     status: Status,
     agents: Vec<Agent>,
     binding: Option<Binding>,
+    /// The selected community, observed.
+    watched: Option<(EntityId, Subscription)>,
     generation: u64,
     runners: HashMap<String, Runner>,
     serial: u64,
@@ -382,6 +386,7 @@ impl Agents2 {
             status: Status::Unavailable,
             agents: Vec::new(),
             binding: None,
+            watched: None,
             generation: 0,
             runners: HashMap::new(),
             serial: 0,
@@ -429,11 +434,6 @@ impl Agents2 {
             .map(|(_, list)| list.host.clone())
             .filter(|host| matches!(host.read(cx).state, ConnectionState::Connected { .. }))
             .collect()
-    }
-
-    /// Whether a community is bound, so agents can be made.
-    pub fn bound(&self) -> bool {
-        self.binding.is_some()
     }
 
     /// Every saved identity, deleted ones included.
@@ -607,6 +607,16 @@ impl Agents2 {
     // ----- the selected community -----
 
     fn bind(&mut self, cx: &mut Context<Self>) {
+        // Follows the selected community, to bind once its session is ready.
+        let current = AppState::current(cx);
+        if self.watched.as_ref().map(|(id, _)| *id) != current.as_ref().map(Entity::entity_id) {
+            self.watched = current.map(|community| {
+                (
+                    community.entity_id(),
+                    cx.observe(&community, |this, _, cx| this.bind(cx)),
+                )
+            });
+        }
         let next = AppState::current(cx).and_then(|community| {
             let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
                 return None;
@@ -638,7 +648,6 @@ impl Agents2 {
             let origin = read.origin.http();
             let destination = read.origin.websocket().to_owned();
             let events = listen(&session, cx);
-            let observe = cx.observe(&community, |this, _, cx| this.bind(cx));
             Binding {
                 origin,
                 destination,
@@ -649,17 +658,8 @@ impl Agents2 {
                 generation: self.generation,
                 community,
                 _events: events,
-                _observe: observe,
             }
         });
-        // Watch the selected community for its session becoming ready.
-        if self.binding.is_none()
-            && let Some(community) = AppState::current(cx)
-        {
-            let observe = cx.observe(&community, |this, _, cx| this.bind(cx));
-            self._subscriptions.push(observe);
-            self._subscriptions.truncate(4);
-        }
         self.update(cx);
         cx.notify();
         if self.binding.is_some() {
@@ -1301,7 +1301,7 @@ impl Agents2 {
                 name: channel.name.clone(),
             })
             .collect();
-        choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        choices.sort_by_key(|choice| choice.name.to_lowercase());
         choices
     }
 }

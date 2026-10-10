@@ -15,6 +15,9 @@
 //! never changes. The app owns each agent's name, key and attention; the
 //! type owns its config (one JSON value) and decides what a run does.
 
+// The type API: agent types compiled in elsewhere use what the app does not.
+#![allow(dead_code)]
+
 use super::Agent;
 use super::attention::AttentionValue;
 use super::runtime::Delivery;

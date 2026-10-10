@@ -53,6 +53,7 @@ pub enum AllChannels {
     All,
 }
 
+#[allow(dead_code)] // Used by agent types and tests.
 impl Channels {
     pub const ALL: Channels = Channels::All(AllChannels::All);
 
@@ -179,6 +180,7 @@ pub fn interest_slug(id: &str) -> String {
     format!("interest/{id}")
 }
 
+#[allow(dead_code)] // For the defaults of agent types.
 pub fn watch_slug(id: &str) -> String {
     format!("watch/{id}")
 }

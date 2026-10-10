@@ -141,8 +141,12 @@ async fn archived(http: &RelayHttp, authority: &str, agent: &str) -> Result<Arch
         )])
         .await
         .map_err(|_| unknown())?;
-    let [event] = events.as_slice() else {
-        return Err(unknown());
+    // A relay that never archived anyone has no snapshot yet: nobody is
+    // archived (the buzz CLI's reading; buzz-app waits for a snapshot).
+    let event = match events.as_slice() {
+        [] => return Ok(Archived::No),
+        [event] => event,
+        _ => return Err(unknown()),
     };
     let markers: Vec<_> = event.tags.iter().filter(|tag| tag.kind() == "-").collect();
     if event.kind.as_u16() != 13535

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub const STORAGE_KEY: &str = "buzz.agents2.v1";
 
@@ -80,9 +80,11 @@ impl Storage for FileStorage {
 }
 
 /// Memory only, for tests.
+#[cfg(test)]
 #[derive(Default)]
-pub struct MemoryStorage(pub Mutex<Option<String>>);
+pub struct MemoryStorage(pub std::sync::Mutex<Option<String>>);
 
+#[cfg(test)]
 impl Storage for MemoryStorage {
     fn read(&self) -> Option<String> {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
