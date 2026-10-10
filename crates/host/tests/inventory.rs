@@ -40,6 +40,7 @@ impl ClientHandler<HostProtocol> for Gui {
                 Ok(HostAnswer::Attestation(attest(&self.0, &agent_pubkey)))
             }
             HostAsk::OpenUrl { .. } => Err(RpcError::Failed("no browser".into())),
+            HostAsk::ProcessOutput { .. } => Err(RpcError::Failed("no processes".into())),
         };
         Box::pin(async move { answer })
     }

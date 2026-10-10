@@ -242,6 +242,36 @@ pub enum Request {
         auth: String,
         bundle: Box<BundleMember>,
     },
+    // claude code
+    /// Starts process `process`, one that agent type `owner` declares (see
+    /// `processes.rs`), with `args` after its declared arguments. `handle`
+    /// is chosen by the GUI, unique on its connection, so output can arrive
+    /// before this request's response. Output and the exit code come back
+    /// as [`HostAsk::ProcessOutput`] on this connection, which owns the
+    /// process: it is killed when the connection closes.
+    ProcessSpawn {
+        handle: u64,
+        owner: String,
+        process: String,
+        args: Vec<String>,
+        /// Absolute, or under home written `~/…`; created if missing.
+        #[serde(default)]
+        cwd: Option<String>,
+        /// Added to the host's environment; `None` removes a variable.
+        #[serde(default)]
+        env: BTreeMap<String, Option<String>>,
+    },
+    /// Writes `data` to the process's stdin; `close` then ends its input.
+    ProcessWrite {
+        handle: u64,
+        data: String,
+        close: bool,
+    },
+    /// Asks the process to stop, then kills it and its descendants. Its
+    /// exit follows as output.
+    ProcessKill {
+        handle: u64,
+    },
 }
 
 // Responses are moved once, from the wire to their caller; boxing the
@@ -297,6 +327,9 @@ pub enum Response {
         /// The request already created this agent.
         saved: bool,
     },
+    // claude code
+    /// A process request succeeded.
+    ProcessDone,
 }
 
 /// What an install did (buzz-app's `InstallReport`).
@@ -323,6 +356,13 @@ pub enum HostAsk {
     /// a loopback port on the host; a GUI on another machine forwards the
     /// browser's callback with [`Request::SignInCallback`].
     OpenUrl { url: String },
+    // claude code
+    /// Output of a process this connection spawned, in order. An
+    /// [`ProcessOutput::Exit`] is always the last.
+    ProcessOutput {
+        handle: u64,
+        output: Vec<ProcessOutput>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -330,6 +370,9 @@ pub enum HostAnswer {
     /// The `auth` tag, JSON encoded.
     Attestation(String),
     Opened,
+    // claude code
+    /// The output was taken. An error instead stops the process.
+    ProcessReceived,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1088,4 +1131,14 @@ pub struct BundleMember {
 pub struct RestoredMemory {
     pub slug: String,
     pub event_id: String,
+}
+
+// claude code
+/// What a spawned process printed, or how it ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessOutput {
+    Stdout(String),
+    Stderr(String),
+    /// `None` when a signal ended it.
+    Exit(Option<i32>),
 }

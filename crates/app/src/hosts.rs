@@ -355,6 +355,7 @@ impl ClientHandler<HostProtocol> for Answers {
                     Ok(HostAnswer::Opened)
                 });
             }
+            _ => return Box::pin(async { Err(RpcError::Failed("Not supported".into())) }),
         };
         let mut slot = self
             .signing

@@ -71,6 +71,17 @@ impl<P: Protocol> Peer<P> {
         &self.address
     }
 
+    /// Resolves once this connection has closed, so work the GUI started
+    /// over it can stop with it.
+    pub async fn closed(&self) {
+        self.outgoing.closed().await
+    }
+
+    /// Whether `other` came from the same connection as this peer.
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.outgoing.same_channel(&other.outgoing)
+    }
+
     pub async fn request(&self, body: P::HostRequest) -> Result<P::HostResponse, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();

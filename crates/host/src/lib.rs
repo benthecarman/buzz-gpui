@@ -15,6 +15,7 @@ pub mod credentials;
 pub mod harness;
 mod import;
 mod models;
+mod processes;
 mod profile;
 mod setup;
 mod snapshot;
@@ -81,6 +82,7 @@ pub struct AgentHost {
     /// forward a browser callback to.
     sign_ins: std::sync::Mutex<BTreeMap<u16, std::time::Instant>>,
     app_agents: app_agents::AppAgentHost,
+    processes: processes::Processes,
 }
 
 struct Owner {
@@ -230,6 +232,7 @@ impl AgentHost {
             legacy_dir: config.legacy_dir,
             sign_ins: Default::default(),
             app_agents,
+            processes: processes::Processes::default(),
         });
         // A GUI's host restores once someone signs in.
         if open {
@@ -569,6 +572,12 @@ impl AgentHost {
                 })
                 .await
             }
+            // claude code: served per connection by `RpcHandler`.
+            Request::ProcessSpawn { .. }
+            | Request::ProcessWrite { .. }
+            | Request::ProcessKill { .. } => {
+                Err(RpcError::Failed("Processes need a GUI connection".into()))
+            }
         }
     }
 
@@ -833,6 +842,7 @@ impl Drop for AgentHost {
     fn drop(&mut self) {
         self.models.shutdown();
         self.setup.shutdown();
+        self.processes.stop_all();
         let (jobs, _) = mpsc::channel();
         drop(std::mem::replace(&mut self.jobs, jobs));
         if let Some(thread) = self.thread.take() {
@@ -1108,6 +1118,11 @@ impl HostHandler<HostProtocol> for RpcHandler {
         request: Request,
     ) -> BoxFuture<'static, Result<Response, RpcError>> {
         let host = self.0.clone();
-        Box::pin(async move { host.request_with(request, Some(Arc::new(peer))).await })
+        Box::pin(async move {
+            if processes::is_process_request(&request) {
+                return host.processes.serve(peer, request).await;
+            }
+            host.request_with(request, Some(Arc::new(peer))).await
+        })
     }
 }
