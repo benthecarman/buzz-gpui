@@ -12,6 +12,7 @@ mod emoji;
 mod notifications;
 mod profile;
 mod shortcuts;
+mod updates;
 
 use crate::community::{AppState, Community};
 use crate::hosts::HostConnection;
@@ -26,7 +27,7 @@ use buzz_ui::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use profile::ProfileForm;
-pub use profile::{default_profile, remember_profile, sign_out_dialog};
+pub use profile::{default_profile, remember_profile};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -53,10 +54,32 @@ pub enum Section {
     Notifications,
     Shortcuts,
     Agents,
+    Updates,
     About,
 }
 
+/// Emitted when the page shows another section, so it is a history visit.
+pub struct SectionChanged;
+
+impl EventEmitter<SectionChanged> for SettingsPage {}
+
 impl Section {
+    /// The default section: Profile with a community, else Appearance
+    /// (`defaultSection`).
+    pub fn default_for(has_community: bool) -> Self {
+        if has_community {
+            Self::Profile
+        } else {
+            Self::Appearance
+        }
+    }
+
+    /// Whether the sidebar lists the section: Custom emoji belongs to a
+    /// community.
+    fn listed(self, has_community: bool) -> bool {
+        has_community || self != Self::CustomEmoji
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Profile => "Profile",
@@ -66,6 +89,7 @@ impl Section {
             Self::Notifications => "Notifications",
             Self::Shortcuts => "Shortcuts",
             Self::Agents => "Agents",
+            Self::Updates => "Updates",
             Self::About => "About",
         }
     }
@@ -79,6 +103,7 @@ impl Section {
             Self::Notifications => IconName::Bell,
             Self::Shortcuts => IconName::Keyboard,
             Self::Agents => IconName::Robot,
+            Self::Updates => IconName::Download,
             Self::About => IconName::Info,
         }
     }
@@ -127,6 +152,8 @@ pub struct SettingsPage {
     archive_error: Option<SharedString>,
     /// Made on first visit; keeps the row being rebound and its notice.
     shortcuts: Option<Entity<shortcuts::ShortcutSettings>>,
+    /// Settings → Updates.
+    update_state: updates::UpdateState,
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -137,11 +164,7 @@ impl SettingsPage {
     pub fn new(section: Option<Section>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let has_community = AppState::current(cx).is_some();
         let mut page = Self {
-            section: section.unwrap_or(if has_community {
-                Section::Profile
-            } else {
-                Section::Appearance
-            }),
+            section: section.unwrap_or(Section::default_for(has_community)),
             profile: ProfileForm::new(window, cx),
             modal: None,
             toast: None,
@@ -152,6 +175,7 @@ impl SettingsPage {
             retention_menu: false,
             archive_error: None,
             shortcuts: None,
+            update_state: updates::UpdateState::default(),
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -161,12 +185,18 @@ impl SettingsPage {
         page
     }
 
+    /// Shows `section`; a change is a history visit.
     pub fn open(&mut self, section: Section, cx: &mut Context<Self>) {
         if section != self.section {
             self.quiet();
+            self.section = section;
+            cx.emit(SectionChanged);
         }
-        self.section = section;
         cx.notify();
+    }
+
+    pub fn section(&self) -> Section {
+        self.section
     }
 
     /// Keeps the profile form on the selected community.
@@ -179,6 +209,12 @@ impl SettingsPage {
             })
         });
         self.profile.sync(community.as_ref(), window, cx);
+        // A section no longer listed falls back to the default
+        // (`Settings.tsx`), e.g. Custom emoji once no community is chosen.
+        let has_community = community.is_some();
+        if !self.section.listed(has_community) {
+            self.open(Section::default_for(has_community), cx);
+        }
         cx.notify();
     }
 
@@ -279,6 +315,7 @@ impl SettingsPage {
             Section::Notifications,
             Section::Shortcuts,
             Section::Agents,
+            Section::Updates,
             Section::About,
         ] {
             app.push(item(section, cx));
@@ -332,6 +369,7 @@ impl SettingsPage {
                 .clone()
                 .into_any_element(),
             Section::Agents => self.agents_section(window, cx),
+            Section::Updates => self.updates_section(cx),
             Section::About => about::render(cx),
         }
     }
