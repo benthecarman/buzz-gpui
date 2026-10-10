@@ -4,13 +4,13 @@
 mod dialogs;
 
 use super::account::Account;
-use super::agents::AgentsPage;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::navigation::{History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
+use super::pages::{self, Page};
 use super::profile_card::{self, ProfileCard};
 use super::settings::{CloseSettings, OpenHostSettings, OpenSettings, Section, SettingsPage};
-use super::sidebar::{self, Page, SidebarProps};
+use super::sidebar::{self, SidebarProps};
 use super::thread::{self, ThreadPanel};
 use super::window_controls;
 use crate::community::{AppState, Community, IdentityState};
@@ -23,6 +23,7 @@ use buzz_ui::{
 use gpui_kit::component::window_border;
 use gpui_kit::*;
 use nostr::prelude::EventId;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -32,7 +33,10 @@ pub struct Workspace {
     community: Option<Entity<Community>>,
     channel: Option<Entity<ChannelPage>>,
     thread: Option<Entity<ThreadPanel>>,
-    agents: Option<Entity<AgentsPage>>,
+    /// Registered pages' views, made on first visit and kept.
+    views: HashMap<Page, AnyView>,
+    /// Pages' own sidebars, such as Me's.
+    own_sidebars: HashMap<Page, AnyView>,
     settings: Option<Entity<SettingsPage>>,
     account: Entity<Account>,
     onboarding: Option<(Step, Entity<Onboarding>)>,
@@ -59,12 +63,13 @@ impl Workspace {
         cx.observe_global_in::<AppState>(window, |this, window, cx| this.sync(window, cx))
             .detach();
         let mut workspace = Self {
-            page: Page::Messages,
+            page: Page::MESSAGES,
             sidebar_open: true,
             community: None,
             channel: None,
             thread: None,
-            agents: None,
+            views: HashMap::new(),
+            own_sidebars: HashMap::new(),
             settings: None,
             account: cx.new(Account::new),
             onboarding: None,
@@ -138,8 +143,8 @@ impl Workspace {
             }
             None => self.settings = Some(cx.new(|cx| SettingsPage::new(section, window, cx))),
         }
-        if self.page != Page::Settings {
-            self.select_page(Page::Settings, cx);
+        if self.page != Page::SETTINGS {
+            self.select_page(Page::SETTINGS, window, cx);
         }
     }
 
@@ -156,7 +161,7 @@ impl Workspace {
                 step.map(|step| (step, cx.new(|cx| Onboarding::new(step, window, cx))));
             // Signed out: start over on Messages after the next sign-in.
             if step == Some(Step::Identity) {
-                self.page = Page::Messages;
+                self.page = Page::MESSAGES;
                 self.settings = None;
             }
         }
@@ -182,7 +187,7 @@ impl Workspace {
         if self.apply_pending(window, cx) {
             return;
         }
-        if self.channel.is_some() || self.page != Page::Messages {
+        if self.channel.is_some() || self.page != Page::MESSAGES {
             return;
         }
         let Some(community) = &self.community else {
@@ -220,7 +225,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.page = Page::Messages;
+        self.page = Page::MESSAGES;
         if self
             .channel
             .as_ref()
@@ -309,20 +314,31 @@ impl Workspace {
     }
 
     /// Shows a page and records the visit.
-    pub fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
-        self.show_page(page, cx);
+    pub fn select_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_page(page, window, cx);
         self.record(cx);
     }
 
-    fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
+    fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
-        if page == Page::Agents && self.agents.is_none() {
-            self.agents = Some(cx.new(AgentsPage::new));
+        if let Some(spec) = pages::spec(page, cx) {
+            if let Some(build) = spec.build
+                && !self.views.contains_key(&page)
+            {
+                let view = build(window, cx);
+                self.views.insert(page, view);
+            }
+            if let pages::Navigation::Own(build) = spec.navigation
+                && !self.own_sidebars.contains_key(&page)
+            {
+                let view = build(window, cx);
+                self.own_sidebars.insert(page, view);
+            }
         }
-        if page != Page::Settings {
+        if page != Page::SETTINGS {
             self.settings = None;
         }
-        if page != Page::Messages
+        if page != Page::MESSAGES
             && let Some(community) = &self.community
         {
             community.read(cx).session.select(None);
@@ -336,7 +352,7 @@ impl Workspace {
                 .size(IconButtonSize::Sm)
                 .surface(Surface::Header)
         };
-        let settings_open = self.page == Page::Settings;
+        let settings_open = self.page == Page::SETTINGS;
         self.account
             .update(cx, |account, _| account.settings_open = settings_open);
         window_controls::title_bar(
@@ -439,20 +455,15 @@ impl Render for Workspace {
         let c = *cx.colors();
         let dialog = self.dialog(window, cx);
         let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding
-            && self.page != Page::Settings
+            && self.page != Page::SETTINGS
         {
             onboarding.clone().into_any_element()
         } else {
             match self.page {
-                Page::Agents => self
-                    .agents
-                    .clone()
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| div().into_any_element()),
                 // Settings draws its own sidebar in the channel sidebar's
                 // place, following the header toggle. History can return
                 // here after the page was closed, so it is made on demand.
-                Page::Settings => {
+                Page::SETTINGS => {
                     let show = self.sidebar_open;
                     let settings = self
                         .settings
@@ -461,7 +472,7 @@ impl Render for Workspace {
                     settings.update(cx, |settings, _| settings.show_sidebar = show);
                     settings.into_any_element()
                 }
-                Page::Messages => match &self.channel {
+                Page::MESSAGES => match &self.channel {
                     Some(channel) => {
                         thread::board(channel.clone().into_any_element(), self.thread.clone(), cx)
                     }
@@ -475,11 +486,17 @@ impl Render for Workspace {
                         .child("Select a channel to read it.")
                         .into_any_element(),
                 },
+                page => self
+                    .views
+                    .get(&page)
+                    .cloned()
+                    .map(IntoElement::into_any_element)
+                    .unwrap_or_else(|| div().into_any_element()),
             }
         };
         let sidebar = (self.sidebar_open
             && self.onboarding.is_none()
-            && self.page != Page::Settings)
+            && self.page != Page::SETTINGS)
             .then(|| self.community.clone())
             .flatten()
             .map(|community| {
@@ -503,8 +520,9 @@ impl Render for Workspace {
                             let _ = weak
                                 .update(cx, |this, cx| this.select_channel(channel, window, cx));
                         }),
-                        on_select_page: Arc::new(move |page, _, cx| {
-                            let _ = weak_page.update(cx, |this, cx| this.select_page(page, cx));
+                        on_select_page: Arc::new(move |page, window, cx| {
+                            let _ =
+                                weak_page.update(cx, |this, cx| this.select_page(page, window, cx));
                         }),
                         on_create_channel: can_create.then(|| {
                             Arc::new(move |window: &mut Window, cx: &mut App| {
@@ -581,7 +599,7 @@ impl Workspace {
             .as_ref()
             .map(|community| community.read(cx).origin.to_string());
         let place = match (self.page, &self.channel) {
-            (Page::Messages, Some(channel)) => {
+            (Page::MESSAGES, Some(channel)) => {
                 let channel = channel.read(cx).channel_id().to_string();
                 let thread = self.thread.as_ref().map(|thread| thread.read(cx).root_id());
                 Place::Conversation {
@@ -623,7 +641,7 @@ impl Workspace {
 
     /// The Messages page, on the channel last open there.
     pub fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_page(Page::Messages, cx);
+        self.show_page(Page::MESSAGES, window, cx);
         if self.channel.is_none() {
             self.restore_selection(window, cx);
         }
@@ -654,8 +672,8 @@ impl Workspace {
         }
         match target.place {
             Place::Page(page) => {
-                self.show_page(page, cx);
-                if page == Page::Messages && self.channel.is_none() {
+                self.show_page(page, window, cx);
+                if page == Page::MESSAGES && self.channel.is_none() {
                     self.restore_selection(window, cx);
                 }
             }

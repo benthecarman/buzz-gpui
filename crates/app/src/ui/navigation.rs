@@ -3,7 +3,7 @@
 //! and the routing of links, notification clicks and later launches to
 //! the workspace.
 
-use super::sidebar::Page;
+use super::pages::Page;
 use super::workspace::Workspace;
 use buzz_relay_client::EventId;
 use buzz_ui::ActiveTheme;
@@ -331,7 +331,7 @@ mod tests {
         assert!(history.push(other_community));
         assert!(history.push(Target {
             community: Some("ws://other".into()),
-            place: Place::Page(Page::Agents),
+            place: Place::Page(Page::AGENTS),
         }));
         assert_eq!(
             history.back(),

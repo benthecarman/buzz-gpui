@@ -6,7 +6,8 @@
 
 use super::message::{channel_icon, display_name};
 use super::modal::{Dismissed, Leading, OpenChannel, group_label, note, row};
-use super::sidebar::{Page, channel_label};
+use super::pages::{self, Page};
+use super::sidebar::channel_label;
 use crate::community::Community;
 use buzz_relay_client::members::{Person, match_tier};
 use buzz_relay_client::search::{self, Day, match_name};
@@ -39,11 +40,14 @@ pub type OpenPage = Rc<dyn Fn(Page, &mut Window, &mut App)>;
 
 /// The pages search offers, in buzz-app's order (`presentation.ts`):
 /// fixed pages, then others by name, then Settings.
-const PAGES: [(Page, &str, IconName); 3] = [
-    (Page::Messages, "Messages", IconName::ChatsCircle),
-    (Page::Agents, "Agents", IconName::Robot),
-    (Page::Settings, "Settings", IconName::Gear),
-];
+/// Every registered page in host order, then Settings (`PageSearch.tsx`).
+fn page_list(cx: &App) -> Vec<(Page, &'static str, IconName)> {
+    pages::all(cx)
+        .into_iter()
+        .map(|spec| (spec.page, spec.label, spec.icon))
+        .chain([(Page::SETTINGS, "Settings", IconName::Gear)])
+        .collect()
+}
 
 /// What a result row does.
 #[derive(Clone)]
@@ -568,7 +572,7 @@ impl SearchDialog {
             });
             groups.push(Group {
                 label: "Actions",
-                entries: PAGES.into_iter().map(page).collect(),
+                entries: page_list(cx).into_iter().map(page).collect(),
                 empty: None,
             });
             return groups;
@@ -603,7 +607,7 @@ impl SearchDialog {
             .map(|(c, rank)| (*rank, conversation(c, None)))
             .take(NAME_MATCHES)
             .collect();
-        let mut pages: Vec<(u8, Entry)> = PAGES
+        let mut pages: Vec<(u8, Entry)> = page_list(cx)
             .into_iter()
             .filter(|_| !needle.is_empty())
             .filter_map(|entry| Some((rank(entry.1)?, page(entry))))
@@ -1004,9 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn pages_follow_buzz_app_order() {
-        let labels: Vec<&str> = PAGES.iter().map(|(_, label, _)| *label).collect();
-        assert_eq!(labels, ["Messages", "Agents", "Settings"]);
+    fn page_names_match_by_prefix() {
         assert_eq!(match_name("Settings", "set"), Some(1));
     }
 }

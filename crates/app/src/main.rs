@@ -63,6 +63,7 @@ fn main() {
         community::AppState::init(cx);
         appearance::init(cx);
         idle::Idle::init(cx);
+        ui::pages::init(cx);
         let requests = navigation::init(cx);
         if let Some(link) = link {
             let _ = requests.unbounded_send(Request::Url(link).into());

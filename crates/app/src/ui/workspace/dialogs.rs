@@ -7,8 +7,9 @@ use crate::ui::modal::{Dismissed, OpenChannel, OpenConversation};
 use crate::ui::new_channel::NewChannelDialog;
 use crate::ui::new_message::NewMessageDialog;
 use crate::ui::overlay::{self, Dismiss};
+use crate::ui::pages::Page;
 use crate::ui::search::{OpenPage, SearchDialog};
-use crate::ui::sidebar::{self, Page};
+use crate::ui::sidebar;
 use buzz_relay_client::{ChannelSummary, EventId};
 use gpui_kit::*;
 use std::rc::Rc;
@@ -77,9 +78,9 @@ impl Workspace {
         let weak = cx.entity().downgrade();
         let on_page: OpenPage = Rc::new(move |page, window, cx| {
             let _ = weak.update(cx, |this, cx| match page {
-                Page::Messages => this.go_home(window, cx),
-                Page::Settings => this.open_settings(None, window, cx),
-                Page::Agents => this.select_page(page, cx),
+                Page::MESSAGES => this.go_home(window, cx),
+                Page::SETTINGS => this.open_settings(None, window, cx),
+                page => this.select_page(page, window, cx),
             });
         });
         let dialog =

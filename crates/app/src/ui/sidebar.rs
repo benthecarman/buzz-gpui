@@ -1,21 +1,15 @@
 //! The channel sidebar (ui.md §3).
 
 use super::message::{channel_icon, display_name};
+use super::pages::{self, Page, Placement};
 use buzz_relay_client::{ChannelSummary, ChannelType, PresenceState, Profiles, SessionSnapshot};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonSize, IconName, NavigationItem,
     Presence, Surface, TypeStyled,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::sync::Arc;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page {
-    Messages,
-    Agents,
-    /// Settings replaces this sidebar with its own (ui.md §5b.1).
-    Settings,
-}
 
 pub struct SidebarProps {
     pub page: Page,
@@ -187,23 +181,35 @@ pub fn render(snapshot: &SessionSnapshot, props: SidebarProps, cx: &App) -> AnyE
         item.on_click(move |_, window, cx| select(&target, window, cx))
     };
 
-    let select_page = props.on_select_page.clone();
+    let page_rows = pages::placed(Placement::Sidebar, cx)
+        .into_iter()
+        .map(|spec| {
+            let select_page = props.on_select_page.clone();
+            let page = spec.page;
+            let mut row = NavigationItem::new(
+                SharedString::from(format!("page-{}", page.key())),
+                spec.label,
+            )
+            .sidebar()
+            .icon(spec.icon)
+            .icon_stroke(2.5)
+            .selected(props.page == page)
+            .on_click(move |_, window, cx| select_page(page, window, cx));
+            if let Some(badge) = spec.badge.and_then(|badge| badge(cx)) {
+                row = row.trailing(badge);
+            }
+            row
+        })
+        .collect::<Vec<_>>();
     let mut list = div()
         .id("sidebar")
         .flex()
         .flex_col()
         .size_full()
         .overflow_y_scroll()
-        .child(
-            rows().mb(rems(0.75)).child(
-                NavigationItem::new("page-agents", "Agents")
-                    .sidebar()
-                    .icon(IconName::Robot)
-                    .icon_stroke(2.5)
-                    .selected(props.page == Page::Agents)
-                    .on_click(move |_, window, cx| select_page(Page::Agents, window, cx)),
-            ),
-        )
+        .when(!page_rows.is_empty(), |list| {
+            list.child(rows().mb(rems(0.75)).children(page_rows))
+        })
         .child(section_with(
             "Channels",
             "create-channel",
