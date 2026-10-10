@@ -7,6 +7,8 @@
 //! reply or an edit) and reports back with [`Composer::sent`] or
 //! [`Composer::failed`].
 
+mod live_markdown;
+
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
 use super::gif_picker::PickedGif;
 use super::media;
@@ -29,6 +31,7 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use live_markdown::LiveMarkdown;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,6 +83,8 @@ pub struct Composer {
     channel: String,
     thread_root: Option<EventId>,
     input: Entity<TextareaState>,
+    /// The Markdown styling of `input`'s text.
+    markdown: LiveMarkdown,
     placeholder: SharedString,
     sending: bool,
     /// The host allows sending (a thread needs a loaded reply target).
@@ -250,11 +255,13 @@ impl Composer {
             ];
         cx.on_release(|this: &mut Self, cx| this.write_draft(cx))
             .detach();
+        let markdown = LiveMarkdown::new(&input, cx);
         let mut composer = Self {
             community,
             channel,
             thread_root,
             input,
+            markdown,
             placeholder,
             sending: false,
             can_send: true,
@@ -351,6 +358,7 @@ impl Composer {
             state.set_placeholder("Edit message", window, cx);
             state.focus(window, cx);
         });
+        self.restyle(cx);
         cx.notify();
     }
 
@@ -366,6 +374,7 @@ impl Composer {
             state.set_selected_range(end..end, cx);
             state.set_placeholder(placeholder, window, cx);
         });
+        self.restyle(cx);
         self.completion = None;
         cx.notify();
     }
@@ -403,6 +412,7 @@ impl Composer {
             state.set_value(next, window, cx);
             state.set_selected_range(end..end, cx);
         });
+        self.restyle(cx);
         self.save_draft = None;
         self.write_draft(cx);
         cx.notify();
@@ -544,6 +554,7 @@ impl Composer {
             state.set_selected_range(selection, cx);
             state.focus(window, cx);
         });
+        self.restyle(cx);
         // The draft keeps chips, so it must forget this one too.
         self.schedule_draft(cx);
         cx.notify();
@@ -639,6 +650,7 @@ impl Composer {
     }
 
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restyle(cx);
         if self.input.read(cx).value().chars().count() > MAX_CHARS {
             self.notice = Some(format!("Messages hold up to {MAX_CHARS} characters.").into());
         } else if self.notice.is_some() {
@@ -650,6 +662,12 @@ impl Composer {
         self.schedule_draft(cx);
         self.refresh_completion(cx);
         cx.notify();
+    }
+
+    /// Styles the Markdown in the text. `set_value` reports no change, so
+    /// the places that call it restyle here too.
+    fn restyle(&mut self, cx: &mut Context<Self>) {
+        self.markdown.restyle(&self.input, cx);
     }
 
     fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -689,6 +707,7 @@ impl Composer {
                 state.set_value(content, window, cx);
                 state.set_selected_range(end..end, cx);
             });
+            self.restyle(cx);
         }
     }
 
@@ -2567,6 +2586,7 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        self.markdown.follow_theme(&self.input, &c, cx);
         // The caret can move without an edit.
         let key = {
             let state = self.input.read(cx);
