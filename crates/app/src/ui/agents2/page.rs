@@ -1143,6 +1143,7 @@ impl Render for Build {
             .flex()
             .flex_col()
             .gap(rems(0.25))
+            .when(narrow, |this| this.flex_1().min_w(rems(12.)))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
