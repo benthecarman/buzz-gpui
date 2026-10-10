@@ -1,6 +1,6 @@
 //! Harness logos and how a saved command maps back to a harness.
 
-use buzz_host::api::{Harness, HarnessKind};
+use buzz_host::api::{Harness, HarnessKind, HarnessStatus};
 use buzz_ui::{Brand, BrandMark, Icon, IconName};
 use gpui_kit::{AnyElement, IntoElement};
 
@@ -14,6 +14,16 @@ pub fn mark(kind: HarnessKind, size: f32) -> AnyElement {
         HarnessKind::Hermes => BrandMark::Hermes,
     };
     Brand::new(brand).size(size).into_any_element()
+}
+
+/// buzz-app's harness status labels; "Unknown" when the host did not say.
+pub fn status_label(status: Option<HarnessStatus>) -> &'static str {
+    match status {
+        Some(HarnessStatus::Ready) => "Ready",
+        Some(HarnessStatus::CliNeeded) => "CLI needed",
+        Some(HarnessStatus::AdapterNeeded) => "Adapter needed",
+        None => "Unknown",
+    }
 }
 
 /// Preset harnesses (Claude Code, Hermes) use their own model and sign-in;

@@ -8,7 +8,7 @@ pub(crate) mod harness;
 mod host_dialog;
 mod import;
 
-pub(crate) use defaults::DefaultsDialog;
+pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
 pub(crate) use editor::{Dismissed, Saved};
 pub(crate) use host_dialog::AddHost;
 
@@ -1251,10 +1251,11 @@ pub(crate) fn harness_row(
                 .max_w(rems(16.))
                 .text_right()
                 .text_color(c.text_subtle)
-                .child(if ready {
-                    "Ready".to_string()
-                } else {
-                    format!("Needs {}", harness.missing.join(", "))
+                .child(match harness.status {
+                    Some(status) => harness::status_label(Some(status)).to_string(),
+                    // Hosts that predate statuses list what is missing.
+                    None if ready => "Ready".to_string(),
+                    None => format!("Needs {}", harness.missing.join(", ")),
                 }),
         )
 }

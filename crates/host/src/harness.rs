@@ -4,6 +4,9 @@
 //! plus common install locations), the same PATH agents launch with.
 
 use crate::api::{Harness, HarnessKind, HarnessStatus};
+/// The preset catalog (Hermes, Claude Code): labels, setup guides and hints
+/// for harnesses Buzz does not configure itself.
+pub use buzz_agent_controller::{HarnessPreset, harness_presets};
 use buzz_agent_controller::{harness_preset, installed, installed_npm_tool, managed_tool};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

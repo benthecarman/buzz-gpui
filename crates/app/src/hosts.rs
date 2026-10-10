@@ -4,8 +4,8 @@
 use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
 use crate::runtime::Runtime;
 use buzz_host::api::{
-    AgentDefaults, AgentsSnapshot, Harness, HostAnswer, HostAsk, HostEvent, HostProtocol, Request,
-    Response,
+    AgentDefaults, AgentsSnapshot, Harness, HarnessKind, HostAnswer, HostAsk, HostEvent,
+    HostProtocol, InstallReport, Request, Response,
 };
 use buzz_host::credentials::{FileCredentials, KeyringCredentials};
 use buzz_host::{AgentHost, HostConfig, RpcHandler};
@@ -36,6 +36,15 @@ pub struct Hosts {
 
 impl Global for Hosts {}
 
+/// An install job on a host (buzz-app's `HarnessInstallState`).
+#[derive(Clone, Debug, Default)]
+pub struct Install {
+    pub installing: bool,
+    pub report: Option<InstallReport>,
+    /// Set when the host could not run the install at all.
+    pub error: Option<SharedString>,
+}
+
 pub struct HostConnection {
     pub label: SharedString,
     /// `None` for the host inside this process.
@@ -43,6 +52,12 @@ pub struct HostConnection {
     pub state: ConnectionState,
     pub agents: AgentsSnapshot,
     pub harnesses: Option<Vec<Harness>>,
+    /// The last harness check failed; `harnesses` holds the one before.
+    pub harnesses_failed: bool,
+    /// Pi and Claude Code installs, kept here so they outlive the page
+    /// that started them.
+    pub pi_install: Install,
+    pub claude_install: Install,
     /// Fetched when a form needs them, not on connect: hosts older than
     /// this request drop the connection on it.
     pub defaults: Option<AgentDefaults>,
@@ -329,6 +344,9 @@ impl HostConnection {
                 state: client.state().borrow().clone(),
                 agents: AgentsSnapshot::default(),
                 harnesses: None,
+                harnesses_failed: false,
+                pi_install: Install::default(),
+                claude_install: Install::default(),
                 defaults: None,
                 signing,
                 client,
@@ -420,8 +438,12 @@ impl HostConnection {
                 if let Ok(Response::Agents(snapshot)) = agents {
                     this.apply(snapshot);
                 }
-                if let Ok(Response::Harnesses(list)) = harnesses {
-                    this.harnesses = Some(list);
+                match harnesses {
+                    Ok(Response::Harnesses(list)) => {
+                        this.harnesses = Some(list);
+                        this.harnesses_failed = false;
+                    }
+                    _ => this.harnesses_failed = true,
                 }
                 cx.notify();
             });
@@ -460,6 +482,65 @@ impl HostConnection {
             }
             response
         })
+    }
+
+    /// Whether an install is running on this host.
+    pub fn installing(&self) -> bool {
+        self.pi_install.installing || self.claude_install.installing
+    }
+
+    /// Installs Pi or Claude Code on the host, then checks harnesses again
+    /// (buzz-app's `installHarness`).
+    pub fn install(&mut self, kind: HarnessKind, cx: &mut Context<Self>) {
+        let label = match kind {
+            HarnessKind::Pi => "Pi",
+            HarnessKind::Claude => "Claude Code",
+            _ => return,
+        };
+        if self.installing() {
+            return;
+        }
+        *self.install_mut(kind) = Install {
+            installing: true,
+            ..Install::default()
+        };
+        cx.notify();
+        let response = self.request(Request::InstallHarness { kind }, cx);
+        cx.spawn(async move |this, cx| {
+            let response = response.await;
+            let refresh = this.update(cx, |this, cx| {
+                *this.install_mut(kind) = match response {
+                    Ok(Response::Installed(report)) => Install {
+                        installing: false,
+                        report: Some(report),
+                        error: None,
+                    },
+                    _ => Install {
+                        installing: false,
+                        report: None,
+                        error: Some(
+                            format!(
+                                "Couldn’t install {label}. Try again or check the desktop app."
+                            )
+                            .into(),
+                        ),
+                    },
+                };
+                cx.notify();
+                this.refresh(cx)
+            });
+            if let Ok(refresh) = refresh {
+                refresh.await;
+            }
+        })
+        .detach();
+    }
+
+    fn install_mut(&mut self, kind: HarnessKind) -> &mut Install {
+        match kind {
+            HarnessKind::Claude => &mut self.claude_install,
+            _ => &mut self.pi_install,
+        }
     }
 
     /// Loads the host's agent defaults into [`Self::defaults`].

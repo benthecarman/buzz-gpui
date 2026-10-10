@@ -1,6 +1,12 @@
 //! Settings → Agents (§5a.11, adapted): the agent hosts, the harnesses
-//! this computer can run, saved agent activity, and the "Remember
-//! mentioned agents" message preference.
+//! this computer can run, its agent defaults, saved agent activity, and the
+//! "Remember mentioned agents" message preference.
+//!
+//! The Hosts block is this port's addition for remote hosts. Harnesses and
+//! the inline Agent defaults card are this computer's, as in buzz-app; a
+//! remote host's defaults open from its row.
+
+mod harnesses;
 
 use super::{
     Modal, SettingsPage, button, form_group, header, inline_header, preference_row, rows_group,
@@ -8,12 +14,13 @@ use super::{
 };
 use crate::community::AppState;
 use crate::hosts::{HostConnection, Hosts};
-use crate::ui::agents::{AddHost, DefaultsDialog, Dismissed, Saved, harness_row};
+use crate::ui::agents::{AddHost, DefaultsCard, DefaultsDialog, Dismissed, Saved};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, AlertDialog, Badge, BadgeTone, Button, ButtonSize, Icon, IconButton,
-    IconButtonSize, IconName, Spinner, Surface, Switch, TypeStyled,
+    IconButtonSize, IconName, Surface, Switch, TypeStyled,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::ops::Range;
 
@@ -76,7 +83,7 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// Opens the same "Agent defaults" dialog as the Agents page.
+    /// A remote host's "Agent defaults", the dialog the Agents page opens.
     fn agent_defaults(
         &mut self,
         host: Entity<HostConnection>,
@@ -114,7 +121,6 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let c = *cx.colors();
         let hosts = cx.global::<Hosts>().hosts.clone();
         let rows = hosts
             .iter()
@@ -141,61 +147,47 @@ impl SettingsPage {
             ))
             .child(rows_group(rows, cx));
 
-        // Harnesses of the embedded host, as in buzz-app.
+        // This computer's harnesses and defaults, as in buzz-app. Both
+        // live while the section is shown, so returning checks again.
         let local = hosts
             .iter()
             .find(|host| host.read(cx).remote.is_none())
             .cloned();
-        let harnesses = local.as_ref().map(|host| {
-            let list = host.read(cx).harnesses.clone();
-            let checking = list.is_none();
-            let refresh = host.clone();
-            let body: AnyElement = match list {
-                None => div()
-                    .flex()
-                    .items_center()
-                    .gap(rems(0.5))
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child(Spinner::new())
-                    .child("Checking harnesses…")
-                    .into_any_element(),
-                Some(list) if list.is_empty() => div()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child("No harnesses found on this computer.")
-                    .into_any_element(),
-                Some(list) => div()
-                    .flex()
-                    .flex_col()
-                    .children(list.iter().enumerate().map(|(index, harness)| {
-                        harness_row(harness, index > 0, &c).into_any_element()
-                    }))
-                    .into_any_element(),
-            };
-            div()
-                .child(inline_header(
-                    "Harnesses",
-                    Some("Agent programs this computer can run.".into()),
-                    vec![
-                        IconButton::new("harnesses-refresh", IconName::ArrowsClockwise)
-                            .size(IconButtonSize::Sm)
-                            .disabled(checking)
-                            .tooltip("Check again")
-                            .on_click(move |_, _, cx| {
-                                refresh.update(cx, |host, cx| host.refresh(cx).detach())
-                            })
-                            .into_any_element(),
-                    ],
+        let harnesses = {
+            let host = local.clone();
+            window.use_keyed_state("settings-harnesses", cx, move |_, cx| {
+                harnesses::Harnesses::new(host, cx)
+            })
+        };
+        let defaults = local.map(|host| {
+            let card = window.use_keyed_state(
+                (
+                    "settings-agent-defaults",
+                    host.entity_id().as_u64() as usize,
+                ),
+                cx,
+                |window, cx| DefaultsCard::new(host.clone(), false, window, cx),
+            );
+            div().when(host.read(cx).defaults.is_some(), |this| {
+                this.child(inline_header(
+                    "Agent defaults",
+                    Some(
+                        "Used when an agent starts without its own choices. Changes apply on \
+                         its next start."
+                            .into(),
+                    ),
+                    Vec::new(),
                     cx,
                 ))
-                .child(form_group(vec![body], cx).py(rems(0.)))
+                .child(form_group(vec![card.into_any_element()], cx))
+            })
         });
         let mut parts = vec![
             header("Agents", None, cx).into_any_element(),
             hosts_block.into_any_element(),
         ];
-        parts.extend(harnesses.map(IntoElement::into_any_element));
+        parts.push(harnesses.into_any_element());
+        parts.extend(defaults.map(IntoElement::into_any_element));
         parts.push(self.archive_section(window, cx).into_any_element());
         let remember = remember_mentioned_agents(cx);
         parts.push(
@@ -269,19 +261,24 @@ impl SettingsPage {
         let reconnect = host.clone();
         let remove = host.clone();
         let defaults = host.clone();
-        let mut trailing = vec![
-            Badge::new(badge).tone(tone).into_any_element(),
-            IconButton::new(
-                SharedString::from(format!("host-defaults-{index}")),
-                IconName::SlidersHorizontal,
-            )
-            .size(IconButtonSize::Sm)
-            .disabled(!connected)
-            .tooltip("Agent defaults")
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.agent_defaults(defaults.clone(), window, cx)
-            }))
-            .into_any_element(),
+        let mut trailing = vec![Badge::new(badge).tone(tone).into_any_element()];
+        // This computer's defaults are the card below.
+        if remote {
+            trailing.push(
+                IconButton::new(
+                    SharedString::from(format!("host-defaults-{index}")),
+                    IconName::SlidersHorizontal,
+                )
+                .size(IconButtonSize::Sm)
+                .disabled(!connected)
+                .tooltip("Agent defaults")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.agent_defaults(defaults.clone(), window, cx)
+                }))
+                .into_any_element(),
+            );
+        }
+        trailing.push(
             IconButton::new(
                 SharedString::from(format!("host-reconnect-{index}")),
                 IconName::Plug,
@@ -290,7 +287,7 @@ impl SettingsPage {
             .tooltip("Reconnect")
             .on_click(move |_, _, cx| reconnect.read(cx).reconnect())
             .into_any_element(),
-        ];
+        );
         if remote {
             trailing.push(
                 button(SharedString::from(format!("host-remove-{index}")), "Remove")
