@@ -541,6 +541,50 @@ fn header(event: &Event) -> String {
 mod tests {
     use super::*;
 
+    /// An observer frame an agent encrypted to its owner opens only for
+    /// that owner, through buzz-desktop's decoder.
+    #[test]
+    fn agent_frames_open_only_for_their_owner() {
+        let owner = Identity::ephemeral();
+        let agent = Keys::generate();
+        let plaintext = r#"{"type":"status","message":"active"}"#;
+        let content = nip44::encrypt(
+            agent.secret_key(),
+            &owner.public_key(),
+            plaintext,
+            nip44::Version::V2,
+        )
+        .unwrap();
+        let event = EventBuilder::new(Kind::from_u16(24200), content)
+            .tags([
+                Tag::custom("p", [owner.pubkey_hex()]),
+                Tag::custom("agent", [agent.public_key().to_hex()]),
+                Tag::custom("frame", ["telemetry"]),
+            ])
+            .finalize(&agent)
+            .unwrap();
+        let event: buzz_desktop::relay::agent::AgentEvent =
+            serde_json::from_str(&event.as_json()).unwrap();
+        let frame = owner.decode_agent_frame(&event, false).unwrap();
+        assert_eq!(frame["plaintext"], plaintext);
+        assert_eq!(frame["agent"], agent.public_key().to_hex());
+        assert!(
+            Identity::ephemeral()
+                .decode_agent_frame(&event, false)
+                .is_err()
+        );
+        // Memories need a real agent target.
+        assert!(
+            owner
+                .decode_agent_memories(&owner.pubkey_hex(), &[])
+                .is_err()
+        );
+        let empty = owner
+            .decode_agent_memories(&agent.public_key().to_hex(), &[])
+            .unwrap();
+        assert_eq!(empty["partial"], false);
+    }
+
     #[test]
     fn nsec_round_trips_and_hex_is_refused() {
         let identity = Identity::ephemeral();
