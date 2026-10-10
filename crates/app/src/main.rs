@@ -1,3 +1,4 @@
+mod agent_activity;
 mod agents2;
 mod appearance;
 mod community;
