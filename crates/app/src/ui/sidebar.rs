@@ -1079,6 +1079,25 @@ impl ChannelSidebar {
         let small =
             |id: SharedString, label: &'static str| Button::new(id, label).size(ButtonSize::Sm);
         let mut notices = Vec::new();
+        // The relay's hidden-DM list could not be read (`refreshVisibility`).
+        if !snapshot.cached
+            && matches!(
+                snapshot.dm_visibility,
+                buzz_relay_client::session::DmVisibilityStatus::Error(_)
+            )
+        {
+            notices.push(
+                notice("dm-visibility-error".into())
+                    .text_color(c.text_danger)
+                    .child("Hidden conversations could not be refreshed.")
+                    .child(div().child(
+                        small("retry-dm-visibility".into(), "Retry hidden conversations").on_click(
+                            cx.listener(|this, _, _, cx| this.session(cx).refresh_dm_visibility()),
+                        ),
+                    ))
+                    .into_any_element(),
+            );
+        }
         for failure in &sidebar.sort_errors {
             let (group, mode) = (failure.group.clone(), failure.mode);
             let retry_group = group.clone();
