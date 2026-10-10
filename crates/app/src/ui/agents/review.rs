@@ -221,6 +221,25 @@ fn init(cx: &mut App) {
     .detach();
 }
 
+/// Listens for the community's management requests for as long as its
+/// session lives, independent of saved or shown activity.
+pub fn listen(
+    community: &Entity<Community>,
+    identity: std::sync::Arc<buzz_identity::Identity>,
+    cx: &mut App,
+) {
+    let (session, origin) = {
+        let community = community.read(cx);
+        (community.session.clone(), community.origin.clone())
+    };
+    let mut frames = session.observe_management();
+    crate::runtime::Runtime::handle(cx).spawn(async move {
+        while let Some(event) = frames.recv().await {
+            observed(&identity, &event, &origin);
+        }
+    });
+}
+
 /// An owner-addressed activity envelope arrived for the viewer in the
 /// community at `origin`. Only management requests are kept.
 pub fn observed(

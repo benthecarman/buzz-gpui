@@ -75,13 +75,11 @@ pub fn capture(community: &Entity<Community>, identity: Arc<Identity>, cx: &mut 
     };
     let (archive, settings) = settings;
     let mut frames = session.observe(settings.kinds());
-    let origin = community.read(cx).origin.clone();
     if settings.kinds().is_empty() {
         return;
     }
     Runtime::handle(cx).spawn(async move {
         while let Some(event) = frames.recv().await {
-            crate::ui::agents::review::observed(&identity, &event, &origin);
             let (archive, identity, viewer, key) = (
                 archive.clone(),
                 identity.clone(),

@@ -1,7 +1,8 @@
 //! The `observer` live route (relay.md §3.3): kinds 24200 and 44200
-//! addressed to the viewer. Two independent taps share it: the archive's
-//! capture, and the Agent Activity feed that shows the viewer's agents at
-//! work. The route asks for the union of what they want.
+//! addressed to the viewer. Three independent taps share it: the
+//! archive's capture, the Agent Activity feed that shows the viewer's
+//! agents at work, and the agent management requests the owner reviews
+//! (`agentManagement`). The route asks for the union of what they want.
 
 use super::{Actor, Message, Session};
 use crate::event::{Verified, kinds};
@@ -21,6 +22,7 @@ struct Tap<T> {
 pub(super) struct Observer {
     capture: Option<Tap<Arc<Event>>>,
     activity: Option<Tap<ActivityFeed>>,
+    management: Option<Tap<Arc<Event>>>,
     /// The feed state last sent to the activity tap.
     status: Option<FeedStatus>,
 }
@@ -77,6 +79,25 @@ impl Session {
     }
 }
 
+impl Session {
+    /// The viewer's agent activity envelopes (kind 24200), for the owner
+    /// review of management requests (`agentManagement.activate`),
+    /// whether or not activity is saved or shown. Dropping the receiver
+    /// stops it once the next envelope finds nobody there.
+    pub fn observe_management(&self) -> mpsc::UnboundedReceiver<Arc<Event>> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            let observer = actor.observer.get_or_insert_default();
+            observer.management = Some(Tap {
+                kinds: vec![kinds::AGENT_ACTIVITY],
+                sender,
+            });
+            actor.observe_live();
+        })));
+        receiver
+    }
+}
+
 impl Actor {
     /// Applies the taps to the live connection, also after a reconnect.
     pub(super) fn observe_live(&mut self) {
@@ -86,7 +107,11 @@ impl Actor {
             .flat_map(|observer| {
                 let capture = observer.capture.iter().flat_map(|tap| tap.kinds.clone());
                 let activity = observer.activity.iter().flat_map(|tap| tap.kinds.clone());
-                capture.chain(activity).collect::<Vec<_>>()
+                let management = observer.management.iter().flat_map(|tap| tap.kinds.clone());
+                capture
+                    .chain(activity)
+                    .chain(management)
+                    .collect::<Vec<_>>()
             })
             .collect();
         kinds.sort_unstable();
@@ -119,6 +144,13 @@ impl Actor {
                     .is_err()
             {
                 observer.activity = None;
+                gone = true;
+            }
+            if let Some(tap) = &observer.management
+                && tap.kinds.contains(&kind)
+                && tap.sender.send(Arc::new(event.event().clone())).is_err()
+            {
+                observer.management = None;
                 gone = true;
             }
         }
