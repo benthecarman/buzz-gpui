@@ -33,6 +33,7 @@ pub mod pages;
 mod profile_card;
 mod renderers;
 mod report;
+mod resize_handle;
 mod search;
 pub mod settings;
 mod sidebar;

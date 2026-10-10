@@ -190,6 +190,7 @@ fn order(a: Page, a_label: &str, b: Page, b_label: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::prelude::v1::test;
 
     fn sorted(mut pages: Vec<(Page, &'static str)>) -> Vec<&'static str> {
         pages.sort_by(|a, b| order(a.0, a.1, b.0, b.1));

@@ -109,6 +109,12 @@ pub fn open(cx: &mut App) {
             window_bounds: Some(bounds),
             window_min_size: Some(size(px(480.), px(400.))),
             app_id: Some("buzz-gpui".into()),
+            // For the taskbar, Alt+Tab and the window list; the header
+            // draws no title.
+            titlebar: Some(TitlebarOptions {
+                title: Some("Buzz".into()),
+                ..Default::default()
+            }),
             // The header is the title bar, with buzz-app's own controls.
             window_decorations: Some(WindowDecorations::Client),
             ..Default::default()

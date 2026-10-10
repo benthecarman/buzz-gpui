@@ -2,6 +2,8 @@
 //! sidebar and the current page (ui.md §2).
 
 mod dialogs;
+pub mod layout;
+mod shell;
 
 use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
@@ -10,26 +12,36 @@ use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
 use super::profile_card::{self, ProfileCard};
 use super::settings::{CloseSettings, OpenHostSettings, OpenSettings, Section, SettingsPage};
-use super::sidebar::{self, SidebarProps};
+use super::sidebar::SidebarView;
 use super::thread::{self, ThreadPanel};
-use super::window_controls;
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
 use buzz_relay_client::{ChannelSummary, ChannelType, RosterStatus};
-use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, IconButton, IconButtonSize, IconName, MaterialStyled,
-    ShellBackground, Surface, Tab, TabVariant, Tabs, TypeStyled,
-};
+use buzz_ui::{ActiveTheme, Avatar, AvatarSize, IconButton, IconName, ShellBackground, TypeStyled};
 use gpui_kit::component::window_border;
 use gpui_kit::*;
 use nostr::prelude::EventId;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct Workspace {
     page: Page,
+    /// The header toggle's choice on a wide window.
     sidebar_open: bool,
+    sidebar_motion: Option<shell::Motion>,
+    /// On a narrow window the sidebar opens as a drawer over the page.
+    drawer_open: bool,
+    /// The current community's saved sidebar view (its width).
+    sidebar_view: SidebarView,
+    /// The header pills fold into More pages when they don't fit.
+    compact_pages: bool,
+    header_sizes: Rc<Cell<shell::HeaderSizes>>,
+    overflow_open: bool,
+    toggle_focus: FocusHandle,
+    /// The page region, focused after a page change.
+    main_focus: FocusHandle,
     community: Option<Entity<Community>>,
     channel: Option<Entity<ChannelPage>>,
     thread: Option<Entity<ThreadPanel>>,
@@ -65,6 +77,14 @@ impl Workspace {
         let mut workspace = Self {
             page: Page::MESSAGES,
             sidebar_open: true,
+            sidebar_motion: None,
+            drawer_open: false,
+            sidebar_view: SidebarView::default(),
+            compact_pages: layout::narrow(f32::from(window.viewport_size().width)),
+            header_sizes: shell::header_sizes(),
+            overflow_open: false,
+            toggle_focus: cx.focus_handle(),
+            main_focus: cx.focus_handle(),
             community: None,
             channel: None,
             thread: None,
@@ -148,6 +168,18 @@ impl Workspace {
         }
     }
 
+    /// History can return to Settings after the page was closed, so it is
+    /// made on demand.
+    fn settings_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SettingsPage> {
+        self.settings
+            .get_or_insert_with(|| cx.new(|cx| SettingsPage::new(None, window, cx)))
+            .clone()
+    }
+
     /// Follows the selected community and the onboarding state.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = cx.global::<AppState>();
@@ -177,6 +209,7 @@ impl Workspace {
                 })
             });
             self.community = current;
+            self.load_sidebar_view(cx);
         }
         cx.notify();
     }
@@ -343,81 +376,12 @@ impl Workspace {
         {
             community.read(cx).session.select(None);
         }
+        // Focus moves to the page, as buzz-app's `#main-content` does; the
+        // channel page focuses its composer instead.
+        if page != Page::MESSAGES || self.channel.is_none() {
+            window.focus(&self.main_focus, cx);
+        }
         cx.notify();
-    }
-
-    fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header_button = |id: &'static str, icon: IconName| {
-            IconButton::new(id, icon)
-                .size(IconButtonSize::Sm)
-                .surface(Surface::Header)
-        };
-        let settings_open = self.page == Page::SETTINGS;
-        self.account
-            .update(cx, |account, _| account.settings_open = settings_open);
-        window_controls::title_bar(
-            div()
-                .id("title-bar")
-                .relative()
-                .flex()
-                .items_center()
-                .justify_between()
-                .h(rems(3.))
-                .pl(rems(1.))
-                .pr(rems(1.)),
-        )
-        .child(
-            window_controls::not_title_bar(div().flex().ml(rems(1.)))
-                .child(
-                    header_button("toggle-sidebar", IconName::Sidebar).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.sidebar_open = !this.sidebar_open;
-                            cx.notify();
-                        },
-                    )),
-                )
-                .child(
-                    header_button("back", IconName::ArrowLeft)
-                        .tooltip("Go back")
-                        .disabled(!self.history.can_go_back())
-                        .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
-                )
-                .child(
-                    header_button("forward", IconName::ArrowRight)
-                        .tooltip("Go forward")
-                        .disabled(!self.history.can_go_forward())
-                        .on_click(cx.listener(|this, _, window, cx| this.go_forward(window, cx))),
-                ),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(rems(0.25))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    window_controls::not_title_bar(div()).child(
-                        Tabs::new(TabVariant::Chrome)
-                            .tab(Tab::new("me", "Me"))
-                            .tab(Tab::new("messages", "Messages").selected(true)),
-                    ),
-                ),
-        )
-        .child(
-            window_controls::not_title_bar(div().flex().items_center().gap(rems(0.5)))
-                .child(
-                    header_button("search", IconName::MagnifyingGlass)
-                        .tooltip("Search Buzz (Ctrl+K)")
-                        .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
-                )
-                .child(self.account.clone())
-                .child(window_controls::render(
-                    window_controls::Policy::current(),
-                    window,
-                )),
-        )
     }
 
     fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -460,18 +424,7 @@ impl Render for Workspace {
             onboarding.clone().into_any_element()
         } else {
             match self.page {
-                // Settings draws its own sidebar in the channel sidebar's
-                // place, following the header toggle. History can return
-                // here after the page was closed, so it is made on demand.
-                Page::SETTINGS => {
-                    let show = self.sidebar_open;
-                    let settings = self
-                        .settings
-                        .get_or_insert_with(|| cx.new(|cx| SettingsPage::new(None, window, cx)))
-                        .clone();
-                    settings.update(cx, |settings, _| settings.show_sidebar = show);
-                    settings.into_any_element()
-                }
+                Page::SETTINGS => self.settings_page(window, cx).into_any_element(),
                 Page::MESSAGES => match &self.channel {
                     Some(channel) => {
                         thread::board(channel.clone().into_any_element(), self.thread.clone(), cx)
@@ -486,68 +439,13 @@ impl Render for Workspace {
                         .child("Select a channel to read it.")
                         .into_any_element(),
                 },
-                page => self
-                    .views
-                    .get(&page)
-                    .cloned()
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| div().into_any_element()),
+                page => self.page_view(page, cx),
             }
         };
-        let sidebar = (self.sidebar_open
-            && self.onboarding.is_none()
-            && self.page != Page::SETTINGS)
-            .then(|| self.community.clone())
-            .flatten()
-            .map(|community| {
-                let snapshot = community.read(cx).snapshot.clone();
-                let weak = cx.entity().downgrade();
-                let weak_page = weak.clone();
-                let (weak_create, weak_message) = (weak.clone(), weak.clone());
-                let can_create = snapshot
-                    .relay
-                    .as_ref()
-                    .is_some_and(|relay| relay.supports_channel_creation);
-                sidebar::render(
-                    &snapshot,
-                    SidebarProps {
-                        page: self.page,
-                        selected: self
-                            .channel
-                            .as_ref()
-                            .map(|c| c.read(cx).channel_id().to_string()),
-                        on_select_channel: Arc::new(move |channel, window, cx| {
-                            let _ = weak
-                                .update(cx, |this, cx| this.select_channel(channel, window, cx));
-                        }),
-                        on_select_page: Arc::new(move |page, window, cx| {
-                            let _ =
-                                weak_page.update(cx, |this, cx| this.select_page(page, window, cx));
-                        }),
-                        on_create_channel: can_create.then(|| {
-                            Arc::new(move |window: &mut Window, cx: &mut App| {
-                                let _ = weak_create
-                                    .update(cx, |this, cx| this.open_new_channel(window, cx));
-                            }) as sidebar::ActionHandler
-                        }),
-                        on_new_message: Arc::new(move |window, cx| {
-                            let _ = weak_message
-                                .update(cx, |this, cx| this.open_new_message(window, cx));
-                        }),
-                    },
-                    cx,
-                )
-            })
-            .map(|sidebar| {
-                div()
-                    .flex_none()
-                    .w(px(260.))
-                    .h_full()
-                    .border_r_1()
-                    .border_color(c.border_standard)
-                    .child(sidebar)
-            });
         let profile = self.profile_card(window, cx);
+        let header = self.header(window, cx);
+        let body = self.body(main, window, cx);
+        let gutter = layout::gutter(f32::from(window.viewport_size().width));
         // No shadow around the frame: that needs a translucent surface,
         // which not every GPU path gives; edges resize from just inside.
         window_border().shadow_size(px(0.)).child(
@@ -575,18 +473,15 @@ impl Render for Workspace {
                             this.open_search(window, cx);
                         }
                     }))
-                    .child(self.header(window, cx))
+                    .child(header)
                     .child(
                         div().flex().flex_1().min_h_0().child(self.rail(cx)).child(
-                            div().flex_1().min_w_0().pr(rems(1.)).pb(rems(1.)).child(
-                                div()
-                                    .flex()
-                                    .size_full()
-                                    .overflow_hidden()
-                                    .panel_surface(&c)
-                                    .children(sidebar)
-                                    .child(main),
-                            ),
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .pr(px(gutter))
+                                .pb(px(gutter))
+                                .child(body),
                         ),
                     )
                     .children(dialog)
@@ -622,8 +517,30 @@ impl Workspace {
         Some(Target { community, place })
     }
 
+    /// A registered page's view, framed by its layout: document pages
+    /// get a centred 56rem column with page padding (ui.md §2.9).
+    fn page_view(&self, page: Page, cx: &App) -> AnyElement {
+        let Some(view) = self.views.get(&page).cloned() else {
+            return div().into_any_element();
+        };
+        match pages::spec(page, cx).map(|spec| spec.layout) {
+            Some(pages::Layout::Document) => div()
+                .id("document-page")
+                .size_full()
+                .overflow_y_scroll()
+                .px(rems(1.))
+                .pt(rems(3.5))
+                .pb(rems(2.5))
+                .child(div().w_full().max_w(rems(56.)).mx_auto().child(view))
+                .into_any_element(),
+            _ => view.into_any_element(),
+        }
+    }
+
     /// Records the place the user just went to.
     fn record(&mut self, cx: &mut Context<Self>) {
+        // Any navigation closes the narrow drawer.
+        self.drawer_open = false;
         if let Some(here) = self.here(cx) {
             self.history.push(here);
         }
@@ -659,6 +576,7 @@ impl Workspace {
 
     /// Shows `target` without recording it.
     fn apply(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.drawer_open = false;
         self.pending = None;
         self.pending_listing = false;
         self._revealing = None;

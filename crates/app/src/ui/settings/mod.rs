@@ -112,8 +112,6 @@ enum Modal {
 
 pub struct SettingsPage {
     section: Section,
-    /// Follows the header's sidebar toggle.
-    pub show_sidebar: bool,
     profile: ProfileForm,
     modal: Option<Modal>,
     toast: Option<(SharedString, usize)>,
@@ -142,7 +140,6 @@ impl SettingsPage {
             } else {
                 Section::Appearance
             }),
-            show_sidebar: true,
             profile: ProfileForm::new(window, cx),
             modal: None,
             toast: None,
@@ -225,8 +222,9 @@ impl SettingsPage {
         self.profile.nsec_message = None;
     }
 
-    /// The settings sidebar (§5b.2).
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The settings sidebar (§5b.2). The shell draws it in the navigation
+    /// column, which sets its width and divider.
+    pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let community = AppState::current(cx).map(|community| community.read(cx).name());
         let item = |section: Section, cx: &mut Context<Self>| {
@@ -280,14 +278,10 @@ impl SettingsPage {
             .id("settings-sidebar")
             .flex()
             .flex_col()
-            .flex_none()
-            .w(px(260.))
-            .h_full()
+            .size_full()
             .pt(rems(0.5))
             .px(rems(0.5))
             .overflow_y_scroll()
-            .border_r_1()
-            .border_color(c.border_standard)
             .text_body_sm()
             .child(
                 NavigationItem::new("settings-back", "Back")
@@ -384,7 +378,6 @@ impl Render for SettingsPage {
             .min_w_0()
             .h_full()
             .text_color(c.text_standard)
-            .when(self.show_sidebar, |this| this.child(self.sidebar(cx)))
             .child(
                 // `.detail`: 32 / 24 / 24 padding; every child is capped at
                 // 768px and centered.
