@@ -842,6 +842,8 @@ impl Render for ThreadPanel {
             rows.in_thread = true;
             let actions = self.message_actions.clone();
             MessageActions::fill(&actions, &mut rows, cx);
+            // Media hook: time chips seek the thread's one video.
+            rows.media = super::media::thread_media(&self.snapshot, &rows.directory.media);
             let rows = Rc::new(rows);
             let entries = self.entries.clone();
             let weak = cx.entity().downgrade();

@@ -361,6 +361,9 @@ impl Workspace {
             return;
         };
         community.read(cx).remember_channel(&channel.id, cx);
+        // Media hook: the old conversation's clips and viewer stop with it.
+        super::media::pause_audio(None, cx);
+        super::media::dismiss_review(window, cx);
         self.leave_channel_tabs();
         self._revealing = None;
         let weak = cx.entity().downgrade();
@@ -431,7 +434,12 @@ impl Workspace {
     fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let had_tab = self.tabs(cx).thread.is_some();
         self.update_tabs(cx, |state| state.close_thread());
-        if self.thread.take().is_none() && !had_tab {
+        let thread = self.thread.take();
+        // Media hook: a clip started in the thread stops with it.
+        if let Some(thread) = &thread {
+            super::media::pause_audio(Some(thread.entity_id()), cx);
+        }
+        if thread.is_none() && !had_tab {
             return;
         }
         if let Some(channel) = &self.channel {
@@ -448,6 +456,10 @@ impl Workspace {
     }
 
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        // Media hook: clips stop while another page hides the conversation.
+        if page != Page::MESSAGES {
+            super::media::pause_audio(None, cx);
+        }
         self.page = page;
         self.route = None;
         self.failure = None;

@@ -346,6 +346,10 @@ impl Workspace {
             true => ThreadPanel::exact(community, channel, target.root, on_close, window, cx),
             false => ThreadPanel::new(community, channel, target.root, on_close, window, cx),
         });
+        // Media hook: a clip started in the replaced thread stops with it.
+        if let Some(old) = &self.thread {
+            super::super::media::pause_audio(Some(old.entity_id()), cx);
+        }
         self.thread = Some(panel.clone());
         self.thread_exact = target.exact;
         Some(panel)
