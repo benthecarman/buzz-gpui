@@ -93,6 +93,8 @@ pub struct Workspace {
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
     route: Option<ChannelRoute>,
+    /// The route a routed page shows (`Place::Route`).
+    page_route: Option<serde_json::Value>,
     /// Bumped by every navigation, so a stale open timeout does nothing.
     attempts: u64,
     /// A link that arrived before an identity or a community was ready,
@@ -158,6 +160,7 @@ impl Workspace {
             dialog: None,
             _page_events: None,
             route: None,
+            page_route: None,
             attempts: 0,
             held: None,
             outside_settings: None,
@@ -459,7 +462,24 @@ impl Workspace {
     /// Shows a page and records the visit.
     pub fn select_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.show_page(page, window, cx);
+        self.open_page_route(page, None, window, cx);
         self.record(cx);
+    }
+
+    /// Hands a routed page its route, or `None` for its start.
+    fn open_page_route(
+        &mut self,
+        page: Page,
+        params: Option<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(routes), Some(view)) = (pages::routes(page, cx), self.views.get(&page).cloned())
+        else {
+            return;
+        };
+        (routes.open)(&view, params.as_ref(), window, cx);
+        self.page_route = params;
     }
 
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
@@ -469,6 +489,7 @@ impl Workspace {
         }
         self.page = page;
         self.route = None;
+        self.page_route = None;
         self.failure = None;
         self.resolving = None;
         if let Some(spec) = pages::spec(page, cx) {
@@ -702,7 +723,13 @@ impl Workspace {
                 Some(settings) => Place::Settings(settings.read(cx).section()),
                 None => Place::Page(Page::SETTINGS),
             },
-            (page, _) => Place::Page(page),
+            (page, _) => match &self.page_route {
+                Some(params) => Place::Route {
+                    page,
+                    params: params.clone(),
+                },
+                None => Place::Page(page),
+            },
         };
         Some(Target { community, place })
     }
@@ -886,9 +913,26 @@ impl Workspace {
             Place::Channels(route) => self.show_route(route, window, cx),
             Place::Page(page) => {
                 self.show_page(page, window, cx);
+                self.open_page_route(page, None, window, cx);
                 if page == Page::MESSAGES && self.channel.is_none() {
                     self.restore_selection(window, cx);
                 }
+            }
+            Place::Route { page, ref params } => {
+                let valid = pages::spec(page, cx).is_some()
+                    && pages::routes(page, cx).is_some_and(|routes| (routes.validate)(params));
+                if !valid {
+                    self.page = Page::MESSAGES;
+                    self.failure = Some(Failed {
+                        target: Some(target.clone()),
+                        reason: Reason::Invalid,
+                        ingress: false,
+                    });
+                    cx.notify();
+                    return;
+                }
+                self.show_page(page, window, cx);
+                self.open_page_route(page, Some(params.clone()), window, cx);
             }
             Place::Settings(section) => {
                 if matches!(self.onboarding, Some((Step::Identity, _))) {
@@ -1106,8 +1150,25 @@ impl Workspace {
             Some(Link::Join { .. }) if viewer.is_none() => {
                 self.held = Some((url.to_string(), None));
             }
-            Some(Link::Conversation { .. }) if viewer.is_none() || self.community.is_none() => {
+            Some(Link::Conversation { .. } | Link::Entity(_))
+                if viewer.is_none() || self.community.is_none() =>
+            {
                 self.held = Some((url.to_string(), viewer));
+            }
+            // Entity links open the Projects page in the selected community.
+            Some(Link::Entity(route)) => {
+                let community = self
+                    .community
+                    .as_ref()
+                    .map(|community| community.read(cx).origin.to_string());
+                let target = Target {
+                    community,
+                    place: Place::Route {
+                        page: super::projects::PAGE,
+                        params: route.params(),
+                    },
+                };
+                self.navigate(target, window, cx);
             }
             Some(Link::Conversation {
                 channel,

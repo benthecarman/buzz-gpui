@@ -93,6 +93,31 @@ pub struct Pages(Vec<PageSpec>);
 
 impl Global for Pages {}
 
+/// A page that takes navigation targets of its own (`handlesNavigation`
+/// with `route.validate`), such as Projects' entity routes. History
+/// records each route as a place.
+#[derive(Clone, Copy)]
+pub struct PageRoutes {
+    /// Whether `params` name a place the page can open.
+    pub validate: fn(&serde_json::Value) -> bool,
+    /// Shows `params` in the page's view, or the page's start for `None`.
+    pub open: fn(&AnyView, Option<&serde_json::Value>, &mut Window, &mut App),
+}
+
+#[derive(Default)]
+struct Routes(std::collections::HashMap<Page, PageRoutes>);
+
+impl Global for Routes {}
+
+/// Lets `page` handle navigation targets.
+pub fn register_routes(page: Page, routes: PageRoutes, cx: &mut App) {
+    cx.default_global::<Routes>().0.insert(page, routes);
+}
+
+pub fn routes(page: Page, cx: &App) -> Option<PageRoutes> {
+    cx.try_global::<Routes>()?.0.get(&page).copied()
+}
+
 /// Registers the bundled pages. A new page adds its `register` call here.
 pub fn init(cx: &mut App) {
     cx.set_global(Pages::default());

@@ -86,6 +86,7 @@ fn main() {
         ui::profile_panel::init(cx);
         ui::channel_usage::init(cx);
         ui::github::init(cx);
+        ui::projects::init(cx);
         ui::channel_panels::dev_sample(cx);
         network::init(cx);
         let requests = navigation::init(cx);

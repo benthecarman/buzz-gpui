@@ -256,7 +256,7 @@ pub fn record_choice(community: &Community, typed: &str, key: &str, cx: &App) {
 pub fn visit_key(place: &Place) -> String {
     match place {
         Place::Conversation { channel, .. } => format!("channel:{channel}"),
-        Place::Page(page) => page.key().to_owned(),
+        Place::Page(page) | Place::Route { page, .. } => page.key().to_owned(),
         Place::Settings(_) => crate::ui::pages::Page::SETTINGS.key().to_owned(),
         // Messages without a conversation open.
         Place::Channels(_) => crate::ui::pages::Page::MESSAGES.key().to_owned(),

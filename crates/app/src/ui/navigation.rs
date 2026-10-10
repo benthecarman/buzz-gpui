@@ -58,6 +58,12 @@ pub enum Place {
     },
     /// Messages without a conversation of its own (`routes.ts`).
     Channels(ChannelRoute),
+    /// A page at one of its own routes (`target.route.params`), such as a
+    /// Projects entity. The page validates the params.
+    Route {
+        page: Page,
+        params: serde_json::Value,
+    },
 }
 
 /// The Channels page's routes that are not a conversation.

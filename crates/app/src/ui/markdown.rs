@@ -928,6 +928,7 @@ fn valid_link(url: &str) -> bool {
     match url::Url::parse(url) {
         Ok(parsed) if parsed.scheme() == "buzz" => {
             buzz_relay_client::parse_buzz_link(url).is_some()
+                || buzz_relay_client::projects::EntityRoute::parse_link(url).is_some()
         }
         Ok(parsed) => {
             matches!(parsed.scheme(), "http" | "https")

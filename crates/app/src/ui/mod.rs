@@ -54,6 +54,7 @@ pub(crate) mod overlay;
 pub mod pages;
 mod panels;
 pub mod profile_panel;
+pub mod projects;
 mod reading;
 mod reminders;
 mod renderers;

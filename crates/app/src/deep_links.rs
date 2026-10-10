@@ -5,6 +5,7 @@
 //! conversation binds to the selected one, and a valid address is never
 //! authorization: the session still decides what the viewer may read.
 
+use buzz_relay_client::projects::EntityRoute;
 use buzz_relay_client::{EventId, RelayOrigin, parse_buzz_link};
 use url::Url;
 
@@ -21,6 +22,9 @@ pub enum Link {
     },
     /// `buzz://join?relay=<url>&code=<code>`.
     Join { relay: RelayOrigin, code: String },
+    /// `buzz://repo|project|pr|issue?owner=&d=[&tab=&commit=|&id=]`, which
+    /// the Projects page opens in the selected community.
+    Entity(EntityRoute),
 }
 
 /// Parses one of the accepted forms; anything else, unknown hosts included,
@@ -39,6 +43,9 @@ pub fn parse(href: &str) -> Option<Link> {
             message: link.message,
             thread: link.thread,
         });
+    }
+    if let Some(route) = EntityRoute::parse_link(href) {
+        return Some(Link::Entity(route));
     }
     join(href)
 }
@@ -248,6 +255,37 @@ mod tests {
             "https://channel/general".to_string(),
             "buzz:".to_string(),
             String::new(),
+        ] {
+            assert_eq!(parse(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_entity_links() {
+        let owner = "ab".repeat(32);
+        let id = "cd".repeat(32);
+        let Some(Link::Entity(repo)) = parse(&format!(
+            "buzz://repo?owner={}&d=demo&tab=files",
+            owner.to_uppercase()
+        )) else {
+            panic!("a repository link");
+        };
+        assert_eq!(repo.owner, owner);
+        assert_eq!(
+            repo.href(),
+            format!("buzz://repo?owner={owner}&d=demo&tab=files")
+        );
+        for href in [
+            format!("buzz://project?owner={owner}&d=demo"),
+            format!("BUZZ://pr?id={id}&owner={owner}&d=demo"),
+            format!("buzz://issue?id={id}&owner={owner}&d=demo"),
+        ] {
+            assert!(matches!(parse(&href), Some(Link::Entity(_))), "{href}");
+        }
+        for bad in [
+            format!("buzz://repo?owner={owner}"),
+            format!("buzz://issue?owner={owner}&d=demo"),
+            format!("buzz://repo?owner={owner}&d=demo&tab=overview"),
         ] {
             assert_eq!(parse(&bad), None, "{bad}");
         }
