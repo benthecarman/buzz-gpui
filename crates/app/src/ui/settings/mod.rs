@@ -7,6 +7,7 @@ mod agents;
 mod appearance;
 mod archive;
 mod avatar;
+pub mod cards;
 mod communities;
 mod emoji;
 mod notifications;
@@ -58,6 +59,8 @@ pub enum Section {
     Plugins,
     Updates,
     About,
+    /// A plugin's card, by its key (`cards::SettingsCard::key`).
+    Card(&'static str),
 }
 
 /// Emitted when the page shows another section, so it is a history visit.
@@ -78,8 +81,16 @@ impl Section {
 
     /// Whether the sidebar lists the section: Custom emoji belongs to a
     /// community.
-    fn listed(self, has_community: bool) -> bool {
-        has_community || self != Self::CustomEmoji
+    fn listed(self, has_community: bool, cx: &App) -> bool {
+        match self {
+            Self::CustomEmoji => has_community,
+            // An open card stays while its check is pending.
+            Self::Card(key) => cards::get(key, cx).is_some_and(|card| {
+                (has_community || matches!(card.placement, cards::CardPlacement::Group(_)))
+                    && card.visibility(cx) != cards::CardVisibility::Hidden
+            }),
+            _ => true,
+        }
     }
 
     fn label(self) -> &'static str {
@@ -94,6 +105,7 @@ impl Section {
             Self::Plugins => "Plugins",
             Self::Updates => "Updates",
             Self::About => "About",
+            Self::Card(key) => key,
         }
     }
 
@@ -109,6 +121,7 @@ impl Section {
             Self::Plugins => IconName::SquaresFour,
             Self::Updates => IconName::Download,
             Self::About => IconName::Info,
+            Self::Card(_) => IconName::Plug,
         }
     }
 }
@@ -159,6 +172,8 @@ pub struct SettingsPage {
     shortcuts: Option<Entity<shortcuts::ShortcutSettings>>,
     /// Settings → Updates.
     update_state: updates::UpdateState,
+    /// The open plugin card's view and the community it was made for.
+    card: Option<(&'static str, Option<EntityId>, AnyView)>,
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -181,6 +196,7 @@ impl SettingsPage {
             archive_error: None,
             shortcuts: None,
             update_state: updates::UpdateState::default(),
+            card: None,
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -217,7 +233,7 @@ impl SettingsPage {
         // A section no longer listed falls back to the default
         // (`Settings.tsx`), e.g. Custom emoji once no community is chosen.
         let has_community = community.is_some();
-        if !self.section.listed(has_community) {
+        if !self.section.listed(has_community, cx) {
             self.open(Section::default_for(has_community), cx);
         }
         cx.notify();
@@ -270,6 +286,8 @@ impl SettingsPage {
         self.profile.hide_private_key(cx);
         // Leaving Shortcuts stops a capture and clears its notice.
         self.shortcuts = None;
+        // Leaving a plugin card unmounts it.
+        self.card = None;
     }
 
     /// The settings sidebar (§5b.2). The shell draws it in the navigation
@@ -301,19 +319,54 @@ impl SettingsPage {
                 )
                 .child(div().flex().flex_col().gap(rems(0.125)).children(items))
         };
+        let card_item = |card: &cards::SettingsCard, cx: &mut Context<Self>| {
+            let section = Section::Card(card.key);
+            NavigationItem::new(
+                SharedString::from(format!("settings-{}", card.key)),
+                card.title,
+            )
+            .sidebar()
+            .when_some(card.sidebar_icon(), |item, icon| {
+                item.leading(Icon::new(icon).size(18.))
+            })
+            .selected(self.section == section)
+            .on_click(cx.listener(move |this, _, _, cx| this.open(section, cx)))
+        };
+        let contributed = cards::visible(cx);
+        let placed = |placement: cards::CardPlacement| {
+            contributed
+                .iter()
+                .filter(move |card| card.placement == placement)
+        };
         let mut groups = Vec::new();
         let mut app = Vec::new();
         match community {
-            Some(name) => groups.push(group(
-                name.into(),
-                vec![item(Section::Profile, cx), item(Section::CustomEmoji, cx)],
-            )),
+            Some(name) => {
+                let mut items = vec![item(Section::Profile, cx), item(Section::CustomEmoji, cx)];
+                for card in placed(cards::CardPlacement::Community) {
+                    items.push(card_item(card, cx));
+                }
+                groups.push(group(name.into(), items));
+                let administration: Vec<_> = placed(cards::CardPlacement::Administration)
+                    .map(|card| card_item(card, cx))
+                    .collect();
+                if !administration.is_empty() {
+                    groups.push(group("Administration".into(), administration));
+                }
+            }
             None => app.push(item(Section::Profile, cx)),
         }
         groups.push(group(
             "Communities".into(),
             vec![item(Section::Communities, cx)],
         ));
+        for label in cards::groups(&contributed) {
+            let items: Vec<_> = placed(cards::CardPlacement::Group(label))
+                .map(|card| card_item(card, cx))
+                .collect();
+            groups.push(group(label.into(), items));
+        }
+
         for section in [
             Section::Appearance,
             Section::Notifications,
@@ -377,7 +430,30 @@ impl SettingsPage {
             Section::Plugins => self.plugins_section(cx),
             Section::Updates => self.updates_section(cx),
             Section::About => about::render(cx),
+            Section::Card(key) => self.card_section(key, window, cx),
         }
+    }
+
+    /// A plugin card's view, kept while its section stays open.
+    fn card_section(
+        &mut self,
+        key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let community = AppState::current(cx).map(|community| community.entity_id());
+        if let Some((open, made_for, view)) = &self.card
+            && *open == key
+            && *made_for == community
+        {
+            return view.clone().into_any_element();
+        }
+        let Some(card) = cards::get(key, cx) else {
+            return div().into_any_element();
+        };
+        let view = (card.build)(window, cx);
+        self.card = Some((key, community, view.clone()));
+        view.into_any_element()
     }
 
     fn modal(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
