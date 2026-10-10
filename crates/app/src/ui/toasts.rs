@@ -160,17 +160,23 @@ pub fn card(notice: &Notice, generation: usize) -> Toast {
     toast
 }
 
+/// Where the toast column starts: 16px from the right edge, 128px down.
+/// Cards are 24rem wide, so the interface size moves it.
+pub fn origin(window: &Window) -> Point<Pixels> {
+    let width = window.rem_size() * 24.;
+    point(window.viewport_size().width - px(16.) - width, px(128.))
+}
+
 /// Lays `cards` out in the toast region, above dialogs.
 pub fn stack(window: &Window, cards: Vec<AnyElement>) -> Option<AnyElement> {
     if cards.is_empty() {
         return None;
     }
-    let right = window.viewport_size().width - px(16.) - px(384.);
     Some(
         deferred(
             anchored()
                 .position_mode(AnchoredPositionMode::Window)
-                .position(point(right, px(128.)))
+                .position(origin(window))
                 .child(
                     div()
                         .id("toasts")

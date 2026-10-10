@@ -361,7 +361,7 @@ impl SettingsPage {
                 settings.clone().into_any_element()
             }
             Section::Communities => self.communities_section(cx),
-            Section::Appearance => appearance::render(cx),
+            Section::Appearance => appearance::render(window, cx),
             Section::Notifications => self.notifications_section(window, cx),
             Section::Shortcuts => self
                 .shortcuts
@@ -408,11 +408,10 @@ impl Render for SettingsPage {
         let detail = self.detail(window, cx);
         let modal = self.modal(window, cx);
         let toast = self.toast.as_ref().map(|(text, generation)| {
-            let right = window.viewport_size().width - px(16.) - px(384.);
             deferred(
                 anchored()
                     .position_mode(AnchoredPositionMode::Window)
-                    .position(point(right, px(128.)))
+                    .position(crate::ui::toasts::origin(window))
                     .child(
                         Toast::new(("settings-toast", *generation), text.clone())
                             .tone(self.toast_tone)

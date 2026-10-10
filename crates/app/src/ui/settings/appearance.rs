@@ -2,7 +2,9 @@
 //! the interface size stepper, and this port's system tray choices.
 
 use super::{button, header, inline_header, note, preference_row, rows_group, section};
+use crate::appearance::{self as saved, AppearanceErrors};
 use crate::main_window;
+use crate::ui::toasts;
 use buzz_ui::{
     ActiveTheme, Appearance, AppearancePreference, ButtonSize, Colors, INTERFACE_SCALE_MAX,
     INTERFACE_SCALE_MIN, IconButton, IconButtonSize, IconName, Switch, Theme, TypeStyled,
@@ -10,7 +12,7 @@ use buzz_ui::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-pub(super) fn render(cx: &App) -> AnyElement {
+pub(super) fn render(window: &Window, cx: &App) -> AnyElement {
     let theme = Theme::base(cx);
     let preference = theme.preference();
     let scale = theme.interface_scale();
@@ -57,7 +59,7 @@ pub(super) fn render(cx: &App) -> AnyElement {
                     .on_click(|_, _, cx| Theme::reset_interface_scale(cx)),
             )
         });
-    section(vec![
+    let mut children = vec![
         header("Appearance", None, cx).into_any_element(),
         rows_group(
             vec![
@@ -82,7 +84,42 @@ pub(super) fn render(cx: &App) -> AnyElement {
         )
         .into_any_element(),
         tray(cx),
-    ])
+    ];
+    children.extend(toasts::stack(window, save_errors(cx)));
+    section(children)
+}
+
+/// "Interface size wasn’t saved" and "Appearance wasn’t saved", each with
+/// its retry (`AppearanceSettings.tsx`).
+fn save_errors(cx: &App) -> Vec<AnyElement> {
+    let Some(errors) = cx.try_global::<AppearanceErrors>() else {
+        return Vec::new();
+    };
+    let mut cards = Vec::new();
+    if let Some(description) = errors.scale {
+        let notice = toasts::Notice {
+            dismissible: false,
+            ..toasts::Notice::error("interface-size", "Interface size wasn’t saved")
+        }
+        .description(description)
+        .action(toasts::Action::new(
+            "Retry saving interface size",
+            |_, cx| saved::save_scale(cx),
+        ));
+        cards.push(toasts::card(&notice, 0).into_any_element());
+    }
+    if let Some(description) = errors.appearance {
+        let notice = toasts::Notice {
+            dismissible: false,
+            ..toasts::Notice::error("appearance", "Appearance wasn’t saved")
+        }
+        .description(description)
+        .action(toasts::Action::new("Retry saving appearance", |_, cx| {
+            saved::save_appearance(cx)
+        }));
+        cards.push(toasts::card(&notice, 0).into_any_element());
+    }
+    cards
 }
 
 /// The tray icon and whether the window hides to it.
