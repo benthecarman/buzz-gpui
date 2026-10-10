@@ -28,9 +28,12 @@ struct Saved {
 }
 
 pub enum IdentityState {
+    /// The saved identity is being read (`identity_restore`).
+    Loading,
     Ready(Arc<Identity>),
     /// No identity is saved yet; onboarding creates or imports one.
     Missing,
+    /// The saved identity could not be read; onboarding offers a retry.
     Error(String),
 }
 
@@ -54,42 +57,48 @@ impl AppState {
             tracing::error!(%error, path = %path.display(), "could not open local storage; using memory");
             Store::in_memory().expect("in-memory store")
         });
-        let identity = load_identity();
-        let mut state = Self {
-            identity,
+        cx.set_global(Self {
+            identity: IdentityState::Loading,
             store,
             communities: Vec::new(),
             selected: None,
             presence_mode: PresenceMode::Auto,
             presence_error: None,
-        };
-        if let IdentityState::Ready(identity) = &state.identity {
-            (state.presence_mode, state.presence_error) =
-                load_presence_mode(&state.store, &identity.pubkey_hex());
-            let saved = state.saved(&identity.pubkey_hex());
-            for origin in saved
-                .origins
-                .iter()
-                .filter_map(|o| RelayOrigin::parse(o).ok())
-            {
-                let community = Community::new(
-                    origin,
-                    identity.clone(),
-                    state.store.clone(),
-                    state.presence_mode,
-                    cx,
-                );
-                state.communities.push(community);
-            }
-            state.selected = saved
-                .selected
-                .and_then(|selected| saved.origins.iter().position(|o| *o == selected))
-                .or((!state.communities.is_empty()).then_some(0));
+        });
+        // A development identity file is read at once, so development
+        // launches open straight into the workspace.
+        if dev_identity_file().is_some() {
+            Self::restored(identity::restore(), cx);
+        } else {
+            Self::restore(cx);
         }
-        cx.set_global(state);
     }
 
-    /// Adopts a newly created or imported identity and opens its saved
+    /// Reads the saved identity off the UI thread, as buzz-app's
+    /// `identity_restore` does; the keyring may wait on an unlock prompt.
+    /// Also the "Retry secure storage access" action.
+    pub fn restore(cx: &mut App) {
+        if matches!(cx.global::<Self>().identity, IdentityState::Ready(_)) {
+            return;
+        }
+        cx.global_mut::<Self>().identity = IdentityState::Loading;
+        let read = cx.background_spawn(async { identity::restore() });
+        cx.spawn(async move |cx| {
+            let result = read.await;
+            cx.update(|cx| Self::restored(result, cx));
+        })
+        .detach();
+    }
+
+    fn restored(result: Result<Option<Identity>, String>, cx: &mut App) {
+        match result {
+            Ok(Some(identity)) => Self::set_identity(identity, cx),
+            Ok(None) => cx.global_mut::<Self>().identity = IdentityState::Missing,
+            Err(error) => cx.global_mut::<Self>().identity = IdentityState::Error(error),
+        }
+    }
+
+    /// Adopts a restored, created or imported identity and opens its saved
     /// communities.
     pub fn set_identity(identity: buzz_identity::Identity, cx: &mut App) {
         let identity = Arc::new(identity);
@@ -103,7 +112,10 @@ impl AppState {
             .map(|origin| Community::new(origin, identity.clone(), store.clone(), mode, cx))
             .collect();
         let state = cx.global_mut::<Self>();
-        state.selected = (!communities.is_empty()).then_some(0);
+        state.selected = saved
+            .selected
+            .and_then(|selected| saved.origins.iter().position(|o| *o == selected))
+            .or((!communities.is_empty()).then_some(0));
         state.communities = communities;
         state.identity = IdentityState::Ready(identity);
         state.presence_mode = mode;
@@ -250,24 +262,31 @@ impl AppState {
         });
     }
 
-    /// Signs out (relay.md §2.4, adapted): deletes the identity from the
-    /// keyring, which buzz-app shares, and closes every community. Local
-    /// data stays, as in buzz-app's sign-out without a wipe.
+    /// Signs out: deletes the saved key and closes every community.
     pub fn sign_out(cx: &mut App) -> Result<(), String> {
-        if std::env::var_os("BUZZ_DEV_NSEC_FILE").is_some() {
-            tracing::warn!("development identity from a file; the keyring is left alone");
-        } else {
-            buzz_identity::forget().map_err(|error| error.to_string())?;
-        }
+        identity::remove()?;
+        Self::close_sessions(cx);
         let state = cx.global_mut::<Self>();
-        let communities = std::mem::take(&mut state.communities);
+        state.communities.clear();
         state.selected = None;
         state.identity = IdentityState::Missing;
-        for community in communities {
-            let session = community.read(cx).session.clone();
-            Runtime::handle(cx).spawn(async move { session.dispose().await });
-        }
         Ok(())
+    }
+
+    /// Sign out's commit point (`IdentityHost::close`): every session
+    /// stops, so nothing more is signed with this key before Buzz restarts
+    /// and the next launch removes it.
+    pub fn close_sessions(cx: &mut App) {
+        let sessions: Vec<_> = cx
+            .global::<Self>()
+            .communities
+            .iter()
+            .map(|community| community.read(cx).session.clone())
+            .collect();
+        let runtime = Runtime::handle(cx);
+        for session in sessions {
+            runtime.spawn(async move { session.dispose().await });
+        }
     }
 
     pub fn current(cx: &App) -> Option<Entity<Community>> {
@@ -500,24 +519,77 @@ pub fn data_dir() -> PathBuf {
         .join("buzz-gpui")
 }
 
-/// The keyring identity buzz-app also uses. For development on machines
-/// without a keyring, `BUZZ_DEV_NSEC_FILE` names a file holding an nsec.
-fn load_identity() -> IdentityState {
-    if let Ok(path) = std::env::var("BUZZ_DEV_NSEC_FILE") {
-        return match std::fs::read_to_string(&path)
-            .map_err(|error| error.to_string())
-            .and_then(|nsec| Identity::from_nsec(&nsec).map_err(|error| error.to_string()))
-        {
-            Ok(identity) => {
-                tracing::warn!(%path, "using a development identity from a file");
-                IdentityState::Ready(Arc::new(identity))
-            }
-            Err(error) => IdentityState::Error(error),
+/// For development on machines without a keyring, `BUZZ_DEV_NSEC_FILE`
+/// names a file that stands in for the keyring entry.
+pub fn dev_identity_file() -> Option<PathBuf> {
+    std::env::var_os("BUZZ_DEV_NSEC_FILE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The human key's store: the keyring entry buzz-app also uses, or the
+/// development file in its place. With the file, the keyring is never
+/// read, written or deleted.
+pub mod identity {
+    use super::dev_identity_file;
+    use buzz_identity::{Identity, IdentityError};
+    use std::io::ErrorKind;
+    use std::path::Path;
+
+    /// The saved identity; `None` when none is saved.
+    pub fn restore() -> Result<Option<Identity>, String> {
+        let Some(path) = dev_identity_file() else {
+            return buzz_identity::load().map_err(|error| error.to_string());
         };
+        tracing::warn!(path = %path.display(), "using a development identity file");
+        read_file(&path).map_err(|error| error.to_string())
     }
-    match buzz_identity::load() {
-        Ok(Some(identity)) => IdentityState::Ready(Arc::new(identity)),
-        Ok(None) => IdentityState::Missing,
-        Err(error) => IdentityState::Error(error.to_string()),
+
+    /// Saves a new random identity, or the imported `nsec`.
+    pub fn save(nsec: Option<&str>) -> Result<Identity, String> {
+        let Some(path) = dev_identity_file() else {
+            return match nsec {
+                Some(nsec) => buzz_identity::import(nsec),
+                None => buzz_identity::create(),
+            }
+            .map_err(|error| error.to_string());
+        };
+        if read_file(&path)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err(IdentityError::AlreadySaved.to_string());
+        }
+        let identity = match nsec {
+            Some(nsec) => Identity::from_nsec(nsec).map_err(|error| error.to_string())?,
+            None => Identity::ephemeral(),
+        };
+        std::fs::write(&path, identity.nsec().as_bytes())
+            .map_err(|_| IdentityError::Unavailable.to_string())?;
+        Ok(identity)
+    }
+
+    /// Sign out's last step at the next launch: deletes the saved key and
+    /// confirms a fresh read finds nothing. An absent key is success.
+    pub fn remove() -> Result<(), String> {
+        let Some(path) = dev_identity_file() else {
+            return buzz_identity::forget().map_err(|error| error.to_string());
+        };
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// An absent or empty file is no identity.
+    fn read_file(path: &Path) -> Result<Option<Identity>, IdentityError> {
+        match std::fs::read_to_string(path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(IdentityError::Unavailable),
+            Ok(text) if text.trim().is_empty() => Ok(None),
+            Ok(text) => Identity::from_nsec(&text)
+                .map(Some)
+                .map_err(|_| IdentityError::Malformed),
+        }
     }
 }
