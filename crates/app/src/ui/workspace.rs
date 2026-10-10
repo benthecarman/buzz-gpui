@@ -546,7 +546,8 @@ impl Render for Workspace {
                         ),
                     )
                     .children(dialog)
-                    .children(super::media::review_overlay(cx)),
+                    .children(super::media::review_overlay(cx))
+                    .children(super::toasts::render(window, cx)),
             ),
         )
     }

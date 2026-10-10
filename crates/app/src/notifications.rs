@@ -1,22 +1,22 @@
 //! Desktop notifications for new messages (relay.md §5l).
 //!
-//! The session decides what deserves attention ([`Session::incoming`]);
-//! this module applies the user's side: only the selected community, the
-//! community's preferences, channel visibility, a two-minute dedupe, and
-//! the reference text format. Banners go to the freedesktop notification
-//! service ([`banners`]) from the tokio runtime, silent and never awaited
-//! by the UI: a missing service is logged, never retried and never fatal.
-//! Clicking a banner brings the window forward on the message it is about.
+//! The session decides what deserves attention ([`Session::incoming`]),
+//! including channel mute; this module applies the user's side: only the
+//! selected community, the viewer's preferences, the message being in
+//! view, a two-minute dedupe, and the reference text format. Banners go to
+//! the freedesktop notification service ([`banners`]) from the tokio
+//! runtime, silent and never awaited by the UI; the chosen sound plays
+//! once the service took the banner. A failure is kept for Settings →
+//! Notifications to show. Clicking a banner brings the window forward on
+//! the message it is about.
 //!
 //! [`Session::incoming`]: buzz_relay_client::Session::incoming
 
-use crate::community::{AppState, Community};
+use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use crate::sounds::Sound;
 use crate::ui::navigation::{self, Place, Target};
-use buzz_relay_client::{
-    Category, ChannelSummary, ChannelType, IncomingMessage, Partition, Profiles, Store,
-};
+use buzz_relay_client::{Category, ChannelSummary, ChannelType, IncomingMessage, Profiles, Store};
 use futures::StreamExt;
 use gpui_kit::{App, Entity, Global, Task};
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,9 @@ use std::time::{Duration, Instant};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod banners;
 
-/// View-state key for a community's notification preferences.
-const PREFERENCES: &str = "notifications";
+/// Viewer preference key for the notification choices
+/// (`buzz-notification-preferences.v1:<viewer>`).
+const PREFERENCES: &str = "notification-preferences";
 /// A message notifies at most once within this window.
 const DEDUPE: Duration = Duration::from_secs(120);
 const DEDUPE_ENTRIES: usize = 2048;
@@ -35,8 +36,15 @@ const TITLE_NAME_CHARS: usize = 64;
 const BODY_CHARS: usize = 200;
 const SOURCE_CHARS: usize = 4096;
 
-/// Per-community choices (`buzz-notification-preferences.v1`). Banners
-/// are always silent; the app plays the chosen sound itself.
+/// Shown when the saved choices could not be read; alerts stay off.
+pub const RESTORE_ERROR: &str = "Notification preferences could not be restored. Alerts are \
+                                 paused; retry loading your settings.";
+/// Shown when a change could not be saved; it still applies.
+pub const SAVE_ERROR: &str = "These notification choices are active, but could not be saved on \
+                              this device. Retry saving.";
+
+/// The viewer's choices, for every community. Banners are always silent;
+/// the app plays the chosen sound itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -44,6 +52,8 @@ pub struct Preferences {
     pub mention: bool,
     pub direct: bool,
     pub thread: bool,
+    /// "Notify while viewing": messages in view still notify.
+    pub notify_while_viewing: bool,
     /// "Sound": alerts play their category's sound.
     pub sound: bool,
     pub sounds: CategorySounds,
@@ -56,6 +66,7 @@ impl Default for Preferences {
             mention: true,
             direct: true,
             thread: true,
+            notify_while_viewing: false,
             sound: true,
             sounds: CategorySounds::default(),
         }
@@ -90,35 +101,160 @@ impl CategorySounds {
 }
 
 impl Preferences {
-    pub fn load(store: &Store, partition: &Partition) -> Self {
-        store
-            .view_state(partition, PREFERENCES)
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
-    }
-
-    pub fn save(&self, store: &Store, partition: &Partition) {
-        let json = serde_json::to_string(self).expect("preferences serialize");
-        if let Err(error) = store.set_view_state(partition, PREFERENCES, Some(&json)) {
-            tracing::warn!(%error, "could not save notification preferences");
+    /// The saved choices of `viewer` (or of this device with none). Saved
+    /// choices that cannot be read pause alerts rather than turn them on.
+    pub fn restore(store: &Store, viewer: Option<&str>) -> Result<Self, Self> {
+        let saved = match viewer {
+            Some(viewer) => store.viewer_pref(viewer, PREFERENCES),
+            None => store.device_pref(PREFERENCES),
+        };
+        let paused = || Self {
+            enabled: false,
+            ..Self::default()
+        };
+        match saved {
+            Ok(None) => Ok(Self::default()),
+            Ok(Some(json)) => serde_json::from_str(&json).map_err(|_| paused()),
+            Err(_) => Err(paused()),
         }
     }
 
-    fn allows(&self, category: Category) -> bool {
-        self.enabled
-            && match category {
-                Category::Mention => self.mention,
-                Category::Direct => self.direct,
-                Category::Thread => self.thread,
-            }
+    pub fn save(&self, store: &Store, viewer: Option<&str>) -> Result<(), String> {
+        let json = serde_json::to_string(self).expect("preferences serialize");
+        match viewer {
+            Some(viewer) => store.set_viewer_pref(viewer, PREFERENCES, &json),
+            None => store.set_device_pref(PREFERENCES, &json),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn allows(&self, category: Category) -> bool {
+        self.enabled && self.category(category)
+    }
+
+    /// The category's own switch, whatever Desktop alerts says.
+    pub fn category(&self, category: Category) -> bool {
+        match category {
+            Category::Mention => self.mention,
+            Category::Direct => self.direct,
+            Category::Thread => self.thread,
+        }
+    }
+
+    pub fn set_category(&mut self, category: Category, enabled: bool) {
+        match category {
+            Category::Mention => self.mention = enabled,
+            Category::Direct => self.direct = enabled,
+            Category::Thread => self.thread = enabled,
+        }
     }
 
     /// The sound an alert in `category` plays, if any.
     pub fn sound_for(&self, category: Category) -> Option<Sound> {
         let sound = self.sounds.get(category);
         (self.allows(category) && self.sound && sound != Sound::Silent).then_some(sound)
+    }
+}
+
+/// Whether the freedesktop notification service can show banners.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServiceStatus {
+    #[default]
+    Unknown,
+    Available,
+    /// No service on the session bus.
+    Unavailable,
+}
+
+/// The viewer's notification state (`NotificationsService` snapshot).
+#[derive(Default)]
+pub struct Notifications {
+    viewer: Option<String>,
+    pub preferences: Preferences,
+    /// The choices could not be restored or saved ([`RESTORE_ERROR`],
+    /// [`SAVE_ERROR`]).
+    pub preferences_error: Option<&'static str>,
+    /// The last banner the service refused.
+    pub error: Option<String>,
+    pub service: ServiceStatus,
+}
+
+impl Global for Notifications {}
+
+impl Notifications {
+    /// Restores the viewer's choices, and again whenever the identity
+    /// changes.
+    pub fn init(cx: &mut App) {
+        cx.set_global(Self::default());
+        Self::reload(cx);
+        Self::follow_viewer(cx);
+        cx.observe_global::<AppState>(Self::follow_viewer).detach();
+        probe(cx);
+    }
+
+    fn follow_viewer(cx: &mut App) {
+        let viewer = match &cx.global::<AppState>().identity {
+            IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+            _ => None,
+        };
+        if cx.global::<Self>().viewer == viewer {
+            return;
+        }
+        let this = cx.global_mut::<Self>();
+        this.viewer = viewer;
+        this.error = None;
+        Self::reload(cx);
+    }
+
+    /// "Reload saved choices".
+    pub fn reload(cx: &mut App) {
+        let store = cx.global::<AppState>().store.clone();
+        let this = cx.global_mut::<Self>();
+        let (preferences, error) = match Preferences::restore(&store, this.viewer.as_deref()) {
+            Ok(preferences) => (preferences, None),
+            Err(paused) => (paused, Some(RESTORE_ERROR)),
+        };
+        this.preferences = preferences;
+        this.preferences_error = error;
+        cx.refresh_windows();
+    }
+
+    /// Applies `preferences` and saves them. A failed save keeps the change
+    /// in effect and reports [`SAVE_ERROR`]; "Retry saving choices" calls
+    /// this with the same choices.
+    pub fn update(preferences: Preferences, cx: &mut App) {
+        let store = cx.global::<AppState>().store.clone();
+        let this = cx.global_mut::<Self>();
+        let saved = preferences.save(&store, this.viewer.as_deref());
+        if let Err(error) = &saved {
+            tracing::warn!(%error, "could not save notification preferences");
+        }
+        this.preferences_error = saved.err().map(|_| SAVE_ERROR);
+        this.preferences = preferences;
+        cx.refresh_windows();
+    }
+
+    pub fn preferences(cx: &App) -> Preferences {
+        cx.try_global::<Self>()
+            .map(|this| this.preferences.clone())
+            .unwrap_or_default()
+    }
+
+    fn report(error: String, cx: &mut App) {
+        if cx.has_global::<Self>() {
+            cx.global_mut::<Self>().error = Some(error);
+        }
+        cx.refresh_windows();
+    }
+
+    fn service(status: ServiceStatus, cx: &mut App) {
+        if cx
+            .try_global::<Self>()
+            .is_some_and(|this| this.service != status)
+        {
+            cx.global_mut::<Self>().service = status;
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -175,13 +311,10 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
         return;
     }
     let this = community.read(cx);
-    // Already in front of the user.
-    if this.reading.as_deref() == Some(item.channel_id.as_str()) && cx.active_window().is_some() {
-        return;
-    }
-    let store = cx.global::<AppState>().store.clone();
-    let preferences = Preferences::load(&store, &this.partition());
-    if !preferences.allows(item.category) {
+    let preferences = Notifications::preferences(cx);
+    // In front of the user: the message is in view in a focused window.
+    let viewing = item.viewing && cx.active_window().is_some();
+    if !preferences.allows(item.category) || (viewing && !preferences.notify_while_viewing) {
         return;
     }
     let key = (this.origin.to_string(), item.message_id.to_hex());
@@ -208,8 +341,18 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
     if !cx.default_global::<Shown>().admit(key, Instant::now()) {
         return;
     }
-    crate::sounds::play(item.category, &preferences);
-    show(title, body, target, cx);
+    let category = item.category;
+    let shown = show(title, body, target, cx);
+    // The sound follows the service taking the banner, if alerts for the
+    // category are still on by then.
+    cx.spawn(async move |cx| {
+        let result = shown.await.unwrap_or(Ok(()));
+        cx.update(|cx| match result {
+            Ok(()) => crate::sounds::play(category, &Notifications::preferences(cx)),
+            Err(error) => Notifications::report(error, cx),
+        });
+    })
+    .detach();
 }
 
 /// Title and body (`content.ts`).
@@ -323,14 +466,18 @@ fn prose(node: &markdown::mdast::Node) -> String {
 
 /// Shows a banner without waiting on the notification service; its click
 /// comes back through navigation.
+/// What became of one banner: `Err` carries the service's refusal.
+type Delivery = futures::channel::oneshot::Receiver<Result<(), String>>;
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn show(title: String, body: String, target: Target, cx: &mut App) {
+fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
     struct Service(banners::Banners);
     impl Global for Service {}
 
+    let (done, shown) = futures::channel::oneshot::channel();
     if cx.try_global::<Service>().is_none() {
         let Some(navigation) = navigation::sender(cx) else {
-            return;
+            return shown;
         };
         let banners = banners::Banners::start(&Runtime::handle(cx), navigation);
         cx.set_global(Service(banners));
@@ -339,12 +486,37 @@ fn show(title: String, body: String, target: Target, cx: &mut App) {
         title,
         body,
         target,
+        done: Some(done),
     });
+    shown
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn show(title: String, _body: String, _target: Target, _cx: &mut App) {
+fn show(title: String, _body: String, _target: Target, _cx: &mut App) -> Delivery {
     tracing::debug!(%title, "desktop notifications are not supported on this platform");
+    let (done, shown) = futures::channel::oneshot::channel();
+    let _ = done.send(Err("This build can’t show system notifications.".into()));
+    shown
+}
+
+/// Learns whether the notification service is there, for the status line
+/// in Settings → Notifications.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn probe(cx: &mut App) {
+    let found = Runtime::handle(cx).spawn(banners::available());
+    cx.spawn(async move |cx| {
+        let status = match found.await {
+            Ok(true) => ServiceStatus::Available,
+            _ => ServiceStatus::Unavailable,
+        };
+        cx.update(|cx| Notifications::service(status, cx));
+    })
+    .detach();
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn probe(cx: &mut App) {
+    Notifications::service(ServiceStatus::Unavailable, cx);
 }
 
 #[cfg(test)]
@@ -365,6 +537,7 @@ mod tests {
             category,
             mentioned: category == Category::Mention,
             thread_root: None,
+            viewing: false,
         }
     }
 
@@ -458,6 +631,34 @@ mod tests {
         assert!(!preferences.allows(Category::Mention));
         // Missing fields keep their defaults.
         let parsed: Preferences = serde_json::from_str(r#"{"direct":false}"#).unwrap();
-        assert!(parsed.enabled && !parsed.direct);
+        assert!(parsed.enabled && !parsed.direct && !parsed.notify_while_viewing);
+    }
+
+    #[test]
+    fn choices_belong_to_the_viewer_and_fail_closed() {
+        let store = Store::in_memory().unwrap();
+        let (alice, bob) = ("a".repeat(64), "b".repeat(64));
+        assert_eq!(
+            Preferences::restore(&store, Some(&alice)),
+            Ok(Preferences::default())
+        );
+        let quiet = Preferences {
+            direct: false,
+            notify_while_viewing: true,
+            ..Preferences::default()
+        };
+        quiet.save(&store, Some(&alice)).unwrap();
+        assert_eq!(Preferences::restore(&store, Some(&alice)), Ok(quiet));
+        // Every community shares them; another viewer has their own.
+        assert_eq!(
+            Preferences::restore(&store, Some(&bob)),
+            Ok(Preferences::default())
+        );
+        // Unreadable choices pause alerts instead of turning them on.
+        store
+            .set_viewer_pref(&bob, PREFERENCES, r#"{"enabled":"yes"}"#)
+            .unwrap();
+        let paused = Preferences::restore(&store, Some(&bob)).unwrap_err();
+        assert!(!paused.enabled && !paused.allows(Category::Mention));
     }
 }

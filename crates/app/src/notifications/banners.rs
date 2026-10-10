@@ -23,6 +23,27 @@ pub struct Banner {
     pub title: String,
     pub body: String,
     pub target: Target,
+    /// Told whether the service took the banner, with its refusal.
+    pub done: Option<futures::channel::oneshot::Sender<Result<(), String>>>,
+}
+
+impl Banner {
+    fn finish(&mut self, result: Result<(), String>) {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(result);
+        }
+    }
+}
+
+/// Whether a notification service is on the session bus.
+pub async fn available() -> bool {
+    match connect().await {
+        Ok(proxy) => proxy
+            .call::<_, _, Vec<String>>("GetCapabilities", &())
+            .await
+            .is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Hands banners to the task that owns the bus connection, starting it on
@@ -96,18 +117,39 @@ async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: Unbounded
         Ok(proxy) => proxy,
         Err(error) => {
             tracing::warn!(%error, "desktop notifications are unavailable");
-            // Drain so senders never notice.
-            while banners.recv().await.is_some() {}
+            // Each banner reports the refusal.
+            let error = error.to_string();
+            while let Some(mut banner) = banners.recv().await {
+                banner.finish(Err(error.clone()));
+            }
             return;
         }
     };
+    // A click opens the message, so a service without actions is refused
+    // (`notifications/linux.rs`).
+    let clickable = match proxy
+        .call::<_, _, Vec<String>>("GetCapabilities", &())
+        .await
+    {
+        Ok(capabilities) => capabilities.iter().any(|c| c == "actions"),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the notification service's capabilities");
+            false
+        }
+    };
     // Subscribed before the first banner, so no click is missed.
-    let mut signals = match proxy.receive_all_signals().await {
+    let signals = match clickable {
+        true => proxy.receive_all_signals().await,
+        false => Err(zbus::Error::Unsupported),
+    };
+    let mut signals = match signals {
         Ok(signals) => signals,
         Err(error) => {
             tracing::warn!(%error, "notification clicks are unavailable");
-            while let Some(banner) = banners.recv().await {
-                let _ = notify(&proxy, &banner).await;
+            while let Some(mut banner) = banners.recv().await {
+                banner.finish(Err(
+                    "The desktop notification service does not support clicks".into(),
+                ));
             }
             return;
         }
@@ -116,10 +158,16 @@ async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: Unbounded
     loop {
         tokio::select! {
             banner = banners.recv() => {
-                let Some(banner) = banner else { return };
+                let Some(mut banner) = banner else { return };
                 match notify(&proxy, &banner).await {
-                    Ok(id) => shown.insert(id, banner.target),
-                    Err(error) => tracing::warn!(%error, "could not show a notification"),
+                    Ok(id) => {
+                        banner.finish(Ok(()));
+                        shown.insert(id, banner.target);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not show a notification");
+                        banner.finish(Err(error.to_string()));
+                    }
                 }
             }
             signal = signals.next() => {

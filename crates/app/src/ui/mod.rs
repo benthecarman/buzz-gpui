@@ -53,6 +53,7 @@ mod sidebar_unread;
 mod status;
 mod thread;
 mod time;
+pub mod toasts;
 mod typing;
 mod unread_badge;
 mod window_controls;

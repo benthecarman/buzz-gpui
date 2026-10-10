@@ -1,24 +1,33 @@
 //! Settings → Notifications (§5b.5 item 3, buzz-app's
-//! `NotificationSettings`): the selected community's notification
-//! preferences and alert sounds. Banners are always silent; the app plays
-//! the chosen sound itself.
+//! `NotificationSettings`): the viewer's notification choices, which
+//! apply to every community, and alert sounds. Banners are always silent;
+//! the app plays the chosen sound itself.
 
-use super::{SettingsPage, header, inline_header, note, preference_row, rows_group, section};
-use crate::community::AppState;
-use crate::notifications::Preferences;
+use super::{SettingsPage, header, inline_header, preference_row, rows_group, section};
+use crate::notifications::{Notifications, Preferences, ServiceStatus};
 use crate::sounds::{self, Sound};
 use crate::ui::overlay::{self, Align};
-use buzz_relay_client::{Category, Partition, Store};
-use buzz_ui::{ActiveTheme, Button, ButtonShape, ButtonSize, IconName, Menu, MenuItem, Switch};
+use crate::ui::toasts;
+use buzz_relay_client::Category;
+use buzz_ui::{
+    ActiveTheme, Button, ButtonShape, ButtonSize, IconName, Menu, MenuItem, Switch, TypeStyled,
+    tokens::radius,
+};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 
-/// Saves the preferences and redraws.
-type Save = Rc<dyn Fn(Preferences, &mut Window)>;
+/// Applies one switch to the choices.
+type Apply = Box<dyn Fn(&mut Preferences, bool)>;
 
 /// Sound rows in the reference order: direct messages, mentions, threads.
 const SOUND_ROWS: [Category; 3] = [Category::Direct, Category::Mention, Category::Thread];
+/// Category switches in the order the categories register (`messages.ts`).
+const CATEGORY_ROWS: [(Category, &str); 3] = [
+    (Category::Mention, "Mentions"),
+    (Category::Direct, "Direct messages"),
+    (Category::Thread, "Thread replies"),
+];
 
 fn sound_label(category: Category) -> &'static str {
     match category {
@@ -38,137 +47,162 @@ fn option_label(sound: Sound, category: Category) -> String {
     }
 }
 
+/// The status line under Desktop alerts (`permissionStatus`). On Linux
+/// the desktop manages permission, so only a missing service shows.
+fn service_status(service: ServiceStatus) -> Option<&'static str> {
+    (service == ServiceStatus::Unavailable).then_some("This build can’t show system notifications.")
+}
+
+/// A switch handler that applies a change to the viewer's choices.
+fn change(
+    apply: impl Fn(&mut Preferences, bool) + 'static,
+) -> impl Fn(bool, &mut Window, &mut App) {
+    let apply = Rc::new(apply);
+    move |value, _, cx| {
+        let mut next = Notifications::preferences(cx);
+        apply(&mut next, value);
+        if !next.enabled || !next.sound {
+            sounds::stop_preview();
+        }
+        Notifications::update(next, cx);
+    }
+}
+
 impl SettingsPage {
     pub(super) fn notifications_section(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(community) = AppState::current(cx) else {
-            return section(vec![
-                header("Notifications", None, cx).into_any_element(),
-                note("Add a community to choose its notifications.", cx).into_any_element(),
-            ]);
-        };
-        let store = cx.global::<AppState>().store.clone();
-        let (name, partition) = {
-            let community = community.read(cx);
-            (community.name(), community.partition())
-        };
-        let preferences = Preferences::load(&store, &partition);
-        let save: Save = {
-            let (store, partition) = (store.clone(), partition.clone());
-            Rc::new(move |next: Preferences, window: &mut Window| {
-                next.save(&store, &partition);
-                window.refresh();
-            })
-        };
-        let toggle = |id: &'static str,
-                      title: &'static str,
-                      description: Option<&'static str>,
-                      checked: bool,
-                      enabled: bool,
-                      apply: fn(&mut Preferences, bool),
-                      cx: &App| {
-            let save = save.clone();
-            let current = preferences.clone();
+        let c = *cx.colors();
+        let state = cx.global::<Notifications>();
+        let preferences = state.preferences.clone();
+        let status = service_status(state.service);
+        let preferences_error = state.preferences_error;
+        let delivery_error = state.error.clone();
+        let switch_row = |id: SharedString,
+                          title: &'static str,
+                          description: Option<&'static str>,
+                          checked: bool,
+                          apply: Apply,
+                          cx: &App| {
             preference_row(
                 None,
                 title,
                 description.map(IntoElement::into_any_element),
                 vec![
                     Switch::new(id, checked)
-                        .disabled(!enabled)
-                        .on_change(move |value, window, _| {
-                            let mut next = current.clone();
-                            apply(&mut next, value);
-                            if !next.enabled || !next.sound {
-                                sounds::stop_preview();
-                            }
-                            save(next, window);
-                        })
+                        .on_change(change(move |p, v| apply(p, v)))
                         .into_any_element(),
                 ],
                 cx,
             )
             .into_any_element()
         };
+        // Category switches stay live with Desktop alerts off.
+        let categories = CATEGORY_ROWS
+            .into_iter()
+            .map(|(category, label)| {
+                switch_row(
+                    format!("notify-{category:?}").into(),
+                    label,
+                    None,
+                    preferences.category(category),
+                    Box::new(move |p, v| p.set_category(category, v)),
+                    cx,
+                )
+            })
+            .collect();
         let enabled = preferences.enabled;
-        let mut delivery = vec![toggle(
-            "notify-desktop",
+        let mut delivery = vec![switch_row(
+            "notify-desktop".into(),
             "Desktop alerts",
-            Some("Show a silent banner through your desktop’s notification service."),
+            None,
             enabled,
-            true,
-            |p, v| p.enabled = v,
+            Box::new(|p, v| p.enabled = v),
             cx,
         )];
+        if enabled && let Some(status) = status {
+            delivery.push(
+                div()
+                    .my(rems(0.75))
+                    .p(rems(0.75))
+                    .rounded(radius::CONTROL)
+                    .bg(c.affordance_warning)
+                    .text_color(c.text_warning)
+                    .text_body_sm()
+                    .child(status)
+                    .into_any_element(),
+            );
+        }
         if enabled {
-            delivery.push(toggle(
-                "notify-sound",
+            delivery.push(switch_row(
+                "notify-while-viewing".into(),
+                "Notify while viewing",
+                Some("Include direct messages in the conversation you’re viewing."),
+                preferences.notify_while_viewing,
+                Box::new(|p, v| p.notify_while_viewing = v),
+                cx,
+            ));
+            delivery.push(switch_row(
+                "notify-sound".into(),
                 "Sound",
                 Some("Choose a sound to preview it."),
                 preferences.sound,
-                true,
-                |p, v| p.sound = v,
+                Box::new(|p, v| p.sound = v),
                 cx,
             ));
             if preferences.sound {
                 for category in SOUND_ROWS {
                     delivery.push(
-                        self.sound_row(category, &preferences, &store, &partition, window, cx)
+                        self.sound_row(category, &preferences, window, cx)
                             .into_any_element(),
                     );
                 }
             }
         }
-        section(vec![
-            header(
-                "Notifications",
-                Some(format!("For {name}. Only the selected community shows alerts.").into()),
-                cx,
-            )
-            .into_any_element(),
+        let mut cards = Vec::new();
+        if let Some(description) = preferences_error {
+            let notice = toasts::Notice {
+                dismissible: false,
+                ..toasts::Notice::error(
+                    "notification-preferences",
+                    "Notification choices weren’t saved",
+                )
+            }
+            .description(description)
+            .action(toasts::Action::new("Retry saving choices", |_, cx| {
+                Notifications::update(Notifications::preferences(cx), cx)
+            }))
+            .action(toasts::Action::new("Reload saved choices", |_, cx| {
+                Notifications::reload(cx)
+            }));
+            cards.push(toasts::card(&notice, 0).into_any_element());
+        }
+        if let Some(description) = delivery_error {
+            let notice = toasts::Notice {
+                dismissible: false,
+                ..toasts::Notice::error(
+                    "notification-delivery",
+                    "Buzz couldn’t send the notification",
+                )
+            }
+            .description(description);
+            cards.push(toasts::card(&notice, 0).into_any_element());
+        }
+        let mut children = vec![
+            header("Notifications", None, cx).into_any_element(),
             div()
                 .child(inline_header("Notify me about", None, Vec::new(), cx))
-                .child(rows_group(
-                    vec![
-                        toggle(
-                            "notify-mentions",
-                            "Mentions",
-                            None,
-                            preferences.mention,
-                            enabled,
-                            |p, v| p.mention = v,
-                            cx,
-                        ),
-                        toggle(
-                            "notify-direct",
-                            "Direct messages",
-                            None,
-                            preferences.direct,
-                            enabled,
-                            |p, v| p.direct = v,
-                            cx,
-                        ),
-                        toggle(
-                            "notify-thread",
-                            "Thread replies",
-                            None,
-                            preferences.thread,
-                            enabled,
-                            |p, v| p.thread = v,
-                            cx,
-                        ),
-                    ],
-                    cx,
-                ))
+                .child(rows_group(categories, cx))
                 .into_any_element(),
             div()
                 .child(inline_header("Delivery", None, Vec::new(), cx))
                 .child(rows_group(delivery, cx))
                 .into_any_element(),
-        ])
+        ];
+        children.extend(toasts::stack(window, cards));
+        section(children)
     }
 
     /// `AlertSoundRow`: the category and a compact select of sounds.
@@ -177,17 +211,11 @@ impl SettingsPage {
         &self,
         category: Category,
         preferences: &Preferences,
-        store: &Store,
-        partition: &Partition,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let c = *cx.colors();
-        let allowed = match category {
-            Category::Mention => preferences.mention,
-            Category::Direct => preferences.direct,
-            Category::Thread => preferences.thread,
-        };
+        let allowed = preferences.category(category);
         let current = preferences.sounds.get(category);
         let open = self.sound_menu == Some(category) && allowed;
         let id = |name: &str| SharedString::from(format!("sound-{name}-{category:?}"));
@@ -212,22 +240,19 @@ impl SettingsPage {
         let mut control = div().relative().child(trigger);
         if open {
             let items = Sound::choices(category).into_iter().map(|sound| {
-                let (store, partition) = (store.clone(), partition.clone());
-                let base = preferences.clone();
                 MenuItem::new(id(sound.name()), option_label(sound, category))
                     .checked(sound == current)
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         this.sound_menu = None;
-                        if sound != base.sounds.get(category) {
-                            let mut next = base.clone();
+                        let mut next = Notifications::preferences(cx);
+                        if sound != next.sounds.get(category) {
                             next.sounds.set(category, sound);
-                            next.save(&store, &partition);
+                            Notifications::update(next, cx);
                             if sound == Sound::Silent {
                                 sounds::stop_preview();
                             } else {
                                 sounds::preview(sound);
                             }
-                            window.refresh();
                         }
                         cx.notify();
                     }))

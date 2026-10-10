@@ -83,13 +83,13 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Preference scope: one account-local set (`buzz-notification-preferences.v1`, per viewer) | `src/features/notifications/preferences.ts:8-28,76+` | DIFFERENT: stored per community partition. The page says "For {name}. Only the selected community shows alerts." With no community it shows only a note (`ui/settings/notifications.rs:11-23,53-58`). | Store per viewer, and show the page without a community. | M |
-| Category switches stay enabled when Desktop alerts is off | `src/app/NotificationSettings.tsx:168-187` | DIFFERENT: they are disabled when alerts are off (`ui/settings/notifications.rs:64-87`). | Leave them enabled. | S |
-| "Notify while viewing" switch ("Include direct messages in the conversation you’re viewing.") | `src/app/NotificationSettings.tsx:245-252`; `preferences.ts:12` | MISSING | The preference, plus delivery for the DM being viewed (`notifications.rs` skips the channel being read). | S |
-| Sound switch and per-category sound selects with preview | `src/app/NotificationSettings.tsx:20-75,89-148,253-283` | IN PROGRESS. The port's module doc says banners are always silent (`ui/settings/notifications.rs:1-3`). | Another agent is adding it. | — |
-| Permission/status line ("This build can’t show system notifications.", "Notifications are off…", "Waiting for system permission…") | `src/app/NotificationSettings.tsx:149-160,199-216` | MISSING | Report when the notification daemon is unavailable or refuses. | S |
-| "Notification choices weren’t saved" toast with "Retry saving choices" / "Reload saved choices" | `src/app/NotificationSettings.tsx:291-311` | MISSING: `Preferences::save` failure is not surfaced (`notifications.rs:69`). | Error toast with retry and reload. | S |
-| "Buzz couldn’t send the notification" error toast | `src/app/NotificationSettings.tsx:312-317` | MISSING | Surface banner delivery errors. | S |
+| Preference scope: one account-local set (`buzz-notification-preferences.v1`, per viewer) | `src/features/notifications/preferences.ts:8-28,76+` | DONE (notifications.rs, ui/settings/notifications.rs) | Store per viewer, and show the page without a community. | M |
+| Category switches stay enabled when Desktop alerts is off | `src/app/NotificationSettings.tsx:168-187` | DONE (ui/settings/notifications.rs) | Leave them enabled. | S |
+| "Notify while viewing" switch ("Include direct messages in the conversation you’re viewing.") | `src/app/NotificationSettings.tsx:245-252`; `preferences.ts:12` | DONE (ui/settings/notifications.rs, notifications.rs) | The preference, plus delivery for the DM being viewed (`notifications.rs` skips the channel being read). | S |
+| Sound switch and per-category sound selects with preview | `src/app/NotificationSettings.tsx:20-75,89-148,253-283` | DONE (ui/settings/notifications.rs, sounds.rs) | Another agent is adding it. | — |
+| Permission/status line ("This build can’t show system notifications.", "Notifications are off…", "Waiting for system permission…") | `src/app/NotificationSettings.tsx:149-160,199-216` | DONE (ui/settings/notifications.rs) | Report when the notification daemon is unavailable or refuses. | S |
+| "Notification choices weren’t saved" toast with "Retry saving choices" / "Reload saved choices" | `src/app/NotificationSettings.tsx:291-311` | DONE (ui/settings/notifications.rs) | Error toast with retry and reload. | S |
+| "Buzz couldn’t send the notification" error toast | `src/app/NotificationSettings.tsx:312-317` | DONE (ui/settings/notifications.rs) | Surface banner delivery errors. | S |
 
 ## 7. Shortcuts (ShortcutSettings.tsx, features/shortcuts)
 

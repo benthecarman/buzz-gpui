@@ -61,6 +61,7 @@ fn main() {
         )));
         Hosts::init(&config, cx);
         community::AppState::init(cx);
+        notifications::Notifications::init(cx);
         appearance::init(cx);
         idle::Idle::init(cx);
         ui::pages::init(cx);
