@@ -174,6 +174,7 @@ use gpui::ParentElement as _;
 pub(super) struct TokenLayoutCache {
     pub(super) key: Option<(Font, Pixels, Pixels, Pixels, bool)>,
     pub(super) revision: u64,
+    pub(super) concealed_revision: u64,
     pub(super) unwrapped_width: Pixels,
     pub(super) metrics: Rc<[(Range<usize>, Pixels)]>,
     pub(super) widths: HashMap<InlineToken, Pixels>,

@@ -368,6 +368,12 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) document_revision: u64,
     pub(super) token_presentation: super::InlineTokenPresentation,
     pub(super) token_layout_cache: Option<Box<super::token_presentation::TokenLayoutCache>>,
+    /// Sorted, disjoint ranges laid out without width. See
+    /// [`super::Concealment`].
+    pub(super) concealed_ranges: Vec<super::Concealment>,
+    /// Bumped whenever `concealed_ranges` changes, so layout knows to
+    /// measure again.
+    pub(super) concealed_revision: u64,
     /// Real per-frame bounds of the placed token elements, keyed by token
     /// start offset; used for hover payloads and stale-hover reconciliation.
     pub(super) token_bounds: std::collections::HashMap<usize, Bounds<Pixels>>,
@@ -744,6 +750,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             hovered_token: None,
             pending_token_hover_exits: Vec::new(),
             token_layout_cache: None,
+            concealed_ranges: Vec::new(),
+            concealed_revision: 0,
             pressed_token: None,
             selections: Selections::default(),
             selected_word_range: None,
@@ -1485,15 +1493,17 @@ impl<M: InputModeKind> InputBaseState<M> {
             return 0;
         }
 
+        // Hidden text is no word to stop at.
+        let offset = self.skip_concealed_backward(offset);
         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
         // FIXME: Avoid to_string
         let left_part = self.text.slice(0..offset).to_string();
 
         let target = UnicodeSegmentation::split_word_bound_indices(left_part.as_str())
-            .rfind(|(_, s)| !s.trim_start().is_empty())
+            .rfind(|(i, s)| !s.trim_start().is_empty() && !self.is_concealed(*i..i + s.len()))
             .map(|(i, _)| i)
             .unwrap_or(0);
-        self.token_boundary(target, Bias::Left)
+        self.conceal_boundary(self.token_boundary(target, Bias::Left), Bias::Left)
     }
 
     /// Return the next end offset of the word after `offset`.
@@ -1503,14 +1513,17 @@ impl<M: InputModeKind> InputBaseState<M> {
             return self.text.len();
         }
 
+        let offset = self.skip_concealed_forward(offset);
         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
         let right_part = self.text.slice(offset..self.text.len()).to_string();
 
         let target = UnicodeSegmentation::split_word_bound_indices(right_part.as_str())
-            .find(|(_, s)| !s.trim_start().is_empty())
+            .find(|(i, s)| {
+                !s.trim_start().is_empty() && !self.is_concealed(offset + i..offset + i + s.len())
+            })
             .map(|(i, s)| offset + i + s.len())
             .unwrap_or(self.text.len());
-        self.token_boundary(target, Bias::Right)
+        self.conceal_boundary(self.token_boundary(target, Bias::Right), Bias::Right)
     }
 
     /// Get start of line byte offset for the given `offset`.
@@ -1832,7 +1845,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         // This is harmless when nothing upstream is bound to backspace. With multiple
         // cursors the others can still delete, so only the lone-cursor case
         // propagates.
-        if self.selections.is_single() && self.active_selection().is_empty() && self.cursor() == 0 {
+        // Only hidden text before the caret counts as the start too.
+        if self.selections.is_single()
+            && self.active_selection().is_empty()
+            && self.skip_concealed_backward(self.cursor()) == 0
+        {
             cx.propagate();
             return;
         }
@@ -1873,7 +1890,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.delete_selections(
             false,
             EditIntent::Backspace,
-            |s, offset| s.previous_boundary(offset)..offset,
+            // The character before any hidden text, never the hidden text.
+            |s, offset| s.previous_boundary(offset)..s.skip_concealed_backward(offset),
             window,
             cx,
         );
@@ -1883,7 +1901,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.delete_selections(
             false,
             EditIntent::DeleteForward,
-            |s, offset| offset..s.next_boundary(offset),
+            |s, offset| s.skip_concealed_forward(offset)..s.next_boundary(offset),
             window,
             cx,
         );
@@ -1940,7 +1958,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.delete_selections(
             true,
             EditIntent::Atomic,
-            |s, offset| s.previous_start_of_word_at(offset)..offset,
+            |s, offset| s.previous_start_of_word_at(offset)..s.skip_concealed_backward(offset),
             window,
             cx,
         );
@@ -1955,7 +1973,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.delete_selections(
             true,
             EditIntent::Atomic,
-            |s, offset| offset..s.next_end_of_word_at(offset),
+            |s, offset| s.skip_concealed_forward(offset)..s.next_end_of_word_at(offset),
             window,
             cx,
         );
@@ -2837,6 +2855,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) -> bool {
         self.document_revision = self.document_revision.wrapping_add(1);
         let token_delta = self.edit_tokens(range, new_text.len());
+        self.adjust_concealments(range, new_text.len());
         if self.undo_manager.is_ignoring() {
             return false;
         }
@@ -2946,8 +2965,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         let restored: Vec<CursorSelection> = selections
             .into_iter()
             .map(|mut sel| {
-                sel.start = sel.start.min(len);
-                sel.end = sel.end.min(len);
+                let range = self.normalize_selection_range(sel.start.min(len)..sel.end.min(len));
+                sel.start = range.start;
+                sel.end = range.end;
                 sel
             })
             .collect();
@@ -2979,7 +2999,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Sets the active selection to the given range, keeping its `reversed`
     /// and `column_anchor` state untouched.
     pub(super) fn set_selection(&mut self, start: usize, end: usize) {
-        let range = self.normalize_token_range(start..end);
+        let range = self.normalize_selection_range(start..end);
         let (start, end) = (range.start, range.end);
         let active = self.active_selection_mut();
         active.start = start;
@@ -2990,6 +3010,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// clearing `reversed`.
     pub(super) fn set_cursor_to(&mut self, offset: usize) {
         let offset = self.token_boundary(offset, Bias::Right);
+        let offset = self.conceal_boundary(offset, Bias::Right);
         let active = self.active_selection_mut();
         active.start = offset;
         active.end = offset;
@@ -3042,7 +3063,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Non-empty ranges expand to character boundaries. Empty ranges remain empty and are
     /// clipped to the preceding character boundary.
     pub fn set_selected_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
-        let range = self.normalize_token_range(range);
+        let range = self.normalize_selection_range(range);
         let end_bias = if range.start == range.end {
             Bias::Left
         } else {
@@ -3170,12 +3191,12 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     /// Map a display byte index back to a text offset, undoing the mask expansion when the input
-    /// is masked.
+    /// is masked. Of the offsets drawn at one x around hidden text, the leftmost wins.
     fn resolve_index(&self, index: usize) -> usize {
         if self.masked {
             self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
         } else {
-            index.min(self.text.len())
+            self.leftmost_visual_offset(index.min(self.text.len()))
         }
     }
 
@@ -3237,7 +3258,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         let offset = self.cursor_boundary(offset, Bias::Left);
         let word_range = self.selected_word_range;
         Self::extend_selection(self.active_selection_mut(), offset, word_range);
-        let range = self.normalize_token_range(self.selected_range());
+        let range = self.normalize_selection_range(self.selected_range());
         self.set_selection(range.start, range.end);
 
         if self.active_selection().is_empty() {
@@ -3280,7 +3301,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                 let offset = self.cursor_boundary(offset, Bias::Left);
                 let mut new_sel = *sel;
                 Self::extend_selection(&mut new_sel, offset, None);
-                let range = self.normalize_token_range(new_sel.start..new_sel.end);
+                let range = self.normalize_selection_range(new_sel.start..new_sel.end);
                 new_sel.start = range.start;
                 new_sel.end = range.end;
                 if !preserve_column {
@@ -3363,6 +3384,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// not alter the rope or its byte/UTF-16 conversion used for exact source APIs.
     pub(super) fn cursor_boundary(&self, offset: usize, bias: Bias) -> usize {
         let offset = self.token_boundary(self.text.clip_offset(offset, bias), bias);
+        let offset = self.conceal_boundary(offset, bias);
         if offset > 0
             && self.text.char_at(offset - 1) == Some('\r')
             && self.text.char_at(offset) == Some('\n')
@@ -3377,12 +3399,18 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
     }
 
+    /// The previous caret stop. Concealed text ending at `offset` is skipped
+    /// first, then one visible character is: a hidden range never takes a
+    /// keypress of its own.
     pub(super) fn previous_boundary(&self, offset: usize) -> usize {
+        let offset = self.skip_concealed_backward(self.conceal_boundary(offset, Bias::Left));
         let offset = self.cursor_boundary(offset.saturating_sub(1), Bias::Left);
         self.clamp_offset_to_visible_backward(offset)
     }
 
+    /// The next caret stop, mirroring [`Self::previous_boundary`].
     pub(super) fn next_boundary(&self, offset: usize) -> usize {
+        let offset = self.skip_concealed_forward(self.conceal_boundary(offset, Bias::Right));
         let offset = self.cursor_boundary(offset.saturating_add(1), Bias::Right);
         self.clamp_offset_to_visible_forward(offset)
     }

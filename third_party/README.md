@@ -52,6 +52,21 @@ Patches:
 - Backgrounds beside inline tokens: a line with a token (a chip) now
   paints the background colors of its text runs. Its layout never marked
   them, so a highlighted background vanished from any line with a chip.
+- Concealed ranges: `set_concealed_ranges` on `InputState` and
+  `TextareaState` takes `Concealment`s, byte ranges of the text that are
+  laid out with no width, or with a short replacement string drawn in the
+  style of their first byte. The value, history and clipboard keep every
+  byte. They reuse the token path: a row with a concealed range is laid out
+  as inline fragments, and its widths reach soft wrapping, auto-grow and
+  horizontal scroll through the display map's inline metrics. Other rows,
+  including rows without a token in a field that has one, keep the plain
+  shaped layout. The caret never rests inside a range. An arrow skips the
+  hidden text first, then steps over one visible character. Backspace and
+  Delete remove the visible character beside the hidden text. A hit test
+  that cannot tell offsets apart takes the leftmost. Edits shift ranges
+  after them and drop the ones they touch inside. Ranges that cross a line
+  break or overlap a token are dropped, and masked inputs ignore them. The
+  composer uses this to hide Markdown markers as buzz-app does.
 
 Run its tests on their own, since it isn't a workspace member:
 

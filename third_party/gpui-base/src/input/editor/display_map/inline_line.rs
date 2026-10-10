@@ -6,7 +6,12 @@ pub(crate) struct InlineFragment {
     pub(crate) range: Range<usize>,
     pub(crate) x: Pixels,
     pub(crate) width: Pixels,
+    /// The shaped source text, or a concealed range's replacement. A token
+    /// has none: its element is placed over the fragment.
     pub(crate) text: Option<ShapedLine>,
+    /// Hidden source bytes. Like a token, the caret only stops at its ends,
+    /// and a zero-width one is never the target of a hit test.
+    pub(crate) concealed: bool,
 }
 
 pub(crate) struct InputLine {
@@ -42,17 +47,24 @@ impl InputLine {
             content: Content::Inline(fragments),
         }
     }
+    #[cfg(test)]
+    pub(crate) fn is_inline(&self) -> bool {
+        matches!(self.content, Content::Inline(_))
+    }
     pub(crate) fn x_for_index(&self, ix: usize) -> Pixels {
         match &self.content {
             Content::Text(line) => line.x_for_index(ix),
             Content::Inline(fragments) => {
                 for f in fragments {
                     if ix < f.range.end {
+                        let atomic = if ix <= f.range.start { px(0.) } else { f.width };
                         return f.x
-                            + f.text.as_ref().map_or(
-                                if ix <= f.range.start { px(0.) } else { f.width },
-                                |line| line.x_for_index(ix.saturating_sub(f.range.start)),
-                            );
+                            + match &f.text {
+                                Some(line) if !f.concealed => {
+                                    line.x_for_index(ix.saturating_sub(f.range.start))
+                                }
+                                _ => atomic,
+                            };
                     }
                 }
                 self.width
@@ -64,15 +76,17 @@ impl InputLine {
             Content::Text(line) => line.closest_index_for_x(x),
             Content::Inline(fragments) => {
                 for f in fragments {
+                    if f.concealed && f.width <= px(0.) {
+                        continue;
+                    }
                     if x <= f.x + f.width {
-                        return f.text.as_ref().map_or(
-                            if x - f.x < f.width / 2. {
-                                f.range.start
-                            } else {
-                                f.range.end
-                            },
-                            |line| f.range.start + line.closest_index_for_x(x - f.x),
-                        );
+                        return match &f.text {
+                            Some(line) if !f.concealed => {
+                                f.range.start + line.closest_index_for_x(x - f.x)
+                            }
+                            _ if x - f.x < f.width / 2. => f.range.start,
+                            _ => f.range.end,
+                        };
                     }
                 }
                 self.len

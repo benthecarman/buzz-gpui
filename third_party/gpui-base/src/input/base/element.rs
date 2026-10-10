@@ -1642,7 +1642,7 @@ impl<M: InputModeKind> TextElement<M> {
             line_height,
             state.is_single_line() || !state.soft_wrap,
         );
-        if !state.tokens_visible() {
+        if !state.inline_items_visible() {
             if state.token_layout_cache.is_none() {
                 let mut exit = self.state.update(cx, |state, _| {
                     state.token_bounds.clear();
@@ -1672,6 +1672,7 @@ impl<M: InputModeKind> TextElement<M> {
             return Default::default();
         }
         let revision = state.document_revision;
+        let concealed_revision = state.concealed_revision;
         let cache = state.token_layout_cache.as_ref();
         let all = cache.is_none_or(|cache| {
             cache.key.as_ref() != Some(&key)
@@ -1719,7 +1720,9 @@ impl<M: InputModeKind> TextElement<M> {
         }
         self.state.update(cx, |state, cx| {
             let mut cache = state.token_layout_cache.take().unwrap_or_default();
-            let mut changed = cache.key.as_ref() != Some(&key) || cache.revision != revision;
+            let mut changed = cache.key.as_ref() != Some(&key)
+                || cache.revision != revision
+                || cache.concealed_revision != concealed_revision;
             if cache.key.as_ref() != Some(&key) {
                 cache.widths.clear();
             }
@@ -1729,11 +1732,15 @@ impl<M: InputModeKind> TextElement<M> {
             }
             cache.key = Some(key);
             if changed {
+                let font_size = style.font_size.to_pixels(window.rem_size());
                 let spans = state.token_spans();
                 let tokens: std::collections::HashSet<_> =
                     spans.iter().map(|s| s.token()).collect();
                 cache.widths.retain(|token, _| tokens.contains(token));
-                cache.metrics = spans
+                // Tokens take their element's width and concealed ranges
+                // their replacement's (or none), measured in the base style
+                // as the wrapper measures text.
+                let mut metrics: Vec<(Range<usize>, Pixels)> = spans
                     .iter()
                     .filter_map(|span| {
                         cache
@@ -1742,15 +1749,39 @@ impl<M: InputModeKind> TextElement<M> {
                             .map(|width| (span.range(), *width))
                     })
                     .collect();
+                metrics.extend(state.active_concealments().iter().map(|c| {
+                    let width = c.replacement.as_ref().map_or(px(0.), |text| {
+                        window
+                            .text_system()
+                            .shape_line(text.clone(), font_size, &[style.to_run(text.len())], None)
+                            .width
+                    });
+                    (c.range.clone(), width)
+                }));
+                metrics.sort_by_key(|(range, _)| range.start);
+                cache.metrics = metrics.into();
                 cache.revision = revision;
+                cache.concealed_revision = concealed_revision;
                 if state.is_single_line() || !state.soft_wrap {
-                    let mut rows: Vec<_> = spans
+                    let metrics = &cache.metrics;
+                    let mut rows: Vec<_> = metrics
                         .iter()
-                        .map(|s| state.text.offset_to_point(s.range().start).row)
+                        .map(|(range, _)| state.text.offset_to_point(range.start).row)
                         .collect();
                     rows.push(state.display_map.longest_row());
                     rows.sort_unstable();
                     rows.dedup();
+                    let shape_width = |part: &str, window: &mut Window| {
+                        window
+                            .text_system()
+                            .shape_line(
+                                part.to_owned().into(),
+                                font_size,
+                                &[style.to_run(part.len())],
+                                None,
+                            )
+                            .width
+                    };
                     cache.unwrapped_width = rows
                         .into_iter()
                         .map(|row| {
@@ -1758,37 +1789,20 @@ impl<M: InputModeKind> TextElement<M> {
                             let text = state.text.slice_line(row).to_string();
                             let mut offset = 0;
                             let mut width = px(0.);
-                            let first = spans.partition_point(|s| s.range().end <= start);
-                            for span in spans[first..]
+                            let first = metrics.partition_point(|(r, _)| r.end <= start);
+                            for (range, item_width) in metrics[first..]
                                 .iter()
-                                .take_while(|s| s.range().start < start + text.len())
+                                .take_while(|(r, _)| r.start < start + text.len())
                             {
-                                let local = span.range().start - start..span.range().end - start;
-                                let part = &text[offset..local.start];
-                                width += window
-                                    .text_system()
-                                    .shape_line(
-                                        part.to_owned().into(),
-                                        style.font_size.to_pixels(window.rem_size()),
-                                        &[style.to_run(part.len())],
-                                        None,
-                                    )
-                                    .width;
-                                width +=
-                                    cache.widths.get(span.token()).copied().unwrap_or_default();
+                                let local = range.start - start..range.end - start;
+                                if local.start < offset || local.end > text.len() {
+                                    continue;
+                                }
+                                width += shape_width(&text[offset..local.start], window);
+                                width += *item_width;
                                 offset = local.end;
                             }
-                            let part = &text[offset..];
-                            width
-                                + window
-                                    .text_system()
-                                    .shape_line(
-                                        part.to_owned().into(),
-                                        style.font_size.to_pixels(window.rem_size()),
-                                        &[style.to_run(part.len())],
-                                        None,
-                                    )
-                                    .width
+                            width + shape_width(&text[offset..], window)
                         })
                         .max()
                         .unwrap_or_default();
@@ -1808,115 +1822,168 @@ impl<M: InputModeKind> TextElement<M> {
         elements
     }
 
-    fn layout_token_lines(
+    /// Tokens and concealed ranges overlapping the absolute byte `range`, in
+    /// order.
+    fn inline_items(state: &InputBaseState<M>, range: Range<usize>) -> Vec<InlineItem<'_>> {
+        let spans = if state.tokens_visible() {
+            state.token_spans()
+        } else {
+            &[]
+        };
+        let first = spans.partition_point(|s| s.range().end <= range.start);
+        let tokens = spans[first..]
+            .iter()
+            .take_while(|s| s.range().start < range.end)
+            .map(InlineItem::Token);
+        let concealed = state.active_concealments();
+        let first = concealed.partition_point(|c| c.range.end <= range.start);
+        let concealed = concealed[first..]
+            .iter()
+            .take_while(|c| c.range.start < range.end)
+            .map(InlineItem::Concealed);
+        let mut items: Vec<_> = tokens.chain(concealed).collect();
+        items.sort_by_key(|item| item.range().start);
+        items
+    }
+
+    /// Lay out a buffer row holding tokens or concealed ranges as inline
+    /// fragments: shaped text between them, a token's measured width, and a
+    /// concealed range's replacement (or nothing).
+    fn layout_inline_row(
         state: &InputBaseState<M>,
-        last_layout: &LastLayout,
+        row: usize,
         font_size: Pixels,
         runs: &[TextRun],
+        run_offset: usize,
         window: &mut Window,
-    ) -> Vec<LineLayout> {
+    ) -> LineLayout {
         use crate::input::display_map::{InlineFragment, InputLine};
-        let spans = state.token_spans();
-        let cache = state
-            .token_layout_cache
-            .as_ref()
-            .expect("tokens measured before shaping");
-        let mut run_offset = 0;
-        last_layout
-            .visible_buffer_lines
-            .iter()
-            .map(|&row| {
-                let line_start = state.text.line_start_offset(row);
-                let text: String = state.text.slice_line(row).into();
-                let ranges = if state.is_single_line() {
-                    smallvec::smallvec![0..text.len()]
-                } else {
-                    state
-                        .display_map
-                        .line(row)
-                        .expect("prepared line")
-                        .wrapped_lines
-                        .clone()
+        let token_widths = state.token_layout_cache.as_ref().map(|cache| &cache.widths);
+        let line_start = state.text.line_start_offset(row);
+        let text: String = state.text.slice_line(row).into();
+        let ranges = if state.is_single_line() {
+            smallvec::smallvec![0..text.len()]
+        } else {
+            state
+                .display_map
+                .line(row)
+                .expect("prepared line")
+                .wrapped_lines
+                .clone()
+        };
+        let items = Self::inline_items(state, line_start..line_start + text.len());
+        let mut lines: SmallVec<[InputLine; 1]> = SmallVec::new();
+        let mut has_bg = false;
+        for range in ranges {
+            let mut fragments = Vec::new();
+            let mut offset = range.start;
+            let mut x = px(0.);
+            // Shapes source text between items; also reports whether its
+            // runs carry a background.
+            let shape_text = |part: Range<usize>, x: Pixels, window: &mut Window| {
+                let part_runs = runs_for_range(runs, run_offset, &part);
+                let shaped = window.text_system().shape_line(
+                    text[part.clone()].to_owned().into(),
+                    font_size,
+                    &part_runs,
+                    None,
+                );
+                let fragment = InlineFragment {
+                    range: part.start - range.start..part.end - range.start,
+                    x,
+                    width: shaped.width,
+                    text: Some(shaped),
+                    concealed: false,
                 };
-                let mut lines: SmallVec<[InputLine; 1]> = SmallVec::new();
-                let mut has_bg = false;
-                for range in ranges {
-                    let mut fragments = Vec::new();
-                    let mut offset = range.start;
-                    let mut x = px(0.);
-                    let first =
-                        spans.partition_point(|s| s.range().end <= line_start + range.start);
-                    for span in spans[first..]
-                        .iter()
-                        .take_while(|s| s.range().start < line_start + range.end)
-                    {
-                        let local = span.range().start - line_start..span.range().end - line_start;
-                        if offset < local.start {
-                            let part = offset..local.start;
-                            let part_runs = runs_for_range(runs, run_offset, &part);
-                            has_bg |= has_background(&part_runs);
-                            let shaped = window.text_system().shape_line(
-                                text[part.clone()].to_owned().into(),
-                                font_size,
-                                &part_runs,
-                                None,
-                            );
-                            let width = shaped.width;
-                            fragments.push(InlineFragment {
-                                range: part.start - range.start..part.end - range.start,
-                                x,
-                                width,
-                                text: Some(shaped),
-                            });
-                            x += width;
-                        }
-                        let width = cache.widths.get(span.token()).copied().unwrap_or_default();
-                        fragments.push(InlineFragment {
-                            range: local.start - range.start..local.end - range.start,
-                            x,
-                            width,
-                            text: None,
-                        });
-                        x += width;
-                        offset = local.end;
-                    }
-                    if offset < range.end {
-                        let part = offset..range.end;
-                        let part_runs = runs_for_range(runs, run_offset, &part);
-                        has_bg |= has_background(&part_runs);
-                        let shaped = window.text_system().shape_line(
-                            text[part.clone()].to_owned().into(),
-                            font_size,
-                            &part_runs,
-                            None,
-                        );
-                        let width = shaped.width;
-                        fragments.push(InlineFragment {
-                            range: part.start - range.start..part.end - range.start,
-                            x,
-                            width,
-                            text: Some(shaped),
-                        });
-                    }
-                    lines.push(InputLine::inline(text[range].to_owned().into(), fragments));
+                (fragment, has_background(&part_runs))
+            };
+            for item in &items {
+                let item_range = item.range();
+                // Items never straddle a wrap boundary, but clip anyway so a
+                // stale wrap can only misplace, never panic.
+                let local = (item_range.start - line_start).max(range.start)
+                    ..(item_range.end - line_start).min(range.end);
+                if local.start >= local.end || local.start < offset {
+                    continue;
                 }
-                let indent = state.display_map.line(row).map_or(0, |line| line.indent);
-                let wrap_indent = if indent > 0 && lines.len() > 1 {
-                    let bytes = text
-                        .char_indices()
-                        .nth(indent as usize)
-                        .map_or(text.len(), |(ix, _)| ix);
-                    lines[0].x_for_index(bytes)
-                } else {
-                    px(0.)
+                if offset < local.start {
+                    let (fragment, bg) = shape_text(offset..local.start, x, window);
+                    has_bg |= bg;
+                    x += fragment.width;
+                    fragments.push(fragment);
+                }
+                let (width, shaped, concealed) = match item {
+                    InlineItem::Token(span) => (
+                        token_widths
+                            .and_then(|widths| widths.get(span.token()))
+                            .copied()
+                            .unwrap_or_default(),
+                        None,
+                        false,
+                    ),
+                    InlineItem::Concealed(concealment) => {
+                        // The replacement wears the style of the first
+                        // hidden character.
+                        let first_char =
+                            text[local.start..].chars().next().map_or(1, char::len_utf8);
+                        let run = runs_for_range(
+                            runs,
+                            run_offset,
+                            &(local.start..local.start + first_char),
+                        )
+                        .into_iter()
+                        .next()
+                        .or_else(|| runs.first().cloned());
+                        match (&concealment.replacement, run) {
+                            (Some(replacement), Some(run)) if !replacement.is_empty() => {
+                                let run = TextRun {
+                                    len: replacement.len(),
+                                    ..run
+                                };
+                                has_bg |= run.background_color.is_some();
+                                let shaped = window.text_system().shape_line(
+                                    replacement.clone(),
+                                    font_size,
+                                    &[run],
+                                    None,
+                                );
+                                (shaped.width, Some(shaped), true)
+                            }
+                            _ => (px(0.), None, true),
+                        }
+                    }
                 };
-                run_offset += text.len() + 1;
-                LineLayout::new()
-                    .inline_lines(lines)
-                    .wrap_indent(wrap_indent)
-                    .with_background(has_bg)
-            })
-            .collect()
+                fragments.push(InlineFragment {
+                    range: local.start - range.start..local.end - range.start,
+                    x,
+                    width,
+                    text: shaped,
+                    concealed,
+                });
+                x += width;
+                offset = local.end;
+            }
+            if offset < range.end {
+                let (fragment, bg) = shape_text(offset..range.end, x, window);
+                has_bg |= bg;
+                fragments.push(fragment);
+            }
+            lines.push(InputLine::inline(text[range].to_owned().into(), fragments));
+        }
+        let indent = state.display_map.line(row).map_or(0, |line| line.indent);
+        let wrap_indent = if indent > 0 && lines.len() > 1 {
+            let bytes = text
+                .char_indices()
+                .nth(indent as usize)
+                .map_or(text.len(), |(ix, _)| ix);
+            lines[0].x_for_index(bytes)
+        } else {
+            px(0.)
+        };
+        LineLayout::new()
+            .inline_lines(lines)
+            .wrap_indent(wrap_indent)
+            .with_background(has_bg)
     }
 
     fn prepaint_tokens(
@@ -2000,6 +2067,12 @@ impl<M: InputModeKind> TextElement<M> {
         out
     }
 
+    fn row_has_inline_items(state: &InputBaseState<M>, row: usize) -> bool {
+        let start = state.text.line_start_offset(row);
+        let end = state.text.line_end_offset(row);
+        !Self::inline_items(state, start..end).is_empty()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn layout_lines(
         state: &InputBaseState<M>,
@@ -2012,8 +2085,21 @@ impl<M: InputModeKind> TextElement<M> {
         window: &mut Window,
     ) -> Vec<LineLayout> {
         let is_single_line = state.is_single_line();
-        if state.tokens_visible() {
-            return Self::layout_token_lines(state, last_layout, font_size, runs, window);
+        // Only rows holding a token or a concealed range take the fragment
+        // layout; every other row is shaped as usual below.
+        let inline = state.inline_items_visible();
+        if inline && is_single_line {
+            let mut run_offset = 0;
+            return last_layout
+                .visible_buffer_lines
+                .iter()
+                .map(|&row| {
+                    let line =
+                        Self::layout_inline_row(state, row, font_size, runs, run_offset, window);
+                    run_offset += state.text.slice_line(row).len() + 1;
+                    line
+                })
+                .collect();
         }
 
         if is_single_line {
@@ -2064,6 +2150,18 @@ impl<M: InputModeKind> TextElement<M> {
 
         for (vi, &buffer_line) in last_layout.visible_buffer_lines.iter().enumerate() {
             let line_text: String = display_text.slice_line(buffer_line).into();
+            if inline && Self::row_has_inline_items(state, buffer_line) {
+                lines.push(Self::layout_inline_row(
+                    state,
+                    buffer_line,
+                    font_size,
+                    runs,
+                    run_offset,
+                    window,
+                ));
+                run_offset += line_text.len() + 1;
+                continue;
+            }
             let line_item = state
                 .display_map
                 .line(buffer_line)
@@ -2773,7 +2871,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 .longest_line_width
                 .set(Some((key, longest_line_width)));
         }
-        if state.tokens_visible() {
+        if state.inline_items_visible() {
             longest_line_width = if let Some(width) = wrap_width {
                 width
             } else {
@@ -3565,6 +3663,21 @@ fn split_runs_by_bg_segments(
     }
 
     result
+}
+
+/// A token or a concealed range: what a row lays out as an inline fragment.
+enum InlineItem<'a> {
+    Token(&'a crate::input::InlineTokenSpan),
+    Concealed(&'a crate::input::Concealment),
+}
+
+impl InlineItem<'_> {
+    fn range(&self) -> Range<usize> {
+        match self {
+            Self::Token(span) => span.range(),
+            Self::Concealed(concealment) => concealment.range.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

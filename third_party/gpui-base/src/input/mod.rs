@@ -17,6 +17,8 @@ mod base;
 pub(crate) mod blink_cursor;
 #[path = "base/change.rs"]
 mod change;
+#[path = "base/concealment.rs"]
+mod concealment;
 #[path = "base/cursor.rs"]
 mod cursor;
 #[path = "editor/decorations.rs"]
@@ -37,6 +39,7 @@ mod inline_tokens;
 mod input;
 #[path = "base/token_presentation.rs"]
 mod token_presentation;
+pub use concealment::Concealment;
 pub use inline_tokens::{InlineToken, InlineTokenError, InlineTokenSpan, InputContent};
 pub(crate) use token_presentation::InlineTokenPresentation;
 pub use token_presentation::{

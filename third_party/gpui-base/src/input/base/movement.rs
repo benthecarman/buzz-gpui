@@ -159,7 +159,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                     },
                     last_layout,
                 ) {
-                    new_offset = line_start_offset + x;
+                    new_offset = self.leftmost_visual_offset(line_start_offset + x);
                     // Landing on a wrap boundary means the preferred column pointed past the
                     // last glyph of the target row, so the caret stays on that row.
                     new_affinity = line_end_affinity;
