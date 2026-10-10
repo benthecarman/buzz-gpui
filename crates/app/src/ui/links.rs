@@ -512,10 +512,10 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         };
         div()
             .flex()
-            .flex_wrap()
             .items_center()
+            .min_w_0()
             .child(div().flex_none().mr(px(gap)).child(icon))
-            .child(text)
+            .child(div().min_w_0().child(text))
             .into_any_element()
     } else {
         // Centred, not baseline-aligned: the lead's box is as tall as its

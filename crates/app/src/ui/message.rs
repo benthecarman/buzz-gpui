@@ -464,20 +464,19 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         body = body.child(
             div()
                 .flex()
-                .flex_wrap()
                 .items_center()
                 .gap(px(4.))
                 .my(px(4.))
                 .text_caption()
                 .text_color(c.text_subtle)
-                .child("Sent from")
-                .child(markdown::link_chip(
+                .child(div().flex_none().child("Sent from"))
+                .child(div().flex_1().min_w_0().child(markdown::link_chip(
                     &url,
                     &label,
                     &rows.directory,
                     &format!("sent-{id}"),
                     cx,
-                )),
+                ))),
         );
     }
     if !row.content.trim().is_empty() || row.diff.is_some() {
