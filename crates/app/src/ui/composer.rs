@@ -1906,6 +1906,14 @@ impl Composer {
         .detach();
     }
 
+    fn set_drag_over(&mut self, over: bool, cx: &mut Context<Self>) {
+        let over = over && self.accepts_drop();
+        if self.drag_over != over {
+            self.drag_over = over;
+            cx.notify();
+        }
+    }
+
     /// Dropping files works outside edits and voice capture (`useFileDrop`).
     fn accepts_drop(&self) -> bool {
         self.editing.is_none() && self.capture.is_none() && !self.sending
@@ -2258,6 +2266,26 @@ impl Composer {
         }
         true
     }
+}
+
+/// Makes a whole conversation pane the composer's drop zone
+/// (`data-attachment-drop-zone`): files dropped anywhere in it attach to
+/// this composer, which shows the drop state.
+pub fn drop_zone(pane: Div, composer: &Entity<Composer>) -> Div {
+    let (moving, dropped) = (composer.downgrade(), composer.downgrade());
+    pane.on_drag_move(move |event: &DragMoveEvent<ExternalPaths>, _, cx| {
+        let over = event.bounds.contains(&event.event.position);
+        let _ = moving.update(cx, |composer, cx| composer.set_drag_over(over, cx));
+    })
+    .on_drop(move |paths: &ExternalPaths, _, cx| {
+        let _ = dropped.update(cx, |composer, cx| {
+            composer.drag_over = false;
+            if composer.accepts_drop() {
+                composer.add_paths(paths.paths().to_vec(), cx);
+            }
+            cx.notify();
+        });
+    })
 }
 
 /// `draft:<channel>`, or `draft:<channel>:thread:<root>` for a thread.
@@ -4169,10 +4197,10 @@ impl Render for Composer {
             }))
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let over = this.accepts_drop() && event.bounds.contains(&event.event.position);
-                    if this.drag_over != over {
-                        this.drag_over = over;
-                        cx.notify();
+                    // Over the composer; leaving it is the pane's to report
+                    // when it is a drop zone, or the drag's end.
+                    if event.bounds.contains(&event.event.position) {
+                        this.set_drag_over(true, cx);
                     }
                 }),
             )
@@ -4181,6 +4209,8 @@ impl Render for Composer {
                 if this.accepts_drop() {
                     this.add_paths(paths.paths().to_vec(), cx);
                 }
+                // The pane's drop zone must not attach them again.
+                cx.stop_propagation();
             }))
             .when(editing, |d| d.child(self.edit_header(cx)))
             .children(self.edit_retry(cx))

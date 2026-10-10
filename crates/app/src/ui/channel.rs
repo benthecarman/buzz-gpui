@@ -1000,7 +1000,8 @@ impl Render for ChannelPage {
             .message_actions
             .update(cx, |actions, cx| actions.status(cx));
 
-        div()
+        // The whole pane takes dropped files for the composer.
+        super::composer::drop_zone(div(), &self.composer)
             .flex()
             .flex_col()
             .flex_1()

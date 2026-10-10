@@ -986,7 +986,8 @@ impl Render for ThreadPanel {
 
         // The panel itself takes focus, so Escape and the scrolling keys
         // work before its rows load.
-        div()
+        // The whole panel takes dropped files for the composer.
+        super::composer::drop_zone(div(), &self.composer)
             .id("thread-panel")
             .aria_label("Thread")
             .track_focus(&self.focus)
