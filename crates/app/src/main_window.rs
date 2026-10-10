@@ -1,6 +1,6 @@
 //! The main window's life: opening it, and opening it again after it was
 //! hidden to the tray; what minimize and close do; where it was last
-//! (`window_state.rs`); the launch surface; and the tray icon, which can
+//! (`buzz_desktop::window_state`); the launch surface; and the tray icon, which can
 //! outlive the window.
 //!
 //! The app quits explicitly. Closing the window quits unless the user
@@ -24,8 +24,11 @@ use crate::tray::{Tray, TrayEvent};
 
 /// View-state key for the tray choices (a device preference).
 const PREFERENCES: &str = "tray";
-/// Device preference holding where the window was.
+/// Device preference holding where the window was, as
+/// tauri-plugin-window-state writes its file.
 const GEOMETRY: &str = "window-state";
+/// The window's label in that file.
+const LABEL: &str = "main";
 /// The header every control area sits in (ui.md §2.1).
 const HEADER_HEIGHT: Pixels = px(48.);
 /// Geometry is saved once moving or resizing pauses this long.
@@ -93,9 +96,7 @@ pub fn init(cx: &mut App) {
         .device_pref(GEOMETRY)
         .ok()
         .flatten()
-        .and_then(|json| serde_json::from_str::<SavedGeometry>(&json).ok())
-        .filter(SavedGeometry::valid)
-        .map(|saved| restore_geometry(&saved, cx));
+        .and_then(|json| restore_geometry(json.as_bytes(), cx));
     cx.set_global(MainWindow {
         handle: None,
         bounds,
@@ -241,7 +242,7 @@ fn save_geometry(cx: &mut App) {
     let Some(bounds) = cx.global::<MainWindow>().bounds else {
         return;
     };
-    let json = serde_json::to_string(&SavedGeometry::from(bounds)).expect("geometry serializes");
+    let json = saved_geometry(bounds).to_string();
     if let Err(error) = cx
         .global::<AppState>()
         .store
@@ -320,119 +321,80 @@ impl Render for Root {
     }
 }
 
-/// Where the window was (`tauri-plugin-window-state`'s fields): the
-/// windowed bounds, also kept while maximized or fullscreen.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-struct SavedGeometry {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
+/// Where the window was, as tauri-plugin-window-state 2.4.1 writes it:
+/// the windowed bounds, also kept while maximized or fullscreen.
+fn saved_geometry(bounds: WindowBounds) -> serde_json::Value {
+    let (inner, maximized, fullscreen) = match bounds {
+        WindowBounds::Windowed(inner) => (inner, false, false),
+        WindowBounds::Maximized(inner) => (inner, true, false),
+        WindowBounds::Fullscreen(inner) => (inner, false, true),
+    };
+    let (x, y) = (f32::from(inner.origin.x), f32::from(inner.origin.y));
+    serde_json::json!({ LABEL: {
+        "width": f32::from(inner.size.width).round() as u32,
+        "height": f32::from(inner.size.height).round() as u32,
+        "x": x.round() as i32,
+        "y": y.round() as i32,
+        "prev_x": x.round() as i32,
+        "prev_y": y.round() as i32,
+        "maximized": maximized,
+        "visible": true,
+        "decorated": true,
+        "fullscreen": fullscreen,
+    }})
+}
+
+/// The window mode of a saved entry, which buzz-desktop leaves to the
+/// front end.
+#[derive(Deserialize)]
+struct Mode {
     maximized: bool,
     fullscreen: bool,
 }
 
-impl SavedGeometry {
-    fn valid(&self) -> bool {
-        [self.x, self.y, self.width, self.height]
-            .iter()
-            .all(|v| v.is_finite())
-            && self.width > 0.
-            && self.height > 0.
-    }
-
-    fn bounds(&self) -> Bounds<Pixels> {
-        Bounds::new(
-            point(px(self.x), px(self.y)),
-            size(px(self.width), px(self.height)),
-        )
-    }
-}
-
-impl From<WindowBounds> for SavedGeometry {
-    fn from(bounds: WindowBounds) -> Self {
-        let (inner, maximized, fullscreen) = match bounds {
-            WindowBounds::Windowed(inner) => (inner, false, false),
-            WindowBounds::Maximized(inner) => (inner, true, false),
-            WindowBounds::Fullscreen(inner) => (inner, false, true),
-        };
-        Self {
-            x: inner.origin.x.into(),
-            y: inner.origin.y.into(),
-            width: inner.size.width.into(),
-            height: inner.size.height.into(),
-            maximized,
-            fullscreen,
-        }
-    }
-}
-
 /// The saved geometry, moved so the header and both control areas are on
-/// some screen; otherwise centred at the top of the primary work area.
-fn restore_geometry(saved: &SavedGeometry, cx: &App) -> WindowBounds {
-    let areas: Vec<Bounds<Pixels>> = cx
+/// some screen; otherwise at the top of the primary work area
+/// (`window_state::restore_request`).
+fn restore_geometry(bytes: &[u8], cx: &App) -> Option<WindowBounds> {
+    use buzz_desktop::window_state::{self as state, Position, Rect, Size as Extent};
+    let saved = state::saved_geometry(bytes, LABEL)?;
+    let mode: Mode = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|mut file| serde_json::from_value(file[LABEL].take()).ok())?;
+    let rect = |bounds: Bounds<Pixels>| Rect {
+        position: Position::new(
+            f32::from(bounds.origin.x).round() as i32,
+            f32::from(bounds.origin.y).round() as i32,
+        ),
+        size: Extent::new(
+            f32::from(bounds.size.width).max(0.).round() as u32,
+            f32::from(bounds.size.height).max(0.).round() as u32,
+        ),
+    };
+    let areas: Vec<Rect> = cx
         .displays()
         .iter()
-        .map(|display| display.visible_bounds())
+        .map(|display| rect(display.visible_bounds()))
         .collect();
     let fallback = cx
         .primary_display()
-        .map(|display| display.visible_bounds())
-        .or_else(|| areas.first().copied());
-    let bounds = match fallback {
-        Some(fallback) => reachable(saved.bounds(), &areas, fallback),
-        None => saved.bounds(),
-    };
-    if saved.fullscreen {
+        .map(|display| rect(display.visible_bounds()))
+        .or_else(|| areas.first().copied())
+        .unwrap_or_default();
+    let header = f32::from(HEADER_HEIGHT) as u32;
+    let (origin, extent) =
+        state::restore_request(&saved, Position::default(), header, &areas, fallback);
+    let bounds = Bounds::new(
+        point(px(origin.x as f32), px(origin.y as f32)),
+        size(px(extent.width as f32), px(extent.height as f32)),
+    );
+    Some(if mode.fullscreen {
         WindowBounds::Fullscreen(bounds)
-    } else if saved.maximized {
+    } else if mode.maximized {
         WindowBounds::Maximized(bounds)
     } else {
         WindowBounds::Windowed(bounds)
-    }
-}
-
-/// `reachable_client`: every corner of the header strip must be in some
-/// work area, though not the same one; otherwise the window is clamped to
-/// the fallback area and placed at its top centre.
-fn reachable(
-    window: Bounds<Pixels>,
-    areas: &[Bounds<Pixels>],
-    fallback: Bounds<Pixels>,
-) -> Bounds<Pixels> {
-    let (x, y) = (window.origin.x, window.origin.y);
-    let right = x + (window.size.width - px(1.)).max(px(0.));
-    let bottom = y + HEADER_HEIGHT - px(1.);
-    let inside = |p: Point<Pixels>| {
-        areas.iter().any(|area| {
-            p.x >= area.origin.x
-                && p.y >= area.origin.y
-                && p.x < area.origin.x + area.size.width
-                && p.y < area.origin.y + area.size.height
-        })
-    };
-    if [
-        point(x, y),
-        point(right, y),
-        point(x, bottom),
-        point(right, bottom),
-    ]
-    .into_iter()
-    .all(inside)
-    {
-        return window;
-    }
-    let size = size(
-        window.size.width.min(fallback.size.width),
-        window.size.height.min(fallback.size.height),
-    );
-    Bounds::new(
-        point(
-            fallback.origin.x + (fallback.size.width - size.width) / 2.,
-            fallback.origin.y,
-        ),
-        size,
-    )
+    })
 }
 
 pub fn preferences(cx: &App) -> Preferences {
@@ -583,41 +545,28 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
-    fn saved_geometry_must_keep_the_header_reachable() {
-        let screen = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1080.)));
-        let left = Bounds::new(point(px(-1280.), px(0.)), size(px(1280.), px(1024.)));
-        let window = |x: f32, y: f32| Bounds::new(point(px(x), px(y)), size(px(1200.), px(800.)));
-        // On one screen, or across two side by side: kept.
-        assert_eq!(
-            reachable(window(100., 50.), &[screen], screen),
-            window(100., 50.)
-        );
-        assert_eq!(
-            reachable(window(-600., 50.), &[left, screen], screen),
-            window(-600., 50.)
-        );
-        // Its screen is gone: top centre of the primary work area.
-        assert_eq!(
-            reachable(window(-600., 50.), &[screen], screen),
-            window(360., 0.)
-        );
-        // The header above the top edge: moved too, and clamped in size.
-        let big = Bounds::new(point(px(0.), px(-20.)), size(px(4000.), px(800.)));
-        assert_eq!(
-            reachable(big, &[screen], screen),
-            Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(800.)))
-        );
-    }
-
-    #[test]
-    fn geometry_keeps_the_windowed_bounds_and_mode() {
+    fn geometry_is_saved_as_window_state_writes_it() {
         let inner = Bounds::new(point(px(10.), px(20.)), size(px(900.), px(700.)));
-        let saved = SavedGeometry::from(WindowBounds::Maximized(inner));
-        assert!(saved.maximized && !saved.fullscreen && saved.valid());
-        assert_eq!(saved.bounds(), inner);
-        let json = serde_json::to_string(&saved).unwrap();
-        assert_eq!(serde_json::from_str::<SavedGeometry>(&json).unwrap(), saved);
-        assert!(!SavedGeometry { width: 0., ..saved }.valid());
+        let json = saved_geometry(WindowBounds::Maximized(inner)).to_string();
+        let saved = buzz_desktop::window_state::saved_geometry(json.as_bytes(), LABEL).unwrap();
+        let screen = buzz_desktop::window_state::Rect {
+            position: Default::default(),
+            size: buzz_desktop::window_state::Size::new(1920, 1080),
+        };
+        let (origin, extent) = buzz_desktop::window_state::restore_request(
+            &saved,
+            Default::default(),
+            48,
+            &[screen],
+            screen,
+        );
+        assert_eq!(
+            (origin.x, origin.y, extent.width, extent.height),
+            (10, 20, 900, 700)
+        );
+        let file: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(file[LABEL]["maximized"], true);
+        assert_eq!(file[LABEL]["fullscreen"], false);
     }
 
     #[test]
