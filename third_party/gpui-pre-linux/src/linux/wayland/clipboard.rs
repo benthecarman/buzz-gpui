@@ -117,6 +117,14 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
+    fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
+        if !self.has_mime_type(FILE_LIST_MIME_TYPE) {
+            return None;
+        }
+        let bytes = self.read_bytes(connection, FILE_LIST_MIME_TYPE)?;
+        crate::linux::file_list_clipboard_item(&String::from_utf8_lossy(&bytes))
+    }
+
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
         for format in ImageFormat::iter() {
             let mime_type = format.mime_type();
@@ -200,8 +208,10 @@ impl Clipboard {
             return self.contents.clone();
         }
 
+        // Copied files also offer their paths as text; files come first.
         let item = offer
-            .read_text(&self.connection)
+            .read_files(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_read = Some(item.clone());
@@ -218,8 +228,10 @@ impl Clipboard {
             return self.primary_contents.clone();
         }
 
+        // Copied files also offer their paths as text; files come first.
         let item = offer
-            .read_text(&self.connection)
+            .read_files(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_primary_read = Some(item.clone());

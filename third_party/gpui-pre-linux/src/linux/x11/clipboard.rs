@@ -78,7 +78,7 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // URI_LIST: b"text/uri-list",
+        URI_LIST: b"text/uri-list",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
         JPEG_MIME: ImageFormat::mime_type(ImageFormat::Jpeg).as_bytes(),
@@ -1037,13 +1037,23 @@ impl Clipboard {
             self.inner.atoms.TEXT_MIME_UNKNOWN,
         ];
 
-        // image formats first, as they are more specific, and read will return the first
-        // format that the contents can be converted to
-        let mut format_atoms = Vec::with_capacity(image_entries.len() + text_format_atoms.len());
+        // files and image formats first, as they are more specific, and read will return the
+        // first format that the contents can be converted to
+        let mut format_atoms =
+            Vec::with_capacity(1 + image_entries.len() + text_format_atoms.len());
+        format_atoms.push(self.inner.atoms.URI_LIST);
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(text_format_atoms);
 
-        let result = self.inner.read(&format_atoms, selection)?;
+        let mut result = self.inner.read(&format_atoms, selection)?;
+        if result.format == self.inner.atoms.URI_LIST {
+            let list = String::from_utf8_lossy(&result.bytes);
+            if let Some(item) = crate::linux::file_list_clipboard_item(&list) {
+                return Ok(item);
+            }
+            // A link rather than files: read it as text.
+            result = self.inner.read(text_format_atoms, selection)?;
+        }
 
         log::trace!(
             "read clipboard as format {:?}",

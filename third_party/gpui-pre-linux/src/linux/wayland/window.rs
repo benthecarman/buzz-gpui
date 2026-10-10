@@ -1811,9 +1811,16 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn activate(&self) {
+        let state = self.borrow();
+        // A token the app was handed lets the compositor raise the window.
+        if let Some(token) = crate::linux::take_activation_token()
+            && let Some(activation) = &state.globals.activation
+        {
+            activation.activate(token, &state.surface);
+            return;
+        }
         // Try to request an activation token. Even though the activation is likely going to be rejected,
         // KWin and Mutter can use the app_id to visually indicate we're requesting attention.
-        let state = self.borrow();
         if let (Some(activation), Some(app_id)) = (&state.globals.activation, state.app_id.clone())
         {
             state.client.set_pending_activation(state.surface.id());

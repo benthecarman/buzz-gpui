@@ -1528,6 +1528,8 @@ impl PlatformWindow for X11Window {
     }
 
     fn activate(&self) {
+        // Activation tokens are for Wayland; X11 window managers don't ask.
+        let _ = crate::linux::take_activation_token();
         let data = [1, xproto::Time::CURRENT_TIME.into(), 0, 0, 0];
         let message = xproto::ClientMessageEvent::new(
             32,
