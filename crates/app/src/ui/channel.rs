@@ -206,6 +206,11 @@ impl ChannelPage {
         page
     }
 
+    /// The header's members button and actions menu.
+    pub fn header_actions(&self) -> Entity<ChannelActions> {
+        self.actions.clone()
+    }
+
     pub fn channel_id(&self) -> &str {
         &self.channel.id
     }

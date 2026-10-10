@@ -320,6 +320,14 @@ impl Workspace {
             window,
             |this, _, _: &ChannelClosed, window, cx| this.close_channel(window, cx),
         ));
+        // "View channel details" opens the Channel settings tab.
+        let weak = cx.entity().downgrade();
+        let actions = page.read(cx).header_actions();
+        actions.update(cx, |actions, _| {
+            actions.set_open_settings(Rc::new(move |_, window, cx| {
+                let _ = weak.update(cx, |this, cx| this.open_channel_settings(window, cx));
+            }))
+        });
         self.channel = Some(page);
         self.restore_channel_tabs(window, cx);
         if let Some(root) = thread::dev_open_thread() {

@@ -9,6 +9,7 @@ use crate::community::Community;
 use crate::ui::channel::{ChannelPage, Launcher, OpenThread, PaneToggle};
 use crate::ui::channel_menu::MenuPanel;
 use crate::ui::channel_panels::{self, ChannelPanel};
+use crate::ui::channel_settings::{self as settings_panel, ChannelRemoved, ChannelSettingsPanel};
 use crate::ui::channel_tab_picker::{ChannelTabPicker, ChooseChannel, ChooseTool, Tool};
 use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabState, ThreadTarget};
 use crate::ui::message::channel_icon;
@@ -32,6 +33,10 @@ pub(super) struct Drawer {
 
 /// A tab's view, made when the tab first shows on this visit.
 pub(super) enum TabView {
+    Settings {
+        panel: Entity<ChannelSettingsPanel>,
+        _subscription: Subscription,
+    },
     Picker(Entity<ChannelTabPicker>),
     Conversation(Entity<ChannelPage>),
     Thread(Entity<ThreadPanel>),
@@ -298,6 +303,10 @@ impl Workspace {
             return;
         }
         match self.tab_views.get(id) {
+            Some(TabView::Settings { panel, .. }) => {
+                let handle = panel.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
             Some(TabView::Picker(picker)) => ChannelTabPicker::focus(&picker.clone(), window, cx),
             Some(TabView::Conversation(page)) => {
                 let composer = page.read(cx).composer();
@@ -401,6 +410,44 @@ impl Workspace {
         };
         let current_id = current.read(cx).channel_id().to_string();
         let state = self.tabs(cx);
+        if state.settings && !self.tab_views.contains_key(channel_tabs::SETTINGS) {
+            let weak = cx.entity().downgrade();
+            let on_close: settings_panel::Callback = Rc::new(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.close_tab(channel_tabs::SETTINGS, window, cx)
+                });
+            });
+            let actions = current.read(cx).header_actions();
+            let open_members: settings_panel::Callback = Rc::new(move |window, cx| {
+                actions.update(cx, |actions, cx| actions.open_members(window, cx));
+            });
+            let summary = current.read(cx).channel().clone();
+            let community = community.clone();
+            let panel = cx.new(|cx| {
+                ChannelSettingsPanel::new(
+                    community,
+                    current_id.clone(),
+                    on_close,
+                    open_members,
+                    window,
+                    cx,
+                )
+                .with_channel(summary, window, cx)
+            });
+            // Leaving or deleting from the panel closes the page, as the
+            // header menu does.
+            let subscription =
+                cx.subscribe_in(&panel, window, |this, _, _: &ChannelRemoved, window, cx| {
+                    this.close_channel(window, cx)
+                });
+            self.tab_views.insert(
+                channel_tabs::SETTINGS.to_string(),
+                TabView::Settings {
+                    panel,
+                    _subscription: subscription,
+                },
+            );
+        }
         for tab in &state.tabs {
             if self.tab_views.contains_key(&tab.id) {
                 continue;
@@ -562,6 +609,18 @@ impl Workspace {
             })
         };
         let mut items = Vec::new();
+        if state.settings
+            && let Some(TabView::Settings { panel, .. }) =
+                self.tab_views.get(channel_tabs::SETTINGS)
+        {
+            items.push(TabItem {
+                id: channel_tabs::SETTINGS.into(),
+                label: "Channel settings".into(),
+                icon: IconName::Gear,
+                content: panel.clone().into_any_element(),
+                close: closer(self, channel_tabs::SETTINGS.to_string(), cx),
+            });
+        }
         if state.thread.is_some()
             && let Some(thread) = self.thread.clone()
         {
@@ -604,7 +663,7 @@ impl Workspace {
                     panel.clone().into_any_element()
                 }
                 Some(TabView::Panel(view)) => view.clone().into_any_element(),
-                None => unavailable(),
+                Some(TabView::Settings { .. }) | None => unavailable(),
             };
             items.push(TabItem {
                 id: tab.id.clone().into(),
@@ -771,6 +830,14 @@ impl Workspace {
         };
         self.update_tabs(cx, |state| state.open_thread(target));
         ThreadPanel::focus(&panel, window, cx);
+    }
+
+    /// "View channel details": the Channel settings tab, focused, as only
+    /// an explicit open moves focus there.
+    pub(super) fn open_channel_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drawer = None;
+        self.update_tabs(cx, |state| state.open_settings());
+        self.focus_tab(channel_tabs::SETTINGS, window, cx);
     }
 
     /// A link clicked in the open channel: a registered panel's link

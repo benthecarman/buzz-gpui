@@ -244,6 +244,11 @@ impl TabState {
         self.select(THREAD);
     }
 
+    pub fn open_settings(&mut self) {
+        self.settings = true;
+        self.select(SETTINGS);
+    }
+
     /// The header toggle: hides the pane, or shows it, adding a New tab
     /// when there is nothing to show.
     pub fn toggle_pane(&mut self, new_id: impl FnOnce() -> String) {
@@ -279,7 +284,7 @@ mod tests {
         assert!(!state.has_panel());
         state.add_new("new:1".into());
         state.open_thread(thread());
-        state.settings = true;
+        state.open_settings();
         state.open_panel(PanelTab::tool("buzz.todos/todos", "c"));
         assert_eq!(
             state.root_ids(),
