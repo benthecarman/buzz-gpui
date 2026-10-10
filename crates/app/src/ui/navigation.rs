@@ -253,6 +253,16 @@ pub fn show_profile(pubkey: String, at: Point<Pixels>, window: &mut Window, cx: 
     }
 }
 
+/// Opens a conversation the session just opened or joined, such as a
+/// direct message, once the channel list has it.
+pub fn open_conversation(id: String, window: &mut Window, cx: &mut App) {
+    if let Some(workspace) = workspace(cx) {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_conversation(id, window, cx)
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

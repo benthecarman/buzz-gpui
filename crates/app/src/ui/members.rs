@@ -1,18 +1,21 @@
-//! Channel members (ui.md §4.2, `ChannelMembersDialog.tsx`): the roster
-//! grouped by role with presence, adding people and agents, and role
-//! changes and removal for channel admins.
+//! Channel members (ui.md §4.2, `ChannelMembersDialog.tsx`,
+//! `MemberAdministration.tsx`): the roster grouped by role with presence
+//! and a role filter, adding people and agents, each member's actions
+//! (profile, direct message), and role changes and removal for channel
+//! admins and for an agent's verified owner.
 
 use super::message::display_name;
 use super::modal::{Dismissed, error, group_label, note};
+use super::navigation;
 use super::overlay::{self, Align, Dismiss};
 use crate::community::Community;
 use buzz_relay_client::lifecycle::{ChannelState, MemberRole};
 use buzz_relay_client::members::{self, Change, MemberChange, Person};
-use buzz_relay_client::{ChannelSummary, ChannelType, PeoplePage, PresenceState};
+use buzz_relay_client::{ChannelSummary, ChannelType, PeoplePage, PresenceState, Profiles};
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonSize, Dialog, IconButton,
-    IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, Presence, SearchField, Spinner,
-    Surface, TypeStyled,
+    ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonSize, ButtonVariant, Dialog,
+    IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, Presence, SearchField,
+    Spinner, Surface, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -23,6 +26,48 @@ use std::time::Duration;
 
 const DEBOUNCE: Duration = Duration::from_millis(180);
 
+/// The roster's sections, in order, and the role filter's options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Group {
+    Owners,
+    Admins,
+    Members,
+    Agents,
+}
+
+impl Group {
+    const ALL: [Group; 4] = [Self::Owners, Self::Admins, Self::Members, Self::Agents];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Owners => "Owners",
+            Self::Admins => "Admins",
+            Self::Members => "Members",
+            Self::Agents => "Agents",
+        }
+    }
+
+    /// Owners and admins by role first; then agents; everyone else is a
+    /// member.
+    fn of(key: &str, role: MemberRole, profiles: &Profiles) -> Self {
+        match role {
+            MemberRole::Owner => Self::Owners,
+            MemberRole::Admin => Self::Admins,
+            _ if is_agent(key, role, profiles) => Self::Agents,
+            _ => Self::Members,
+        }
+    }
+}
+
+fn is_agent(key: &str, role: MemberRole, profiles: &Profiles) -> bool {
+    role == MemberRole::Bot || profiles.get(key).is_some_and(|p| p.is_agent)
+}
+
+/// An agent's owner, when its attestation verifies.
+fn owner_of(key: &str, profiles: &Profiles) -> Option<String> {
+    profiles.get(key)?.attested_owner.clone()
+}
+
 pub struct MembersDialog {
     community: Entity<Community>,
     channel: ChannelSummary,
@@ -32,11 +77,14 @@ pub struct MembersDialog {
     /// People found for the typed text, with the text they answer.
     found: Option<(String, Result<PeoplePage, String>)>,
     searching: Option<Task<()>>,
-    /// People being added or changed.
+    /// People being added, changed or messaged.
     busy: HashSet<String>,
     error: Option<SharedString>,
     menu: Option<String>,
     confirm: Option<MemberChange>,
+    /// `None` shows every group.
+    filter: Option<Group>,
+    filter_open: bool,
     _subscription: Subscription,
 }
 
@@ -54,6 +102,9 @@ impl MembersDialog {
         let subscription =
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
+                    // Typing searches everyone again.
+                    this.filter = None;
+                    this.filter_open = false;
                     this.search(window, cx);
                 }
             });
@@ -69,6 +120,8 @@ impl MembersDialog {
             error: None,
             menu: None,
             confirm: None,
+            filter: None,
+            filter_open: false,
             _subscription: subscription,
         };
         dialog.refresh(window, cx);
@@ -201,21 +254,52 @@ impl MembersDialog {
         cx.notify();
     }
 
+    /// "Send message": opens (or reopens and unhides) the DM with this
+    /// person, then shows it and closes the dialog.
+    fn message(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.busy.insert(pubkey.clone()) {
+            return;
+        }
+        self.error = None;
+        let session = self.community.read(cx).session.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = session.open_dm(vec![pubkey.clone()]).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy.remove(&pubkey);
+                match result {
+                    Ok(id) => {
+                        navigation::open_conversation(id, window, cx);
+                        cx.emit(Dismissed);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not open the direct message");
+                        this.error =
+                            Some("Could not open the conversation. Try Send message again.".into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn dismiss_menu(cx: &mut Context<Self>) -> Dismiss {
         let weak = cx.entity().downgrade();
         Rc::new(move |_, cx| {
             let _ = weak.update(cx, |this, cx| {
                 this.menu = None;
+                this.filter_open = false;
                 cx.notify();
             });
         })
     }
 
-    fn avatar(&self, pubkey: &str, agent: bool, cx: &App) -> Avatar {
+    fn avatar(&self, pubkey: &str, agent: bool, size: f32, cx: &App) -> Avatar {
         let community = self.community.read(cx);
         let snapshot = &community.snapshot;
         let mut avatar = Avatar::new(display_name(&snapshot.profiles, pubkey))
-            .size(AvatarSize::Px(32.))
+            .size(AvatarSize::Px(size))
             .presence(snapshot.presence.get(pubkey).map(|state| match state {
                 PresenceState::Online => Presence::Online,
                 PresenceState::Away => Presence::Away,
@@ -234,6 +318,87 @@ impl MembersDialog {
         avatar
     }
 
+    /// The row's actions (`MemberAdministration.tsx`): profiles and a DM
+    /// for anyone, role changes for admins, removal for admins and for an
+    /// agent's verified owner.
+    fn actions_menu(
+        &self,
+        pubkey: &str,
+        role: MemberRole,
+        state: &ChannelState,
+        cx: &mut Context<Self>,
+    ) -> Menu {
+        let viewer = self.viewer(cx);
+        let profiles = self.community.read(cx).snapshot.profiles.clone();
+        let agent = is_agent(pubkey, role, &profiles);
+        let owner = owner_of(pubkey, &profiles);
+        let key = pubkey.to_string();
+        let profile_item = |id: &'static str, label: &'static str, target: String| {
+            MenuItem::new(id, label).on_click(cx.listener(
+                move |this, event: &ClickEvent, window, cx| {
+                    this.menu = None;
+                    navigation::show_profile(target.clone(), event.position(), window, cx);
+                    cx.emit(Dismissed);
+                },
+            ))
+        };
+        let mut menu = Menu::new().child(profile_item("view-profile", "View profile", key.clone()));
+        if let Some(owner) = owner.clone() {
+            menu = menu.child(profile_item(
+                "view-owner-profile",
+                "View owner profile",
+                owner,
+            ));
+        }
+        if !agent && pubkey != viewer {
+            let target = key.clone();
+            menu = menu.child(
+                MenuItem::new("send-message", "Send message").on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.menu = None;
+                        this.message(target.clone(), window, cx);
+                    },
+                )),
+            );
+        }
+        let change = |change: Change| MemberChange {
+            pubkey: key.clone(),
+            expected: role,
+            change,
+        };
+        let confirm = |id: &'static str, label: &'static str, next: MemberChange| {
+            MenuItem::new(id, label).on_click(cx.listener(move |this, _, _, cx| {
+                this.menu = None;
+                this.confirm = Some(next.clone());
+                cx.notify();
+            }))
+        };
+        let can_edit = state.can_manage_member(&viewer, pubkey);
+        let can_remove = state.can_remove_member(&viewer, pubkey, owner.as_deref());
+        if can_edit {
+            menu = menu.child(MenuSeparator::new());
+            for (id, next, target, label) in [
+                ("make-admin", Change::Admin, MemberRole::Admin, "Make admin"),
+                (
+                    "make-member",
+                    Change::Member,
+                    MemberRole::Member,
+                    "Make member",
+                ),
+            ] {
+                if target != role {
+                    menu = menu.child(confirm(id, label, change(next)));
+                }
+            }
+        }
+        if can_remove {
+            menu = menu
+                .child(MenuSeparator::new())
+                .child(confirm("remove", "Remove from channel", change(Change::Remove)).danger());
+        }
+        menu
+    }
+
     fn member_row(
         &self,
         pubkey: &str,
@@ -245,49 +410,27 @@ impl MembersDialog {
         let c = *cx.colors();
         let viewer = self.viewer(cx);
         let profiles = self.community.read(cx).snapshot.profiles.clone();
-        let agent = role == MemberRole::Bot || profiles.get(pubkey).is_some_and(|p| p.is_agent);
+        let agent = is_agent(pubkey, role, &profiles);
         let mut name = display_name(&profiles, pubkey).to_string();
         if pubkey == viewer {
             name.push_str(" (you)");
         }
-        let manage = state.can_manage_member(&viewer, pubkey);
+        // "managed by …" for an agent whose owner is verified.
+        let managed = agent
+            .then(|| owner_of(pubkey, &profiles))
+            .flatten()
+            .map(|owner| {
+                let mut owner_name = display_name(&profiles, &owner).to_string();
+                if owner == viewer {
+                    owner_name.push_str(" (you)");
+                }
+                format!("managed by {owner_name}")
+            });
         let menu_open = self.menu.as_deref() == Some(pubkey);
         let busy = self.busy.contains(pubkey);
         let key = pubkey.to_string();
         let menu = menu_open.then(|| {
-            let change = |change: Change| MemberChange {
-                pubkey: key.clone(),
-                expected: role,
-                change,
-            };
-            let item = |id: &'static str, label: String, next: MemberChange| {
-                MenuItem::new(id, label).on_click(cx.listener(move |this, _, _, cx| {
-                    this.menu = None;
-                    this.confirm = Some(next.clone());
-                    cx.notify();
-                }))
-            };
-            let mut menu = Menu::new();
-            for (id, next, label) in [
-                ("make-admin", Change::Admin, "Make admin"),
-                ("make-member", Change::Member, "Make member"),
-            ] {
-                let target = match next {
-                    Change::Admin => MemberRole::Admin,
-                    _ => MemberRole::Member,
-                };
-                if target != role {
-                    menu = menu.child(item(id, label.to_string(), change(next)));
-                }
-            }
-            menu = menu.child(MenuSeparator::new()).child(
-                item(
-                    "remove",
-                    "Remove from channel".into(),
-                    change(Change::Remove),
-                )
-                .danger(),
-            );
+            let menu = self.actions_menu(pubkey, role, state, cx);
             overlay::dropdown(window, Align::End, menu, Self::dismiss_menu(cx))
         });
         let id = SharedString::from(format!("member-{pubkey}"));
@@ -302,17 +445,24 @@ impl MembersDialog {
             .py(rems(0.25))
             .rounded(px(11.))
             .hover(|s| s.bg(c.interaction(Surface::Floating).row_hover))
-            .child(self.avatar(pubkey, agent, cx))
+            .child(self.avatar(pubkey, agent, 32., cx))
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .text_body_sm()
-                    .truncate()
-                    .child(name),
+                    .child(div().text_body_sm().truncate().child(name))
+                    .children(managed.map(|managed| {
+                        div()
+                            .text_caption()
+                            .text_color(c.text_subtle)
+                            .truncate()
+                            .child(managed)
+                    })),
             )
             .when(busy, |this| this.child(Spinner::new().size(16.)))
-            .when(manage && !busy, |this| {
+            .when(!busy, |this| {
                 this.child(
                     div()
                         .relative()
@@ -323,7 +473,12 @@ impl MembersDialog {
                             )
                             .size(IconButtonSize::Sm)
                             .surface(Surface::Floating)
-                            .tooltip("Member actions")
+                            .when(!menu_open, |b| {
+                                b.tooltip(format!(
+                                    "Actions for {}",
+                                    display_name(&profiles, pubkey)
+                                ))
+                            })
                             .on_click(cx.listener({
                                 let key = key.clone();
                                 move |this, _, _, cx| {
@@ -352,7 +507,7 @@ impl MembersDialog {
             .py(rems(0.25))
             .rounded(px(11.))
             .hover(|s| s.bg(c.interaction(Surface::Floating).row_hover))
-            .child(self.avatar(&person.pubkey, person.profile.is_agent, cx))
+            .child(self.avatar(&person.pubkey, person.profile.is_agent, 32., cx))
             .child(
                 div()
                     .flex_1()
@@ -377,57 +532,116 @@ impl MembersDialog {
     }
 
     fn confirmation(&self, change: &MemberChange, cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
         let profiles = self.community.read(cx).snapshot.profiles.clone();
         let name = display_name(&profiles, &change.pubkey);
-        let (title, description, action) = match change.change {
-            Change::Remove => (
-                format!("Remove {name} from channel"),
-                format!("{name} loses access to this channel's messages."),
-                format!("Remove {name}"),
-            ),
-            next => {
-                let role = if next == Change::Admin {
-                    "admin"
-                } else {
-                    "member"
-                };
-                (
-                    "Change member role?".to_string(),
-                    format!(
-                        "Change this member’s role from {} to {role}. {}",
-                        change.expected.as_str(),
-                        if next == Change::Admin {
-                            "Admins can manage this channel and its members."
-                        } else {
-                            "This changes their authority in this channel."
-                        }
-                    ),
-                    format!("Make {role}"),
+        let cancel = Button::new("member-cancel", "Cancel")
+            .variant(ButtonVariant::Subtle)
+            .surface(Surface::Floating)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.confirm = None;
+                cx.notify();
+            }));
+        let confirm = |label: String| {
+            Button::new("member-confirm", label)
+                .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx)))
+        };
+        if change.change == Change::Remove {
+            let agent = is_agent(&change.pubkey, change.expected, &profiles);
+            let noun = if agent { "agent" } else { "member" };
+            return AlertDialog::new(format!("Remove {noun} from channel"))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(rems(0.75))
+                        .child(self.avatar(&change.pubkey, agent, 32., cx))
+                        .child(
+                            div()
+                                .text_body()
+                                .text_color(c.text_standard)
+                                .truncate()
+                                .child(name),
+                        ),
                 )
+                .action(cancel)
+                .action(confirm(format!("Remove {noun}")).destructive())
+                .into_any_element();
+        }
+        let role = if change.change == Change::Admin {
+            "admin"
+        } else {
+            "member"
+        };
+        AlertDialog::new("Change member role?")
+            .description(format!(
+                "Change this member’s role from {} to {role}. {}",
+                change.expected.as_str(),
+                if change.change == Change::Admin {
+                    "Admins can manage this channel and its members."
+                } else {
+                    "This changes their authority in this channel."
+                }
+            ))
+            .action(cancel)
+            .action(confirm(format!("Make {role}")).prominent())
+            .into_any_element()
+    }
+
+    /// "Filter members by role": a compact select of the groups present.
+    fn filter_select(
+        &self,
+        counts: &[(Group, usize)],
+        total: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = |group: Option<Group>| match group {
+            None => format!("All · {total}"),
+            Some(group) => {
+                let count = counts
+                    .iter()
+                    .find(|(g, _)| *g == group)
+                    .map_or(0, |(_, n)| *n);
+                format!("{} · {count}", group.label())
             }
         };
-        let destructive = change.change == Change::Remove;
-        AlertDialog::new(title)
-            .description(description)
-            .action(
-                Button::new("member-cancel", "Cancel")
+        let menu = self.filter_open.then(|| {
+            let mut menu = Menu::new();
+            let options = std::iter::once(None).chain(counts.iter().map(|(group, _)| Some(*group)));
+            for (index, option) in options.enumerate() {
+                menu = menu.child(
+                    MenuItem::new(("member-filter", index), label(option))
+                        .checked(self.filter == option)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.filter = option;
+                            this.filter_open = false;
+                            cx.notify();
+                        })),
+                );
+            }
+            overlay::dropdown(window, Align::End, menu, Self::dismiss_menu(cx))
+        });
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                Button::new("member-filter", label(self.filter))
+                    .outline()
+                    .size(ButtonSize::Sm)
                     .surface(Surface::Floating)
+                    .icon_end(if self.filter_open {
+                        IconName::CaretUp
+                    } else {
+                        IconName::CaretDown
+                    })
+                    .when(!self.filter_open, |b| b.tooltip("Filter members by role"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.confirm = None;
+                        this.filter_open = !this.filter_open;
                         cx.notify();
                     })),
             )
-            .action(
-                Button::new("member-confirm", action)
-                    .map(|b| {
-                        if destructive {
-                            b.destructive()
-                        } else {
-                            b.prominent()
-                        }
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx))),
-            )
+            .children(menu)
             .into_any_element()
     }
 }
@@ -461,6 +675,7 @@ impl Render for MembersDialog {
         if let Some(message) = &self.error {
             list = list.child(div().px(rems(1.)).child(error(message.clone(), cx)));
         }
+        let mut filter = None;
         match &self.state {
             None => {
                 list = list.child(
@@ -477,43 +692,46 @@ impl Render for MembersDialog {
                     query.is_empty()
                         || members::match_tier(&display_name(&profiles, key), &query).is_some()
                 };
-                let groups = [
-                    ("Owners", vec![MemberRole::Owner]),
-                    ("Admins", vec![MemberRole::Admin]),
-                    (
-                        "Members",
-                        vec![MemberRole::Member, MemberRole::Guest, MemberRole::Unknown],
-                    ),
-                    ("Agents", vec![MemberRole::Bot]),
-                ];
+                let grouped: Vec<(Group, Vec<(&String, MemberRole)>)> = Group::ALL
+                    .iter()
+                    .map(|group| {
+                        let keys = state
+                            .roles
+                            .iter()
+                            .filter(|(key, role)| Group::of(key, **role, &profiles) == *group)
+                            .map(|(key, role)| (key, *role))
+                            .collect();
+                        (*group, keys)
+                    })
+                    .collect();
+                let counts: Vec<(Group, usize)> = grouped
+                    .iter()
+                    .filter(|(_, keys)| !keys.is_empty())
+                    .map(|(group, keys)| (*group, keys.len()))
+                    .collect();
+                // Only worth offering with more than one group, and not
+                // while searching.
+                if counts.len() > 1 && query.is_empty() {
+                    filter = Some(self.filter_select(&counts, state.roles.len(), window, cx));
+                }
                 let mut shown = 0;
-                for (label, roles) in groups {
-                    let mut keys: Vec<(&String, MemberRole)> = state
-                        .roles
-                        .iter()
-                        .filter(|(key, role)| {
-                            let agent = **role == MemberRole::Bot
-                                || profiles.get(*key).is_some_and(|p| p.is_agent);
-                            let in_group = if label == "Agents" {
-                                agent
-                            } else {
-                                !agent && roles.contains(role)
-                            };
-                            in_group && matches(key)
-                        })
-                        .map(|(key, role)| (key, *role))
-                        .collect();
-                    if keys.is_empty() && label != "Members" {
+                for (group, keys) in grouped {
+                    if self.filter.is_some_and(|only| only != group) {
+                        continue;
+                    }
+                    let mut keys: Vec<(&String, MemberRole)> =
+                        keys.into_iter().filter(|(key, _)| matches(key)).collect();
+                    if keys.is_empty() && group != Group::Members {
                         continue;
                     }
                     keys.sort_by_key(|(key, _)| {
                         (**key != viewer, display_name(&profiles, key).to_lowercase())
                     });
                     shown += keys.len();
-                    let mut section = div()
-                        .flex()
-                        .flex_col()
-                        .child(group_label(format!("{label} · {}", keys.len()), cx));
+                    let mut section = div().flex().flex_col().child(group_label(
+                        format!("{} · {}", group.label(), keys.len()),
+                        cx,
+                    ));
                     for (key, role) in keys {
                         section = section.child(self.member_row(key, role, &state, window, cx));
                     }
@@ -578,7 +796,18 @@ impl Render for MembersDialog {
                     .flex()
                     .flex_col()
                     .gap(rems(1.))
-                    .child(SearchField::new(&self.input).surface(Surface::Floating))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(rems(0.5))
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    SearchField::new(&self.input).surface(Surface::Floating),
+                                ),
+                            )
+                            .children(filter),
+                    )
                     .child(
                         div()
                             .id("member-list")
@@ -592,5 +821,28 @@ impl Render for MembersDialog {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_relay_client::Profile;
+    use core::prelude::v1::test;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn groups_roles_before_agents() {
+        let agent = Profile {
+            is_agent: true,
+            ..Default::default()
+        };
+        let profiles: Profiles = Arc::new(HashMap::from([("a".to_string(), Arc::new(agent))]));
+        assert_eq!(Group::of("a", MemberRole::Admin, &profiles), Group::Admins);
+        assert_eq!(Group::of("a", MemberRole::Member, &profiles), Group::Agents);
+        assert_eq!(Group::of("b", MemberRole::Bot, &profiles), Group::Agents);
+        assert_eq!(Group::of("b", MemberRole::Guest, &profiles), Group::Members);
+        assert_eq!(Group::of("b", MemberRole::Owner, &profiles), Group::Owners);
     }
 }
