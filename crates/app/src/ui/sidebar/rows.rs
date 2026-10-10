@@ -480,7 +480,7 @@ impl ChannelSidebar {
         // The 1:1 peer's status emoji, 8px after the name.
         let accessory = peer
             .as_ref()
-            .and_then(|peer| self.statuses.get(peer))
+            .and_then(|peer| snapshot.statuses.get(peer))
             .filter(|status| !status.emoji.is_empty() || !status.text.is_empty())
             .map(|status| {
                 let value = if status.emoji.is_empty() {

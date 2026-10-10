@@ -19,7 +19,8 @@ use buzz_relay_client::lifecycle::{Action, LifecyclePermissions};
 use buzz_relay_client::sidebar::{SidebarSection, sidebar_sections};
 use buzz_relay_client::sidebar_store::{Destination, PreferencesStatus, SidebarState};
 use buzz_relay_client::{
-    ChannelSummary, ChannelType, Profiles, RosterStatus, SessionSnapshot, SessionStatus, UserStatus,
+    ChannelSummary, ChannelType, Profiles, RosterStatus, SessionSnapshot, SessionStatus,
+    StatusWatch,
 };
 use buzz_ui::{ActiveTheme, Button, ButtonSize, NavigationItem, Toast, ToastTone, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
@@ -55,8 +56,6 @@ pub type PageHandler = Arc<dyn Fn(Page, &mut Window, &mut App)>;
 const REVEAL_BUDGET: Duration = Duration::from_millis(1500);
 /// `useToastNotification`'s timeout.
 const TOAST_DURATION: Duration = Duration::from_secs(4);
-/// How often the DM rows' statuses are read again.
-const STATUS_REFRESH: Duration = Duration::from_secs(120);
 
 /// DM label: the other participants' names, or "Notes to self".
 pub fn channel_label(channel: &ChannelSummary, profiles: &Profiles) -> SharedString {
@@ -289,7 +288,8 @@ pub struct ChannelSidebar {
     toast: Option<(SharedString, ToastTone, usize)>,
     toasts: usize,
     dragging: Option<String>,
-    statuses: HashMap<String, UserStatus>,
+    /// Follows the one-to-one DM peers' statuses (`useUserStatus`).
+    status_watch: Option<StatusWatch>,
     status_demand: Vec<String>,
     /// What `Session::track_channel_activity` was last told.
     tracking_activity: Option<bool>,
@@ -336,18 +336,6 @@ impl ChannelSidebar {
             this.follow_activity(cx);
             cx.notify();
         });
-        let refresh = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(STATUS_REFRESH).await;
-                let refreshed = this.update(cx, |this, cx| {
-                    this.status_demand.clear();
-                    this.follow_statuses(cx);
-                });
-                if refreshed.is_err() {
-                    return;
-                }
-            }
-        });
         Self {
             community,
             props: None,
@@ -372,10 +360,10 @@ impl ChannelSidebar {
             toast: None,
             toasts: 0,
             dragging: None,
-            statuses: HashMap::new(),
+            status_watch: None,
             status_demand: Vec::new(),
             tracking_activity: None,
-            _tasks: vec![refresh],
+            _tasks: Vec::new(),
             _observe: observe,
         }
         .with_saved_scroll(view.scroll_top)
@@ -630,25 +618,13 @@ impl ChannelSidebar {
             .collect();
         peers.sort();
         peers.dedup();
-        if peers == self.status_demand || snapshot.status != SessionStatus::Ready {
+        if peers == self.status_demand {
             return;
         }
-        self.status_demand = peers.clone();
-        if peers.is_empty() {
-            self.statuses.clear();
-            return;
-        }
-        let session = self.session(cx);
-        cx.spawn(async move |this, cx| {
-            let Ok(statuses) = session.user_statuses(peers).await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.statuses = statuses;
-                cx.notify();
-            });
-        })
-        .detach();
+        // The new watch is taken before the old one goes, so peers in both
+        // keep their statuses.
+        self.status_watch = Some(self.session(cx).watch_statuses(&peers));
+        self.status_demand = peers;
     }
 
     // ----- actions -----
