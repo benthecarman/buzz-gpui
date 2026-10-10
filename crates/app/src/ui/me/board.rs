@@ -281,6 +281,7 @@ impl SessionWork {
                 channel: self.channel.id.clone(),
                 target,
                 close,
+                thread: self.tabs(cx).thread.map(|thread| thread.root.to_hex()),
             },
             window,
             cx,
