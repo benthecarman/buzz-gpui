@@ -16,6 +16,7 @@ pub struct Switch {
     checked: bool,
     disabled: bool,
     label: Option<SharedString>,
+    label_first: bool,
     on_change: Option<ChangeHandler>,
 }
 
@@ -26,6 +27,7 @@ impl Switch {
             checked,
             disabled: false,
             label: None,
+            label_first: false,
             on_change: None,
         }
     }
@@ -37,6 +39,12 @@ impl Switch {
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// The label before the track, as buzz-app's `Switch` lays it out.
+    pub fn label_first(mut self) -> Self {
+        self.label_first = true;
         self
     }
 
@@ -95,8 +103,13 @@ impl RenderOnce for Switch {
             })
             .when(!self.disabled, |this| this.cursor_pointer())
             .when(self.disabled, |this| this.cursor_not_allowed())
-            .child(switch)
-            .children(self.label)
+            .map(|this| {
+                if self.label_first {
+                    this.children(self.label).child(switch)
+                } else {
+                    this.child(switch).children(self.label)
+                }
+            })
             .when_some(self.on_change.filter(|_| !self.disabled), |this, f| {
                 this.on_click(move |_, w, cx| f(next, w, cx))
             })

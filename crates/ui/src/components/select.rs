@@ -25,6 +25,7 @@ pub struct Select {
     open: bool,
     invalid: bool,
     disabled: bool,
+    subtle: bool,
     surface: Surface,
     on_click: Option<ClickHandler>,
 }
@@ -39,6 +40,7 @@ impl Select {
             open: false,
             invalid: false,
             disabled: false,
+            subtle: false,
             surface: Surface::default(),
             on_click: None,
         }
@@ -78,6 +80,13 @@ impl Select {
         self
     }
 
+    /// Rests on the subtle affordance instead of the inset fill, as the
+    /// Share dialog's fields do inside the elevated dialog.
+    pub fn subtle(mut self) -> Self {
+        self.subtle = true;
+        self
+    }
+
     pub fn surface(mut self, surface: Surface) -> Self {
         self.surface = surface;
         self
@@ -93,6 +102,11 @@ impl RenderOnce for Select {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let (bg, border, text) =
             field_colors(self.open, self.invalid, self.disabled, self.surface, cx);
+        let bg = if self.subtle && !self.disabled {
+            cx.colors().affordance_subtle
+        } else {
+            bg
+        };
         let metadata = cx.colors().text_metadata;
         let caret = if self.open {
             IconName::CaretUp

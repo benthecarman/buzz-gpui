@@ -19,7 +19,6 @@ use std::rc::Rc;
 pub enum DialogEvent {
     Close,
     /// The conversation moved to Messages.
-    #[allow(dead_code)] // Until the share dialog sends it.
     Shared(String),
     /// "Create and move": a new group named this, the row moved in.
     CreateSection {
