@@ -11,6 +11,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -552,15 +553,36 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     let (open_state, middle_state) = (unavailable.clone(), unavailable);
     let menu_state =
         window.use_keyed_state(SharedString::from(format!("{id}-menu")), cx, |_, _| {
-            None::<Point<Pixels>>
+            None::<OpenMenu>
         });
     let menu_at = *menu_state.read(cx);
+    let menu_focus = window
+        .use_keyed_state(
+            SharedString::from(format!("{id}-menu-focus")),
+            cx,
+            |_, cx| cx.focus_handle(),
+        )
+        .read(cx)
+        .clone();
     let hover_state =
         window.use_keyed_state(SharedString::from(format!("{id}-hover")), cx, |_, _| {
             HoverCard::default()
         });
+    // A link is a tab stop, as an anchor is; Enter opens it, and the
+    // context-menu key or Shift+F10 opens an external link's menu under it.
+    let focus = window
+        .use_keyed_state(SharedString::from(format!("{id}-focus")), cx, |_, cx| {
+            cx.focus_handle().tab_stop(true)
+        })
+        .read(cx)
+        .clone();
+    let bounds = window.use_keyed_state(SharedString::from(format!("{id}-bounds")), cx, |_, _| {
+        Bounds::<Pixels>::default()
+    });
+    let ring = focus.is_focused(window) && window.last_input_was_keyboard();
     let mut element = div()
         .id(id.clone())
+        .track_focus(&focus)
         .relative()
         .max_w_full()
         .when_some(chip.max_width, |d, width| d.max_w(width))
@@ -583,6 +605,29 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             d.tooltip(Tooltip::text(text))
         })
         .child(body)
+        .child({
+            let bounds = bounds.clone();
+            canvas(
+                move |area, _, cx| bounds.update(cx, |bounds, _| *bounds = area),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        })
+        .when(ring, |d| {
+            // The 2px focus outline, 3px out (`:focus-visible`).
+            d.child(
+                div()
+                    .absolute()
+                    .top(px(-5.))
+                    .bottom(px(-5.))
+                    .left(px(-5.))
+                    .right(px(-5.))
+                    .rounded(px(6.))
+                    .border_2()
+                    .border_color(c.border_focus),
+            )
+        })
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
             if internal {
@@ -605,14 +650,34 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             });
         });
     } else {
-        let state = menu_state.clone();
-        element = element.on_mouse_down(MouseButton::Right, move |event, _, cx| {
+        let (state, pointer_focus) = (menu_state.clone(), menu_focus.clone());
+        element = element.on_mouse_down(MouseButton::Right, move |event, window, cx| {
             cx.stop_propagation();
             let at = event.position;
             state.update(cx, |open, cx| {
-                *open = Some(at);
+                *open = Some(OpenMenu {
+                    at,
+                    highlight: None,
+                });
                 cx.notify();
             });
+            pointer_focus.focus(window, cx);
+        });
+        let (state, key_focus) = (menu_state.clone(), menu_focus.clone());
+        element = element.on_key_down(move |event: &KeyDownEvent, window, cx| {
+            let keys = &event.keystroke;
+            if keys.key == "menu" || (keys.key == "f10" && keys.modifiers.shift) {
+                cx.stop_propagation();
+                let at = bounds.read(cx).bottom_left();
+                state.update(cx, |open, cx| {
+                    *open = Some(OpenMenu {
+                        at,
+                        highlight: Some(0),
+                    });
+                    cx.notify();
+                });
+                key_focus.focus(window, cx);
+            }
         });
     }
     // Hover cards: message links preview the message; channel links the
@@ -681,7 +746,14 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             .session
             .clone()
             .filter(|session| super::agents::snapshot_preview::can_preview_link(session, url));
-        wrapper = wrapper.child(link_menu(id, url, at, menu_state, snapshot, &c));
+        wrapper = wrapper.child(link_menu(
+            id,
+            url,
+            at,
+            menu_state,
+            snapshot,
+            (menu_focus, focus),
+        ));
     }
     wrapper.into_any_element()
 }
@@ -726,84 +798,142 @@ impl HoverCard {
     }
 }
 
+/// An open link menu: where, and the keyboard's highlighted item.
+#[derive(Clone, Copy)]
+struct OpenMenu {
+    at: Point<Pixels>,
+    highlight: Option<usize>,
+}
+
 /// The external link's context menu (`MessageLink.tsx`): open in the
-/// browser or copy the link.
+/// browser, preview a snapshot, or copy the link. It takes focus, moves
+/// with the arrow keys, and gives focus back to the link as it closes.
 fn link_menu(
     id: SharedString,
     url: &str,
-    at: Point<Pixels>,
-    state: Entity<Option<Point<Pixels>>>,
+    open: OpenMenu,
+    state: Entity<Option<OpenMenu>>,
     snapshot: Option<std::sync::Arc<buzz_relay_client::Session>>,
-    _: &buzz_ui::Colors,
+    (menu_focus, trigger): (FocusHandle, FocusHandle),
 ) -> AnyElement {
-    let close = state.clone();
-    let (open, copy) = (url.to_string(), url.to_string());
-    let (close_open, close_preview, close_copy) = (state.clone(), state.clone(), state);
-    let preview = snapshot.map(|session| {
+    type Action = Rc<dyn Fn(&mut Window, &mut App)>;
+    let mut items: Vec<(&str, &str, Option<IconName>, Action)> = Vec::new();
+    let browser = url.to_string();
+    items.push((
+        "open",
+        "Open in browser",
+        Some(IconName::Browser),
+        Rc::new(move |_, cx| cx.open_url(&browser)),
+    ));
+    if let Some(session) = snapshot {
         let url = url.to_string();
-        MenuItem::new(
-            SharedString::from(format!("{id}-snapshot")),
+        items.push((
+            "snapshot",
             "Preview snapshot",
-        )
-        .size(MenuSize::Compact)
-        .on_click(move |_, window, cx| {
-            close_preview.update(cx, |open, cx| {
+            None,
+            Rc::new(move |window, cx| {
+                super::agents::snapshot_preview::preview_link(&session, &url, window, cx)
+            }),
+        ));
+    }
+    let copy = url.to_string();
+    items.push((
+        "copy",
+        "Copy link",
+        Some(IconName::Copy),
+        Rc::new(move |_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+            notice::success("Link copied", cx);
+        }),
+    ));
+    let actions: Vec<Action> = items
+        .iter()
+        .map(|(_, _, _, action)| action.clone())
+        .collect();
+    let close = {
+        let state = state.clone();
+        move |refocus: bool, window: &mut Window, cx: &mut App| {
+            state.update(cx, |open, cx| {
                 *open = None;
                 cx.notify();
             });
-            super::agents::snapshot_preview::preview_link(&session, &url, window, cx);
-        })
-    });
+            if refocus {
+                trigger.focus(window, cx);
+            }
+        }
+    };
+    let close = Rc::new(close);
+    let menu = Menu::new()
+        .size(MenuSize::Compact)
+        .children(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, (key, label, icon, action))| {
+                    let close = close.clone();
+                    let item = MenuItem::new(SharedString::from(format!("{id}-{key}")), label)
+                        .size(MenuSize::Compact)
+                        .highlighted(open.highlight == Some(index))
+                        .on_click(move |_, window, cx| {
+                            close(true, window, cx);
+                            action(window, cx);
+                        });
+                    match icon {
+                        Some(icon) => item.icon(icon),
+                        None => item,
+                    }
+                }),
+        );
+    let count = actions.len();
+    let (outside, keys) = (close.clone(), close);
     deferred(
         anchored()
             .position_mode(AnchoredPositionMode::Window)
-            .position(at)
+            .position(open.at)
             .snap_to_window_with_margin(px(8.))
             .child(
                 div()
+                    .track_focus(&menu_focus)
                     .occlude()
-                    .on_mouse_down_out(move |_, _, cx| {
-                        close.update(cx, |open, cx| {
-                            *open = None;
+                    .on_mouse_down_out(move |_, window, cx| outside(false, window, cx))
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        let step = |forward: bool| {
+                            Some(match (open.highlight, forward) {
+                                (None, true) => 0,
+                                (None, false) => count - 1,
+                                (Some(i), true) => (i + 1) % count,
+                                (Some(i), false) => (i + count - 1) % count,
+                            })
+                        };
+                        let highlight = match event.keystroke.key.as_str() {
+                            "escape" | "tab" => {
+                                cx.stop_propagation();
+                                keys(true, window, cx);
+                                return;
+                            }
+                            "enter" | "space" => {
+                                if let Some(action) = open.highlight.and_then(|i| actions.get(i)) {
+                                    cx.stop_propagation();
+                                    keys(true, window, cx);
+                                    action(window, cx);
+                                }
+                                return;
+                            }
+                            "down" => step(true),
+                            "up" => step(false),
+                            "home" => Some(0),
+                            "end" => Some(count - 1),
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        state.update(cx, |menu, cx| {
+                            if let Some(menu) = menu {
+                                menu.highlight = highlight;
+                            }
                             cx.notify();
-                        })
+                        });
                     })
-                    .child(
-                        Menu::new()
-                            .size(MenuSize::Compact)
-                            .child(
-                                MenuItem::new(
-                                    SharedString::from(format!("{id}-open")),
-                                    "Open in browser",
-                                )
-                                .icon(IconName::Browser)
-                                .size(MenuSize::Compact)
-                                .on_click(move |_, _, cx| {
-                                    close_open.update(cx, |open, cx| {
-                                        *open = None;
-                                        cx.notify();
-                                    });
-                                    cx.open_url(&open);
-                                }),
-                            )
-                            .children(preview)
-                            .child(
-                                MenuItem::new(
-                                    SharedString::from(format!("{id}-copy")),
-                                    "Copy link",
-                                )
-                                .icon(IconName::Copy)
-                                .size(MenuSize::Compact)
-                                .on_click(move |_, _, cx| {
-                                    close_copy.update(cx, |open, cx| {
-                                        *open = None;
-                                        cx.notify();
-                                    });
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                    notice::success("Link copied", cx);
-                                }),
-                            ),
-                    ),
+                    .child(menu),
             ),
     )
     .with_priority(2)
