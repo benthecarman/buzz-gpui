@@ -8,3 +8,5 @@ Terminal=false
 Categories=Network;Chat;InstantMessaging;
 MimeType=x-scheme-handler/buzz;
 StartupWMClass=buzz-gpui
+# Lists Buzz under Settings → Notifications before its first banner.
+X-GNOME-UsesNotifications=true

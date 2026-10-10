@@ -139,9 +139,27 @@ pub enum Request {
     Open(Target),
 }
 
+/// A [`Request`] with the activation token that came with it, which lets
+/// the window come to the front on Wayland (see
+/// `gpui_linux::set_activation_token`).
+#[derive(Debug)]
+pub struct Arrival {
+    pub request: Request,
+    pub activation_token: Option<String>,
+}
+
+impl From<Request> for Arrival {
+    fn from(request: Request) -> Self {
+        Self {
+            request,
+            activation_token: None,
+        }
+    }
+}
+
 /// Reaches the one main window from anywhere in the app.
 struct Navigator {
-    sender: UnboundedSender<Request>,
+    sender: UnboundedSender<Arrival>,
     window: Option<(AnyWindowHandle, WeakEntity<Workspace>)>,
 }
 
@@ -149,8 +167,8 @@ impl Global for Navigator {}
 
 /// Binds the shortcuts and starts delivering [`Request`]s. Requests sent
 /// before [`install`] wait for the window.
-pub fn init(cx: &mut App) -> UnboundedSender<Request> {
-    let (sender, mut requests) = unbounded::<Request>();
+pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
+    let (sender, mut arrivals) = unbounded::<Arrival>();
     cx.set_global(Navigator {
         sender: sender.clone(),
         window: None,
@@ -164,11 +182,15 @@ pub fn init(cx: &mut App) -> UnboundedSender<Request> {
         KeyBinding::new("secondary-shift-a", GoHome, None),
     ]);
     cx.spawn(async move |cx| {
-        while let Some(request) = requests.next().await {
+        while let Some(arrival) = arrivals.next().await {
             cx.update(|cx| {
                 with_workspace(cx, move |workspace, window, cx| {
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    if let Some(token) = arrival.activation_token {
+                        gpui_linux::set_activation_token(token);
+                    }
                     window.activate_window();
-                    workspace.handle(request, window, cx);
+                    workspace.handle(arrival.request, window, cx);
                 })
             });
         }
@@ -183,7 +205,7 @@ pub fn install(window: AnyWindowHandle, workspace: &Entity<Workspace>, cx: &mut 
 }
 
 /// Where to send [`Request`]s from other threads.
-pub fn sender(cx: &App) -> Option<UnboundedSender<Request>> {
+pub fn sender(cx: &App) -> Option<UnboundedSender<Arrival>> {
     cx.try_global::<Navigator>()
         .map(|navigator| navigator.sender.clone())
 }

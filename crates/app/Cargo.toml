@@ -42,9 +42,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
-# Both already come with GPUI on Linux.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-notify-rust = "4"
+# GPUI's Linux platform, for raising the window with a handed-over
+# activation token (third_party/README.md).
+gpui-pre-linux = "=0.3.8"
+# Already comes with GPUI on Linux.
 zbus = "5"
 
 [package.metadata.deb]

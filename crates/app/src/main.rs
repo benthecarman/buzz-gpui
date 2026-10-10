@@ -28,7 +28,13 @@ fn main() {
     #[cfg(unix)]
     let instance = {
         let path = single_instance::socket_path(&community::data_dir());
-        match single_instance::claim(&path, link.as_deref().unwrap_or_default()) {
+        let handoff = single_instance::Handoff {
+            link: link.clone().unwrap_or_default(),
+            // What the launcher gave us to come to the front with; the
+            // running instance uses it instead.
+            activation_token: std::env::var("XDG_ACTIVATION_TOKEN").ok(),
+        };
+        match single_instance::claim(&path, &handoff) {
             Ok(single_instance::Claim::Forwarded) => {
                 tracing::info!("handed off to the running Buzz");
                 return;
@@ -55,16 +61,19 @@ fn main() {
         idle::Idle::init(cx);
         let requests = navigation::init(cx);
         if let Some(link) = link {
-            let _ = requests.unbounded_send(Request::Url(link));
+            let _ = requests.unbounded_send(Request::Url(link).into());
         }
         #[cfg(unix)]
         if let Some(listener) = instance {
-            single_instance::serve(listener, move |message| {
-                let request = match message.is_empty() {
+            single_instance::serve(listener, move |handoff| {
+                let request = match handoff.link.is_empty() {
                     true => Request::Focus,
-                    false => Request::Url(message),
+                    false => Request::Url(handoff.link),
                 };
-                let _ = requests.unbounded_send(request);
+                let _ = requests.unbounded_send(navigation::Arrival {
+                    request,
+                    activation_token: handoff.activation_token,
+                });
             });
         }
         cx.bind_keys([KeyBinding::new(

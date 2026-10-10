@@ -4,15 +4,15 @@
 //! this module applies the user's side: only the selected community, the
 //! community's preferences, channel visibility, a two-minute dedupe, and
 //! the reference text format. Banners go to the freedesktop notification
-//! service from the tokio runtime, silent and never awaited by the UI: a
-//! missing service is logged, never retried and never fatal. Clicking a
-//! banner brings the window forward on the message it is about.
+//! service ([`banners`]) from the tokio runtime, silent and never awaited
+//! by the UI: a missing service is logged, never retried and never fatal.
+//! Clicking a banner brings the window forward on the message it is about.
 //!
 //! [`Session::incoming`]: buzz_relay_client::Session::incoming
 
 use crate::community::{AppState, Community};
 use crate::runtime::Runtime;
-use crate::ui::navigation::{self, Place, Request, Target};
+use crate::ui::navigation::{self, Place, Target};
 use buzz_relay_client::{
     Category, ChannelSummary, ChannelType, IncomingMessage, Partition, Profiles, Store,
 };
@@ -21,6 +21,9 @@ use gpui_kit::{App, Entity, Global, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod banners;
 
 /// View-state key for a community's notification preferences.
 const PREFERENCES: &str = "notifications";
@@ -277,60 +280,29 @@ fn prose(node: &markdown::mdast::Node) -> String {
     }
 }
 
-/// Shows a banner without waiting on the notification service, and
-/// keeps listening for its click.
+/// Shows a banner without waiting on the notification service; its click
+/// comes back through navigation.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn show(title: String, body: String, target: Target, cx: &App) {
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-    /// Banners still listened to. Each holds a bus connection, and some
-    /// services keep banners until dismissed, so the oldest are let go.
-    const LISTENING: usize = 32;
-    static WAITING: Mutex<VecDeque<tokio::task::AbortHandle>> = Mutex::new(VecDeque::new());
+fn show(title: String, body: String, target: Target, cx: &mut App) {
+    struct Service(banners::Banners);
+    impl Global for Service {}
 
-    let Some(sender) = navigation::sender(cx) else {
-        return;
-    };
-    let task = Runtime::handle(cx).spawn(async move {
-        let shown = notify_rust::Notification::new()
-            .appname("Buzz")
-            .icon("buzz-gpui")
-            .summary(&title)
-            .body(&body)
-            .action("default", "Open")
-            .hint(notify_rust::Hint::DesktopEntry("buzz-gpui".into()))
-            .hint(notify_rust::Hint::SuppressSound(true))
-            .show_async()
-            .await;
-        let banner = match shown {
-            Ok(banner) => banner,
-            Err(error) => {
-                tracing::warn!(%error, "could not show a notification");
-                return;
-            }
+    if cx.try_global::<Service>().is_none() {
+        let Some(navigation) = navigation::sender(cx) else {
+            return;
         };
-        banner
-            .wait_for_action_async(|response| {
-                if matches!(response, notify_rust::NotificationResponse::Default) {
-                    let _ = sender.unbounded_send(Request::Open(target));
-                }
-            })
-            .await;
-    });
-    let mut waiting = WAITING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    waiting.retain(|task| !task.is_finished());
-    if waiting.len() >= LISTENING
-        && let Some(oldest) = waiting.pop_front()
-    {
-        oldest.abort();
+        let banners = banners::Banners::start(&Runtime::handle(cx), navigation);
+        cx.set_global(Service(banners));
     }
-    waiting.push_back(task.abort_handle());
+    cx.global::<Service>().0.show(banners::Banner {
+        title,
+        body,
+        target,
+    });
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn show(title: String, _body: String, _target: Target, _cx: &App) {
+fn show(title: String, _body: String, _target: Target, _cx: &mut App) {
     tracing::debug!(%title, "desktop notifications are not supported on this platform");
 }
 
