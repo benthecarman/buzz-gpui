@@ -598,7 +598,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | `delivered(id, channelId)`: confirm an earlier first message from journal or relay read, retry failed/unknown, wait on outbox | src/features/relay/direct-messages.ts:103-184 | DONE (`Session::dm_delivered`; dm.rs `sent_filter`) | - | - |
 | New message as a full page (not a dialog) with composer (mentions, attachments) | src/features/direct-messages/NewMessage.tsx:363-440 | DIFFERENT: modal dialog with plain textarea (crates/app/src/ui/new_message.rs:303-380) | Page with full composer | M |
 | Persist recipients and draft per scope; restore after restart ("Could not restore the message.") | src/features/direct-messages/NewMessage.tsx:20-110, 160-205 | MISSING | View-state persistence | S |
-| Pending send recovery ("Retry the earlier message to confirm its delivery before editing.", retry button) | src/features/direct-messages/NewMessage.tsx:270-410 | MISSING | Durable pending record and retry UI | M |
+| Pending send recovery ("Retry the earlier message to confirm its delivery before editing.", retry button) | src/features/direct-messages/NewMessage.tsx:270-410 | PARTIAL (crates/app/src/ui/new_message.rs): the first message waits for `Session::dm_delivered` ("Sending message…"); an unconfirmed send stays pending with "Retry send", and editing waits for it. Not done: restoring the pending send after a restart, as `Session::send` takes no recovery record | A recovery record on the first send | M |
 | Selected agent no longer available guard | src/features/direct-messages/NewMessage.tsx:226-230 | MISSING | Check agent availability | S |
 | Recipient picker: chips, Backspace removes last, Escape, Enter/Tab, "Find a person…" / "Add another person…", "Agent" tag | src/features/direct-messages/RecipientPicker.tsx:290-500 | DONE (crates/app/src/ui/new_message.rs:120-150, 286, 330-336) | - | - |
 | Picker "Load more people" / "Retry loading people" paging | src/features/direct-messages/RecipientPicker.tsx:505-540 | MISSING (only page 1, crates/app/src/ui/new_message.rs:98) | Page 2+ and retry | S |
@@ -617,7 +617,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Session participants: agents rejected ("Add agents with the session agent picker instead.") | src/features/channel-members/members.ts:119-128 | DONE (session/members.rs `AddOps::check`) | - | - |
 | Failed addition older than 15 min must be removed from Outbox first | src/features/channel-members/members.ts:180-186 | DONE (session/members.rs `AddOps::add`) | - | - |
 | Guarded (agent-profile) invitation retry rule | src/features/channel-members/members.ts:161-164 | DONE (session/members.rs `AddOps::add`) | - | - |
-| Start added managed agent after confirmed membership (`startAddedAgent`, MembershipChanged error) | src/features/channel-members/members.ts:224-294 | MISSING | Local agent control lives in the app and host, not the relay crate: after `Session::add_member` succeeds the app starts a managed agent it owns | M |
+| Start added managed agent after confirmed membership (`startAddedAgent`, MembershipChanged error) | src/features/channel-members/members.ts:224-294 | DONE (crates/app/src/ui/members.rs `start_added_agent`) | - | M |
 | Member search (kind 0 prefix, 30 per page, npub/hex exact, rank by name tier, 256 cap) | src/features/channel-members/search.ts:9-58 | DONE (crates/relay/src/members.rs:218-340) | - | - |
 | Administration authority: roles admin/member/guest/owner/bot, canManage/canRemove, authorize, confirmation | src/features/channel-members/administration-protocol.ts:10-207 | DONE (crates/relay/src/members.rs:84-190; crates/relay/src/lifecycle.rs) | - | - |
 | Owner may remove own agent with fresh attestation | src/features/channel-members/administration.ts:200-240 | DONE (crates/relay/src/session/actions.rs:648-660) | - | - |
@@ -633,15 +633,15 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Role filter "All · N" select | src/bundled/channels/ChannelMembersDialog.tsx:1151-1170 | DONE (crates/app/src/ui/members.rs:591-640) | - | - |
 | Search box "Add people and agents" / "Search members"; "Not in this channel" results with Add / "Adding…" | src/bundled/channels/ChannelMembersDialog.tsx:1105-1260 | DONE (crates/app/src/ui/members.rs:160-165, 515-525, 750-775) | - | - |
 | Search results "Show more results" paging | src/bundled/channels/ChannelMembersDialog.tsx:1290-1302 | MISSING | Page 2+ | S |
-| Disabled-add reasons (DM, archived, unavailable, join first) | src/bundled/channels/ChannelMembersDialog.tsx:1186-1194 | PARTIAL: missing "Adding members is unavailable in this connection." (crates/app/src/ui/members.rs:660-670) | Add the connection case | S |
+| Disabled-add reasons (DM, archived, unavailable, join first) | src/bundled/channels/ChannelMembersDialog.tsx:1186-1194 | DONE (crates/app/src/ui/members.rs): a saved conversation shown offline gives the connection reason | - | S |
 | Member row menu: View profile, View owner profile, Send message, Make admin/member, Remove | src/bundled/channels/MemberAdministration.tsx:230-300 | DONE (crates/app/src/ui/members.rs:340-400) | - | - |
 | Role change and removal confirmations with exact copy | src/bundled/channels/ChannelMembersDialog.tsx:995-1100 | DONE (crates/app/src/ui/members.rs:550-590) | - | - |
 | "managed by <owner> (you)" attribution | src/bundled/channels/ChannelMembersDialog.tsx:220-235; useMemberOwners.ts | DONE (crates/app/src/ui/members.rs:418-428) | - | - |
 | Archived identities labelled/hidden; "Archived identities could not be checked." | src/bundled/channels/ChannelMembersDialog.tsx:205, 1318-1322 | DONE (crates/app/src/ui/members.rs, crates/app/src/ui/archives.rs) | - | S |
 | "Role unverified" label | src/bundled/channels/ChannelMembersDialog.tsx:935 | MISSING | Label when role cannot be verified | S |
 | Roster load errors ("The member list could not be confirmed." / "could not load."), names-failed note, owners-failed note, "Some agents could not load." | src/bundled/channels/ChannelMembersDialog.tsx:520-565, 1307-1318 | PARTIAL: generic error only | Distinct notes | S |
-| Per-person addition error with Retry / "Retrying…" | src/bundled/channels/ChannelMembersDialog.tsx:1324-1338 | MISSING (single error line) | Per-person retry | S |
-| "<name> is in the channel." live announcement; "Opening conversation…" status | src/bundled/channels/ChannelMembersDialog.tsx:798, 1340-1344 | MISSING | Status notes | S |
+| Per-person addition error with Retry / "Retrying…" | src/bundled/channels/ChannelMembersDialog.tsx:1324-1338 | DONE (crates/app/src/ui/members.rs, from `Session::member_additions`). A failed agent start is kept in the dialog, not the session, so it does not survive reopening | - | S |
+| "<name> is in the channel." live announcement; "Opening conversation…" status | src/bundled/channels/ChannelMembersDialog.tsx:798, 1340-1344 | DONE (crates/app/src/ui/members.rs) | - | S |
 | Refresh member data button | src/bundled/channels/ChannelMembersDialog.tsx:1074 | DONE (crates/app/src/ui/members.rs:789) | - | - |
 
 ### Community moderation (Settings → Membership)
@@ -663,13 +663,13 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Profile directory: batched 500-author reads, in-flight dedupe, 1024-entry LRU | src/features/relay/profile-directory.ts:25-160 | DONE (crates/relay/src/profiles.rs:13-15, 183-305) | - | - |
 | Profile directory 2 MiB byte cap | src/features/relay/profile-directory.ts:25 | DONE (profiles.rs; budget.rs) | - | - |
 | Profile selection (per-id stable snapshot) | src/features/relay/profile-selection.ts:1-34 | DONE (snapshot map, crates/relay/src/profiles.rs:183) | - | - |
-| Profile panel (side panel, tabs Info / Runtime / Channels / Memories) | src/bundled/profiles/ProfilePanel.tsx:370-620 | DIFFERENT: popover card with avatar, name, key, about, Message (crates/app/src/ui/profile_card.rs:1-90) | Full panel | L |
-| Copy npub with status text | src/bundled/profiles/ProfilePanel.tsx:521-540 | MISSING | Copy action | S |
-| Presence label (Active / Away / Offline) in profile | src/bundled/profiles/ProfilePanel.tsx:410-415 | MISSING | Show presence | S |
+| Profile panel (side panel, tabs Info / Runtime / Channels / Memories) | src/bundled/profiles/ProfilePanel.tsx:370-620 | DONE (crates/app/src/ui/profile_panel.rs): a tab beside the conversation for profile links, or the companion dock elsewhere. The agent-only sections are the rows below | - | L |
+| Copy npub with status text | src/bundled/profiles/ProfilePanel.tsx:521-540 | DONE (crates/app/src/ui/profile_panel.rs) | - | S |
+| Presence label (Active / Away / Offline) in profile | src/bundled/profiles/ProfilePanel.tsx:410-415 | DONE (crates/app/src/ui/profile_panel.rs) | - | S |
 | Profile activity preview ("Latest activity", states) | src/bundled/profiles/ProfileActivity.tsx:44-70; activity-preview.ts | MISSING | Activity feed | M |
-| Profile channels list ("No visible channels with verified membership…") | src/bundled/profiles/ProfileChannels.tsx:49-95 | MISSING | Channels list | S |
+| Profile channels list ("No visible channels with verified membership…") | src/bundled/profiles/ProfileChannels.tsx:49-95 | DONE (crates/app/src/ui/profile_panel.rs). Not done: the partial-roster notes, as the session does not publish roster coverage | - | S |
 | Add agent to channel from profile | src/bundled/profiles/ProfileAddChannel.tsx:90-205 | MISSING | Dialog + add + start | M |
-| Agent instances, runtime, actions, delete, archive, identity, harness log, memories, public metadata | src/bundled/profiles/ProfileInstances.tsx, ProfileRuntime.tsx, ProfileAgentActions.tsx, ProfileAgentDelete.tsx, ProfileAgentArchive.tsx, ProfileAgentIdentity.tsx, ProfileHarnessLog.tsx, ProfileMemories.tsx, ProfilePublicMetadata.tsx | MISSING from profile (some agent management lives on the Agents page, crates/app/src/ui/agents.rs) | Profile-side agent sections | L |
+| Agent instances, runtime, actions, delete, archive, identity, harness log, memories, public metadata | src/bundled/profiles/ProfileInstances.tsx, ProfileRuntime.tsx, ProfileAgentActions.tsx, ProfileAgentDelete.tsx, ProfileAgentArchive.tsx, ProfileAgentIdentity.tsx, ProfileHarnessLog.tsx, ProfileMemories.tsx, ProfilePublicMetadata.tsx | PARTIAL (crates/app/src/ui/profile_panel.rs): the Runtime tab (restart notice, status, Start on launch, configuration, model, advanced) and the Memories tab are done. Not done: instances, agent actions, delete, archive, identity, harness log, public agent metadata and the model Edit buttons, which belong to the agents slice | Agent sections in the profile panel | L |
 | Instance profile panel (`parseInstanceTarget`) | src/bundled/profiles/InstanceProfilePanel.tsx | MISSING | Instance panel | M |
 | "Message" from profile opens DM ("Could not open the conversation. Try again.") | src/bundled/profiles/ProfilePanel.tsx:330-350 | DONE (crates/app/src/ui/profile_card.rs:45-55; crates/app/src/ui/workspace.rs:737) | - | - |
 
@@ -697,7 +697,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Rail tooltip / label "Switch to <name>" | src/features/communities/CommunityRailItem.tsx:159 | MISSING | Tooltip | S |
 | `useCommunityRole` (owner/admin from 13534) gating admin menu items | src/features/communities/useCommunityRole.ts:23-69 | MISSING | Role lookup | S |
 | Admin protocol (invite request, member command kinds, reasons) | src/features/communities/admin-protocol.ts:11-108 | MISSING | Protocol helpers | M |
-| Connection status per community | src/features/communities/connection.ts:1-22 | PARTIAL: session status exists, not shown in rail | Show state | S |
+| Connection status per community | src/features/communities/connection.ts:1-22 | DONE: not applicable. buzz-app's rail shows no connection state; `connection.ts` only registers and connects transports. Connection problems show in the live status toast (ui/live_status.rs) | - | S |
 
 ### Hosted communities
 
@@ -826,7 +826,7 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | `threadReference` | thread-reference.ts:1-13 | DONE (fold/thread.rs:18-39; unread.rs:140-158) | - | - |
 | Follow storage (newest 1000, per partition) | thread-follows.ts:1-63 | DONE (store.rs:804-836; unread.rs:2531-2546) | - | - |
 | Forget follows on leave | thread-follows.ts:65-68 | DONE (store.rs:397-409) | - | - |
-| Follow/Unfollow thread action | unread.ts follow; docs/port/ui.md:1421 | PARTIAL | Data done (`Session::follow_thread`, `Session::thread_following`); add the menu item | S |
+| Follow/Unfollow thread action | unread.ts follow; docs/port/ui.md:1421 | DONE (crates/app/src/ui/message.rs, crates/app/src/ui/message_actions.rs) | - | S |
 | Duplicate follows model | n/a | DONE (threads/follows.rs removed; follows live in unread.rs) | - | - |
 
 ### Typing
@@ -851,7 +851,7 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | Expiry timer republish | user-status.ts:68-95 | DONE (user_status.rs `StatusDirectory::deadline`; session/statuses.rs `statuses_tick`) | - | - |
 | Background retries 5/15/60 s | user-status.ts:149-161 | DONE (user_status.rs `StatusDirectory::finished`, `next_read`) | - | - |
 | `current(userId)` for others; reload on reconnect/clear | user-status.ts:310-350 | DONE (`Session::user_status`; session/statuses.rs `statuses_reconnected`, `statuses_clear`) | - | - |
-| Status on profiles, member lists, rows | UI consumers | MISSING | Data ready: `Session::watch_statuses`, `SessionSnapshot::statuses`; render it | M |
+| Status on profiles, member lists, rows | UI consumers | DONE (crates/app/src/ui/profile_panel.rs; sidebar DM rows follow `Session::watch_statuses` in crates/app/src/ui/sidebar.rs). buzz-app shows no status in member lists | - | M |
 
 ### Me preferences (Me groups kit)
 
@@ -870,7 +870,7 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | `relay_agent_log_proof` | agent.rs:68-112 | MISSING | - | S |
 | Observer telemetry 24200 decrypt | agent.rs:124-232; native.ts:612-628 | MISSING | - | M |
 | Archive 44200 decode and archive settings | agent.rs:203-232; native.ts:596-640 | MISSING | - | M |
-| Agent memories 30174 read (limits, HMAC d-tag, newest per slug, `MemoryDenied`) | agent.rs:317-497; native.ts:666-690 | MISSING | - | L |
+| Agent memories 30174 read (limits, HMAC d-tag, newest per slug, `MemoryDenied`) | agent.rs:317-497; native.ts:666-690 | DONE (crates/relay/src/session/memories.rs `Session::agent_memories`; crates/identity `decode_agent_memories` with buzz-desktop's decoder) | - | L |
 | `relay_agent_library` (legacy managed-agents.json listing) | agent.rs:499-636 | DIFFERENT | crates/host/src/import.rs:51-80 reads it for import only | M |
 
 ## Channel page, settings, lifecycle, create, canvas, templates and usage

@@ -85,7 +85,7 @@ Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them c
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
 | Agent-library names also bind mentions | src/features/messages/profile-mentions.ts:27-33 | DONE (crates/app/src/ui/markdown.rs, crates/app/src/ui/identity.rs) | The port reads names from profiles only. Add the viewer's agent identities | S |
-| Clicking a mention opens the profile panel (side panel) | src/features/messages/MessageMarkdown.tsx:527-533 | DIFFERENT: not done. Mentions open the profile through `navigation::show_profile`, which shows the card; the side panel is the Profile panel row in channels.md | The port shows a profile card popover at the pointer. Decide whether to match the panel | M |
+| Clicking a mention opens the profile panel (side panel) | src/features/messages/MessageMarkdown.tsx:527-533 | DONE (crates/app/src/ui/workspace.rs `show_profile`, crates/app/src/ui/profile_panel.rs): mentions, avatars, workflow owners and "View profile" open the profile panel as a tab beside the conversation | - | M |
 | `#channel-name` in prose becomes a channel link (hash or lock icon) for known, unarchived, unambiguous channels | src/features/messages/ReferenceText.tsx:111-187, src/features/messages/message-references.ts:14-72 | DONE (crates/app/src/ui/markdown.rs) | Port `messageReferences` for channels into the prose scan and emit `buzz://channel/<id>` links | M |
 
 ### Links: inline rendering and behaviour

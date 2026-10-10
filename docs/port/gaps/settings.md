@@ -150,7 +150,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 |---|---|---|---|---|
 | Namesake disambiguation: a public-key suffix ("Alice · pktz"), "{Owner}’s {Agent}" and "{Name} (agent)", with the viewer and the viewer's own agents given priority | `src/features/identity-names/policy.ts:11-112` | DONE (ui/identity.rs, with the messages rework) | A shared resolver used by messages, mentions and member lists. | M |
 | Agent directory names: signed agent profile, then library alias, then same-community native agent name overriding the profile | `src/features/identity-names/directory.ts:15-149`; `src/features/identity-names/service.ts` | DONE (ui/identity.rs, with the messages rework) | Merge host agent names, scoped to the community. | M |
-| App-local profile targets `buzz:agent-profile:<hex>` and `buzz:agent-instance:<json>` (agent avatar hint, instance profile panel) | `src/features/profiles/target.ts:1-36`; `src/features/profiles/instance-target.ts:1-52` | MISSING: the profile panel (ui/workspace/companion.rs) opens people by key; nothing creates agent-profile or agent-instance targets yet | Belongs with the profile-panel work. | M |
+| App-local profile targets `buzz:agent-profile:<hex>` and `buzz:agent-instance:<json>` (agent avatar hint, instance profile panel) | `src/features/profiles/target.ts:1-36`; `src/features/profiles/instance-target.ts:1-52` | PARTIAL (crates/app/src/ui/profile_panel.rs): the profile panel opens `buzz:agent-profile:<hex>` with the agent hint (squircle avatar, "Unknown agent"). Not done: `buzz:agent-instance:<json>` and the instance profile panel (channels.md "Instance profile panel") | The instance target and panel | M |
 
 ## 11. Account actions (features/account-actions)
 
