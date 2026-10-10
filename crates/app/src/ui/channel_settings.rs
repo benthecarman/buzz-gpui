@@ -8,6 +8,7 @@
 //! tab (gear icon, close button) around it and passes `on_close`, which
 //! Escape inside the panel also calls.
 
+use super::channel_diagnostics::ChannelDiagnostics;
 use super::form_fields::{self, Bounded};
 use super::outbox_status::OutboxStatus;
 use super::overlay::{self, Dismiss};
@@ -429,8 +430,10 @@ pub struct ChannelSettingsPanel {
     lifecycle: Lifecycle,
     confirm: Option<(Entity<LifecycleDialog>, Subscription)>,
     copied: bool,
-    /// The Diagnostics disclosure and the session outbox inside it.
+    /// The Diagnostics disclosure, its unread, live and refresh tools,
+    /// and the session outbox inside it.
     diagnostics: bool,
+    tools: Entity<ChannelDiagnostics>,
     outbox: Entity<OutboxStatus>,
     _subscriptions: Vec<Subscription>,
 }
@@ -515,6 +518,7 @@ impl ChannelSettingsPanel {
         ];
         let session = community.read(cx).session.clone();
         let outbox = cx.new(|cx| OutboxStatus::new(session, cx));
+        let tools = cx.new(|cx| ChannelDiagnostics::new(community.clone(), channel_id.clone(), cx));
         let mut panel = Self {
             community,
             channel_id,
@@ -534,6 +538,7 @@ impl ChannelSettingsPanel {
             confirm: None,
             copied: false,
             diagnostics: false,
+            tools,
             outbox,
             _subscriptions: subscriptions,
         };
@@ -1063,7 +1068,9 @@ impl ChannelSettingsPanel {
                         cx.notify();
                     })),
             )
-            .when(self.diagnostics, |this| this.child(self.outbox.clone()))
+            .when(self.diagnostics, |this| {
+                this.child(self.tools.clone()).child(self.outbox.clone())
+            })
     }
 
     fn lifecycle_actions(&self, cx: &mut Context<Self>) -> Div {

@@ -8,6 +8,7 @@ pub mod agents2;
 mod archives;
 mod channel;
 mod channel_activity;
+mod channel_diagnostics;
 mod channel_menu;
 pub mod channel_panels;
 mod channel_settings;
