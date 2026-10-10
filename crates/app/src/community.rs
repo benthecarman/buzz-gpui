@@ -303,6 +303,8 @@ pub struct Community {
     presence_extra: Vec<String>,
     /// Agents whose messages the open timeline shows, for their badges.
     presence_rows: Vec<String>,
+    /// People open profile panels show, counted per panel.
+    presence_profiles: Vec<String>,
     _watch: Task<()>,
     _notifications: Option<Task<()>>,
 }
@@ -345,6 +347,7 @@ impl Community {
                 presence_demand: Vec::new(),
                 presence_extra: Vec::new(),
                 presence_rows: Vec::new(),
+                presence_profiles: Vec::new(),
                 _notifications: None,
             }
         });
@@ -376,7 +379,12 @@ impl Community {
                     }),
             )
             .collect();
-        for person in self.presence_extra.iter().chain(&self.presence_rows) {
+        for person in self
+            .presence_extra
+            .iter()
+            .chain(&self.presence_rows)
+            .chain(&self.presence_profiles)
+        {
             if !demand.contains(person) {
                 demand.push(person.clone());
             }
@@ -401,6 +409,20 @@ impl Community {
     pub fn set_presence_extra(&mut self, people: Vec<String>) {
         self.presence_extra = people;
         self.follow_presence();
+    }
+
+    /// Follows one more person's presence for a profile panel, until
+    /// [`Self::release_profile_presence`].
+    pub fn hold_profile_presence(&mut self, person: &str) {
+        self.presence_profiles.push(person.to_string());
+        self.follow_presence();
+    }
+
+    pub fn release_profile_presence(&mut self, person: &str) {
+        if let Some(index) = self.presence_profiles.iter().position(|p| p == person) {
+            self.presence_profiles.remove(index);
+            self.follow_presence();
+        }
     }
 
     pub fn open_channel(&mut self, channel: &str, cx: &mut App) -> Entity<ChannelModel> {

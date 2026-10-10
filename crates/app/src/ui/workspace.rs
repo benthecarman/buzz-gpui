@@ -15,7 +15,6 @@ use super::channel_tabs::{TabState, ThreadTarget};
 use super::navigation::{ChannelRoute, History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
-use super::profile_card::{self, ProfileCard};
 use super::settings::{
     CloseSettings, OpenHostSettings, OpenSettings, Section, SectionChanged, SettingsPage,
 };
@@ -23,7 +22,7 @@ use super::sidebar::SidebarView;
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
-use buzz_relay_client::{ChannelSummary, ChannelType, RosterStatus};
+use buzz_relay_client::{ChannelSummary, RosterStatus};
 use buzz_ui::{ActiveTheme, Avatar, AvatarSize, IconButton, IconName, ShellBackground, TypeStyled};
 use gpui_kit::component::window_border;
 use gpui_kit::*;
@@ -90,10 +89,6 @@ pub struct Workspace {
     resolving: Option<(Target, Task<()>)>,
     /// A place that could not open, kept for Retry navigation.
     failure: Option<Failed>,
-    /// The person whose card a mention opened, and where.
-    profile: Option<(String, Point<Pixels>)>,
-    /// Keeps the card's person's status current.
-    profile_status: Option<buzz_relay_client::StatusWatch>,
     dialog: Option<dialogs::OpenDialog>,
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
@@ -160,8 +155,6 @@ impl Workspace {
             _revealing: None,
             resolving: None,
             failure: None,
-            profile: None,
-            profile_status: None,
             dialog: None,
             _page_events: None,
             route: None,
@@ -586,7 +579,6 @@ impl Render for Workspace {
             true => main,
             false => self.frame(main, window, cx),
         };
-        let profile = self.profile_card(window, cx);
         let header = self.header(window, cx);
         let body = self.body(main, window, cx);
         let gutter = layout::gutter(f32::from(window.viewport_size().width));
@@ -617,7 +609,6 @@ impl Render for Workspace {
                         MouseButton::Navigate(NavigationDirection::Forward),
                         cx.listener(|this, _, window, cx| this.go_forward(window, cx)),
                     )
-                    .children(profile)
                     .font_family("Inter")
                     .emoji_fallback()
                     .text_color(c.text_standard)
@@ -863,11 +854,9 @@ impl Workspace {
         self.pending = None;
         self.pending_listing = false;
         self._revealing = None;
-        self.profile = None;
         self.resolving = None;
         self.failure = None;
         self.attempts += 1;
-        self.profile_status = None;
         if let Some(origin) = &target.community {
             let state = cx.global::<AppState>();
             let index = state
@@ -1048,25 +1037,6 @@ impl Workspace {
         }
     }
 
-    /// Opens, or reopens, the direct message with one person.
-    fn message_person(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(community) = &self.community else {
-            return;
-        };
-        let session = community.read(cx).session.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            match session.open_dm(vec![pubkey]).await {
-                Ok(id) => {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.open_conversation(id, window, cx)
-                    });
-                }
-                Err(error) => tracing::warn!(%error, "could not open the direct message"),
-            }
-        })
-        .detach();
-    }
-
     /// Reveals a message in the open channel: in the timeline when it is a
     /// loaded top-level message, else in the thread panel in exact mode
     /// (relay.md §5c.5).
@@ -1168,113 +1138,21 @@ impl Workspace {
         }
     }
 
+    /// A mention, avatar or member opens the person's profile panel
+    /// (`profileTarget` through `openLink`): as a tab beside the open
+    /// conversation, or in the companion dock elsewhere.
     pub fn show_profile(
         &mut self,
         pubkey: String,
-        at: Point<Pixels>,
-        _: &mut Window,
+        _: Point<Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.profile_status = self.community.as_ref().map(|community| {
-            community
-                .read(cx)
-                .session
-                .watch_statuses(std::slice::from_ref(&pubkey))
-        });
-        self.profile = Some((pubkey, at));
-        cx.notify();
-    }
-
-    /// The card a mention opened, kept inside the window.
-    fn profile_card(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (pubkey, at) = self.profile.clone()?;
-        let community = self.community.as_ref()?.read(cx);
-        let snapshot = community.snapshot.clone();
-        let viewer = community.session.viewer().to_string();
-        let media = community.session.media().clone();
-        let origin = community.origin.to_string();
-        // The DM with just this person, or notes to self.
-        let dm = snapshot
-            .channels
-            .iter()
-            .find(|channel| {
-                channel.channel_type == Some(ChannelType::Dm)
-                    && match channel.participants.as_deref() {
-                        Some([]) => pubkey == viewer,
-                        Some([other]) => *other == pubkey,
-                        _ => false,
-                    }
-            })
-            .map(|channel| channel.id.clone())
-            // A hidden DM is reopened through the relay, which unhides it
-            // (`ProfilePanel.tsx`). Notes to self cannot be reopened so.
-            .filter(|dm| pubkey == viewer || !snapshot.hidden_dms.contains(dm));
-        let weak = cx.entity().downgrade();
-        let on_message: Option<profile_card::OnMessage> = match dm {
-            Some(dm) => Some(Rc::new(move |window, cx| {
-                let target = Target::channel(Some(origin.clone()), dm.clone());
-                let _ = weak.update(cx, |this, cx| this.navigate(target, window, cx));
-            })),
-            // Notes to self are not opened on request.
-            None if pubkey == viewer => None,
-            None => {
-                let pubkey = pubkey.clone();
-                Some(Rc::new(move |window, cx| {
-                    let _ = weak.update(cx, |this, cx| {
-                        this.profile = None;
-                        this.profile_status = None;
-                        this.message_person(pubkey.clone(), window, cx);
-                    });
-                }))
-            }
+        let Some(target) = super::profile_panel::target(&pubkey, false) else {
+            return;
         };
-        let status = self.community.as_ref().and_then(|community| {
-            super::status::display(snapshot.statuses.get(&pubkey), community, cx)
-        });
-        let activity = self.community.as_ref().and_then(|community| {
-            let channel = self
-                .channel
-                .as_ref()
-                .map(|c| c.read(cx).channel_id().to_string());
-            super::agent_activity::profile::latest_activity(
-                community,
-                &pubkey,
-                channel.as_deref(),
-                cx,
-            )
-        });
-        let card = ProfileCard {
-            pubkey: &pubkey,
-            profile: snapshot.profiles.get(&pubkey).map(|p| &**p),
-            media: &media,
-            status,
-            on_message,
+        if !self.route_link_to_tab(&target, window, cx) {
+            self.open_profile(pubkey, window, cx);
         }
-        .render_with(activity, cx);
-        let viewport = window.viewport_size();
-        let x =
-            at.x.min(viewport.width - profile_card::WIDTH - px(8.))
-                .max(px(8.));
-        Some(
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(point(x, at.y + px(8.)))
-                    .snap_to_window_with_margin(px(8.))
-                    .child(
-                        div()
-                            .id("profile-card")
-                            .occlude()
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.profile = None;
-                                this.profile_status = None;
-                                cx.notify();
-                            }))
-                            .child(card),
-                    ),
-            )
-            .with_priority(2)
-            .into_any_element(),
-        )
     }
 }

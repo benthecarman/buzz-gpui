@@ -4,30 +4,48 @@
 
 use super::Workspace;
 use super::layout::{self, Split};
-use crate::ui::navigation::Target;
 use crate::ui::pages::{self, Page};
 use crate::ui::panels::{self, Dock};
-use crate::ui::profile_card::{self, ProfileCard};
+use crate::ui::profile_panel::{self, ProfilePanel};
 use gpui_kit::*;
 use std::rc::Rc;
 
 /// What the companion dock shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(super) enum Companion {
     /// A person's profile; the account menu opens the viewer's.
-    Profile { pubkey: String },
+    Profile(Entity<ProfilePanel>),
 }
 
 impl Workspace {
     /// "View your profile": the viewer's profile beside the page.
-    pub(super) fn open_own_profile(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_own_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(community) = &self.community else {
             return;
         };
         let pubkey = community.read(cx).session.viewer().to_string();
-        let next = Companion::Profile { pubkey };
-        if self.companion.as_ref() != Some(&next) {
-            self.companion = Some(next);
+        self.open_profile(pubkey, window, cx);
+    }
+
+    /// Shows `pubkey`'s profile panel in the companion dock.
+    pub(super) fn open_profile(
+        &mut self,
+        pubkey: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(community) = self.community.clone() else {
+            return;
+        };
+        let showing = matches!(&self.companion, Some(Companion::Profile(view))
+            if view.read(cx).pubkey() == pubkey);
+        if !showing {
+            let weak = cx.entity().downgrade();
+            let close: crate::ui::channel_panels::Close = Rc::new(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.close_companion(window, cx));
+            });
+            let view = profile_panel::view(community, pubkey, close, window, cx);
+            self.companion = Some(Companion::Profile(view));
             self.companion_opening += 1;
         }
         cx.notify();
@@ -44,56 +62,16 @@ impl Workspace {
     /// The companion's card, if one is open.
     pub(super) fn companion_panel(
         &mut self,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let Companion::Profile { pubkey } = self.companion.clone()?;
-        let community = self.community.as_ref()?.read(cx);
-        let snapshot = community.snapshot.clone();
-        let media = community.session.media().clone();
-        let origin = community.origin.to_string();
-        let viewer = community.session.viewer().to_string();
-        // Notes to self, for the viewer's own profile.
-        let dm = (pubkey == viewer)
-            .then(|| {
-                snapshot.channels.iter().find(|channel| {
-                    channel.channel_type == Some(buzz_relay_client::ChannelType::Dm)
-                        && channel.participants.as_deref() == Some(&[])
-                })
-            })
-            .flatten()
-            .map(|channel| channel.id.clone());
+        let Companion::Profile(view) = self.companion.clone()?;
         let weak = cx.entity().downgrade();
-        let on_message: Option<profile_card::OnMessage> = dm.map(|dm| {
-            let weak = weak.clone();
-            Rc::new(move |window: &mut Window, cx: &mut App| {
-                let target = Target::channel(Some(origin.clone()), dm.clone());
-                let _ = weak.update(cx, |this, cx| this.navigate(target, window, cx));
-            }) as profile_card::OnMessage
-        });
-        let content = ProfileCard {
-            pubkey: &pubkey,
-            profile: snapshot.profiles.get(&pubkey).map(|p| &**p),
-            media: &media,
-            status: self.community.as_ref().and_then(|community| {
-                crate::ui::status::display(snapshot.statuses.get(&pubkey), community, cx)
-            }),
-            on_message,
-        }
-        .panel(cx);
-        // An Agents2 agent's sections and Delete (ProfilePanel.tsx).
-        let agents2 = crate::ui::agents2::profile_sections(&pubkey, window, cx);
-        let content = div()
-            .flex()
-            .flex_col()
-            .child(content)
-            .children(agents2)
-            .into_any_element();
         Some(panels::card(
             "companion",
             "Profile",
             None,
-            content,
+            view.into_any_element(),
             Rc::new(move |window, cx| {
                 let _ = weak.update(cx, |this, cx| this.close_companion(window, cx));
             }),

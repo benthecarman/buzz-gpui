@@ -79,6 +79,33 @@ pub fn register(panel: ChannelPanel, cx: &mut App) {
     panels.push(panel);
 }
 
+/// A panel tab's title from its view, such as the person a profile
+/// shows (`usePanelTabTitle`). Without one the tab shows the panel's
+/// title.
+pub type Title = fn(&AnyView, &App) -> Option<SharedString>;
+
+#[derive(Default)]
+struct Titles(Vec<(&'static str, Title)>);
+
+impl Global for Titles {}
+
+/// Gives a registered panel's tabs a title of their own.
+pub fn register_title(key: &'static str, title: Title, cx: &mut App) {
+    let titles = &mut cx.default_global::<Titles>().0;
+    titles.retain(|(existing, _)| *existing != key);
+    titles.push((key, title));
+}
+
+/// The tab title of `view`, a view of the panel `key`.
+pub fn title(key: &str, view: &AnyView, cx: &App) -> Option<SharedString> {
+    let (_, title) = cx
+        .try_global::<Titles>()?
+        .0
+        .iter()
+        .find(|(existing, _)| *existing == key)?;
+    title(view, cx)
+}
+
 /// The registered panels whose plugin is on.
 pub fn all(cx: &App) -> Vec<ChannelPanel> {
     cx.try_global::<ChannelPanels>()

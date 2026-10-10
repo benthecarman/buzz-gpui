@@ -79,6 +79,13 @@ pub fn full(seconds: u64) -> String {
     )
 }
 
+/// `Date.toLocaleString()` in en-US: "10/2/2026, 3:05:09 PM".
+pub fn locale_string(seconds: u64) -> String {
+    local(seconds)
+        .format("%-m/%-d/%Y, %-I:%M:%S %p")
+        .to_string()
+}
+
 /// `dateStyle: "full"`, `timeStyle: "short"`: "Friday, October 2, 2026 at
 /// 3:05 PM".
 pub fn full_short(seconds: u64) -> String {

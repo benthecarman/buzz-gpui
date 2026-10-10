@@ -691,14 +691,22 @@ impl Workspace {
             let Some(panel) = channel_panels::get(opening.panel, cx) else {
                 continue;
             };
-            let content = match self.tab_views.get(&id) {
-                Some(TabView::Panel(view)) => view.clone().into_any_element(),
-                _ => div().into_any_element(),
+            let view = match self.tab_views.get(&id) {
+                Some(TabView::Panel(view)) => Some(view.clone()),
+                _ => None,
+            };
+            let label = view
+                .as_ref()
+                .and_then(|view| channel_panels::title(panel.key, view, cx))
+                .unwrap_or_else(|| panel.title.into());
+            let content = match view {
+                Some(view) => view.into_any_element(),
+                None => div().into_any_element(),
             };
             let close = closer(id.clone());
             items.push(TabItem {
                 id: id.into(),
-                label: panel.title.into(),
+                label,
                 icon: panel.icon,
                 content,
                 close,

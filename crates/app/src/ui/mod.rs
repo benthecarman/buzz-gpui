@@ -50,7 +50,7 @@ mod outbox_status;
 pub(crate) mod overlay;
 pub mod pages;
 mod panels;
-mod profile_card;
+pub mod profile_panel;
 mod reading;
 mod reminders;
 mod renderers;
