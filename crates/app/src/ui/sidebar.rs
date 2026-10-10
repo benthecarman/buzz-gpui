@@ -75,8 +75,9 @@ pub fn channel_label(channel: &ChannelSummary, profiles: &Profiles) -> SharedStr
 }
 
 /// The roster as the sidebar arranges it: DMs named after their
-/// participants (`useChannelLabels`) and the newest activity of each
-/// channel for "Recent" sorting.
+/// participants (`useChannelLabels`). "Recent" sorting reads the
+/// session's `last_activity_at`, which [`ChannelSidebar`] asks for while a
+/// section sorts that way.
 fn labelled(snapshot: &SessionSnapshot) -> Vec<ChannelSummary> {
     snapshot
         .channels
@@ -86,7 +87,6 @@ fn labelled(snapshot: &SessionSnapshot) -> Vec<ChannelSummary> {
             if channel.channel_type == Some(ChannelType::Dm) {
                 channel.name = channel_label(&channel, &snapshot.profiles).to_string();
             }
-            channel.last_activity_at = snapshot.unread.latest.get(&channel.id).copied();
             channel
         })
         .collect()
@@ -291,6 +291,8 @@ pub struct ChannelSidebar {
     dragging: Option<String>,
     statuses: HashMap<String, UserStatus>,
     status_demand: Vec<String>,
+    /// What `Session::track_channel_activity` was last told.
+    tracking_activity: Option<bool>,
     _tasks: Vec<Task<()>>,
     _observe: Subscription,
 }
@@ -331,6 +333,7 @@ impl ChannelSidebar {
         let view = SidebarView::load(community.read(cx), cx);
         let observe = cx.observe(&community, |this, _, cx| {
             this.follow_statuses(cx);
+            this.follow_activity(cx);
             cx.notify();
         });
         let refresh = cx.spawn(async move |this, cx| {
@@ -371,6 +374,7 @@ impl ChannelSidebar {
             dragging: None,
             statuses: HashMap::new(),
             status_demand: Vec::new(),
+            tracking_activity: None,
             _tasks: vec![refresh],
             _observe: observe,
         }
@@ -591,6 +595,24 @@ impl ChannelSidebar {
             self.revealed = true;
         }
         self.revealed
+    }
+
+    // ----- recent activity -----
+
+    /// Channel activity is read only while some section sorts by Recent
+    /// (`refreshChannelActivity`).
+    fn follow_activity(&mut self, cx: &mut Context<Self>) {
+        let wanted = self
+            .community
+            .read(cx)
+            .snapshot
+            .sidebar
+            .data
+            .as_ref()
+            .is_some_and(buzz_relay_client::sidebar::needs_activity);
+        if self.tracking_activity.replace(wanted) != Some(wanted) {
+            self.session(cx).track_channel_activity(wanted);
+        }
     }
 
     // ----- statuses of one-to-one DM peers -----
