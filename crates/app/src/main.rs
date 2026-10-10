@@ -1,3 +1,4 @@
+mod agents2;
 mod appearance;
 mod community;
 mod config;
@@ -72,6 +73,7 @@ fn main() {
         notifications::Notifications::init(cx);
         appearance::init(cx);
         idle::Idle::init(cx);
+        agents2::init(cx);
         ui::pages::init(cx);
         ui::channel_panels::dev_sample(cx);
         network::init(cx);

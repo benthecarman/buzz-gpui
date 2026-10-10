@@ -1,0 +1,70 @@
+//! Agents2: agents that are types from the start (buzz-app's
+//! `features/agents2`). A compiled-in agent type ([`AgentType`]) gives its
+//! summary line, peek view, settings tabs and `run`. Each agent made from
+//! it has its own key held by an agent host (`buzz_host::api::AppAgentRequest`),
+//! an `agent-attention/v1` configuration the app owns and edits, and a
+//! config value the type owns. The app delivers matching live events to
+//! `run` from the stream the owner already receives, so no type opens a
+//! socket of its own.
+//!
+//! - [`registry`]: the [`AgentType`] trait and [`register_type`].
+//! - [`runtime`]: what a run receives ([`Delivery`], [`AgentHandle`]).
+//! - [`attention`] and [`store`]: the attention format and local records.
+//! - [`Agents2`]: the service, a GPUI entity reachable with
+//!   [`Agents2::global`].
+
+pub mod attention;
+mod cleanup;
+#[cfg(debug_assertions)]
+mod dev;
+pub mod registry;
+pub mod runtime;
+mod service;
+pub mod store;
+
+use attention::{AttentionObject, TimerState};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use store::SkippedObject;
+
+pub use registry::{
+    AgentTab, AgentType, AgentView, RegisteredType, TypeDefaults, register_type, type_of, types,
+};
+pub use runtime::{AgentHandle, Cancellation, Delivery, Trigger};
+pub use service::{Agents2, Status};
+
+/// One agent in the selected community.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Agent {
+    pub pubkey: String,
+    pub name: String,
+    /// The agent type's key, `<plugin>/<id>`.
+    pub agent_type: String,
+    pub owner: String,
+    /// The canonical `wss://` community origin it was created for.
+    pub relay: String,
+    pub attention: Arc<BTreeMap<String, AttentionObject>>,
+    /// Stored attention objects that are invalid or over a limit, by slug.
+    pub skipped: Arc<BTreeMap<String, SkippedObject>>,
+    /// Run state of its timers, by slug; written only by the runtime.
+    pub timers: Arc<BTreeMap<String, TimerState>>,
+    pub config: Value,
+}
+
+/// A change to an agent. `attention` maps slugs to new values; `None`
+/// deletes the object.
+#[derive(Clone, Debug, Default)]
+pub struct AgentChange {
+    pub name: Option<String>,
+    pub config: Option<Value>,
+    pub attention: Vec<(String, Option<Value>)>,
+}
+
+/// Starts the Agents2 service. Call after the hosts and the app state.
+/// Agent types register before or after this, from their own `init`.
+pub fn init(cx: &mut gpui_kit::App) {
+    #[cfg(debug_assertions)]
+    dev::init(cx);
+    service::init(cx);
+}

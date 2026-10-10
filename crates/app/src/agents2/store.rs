@@ -1,0 +1,355 @@
+//! Device-local settings for Agents2 agents (buzz-app's
+//! `features/agents2/store.ts`): each agent's attention objects in the
+//! `agent-attention/v1` shape, one JSON blob its type owns, and its timers'
+//! run state. Which agents exist, their type and name, and their keys live
+//! on a host, never here; a record without an identity does nothing.
+//!
+//! buzz-app keeps this in `localStorage["buzz.agents2.v1"]`; here it is a
+//! JSON file of the same shape in the data directory.
+
+use super::attention::{
+    AttentionObject, AttentionValue, OBJECT_LIMIT, TimerState, same_schedule, timer_state,
+    validate_object,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+pub const STORAGE_KEY: &str = "buzz.agents2.v1";
+
+/// An object a reader cannot apply, kept as it was stored so it can be
+/// fixed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkippedObject {
+    pub slug: String,
+    pub value: Value,
+    pub modified_at: u64,
+    pub problem: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct AgentRecord {
+    pub pubkey: String,
+    /// Keyed by slug (`interest/<id>` or `watch/<id>`). Shared, so a reader
+    /// can tell an unchanged set by pointer.
+    pub attention: Arc<BTreeMap<String, AttentionObject>>,
+    /// Stored objects that are invalid or over a limit. They do nothing, and
+    /// stay stored until they are fixed or removed.
+    pub skipped: Arc<BTreeMap<String, SkippedObject>>,
+    /// Type-owned config. The app never reads it. `Null` when unset.
+    pub config: Value,
+    /// Run state of its timers, by slug. Not config, so it never leaves the
+    /// device; kept here so removing a timer or the agent removes its state.
+    pub timers: Arc<BTreeMap<String, TimerState>>,
+}
+
+impl AgentRecord {
+    pub fn blank(pubkey: &str) -> Self {
+        Self {
+            pubkey: pubkey.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Where the records are kept.
+pub trait Storage: Send + Sync {
+    fn read(&self) -> Option<String>;
+    fn write(&self, text: &str) -> Result<(), String>;
+}
+
+/// A JSON file, replaced atomically.
+pub struct FileStorage(pub PathBuf);
+
+impl Storage for FileStorage {
+    fn read(&self) -> Option<String> {
+        std::fs::read_to_string(&self.0).ok()
+    }
+
+    fn write(&self, text: &str) -> Result<(), String> {
+        let fail = |_| "Agent settings could not be saved".to_string();
+        if let Some(parent) = self.0.parent() {
+            std::fs::create_dir_all(parent).map_err(fail)?;
+        }
+        let temp = self.0.with_extension("tmp");
+        std::fs::write(&temp, text).map_err(fail)?;
+        std::fs::rename(&temp, &self.0).map_err(fail)
+    }
+}
+
+/// Memory only, for tests.
+#[derive(Default)]
+pub struct MemoryStorage(pub Mutex<Option<String>>);
+
+impl Storage for MemoryStorage {
+    fn read(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn write(&self, text: &str) -> Result<(), String> {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(text.into());
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredObject {
+    slug: String,
+    value: Value,
+    modified_at: u64,
+}
+
+fn is_pubkey(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn group(value: &AttentionValue) -> &'static str {
+    if value.is_interest() {
+        "Interests"
+    } else {
+        "watches and timers"
+    }
+}
+
+fn safe(value: Option<&Value>) -> Option<u64> {
+    value?.as_u64().filter(|n| *n < (1 << 53))
+}
+
+/// Reads every record. An attention object a reader would not apply is
+/// skipped and reported, never dropped.
+pub fn read_records(storage: &dyn Storage) -> BTreeMap<String, AgentRecord> {
+    let mut records = BTreeMap::new();
+    let Some(stored) = storage
+        .read()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return records;
+    };
+    if stored.get("version") != Some(&Value::from(1)) {
+        return records;
+    }
+    let Some(agents) = stored.get("agents").and_then(Value::as_object) else {
+        return records;
+    };
+    for (pubkey, record) in agents {
+        if !is_pubkey(pubkey) || record.get("pubkey").and_then(Value::as_str) != Some(pubkey) {
+            continue;
+        }
+        let mut attention = BTreeMap::new();
+        let mut skipped = BTreeMap::new();
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        let empty = Map::new();
+        let mut objects: Vec<_> = record
+            .get("attention")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty)
+            .iter()
+            .collect();
+        // In slug order, so the same objects go over a limit every time.
+        objects.sort_by(|a, b| a.0.cmp(b.0));
+        for (slug, object) in objects {
+            let modified_at = safe(object.get("modifiedAt")).unwrap_or(0);
+            let value = object.get("value").cloned().unwrap_or(Value::Null);
+            let mut problem = if object.get("slug").and_then(Value::as_str) == Some(slug) {
+                validate_object(slug, &value)
+            } else {
+                Some("Stored under another slug".into())
+            };
+            let parsed = match &problem {
+                None => match serde_json::from_value::<AttentionValue>(
+                    super::attention::whole_numbers(value.clone()),
+                ) {
+                    Ok(parsed) => Some(parsed),
+                    Err(error) => {
+                        problem = Some(error.to_string());
+                        None
+                    }
+                },
+                Some(_) => None,
+            };
+            if let Some(parsed) = &parsed {
+                let kind = group(parsed);
+                let count = counts.entry(kind).or_default();
+                *count += 1;
+                if *count > OBJECT_LIMIT {
+                    problem = Some(format!("Over the limit of {OBJECT_LIMIT} {kind}"));
+                }
+            }
+            match (problem, parsed) {
+                (None, Some(value)) => {
+                    attention.insert(
+                        slug.clone(),
+                        AttentionObject {
+                            slug: slug.clone(),
+                            value,
+                            modified_at,
+                        },
+                    );
+                }
+                (problem, _) => {
+                    skipped.insert(
+                        slug.clone(),
+                        SkippedObject {
+                            slug: slug.clone(),
+                            value,
+                            modified_at,
+                            problem: problem.unwrap_or_default(),
+                        },
+                    );
+                }
+            }
+        }
+        let mut timers = BTreeMap::new();
+        for (slug, state) in record
+            .get("timers")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty)
+        {
+            let is_timer = matches!(
+                attention
+                    .get(slug)
+                    .map(|object: &AttentionObject| &object.value),
+                Some(AttentionValue::Timer(_))
+            );
+            let (Some(armed_at), Some(next_due), Some(used)) = (
+                safe(state.get("armedAt")),
+                safe(state.get("nextDue")),
+                safe(state.get("used")),
+            ) else {
+                continue;
+            };
+            if is_timer {
+                timers.insert(
+                    slug.clone(),
+                    TimerState {
+                        armed_at,
+                        next_due,
+                        used,
+                    },
+                );
+            }
+        }
+        records.insert(
+            pubkey.clone(),
+            AgentRecord {
+                pubkey: pubkey.clone(),
+                attention: Arc::new(attention),
+                skipped: Arc::new(skipped),
+                config: record.get("config").cloned().unwrap_or(Value::Null),
+                timers: Arc::new(timers),
+            },
+        );
+    }
+    records
+}
+
+/// Writes every record. Skipped objects go back where they were read from,
+/// so a later reader that can apply them still finds them.
+pub fn write_records(
+    storage: &dyn Storage,
+    records: &BTreeMap<String, AgentRecord>,
+) -> Result<(), String> {
+    let mut agents = Map::new();
+    for (pubkey, record) in records {
+        let mut attention = Map::new();
+        for object in record.skipped.values() {
+            attention.insert(
+                object.slug.clone(),
+                serde_json::to_value(StoredObject {
+                    slug: object.slug.clone(),
+                    value: object.value.clone(),
+                    modified_at: object.modified_at,
+                })
+                .expect("objects serialize"),
+            );
+        }
+        for object in record.attention.values() {
+            attention.insert(
+                object.slug.clone(),
+                serde_json::to_value(object).expect("objects serialize"),
+            );
+        }
+        let mut stored = Map::new();
+        stored.insert("pubkey".into(), Value::from(pubkey.clone()));
+        stored.insert("attention".into(), Value::Object(attention));
+        if !record.config.is_null() {
+            stored.insert("config".into(), record.config.clone());
+        }
+        stored.insert(
+            "timers".into(),
+            serde_json::to_value(&*record.timers).expect("timers serialize"),
+        );
+        agents.insert(pubkey.clone(), Value::Object(stored));
+    }
+    let text = serde_json::json!({ "version": 1, "agents": agents }).to_string();
+    storage.write(&text)
+}
+
+/// Replaces or deletes (`None`) one attention object, after validating it
+/// and the count limits. A timer keeps its run state only while its
+/// schedule (`armed_at`, `interval_secs`, `enabled`) is unchanged;
+/// otherwise it recounts.
+pub fn set_attention(
+    record: &AgentRecord,
+    slug: &str,
+    value: Option<&Value>,
+    now: u64,
+) -> Result<AgentRecord, String> {
+    let mut rest = (*record.attention).clone();
+    let prior = rest.remove(slug).map(|object| object.value);
+    let mut skipped = (*record.skipped).clone();
+    skipped.remove(slug);
+    let mut timers = (*record.timers).clone();
+    let state = timers.remove(slug);
+    let Some(value) = value else {
+        return Ok(AgentRecord {
+            attention: Arc::new(rest),
+            skipped: Arc::new(skipped),
+            timers: Arc::new(timers),
+            ..record.clone()
+        });
+    };
+    let parsed = AttentionValue::parse(slug, value)?;
+    let kind = group(&parsed);
+    if prior.is_none()
+        && rest
+            .values()
+            .filter(|object| group(&object.value) == kind)
+            .count()
+            >= OBJECT_LIMIT
+    {
+        return Err(format!("An agent can have at most {OBJECT_LIMIT} {kind}"));
+    }
+    if let AttentionValue::Timer(timer) = &parsed {
+        let kept = match (state, &prior) {
+            (Some(state), Some(AttentionValue::Timer(prior))) if same_schedule(prior, timer) => {
+                state
+            }
+            _ => timer_state(timer, None, now),
+        };
+        timers.insert(slug.into(), kept);
+    }
+    rest.insert(
+        slug.into(),
+        AttentionObject {
+            slug: slug.into(),
+            value: parsed,
+            modified_at: now,
+        },
+    );
+    Ok(AgentRecord {
+        attention: Arc::new(rest),
+        skipped: Arc::new(skipped),
+        timers: Arc::new(timers),
+        ..record.clone()
+    })
+}
+
+#[cfg(test)]
+mod tests;

@@ -744,4 +744,10 @@ impl HostConnection {
     pub fn reconnect(&self) {
         self.client.reconnect();
     }
+
+    /// The RPC client, for requests made outside a GPUI context (Agents2
+    /// runs). Run them on the I/O runtime.
+    pub fn client(&self) -> Arc<HostClient<HostProtocol>> {
+        self.client.clone()
+    }
 }
