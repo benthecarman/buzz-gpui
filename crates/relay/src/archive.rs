@@ -59,6 +59,11 @@ END;
 pub const RETENTION_DAYS: [u32; 4] = [1, 7, 30, 90];
 /// Envelopes older than this when they arrive are not archived.
 const FRESHNESS_SECS: u64 = 300;
+/// Saved envelopes older than this are not read back (`decode_archive`
+/// with `history`).
+const HISTORY_SECS: u64 = 90 * 24 * 60 * 60;
+/// Records per [`Archive::read`] page.
+pub const PAGE_SIZE: usize = 100;
 const MAX_CONTENT: usize = 87_472;
 const MIN_CONTENT: usize = 132;
 const MAX_FRAME: usize = 65_535;
@@ -97,6 +102,33 @@ impl ArchiveSettings {
         }
         kinds
     }
+}
+
+/// One saved record, verified and decrypted for the viewer (an
+/// `ArchivePage` record).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchiveRecord {
+    /// The envelope's event id.
+    pub id: String,
+    /// The agent that signed it.
+    pub agent: String,
+    pub created_at: u64,
+    /// When it was saved, in seconds.
+    pub received_at: i64,
+    /// The decrypted frame: JSON.
+    pub plaintext: String,
+}
+
+/// A page of saved records, newest first (`ArchivePage`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArchivePage {
+    pub records: Vec<ArchiveRecord>,
+    /// Saved records that no longer verify or decrypt.
+    pub skipped: usize,
+    /// The cursor for the next, older page; `None` on the last page.
+    pub before: Option<i64>,
+    /// The settings revision the page was read under.
+    pub revision: i64,
 }
 
 pub struct Archive {
@@ -234,6 +266,88 @@ impl Archive {
             .connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
         Ok(())
+    }
+
+    /// One page of the viewer's saved records of `kind`, newest first,
+    /// optionally from one `agent` and older than the `before` cursor
+    /// (buzz-app's archive `read`). Records past their retention are left
+    /// out. Each record is verified and decrypted again; those that fail
+    /// count as skipped.
+    pub fn read(
+        &self,
+        identity: &Identity,
+        community: &str,
+        kind: u16,
+        agent: Option<&str>,
+        before: Option<i64>,
+    ) -> Result<ArchivePage> {
+        if !matches!(kind, kinds::AGENT_ACTIVITY | kinds::AGENT_METRICS) {
+            return Err("Unsupported archive kind".into());
+        }
+        if agent.is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+            || before.is_some_and(|v| v <= 0)
+        {
+            return Err("Invalid archive page".into());
+        }
+        let viewer = identity.pubkey_hex();
+        let (rows, revision) = {
+            let inner = self.lock()?;
+            inner.seed(&viewer, community)?;
+            let mut statement = database(inner.connection.prepare(
+                "SELECT seq,received,envelope FROM archive_events WHERE viewer=?1 AND community=?2 AND kind=?3 AND (?4 IS NULL OR agent=?4) AND (?5 IS NULL OR seq<?5) AND created > ?6-(SELECT days*86400 FROM archive_subscriptions WHERE viewer=?1 AND community=?2 AND name=subscription) ORDER BY seq DESC LIMIT ?7",
+            ))?;
+            let rows = database(statement.query_map(
+                params![
+                    viewer,
+                    community,
+                    kind,
+                    agent,
+                    before,
+                    now(),
+                    PAGE_SIZE as i64
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            ))?;
+            let rows = database(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+            (rows, inner.settings(&viewer, community)?.revision)
+        };
+        let before = if rows.len() == PAGE_SIZE {
+            rows.last().map(|row| row.0)
+        } else {
+            None
+        };
+        let now = now().max(0) as u64;
+        let mut page = ArchivePage {
+            before,
+            revision,
+            ..ArchivePage::default()
+        };
+        for (_, received_at, raw) in rows {
+            let opened = serde_json::from_str::<Event>(&raw)
+                .ok()
+                .filter(|event| event.verify().is_ok())
+                .and_then(|event| {
+                    let plaintext = open_envelope(identity, &event, now, HISTORY_SECS).ok()?;
+                    Some(ArchiveRecord {
+                        id: event.id.to_hex(),
+                        agent: event.pubkey.to_hex(),
+                        created_at: event.created_at.as_secs(),
+                        received_at,
+                        plaintext,
+                    })
+                });
+            match opened {
+                Some(record) => page.records.push(record),
+                None => page.skipped += 1,
+            }
+        }
+        Ok(page)
     }
 
     /// Stores a checked envelope (see [`check_envelope`]) if its kind is
@@ -398,6 +512,12 @@ impl Inner {
 /// names, activity marked as telemetry, within size limits, and
 /// decrypting to JSON. The signature was verified on receipt.
 pub fn check_envelope(identity: &Identity, event: &Event, now: u64) -> Result<()> {
+    open_envelope(identity, event, now, FRESHNESS_SECS).map(drop)
+}
+
+/// The checks of [`check_envelope`] for an envelope at most `max_age`
+/// seconds old; the decrypted frame when it passes.
+fn open_envelope(identity: &Identity, event: &Event, now: u64, max_age: u64) -> Result<String> {
     let invalid = || "Invalid observer envelope".to_string();
     let exact = |name: &str, value: &str| {
         let mut tags = event
@@ -421,7 +541,7 @@ pub fn check_envelope(identity: &Identity, event: &Event, now: u64) -> Result<()
         || !exact("agent", &event.pubkey.to_hex())
         || (kind == kinds::AGENT_ACTIVITY && !exact("frame", "telemetry"))
         || created > now + 300
-        || now.saturating_sub(created) > FRESHNESS_SECS
+        || now.saturating_sub(created) > max_age
         || event.content.len() < MIN_CONTENT
         || event.content.len() > MAX_CONTENT
     {
@@ -433,7 +553,7 @@ pub fn check_envelope(identity: &Identity, event: &Event, now: u64) -> Result<()
     if text.len() > MAX_FRAME || serde_json::from_str::<serde_json::Value>(&text).is_err() {
         return Err("Invalid observer frame".into());
     }
-    Ok(())
+    Ok(text)
 }
 
 /// The archive's name for a community: its HTTP origin.
@@ -553,5 +673,82 @@ mod tests {
                 .revision,
             0
         );
+    }
+
+    #[test]
+    fn reads_pages_newest_first_and_skips_what_no_longer_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = Archive::open(dir.path().join("events.sqlite3")).unwrap();
+        let viewer = Identity::ephemeral();
+        let (me, community) = (viewer.pubkey_hex(), "https://relay.example.com");
+        let revision = archive.settings(&me, community).unwrap().revision;
+        let (agent, other) = (Keys::generate(), Keys::generate());
+        let at = now() as u64;
+        for n in 0..(PAGE_SIZE + 5) {
+            let frame = format!(r#"{{"n":{n}}}"#);
+            let event = envelope(&agent, &viewer, 44200, &frame, at - n as u64);
+            archive.ingest(&me, community, &event, revision).unwrap();
+        }
+        let theirs = envelope(&other, &viewer, 44200, r#"{"n":"other"}"#, at);
+        archive.ingest(&me, community, &theirs, revision).unwrap();
+        let activity = envelope(&agent, &viewer, 24200, "{}", at);
+        archive.ingest(&me, community, &activity, revision).unwrap();
+
+        let first = archive.read(&viewer, community, 44200, None, None).unwrap();
+        assert_eq!((first.records.len(), first.skipped), (PAGE_SIZE, 0));
+        assert_eq!(first.revision, revision);
+        assert_eq!(first.records[0].plaintext, r#"{"n":"other"}"#);
+        assert_eq!(first.records[0].agent, other.public_key().to_hex());
+        // Newest saved first: by arrival, not creation time.
+        assert_eq!(first.records[1].plaintext, r#"{"n":104}"#);
+        let second = archive
+            .read(&viewer, community, 44200, None, first.before)
+            .unwrap();
+        assert_eq!((second.records.len(), second.before), (6, None));
+        assert_eq!(second.records[5].plaintext, r#"{"n":0}"#);
+
+        let mine = archive
+            .read(
+                &viewer,
+                community,
+                44200,
+                Some(&other.public_key().to_hex()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(mine.records.len(), 1);
+        let activity_page = archive.read(&viewer, community, 24200, None, None).unwrap();
+        assert_eq!(activity_page.records.len(), 1);
+        assert!(archive.read(&viewer, community, 1, None, None).is_err());
+        assert!(
+            archive
+                .read(&viewer, community, 44200, Some("nope"), None)
+                .is_err()
+        );
+
+        // Someone else reading the same partition opens nothing.
+        let stranger = Identity::ephemeral();
+        assert_eq!(
+            archive
+                .read(&stranger, community, 44200, None, None)
+                .unwrap()
+                .records
+                .len(),
+            0,
+            "partitioned by viewer"
+        );
+        // A tampered envelope is skipped, not shown.
+        {
+            let inner = archive.lock().unwrap();
+            inner
+                .connection
+                .execute(
+                    "UPDATE archive_events SET envelope=replace(envelope,'\"kind\":44200','\"kind\":44201') WHERE id=?1",
+                    [theirs.id.to_hex()],
+                )
+                .unwrap();
+        }
+        let tampered = archive.read(&viewer, community, 44200, None, None).unwrap();
+        assert_eq!((tampered.records.len(), tampered.skipped), (99, 1));
     }
 }
