@@ -20,6 +20,7 @@ pub mod live;
 pub mod media;
 pub mod members;
 pub mod messages;
+pub mod moderation;
 pub mod origin;
 pub mod outbox;
 pub mod presence;

@@ -27,6 +27,7 @@ mod live_feed;
 mod members;
 mod memories;
 mod messaging;
+mod moderation;
 mod observer;
 mod presence;
 mod projects;
