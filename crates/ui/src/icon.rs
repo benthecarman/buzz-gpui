@@ -23,6 +23,8 @@ macro_rules! tabler_icons {
             OneDriveLogo,
             /// buzz-app's GitHub open-issue mark.
             GitHubIssue,
+            /// Bestie's raster mark (`BestieIcon`), drawn as an image.
+            Bestie,
         }
 
         impl IconName {
@@ -34,6 +36,7 @@ macro_rules! tabler_icons {
                 IconName::GooseLogo,
                 IconName::OneDriveLogo,
                 IconName::GitHubIssue,
+                IconName::Bestie,
             ];
 
             /// The embedded asset path.
@@ -45,6 +48,7 @@ macro_rules! tabler_icons {
                     IconName::GooseLogo => "icons/brand/goose.svg",
                     IconName::OneDriveLogo => "icons/custom/onedrive-logo.svg",
                     IconName::GitHubIssue => "icons/custom/github-issue.svg",
+                    IconName::Bestie => "icons/custom/bestie.png",
                 }
             }
 
@@ -57,6 +61,7 @@ macro_rules! tabler_icons {
                     IconName::GooseLogo => "GooseLogo",
                     IconName::OneDriveLogo => "OneDriveLogo",
                     IconName::GitHubIssue => "GitHubIssue",
+                    IconName::Bestie => "Bestie",
                 }
             }
         }
@@ -276,6 +281,12 @@ impl Icon {
 
 impl RenderOnce for Icon {
     fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
+        if self.name == IconName::Bestie {
+            return img(self.name.path())
+                .flex_none()
+                .size(self.size)
+                .into_any_element();
+        }
         let color = self.color.unwrap_or_else(|| window.text_style().color);
         let path: SharedString = match self.stroke {
             Some(width) if self.name.is_stroked() && width != 2. => {
@@ -291,6 +302,7 @@ impl RenderOnce for Icon {
             .when_some(self.rotation, |this, angle| {
                 this.with_transformation(Transformation::rotate(angle))
             })
+            .into_any_element()
     }
 }
 

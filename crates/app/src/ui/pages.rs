@@ -137,6 +137,7 @@ pub fn init(cx: &mut App) {
         cx,
     );
     super::me::register(cx);
+    super::bestie::register(cx);
     super::inbox::register(cx);
     super::reminders::register(cx);
     register(

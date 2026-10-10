@@ -8,6 +8,7 @@ use std::borrow::Cow;
 #[folder = "../../assets"]
 #[include = "icons/tabler/**/*.svg"]
 #[include = "icons/custom/*.svg"]
+#[include = "icons/custom/*.png"]
 #[include = "icons/brand/*.svg"]
 #[include = "icons/brand/*.png"]
 struct Embedded;
