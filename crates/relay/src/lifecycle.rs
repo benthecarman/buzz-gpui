@@ -1,7 +1,7 @@
 //! Channel lifecycle and details (`docs/port/relay.md` §5m): create (9007),
-//! join (9021), leave (9022), archive and unarchive (9002 `archived`),
-//! details edits (9002 name/about/visibility/ttl) and the DM hide command
-//! (41012).
+//! join (9021), leave (9022), delete (9008), archive and unarchive (9002
+//! `archived`), details edits (9002 name/about/visibility/ttl) and the DM
+//! hide command (41012).
 //!
 //! Pure: templates, validation and the permission rules read from one
 //! strong read of a channel's 39000/39001/39002 ([`ChannelState`]). The
@@ -314,6 +314,15 @@ impl ChannelState {
             .count()
     }
 
+    /// The channel's owners, already checked against the 39001.
+    pub fn owner_keys(&self) -> Vec<String> {
+        self.roles
+            .iter()
+            .filter(|(_, role)| **role == MemberRole::Owner)
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     // ----- lifecycle (`lifecycleSettings`) -----
 
     /// What the viewer may do to the channel as a whole. Refuses when the
@@ -333,6 +342,7 @@ impl ChannelState {
             can_hide: dm,
             leave_reason: (last_owner && !dm)
                 .then(|| "Transfer ownership before leaving the channel.".to_owned()),
+            delete_unavailable: false,
         })
     }
 
@@ -405,6 +415,43 @@ pub struct LifecyclePermissions {
     pub can_hide: bool,
     /// Why Leave is unavailable, when it is.
     pub leave_reason: Option<String>,
+    /// The owner-agent check for Delete could not be read.
+    pub delete_unavailable: bool,
+}
+
+impl LifecyclePermissions {
+    /// Whether an owner agent of the viewer's could grant what a direct
+    /// role does not: Unarchive when archived, else Delete, which implies
+    /// Archive (`channel-lifecycle.ts:146-163`).
+    pub fn wants_owner_evidence(&self, archived: bool) -> bool {
+        !self.can_hide
+            && if archived {
+                !self.can_unarchive
+            } else {
+                !self.can_delete
+            }
+    }
+
+    /// The relay lets an owner agent's verified human archive, unarchive
+    /// and delete as a direct owner would.
+    pub fn grant_owned_agent(&mut self, archived: bool) {
+        self.can_archive = !archived;
+        self.can_unarchive = archived;
+        self.can_delete = !archived;
+    }
+}
+
+/// Owner profiles read per batch for owner-agent evidence.
+pub const OWNER_BATCH: usize = 4;
+/// The whole owner-agent lookup's budget.
+pub const OWNER_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One `{kinds:[0], authors:[owner], limit:1}` per owner.
+pub fn owner_profile_filters(owners: &[String]) -> Vec<Filter> {
+    owners
+        .iter()
+        .map(|owner| filter(json!({"kinds": [kinds::PROFILE], "authors": [owner], "limit": 1})))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +464,8 @@ pub enum Action {
     Leave,
     Archive,
     Unarchive,
+    /// Streams and forums, by an owner (9008).
+    Delete,
     /// DMs only (41012).
     Hide,
 }
@@ -430,6 +479,7 @@ impl Action {
             Self::Leave => permissions.can_leave,
             Self::Archive => permissions.can_archive,
             Self::Unarchive => permissions.can_unarchive,
+            Self::Delete => permissions.can_delete,
             Self::Hide => permissions.can_hide,
         }
     }
@@ -443,6 +493,7 @@ pub fn template(action: Action, channel: &str, now: u64) -> Result<EventTemplate
         Action::Join => kinds::JOIN_CHANNEL,
         Action::Leave => kinds::LEAVE_CHANNEL,
         Action::Archive | Action::Unarchive => kinds::EDIT_CHANNEL,
+        Action::Delete => kinds::DELETE_CHANNEL,
         Action::Hide => kinds::HIDE_DM,
     };
     let mut tags = vec![vec!["h".to_owned(), channel.to_owned()]];
@@ -460,7 +511,8 @@ pub fn template(action: Action, channel: &str, now: u64) -> Result<EventTemplate
 }
 
 /// The confirmation read for an action (§5m.2): the viewer's roster for
-/// join and leave, the metadata for archive, the visibility list for hide.
+/// join and leave, the metadata for archive and delete, the visibility
+/// list for hide.
 pub fn confirm_filter(action: Action, relay_author: &str, viewer: &str, channel: &str) -> Filter {
     match action {
         Action::Join | Action::Leave => filter(json!({
@@ -471,7 +523,7 @@ pub fn confirm_filter(action: Action, relay_author: &str, viewer: &str, channel:
             "#p": [viewer],
             "limit": 1,
         })),
-        Action::Archive | Action::Unarchive => filter(json!({
+        Action::Archive | Action::Unarchive | Action::Delete => filter(json!({
             "kinds": [kinds::CHANNEL_METADATA],
             "consistency": "strong",
             "authors": [relay_author],
@@ -507,6 +559,8 @@ pub fn confirmed(
         }
         Action::Unarchive => newest(kinds::CHANNEL_METADATA)
             .is_some_and(|m| matches!(m.tag("archived"), None | Some("false"))),
+        // The relay soft-deletes the channel's discovery events.
+        Action::Delete => newest(kinds::CHANNEL_METADATA).is_none(),
         Action::Hide => hidden_dms(events, relay_author, viewer)
             .is_some_and(|ids| ids.iter().any(|id| id == channel)),
     }

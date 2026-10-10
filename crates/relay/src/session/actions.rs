@@ -14,8 +14,8 @@ use crate::dm;
 use crate::event::{Verified, kinds};
 use crate::http::RelayHttp;
 use crate::lifecycle::{
-    self, Action, CONFIRM_DELAYS, ChannelDetails, ChannelState, DetailsDraft, NewChannel,
-    RUN_TIMEOUT,
+    self, Action, CONFIRM_DELAYS, ChannelDetails, ChannelState, DetailsDraft, LifecyclePermissions,
+    NewChannel, RUN_TIMEOUT,
 };
 use crate::members::{self, MemberChange, Person};
 use crate::messages::EventTemplate;
@@ -130,6 +130,17 @@ impl Session {
         .await
     }
 
+    /// What the viewer may do to the channel as a whole, including what an
+    /// owner agent of theirs grants (`channel-lifecycle.ts` `load`).
+    pub async fn channel_permissions(&self, channel: &str) -> Result<LifecyclePermissions, String> {
+        let (ops, channel) = (self.ops(), channel.to_owned());
+        self.run(async move {
+            let ctx = ops.context().await?;
+            ops.permissions(&ctx, &channel).await
+        })
+        .await
+    }
+
     /// The editable details, with the version a save must still match.
     pub async fn channel_details(&self, channel: &str) -> Result<ChannelDetails, String> {
         let state = self.channel_state(channel).await?;
@@ -151,8 +162,8 @@ impl Session {
             .await
     }
 
-    /// Joins, leaves, archives, unarchives or hides, and waits until the
-    /// relay shows it.
+    /// Joins, leaves, archives, unarchives, deletes or hides, and waits
+    /// until the relay shows it.
     pub async fn channel_action(&self, action: Action, channel: &str) -> Result<(), String> {
         let (ops, channel) = (self.ops(), channel.to_owned());
         self.run(async move { ops.lifecycle(action, &channel).await })
@@ -386,6 +397,63 @@ impl Ops {
         ChannelState::parse(&events, channel, &ctx.relay).map_err(|error| error.to_string())
     }
 
+    /// Lifecycle permissions from a fresh state. When a direct role does
+    /// not grant Delete (or Unarchive), the owners' profiles are read, four
+    /// at a time within [`lifecycle::OWNER_EVIDENCE_TIMEOUT`]: an owner
+    /// agent attested by the viewer grants it. The relay still authorizes
+    /// every command.
+    async fn permissions(
+        &self,
+        ctx: &Context,
+        channel: &str,
+    ) -> Result<LifecyclePermissions, String> {
+        let state = self.state(ctx, channel).await?;
+        let mut permissions = state
+            .lifecycle(&ctx.viewer)
+            .map_err(|error| error.to_string())?;
+        let owners = state.owner_keys();
+        if !permissions.wants_owner_evidence(state.archived) || owners.is_empty() {
+            return Ok(permissions);
+        }
+        let lookup = async {
+            for batch in owners.chunks(lifecycle::OWNER_BATCH) {
+                let events = read(ctx, lifecycle::owner_profile_filters(batch)).await?;
+                if events.iter().any(|event| {
+                    event.kind_u16() != kinds::PROFILE || !batch.contains(&event.pubkey_hex())
+                }) {
+                    return Err("Unexpected channel owner profile response".to_owned());
+                }
+                let owned = batch.iter().any(|owner| {
+                    let newest = crate::account::newest_profile(&events, owner);
+                    newest.and_then(crate::profiles::attested_owner).as_deref()
+                        == Some(ctx.viewer.as_str())
+                });
+                if owned {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        match tokio::time::timeout(lifecycle::OWNER_EVIDENCE_TIMEOUT, lookup).await {
+            Ok(Ok(true)) => permissions.grant_owned_agent(state.archived),
+            Ok(Ok(false)) => {}
+            // Only owner-agent actions are affected; an archived channel
+            // has no Delete to retry.
+            Ok(Err(_)) | Err(_) => permissions.delete_unavailable = !state.archived,
+        }
+        Ok(permissions)
+    }
+
+    /// The verified NIP-OA owner of `agent`, from a fresh strong read of
+    /// its kind 0 (`administration.ts:187-225`).
+    async fn agent_owner(&self, ctx: &Context, agent: &str) -> Result<Option<String>, String> {
+        let events = read(ctx, vec![members::owner_filter(agent)]).await?;
+        Ok(
+            crate::account::newest_profile(&events, agent)
+                .and_then(crate::profiles::attested_owner),
+        )
+    }
+
     // ----- lifecycle -----
 
     async fn lifecycle(&self, action: Action, channel: &str) -> Result<(), String> {
@@ -404,10 +472,7 @@ impl Ops {
             }
             adopted = events;
         } else {
-            let state = self.state(&ctx, channel).await?;
-            let permissions = state
-                .lifecycle(&ctx.viewer)
-                .map_err(|error| error.to_string())?;
+            let permissions = self.permissions(&ctx, channel).await?;
             if !action.allowed(&permissions) {
                 return Err(match (action, permissions.leave_reason) {
                     (Action::Leave, Some(reason)) => reason,
@@ -430,7 +495,7 @@ impl Ops {
                 adopted.extend(events);
                 self.adopt(ctx.epoch, adopted).await
             }
-            Action::Leave => self.with(move |actor| actor.removed(&channel)).await,
+            Action::Leave | Action::Delete => self.with(move |actor| actor.removed(&channel)).await,
             Action::Hide => {
                 let (relay, viewer) = (ctx.relay.clone(), ctx.viewer.clone());
                 self.with(move |actor| {
@@ -583,7 +648,17 @@ impl Ops {
     async fn change_member(&self, channel: &str, change: MemberChange) -> Result<(), String> {
         let ctx = self.context().await?;
         let state = self.state(&ctx, channel).await?;
-        members::authorize(&state, &ctx.viewer, &change, None).map_err(|e| e.to_string())?;
+        // Removing someone's own agent needs its attestation, read fresh.
+        let owner = if change.change == members::Change::Remove
+            && !state.can_manage_member(&ctx.viewer, &change.pubkey)
+            && state.can_remove_member(&ctx.viewer, &change.pubkey, Some(&ctx.viewer))
+        {
+            self.agent_owner(&ctx, &change.pubkey).await?
+        } else {
+            None
+        };
+        members::authorize(&state, &ctx.viewer, &change, owner.as_deref())
+            .map_err(|e| e.to_string())?;
         let template = members::administration(channel, &change, &ctx.viewer, now())
             .map_err(|error| error.to_string())?;
         publish(&ctx, template).await?;

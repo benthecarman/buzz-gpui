@@ -159,6 +159,7 @@ fn builds_lifecycle_templates() {
     assert_eq!((join.kind, join.tags.len()), (9021, 1));
     assert_eq!(template(Action::Leave, CHANNEL, 5).unwrap().kind, 9022);
     assert_eq!(template(Action::Hide, CHANNEL, 5).unwrap().kind, 41012);
+    assert!(template(Action::Delete, "general", 5).is_err());
     assert!(template(Action::Join, "general", 5).is_err());
 }
 
@@ -190,11 +191,58 @@ fn confirms_join_leave_and_archive() {
     ));
     assert!(!confirmed(
         Action::Unarchive,
+        std::slice::from_ref(&archived),
+        &relay,
+        &viewer,
+        CHANNEL
+    ));
+    // A deleted channel's metadata is gone.
+    assert!(confirmed(Action::Delete, &[], &relay, &viewer, CHANNEL));
+    assert!(!confirmed(
+        Action::Delete,
         &[archived],
         &relay,
         &viewer,
         CHANNEL
     ));
+}
+
+#[test]
+fn only_owners_delete_and_owner_agents_extend_that() {
+    let mut channel = Channel::new();
+    let viewer = channel.signer.viewer_hex();
+    let delete = template(Action::Delete, CHANNEL, 5).unwrap();
+    assert_eq!(
+        (delete.kind, delete.tags.clone()),
+        (9008, vec![vec!["h".to_owned(), CHANNEL.to_owned()]])
+    );
+    let confirm = confirm_filter(Action::Delete, "r", &viewer, CHANNEL);
+    assert_eq!(confirm["kinds"], json!([39000]));
+    assert_eq!(confirm["consistency"], json!("strong"));
+
+    // An admin archives but does not delete; the owner is an agent.
+    let agent = key(3);
+    channel.admins = vec![(agent.clone(), "owner"), (viewer.clone(), "admin")];
+    channel.members = vec![(agent.clone(), "owner"), (viewer.clone(), "admin")];
+    let state = channel.state().unwrap();
+    assert_eq!(state.owner_keys(), vec![agent.clone()]);
+    let mut admin = state.lifecycle(&viewer).unwrap();
+    assert!(admin.can_archive && !admin.can_delete);
+    assert!(!Action::Delete.allowed(&admin));
+    assert!(admin.wants_owner_evidence(false));
+    admin.grant_owned_agent(false);
+    assert!(admin.can_delete && admin.can_archive && !admin.can_unarchive);
+    assert!(Action::Delete.allowed(&admin));
+    let filters = owner_profile_filters(&state.owner_keys());
+    assert_eq!(filters.len(), 1);
+    assert_eq!(filters[0]["authors"], json!([agent]));
+
+    // Archived: only Unarchive can be granted; deleting is not offered.
+    channel.meta.push(vec!["archived".into(), "true".into()]);
+    let mut archived = channel.state().unwrap().lifecycle(&viewer).unwrap();
+    assert!(archived.can_unarchive && !archived.wants_owner_evidence(true));
+    archived.grant_owned_agent(true);
+    assert!(!archived.can_delete && archived.can_unarchive);
 }
 
 #[test]

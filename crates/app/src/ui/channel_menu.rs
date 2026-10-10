@@ -19,7 +19,8 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 
-/// Called after the viewer left or hid the channel, so the page closes.
+/// Called after the viewer left, hid or deleted the channel, so the page
+/// closes.
 pub type OnRemoved = Rc<dyn Fn(&mut Window, &mut App)>;
 
 enum Modal {
@@ -102,12 +103,9 @@ impl ChannelActions {
         self.menu_open = true;
         self.permissions = None;
         let session = self.community.read(cx).session.clone();
-        let viewer = session.viewer().to_string();
         let channel = self.channel.id.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let state = session.channel_state(&channel).await;
-            let permissions =
-                state.and_then(|state| state.lifecycle(&viewer).map_err(|error| error.to_string()));
+            let permissions = session.channel_permissions(&channel).await;
             let _ = this.update(cx, |this, cx| {
                 this.permissions = Some(permissions);
                 cx.notify();
@@ -129,7 +127,7 @@ impl ChannelActions {
                 match result {
                     Ok(()) => {
                         this.modal = None;
-                        if matches!(action, Action::Leave | Action::Hide) {
+                        if matches!(action, Action::Leave | Action::Hide | Action::Delete) {
                             (this.on_removed)(window, cx);
                         }
                     }
@@ -204,7 +202,9 @@ impl ChannelActions {
                 let any = permissions.can_hide
                     || permissions.can_leave
                     || permissions.can_archive
-                    || permissions.can_unarchive;
+                    || permissions.can_unarchive
+                    || permissions.can_delete
+                    || permissions.delete_unavailable;
                 if any {
                     menu = menu.child(MenuSeparator::new());
                 }
@@ -232,13 +232,32 @@ impl ChannelActions {
                             .on_click(confirm(Action::Unarchive)),
                     );
                 }
+                // An owner agent's check could not be read; reopening the
+                // menu reads it again.
+                if permissions.delete_unavailable {
+                    menu = menu.child(
+                        item(
+                            "delete-unavailable",
+                            "Delete check unavailable",
+                            IconName::WarningCircle,
+                        )
+                        .disabled(true),
+                    );
+                }
+                if permissions.can_delete {
+                    menu = menu.child(
+                        item("delete", "Delete channel", IconName::Trash)
+                            .danger()
+                            .on_click(confirm(Action::Delete)),
+                    );
+                }
             }
         }
         menu
     }
 
     fn confirmation(&self, action: Action, cx: &mut Context<Self>) -> AnyElement {
-        let (title, description) = match action {
+        let (label, description) = match action {
             Action::Archive => (
                 "Archive channel",
                 "Archive this channel for everyone and remove it from the sidebar. Messages are \
@@ -259,10 +278,17 @@ impl ChannelActions {
                 "Hide this conversation from your sidebar only. Messages and membership are \
                  kept; other participants are not removed.",
             ),
+            Action::Delete => (
+                "Delete channel",
+                "Delete this channel for everyone. You cannot undo this action from Buzz.",
+            ),
             Action::Join => ("Join channel", ""),
         };
-        let destructive = matches!(action, Action::Leave | Action::Archive);
-        AlertDialog::new(title)
+        // `ChannelLifecycleDialog.tsx`: only Delete is destructive.
+        let destructive = action == Action::Delete;
+        let profiles = &self.community.read(cx).snapshot.profiles;
+        let name = super::sidebar::channel_label(&self.channel, profiles);
+        AlertDialog::new(format!("{label}: {name}"))
             .description(description)
             .children(self.error.clone().map(|message| error(message, cx)))
             .action(
@@ -272,7 +298,7 @@ impl ChannelActions {
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
             )
             .action(
-                Button::new("lifecycle-confirm", title)
+                Button::new("lifecycle-confirm", label)
                     .map(|b| {
                         if destructive {
                             b.destructive()

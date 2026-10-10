@@ -163,6 +163,17 @@ pub fn administration(
     })
 }
 
+/// The strong read of an agent's kind 0 whose NIP-OA attestation lets its
+/// owner remove it.
+pub fn owner_filter(agent: &str) -> Filter {
+    filter(json!({
+        "kinds": [kinds::PROFILE],
+        "authors": [agent],
+        "limit": 5,
+        "consistency": "strong",
+    }))
+}
+
 /// `memberChangeConfirmed`: removed members are gone, others hold the role.
 pub fn change_confirmed(state: &ChannelState, change: &MemberChange) -> bool {
     match change.change.role() {
@@ -282,10 +293,38 @@ fn compare_names(a: &str, b: &str) -> Ordering {
         .then_with(|| a.cmp(b))
 }
 
-/// Case-folded and trimmed, for comparing names (`normalizeName`). Accents
-/// are not folded: there is no Unicode decomposition table here.
+/// Combining marks `foldName` strips after NFKD: the diacritical mark
+/// blocks only, so vowel signs and dakuten survive.
+fn is_accent(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036f}'
+            | '\u{1ab0}'..='\u{1aff}'
+            | '\u{1dc0}'..='\u{1dff}'
+            | '\u{20d0}'..='\u{20ff}'
+            | '\u{fe20}'..='\u{fe2f}'
+    )
+}
+
+/// Accent- and case-folded, one code point at a time (`foldName`): NFKD,
+/// diacritics dropped, lowercased, final sigma as sigma.
+pub fn fold_name(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let mut folded = String::with_capacity(text.len());
+    for c in text.chars() {
+        for part in std::iter::once(c).nfkd().filter(|c| !is_accent(*c)) {
+            folded.extend(
+                part.to_lowercase()
+                    .map(|lower| if lower == 'ς' { 'σ' } else { lower }),
+            );
+        }
+    }
+    folded
+}
+
+/// Folded and trimmed, for comparing names (`normalizeName`).
 pub fn normalize_name(text: &str) -> String {
-    text.trim().to_lowercase().replace('ς', "σ")
+    fold_name(text).trim().to_owned()
 }
 
 /// `matchPerson` tiers: 0 equal, 1 the name starts with the query, 2 a later
@@ -422,6 +461,9 @@ mod tests {
             ..remove
         };
         assert!(authorize(&state, &viewer, &promote, Some(&viewer)).is_err());
+        let read = owner_filter(&key(4));
+        assert_eq!(read["authors"], json!([key(4)]));
+        assert_eq!(read["consistency"], json!("strong"));
     }
 
     #[test]
@@ -485,6 +527,17 @@ mod tests {
     }
 
     #[test]
+    fn folds_accents_case_and_compatibility_forms() {
+        assert_eq!(normalize_name("  Ångström "), "angstrom");
+        assert_eq!(fold_name("ＡＢＣ"), "abc");
+        assert_eq!(fold_name("ΟΔΥΣΣΕΥΣ"), "οδυσσευσ");
+        assert_eq!(fold_name("ὀδυσσεύς"), "οδυσσευσ");
+        // Marks outside the diacritical blocks are kept.
+        assert_eq!(fold_name("हिंदी"), "हिंदी");
+        assert_eq!(fold_name("ガ"), "\u{30ab}\u{3099}");
+    }
+
+    #[test]
     fn ranks_names_by_match_tier() {
         assert_eq!(match_tier("Alice", "alice"), Some(0));
         assert_eq!(match_tier("Alice Smith", "ali"), Some(1));
@@ -492,6 +545,9 @@ mod tests {
         assert_eq!(match_tier("Mary Alicia", "ali"), Some(3));
         assert_eq!(match_tier("Malice", "ali"), None);
         assert_eq!(match_tier("Mary Alice", "ry al"), None);
+        assert_eq!(match_tier("José Ñúñez", "jose"), Some(1));
+        assert_eq!(match_tier("Zoë", "ZOE"), Some(0));
+        assert_eq!(match_tier("Ana Sofía", "sofia"), Some(2));
 
         let signer = Signer::new();
         let a = signer.sign(&signer.viewer, 0, T0, r#"{"name":"Mary Alice"}"#, &[]);

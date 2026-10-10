@@ -26,8 +26,11 @@ pub struct Profile {
     /// Self-declared and not DNS-verified.
     pub nip05: Option<String>,
     pub is_agent: bool,
-    /// From a NIP-OA `auth` tag; its signature is checked elsewhere.
+    /// From a NIP-OA `auth` tag, by shape only.
     pub owner_pubkey: Option<String>,
+    /// The owner whose attestation verifies ([`attested_owner`]); only
+    /// this one may act as the agent's owner.
+    pub attested_owner: Option<String>,
 }
 
 impl Profile {
@@ -47,10 +50,12 @@ impl Profile {
             .tags_named("auth")
             .find(|tag| tag.len() == 4 && is_hex(&tag[1], 64) && is_hex(&tag[3], 128));
         let owner_pubkey = auth.map(|tag| tag[1].clone());
+        let attested_owner = owner_pubkey.as_ref().and_then(|_| attested_owner(event));
         let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(&event.content) else {
             return Self {
                 is_agent: owner_pubkey.is_some(),
                 owner_pubkey,
+                attested_owner,
                 ..Self::fallback(&pubkey)
             };
         };
@@ -72,8 +77,75 @@ impl Profile {
             nip05: text("nip05"),
             is_agent: flagged("is_agent") || flagged("isAgent") || owner_pubkey.is_some(),
             owner_pubkey,
+            attested_owner,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// NIP-OA owner attestation (`owner-attestation.ts`)
+
+/// `^(kind=|created_at<|created_at>)(0|[1-9][0-9]*)$`, bounded.
+fn clause(clause: &str) -> Option<(&'static str, u64)> {
+    let (name, digits) = ["kind=", "created_at<", "created_at>"]
+        .into_iter()
+        .find_map(|name| Some((name, clause.strip_prefix(name)?)))?;
+    let canonical = !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'));
+    let value: u64 = digits.parse().ok().filter(|_| canonical)?;
+    let limit = if name == "kind=" {
+        65_535
+    } else {
+        4_294_967_295
+    };
+    (value <= limit).then_some((name, value))
+}
+
+/// Every clause is valid and holds for this event; empty always holds.
+fn conditions_hold(conditions: &str, kind: u16, created_at: u64) -> bool {
+    if conditions.is_empty() {
+        return true;
+    }
+    let clauses: Option<Vec<(&str, u64)>> = conditions.split('&').map(clause).collect();
+    clauses.is_some_and(|clauses| {
+        clauses.iter().all(|(name, value)| match *name {
+            "kind=" => u64::from(kind) == *value,
+            "created_at<" => created_at < *value,
+            _ => created_at > *value,
+        })
+    })
+}
+
+/// The verified NIP-OA owner of an agent's signature-checked event: its
+/// one `["auth", owner, conditions, sig]` tag, with conditions that hold
+/// for the event and a BIP-340 signature by `owner` over
+/// `sha256("nostr:agent-auth:<agent>:<conditions>")`. Provenance only: the
+/// event stays authored by the agent.
+pub fn attested_owner(event: &Verified) -> Option<String> {
+    use secp256k1::{Secp256k1, XOnlyPublicKey, schnorr::Signature};
+    use sha2::{Digest, Sha256};
+    let mut auth = event.tags_named("auth");
+    let tag = auth.next()?;
+    if auth.next().is_some() || tag.len() != 4 {
+        return None;
+    }
+    let (owner, conditions, sig) = (&tag[1], &tag[2], &tag[3]);
+    let target = event.pubkey_hex();
+    if !is_hex(owner, 64)
+        || !is_hex(sig, 128)
+        || *owner == target
+        || !conditions_hold(conditions, event.kind_u16(), event.created_at_secs())
+    {
+        return None;
+    }
+    let digest: [u8; 32] = Sha256::digest(format!("nostr:agent-auth:{target}:{conditions}")).into();
+    let signature: Signature = sig.parse().ok()?;
+    let key: XOnlyPublicKey = owner.parse().ok()?;
+    Secp256k1::verification_only()
+        .verify_schnorr(&signature, &digest, &key)
+        .ok()
+        .map(|_| owner.clone())
 }
 
 /// `avatar-source.ts`: credential-free HTTPS up to 2048 characters, or an
@@ -295,6 +367,70 @@ mod tests {
         ));
         assert!(agent.is_agent && agent.name_is_fallback);
         assert_eq!(agent.owner_pubkey, Some("a".repeat(64)));
+        assert_eq!(
+            agent.attested_owner, None,
+            "a bogus signature attests nothing"
+        );
+    }
+
+    /// An `auth` tag signed by `owner` for `agent` under `conditions`.
+    fn auth(owner: &Keys, agent: &Keys, conditions: &str) -> Tag {
+        use sha2::{Digest, Sha256};
+        let agent = agent.public_key().to_hex();
+        let digest: [u8; 32] =
+            Sha256::digest(format!("nostr:agent-auth:{agent}:{conditions}")).into();
+        Tag::custom(
+            "auth",
+            [
+                owner.public_key().to_hex(),
+                conditions.to_owned(),
+                owner.sign_schnorr(digest).to_string(),
+            ],
+        )
+    }
+
+    #[test]
+    fn verifies_owner_attestations() {
+        let (owner, agent) = (buzz_identity::Identity::ephemeral(), Keys::generate());
+        let tag: Vec<String> =
+            serde_json::from_str(&owner.attest_agent(&agent.public_key().to_hex()).unwrap())
+                .unwrap();
+        let signed = profile(&agent, "{}", 100, vec![Tag::parse(tag).unwrap()]);
+        assert_eq!(attested_owner(&signed), Some(owner.pubkey_hex()));
+        let parsed = Profile::from_event(&signed);
+        assert_eq!(parsed.attested_owner, Some(owner.pubkey_hex()));
+        assert!(parsed.is_agent);
+
+        let (owner, other) = (Keys::generate(), Keys::generate());
+        let owner_hex = owner.public_key().to_hex();
+        // Conditions are bound into the signature and must hold.
+        let bounded = auth(&owner, &agent, "kind=0&created_at<200");
+        let current = profile(&agent, "{}", 100, vec![bounded.clone()]);
+        assert_eq!(attested_owner(&current), Some(owner_hex));
+        assert_eq!(
+            attested_owner(&profile(&agent, "{}", 300, vec![bounded])),
+            None
+        );
+        let wrong_kind = profile(&agent, "{}", 100, vec![auth(&owner, &agent, "kind=1")]);
+        assert_eq!(attested_owner(&wrong_kind), None);
+        for bad in [
+            "kind=01",
+            "kind=65536",
+            "created_at=5",
+            "kind=0&",
+            "created_at>-1",
+        ] {
+            let event = profile(&agent, "{}", 100, vec![auth(&owner, &agent, bad)]);
+            assert_eq!(attested_owner(&event), None, "{bad}");
+        }
+        // Signed for another agent, or two auth tags: not attested.
+        let stolen = profile(&other, "{}", 100, vec![auth(&owner, &agent, "")]);
+        assert_eq!(attested_owner(&stolen), None);
+        let twice = vec![auth(&owner, &agent, ""), auth(&other, &agent, "")];
+        assert_eq!(attested_owner(&profile(&agent, "{}", 100, twice)), None);
+        // An agent cannot own itself.
+        let own = profile(&agent, "{}", 100, vec![auth(&agent, &agent, "")]);
+        assert_eq!(attested_owner(&own), None);
     }
 
     #[test]
