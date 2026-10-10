@@ -5,9 +5,11 @@
 //! with their outbox recovery. Channel pages and thread panels each own
 //! one, so their rows behave the same.
 
+use super::composer::{Composer, Submission};
 use super::emoji_picker::{self, Dismissed, EmojiPicker, Pick, Picked};
 use super::markdown::Directory;
 use super::message::{Actions, Command, Hover, Interaction, MenuFacts, Popup, Rows};
+use super::message_edit::{self, EditStatus, Save};
 use super::outbox_ops::Ops;
 use super::report::{ReportClosed, ReportDialog};
 use super::{message_copy, notice, overlay};
@@ -41,6 +43,14 @@ pub struct Hooks {
     pub find: FindHook,
     /// Typing in this view: the channel, or a thread root.
     pub thread: Option<EventId>,
+    /// The page's composer, where edits happen.
+    pub composer: WeakEntity<Composer>,
+}
+
+/// An edit sent from the composer, followed until it lands.
+struct Editing {
+    target: Arc<MessageRow>,
+    op: Option<EventId>,
 }
 
 struct Deletion {
@@ -52,6 +62,8 @@ struct Deletion {
     awaiting: bool,
     error: Option<SharedString>,
     focus: FocusHandle,
+    /// Asked for by saving an empty edit: the edit ends with the deletion.
+    from_edit: bool,
 }
 
 pub struct MessageActions {
@@ -65,6 +77,7 @@ pub struct MessageActions {
     reaction_parents: HashMap<EventId, EventId>,
     outbox: Option<Outbox>,
     deleting: Option<Deletion>,
+    editing: Option<Editing>,
     reporting: Option<(Entity<ReportDialog>, Subscription)>,
     /// The page alert (`role="alert"`): unread and follow failures.
     error: Option<SharedString>,
@@ -132,6 +145,7 @@ impl MessageActions {
             reaction_parents: HashMap::new(),
             outbox: None,
             deleting: None,
+            editing: None,
             reporting: None,
             error: None,
             reaction_error: None,
@@ -217,15 +231,175 @@ impl MessageActions {
             }
         }
         if close {
-            self.deleting = None;
+            let from_edit = self.deleting.take().is_some_and(|d| d.from_edit);
             let focus = self.hooks.focus_composer.clone();
+            let composer = self.hooks.composer.clone();
             cx.defer(move |cx| {
-                let _ = cx
-                    .active_window()
-                    .map(|w| w.update(cx, |_, window, cx| focus(window, cx)));
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, cx| {
+                        if from_edit {
+                            let _ = composer.update(cx, |composer, cx| {
+                                composer.set_edit_status(EditStatus::default(), cx);
+                                composer.cancel_edit(window, cx)
+                            });
+                        }
+                        focus(window, cx)
+                    });
+                }
             });
         }
+        self.follow_edit(cx);
         cx.notify();
+    }
+
+    /// Saves the composer's edit (`useMessageEdit`'s `save`): checks it,
+    /// sends it through the outbox, and keeps the composer locked until it
+    /// lands; an empty edit asks to delete the message.
+    pub fn save_edit(
+        &mut self,
+        submission: Submission,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = submission.editing.clone() else {
+            return;
+        };
+        let Some(composer) = self.hooks.composer.upgrade() else {
+            return;
+        };
+        let initial = composer
+            .read(cx)
+            .edit_initial()
+            .map(str::to_string)
+            .unwrap_or_default();
+        let current = (self.hooks.find)(target.id, cx);
+        let editable = current.as_ref().is_some_and(|row| {
+            super::message::editable(row) && !self.ops.deleting(row.id) && self.writable(cx)
+        });
+        match message_edit::plan(
+            &target,
+            current.as_deref(),
+            editable,
+            &initial,
+            &submission.content,
+        ) {
+            Save::Close => composer.update(cx, |composer, cx| composer.sent(window, cx)),
+            Save::Delete => {
+                composer.update(cx, |composer, cx| composer.set_notice(None, cx));
+                self.open_delete(target, window, cx);
+                if let Some(deletion) = &mut self.deleting {
+                    deletion.from_edit = true;
+                }
+            }
+            Save::Error(error) => composer.update(cx, |composer, cx| {
+                composer.set_notice(Some(error.into()), cx)
+            }),
+            Save::Send(body) => {
+                self.editing = Some(Editing {
+                    target: target.clone(),
+                    op: None,
+                });
+                composer.update(cx, |composer, cx| {
+                    composer.set_edit_status(
+                        EditStatus {
+                            locked: true,
+                            busy: true,
+                            retryable: false,
+                        },
+                        cx,
+                    )
+                });
+                let (session, channel) = (self.session(cx), self.channel.clone());
+                cx.spawn(async move |this, cx| {
+                    let result = session.edit(&channel, target.id, &body).await;
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(()) => this.read_ops(cx),
+                        Err(error) => {
+                            this.editing = None;
+                            if let Some(composer) = this.hooks.composer.upgrade() {
+                                composer.update(cx, |composer, cx| {
+                                    composer.set_edit_status(EditStatus::default(), cx);
+                                    composer.set_notice(Some(error.into()), cx);
+                                });
+                            }
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    /// "Retry edit": republishes the edit still in the outbox.
+    pub fn retry_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(op) = self.editing.as_ref().and_then(|e| e.op) else {
+            return;
+        };
+        let session = self.session(cx);
+        cx.foreground_executor()
+            .spawn(async move {
+                let _ = session.retry_send(op).await;
+            })
+            .detach();
+    }
+
+    /// Mirrors the sent edit's delivery into the composer, and ends the
+    /// edit once the relay has it.
+    fn follow_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(editing) = &mut self.editing else {
+            return;
+        };
+        if editing.op.is_none() {
+            editing.op = self
+                .ops
+                .list
+                .iter()
+                .rev()
+                .find(|op| {
+                    op.kind == buzz_relay_client::kinds::EDIT
+                        && op.target == Some(editing.target.id)
+                })
+                .map(|op| op.id);
+        }
+        let Some(id) = editing.op else {
+            return;
+        };
+        let Some(composer) = self.hooks.composer.upgrade() else {
+            return;
+        };
+        match self.ops.get(id) {
+            Some(op) if !matches!(op.delivery, Delivery::Seen | Delivery::Accepted) => {
+                let retryable = matches!(op.delivery, Delivery::Failed | Delivery::Unknown);
+                let error = op.error.clone();
+                composer.update(cx, |composer, cx| {
+                    composer.set_edit_status(
+                        EditStatus {
+                            locked: true,
+                            busy: op.delivery == Delivery::Sending,
+                            retryable,
+                        },
+                        cx,
+                    );
+                    if retryable && error.is_some() {
+                        composer.set_notice(error.map(Into::into), cx);
+                    }
+                });
+            }
+            _ => {
+                self.editing = None;
+                cx.defer(move |cx| {
+                    if let Some(window) = cx.active_window() {
+                        let _ = window.update(cx, |_, window, cx| {
+                            composer.update(cx, |composer, cx| {
+                                composer.set_edit_status(EditStatus::default(), cx);
+                                composer.sent(window, cx)
+                            })
+                        });
+                    }
+                });
+            }
+        }
     }
 
     /// Fills a page's rows with these actions and their state.
@@ -576,6 +750,7 @@ impl MessageActions {
             awaiting: false,
             error: None,
             focus,
+            from_edit: false,
         });
     }
 

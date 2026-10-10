@@ -128,6 +128,9 @@ impl ThreadPanel {
                     ComposerEvent::Submit(submission) => this.send(submission.clone(), window, cx),
                     ComposerEvent::CancelReply => this.reply_to(None, window, cx),
                     ComposerEvent::EditLast => this.edit_last(window, cx),
+                    ComposerEvent::RetryEdit => this
+                        .message_actions
+                        .update(cx, |actions, cx| actions.retry_edit(cx)),
                 },
             ),
         ];
@@ -222,6 +225,7 @@ impl ThreadPanel {
                 })
             }),
             thread: Some(root_id),
+            composer: composer.downgrade(),
         };
         let (community, channel) = (community.clone(), channel.to_string());
         cx.new(|cx| MessageActions::new(community, channel, hooks, window, cx))
@@ -328,8 +332,9 @@ impl ThreadPanel {
     }
 
     fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(row) = submission.editing.clone() {
-            self.save_edit(row, submission, window, cx);
+        if submission.editing.is_some() {
+            self.message_actions
+                .update(cx, |actions, cx| actions.save_edit(submission, window, cx));
             return;
         }
         let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) else {
@@ -367,36 +372,6 @@ impl ThreadPanel {
                             }
                             None => this.list.set_follow_mode(FollowMode::Tail),
                         }
-                        this.composer
-                            .update(cx, |composer, cx| composer.sent(window, cx));
-                    }
-                    Err(error) => {
-                        this.error = Some(error.into());
-                        this.composer.update(cx, |composer, cx| composer.failed(cx));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Saves an edit made in the panel's composer.
-    fn save_edit(
-        &mut self,
-        row: Arc<MessageRow>,
-        submission: Submission,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let session = self.community.read(cx).session.clone();
-        let channel = self.channel.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = session.edit(&channel, row.id, &submission.content).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(()) => {
-                        this.error = None;
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
                     }

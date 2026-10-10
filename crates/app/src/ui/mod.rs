@@ -19,6 +19,7 @@ mod membership;
 mod message;
 mod message_actions;
 mod message_copy;
+mod message_edit;
 mod modal;
 pub mod navigation;
 mod new_channel;

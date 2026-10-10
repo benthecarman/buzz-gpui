@@ -14,6 +14,7 @@ use super::gif_picker::PickedGif;
 use super::media;
 use super::media::recorder::{self, Recorder};
 use super::message::{self, channel_icon};
+use super::message_edit;
 use super::overlay;
 use crate::community::{AppState, Community};
 use buzz_relay_client::fold::MessageRow;
@@ -22,7 +23,7 @@ use buzz_relay_client::messages::media_byte_limit;
 use buzz_relay_client::upload::{self, MAX_UPLOAD, UploadError, UploadFile};
 use buzz_relay_client::{Attachment, ChannelSummary, ChannelType, EventId, Mentions, Partition};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, Button, ButtonVariant, Dialog, Icon, IconButton,
+    ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, ButtonVariant, Dialog, Icon, IconButton,
     IconButtonShape, IconButtonSize, IconName, Spinner, Surface, Tooltip, TypeStyled,
 };
 use gpui_kit::component::input::{
@@ -53,6 +54,8 @@ pub enum ComposerEvent {
     /// Up in an empty composer: edit the viewer's last message.
     EditLast,
     CancelReply,
+    /// "Retry edit": republish the edit still in the outbox.
+    RetryEdit,
 }
 
 #[derive(Clone)]
@@ -90,6 +93,10 @@ pub struct Composer {
     /// The host allows sending (a thread needs a loaded reply target).
     can_send: bool,
     editing: Option<Arc<MessageRow>>,
+    /// The text the edit started from.
+    edit_initial: Option<String>,
+    /// The edit's delivery, as the host reports it.
+    edit_status: message_edit::EditStatus,
     /// The draft set aside while editing.
     stash: Option<InputContent>,
     context: Option<ReplyContext>,
@@ -266,6 +273,8 @@ impl Composer {
             sending: false,
             can_send: true,
             editing: None,
+            edit_initial: None,
+            edit_status: message_edit::EditStatus::default(),
             stash: None,
             context: None,
             formatting: false,
@@ -301,6 +310,7 @@ impl Composer {
         self.input.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    #[allow(dead_code)]
     pub fn editing(&self) -> Option<&Arc<MessageRow>> {
         self.editing.as_ref()
     }
@@ -336,20 +346,59 @@ impl Composer {
         }
     }
 
+    /// The text the current edit started from.
+    pub fn edit_initial(&self) -> Option<&str> {
+        self.edit_initial.as_deref()
+    }
+
+    /// Shows the edit's delivery: locked while sent, busy while sending,
+    /// and "Retry edit" when it failed.
+    pub fn set_edit_status(&mut self, status: message_edit::EditStatus, cx: &mut Context<Self>) {
+        if self.edit_status != status {
+            self.edit_status = status;
+            cx.notify();
+        }
+    }
+
+    /// A message under the text, such as why an edit cannot be saved.
+    pub fn set_notice(&mut self, notice: Option<SharedString>, cx: &mut Context<Self>) {
+        self.notice = notice;
+        self.sending = false;
+        cx.notify();
+    }
+
     /// Puts `row`'s text in the composer to edit it (§4.8 edit mode). The
-    /// draft waits until the edit ends.
+    /// draft waits until the edit ends. Another edit must end first.
     pub fn start_edit(
         &mut self,
         row: Arc<MessageRow>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|editing| editing.id != row.id)
+        {
+            self.notice = Some(message_edit::BUSY.into());
+            self.input.update(cx, |state, cx| state.focus(window, cx));
+            cx.notify();
+            return;
+        }
         if self.editing.is_none() {
             self.write_draft(cx);
             self.stash = Some(self.input.read(cx).content());
         }
-        let content = edit_content(&edit_text(&row));
+        let text = {
+            let community = self.community.read(cx);
+            let directory = super::markdown::Directory::of(community, None, cx);
+            message_edit::edit_text(&row, &directory.profiles, &directory.names)
+        };
+        let content = edit_content(&text);
         let end = content.text().len();
+        self.edit_initial = Some(content.text().to_string());
+        self.edit_status = message_edit::EditStatus::default();
+        self.notice = None;
         self.editing = Some(row);
         self.completion = None;
         self.input.update(cx, |state, cx| {
@@ -363,9 +412,13 @@ impl Composer {
     }
 
     pub fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.editing.take().is_none() {
+        if self.edit_status.busy || self.editing.take().is_none() {
             return;
         }
+        self.edit_initial = None;
+        self.edit_status = message_edit::EditStatus::default();
+        self.notice = None;
+        self.sending = false;
         let stash = self.stash.take().unwrap_or_else(|| InputContent::new(""));
         let placeholder = self.placeholder.clone();
         self.input.update(cx, |state, cx| {
@@ -439,7 +492,9 @@ impl Composer {
             && self.can_send
             && self.uploads_ready()
             && self.input.read(cx).value().chars().count() <= MAX_CHARS
-            && (self.has_text(cx) || (!self.attachments.is_empty() && self.editing.is_none()))
+            && !self.edit_status.locked
+            // An empty edit asks to delete the message instead.
+            && (self.has_text(cx) || self.editing.is_some() || !self.attachments.is_empty())
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -448,12 +503,7 @@ impl Composer {
         }
         let state = self.input.read(cx);
         let content = state.value().trim().to_string();
-        if let Some(row) = &self.editing
-            && content == edit_text(row).trim()
-        {
-            self.cancel_edit(window, cx);
-            return;
-        }
+        let _ = window;
         let chosen = self.recipients(cx);
         let mentioned: Vec<String> = chosen.iter().map(|(key, _)| key.clone()).collect();
         // Agents among the recipients, for the next draft.
@@ -960,6 +1010,12 @@ impl Composer {
         };
         let range = completion.query.start..completion.query.end;
         let token = match item {
+            // While editing, a pick is an identity link, never a recipient.
+            Suggestion::Person { pubkey, name, .. } if self.editing.is_some() => {
+                message_edit::mention_text(pubkey, name).map(|link| {
+                    InlineToken::new(pubkey.clone(), link).with_label(format!("@{name}"))
+                })
+            }
             Suggestion::Person { pubkey, name, .. } => {
                 Some(InlineToken::new(pubkey.clone(), format!("@{name}")))
             }
@@ -1366,18 +1422,40 @@ impl Composer {
     }
 }
 
-/// What "Edit message" puts in the composer: the body with its attachment
-/// Markdown (`messageEditText`).
-pub fn edit_text(row: &MessageRow) -> String {
-    row.source_content
-        .clone()
-        .unwrap_or_else(|| row.content.clone())
-}
-
-/// The text to edit, with its channel references back as chips.
+/// The text to edit, with its identity links and channel references back
+/// as chips.
 fn edit_content(text: &str) -> InputContent {
     const LINK: &str = "](buzz://channel/";
     let mut content = InputContent::new(text.to_string());
+    // `[\@Name](nostr:npub1…)`, as `profileMentionLink` writes them.
+    let mut from = 0;
+    while let Some(open) = text[from..].find("[\\@").map(|i| from + i) {
+        from = open + 3;
+        let Some(link) = text[open..].find("](nostr:npub1").map(|i| open + i) else {
+            break;
+        };
+        let Some(close) = text[link..].find(')').map(|i| link + i) else {
+            break;
+        };
+        let mut name = String::new();
+        let mut escaped = false;
+        for c in text[open + 1..link].chars() {
+            if c == '\\' && !escaped {
+                escaped = true;
+            } else {
+                name.push(c);
+                escaped = false;
+            }
+        }
+        let Some(key) = buzz_relay_client::profile_key(&text[link + 2..close]) else {
+            continue;
+        };
+        let chip = InlineToken::new(key.to_hex(), text[open..=close].to_string()).with_label(name);
+        if let Ok(next) = content.clone().with_token(open..close + 1, chip) {
+            content = next;
+        }
+        from = close + 1;
+    }
     let mut from = 0;
     while let Some(open) = text[from..].find("[\\#").map(|i| from + i) {
         from = open + 3;
@@ -1675,9 +1753,38 @@ impl Composer {
                 IconButton::new("cancel-edit", IconName::X)
                     .size(IconButtonSize::Sm)
                     .icon_size(18.)
-                    .tooltip("Cancel edit")
+                    .disabled(self.edit_status.busy)
+                    .tooltip(if self.edit_status.locked {
+                        "Close edit"
+                    } else {
+                        "Cancel edit"
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
             )
+    }
+
+    /// "Your edit is still in the outbox." with "Retry edit".
+    fn edit_retry(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.editing.is_none() || !self.edit_status.retryable {
+            return None;
+        }
+        let c = *cx.colors();
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .text_caption()
+                .text_color(c.text_subtle)
+                .child("Your edit is still in the outbox.")
+                .child(
+                    Button::new("retry-edit", "Retry edit")
+                        .size(ButtonSize::Sm)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::RetryEdit))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn context_box(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2721,6 +2828,7 @@ impl Render for Composer {
                 this.add_paths(paths.paths().to_vec(), cx);
             }))
             .when(editing, |d| d.child(self.edit_header(cx)))
+            .children(self.edit_retry(cx))
             .children(self.attachment_row(cx))
             .child(div().pl(px(4.)).pt(px(4.)).child(textarea))
             .when(self.drag_over, |d| {

@@ -124,6 +124,9 @@ impl ChannelPage {
                     ComposerEvent::Submit(submission) => this.send(submission.clone(), window, cx),
                     ComposerEvent::EditLast => this.edit_last(window, cx),
                     ComposerEvent::CancelReply => {}
+                    ComposerEvent::RetryEdit => this
+                        .message_actions
+                        .update(cx, |actions, cx| actions.retry_edit(cx)),
                 },
             ),
         ];
@@ -238,7 +241,7 @@ impl ChannelPage {
 
     /// Rebuilds the rows, telling the list exactly what was added at either
     /// end so the reading position stays put while history loads above.
-    fn sync_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_items(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let rows = self.model.read(cx).snapshot.rows.clone();
         let next = message::items(&rows);
         let old: Vec<_> = self.items.iter().map(|item| item.row.id).collect();
@@ -267,15 +270,6 @@ impl ChannelPage {
         }
         // The edge's state may have changed.
         self.list.splice(0..1, 1);
-        if self
-            .composer
-            .read(cx)
-            .editing()
-            .is_some_and(|editing| !new.contains(&editing.id))
-        {
-            self.composer
-                .update(cx, |composer, cx| composer.cancel_edit(window, cx));
-        }
         self.items = next;
         cx.notify();
     }
@@ -285,6 +279,11 @@ impl ChannelPage {
     }
 
     fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
+        if submission.editing.is_some() {
+            self.message_actions
+                .update(cx, |actions, cx| actions.save_edit(submission, window, cx));
+            return;
+        }
         let session = self.session(cx);
         let channel = self.channel.id.clone();
         if submission.editing.is_none() {
@@ -375,6 +374,7 @@ impl ChannelPage {
                 })
             }),
             thread: None,
+            composer: composer.downgrade(),
         };
         let (community, channel) = (community.clone(), channel.id.clone());
         cx.new(|cx| MessageActions::new(community, channel, hooks, window, cx))
