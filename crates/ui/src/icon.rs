@@ -176,6 +176,7 @@ tabler_icons! {
     SpeakerSlash => "outline/volume-off",
     SquaresFour => "outline/layout-grid",
     Stop => "outline/player-stop",
+    StopFilled => "filled/player-stop",
     Sun => "outline/sun",
     Table => "outline/table",
     TerminalWindow => "outline/terminal-2",

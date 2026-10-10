@@ -22,7 +22,7 @@ const CHUNK: usize = 256 * 1024;
 /// How long a poster frame may take to decode.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn init() -> Result<(), String> {
+pub(super) fn init() -> Result<(), String> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     INIT.get_or_init(|| gst::init().map_err(|error| error.to_string()))
         .clone()

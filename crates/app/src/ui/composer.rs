@@ -9,6 +9,7 @@
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
 use super::media;
+use super::media::recorder::{self, Recorder};
 use super::message::{self, channel_icon};
 use super::overlay;
 use crate::community::{AppState, Community};
@@ -19,7 +20,7 @@ use buzz_relay_client::upload::{self, MAX_UPLOAD, UploadError, UploadFile};
 use buzz_relay_client::{Attachment, ChannelSummary, ChannelType, EventId, Mentions, Partition};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonVariant, Dialog, Icon, IconButton,
-    IconButtonSize, IconName, Spinner, Surface, Tooltip, TypeStyled,
+    IconButtonShape, IconButtonSize, IconName, Spinner, Surface, Tooltip, TypeStyled,
 };
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent, InputEvent,
@@ -103,8 +104,36 @@ pub struct Composer {
     save_draft: Option<Task<()>>,
     /// The send waiting on "Mention people outside this channel?".
     outsiders: Option<Outsiders>,
+    /// A voice note being recorded or prepared, in place of the tools.
+    capture: Option<Capture>,
+    _capture_task: Option<Task<()>>,
     outsiders_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Voice note capture (`VoiceCapture.tsx`).
+enum Capture {
+    Recording(Recorder),
+    Preparing,
+    Failed(SharedString),
+}
+
+/// A recorded note attached to the draft: it plays from memory under
+/// `key` until it is sent.
+struct VoiceDraft {
+    key: String,
+    duration: f64,
+    waveform: Vec<u8>,
+}
+
+/// `formatVoiceNoteDuration`: whole seconds as `m:ss`.
+fn voice_time(seconds: f64) -> String {
+    let whole = if seconds.is_finite() {
+        seconds.max(0.).floor() as u64
+    } else {
+        0
+    };
+    format!("{}:{:02}", whole / 60, whole % 60)
 }
 
 /// A send that mentions people outside the channel, held until the user
@@ -231,6 +260,8 @@ impl Composer {
             save_draft: None,
             outsiders: None,
             outsiders_focus: cx.focus_handle(),
+            capture: None,
+            _capture_task: None,
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
@@ -330,7 +361,11 @@ impl Composer {
             self.cancel_edit(window, cx);
             return;
         }
-        self.attachments.clear();
+        for item in self.attachments.drain(..) {
+            if let Some(voice) = &item.voice {
+                media::forget_local(&voice.key, cx);
+            }
+        }
         self.completion = None;
         self.input
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -1040,6 +1075,7 @@ impl Composer {
             thumbnail,
             bytes,
             status,
+            voice: None,
         });
         self.pump(cx);
         cx.notify();
@@ -1076,8 +1112,9 @@ impl Composer {
             let _ = this.update(cx, |this, cx| {
                 if let Some(item) = this.attachments.iter_mut().find(|item| item.id == id) {
                     match result {
-                        Ok(attachment) => {
+                        Ok(mut attachment) => {
                             item.bytes = None;
+                            attachment.voice_duration = item.voice.as_ref().map(|v| v.duration);
                             item.status = Status::Ready(attachment);
                         }
                         Err(error) => item.status = Status::Failed(error.to_string().into()),
@@ -1090,7 +1127,141 @@ impl Composer {
         .detach();
     }
 
+    // ----- voice notes -----
+
+    /// "Record voice note": starts the microphone at once
+    /// (`useVoiceCapture`), unless a note is already attached or the
+    /// message is full.
+    fn start_capture(&mut self, cx: &mut Context<Self>) {
+        if self.editing.is_some()
+            || self.capture.is_some()
+            || self.attachments.iter().any(|item| item.voice.is_some())
+        {
+            return;
+        }
+        if self.attachments.len() >= MAX_FILES {
+            self.notice = Some(format!("Attach at most {MAX_FILES} files per message.").into());
+            cx.notify();
+            return;
+        }
+        self.capture = Some(match Recorder::start() {
+            Ok(recorder) => Capture::Recording(recorder),
+            Err(error) => Capture::Failed(error.into()),
+        });
+        self._capture_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let going = this.update(cx, |this, cx| {
+                    let Some(Capture::Recording(recorder)) = &this.capture else {
+                        return false;
+                    };
+                    if let Some(error) = recorder.failure() {
+                        this.capture = Some(Capture::Failed(error.into()));
+                    } else if recorder.seconds() >= recorder::MAX_SECONDS {
+                        // The five-minute cap finishes the note.
+                        this.finish_capture(cx);
+                    }
+                    cx.notify();
+                    true
+                });
+                if !matches!(going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// "Discard voice note" (or "Close" after a failure).
+    fn discard_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.capture, Some(Capture::Preparing)) {
+            return;
+        }
+        self.capture = None;
+        self._capture_task = None;
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// "Finish voice note": stops, encodes, and attaches the note.
+    fn finish_capture(&mut self, cx: &mut Context<Self>) {
+        let Some(Capture::Recording(recorder)) = self.capture.take() else {
+            return;
+        };
+        if !recorder.live() {
+            self.capture = Some(Capture::Recording(recorder));
+            return;
+        }
+        self.capture = Some(Capture::Preparing);
+        let prepared = cx.background_executor().spawn(async move {
+            let samples = recorder.finish();
+            let duration = recorder::duration(&samples).min(recorder::MAX_SECONDS);
+            let waveform = recorder::waveform(&samples, recorder::WAVEFORM_BUCKETS);
+            recorder::encode_mp4(&samples).map(|mp4| (mp4, duration, waveform))
+        });
+        self._capture_task = Some(cx.spawn(async move |this, cx| {
+            let prepared = prepared.await;
+            let _ = this.update(cx, |this, cx| {
+                match prepared {
+                    Ok((mp4, duration, waveform)) if duration > 0. => {
+                        this.capture = None;
+                        this.add_voice(mp4, duration, waveform, cx);
+                    }
+                    _ => {
+                        this.capture = Some(Capture::Failed(
+                            "Could not attach this voice note. Close and try again.".into(),
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn add_voice(
+        &mut self,
+        mp4: Vec<u8>,
+        duration: f64,
+        waveform: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        self.next_attachment += 1;
+        let id = self.next_attachment;
+        let key = format!("voice-draft:{}:{id}", cx.entity_id());
+        let bytes: Arc<[u8]> = mp4.clone().into();
+        media::set_local(&key, bytes, cx);
+        self.attachments.push(Pending {
+            id,
+            name: format!("voice-note-{millis}.mp4"),
+            mime: "video/mp4".into(),
+            size: mp4.len() as u64,
+            thumbnail: None,
+            bytes: Some(mp4),
+            status: Status::Queued,
+            voice: Some(VoiceDraft {
+                key,
+                duration,
+                waveform,
+            }),
+        });
+        self.pump(cx);
+    }
+
     fn remove_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(voice) = self
+            .attachments
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.voice.as_ref())
+        {
+            media::forget_local(&voice.key, cx);
+        }
         self.attachments.retain(|item| item.id != id);
         self.notice = None;
         self.pump(cx);
@@ -1351,6 +1522,7 @@ struct Pending {
     /// Kept until the upload succeeds, for retries.
     bytes: Option<Vec<u8>>,
     status: Status,
+    voice: Option<VoiceDraft>,
 }
 
 enum Status {
@@ -1561,6 +1733,9 @@ impl Composer {
                 .children(issue)
                 .children(retry)
                 .child(remove);
+            if let Some(voice) = &item.voice {
+                return self.voice_item(item, voice, failed, cx);
+            }
             match &item.thumbnail {
                 Some(image) => div()
                     .id(("attachment", id))
@@ -1754,6 +1929,24 @@ impl Composer {
                         })),
                 ),
             )
+            .when(!editing, |d| {
+                // A plain 32px button: no hover fill, an 18px glyph.
+                d.child(
+                    div()
+                        .id("record-voice-note")
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded(px(10.))
+                        .text_color(c.text_subtle)
+                        .cursor_pointer()
+                        .tooltip(Tooltip::text("Record voice note"))
+                        .child(Icon::new(IconName::Microphone).size(18.))
+                        .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx))),
+                )
+            })
             .child(
                 IconButton::new("format", IconName::TextAa)
                     .size(IconButtonSize::Sm)
@@ -1882,6 +2075,198 @@ impl Composer {
                         .children(buttons),
                 )
             })
+    }
+
+    /// A recorded note waiting to send: the voice card, 21rem wide, with
+    /// its remove button on the corner (`ComposerAttachments.tsx:128-170`).
+    fn voice_item(
+        &self,
+        item: &Pending,
+        voice: &VoiceDraft,
+        failed: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = *cx.colors();
+        let id = item.id;
+        let media = self.community.read(cx).session.media().clone();
+        let attachment = buzz_relay_client::fold::Attachment {
+            url: voice.key.clone(),
+            kind: buzz_relay_client::fold::AttachmentKind::Audio,
+            mime: Some(item.mime.clone()),
+            size: Some(item.size),
+            name: Some(item.name.clone()),
+            duration: Some(voice.duration),
+            waveform: Some(voice.waveform.clone()),
+            voice_note: true,
+            dimensions: None,
+            blurhash: None,
+            preview_url: None,
+            insecure: false,
+        };
+        let busy = matches!(item.status, Status::Uploading);
+        div()
+            .id(("voice-draft", id))
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .w(px(336.))
+            .max_w_full()
+            .child(media::voice_draft(
+                ("voice-draft-card", id),
+                &attachment,
+                &media,
+                cx,
+            ))
+            .when_some(failed, |d, error| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .text_caption()
+                        .text_color(c.text_danger)
+                        .child(format!("Upload failed · {error}"))
+                        .child(
+                            IconButton::new(("retry-voice", id), IconName::ArrowsClockwise)
+                                .size(IconButtonSize::Xs)
+                                .tooltip("Retry upload")
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.retry_attachment(id, cx)
+                                    }),
+                                ),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id(("remove-voice", id))
+                    .absolute()
+                    .top(px(-1.))
+                    .right(px(-5.))
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(c.border_standard)
+                    .bg(c.surface_popover)
+                    .text_color(c.text_standard)
+                    .cursor_pointer()
+                    .tooltip(Tooltip::text("Remove voice note"))
+                    .map(|d| {
+                        if busy {
+                            d.child(Spinner::new().size(12.))
+                        } else {
+                            d.child(Icon::new(IconName::X).size(16.))
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(id, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The recorder in place of the tools (`VoiceCapture.tsx`): discard,
+    /// a divider, the timer, the live waveform and the finish button.
+    fn capture_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let capture = self.capture.as_ref()?;
+        let c = *cx.colors();
+        let discard = IconButton::new("discard-voice-note", IconName::X)
+            .size(IconButtonSize::Sm)
+            .icon_size(18.)
+            .tooltip("Discard voice note")
+            .disabled(matches!(capture, Capture::Preparing))
+            .on_click(cx.listener(|this, _, window, cx| this.discard_capture(window, cx)));
+        let row = div()
+            .id("voice-capture")
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .min_h(px(40.))
+            .child(discard)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(1.))
+                    .h(px(20.))
+                    .mx(px(4.))
+                    .bg(c.border_standard),
+            );
+        if let Capture::Failed(error) = capture {
+            return Some(
+                row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_caption()
+                        .text_color(c.text_danger)
+                        .child(error.clone()),
+                )
+                .child(
+                    Button::new("close-voice-note", "Close").on_click(
+                        cx.listener(|this, _, window, cx| this.discard_capture(window, cx)),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        let recorder = match capture {
+            Capture::Recording(recorder) => Some(recorder),
+            _ => None,
+        };
+        let live = recorder.is_some_and(Recorder::live);
+        let timer = match recorder {
+            Some(recorder) if live => div().flex().child(voice_time(recorder.seconds())).child(
+                div()
+                    .text_color(c.text_subtle)
+                    .child(format!(" / {}", voice_time(recorder::MAX_SECONDS))),
+            ),
+            Some(_) => div().child("Waiting for microphone…"),
+            None => div().child("Preparing voice note…"),
+        };
+        let levels = recorder.map(|r| r.levels(256)).unwrap_or_default();
+        Some(
+            row.child(
+                timer
+                    .flex_none()
+                    .text_caption()
+                    .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                    .text_color(c.text_standard),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(24.))
+                    .mx(px(8.))
+                    .items_center()
+                    .justify_end()
+                    .gap(px(2.))
+                    .overflow_hidden()
+                    .children(levels.into_iter().map(move |level| {
+                        div()
+                            .flex_none()
+                            .w(px(3.))
+                            .h(px(recorder::bar_height(level)))
+                            .rounded_full()
+                            .bg(c.text_standard)
+                    })),
+            )
+            .child(
+                IconButton::new("finish-voice-note", IconName::StopFilled)
+                    .size(IconButtonSize::Sm)
+                    .icon_size(16.)
+                    .variant(ButtonVariant::Prominent)
+                    .shape(IconButtonShape::Round)
+                    .tooltip("Finish voice note")
+                    .disabled(!live)
+                    .on_click(cx.listener(|this, _, _, cx| this.finish_capture(cx))),
+            )
+            .into_any_element(),
+        )
     }
 
     /// "Mention people outside this channel?" (`useNonmemberMentions.tsx`).
@@ -2297,26 +2682,31 @@ impl Render for Composer {
                     .child(notice)
             }))
             .children(self.context_box(cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(self.tools(cx))
-                    .child(
-                        IconButton::new("send", IconName::ArrowUp)
-                            .size(IconButtonSize::Sm)
-                            .when(can_submit, |b| b.variant(ButtonVariant::Prominent))
-                            .disabled(!can_submit)
-                            .tooltip(if editing {
-                                "Save changes"
-                            } else {
-                                "Send message"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-                    ),
-            );
+            .children(self.capture_row(cx))
+            .when(self.capture.is_none(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(self.tools(cx))
+                        .child(
+                            IconButton::new("send", IconName::ArrowUp)
+                                .size(IconButtonSize::Sm)
+                                .when(can_submit, |b| b.variant(ButtonVariant::Prominent))
+                                .disabled(!can_submit)
+                                .tooltip(if editing {
+                                    "Save changes"
+                                } else {
+                                    "Send message"
+                                })
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                                ),
+                        ),
+                )
+            });
 
         let picker = self.picker_open.then(|| {
             let dismiss = cx.listener(|this, _: &MouseDownEvent, _, cx| {

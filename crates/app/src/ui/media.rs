@@ -9,11 +9,12 @@
 
 mod audio;
 mod engine;
+pub mod recorder;
 mod review;
 mod seek;
 mod video;
 
-pub use audio::{audio_attachment, voice_note};
+pub use audio::{audio_attachment, forget_local, set_local, voice_draft, voice_note};
 pub use review::{open_review, review_overlay};
 pub use video::video_preview;
 

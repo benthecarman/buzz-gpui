@@ -18,6 +18,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How often a playing clip reports its position.
@@ -35,6 +36,8 @@ pub struct Audio {
     durations: HashMap<String, f64>,
     failed: HashSet<String>,
     rates: HashMap<String, f64>,
+    /// Clips that play from memory, not the relay: voice note drafts.
+    local: HashMap<String, Arc<[u8]>>,
 }
 
 struct Track {
@@ -91,6 +94,37 @@ fn audio(window: &mut Window, cx: &mut App) -> Entity<Audio> {
     // Rows drawn before it existed do not watch it yet.
     window.refresh();
     audio
+}
+
+/// Lets `key` play `bytes` from memory, for a draft that is not uploaded
+/// yet.
+pub fn set_local(key: &str, bytes: Arc<[u8]>, cx: &mut App) {
+    let audio = match cx.try_global::<AudioGlobal>() {
+        Some(audio) => audio.0.clone(),
+        None => {
+            let audio = cx.new(|_| Audio::default());
+            cx.set_global(AudioGlobal(audio.clone()));
+            audio
+        }
+    };
+    let key = key.to_string();
+    audio.update(cx, |audio, _| {
+        audio.local.insert(key, bytes);
+    });
+}
+
+/// Forgets a draft from [`set_local`], stopping it if it plays.
+pub fn forget_local(key: &str, cx: &mut App) {
+    let Some(audio) = cx.try_global::<AudioGlobal>().map(|audio| audio.0.clone()) else {
+        return;
+    };
+    audio.update(cx, |audio, cx| {
+        audio.local.remove(key);
+        if audio.track.as_ref().is_some_and(|track| track.url == key) {
+            audio.track = None;
+        }
+        cx.notify();
+    });
 }
 
 fn toggle(url: &str, voice: bool, media: &Media, window: &mut Window, cx: &mut App) {
@@ -179,9 +213,14 @@ impl Audio {
     ) {
         self.failed.remove(&url);
         let task_url = url.clone();
+        let local = self.local.get(&url).cloned();
         let task = cx.spawn(async move |this, cx| {
             let url = task_url;
-            let engine = match media.fetch(&url).await {
+            let bytes = match local {
+                Some(bytes) => Ok(bytes),
+                None => media.fetch(&url).await,
+            };
+            let engine = match bytes {
                 Ok(bytes) => {
                     cx.background_executor()
                         .spawn(async move { Engine::new(bytes, Kind::Audio) })
@@ -385,6 +424,28 @@ pub fn voice_note(
     media: &Media,
     cx: &App,
 ) -> AnyElement {
+    voice_card(id.into(), attachment, media, false, cx)
+}
+
+/// A recorded note in the composer (`data-voice-draft`): it plays from
+/// memory under `attachment.url` (see [`set_local`]), always shows its
+/// length and has no speed button.
+pub fn voice_draft(
+    id: impl Into<ElementId>,
+    attachment: &Attachment,
+    media: &Media,
+    cx: &App,
+) -> AnyElement {
+    voice_card(id.into(), attachment, media, true, cx)
+}
+
+fn voice_card(
+    id: ElementId,
+    attachment: &Attachment,
+    media: &Media,
+    draft: bool,
+    cx: &App,
+) -> AnyElement {
     let c = *cx.colors();
     let url = attachment.url.clone();
     let state = status(&url, attachment.duration, cx);
@@ -495,40 +556,42 @@ pub fn voice_note(
                         .text_caption()
                         .font_features(tabular())
                         .text_color(c.text_subtle)
-                        .group_hover("voice-note", |s| s.opacity(0.))
+                        .when(!draft, |d| d.group_hover("voice-note", |s| s.opacity(0.)))
                         .child(media_time(if state.playing {
                             (duration - state.position).max(0.)
                         } else {
                             duration
                         })),
                 )
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .opacity(0.)
-                        .group_hover("voice-note", |s| s.opacity(1.))
-                        .child(
-                            Button::new(
-                                "speed",
-                                if rate == 0.5 {
-                                    ".5×".to_string()
-                                } else {
-                                    format!("{rate}×")
-                                },
-                            )
-                            .variant(ButtonVariant::Prominent)
-                            .size(ButtonSize::Xs)
-                            .full_width()
-                            .tooltip("Playback speed")
-                            .on_click(move |_, window, cx| {
-                                audio(window, cx)
-                                    .update(cx, |audio, cx| audio.cycle_rate(&rate_url, cx))
-                            }),
-                        ),
-                ),
+                .when(!draft, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .opacity(0.)
+                            .group_hover("voice-note", |s| s.opacity(1.))
+                            .child(
+                                Button::new(
+                                    "speed",
+                                    if rate == 0.5 {
+                                        ".5×".to_string()
+                                    } else {
+                                        format!("{rate}×")
+                                    },
+                                )
+                                .variant(ButtonVariant::Prominent)
+                                .size(ButtonSize::Xs)
+                                .full_width()
+                                .tooltip("Playback speed")
+                                .on_click(move |_, window, cx| {
+                                    audio(window, cx)
+                                        .update(cx, |audio, cx| audio.cycle_rate(&rate_url, cx))
+                                }),
+                            ),
+                    )
+                }),
         )
         .when(state.failed, |this| {
             this.child(
