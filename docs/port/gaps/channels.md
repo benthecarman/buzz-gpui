@@ -74,7 +74,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | Routes (profiles, membership, presence, singletons, batches of 10); capacity 1022; `limited` over capacity | live.ts:17-22, 369-454 | DONE (live.rs:40-54, 321-406) | - | - |
 | REQ filters per route (channel kinds `#h`; profiles; membership incl. read-state and 30300; presence `limit 0`) | live.ts:200-203, 572-635 | DONE (live.rs:462-511) | - | - |
-| Observer/telemetry route (24200/44200 `#p viewer`, archive capture, settings retry) | live.ts:302-320, 567-588, 852-866; native.ts:539-659 | MISSING | With agent activity feature | M |
+| Observer/telemetry route (24200/44200 `#p viewer`, archive capture, settings retry) | live.ts:302-320, 567-588, 852-866; native.ts:539-659 | PARTIAL | Route and capture done (live.rs `RouteKey::Observer`; `Session::observe`); decrypting, archiving and the settings retry come with the agent activity feature | M |
 | `prioritize` ≤64 ids; singletons; globals first; `SETUP_CONCURRENCY=4` | live.ts:22, 521-553, 1031-1035 | DONE (live.rs:214-226, 515-565) | - | - |
 | Setup deadline 10 s ("Live subscription setup timed out; retry available"); keep previous wire and re-pend | live.ts:455-473, 558-565 | DONE (live.rs) | - | - |
 | Replacement keeps previous wire until EOSE; previous-wire events filtered to narrowed scope | live.ts:323-344, 832-842 | DONE (live.rs) | - | - |
@@ -160,7 +160,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | MISSING | Dev-only; tracing spans | S |
+| Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | PARTIAL | Every request is traced with timings and Server-Timing (http.rs `send`, target `buzz_relay::profile`); the 2048-sample ring and client metrics come with a diagnostics view | S |
 | Frame traffic log and `relayDebug` | live.ts:280-286, 689, 718; debug.ts:1-7 | DONE (socket.rs: `relay-ws` trace target for every frame) | - | - |
 | `yieldToHost` batches of 12 | yield.ts:1-12; transport.ts:234-241 | DONE (reader.rs:544-547, `spawn_blocking`) | - | - |
 | Budgets (32 KiB input, byteSize, ByteLru) | budget.ts:1-71 | DONE (outbox.rs:51, 749; unread.rs:319) | - | - |
@@ -319,7 +319,7 @@ Key findings:
 | `observe()` marks seen on verified echo | outbox.ts:838-892 | DONE (outbox.rs:1609-1651; session/mod.rs:1186-1187) | - | - |
 | Retry reuses saved signature; refusal rules | outbox.ts:767-794 | DONE (outbox.rs:849-886) | - | - |
 | dismiss / recover / acknowledge rules and texts | outbox.ts:587-636, 795-815, 117-122 | DONE (outbox.rs:891-1000, 1339-1353) | - | - |
-| Workflow receipt callback | session.ts:293-294 | PARTIAL | Session passes `on_receipt: None` (session/mod.rs:878-886) | S |
+| Workflow receipt callback | session.ts:293-294 | PARTIAL | Session passes `on_receipt: None`; comes with the workflows feature | S |
 | preparePublish: fresh mention roster check, canvas/workflow validation, re-check at publish start | session.ts:296-315 | DONE (session/publisher.rs; canvas and workflow checks come with those features) | - | - |
 | `observeSend` hook (mention-wake, unhide DM on outgoing send) | outbox.ts:48-50, 153-177 | DONE (outbox.rs `observe_send`; `Session::observe_send`; its consumers are agent mention-wake and local DM hides) | - | - |
 | Serialized journal commits; confirmed LRU 2048 / 8 MiB; "Outbox storage is full" over 2 MiB | outbox.ts:205-276, 127 | DONE (outbox.rs:45-49, 1065-1153; store.rs:136, 512-660) | - | - |

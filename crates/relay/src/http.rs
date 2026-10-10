@@ -330,6 +330,10 @@ impl RelayHttp {
             .identity
             .http_auth(&url, "POST", Some(body.as_bytes()))
             .map_err(|error| HttpError::Invalid(error.to_string()))?;
+        // Request timings for profiling (`profiling.ts`): time to headers,
+        // to the whole body, and the relay's own Server-Timing stages.
+        let started = Instant::now();
+        let sent = body.len();
         let response = self
             .client
             .post(&url)
@@ -339,7 +343,25 @@ impl RelayHttp {
             .send()
             .await
             .map_err(|error| HttpError::Transport(error.to_string()))?;
+        let headers = started.elapsed();
+        let status = response.status().as_u16();
+        let server_timing = response
+            .headers()
+            .get("server-timing")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let result = read(response).await;
+        tracing::debug!(
+            target: "buzz_relay::profile",
+            path,
+            status,
+            sent,
+            received = result.as_ref().map_or(0, Vec::len),
+            headers_ms = headers.as_millis() as u64,
+            total_ms = started.elapsed().as_millis() as u64,
+            server_timing = server_timing.as_deref().unwrap_or(""),
+            "relay request"
+        );
         if let Err(HttpError::Status {
             status: 429,
             message,
