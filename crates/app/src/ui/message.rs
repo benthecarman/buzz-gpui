@@ -940,8 +940,10 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
         _ => None,
     };
     // Menus drop below the bar's end; the reaction picker opens above it,
-    // 6px off, flipping below when there is no room.
-    let above = matches!(open, Some(Popup::Picker { .. }));
+    // 6px off, and below it when there is no room above.
+    let top = bar_top(&id);
+    let above = matches!(open, Some(Popup::Picker { .. })) && top.get() > PICKER_ROOM;
+    bar = bar.child(measure_top(top));
     bar.children(popup.map(|popup| {
         let anchor = div().absolute().right_0();
         let anchor = if above {
@@ -961,6 +963,43 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
                 .child(popup),
         ))
     }))
+}
+
+/// Room the reaction picker needs above its trigger.
+const PICKER_ROOM: f32 = 380.;
+
+/// The window y of a row's action bar, measured each frame.
+fn bar_top(id: &str) -> Rc<Cell<f32>> {
+    thread_local! {
+        static TOPS: std::cell::RefCell<HashMap<String, Rc<Cell<f32>>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    TOPS.with_borrow_mut(|tops| {
+        if tops.len() > 256 {
+            tops.clear();
+        }
+        tops.entry(id.to_string())
+            .or_insert_with(|| Rc::new(Cell::new(f32::MAX)))
+            .clone()
+    })
+}
+
+fn measure_top(top: Rc<Cell<f32>>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let next = f32::from(bounds.origin.y);
+            if (top.get() - next).abs() > 0.5 {
+                let was = top.get() > PICKER_ROOM;
+                top.set(next);
+                if was != (next > PICKER_ROOM) {
+                    window.refresh();
+                }
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// A quick reaction's glyph: lifts 1px and grows 12% under the pointer,
@@ -1511,17 +1550,32 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElem
                     )
                 })
             });
-        pills = pills.child(div().relative().child(button).when(open, |d| {
-            d.child(
-                div().absolute().left_0().top_0().child(deferred(
-                    anchored()
-                        .anchor(Anchor::BottomLeft)
-                        .offset(point(px(0.), px(-6.)))
-                        .snap_to_window_with_margin(px(8.))
-                        .child(picker(rows)),
-                )),
-            )
-        }));
+        let top = bar_top(&format!("react-more-{id}"));
+        let above = top.get() > PICKER_ROOM;
+        pills = pills.child(div().relative().child(measure_top(top)).child(button).when(
+            open,
+            |d| {
+                let anchor = div().absolute().left_0();
+                let anchor = if above {
+                    anchor.top_0()
+                } else {
+                    anchor.bottom_0()
+                };
+                d.child(
+                    anchor.child(deferred(
+                        anchored()
+                            .anchor(if above {
+                                Anchor::BottomLeft
+                            } else {
+                                Anchor::TopLeft
+                            })
+                            .offset(point(px(0.), px(if above { -6. } else { 6. })))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(picker(rows)),
+                    )),
+                )
+            },
+        ));
     }
     if let Some(error) = error {
         pills = pills.child(div().text_caption().text_color(c.text_danger).child(error));

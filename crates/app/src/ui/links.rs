@@ -579,7 +579,9 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
                     .hover(|s| s.bg(c.affordance_link_hover))
             }
         })
-        .when_some(tooltip, |d, text| d.tooltip(Tooltip::text(text)))
+        .when_some(tooltip.filter(|_| menu_at.is_none()), |d, text| {
+            d.tooltip(Tooltip::text(text))
+        })
         .child(body)
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
