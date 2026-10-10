@@ -28,6 +28,10 @@ const LEVEL_SAMPLES: usize = SAMPLE_RATE as usize * 120 / 1000;
 pub const WAVEFORM_BUCKETS: usize = 48;
 const MAX_SAMPLES: usize = SAMPLE_RATE as usize * MAX_SECONDS as usize;
 const ENCODE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The still video's frame rate. The upload re-encodes it at a constant
+/// rate, so its last frame lasts a whole frame; the relay refuses an
+/// `imeta` duration more than 0.1s from that track, which 1 fps overshot.
+const VIDEO_FPS: u32 = 25;
 
 pub const NO_MICROPHONE: &str = "Buzz could not start the voice recorder.";
 pub const UNAVAILABLE: &str = "Voice recording is not available in this environment.";
@@ -326,7 +330,7 @@ fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
            ! audioconvert ! audioresample ! avenc_aac bitrate=128000 ! aacparse ! mux.audio_0 \
          appsrc name=video format=time \
            caps=\"video/x-h264,stream-format=avc,alignment=au,width=16,height=16,\
-                 framerate=1/1,codec_data=(buffer){}\" ! mux.video_0 \
+                 framerate={VIDEO_FPS}/1,codec_data=(buffer){}\" ! mux.video_0 \
          mp4mux name=mux faststart=true ! filesink location=\"{location}\"",
         hex(&avc_config())
     );
@@ -346,16 +350,20 @@ fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     let seconds = duration(samples);
-    let frames = seconds.ceil().max(1.) as u64;
+    let fps = VIDEO_FPS as f64;
+    let frames = (seconds * fps).ceil().max(1.) as u64;
     for frame in 0..frames {
         let mut access_unit = (IDR.len() as u32).to_be_bytes().to_vec();
         access_unit.extend_from_slice(IDR);
         let mut buffer = gst::Buffer::from_mut_slice(access_unit);
         let buffer_ref = buffer.get_mut().ok_or("buffer")?;
-        let start = gst::ClockTime::from_seconds(frame);
+        let start = frame as f64 / fps;
         // The last frame ends with the audio.
-        let end = ((frame + 1) as f64).min(seconds).max(frame as f64 + 0.001);
-        let end = gst::ClockTime::from_nseconds((end * 1e9) as u64);
+        let end = ((frame + 1) as f64 / fps).min(seconds).max(start + 0.001);
+        let (start, end) = (
+            gst::ClockTime::from_nseconds((start * 1e9) as u64),
+            gst::ClockTime::from_nseconds((end * 1e9) as u64),
+        );
         buffer_ref.set_pts(start);
         buffer_ref.set_dts(start);
         buffer_ref.set_duration(end.saturating_sub(start));
@@ -544,6 +552,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(attachment.mime, "video/mp4");
+            // Not a whole second: the relay holds the tag to the converted
+            // video track's length.
             attachment.voice_duration = Some(duration(&samples));
             let view = session.open_channel(&channel);
             session
