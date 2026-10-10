@@ -148,9 +148,9 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Namesake disambiguation: a public-key suffix ("Alice · pktz"), "{Owner}’s {Agent}" and "{Name} (agent)", with the viewer and the viewer's own agents given priority | `src/features/identity-names/policy.ts:11-112` | MISSING: names come straight from profiles (`ui/message.rs:79-84`). | A shared resolver used by messages, mentions and member lists. | M |
-| Agent directory names: signed agent profile, then library alias, then same-community native agent name overriding the profile | `src/features/identity-names/directory.ts:15-149`; `src/features/identity-names/service.ts` | MISSING: local host agent names are not merged into display names. | Merge host agent names, scoped to the community. | M |
-| App-local profile targets `buzz:agent-profile:<hex>` and `buzz:agent-instance:<json>` (agent avatar hint, instance profile panel) | `src/features/profiles/target.ts:1-36`; `src/features/profiles/instance-target.ts:1-52` | MISSING: only `nostr:npub1…` links resolve (`crates/relay/src/links.rs:8-21`). | Belongs with the profile-panel work. | M |
+| Namesake disambiguation: a public-key suffix ("Alice · pktz"), "{Owner}’s {Agent}" and "{Name} (agent)", with the viewer and the viewer's own agents given priority | `src/features/identity-names/policy.ts:11-112` | DONE (ui/identity.rs, with the messages rework) | A shared resolver used by messages, mentions and member lists. | M |
+| Agent directory names: signed agent profile, then library alias, then same-community native agent name overriding the profile | `src/features/identity-names/directory.ts:15-149`; `src/features/identity-names/service.ts` | DONE (ui/identity.rs, with the messages rework) | Merge host agent names, scoped to the community. | M |
+| App-local profile targets `buzz:agent-profile:<hex>` and `buzz:agent-instance:<json>` (agent avatar hint, instance profile panel) | `src/features/profiles/target.ts:1-36`; `src/features/profiles/instance-target.ts:1-52` | MISSING: the profile panel (ui/workspace/companion.rs) opens people by key; nothing creates agent-profile or agent-instance targets yet | Belongs with the profile-panel work. | M |
 
 ## 11. Account actions (features/account-actions)
 

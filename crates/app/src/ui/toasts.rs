@@ -64,11 +64,6 @@ impl Notice {
         self
     }
 
-    pub fn tone(mut self, tone: ToastTone) -> Self {
-        self.tone = tone;
-        self
-    }
-
     pub fn action(mut self, action: Action) -> Self {
         self.actions.push(action);
         self
