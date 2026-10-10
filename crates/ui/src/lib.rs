@@ -51,8 +51,14 @@ actions!(
         DecreaseInterfaceSize,
         /// Mod+0 : reset the interface size to 100%.
         ResetInterfaceSize,
+        /// Escape in a [`Dialog`]: closes it. A dialog with a menu open
+        /// closes the menu first by capturing this action.
+        Cancel,
     ]
 );
+
+/// The key context of a [`Dialog`], where Escape is [`Cancel`].
+pub const DIALOG_CONTEXT: &str = "BuzzDialog";
 
 /// Initializes the design system. Call after `gpui_kit::init`.
 ///
@@ -73,6 +79,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-+", IncreaseInterfaceSize, None),
         KeyBinding::new("secondary--", DecreaseInterfaceSize, None),
         KeyBinding::new("secondary-0", ResetInterfaceSize, None),
+        KeyBinding::new("escape", Cancel, Some(DIALOG_CONTEXT)),
     ]);
 
     // Every window gets a gpui-kit Root; follow its system appearance.

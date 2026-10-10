@@ -170,7 +170,7 @@ impl ParentElement for Dialog {
 
 impl RenderOnce for Dialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let c = cx.colors();
+        let c = *cx.colors();
         let width = match self.size {
             DialogSize::Default => 496.,
             DialogSize::Wide => 896.,
@@ -180,8 +180,21 @@ impl RenderOnce for Dialog {
         let heading = self.heading_title;
         // `max-height: 100dvh - 48px`; the body scrolls.
         let max_height = window.viewport_size().height - gpui_kit::px(48.);
+        // Focus inside the dialog keeps Escape (`Cancel`) reaching it.
+        let focus = window
+            .use_keyed_state((self.id.clone(), "focus"), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let on_escape = self.on_close.clone();
         popup(width, cx)
             .id(self.id.clone())
+            .key_context(crate::DIALOG_CONTEXT)
+            .track_focus(&focus)
+            .when_some(on_escape, |this, close| {
+                this.on_action(move |_: &crate::Cancel, window, cx| {
+                    close(&ClickEvent::default(), window, cx)
+                })
+            })
             .max_h(max_height)
             .child(
                 div()
