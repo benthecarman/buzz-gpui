@@ -14,7 +14,7 @@ use crate::hosts::HostConnection;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_host::api::{
     AgentDefaults, AgentEdit, BuildDefaults, DefaultsEdit, Harness, HarnessEdit, HarnessKind,
-    ModelOption, Request, Response, SessionPolicy,
+    ModelAction, ModelOption, ModelRequest, Request, Response, SessionPolicy,
 };
 use buzz_host::harness::{Provider, defaults_name, efforts, from_defaults_name, providers};
 use buzz_ui::{
@@ -329,6 +329,8 @@ struct Lookup {
     busy: bool,
     attempted: bool,
     generation: u64,
+    /// Cancels the lookup in flight.
+    handle: Option<crate::hosts::models::Lookup>,
 }
 
 /// Input placeholders and masking as last set, to set them only on change.
@@ -621,31 +623,57 @@ impl DefaultsCard {
             environment: draft.environment.clone(),
             ..Default::default()
         };
+        // Environment keys the draft sets (or keeps from the saved
+        // defaults) win over the build's workspace (`environmentSet`).
+        let saved_keys = self.saved_keys(cx);
+        let set = |key: &str| match draft.environment.get(key) {
+            Some(value) => value.is_some(),
+            None => saved_keys.iter().any(|saved| saved == key),
+        };
+        let (environment_host, environment_filter) =
+            (set("DATABRICKS_HOST"), set("DATABRICKS_MODEL_FILTER"));
+        let buzz_agent = draft.harness == HarnessKind::BuzzAgent;
+        let workspace = self
+            .host
+            .read(cx)
+            .agents
+            .databricks_defaults
+            .clone()
+            .unwrap_or_default();
+        let request = ModelRequest {
+            edit: Some(edit),
+            host: if buzz_agent && !environment_host {
+                workspace.host
+            } else {
+                String::new()
+            },
+            filter: if buzz_agent && !environment_filter {
+                workspace.filter
+            } else {
+                String::new()
+            },
+            action: ModelAction::Connect,
+            inherit_workspace: environment_host || environment_filter,
+            ..Default::default()
+        };
         self.lookup.generation += 1;
         let generation = self.lookup.generation;
         self.lookup.busy = true;
         self.lookup.attempted = true;
         self.lookup.status = Some(format!("Loading {} models…", harness.label).into());
         let label = harness.label.clone();
-        let response = self.host.update(cx, |host, cx| {
-            host.request(
-                Request::Models {
-                    id: None,
-                    revision: 0,
-                    edit,
-                },
-                cx,
-            )
-        });
+        let (task, handle) = self.host.update(cx, |host, cx| host.models(request, cx));
+        self.lookup.handle = Some(handle);
         cx.spawn(async move |this, cx| {
-            let response = response.await;
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 if this.lookup.generation != generation {
                     return;
                 }
                 this.lookup.busy = false;
-                this.lookup.status = Some(match response {
-                    Ok(Response::Models(catalog)) => {
+                this.lookup.handle = None;
+                this.lookup.status = Some(match result {
+                    Ok(catalog) => {
                         let status = if catalog.model_overridden {
                             "A saved environment model override takes precedence over this \
                              selection."
@@ -659,8 +687,7 @@ impl DefaultsCard {
                         this.lookup.models = Some(catalog.models);
                         status.into()
                     }
-                    Ok(_) => "The host sent an unexpected reply.".into(),
-                    Err(error) => error.to_string().into(),
+                    Err(error) => error.into(),
                 });
                 cx.notify();
             });
@@ -672,6 +699,10 @@ impl DefaultsCard {
     fn cancel_lookup(&mut self, cx: &mut Context<Self>) {
         self.lookup.generation += 1;
         self.lookup.busy = false;
+        if let Some(handle) = self.lookup.handle.take() {
+            self.host
+                .update(cx, |host, cx| host.cancel_models(&handle, cx));
+        }
         self.lookup.status = Some("Cancelled. Retry when ready.".into());
         cx.notify();
     }
