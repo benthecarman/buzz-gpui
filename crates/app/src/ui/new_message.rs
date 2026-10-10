@@ -6,8 +6,8 @@
 use super::message::display_name;
 use super::modal::{Dismissed, Leading, OpenConversation, error, group_label, note, row};
 use crate::community::Community;
-use buzz_relay_client::PeoplePage;
 use buzz_relay_client::members::Person;
+use buzz_relay_client::{Delivery, EventId, PeoplePage, kinds};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, Dialog, Icon, IconName, SearchField, Surface,
     TextArea, TypeStyled,
@@ -31,12 +31,25 @@ pub struct NewMessageDialog {
     searching: Option<Task<()>>,
     highlighted: usize,
     opening: bool,
+    /// The first message is being confirmed ("Sending message…").
+    sending: bool,
     error: Option<SharedString>,
+    /// A first message sent but not yet confirmed, kept for Retry send.
+    pending: Option<Pending>,
     on_open: OpenConversation,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<Dismissed> for NewMessageDialog {}
+
+/// A first message waiting for its delivery to be confirmed.
+#[derive(Clone)]
+struct Pending {
+    id: EventId,
+    channel: String,
+    recipients: Vec<String>,
+    draft: String,
+}
 
 impl NewMessageDialog {
     pub fn new(
@@ -78,7 +91,9 @@ impl NewMessageDialog {
             searching: None,
             highlighted: 0,
             opening: false,
+            sending: false,
             error: None,
+            pending: None,
             on_open,
             _subscriptions: subscriptions,
         };
@@ -174,7 +189,10 @@ impl NewMessageDialog {
     }
 
     /// Opens the conversation with the people picked; with `send`, posts
-    /// the typed message there first.
+    /// the typed message there first and waits until its delivery is
+    /// confirmed (`directMessages.delivered`). A send that cannot be
+    /// confirmed stays pending for "Retry send"; changing the message or
+    /// the people first needs it confirmed or failed.
     fn open(&mut self, send: bool, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.draft(cx);
         if self.selected.is_empty() || self.opening || (send && draft.is_empty()) {
@@ -182,40 +200,107 @@ impl NewMessageDialog {
         }
         let pubkeys: Vec<String> = self.selected.iter().map(|p| p.pubkey.clone()).collect();
         let session = self.community.read(cx).session.clone();
+        let earlier = self.pending.clone().filter(|_| send);
         self.opening = true;
+        self.sending = send;
         self.error = None;
         cx.spawn_in(window, async move |this, cx| {
-            let opened = session.open_dm(pubkeys).await;
-            let sent = match &opened {
-                Ok(id) if send => {
-                    let sent = session
-                        .send(id, &draft, Default::default(), Vec::new(), None)
-                        .await;
-                    Some(sent)
-                }
-                _ => None,
-            };
-            let _ =
-                this.update_in(cx, |this, window, cx| {
-                    this.opening = false;
-                    match (opened, sent) {
-                        (Ok(id), None | Some(Ok(()))) => {
-                            (this.on_open)(id, window, cx);
-                            cx.emit(Dismissed);
-                        }
-                        (Ok(_), Some(Err(error))) => this.error = Some(
-                            format!(
-                                "The conversation is open, but the message was not sent. {error}"
-                            )
-                            .into(),
-                        ),
-                        (Err(error), _) => this.error = Some(error.into()),
+            let result = async {
+                let mut pending = earlier;
+                if let Some(earlier) = &pending
+                    && (earlier.recipients != pubkeys || earlier.draft != draft)
+                {
+                    let failed = match session.outbox().await {
+                        Some(outbox) => outbox
+                            .get(&earlier.id)
+                            .is_some_and(|op| op.delivery == Delivery::Failed),
+                        None => false,
+                    };
+                    if !failed {
+                        return Err((
+                            "Retry the earlier message to confirm its delivery before editing."
+                                .to_string(),
+                            pending,
+                        ));
                     }
-                    cx.notify();
-                });
+                    session
+                        .dismiss(earlier.id)
+                        .await
+                        .map_err(|error| (error, pending.clone()))?;
+                    pending = None;
+                }
+                let pending = match pending {
+                    Some(pending) => pending,
+                    None => {
+                        let id = session
+                            .open_dm(pubkeys.clone())
+                            .await
+                            .map_err(|error| (error, None))?;
+                        if !send {
+                            return Ok(id);
+                        }
+                        session
+                            .send(&id, &draft, Default::default(), Vec::new(), None)
+                            .await
+                            .map_err(|error| {
+                                (
+                                    format!(
+                                        "The conversation is open, but the message was not \
+                                         sent. {error}"
+                                    ),
+                                    None,
+                                )
+                            })?;
+                        let sent = queued(&session, &id, &draft).await.ok_or_else(|| {
+                            ("The message could not be confirmed.".to_string(), None)
+                        })?;
+                        Pending {
+                            id: sent,
+                            channel: id,
+                            recipients: pubkeys.clone(),
+                            draft: draft.clone(),
+                        }
+                    }
+                };
+                session
+                    .dm_delivered(pending.id, &pending.channel)
+                    .await
+                    .map_err(|error| (error, Some(pending.clone())))?;
+                Ok(pending.channel)
+            }
+            .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.opening = false;
+                this.sending = false;
+                match result {
+                    Ok(id) => {
+                        this.pending = None;
+                        (this.on_open)(id, window, cx);
+                        cx.emit(Dismissed);
+                    }
+                    Err((error, pending)) => {
+                        this.error = Some(error.into());
+                        this.pending = pending;
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
         cx.notify();
+    }
+
+    /// "Retry send": confirms the pending first message again.
+    fn retry_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.clone() else {
+            return;
+        };
+        if self.draft(cx) != pending.draft {
+            self.message.update(cx, |state, cx| {
+                state.set_value(pending.draft.clone(), window, cx)
+            });
+        }
+        self.open(true, window, cx);
     }
 
     fn avatar(&self, person: &Person, size: f32, cx: &App) -> Avatar {
@@ -361,7 +446,28 @@ impl Render for NewMessageDialog {
                             .surface(Surface::Floating)
                             .disabled(self.selected.is_empty() || self.opening),
                     )
-                    .children(self.error.clone().map(|message| error(message, cx))),
+                    .when(self.opening, |this| {
+                        this.child(note(
+                            if self.sending {
+                                "Sending message…"
+                            } else {
+                                "Opening conversation…"
+                            },
+                            cx,
+                        ))
+                    })
+                    .children(self.error.clone().map(|message| error(message, cx)))
+                    .when(self.pending.is_some() && !self.opening, |this| {
+                        this.child(
+                            div().child(
+                                Button::new("new-message-retry", "Retry send")
+                                    .surface(Surface::Floating)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.retry_send(window, cx)
+                                    })),
+                            ),
+                        )
+                    }),
             )
             // No Cancel: the dialog closes with its X or Escape, and three
             // buttons do not fit.
@@ -379,4 +485,26 @@ impl Render for NewMessageDialog {
                     .on_click(cx.listener(|this, _, window, cx| this.open(true, window, cx))),
             )
     }
+}
+
+/// The outbox's newest message with this text in `channel`, which
+/// `Session::send` just queued (still pending, or kept once confirmed).
+async fn queued(
+    session: &buzz_relay_client::Session,
+    channel: &str,
+    draft: &str,
+) -> Option<EventId> {
+    let outbox = session.outbox().await?;
+    let viewer = session.viewer().to_string();
+    outbox
+        .visible()
+        .iter()
+        .filter(|op| {
+            op.kind() == kinds::CHAT
+                && op.channel() == Some(channel)
+                && op.event.content == draft
+                && op.event.pubkey.to_hex() == viewer
+        })
+        .max_by_key(|op| op.created_at())
+        .map(|op| op.id())
 }
