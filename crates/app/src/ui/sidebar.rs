@@ -463,6 +463,76 @@ impl ChannelSidebar {
         window.request_animation_frame();
     }
 
+    /// Unread conversations scrolled out of view, from where rows were
+    /// last painted (`SidebarUnread`).
+    fn unread_edges(
+        &self,
+        sections: &[SidebarSection<'_>],
+        snapshot: &SessionSnapshot,
+    ) -> super::sidebar_unread::Edges {
+        let bounds = self.bounds.borrow();
+        let mut rows = Vec::new();
+        for section in sections {
+            let open = self.is_open(&section.key);
+            for channel in &section.rows {
+                let unread = snapshot.unread.channel(&channel.id);
+                if !unread.unread && unread.threads == 0 {
+                    continue;
+                }
+                let anchor = match open {
+                    true => bounds.get(&channel.id),
+                    false => bounds.get(&format!("section:{}", section.key)),
+                };
+                let Some(anchor) = anchor else {
+                    continue;
+                };
+                // A one-to-one direct message lends the pill its face.
+                let face = match channel.participants.as_deref() {
+                    Some([other]) if channel.channel_type == Some(ChannelType::Dm) => {
+                        let profile = snapshot.profiles.get(other);
+                        Some(super::sidebar_unread::Face {
+                            name: channel_label(channel, &snapshot.profiles),
+                            picture: profile.and_then(|p| p.picture.clone()),
+                            agent: profile.is_some_and(|p| p.is_agent),
+                        })
+                    }
+                    _ => None,
+                };
+                rows.push(super::sidebar_unread::Seen {
+                    channel: channel.id.clone(),
+                    bounds: *anchor,
+                    face,
+                });
+            }
+        }
+        super::sidebar_unread::split(&rows, self.scroll.bounds())
+    }
+
+    /// Opens the conversation's section if it is collapsed, then scrolls
+    /// its row into view without selecting it.
+    fn reveal_unread(&self, cx: &mut Context<Self>) -> super::sidebar_unread::OnReveal {
+        let weak = cx.entity().downgrade();
+        Rc::new(move |channel, window, cx| {
+            let channel = channel.to_string();
+            let _ = weak.update(cx, |this, cx| {
+                let snapshot = this.community.read(cx).snapshot.clone();
+                let channels = labelled(&snapshot);
+                let hidden = hidden_dms(&snapshot);
+                let closed = sections(&channels, &snapshot.sidebar, &hidden)
+                    .into_iter()
+                    .filter(|section| !this.is_open(&section.key))
+                    .find(|section| section.rows.iter().any(|row| row.id == channel))
+                    .map(|section| section.key.clone());
+                if let Some(key) = closed {
+                    this.toggle(&key, true, cx);
+                }
+                this.reveal = Some(channel);
+                window.request_animation_frame();
+                cx.notify();
+            });
+        })
+    }
+
     /// Saves the scroll position shortly after it settles.
     fn save_scroll(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.saving_scroll, true) {
@@ -907,6 +977,7 @@ impl ChannelSidebar {
             Vec::new()
         };
         self.manage_scroll(ready && snapshot.roster == RosterStatus::Ready, window, cx);
+        let edges = self.unread_edges(&sections, &snapshot);
         self.bounds.borrow_mut().clear();
 
         let mut list = div()
@@ -959,7 +1030,14 @@ impl ChannelSidebar {
                     this.close_menus(cx);
                 }
             }))
-            .child(div().flex_1().min_h_0().child(list))
+            .child(div().relative().flex_1().min_h_0().child(list).children(
+                super::sidebar_unread::pills(
+                    &edges,
+                    &self.community.read(cx).session.media().clone(),
+                    self.reveal_unread(cx),
+                    cx,
+                ),
+            ))
             .children(notices)
             .children(menu)
             .children(dialog)

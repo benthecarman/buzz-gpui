@@ -197,7 +197,22 @@ impl ChannelSidebar {
                     .child(crate::ui::status::emoji(icon, px(13.), &self.community, cx)),
             );
         }
+        // A closed section stands in for its rows at the sidebar's edges.
+        if !open {
+            let (bounds, bounds_key) = (self.bounds.clone(), format!("section:{key}"));
+            summary = summary.child(
+                canvas(
+                    move |header, _, _| {
+                        bounds.borrow_mut().insert(bounds_key, header);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
         summary = summary
+            .relative()
             .child(div().min_w_0().truncate().child(section.title.clone()))
             .child(
                 div()
@@ -489,23 +504,9 @@ impl ChannelSidebar {
             });
 
         let mut trailing = Vec::new();
-        if unread.mentions > 0 {
-            trailing.push(
-                div()
-                    .min_w(px(18.))
-                    .h(px(18.))
-                    .px(px(5.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(c.affordance_prominent)
-                    .text_color(c.text_inverse)
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(unread.mentions.to_string())
-                    .into_any_element(),
-            );
+        // Dots, never numerals: counts are sampled (`UnreadBadge`).
+        if let Some(badge) = crate::ui::unread_badge::trailing(&id, &unread, dm, cx) {
+            trailing.push(badge);
         }
         if !agents.is_empty() {
             let names = agents
@@ -562,12 +563,14 @@ impl ChannelSidebar {
         let (menu_section, key_section) = (section.to_owned(), section.to_owned());
         let key_id = id.clone();
         let focus_down = focus.clone();
+        let activity = snapshot.unread.activity.get(&id).cloned();
+        let popover_agents = agents.clone();
         let label_color = if unread.bold {
             Some(c.text_navigation_unread)
         } else {
             None
         };
-        div()
+        let row = div()
             .id(SharedString::from(format!("ch-{id}")))
             .track_focus(&focus)
             .relative()
@@ -695,6 +698,17 @@ impl ChannelSidebar {
                     })
                 })
             })
+            .into_any_element();
+        // Resting on the row opens its activity (`ChannelActivityPopover`).
+        let community = self.community.clone();
+        let media = community.read(cx).session.media().clone();
+        crate::ui::channel_activity::ActivityRow::new(&channel.id, row)
+            .activity(
+                activity,
+                popover_agents,
+                std::sync::Arc::new(own_agents.clone()),
+            )
+            .directory(snapshot.profiles.clone(), Some(media), Some(community))
             .into_any_element()
     }
 }
