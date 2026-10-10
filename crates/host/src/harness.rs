@@ -338,6 +338,47 @@ pub fn status(option: &HarnessOption) -> Option<HarnessStatus> {
     }
 }
 
+/// A preset harness (Hermes, Claude Code): its own model and sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preset {
+    pub id: String,
+    pub label: String,
+    pub setup_hint: String,
+    pub setup_url: String,
+}
+
+/// The preset `command` runs, by executable name (buzz-app's
+/// `harnessPreset`).
+pub fn preset(command: &str) -> Option<Preset> {
+    let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let name = [".exe", ".cmd", ".bat"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    harness_presets()
+        .iter()
+        .find(|preset| preset.command == name)
+        .map(|preset| Preset {
+            id: preset.id.clone(),
+            label: preset.label.clone(),
+            setup_hint: preset.setup_hint.clone(),
+            setup_url: preset.setup_url.clone(),
+        })
+}
+
+/// Every preset, for setup guides.
+pub fn presets() -> Vec<Preset> {
+    harness_presets()
+        .iter()
+        .map(|preset| Preset {
+            id: preset.id.clone(),
+            label: preset.label.clone(),
+            setup_hint: preset.setup_hint.clone(),
+            setup_url: preset.setup_url.clone(),
+        })
+        .collect()
+}
+
 /// The options as [`Request::Harnesses`](crate::api::Request::Harnesses)
 /// answers them, for GUIs from before harness options. `claude` adds Claude
 /// Code's sign-in command.

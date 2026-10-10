@@ -1,6 +1,8 @@
 //! Every agent host the GUI manages: the one embedded in this process and any
 //! remote `buzzd` instances from the config file.
 
+pub mod control;
+pub mod models;
 mod sign_in;
 
 use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
@@ -69,6 +71,10 @@ pub struct HostConnection {
     /// Fetched when a form needs them, not on connect: hosts older than
     /// this request drop the connection on it.
     pub defaults: Option<AgentDefaults>,
+    /// Writes in flight and what the last ones left unconfirmed.
+    pub control: control::Control,
+    /// A snapshot arrived since this connection was made.
+    received: bool,
     signing: SigningSlot,
     client: Arc<HostClient<HostProtocol>>,
     _watch: Task<()>,
@@ -263,6 +269,19 @@ fn start_embedded(
     Ok((connector, (server, host)))
 }
 
+/// The command an older host's harness list implies when it is not
+/// installed.
+fn legacy_command(kind: buzz_host::api::HarnessKind) -> &'static str {
+    use buzz_host::api::HarnessKind;
+    match kind {
+        HarnessKind::BuzzAgent => "buzz-agent",
+        HarnessKind::Goose => "goose",
+        HarnessKind::Pi => "buzz-pi-acp",
+        HarnessKind::Claude => "claude-agent-acp",
+        HarnessKind::Hermes => "hermes-acp",
+    }
+}
+
 fn remote_connector(host: &RemoteHost) -> Result<Arc<dyn Connector>, String> {
     if let Some(address) = host.address.strip_prefix("tcp://")
         && !address.is_empty()
@@ -404,6 +423,8 @@ impl HostConnection {
                 pi_install: Install::default(),
                 claude_install: Install::default(),
                 defaults: None,
+                control: Default::default(),
+                received: false,
                 signing,
                 client,
                 _watch: watch,
@@ -484,28 +505,87 @@ impl HostConnection {
     fn apply(&mut self, snapshot: AgentsSnapshot) {
         if snapshot.seq >= self.agents.seq {
             self.agents = snapshot;
+            self.received = true;
         }
     }
 
+    /// Reads the agents again, and the harnesses from hosts whose snapshot
+    /// does not list them.
     pub fn refresh(&mut self, cx: &mut Context<Self>) -> Task<()> {
         let agents = self.request(Request::Agents, cx);
-        let harnesses = self.request(Request::Harnesses, cx);
         cx.spawn(async move |this, cx| {
-            let (agents, harnesses) = futures::join!(agents, harnesses);
-            let _ = this.update(cx, |this, cx| {
-                if let Ok(Response::Agents(snapshot)) = agents {
-                    this.apply(snapshot);
-                }
-                match harnesses {
-                    Ok(Response::Harnesses(list)) => {
-                        this.harnesses = Some(list);
-                        this.harnesses_failed = false;
+            let agents = agents.await;
+            let legacy = matches!(&agents, Ok(Response::Agents(snapshot))
+                if snapshot.harness_options.is_none());
+            let harnesses = this.update(cx, |this, cx| {
+                let read = matches!(agents, Ok(Response::Agents(_)));
+                this.refreshed(read);
+                // Settings lists the snapshot's harnesses as older hosts
+                // list theirs.
+                if !legacy {
+                    if read && let Some(options) = &this.agents.harness_options {
+                        this.harnesses = Some(buzz_host::harness::legacy(
+                            options,
+                            this.agents.claude_setup.as_ref(),
+                        ));
                     }
-                    _ => this.harnesses_failed = true,
+                    this.harnesses_failed = !read;
                 }
                 cx.notify();
+                legacy.then(|| this.request(Request::Harnesses, cx))
             });
+            if let Ok(Some(harnesses)) = harnesses {
+                let harnesses = harnesses.await;
+                let _ = this.update(cx, |this, cx| {
+                    match harnesses {
+                        Ok(Response::Harnesses(list)) => {
+                            this.harnesses = Some(list);
+                            this.harnesses_failed = false;
+                        }
+                        _ => this.harnesses_failed = true,
+                    }
+                    cx.notify();
+                });
+            }
         })
+    }
+
+    /// The agents snapshot, with an older host's harnesses as options.
+    pub fn snapshot(&self) -> AgentsSnapshot {
+        let mut snapshot = self.agents.clone();
+        if snapshot.harness_options.is_none() {
+            snapshot.harness_options = self.harness_options();
+        }
+        snapshot
+    }
+
+    /// The harnesses agents can use: the snapshot's options, or those an
+    /// older host lists, converted.
+    pub fn harness_options(&self) -> Option<Vec<buzz_host::api::HarnessOption>> {
+        if let Some(options) = &self.agents.harness_options {
+            return Some(options.clone());
+        }
+        let legacy = self.harnesses.as_ref()?;
+        Some(
+            legacy
+                .iter()
+                .map(|harness| buzz_host::api::HarnessOption {
+                    command: harness
+                        .command
+                        .clone()
+                        .unwrap_or_else(|| legacy_command(harness.kind).into()),
+                    label: harness.label.clone(),
+                    available: harness.command.is_some(),
+                    status: if harness.command.is_some() {
+                        "ready"
+                    } else {
+                        "cli-needed"
+                    }
+                    .into(),
+                    ..Default::default()
+                })
+                .collect(),
+        )
     }
 
     /// Runs a request on the I/O runtime. Responses that carry a snapshot
@@ -636,17 +716,24 @@ impl HostConnection {
     /// Commits an import. While it runs, the host may ask this app to attest
     /// the given agent keys, and only those, with `identity`.
     pub fn import(
-        &self,
+        &mut self,
         token: String,
         ids: Vec<String>,
         pubkeys: HashSet<String>,
         identity: Arc<Identity>,
         cx: &mut Context<Self>,
-    ) -> Task<Result<Response, RpcError>> {
+    ) -> Task<Result<Response, control::Failure>> {
         let slot = self.signing.clone();
         *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
             Some(Signing { identity, pubkeys });
-        let response = self.request(Request::ImportCommit { token, ids }, cx);
+        let response = self.write(
+            Request::ImportCommit { token, ids },
+            control::Lane {
+                credential_write: true,
+                ..Default::default()
+            },
+            cx,
+        );
         cx.spawn(async move |_, _| {
             let response = response.await;
             *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = None;

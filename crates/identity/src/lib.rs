@@ -328,6 +328,33 @@ impl Identity {
         )
     }
 
+    /// The owner's signed intent to set up `agent_pubkey` in the community
+    /// whose relay is `relay_url` (`wss://host`): a schnorr signature over
+    /// `sha256("nostr:agent-community:<agent>:<relay>")`, as buzz-app's Use
+    /// here sends it to the agent host.
+    pub fn resolve_agent_community(
+        &self,
+        agent_pubkey: &str,
+        relay_url: &str,
+    ) -> Result<String, IdentityError> {
+        let hex = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        if !hex(agent_pubkey)
+            || agent_pubkey == self.pubkey_hex()
+            || !relay_url.starts_with("wss://")
+            || relay_url.ends_with('/')
+        {
+            return Err(IdentityError::NotAllowed);
+        }
+        let digest: [u8; 32] =
+            Sha256::digest(format!("nostr:agent-community:{agent_pubkey}:{relay_url}")).into();
+        Ok(self.keys.sign_schnorr(digest).to_string())
+    }
+
     /// NIP-44 v2 encryption to our own key, for app data only.
     pub fn encrypt_to_self(&self, plaintext: &str) -> Result<String, IdentityError> {
         nip44::encrypt(

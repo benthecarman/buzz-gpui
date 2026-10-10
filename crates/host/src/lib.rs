@@ -498,6 +498,12 @@ impl AgentHost {
                     .legacy_parent()?
                     .join(buzz_agent_controller::LegacySource::Installed.app_directory())
                     .join("agents/managed-agents.json");
+                // No earlier install is an empty library, not a failed read.
+                if matches!(std::fs::symlink_metadata(&path), Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Ok(Response::Library(Default::default()));
+                }
                 let library = tokio::task::spawn_blocking(move || {
                     buzz_desktop::relay::agent::read_agent_library(path)
                 })

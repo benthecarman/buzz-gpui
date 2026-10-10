@@ -1,32 +1,49 @@
 //! The Agents page (ui.md §5a): the agent inventory of this computer and of
-//! every remote `buzzd`, one section per host.
+//! every remote `buzzd`, one section per host, then what only the
+//! community relays know.
+//!
+//! buzz-app's `AgentsPage`, `AgentControlPanel`, `UnifiedInventory` and
+//! `InventoryView`. Each identity is listed once, in the section of the host
+//! that holds it; relay-only identities, archived ones and profiles without
+//! identities follow the hosts.
 
+mod card;
+mod create;
 mod defaults;
+mod dialogs;
+mod discovery;
+mod draft;
+mod edit;
 mod editor;
+mod fields;
 mod form;
 pub(crate) mod harness;
 mod host_dialog;
 mod import;
+mod inventory;
+mod relay;
 
 pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
 pub(crate) use editor::{Dismissed, Saved};
 pub(crate) use host_dialog::AddHost;
 
-use crate::hosts::{HostConnection, Hosts, PERSON_WAIT};
+use crate::community::AppState;
+use crate::hosts::control::Status;
+use crate::hosts::{HostConnection, Hosts};
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::settings::OpenHostSettings;
-use buzz_host::api::{Agent, AgentAction, Harness, ProcessStatus, Request};
+use buzz_host::api::{Agent, ImportSource, ProcessStatus};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Avatar, AvatarSize, Badge, BadgeTone, Button, ButtonSize, Dialog,
-    Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuSeparator, MenuSize,
-    PanelHeader, Presence, Surface, Toast, ToastTone, TypeStyled, tokens::radius,
+    ActiveTheme, Badge, BadgeTone, Button, ButtonSize, Icon, IconButton, IconButtonSize, IconName,
+    Menu, MenuItem, MenuSeparator, PanelHeader, Toast, ToastTone, TypeStyled, tokens::radius,
 };
-use editor::AgentEditor;
+use discovery::{Discovery, ReadStatus};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use inventory::{Decision, Group, Row};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 /// An agent on a host.
@@ -36,62 +53,199 @@ type AgentKey = (EntityId, String);
 enum OpenMenu {
     Page,
     Host(EntityId),
-    Agent(EntityId, String),
+    /// A card's actions, by identity.
+    Card(String),
+    /// A card's old Buzz installation choice.
+    Source(String),
+}
+
+/// Use here or Clone, for one identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Handover {
+    Use,
+    Clone,
 }
 
 enum Modal {
-    Editor {
-        editor: Entity<AgentEditor>,
-        _subscriptions: [Subscription; 2],
+    Create {
+        dialog: Entity<create::CreateDialog>,
+        _subscriptions: Vec<Subscription>,
+    },
+    Edit {
+        dialog: Entity<edit::EditDialog>,
+        _subscriptions: Vec<Subscription>,
     },
     Defaults {
         dialog: Entity<DefaultsDialog>,
         _subscriptions: [Subscription; 2],
     },
-    Manage(Entity<HostConnection>, String),
+    /// The tile's Manage dialog, for every setup of one identity.
+    Manage(String),
     Delete {
         host: Entity<HostConnection>,
         id: String,
         busy: bool,
         error: Option<SharedString>,
     },
+    Archive {
+        pubkey: String,
+        name: String,
+        running: bool,
+    },
+    Remove {
+        pubkey: String,
+        name: String,
+    },
+    Handover {
+        pubkey: String,
+        action: Handover,
+        /// The setup a Use here finishes, or a Clone reads.
+        setup: Option<(Entity<HostConnection>, String)>,
+        /// An old Buzz install a Clone reads instead.
+        source: Option<(Entity<HostConnection>, ImportSource)>,
+        pending: bool,
+        error: Option<SharedString>,
+    },
+    Import {
+        dialog: Entity<import::ImportDialog>,
+        _subscriptions: [Subscription; 2],
+    },
+}
+
+/// What `useManagedAgentActions` remembers about a failed Start or Stop.
+#[derive(Clone, Debug)]
+struct Outcome {
+    status: ProcessStatus,
+    version: Option<u64>,
+    checking: bool,
+    notice: Option<SharedString>,
+}
+
+struct PageToast {
+    text: SharedString,
+    generation: usize,
+    /// Archive's Undo.
+    undo: Option<String>,
 }
 
 pub struct AgentsPage {
     hosts: Vec<Entity<HostConnection>>,
+    discovery: Entity<Discovery>,
     _observers: Vec<Subscription>,
     _hosts_observer: Subscription,
+    _app_observer: Subscription,
     menu: Option<OpenMenu>,
     modal: Option<Modal>,
-    /// Agents with a request in flight.
-    pending: HashSet<AgentKey>,
-    /// The last failed request per agent.
-    failures: HashMap<AgentKey, SharedString>,
-    /// Hosts whose harness list is open.
-    harnesses_open: HashSet<EntityId>,
+    outcomes: HashMap<AgentKey, Outcome>,
+    /// The agent an import just added: its card asks for review.
+    imported: Option<AgentKey>,
+    /// The installation chosen per identity, when several hold it.
+    sources: HashMap<String, ImportSource>,
+    /// Identities whose "Identity & sources" details are open.
+    details: HashSet<String>,
+    archived_open: Option<bool>,
+    was_all_archived: bool,
+    /// Hosts whose team repair accordion is open.
+    repair_open: HashSet<EntityId>,
+    /// Each host's repair list, once opened.
+    repairs: HashMap<EntityId, Entity<import::ImportDialog>>,
     /// The content column width, measured after layout, for the tile grid.
     width: Rc<Cell<Pixels>>,
-    /// A confirmation, such as what a save restarted, and its generation.
-    toast: Option<(SharedString, usize)>,
+    toast: Option<PageToast>,
     toasts: usize,
+    /// Holds focus inside the page's own dialogs so Escape reaches them.
+    modal_focus: FocusHandle,
 }
 
 const TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Columns of the `.agent-grid`: `repeat(auto-fill, minmax(172px, 1fr))`
+/// with a 16px gap.
+fn columns(width: Pixels) -> u16 {
+    ((f32::from(width) + 16.) / 188.).floor().clamp(1., 6.) as u16
+}
+
+/// Process status text, ui.md §5a.6 (c).
+pub(super) fn process_label(status: ProcessStatus) -> &'static str {
+    match status {
+        ProcessStatus::Running => "Process running · relay readiness unverified",
+        ProcessStatus::Waiting => "Waiting to start · unlock Keychain if prompted",
+        ProcessStatus::Starting => "Starting process",
+        ProcessStatus::Stopping => "Stopping process",
+        ProcessStatus::Failed => "Process failed",
+        ProcessStatus::Stopped => "Process stopped",
+    }
+}
+
+/// The tile's model line: launch model, an environment override, the saved
+/// model, or "Default model".
+fn model_line(agent: &Agent) -> String {
+    if let Some(model) = agent.launch_model.clone().filter(|m| !m.is_empty()) {
+        return model;
+    }
+    if agent.launch_model_env.is_some() {
+        return "Custom model".into();
+    }
+    Some(agent.harness.model.clone())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "Default model".into())
+}
+
+fn restart_required(agent: &Agent) -> bool {
+    !agent.restart_diff.is_empty()
+}
+
+/// Everything the inventory shows, joined for one render.
+struct View {
+    destination: String,
+    rows: BTreeMap<String, Row>,
+    archived: BTreeSet<String>,
+}
+
+impl View {
+    fn decide(&self, row: &Row) -> Decision {
+        inventory::decide(row, &self.destination)
+    }
+
+    /// The host whose section lists the identity.
+    fn host_of(&self, row: &Row, decision: &Decision) -> Option<usize> {
+        match decision.group {
+            Group::LocalHere => row
+                .setups
+                .get(&self.destination)
+                .map(|setup| setup.host)
+                .or_else(|| row.unconfigured.first().map(|setup| setup.host))
+                .or(row.local.as_ref().map(|(host, _)| *host)),
+            Group::LocalOther => row.local.as_ref().map(|(host, _)| *host),
+            Group::Import => row.sources.first().map(|(host, _)| *host),
+            Group::Relay => None,
+        }
+    }
+}
+
 impl AgentsPage {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let discovery = cx.new(Discovery::new);
         let mut page = Self {
             hosts: Vec::new(),
-            _observers: Vec::new(),
+            _observers: vec![cx.observe(&discovery, |_, _, cx| cx.notify())],
+            discovery,
             _hosts_observer: cx.observe_global::<Hosts>(|this, cx| this.sync_hosts(cx)),
+            _app_observer: cx.observe_global::<AppState>(|this, cx| this.sync_community(cx)),
             menu: None,
             modal: None,
-            pending: HashSet::new(),
-            failures: HashMap::new(),
-            harnesses_open: HashSet::new(),
+            outcomes: HashMap::new(),
+            imported: None,
+            sources: HashMap::new(),
+            details: HashSet::new(),
+            archived_open: None,
+            was_all_archived: false,
+            repair_open: HashSet::new(),
+            repairs: HashMap::new(),
             width: Rc::new(Cell::new(px(0.))),
             toast: None,
             toasts: 0,
+            modal_focus: cx.focus_handle(),
         };
         page.sync_hosts(cx);
         page
@@ -108,12 +262,81 @@ impl AgentsPage {
         if same {
             return;
         }
-        self._observers = hosts
+        let mut observers: Vec<Subscription> = hosts
             .iter()
-            .map(|host| cx.observe(host, |_, _, cx| cx.notify()))
+            .map(|host| cx.observe(host, |this, _, cx| this.host_changed(cx)))
             .collect();
+        observers.push(cx.observe(&self.discovery, |_, _, cx| cx.notify()));
+        self._observers = observers;
         self.hosts = hosts;
+        let hosts = self.hosts.clone();
+        self.discovery
+            .update(cx, |discovery, cx| discovery.refresh(&hosts, cx));
         cx.notify();
+    }
+
+    /// A different community or identity: discovery starts over, and
+    /// archive Undo offers end with the view they belonged to.
+    fn sync_community(&mut self, cx: &mut Context<Self>) {
+        let hosts = self.hosts.clone();
+        let before = self.discovery.read(cx).destination();
+        self.discovery
+            .update(cx, |discovery, cx| discovery.sync(&hosts, cx));
+        if self.discovery.read(cx).destination() != before {
+            self.toast = None;
+            self.sources.clear();
+        }
+        cx.notify();
+    }
+
+    fn host_changed(&mut self, cx: &mut Context<Self>) {
+        // Notices describe one attempt; a newer action or status retires
+        // them (`useManagedAgentActions`).
+        let hosts = self.hosts.clone();
+        self.outcomes.retain(|(host_id, id), outcome| {
+            hosts
+                .iter()
+                .find(|host| host.entity_id() == *host_id)
+                .is_some_and(|host| {
+                    let host = host.read(cx);
+                    host.control.action_versions.get(id).copied() == outcome.version
+                        && host
+                            .agent(id)
+                            .is_some_and(|agent| agent.status == outcome.status)
+                })
+        });
+        if let Some((host_id, id)) = &self.imported
+            && self.hosts.iter().any(|host| {
+                host.entity_id() == *host_id
+                    && host.read(cx).agent(id).is_some_and(|agent| agent.enabled)
+            })
+        {
+            self.imported = None;
+        }
+        self.follow_presence(cx);
+        cx.notify();
+    }
+
+    /// Follows the presence of every agent key on the page.
+    fn follow_presence(&self, cx: &mut Context<Self>) {
+        let Some(community) = AppState::current(cx) else {
+            return;
+        };
+        let mut keys: Vec<String> = self
+            .hosts
+            .iter()
+            .flat_map(|host| {
+                host.read(cx)
+                    .agents
+                    .agents
+                    .iter()
+                    .map(|agent| agent.pubkey.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        community.update(cx, |community, _| community.set_presence_extra(keys));
     }
 
     fn set_menu(&mut self, menu: Option<OpenMenu>, cx: &mut Context<Self>) {
@@ -126,14 +349,22 @@ impl AgentsPage {
         cx.notify();
     }
 
-    fn show_toast(&mut self, text: SharedString, cx: &mut Context<Self>) {
+    fn show_toast(&mut self, text: SharedString, undo: Option<String>, cx: &mut Context<Self>) {
         self.toasts += 1;
         let generation = self.toasts;
-        self.toast = Some((text, generation));
+        self.toast = Some(PageToast {
+            text,
+            generation,
+            undo,
+        });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_DURATION).await;
             let _ = this.update(cx, |this, cx| {
-                if this.toast.as_ref().is_some_and(|(_, g)| *g == generation) {
+                if this
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.generation == generation)
+                {
                     this.toast = None;
                     cx.notify();
                 }
@@ -150,63 +381,89 @@ impl AgentsPage {
         })
     }
 
-    /// Sends a request about one agent, tracking it on the agent's card.
-    fn act(
-        &mut self,
-        host: &Entity<HostConnection>,
-        id: String,
-        request: Request,
-        cx: &mut Context<Self>,
-    ) {
-        let key = (host.entity_id(), id);
-        self.pending.insert(key.clone());
-        self.failures.remove(&key);
-        // A start may wait on a keyring prompt.
-        let response = host.update(cx, |host, cx| host.request_within(request, PERSON_WAIT, cx));
-        cx.spawn(async move |this, cx| {
-            let result = response.await;
-            let _ = this.update(cx, |this, cx| {
-                this.pending.remove(&key);
-                if let Err(error) = result {
-                    this.failures.insert(key, error.to_string().into());
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+    fn host(&self, ix: usize) -> Option<&Entity<HostConnection>> {
+        self.hosts.get(ix)
     }
 
-    fn open_editor(&mut self, editor: Entity<AgentEditor>, cx: &mut Context<Self>) {
-        let subscriptions = [
-            cx.subscribe(&editor, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
-            cx.subscribe(&editor, |this, _, Saved(text), cx| {
-                this.show_toast(text.clone(), cx)
+    /// Add agent, Duplicate or Clone. `host` defaults to the first
+    /// connected one.
+    fn create_dialog(
+        &mut self,
+        host: Option<Entity<HostConnection>>,
+        kind: create::Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hosts = self.hosts.clone();
+        let Some(host) = host.or_else(|| {
+            hosts
+                .iter()
+                .find(|host| editor::connected(host, cx))
+                .or(hosts.first())
+                .cloned()
+        }) else {
+            return;
+        };
+        let destination = self.discovery.read(cx).destination();
+        let dialog =
+            cx.new(|cx| create::CreateDialog::new(hosts, host, kind, destination, window, cx));
+        let subscriptions = vec![
+            cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
+            cx.subscribe(&dialog, |this, _, create::Created(host, id), _| {
+                this.imported = Some((host.entity_id(), id.clone()));
             }),
+            cx.subscribe_in(
+                &dialog,
+                window,
+                |this, _, _: &create::OpenHarnesses, window, cx| {
+                    this.close_modal(cx);
+                    window.dispatch_action(Box::new(OpenHostSettings), cx);
+                },
+            ),
         ];
         self.menu = None;
-        self.modal = Some(Modal::Editor {
-            editor,
+        self.modal = Some(Modal::Create {
+            dialog,
             _subscriptions: subscriptions,
         });
         cx.notify();
     }
 
     fn add_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let hosts = self.hosts.clone();
-        let editor = cx.new(|cx| AgentEditor::create(hosts, window, cx));
-        self.open_editor(editor, cx);
+        self.create_dialog(None, create::Kind::Add, window, cx);
     }
 
     fn edit_agent(
         &mut self,
         host: Entity<HostConnection>,
         agent: Agent,
+        name: String,
+        initial: Option<draft::Draft>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let editor = cx.new(|cx| AgentEditor::edit(host, agent, window, cx));
-        self.open_editor(editor, cx);
+        let dialog =
+            cx.new(|cx| edit::EditDialog::new(host, agent, name, initial, None, window, cx));
+        let subscriptions = vec![
+            cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
+            cx.subscribe(&dialog, |this, _, Saved(text), cx| {
+                this.show_toast(text.clone(), None, cx)
+            }),
+            cx.subscribe_in(
+                &dialog,
+                window,
+                |this, _, _: &create::OpenHarnesses, window, cx| {
+                    this.close_modal(cx);
+                    window.dispatch_action(Box::new(OpenHostSettings), cx);
+                },
+            ),
+        ];
+        self.menu = None;
+        self.modal = Some(Modal::Edit {
+            dialog,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
     }
 
     fn agent_defaults(
@@ -219,7 +476,7 @@ impl AgentsPage {
         let subscriptions = [
             cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
             cx.subscribe(&dialog, |this, _, Saved(text), cx| {
-                this.show_toast(text.clone(), cx)
+                this.show_toast(text.clone(), None, cx)
             }),
         ];
         self.menu = None;
@@ -230,118 +487,99 @@ impl AgentsPage {
         cx.notify();
     }
 
-    fn delete_agent(&mut self, cx: &mut Context<Self>) {
-        let Some(Modal::Delete { host, id, busy, .. }) = &mut self.modal else {
-            return;
-        };
-        let Some(revision) = find(host, id, cx).map(|agent| agent.revision) else {
-            self.modal = None;
-            return;
-        };
-        *busy = true;
-        let request = Request::Delete {
-            id: id.clone(),
-            revision,
-        };
-        let response = host.update(cx, |host, cx| host.request(request, cx));
-        cx.spawn(async move |this, cx| {
-            let result = response.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => this.modal = None,
-                    Err(error) => {
-                        if let Some(Modal::Delete { busy, error: e, .. }) = &mut this.modal {
-                            *busy = false;
-                            *e = Some(error.to_string().into());
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
+    /// Refresh agents: every host's status and every relay read.
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         for host in &self.hosts {
-            host.update(cx, |host, cx| host.refresh(cx).detach());
+            host.update(cx, |host, cx| host.refresh_status(cx).detach());
         }
+        let hosts = self.hosts.clone();
+        self.discovery
+            .update(cx, |discovery, cx| discovery.refresh(&hosts, cx));
         cx.notify();
     }
-}
 
-fn find<'a>(host: &'a Entity<HostConnection>, id: &str, cx: &'a App) -> Option<&'a Agent> {
-    host.read(cx)
-        .agents
-        .agents
-        .iter()
-        .find(|agent| agent.id == id)
-}
-
-/// Process status text, ui.md §5a.6 (c).
-pub(super) fn process_label(status: ProcessStatus) -> &'static str {
-    match status {
-        ProcessStatus::Running => "Process running · relay readiness unverified",
-        ProcessStatus::Waiting => "Waiting to start · unlock Keychain if prompted",
-        ProcessStatus::Starting => "Starting process",
-        ProcessStatus::Stopping => "Stopping process",
-        ProcessStatus::Failed => "Process failed",
-        ProcessStatus::Stopped => "Process stopped",
-    }
-}
-
-/// The short form under a tile.
-fn status_label(status: ProcessStatus) -> &'static str {
-    match status {
-        ProcessStatus::Running => "Running",
-        ProcessStatus::Waiting => "Waiting to start",
-        ProcessStatus::Starting => "Starting",
-        ProcessStatus::Stopping => "Stopping",
-        ProcessStatus::Failed => "Failed",
-        ProcessStatus::Stopped => "Stopped",
-    }
-}
-
-fn presence(status: ProcessStatus) -> Presence {
-    match status {
-        ProcessStatus::Running => Presence::Online,
-        ProcessStatus::Waiting | ProcessStatus::Starting | ProcessStatus::Stopping => {
-            Presence::Away
+    /// Names as the page shows them: the community's profile name, else the
+    /// name a membership's relay supplied, else the saved one.
+    fn view(&self, cx: &App) -> View {
+        let discovery = self.discovery.read(cx);
+        let destination = discovery.destination();
+        let profiles =
+            AppState::current(cx).map(|community| community.read(cx).snapshot.profiles.clone());
+        let snapshots: Vec<_> = self
+            .hosts
+            .iter()
+            .map(|host| &host.read(cx).agents)
+            .collect();
+        let (relay_identities, _) = relay::tiles(&discovery.library);
+        let resolve = |key: &str, fallback: &str| {
+            profiles
+                .as_ref()
+                .and_then(|profiles| profiles.get(key))
+                .filter(|profile| !profile.name_is_fallback)
+                .map(|profile| profile.name.clone())
+                .or_else(|| {
+                    discovery
+                        .source_profile(key)
+                        .filter(|(_, profile)| !profile.name_is_fallback)
+                        .map(|(_, profile)| profile.name)
+                })
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        let mut rows = inventory::identities(
+            if discovery.library_status == ReadStatus::Ready {
+                &relay_identities
+            } else {
+                &[]
+            },
+            &discovery.known,
+            &snapshots,
+            resolve,
+        );
+        // A configured setup's own name labels it; collisions get a suffix.
+        let names: BTreeMap<String, String> = rows
+            .iter()
+            .map(|(key, row)| {
+                let name = row
+                    .local_setups(&destination)
+                    .first()
+                    .map(|setup| setup.agent.name.clone())
+                    .or_else(|| {
+                        row.unconfigured
+                            .first()
+                            .map(|setup| setup.agent.name.clone())
+                    })
+                    .unwrap_or_else(|| row.display_name.clone());
+                (key.clone(), name)
+            })
+            .collect();
+        let labels = inventory::disambiguate(&names);
+        for (key, row) in rows.iter_mut() {
+            if let Some(label) = labels.get(key) {
+                row.display_name = label.clone();
+            }
         }
-        ProcessStatus::Failed | ProcessStatus::Stopped => Presence::Offline,
+        let mut archived = BTreeSet::new();
+        rows.retain(|key, row| {
+            let removed = discovery.removed.contains(key) && row.local.is_none();
+            if !removed {
+                let hidden = match discovery.runs.get(key) {
+                    // A request keeps the card in the section it started in.
+                    Some(run) => !run.archive,
+                    None => discovery.archived(key),
+                };
+                if hidden {
+                    archived.insert(key.clone());
+                }
+            }
+            !removed
+        });
+        View {
+            destination,
+            rows,
+            archived,
+        }
     }
-}
-
-fn stoppable(status: ProcessStatus) -> bool {
-    matches!(
-        status,
-        ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Waiting
-    )
-}
-
-/// The tile's model line: launch model, saved model, or "Default model".
-fn model_line(agent: &Agent) -> String {
-    agent
-        .launch_model
-        .clone()
-        .filter(|model| !model.is_empty())
-        .or_else(|| Some(agent.harness.model.clone()).filter(|model| !model.is_empty()))
-        .unwrap_or_else(|| "Default model".into())
-}
-
-fn restart_required(agent: &Agent) -> bool {
-    agent.status == ProcessStatus::Running
-        && agent
-            .running_revision
-            .is_some_and(|running| running != agent.revision)
-}
-
-/// Columns of the `.agent-grid`: `repeat(auto-fill, minmax(172px, 1fr))`
-/// with a 16px gap.
-fn columns(width: Pixels) -> u16 {
-    ((f32::from(width) + 16.) / 188.).floor().clamp(1., 6.) as u16
 }
 
 impl AgentsPage {
@@ -378,11 +616,13 @@ impl AgentsPage {
                             })),
                     )
                     .when(menu_open, |this| {
+                        let loading = self.discovery.read(cx).library_status == ReadStatus::Loading;
                         this.child(overlay::dropdown(
                             window,
                             Align::End,
                             Menu::new().child(
                                 MenuItem::new("refresh", "Refresh agents")
+                                    .disabled(loading)
                                     .on_click(cx.listener(|this, _, _, cx| this.refresh_all(cx))),
                             ),
                             Self::dismiss(cx),
@@ -391,30 +631,26 @@ impl AgentsPage {
             )
     }
 
-    fn host_section(
+    fn host_heading(
         &self,
         host: &Entity<HostConnection>,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Div {
         let c = *cx.colors();
         let state = host.read(cx);
         let label = state.label.clone();
-        let connection = state.state.clone();
-        let snapshot = state.agents.clone();
-        let harnesses = state.harnesses.clone().unwrap_or_default();
-        let host_id = host.entity_id();
         let remote = state.remote.clone();
-        let connected = matches!(connection, ConnectionState::Connected { .. });
-        let (badge, tone) = match &connection {
+        let host_id = host.entity_id();
+        let connected = matches!(state.state, ConnectionState::Connected { .. });
+        let (badge, tone) = match &state.state {
             ConnectionState::Connected { .. } => ("Connected", BadgeTone::Success),
             ConnectionState::Connecting { .. } => ("Connecting", BadgeTone::Neutral),
             ConnectionState::Disconnected { .. } => ("Offline", BadgeTone::Danger),
             ConnectionState::Rejected { .. } => ("Refused", BadgeTone::Warning),
         };
         let menu_open = self.menu == Some(OpenMenu::Host(host_id));
-
-        let heading = div()
+        div()
             .flex()
             .items_center()
             .gap(rems(0.5))
@@ -467,7 +703,9 @@ impl AgentsPage {
                                     .disabled(!connected)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.menu = None;
-                                        refresh.update(cx, |host, cx| host.refresh(cx).detach());
+                                        refresh.update(cx, |host, cx| {
+                                            host.refresh_status(cx).detach()
+                                        });
                                     })),
                             )
                             .child(
@@ -507,20 +745,34 @@ impl AgentsPage {
                             Self::dismiss(cx),
                         ))
                     }),
-            );
+            )
+    }
 
-        // Inline status lines (§5a.9): bare paragraphs at body size.
+    /// Inline status lines (§5a.9): bare paragraphs at body size.
+    fn host_alerts(&self, host: &Entity<HostConnection>, cx: &mut Context<Self>) -> Div {
+        let c = *cx.colors();
+        let state = host.read(cx);
+        let label = state.label.clone();
+        let host_id = host.entity_id();
         let line = |text: String| div().text_body().child(text);
+        let quiet = |text: String| div().text_body_sm().text_color(c.text_subtle).child(text);
+        let reconnect = |host: &Entity<HostConnection>| {
+            let host = host.clone();
+            div().flex().child(
+                Button::new(
+                    SharedString::from(format!("retry-{host_id}")),
+                    "Retry connection",
+                )
+                .size(ButtonSize::Sm)
+                .on_click(move |_, _, cx| host.read(cx).reconnect()),
+            )
+        };
         let mut alerts = div().flex().flex_col().gap(rems(0.5));
-        match &connection {
-            ConnectionState::Connecting { attempt } if *attempt > 1 || remote.is_some() => {
+        match &state.state {
+            ConnectionState::Connecting { attempt } if *attempt > 1 || state.remote.is_some() => {
                 alerts = alerts.child(line(format!("Connecting to {label}…")));
             }
-            ConnectionState::Connecting { .. } => {
-                alerts = alerts.child(line("Reading local agent status…".into()));
-            }
             ConnectionState::Disconnected { error, retry_in } => {
-                let retry = host.clone();
                 alerts = alerts
                     .child(
                         line(format!(
@@ -529,740 +781,400 @@ impl AgentsPage {
                         ))
                         .text_color(c.text_danger),
                     )
-                    .when(!snapshot.agents.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_body_sm()
-                                .text_color(c.text_subtle)
-                                .child("The agent statuses below may be out of date."),
-                        )
+                    .when(!state.agents.agents.is_empty(), |this| {
+                        this.child(quiet("The agent statuses below may be out of date.".into()))
                     })
-                    .child(
-                        div().flex().child(
-                            Button::new(
-                                SharedString::from(format!("retry-{host_id}")),
-                                "Retry connection",
-                            )
-                            .size(ButtonSize::Sm)
-                            .on_click(move |_, _, cx| retry.read(cx).reconnect()),
-                        ),
-                    );
+                    .child(reconnect(host));
             }
             ConnectionState::Rejected { reason } => {
-                let retry = host.clone();
                 alerts = alerts
                     .child(
                         line(format!("{label} refused this app: {reason}"))
                             .text_color(c.text_danger),
                     )
-                    .child(div().text_body_sm().text_color(c.text_subtle).child(
-                        "Check the token with `buzzd token` on that machine, then \
-                                 remove and add the host again in Settings → Agents.",
+                    .child(quiet(
+                        "Check the token with `buzzd token` on that machine, then remove and \
+                         add the host again in Settings → Agents."
+                            .into(),
                     ))
-                    .child(
-                        div().flex().child(
-                            Button::new(
-                                SharedString::from(format!("retry-{host_id}")),
-                                "Retry connection",
-                            )
-                            .size(ButtonSize::Sm)
-                            .on_click(move |_, _, cx| retry.read(cx).reconnect()),
-                        ),
-                    );
+                    .child(reconnect(host));
             }
-            ConnectionState::Connected { .. } => {}
+            _ => {}
         }
-        if connected && !snapshot.runtime_available {
-            alerts =
-                alerts.child(
-                    line(snapshot.runtime_message.clone().unwrap_or_else(|| {
+        let status = state.status();
+        if status == Status::Loading {
+            alerts = alerts.child(line("Reading local agent status…".into()));
+        }
+        if matches!(state.state, ConnectionState::Connected { .. }) {
+            if let Some(error) = state.control.error.clone() {
+                alerts = alerts.child(line(error));
+            }
+            if status == Status::Error {
+                if !state.agents.agents.is_empty() {
+                    alerts =
+                        alerts.child(quiet("The agent statuses below may be out of date.".into()));
+                }
+                let refresh = host.clone();
+                alerts = alerts.child(
+                    div().flex().child(
+                        Button::new(
+                            SharedString::from(format!("retry-status-{host_id}")),
+                            "Retry status",
+                        )
+                        .on_click(move |_, _, cx| {
+                            refresh.update(cx, |host, cx| host.refresh(cx).detach())
+                        }),
+                    ),
+                );
+            }
+            if state.control.busy {
+                alerts = alerts.child(line(if state.remote.is_some() {
+                    format!("Waiting for {label}…")
+                } else {
+                    "Waiting for the desktop app…".into()
+                }));
+            }
+            if !state.agents.runtime_available && status == Status::Ready {
+                alerts = alerts.child(
+                    line(state.agents.runtime_message.clone().unwrap_or_else(|| {
                         "The agent runtime is unavailable on this host.".into()
                     }))
                     .text_color(c.text_danger),
                 );
-        }
-        if remote.as_ref().is_some_and(|remote| remote.token.is_some()) {
-            alerts = alerts.child(
-                div()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child("This host's token is saved in config.toml, not the OS keyring."),
-            );
-        }
-
-        let mut agents: Vec<&Agent> = snapshot.agents.iter().collect();
-        agents.sort_by(|a, b| {
-            a.name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase())
-                .then(a.pubkey.cmp(&b.pubkey))
-        });
-        let body: AnyElement = if agents.is_empty() {
-            if connected {
-                div()
-                    .text_body()
-                    .child("No agents yet. Add an agent to get started.")
-                    .into_any_element()
-            } else {
-                div().into_any_element()
             }
-        } else {
-            let mut cards = Vec::new();
-            for agent in agents {
-                cards.push(
-                    self.card(host, agent, &harnesses, connected, window, cx)
-                        .into_any_element(),
-                );
+            for warning in &state.agents.inventory_warnings {
+                alerts = alerts.child(line(format!(
+                    "{warning} Retry local discovery by reopening the app."
+                )));
             }
-            div()
-                .grid()
-                .grid_cols(columns(self.width.get()))
-                .gap(rems(1.))
-                .children(cards)
-                .into_any_element()
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(rems(0.75))
-            .child(heading)
-            .child(alerts)
-            .child(body)
-            .when(connected, |this| this.child(self.harnesses(host, cx)))
+        }
+        if state
+            .remote
+            .as_ref()
+            .is_some_and(|remote| remote.token.is_some())
+        {
+            alerts = alerts.child(quiet(
+                "This host's token is saved in config.toml, not the OS keyring.".into(),
+            ));
+        }
+        alerts
     }
 
-    fn harnesses(&self, host: &Entity<HostConnection>, cx: &mut Context<Self>) -> AnyElement {
-        let c = *cx.colors();
-        let host_id = host.entity_id();
-        let Some(list) = host.read(cx).harnesses.clone() else {
-            return div()
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child("Checking harnesses…")
-                .into_any_element();
-        };
-        let open = self.harnesses_open.contains(&host_id);
-        let ready = list.iter().filter(|h| h.missing.is_empty()).count();
-        let toggle = div()
-            .id(SharedString::from(format!("harnesses-{host_id}")))
-            .flex()
-            .items_center()
-            .gap(rems(0.25))
-            .min_h(rems(2.))
-            .cursor_pointer()
-            .text_label_sm()
-            .child(format!("Harnesses · {ready} of {} ready", list.len()))
-            .child(
-                Icon::new(if open {
-                    IconName::CaretUp
-                } else {
-                    IconName::CaretDown
-                })
-                .size(16.)
-                .color(c.text_subtle),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.harnesses_open.remove(&host_id) {
-                    this.harnesses_open.insert(host_id);
-                }
-                cx.notify();
-            }));
-        div()
-            .flex()
-            .flex_col()
-            .gap(rems(0.5))
-            .child(toggle)
-            .when(open, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .px(rems(1.))
-                        .rounded(radius::CONTAINER)
-                        .border_1()
-                        .border_color(c.border_standard)
-                        .children(list.iter().enumerate().map(|(index, harness)| {
-                            harness_row(harness, index > 0, &c).into_any_element()
-                        })),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn card(
+    /// One group: a heading, community subsections, and tiles or rows.
+    fn group(
         &self,
-        host: &Entity<HostConnection>,
-        agent: &Agent,
-        harnesses: &[Harness],
-        connected: bool,
+        view: &View,
+        group: Group,
+        mut rows: Vec<&Row>,
+        nested: bool,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let c = *cx.colors();
-        let host_id = host.entity_id();
-        let key = (host_id, agent.id.clone());
-        let busy = self.pending.contains(&key);
-        let menu_open = self.menu == Some(OpenMenu::Agent(host_id, agent.id.clone()));
-        let element_id = |part: &str| SharedString::from(format!("{part}-{host_id}-{}", agent.id));
-
-        let mut avatar = Avatar::new(agent.name.clone())
-            .squircle()
-            .size(AvatarSize::Px(80.))
-            .presence(Some(presence(agent.status)));
-        if let Some(picture) = agent.picture.clone().filter(|p| !p.is_empty()) {
-            avatar = avatar.image(SharedString::from(picture));
-        }
-        let kind = harness::kind_of(&agent.harness.command, harnesses);
-        let status_color = match agent.status {
-            ProcessStatus::Failed => c.text_danger,
-            _ => c.text_subtle,
-        };
-        let manage = {
-            let host = host.clone();
-            let id = agent.id.clone();
-            cx.listener(move |this, _, _, cx| {
-                this.menu = None;
-                this.modal = Some(Modal::Manage(host.clone(), id.clone()));
-                cx.notify();
-            })
-        };
-        let content = div()
-            .id(element_id("open"))
+        inventory::sort(&mut rows);
+        let sections = inventory::community_sections(group, rows);
+        let mut column = div()
             .flex()
             .flex_col()
-            .flex_1()
-            .items_center()
-            .justify_center()
             .gap(rems(0.75))
-            .px(rems(0.75))
-            .pt(rems(2.))
-            .pb(rems(1.))
-            .rounded(radius::CONTAINER)
-            .cursor_pointer()
-            .hover(|style| style.bg(c.affordance_subtle_hover))
-            .on_click(manage)
-            .child(avatar)
-            .child(
+            .child(div().text_label_sm().child(group.heading()));
+        for (community, rows) in sections {
+            let cards: Vec<AnyElement> = rows
+                .into_iter()
+                .map(|row| {
+                    let decision = view.decide(row);
+                    self.card(
+                        view,
+                        row,
+                        decision,
+                        community.as_deref(),
+                        nested,
+                        window,
+                        cx,
+                    )
+                })
+                .collect();
+            let list = if group == Group::LocalHere {
+                div()
+                    .grid()
+                    .grid_cols(columns(self.width.get()))
+                    .gap(rems(1.))
+                    .children(cards)
+            } else {
                 div()
                     .flex()
                     .flex_col()
-                    .items_center()
-                    .w_full()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .w_full()
-                            .text_label_sm()
-                            .text_center()
-                            .truncate()
-                            .child(agent.name.clone()),
-                    )
-                    .when(restart_required(agent), |this| {
-                        this.child(
-                            div().mt(rems(0.25)).child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(rems(0.25))
-                                    .px(rems(0.5))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(c.border_warning)
-                                    .bg(c.affordance_warning)
-                                    .text_caption()
-                                    .text_color(c.text_warning)
-                                    .child(Icon::new(IconName::ArrowsClockwise).size(14.))
-                                    .child("Restart required"),
-                            ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(rems(0.25))
-                            .w_full()
-                            .mt(rems(0.25))
-                            .text_caption()
-                            .text_color(c.text_subtle)
-                            .children(kind.map(|kind| harness::mark(kind, 14.)))
-                            .child(div().min_w_0().truncate().child(model_line(agent))),
-                    )
-                    .child(
-                        div()
-                            .mt(rems(0.25))
-                            .text_caption()
-                            .text_color(status_color)
-                            .child(if connected {
-                                status_label(agent.status).to_string()
-                            } else {
-                                format!("Last known: {}", status_label(agent.status))
-                            }),
-                    ),
-            );
-
-        let failure = self.failures.get(&key).cloned();
-        let problem = failure
-            .clone()
-            .or_else(|| agent.error.clone().map(SharedString::from));
-        let action_button = |id: SharedString, label: &'static str, action: AgentAction| {
-            let host = host.clone();
-            let agent_id = agent.id.clone();
-            Button::new(id, label)
-                .size(ButtonSize::Sm)
-                .disabled(busy || !connected)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let request = Request::Action {
-                        id: agent_id.clone(),
-                        action,
-                        replay_floor: None,
-                        owner: None,
-                    };
-                    this.act(&host, agent_id.clone(), request, cx);
-                }))
-        };
-        let actions = if stoppable(agent.status) {
-            div()
-                .flex()
-                .gap(rems(0.5))
-                .child(action_button(element_id("stop"), "Stop", AgentAction::Stop))
-                .when(agent.status == ProcessStatus::Running, |this| {
-                    this.child(action_button(
-                        element_id("restart"),
-                        if restart_required(agent) {
-                            "Restart to apply"
-                        } else {
-                            "Restart"
-                        },
-                        AgentAction::Restart,
-                    ))
-                })
-        } else {
-            let label = if agent.status == ProcessStatus::Failed {
-                "Retry start"
-            } else {
-                "Start"
+                    .overflow_hidden()
+                    .rounded(radius::CONTAINER)
+                    .border_1()
+                    .border_color(c.border_standard)
+                    .children(cards)
             };
-            div().flex().gap(rems(0.5)).child(
-                action_button(element_id("start"), label, AgentAction::Start)
-                    .prominent()
-                    .disabled(busy || !connected || agent.status == ProcessStatus::Stopping),
-            )
-        };
-        let footer = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(rems(0.5))
-            .px(rems(1.))
-            .pb(rems(1.))
-            .children(problem.map(|text| {
+            column = column.child(
                 div()
-                    .w_full()
-                    .text_caption()
-                    .text_center()
-                    .text_color(c.text_danger)
-                    .line_clamp(3)
-                    .child(text)
-            }))
-            .when(agent.profile_pending, |this| {
-                this.child(
-                    div()
-                        .text_caption()
-                        .text_center()
-                        .text_color(c.text_subtle)
-                        .child("Profile publication is pending."),
-                )
-            })
-            .child(actions);
-
-        let menu = self.agent_menu(host, agent, menu_open, window, cx);
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .min_h(rems(15.25))
-            .rounded(radius::CONTAINER)
-            .border_1()
-            .border_color(c.border_standard)
-            .child(content)
-            .child(footer)
-            .child(div().absolute().top(rems(0.5)).right(rems(0.5)).child(menu))
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(rems(0.5))
+                    .children(community.map(|community| {
+                        div()
+                            .text_label()
+                            .text_color(c.text_subtle)
+                            .child(community)
+                    }))
+                    .child(list),
+            );
+        }
+        column.into_any_element()
     }
 
-    fn agent_menu(
+    /// The groups of `rows`, in page order.
+    fn groups(
         &self,
-        host: &Entity<HostConnection>,
-        agent: &Agent,
-        open: bool,
+        view: &View,
+        rows: Vec<&Row>,
+        nested: bool,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let host_id = host.entity_id();
-        let agent_id = agent.id.clone();
-        let trigger = IconButton::new(
-            SharedString::from(format!("agent-actions-{host_id}-{agent_id}")),
-            IconName::DotsThree,
-        )
-        .size(IconButtonSize::Sm)
-        .selected(open)
-        .when(!open, |this| {
-            this.tooltip(format!("Actions for {}", agent.name))
-        })
-        .on_click(cx.listener({
-            let agent_id = agent_id.clone();
-            move |this, _, _, cx| {
-                this.set_menu(Some(OpenMenu::Agent(host_id, agent_id.clone())), cx)
-            }
-        }));
-        let menu = open.then(|| {
-            let item = |id: &'static str, label: &'static str| {
-                MenuItem::new(id, label).size(MenuSize::Default)
-            };
-            let manage = {
-                let host = host.clone();
-                let id = agent_id.clone();
-                cx.listener(move |this, _, _, cx| {
-                    this.menu = None;
-                    this.modal = Some(Modal::Manage(host.clone(), id.clone()));
-                    cx.notify();
-                })
-            };
-            let edit = {
-                let host = host.clone();
-                let agent = agent.clone();
-                cx.listener(move |this, _, window, cx| {
-                    this.edit_agent(host.clone(), agent.clone(), window, cx)
-                })
-            };
-            let launch = {
-                let host = host.clone();
-                let id = agent_id.clone();
-                let value = !agent.start_on_app_launch;
-                cx.listener(move |this, _, _, cx| {
-                    this.menu = None;
-                    let request = Request::SetStartOnLaunch {
-                        id: id.clone(),
-                        value,
-                    };
-                    this.act(&host, id.clone(), request, cx);
-                })
-            };
-            let publish = {
-                let host = host.clone();
-                let id = agent_id.clone();
-                cx.listener(move |this, _, _, cx| {
-                    this.menu = None;
-                    let request = Request::PublishProfile { id: id.clone() };
-                    this.act(&host, id.clone(), request, cx);
-                })
-            };
-            let delete = {
-                let host = host.clone();
-                let id = agent_id.clone();
-                cx.listener(move |this, _, _, cx| {
-                    this.menu = None;
-                    this.modal = Some(Modal::Delete {
-                        host: host.clone(),
-                        id: id.clone(),
-                        busy: false,
-                        error: None,
-                    });
-                    cx.notify();
-                })
-            };
-            let connected = matches!(host.read(cx).state, ConnectionState::Connected { .. });
-            let menu = Menu::new()
-                .size(MenuSize::Wide)
-                .child(item("manage", "Manage agent").on_click(manage))
-                .child(MenuSeparator::new())
-                .child(
-                    item("edit", "Edit")
-                        .icon(IconName::PencilSimple)
-                        .icon_size(14.)
-                        .disabled(!connected)
-                        .on_click(edit),
-                )
-                .child(
-                    item("launch", "Start on launch")
-                        .icon(IconName::Lightning)
-                        .icon_size(14.)
-                        .checked(agent.start_on_app_launch)
-                        .disabled(!connected)
-                        .on_click(launch),
-                )
-                .when(agent.profile_pending, |this| {
-                    this.child(
-                        item("publish", "Retry profile publication")
-                            .icon(IconName::ArrowsClockwise)
-                            .icon_size(14.)
-                            .disabled(!connected)
-                            .on_click(publish),
-                    )
-                })
-                .child(MenuSeparator::new())
-                .child(
-                    item("delete", "Delete")
-                        .icon(IconName::Trash)
-                        .icon_size(14.)
-                        .danger()
-                        .disabled(!connected)
-                        .on_click(delete),
-                );
-            overlay::dropdown(window, Align::End, menu, Self::dismiss(cx))
-        });
-        div().relative().occlude().child(trigger).children(menu)
+    ) -> Vec<AnyElement> {
+        let mut by_group: BTreeMap<Group, Vec<&Row>> = BTreeMap::new();
+        for row in rows {
+            by_group
+                .entry(view.decide(row).group)
+                .or_default()
+                .push(row);
+        }
+        by_group
+            .into_iter()
+            .map(|(group, rows)| self.group(view, group, rows, nested, window, cx))
+            .collect()
     }
 
-    fn manage_dialog(
+    fn host_section(
         &self,
-        host: &Entity<HostConnection>,
-        id: &str,
+        ix: usize,
+        view: &View,
+        window: &Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let c = *cx.colors();
-        let agent = find(host, id, cx)?.clone();
+    ) -> AnyElement {
+        let host = self.hosts[ix].clone();
+        let mine = |row: &&Row| view.host_of(row, &view.decide(row)) == Some(ix);
+        let any = view.rows.values().any(|row| mine(&row));
+        let rows: Vec<&Row> = view
+            .rows
+            .values()
+            .filter(|row| !view.archived.contains(&row.pubkey))
+            .filter(mine)
+            .collect();
         let state = host.read(cx);
-        let label = state.label.clone();
         let connected = matches!(state.state, ConnectionState::Connected { .. });
-        let runtime_blocked = connected && !state.agents.runtime_available;
-        let key = (host.entity_id(), agent.id.clone());
-        let busy = self.pending.contains(&key);
-        let close = cx.listener(|this, _, _, cx| this.close_modal(cx));
-        let line = |text: SharedString| div().text_body_sm().child(text);
-        let button = |label: &'static str, request: Request| {
-            let host = host.clone();
-            let id = agent.id.clone();
-            Button::new(SharedString::from(format!("manage-{label}")), label)
-                .size(ButtonSize::Sm)
-                .surface(Surface::Floating)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.act(&host, id.clone(), request.clone(), cx)
-                }))
-        };
-        let action = |action| Request::Action {
-            id: agent.id.clone(),
-            action,
-            replay_floor: None,
-            owner: None,
-        };
-        let start_label = if agent.status == ProcessStatus::Failed {
-            "Retry start"
-        } else {
-            "Start"
-        };
-        let block_reason = if !connected {
-            Some(format!("{label} is not connected."))
-        } else if runtime_blocked {
-            Some("The agent runtime is unavailable on this host.".into())
-        } else if agent.status == ProcessStatus::Stopping {
-            Some("Waiting for the process transition.".into())
-        } else {
-            None
-        };
-        let dialog = Dialog::new("manage-agent", format!("Manage {}", agent.name))
-            .on_close(close)
+        let empty = !any && connected && state.status() != Status::Loading;
+        let repair = state
+            .agents
+            .agents
+            .iter()
+            .any(|agent| agent.needs_team_import);
+        let groups = self.groups(view, rows, false, window, cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap(rems(1.5))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(rems(0.75))
-                    .child(
-                        div()
-                            .text_body_sm()
-                            .text_color(c.text_subtle)
-                            .child(format!("{} · {label}", agent.relay_url)),
-                    )
-                    .child(line(
-                        if connected {
-                            process_label(agent.status).to_string()
-                        } else {
-                            format!("Last known: {}", process_label(agent.status))
-                        }
-                        .into(),
-                    ))
-                    .when(agent.start_on_app_launch, |this| {
-                        this.child(line("Starts with this app.".into()))
+                    .child(self.host_heading(&host, window, cx))
+                    .child(self.host_alerts(&host, cx)),
+            )
+            .when(empty, |this| {
+                this.child(
+                    div()
+                        .text_body()
+                        .child("No agents yet. Add an agent to get started."),
+                )
+            })
+            .children(groups)
+            .when(repair, |this| this.child(self.repair(&host, cx)))
+            .into_any_element()
+    }
+
+    /// The relay's status lines, then what only the relays know.
+    fn shared_sections(
+        &self,
+        view: &View,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let c = *cx.colors();
+        let discovery = self.discovery.read(cx);
+        let line = |text: String| div().text_body().child(text).into_any_element();
+        let mut parts = Vec::new();
+        if discovery.pending() {
+            parts.push(line("Checking community inventory…".into()));
+        }
+        for community in discovery.profile_errors() {
+            parts.push(line(format!(
+                "Agent names and pictures could not be checked for {community}. Refresh to retry."
+            )));
+        }
+        let errors = discovery.errors();
+        for community in &errors {
+            parts.push(line(format!(
+                "Community inventory could not be checked for {community}. Refresh to retry."
+            )));
+        }
+        if discovery.pending() || !errors.is_empty() {
+            parts.push(line(
+                "Showing known community associations. Community checks are not current.".into(),
+            ));
+        }
+        if let Some(error) = discovery.library_error.clone() {
+            parts.push(line(error));
+        }
+        let library_ready = discovery.library_status == ReadStatus::Ready;
+        let (_, profiles) = relay::tiles(&discovery.library);
+        let active: Vec<&Row> = view
+            .rows
+            .values()
+            .filter(|row| !view.archived.contains(&row.pubkey))
+            .collect();
+        let all_archived = active.is_empty() && !view.archived.is_empty();
+        if all_archived {
+            parts.push(line(
+                "All your agents are archived in this community.".into(),
+            ));
+        }
+        let relay_only: Vec<&Row> = active
+            .into_iter()
+            .filter(|row| view.decide(row).group == Group::Relay)
+            .collect();
+        if !relay_only.is_empty() {
+            parts.push(self.group(view, Group::Relay, relay_only, false, window, cx));
+        }
+        if !view.archived.is_empty() {
+            let open = self.archived_open.unwrap_or(all_archived);
+            let archived: Vec<&Row> = view
+                .rows
+                .values()
+                .filter(|row| view.archived.contains(&row.pubkey))
+                .collect();
+            let count = archived.len();
+            let header = div()
+                .id("archived-toggle")
+                .flex()
+                .items_center()
+                .justify_between()
+                .py(rems(0.5))
+                .px(rems(0.5))
+                .mx(rems(-0.5))
+                .rounded(radius::CONTROL)
+                .cursor_pointer()
+                .hover(|this| this.bg(c.affordance_subtle_hover))
+                .child(div().text_label().child(format!("Archived ({count})")))
+                .child(
+                    Icon::new(if open {
+                        IconName::CaretUp
+                    } else {
+                        IconName::CaretDown
                     })
-                    .children(
-                        agent
-                            .error
-                            .clone()
-                            .map(|error| line(error.into()).text_color(c.text_danger)),
-                    )
-                    .children(
-                        self.failures
-                            .get(&key)
-                            .cloned()
-                            .map(|error| line(error).text_color(c.text_danger)),
-                    )
-                    .children(agent.diagnostics.iter().map(|diagnostic| {
-                        div()
-                            .text_mono()
-                            .text_color(c.text_subtle)
-                            .child(diagnostic.clone())
-                    }))
-                    .when(agent.profile_pending, |this| {
-                        this.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(rems(0.5))
-                                .child(line(
-                                    "Settings saved. Profile publication is pending.".into(),
-                                ))
-                                .child(
-                                    button(
-                                        "Retry profile",
-                                        Request::PublishProfile {
-                                            id: agent.id.clone(),
-                                        },
-                                    )
-                                    .disabled(busy || !connected),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap(rems(0.5))
-                            .when(!stoppable(agent.status), |this| {
-                                this.child(
-                                    button(start_label, action(AgentAction::Start))
-                                        .prominent()
-                                        .disabled(busy || block_reason.is_some()),
-                                )
-                            })
-                            .child(
-                                button("Stop", action(AgentAction::Stop))
-                                    .disabled(busy || !connected || !stoppable(agent.status)),
-                            )
-                            .when(agent.status == ProcessStatus::Running, |this| {
-                                this.child(
-                                    button(
-                                        if restart_required(&agent) {
-                                            "Restart to apply"
-                                        } else {
-                                            "Restart"
-                                        },
-                                        action(AgentAction::Restart),
-                                    )
-                                    .disabled(busy || !connected),
-                                )
-                            }),
-                    )
-                    .children(block_reason.map(|reason| {
-                        div().text_body_sm().text_color(c.text_subtle).child(reason)
-                    })),
+                    .size(16.)
+                    .color(c.text_subtle),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.archived_open = Some(!open);
+                    cx.notify();
+                }));
+            let body = open.then(|| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(1.5))
+                    .children(self.groups(view, archived, true, window, cx))
+            });
+            parts.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(0.75))
+                    .child(header)
+                    .children(body)
+                    .into_any_element(),
             );
-        Some(dialog.into_any_element())
+        }
+        let mut profiles = if library_ready { profiles } else { Vec::new() };
+        if !profiles.is_empty() {
+            profiles.sort_by(|a, b| {
+                a.name
+                    .to_lowercase()
+                    .cmp(&b.name.to_lowercase())
+                    .then(a.id.cmp(&b.id))
+            });
+            let cards: Vec<AnyElement> = profiles
+                .iter()
+                .map(|profile| self.profile_card(profile, cx))
+                .collect();
+            parts.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(0.75))
+                    .child(div().text_heading().child("Profiles without identities"))
+                    .child(
+                        div()
+                            .grid()
+                            .grid_cols(columns(self.width.get()))
+                            .gap(rems(1.))
+                            .children(cards),
+                    )
+                    .into_any_element(),
+            );
+        }
+        parts
     }
 
     fn modal(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let c = *cx.colors();
         let page = cx.entity().downgrade();
         let close: Dismiss = Rc::new(move |_, cx| {
             let _ = page.update(cx, |this, cx| this.close_modal(cx));
         });
         let (content, dismiss): (AnyElement, Option<Dismiss>) = match self.modal.as_ref()? {
-            Modal::Editor { editor, .. } => (editor.clone().into_any_element(), None),
+            Modal::Create { dialog, .. } => (dialog.clone().into_any_element(), None),
+            Modal::Edit { dialog, .. } => (dialog.clone().into_any_element(), None),
             Modal::Defaults { dialog, .. } => (dialog.clone().into_any_element(), None),
-            Modal::Manage(host, id) => (self.manage_dialog(host, id, cx)?, Some(close)),
-            Modal::Delete {
-                host,
-                id,
-                busy,
-                error,
-            } => {
-                let name = find(host, id, cx)
-                    .map(|agent| agent.name.clone())
-                    .unwrap_or_else(|| "this agent".into());
-                let dialog =
-                    AlertDialog::new(format!("Delete {name}?"))
-                        .description(
-                            "This stops the agent and removes its settings and app credential \
-                         from its host. Its relay identity and past messages remain visible. \
-                         This cannot be undone here.",
-                        )
-                        .children(error.clone().map(|error| {
-                            div().text_body_sm().text_color(c.text_danger).child(error)
-                        }))
-                        .action(
-                            Button::new("cancel-delete", "Cancel")
-                                .surface(Surface::Floating)
-                                .disabled(*busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx))),
-                        )
-                        .action(
-                            Button::new("confirm-delete", "Delete agent")
-                                .destructive()
-                                .loading(*busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.delete_agent(cx))),
-                        );
-                (dialog.into_any_element(), (!*busy).then_some(close))
+            Modal::Import { dialog, .. } => (dialog.clone().into_any_element(), None),
+            Modal::Manage(pubkey) => {
+                let view = self.view(cx);
+                let row = view.rows.get(pubkey)?.clone();
+                (self.manage_dialog(&view, &row, window, cx), Some(close))
             }
+            Modal::Delete { busy, .. } => {
+                let busy = *busy;
+                (self.delete_dialog(cx)?, (!busy).then_some(close))
+            }
+            Modal::Archive { .. } => (self.archive_dialog(cx)?, Some(close)),
+            Modal::Remove { .. } => (self.remove_dialog(cx)?, Some(close)),
+            Modal::Handover { pending, .. } => {
+                let pending = *pending;
+                (self.handover_dialog(cx)?, (!pending).then_some(close))
+            }
+        };
+        let content = match self.modal.as_ref()? {
+            Modal::Create { .. }
+            | Modal::Edit { .. }
+            | Modal::Defaults { .. }
+            | Modal::Import { .. } => content,
+            _ => div()
+                .track_focus(&self.modal_focus)
+                .key_context(buzz_ui::DIALOG_CONTEXT)
+                .when_some(dismiss.clone(), |this, close| {
+                    this.on_action(move |_: &buzz_ui::Cancel, window, cx| close(window, cx))
+                })
+                .child(content)
+                .into_any_element(),
         };
         Some(overlay::modal(window, content, dismiss).into_any_element())
     }
-}
-
-pub(crate) fn harness_row(
-    harness: &Harness,
-    divided: bool,
-    c: &buzz_ui::Colors,
-) -> impl IntoElement {
-    let ready = harness.missing.is_empty();
-    div()
-        .flex()
-        .items_center()
-        .gap(rems(1.))
-        .py(rems(0.75))
-        .text_body_sm()
-        .when(divided, |this| {
-            this.border_t_1().border_color(c.border_standard)
-        })
-        .child(
-            div()
-                .flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .gap(rems(0.75))
-                .child(harness::mark(harness.kind, 32.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(div().text_label_sm().child(harness.label.clone()))
-                        .when(!ready, |this| {
-                            this.child(
-                                div()
-                                    .text_caption()
-                                    .text_color(c.text_subtle)
-                                    .child(harness.setup_hint.clone()),
-                            )
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .flex_none()
-                .max_w(rems(16.))
-                .text_right()
-                .text_color(c.text_subtle)
-                .child(match harness.status {
-                    Some(status) => harness::status_label(Some(status)).to_string(),
-                    // Hosts that predate statuses list what is missing.
-                    None if ready => "Ready".to_string(),
-                    None => format!("Needs {}", harness.missing.join(", ")),
-                }),
-        )
 }
 
 impl Render for AgentsPage {
@@ -1283,27 +1195,58 @@ impl Render for AgentsPage {
         .absolute()
         .size_full();
 
-        let sections: Vec<AnyElement> = self
-            .hosts
-            .clone()
-            .iter()
-            .map(|host| self.host_section(host, window, cx).into_any_element())
+        let view = self.view(cx);
+        // Entering the all-archived state opens the Archived section again.
+        let all_archived =
+            !view.archived.is_empty() && view.rows.keys().all(|key| view.archived.contains(key));
+        if all_archived != self.was_all_archived {
+            self.was_all_archived = all_archived;
+            if all_archived {
+                self.archived_open = None;
+            }
+        }
+        let mut sections: Vec<AnyElement> = (0..self.hosts.len())
+            .map(|ix| self.host_section(ix, &view, window, cx))
             .collect();
+        sections.extend(self.shared_sections(&view, window, cx));
         let modal = self.modal(window, cx);
-        let toast = self.toast.as_ref().map(|(text, generation)| {
+        // The page's own dialogs take focus when they open.
+        let own = matches!(
+            self.modal,
+            Some(
+                Modal::Manage(_)
+                    | Modal::Delete { .. }
+                    | Modal::Archive { .. }
+                    | Modal::Remove { .. }
+                    | Modal::Handover { .. }
+            )
+        );
+        if own && !self.modal_focus.contains_focused(window, cx) {
+            window.focus(&self.modal_focus, cx);
+        }
+        let toast = self.toast.as_ref().map(|toast| {
             let right = window.viewport_size().width - px(16.) - px(384.);
+            let mut notice = Toast::new(("agents-toast", toast.generation), toast.text.clone())
+                .tone(ToastTone::Success)
+                .on_dismiss(cx.listener(|this, _, _, cx| {
+                    this.toast = None;
+                    cx.notify();
+                }));
+            if let Some(pubkey) = toast.undo.clone() {
+                notice = notice.action(
+                    Button::new("archive-undo", "Undo")
+                        .size(ButtonSize::Sm)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toast = None;
+                            this.archive(&pubkey, false, cx);
+                        })),
+                );
+            }
             deferred(
                 anchored()
                     .position_mode(AnchoredPositionMode::Window)
                     .position(point(right, px(128.)))
-                    .child(
-                        Toast::new(("agents-toast", *generation), text.clone())
-                            .tone(ToastTone::Success)
-                            .on_dismiss(cx.listener(|this, _, _, cx| {
-                                this.toast = None;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(notice),
             )
             .with_priority(3)
         });
