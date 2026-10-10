@@ -70,6 +70,7 @@ pub mod settings;
 mod sidebar;
 mod sidebar_unread;
 mod status;
+pub mod templates;
 mod thread;
 mod time;
 pub mod toasts;
