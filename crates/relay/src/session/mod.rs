@@ -20,6 +20,7 @@ mod channels;
 mod feedback;
 mod gifs;
 mod incoming;
+mod live_feed;
 mod members;
 mod messaging;
 mod observer;
@@ -34,6 +35,7 @@ mod unread;
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use feedback::{FeedbackState, PendingFeedback};
 pub use incoming::IncomingMessage;
+pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
 pub use statuses::StatusWatch;
 pub use threads::ThreadView;
@@ -417,6 +419,7 @@ impl Session {
             snapshot,
             live: None,
             observer: None,
+            live_feed: Vec::new(),
             relay: None,
             discovery: None,
             scan: None,
@@ -1033,6 +1036,8 @@ struct Actor {
     live: Option<Live>,
     /// The agent activity capture, if the archive wants one.
     observer: Option<observer::Observer>,
+    /// Receivers of live events (`Session::live_events`).
+    live_feed: Vec<mpsc::UnboundedSender<LiveBatch>>,
     relay: Option<RelayInfo>,
     discovery: Option<DiscoveryState>,
     scan: Option<RosterScan>,
@@ -1873,6 +1878,9 @@ impl Actor {
                 }
                 if !pulses.is_empty() && self.live.as_ref().is_some_and(Live::is_connected) {
                     self.typing_accept(&pulses);
+                }
+                if phase == crate::live::Phase::Live {
+                    self.feed_live(&events, channel.as_deref());
                 }
                 let arrived: Vec<String> = candidates
                     .iter()

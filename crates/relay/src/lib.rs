@@ -69,10 +69,10 @@ pub use read_state::{
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
     CatchUpState, ChannelUnread, ChannelView, FeedbackState, HeadCatchUp, IncomingMessage,
-    LiveView, MessageSearch, PendingFeedback, PeoplePage, PublicChannels, READING_DWELL_MS,
-    RelayInfo, RosterRefresh, RosterStatus, SearchOutcome, SendObserverHandle, Session,
-    SessionSnapshot, SessionStatus, StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus,
-    UnreadCounts, UnreadDetail, UnreadWatch,
+    LiveBatch, LiveView, MessageSearch, PendingFeedback, PeoplePage, PublicChannels,
+    READING_DWELL_MS, RelayInfo, RosterRefresh, RosterStatus, SearchOutcome, SendObserverHandle,
+    Session, SessionSnapshot, SessionStatus, StatusWatch, ThreadUnread, TimelineSnapshot,
+    TimelineStatus, UnreadCounts, UnreadDetail, UnreadWatch,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
