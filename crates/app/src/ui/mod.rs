@@ -22,9 +22,6 @@ mod profile_card;
 mod search;
 pub mod settings;
 mod sidebar;
-/// Declared here until main.rs declares `mod sounds;`.
-#[path = "../sounds.rs"]
-pub(crate) mod sounds;
 mod status;
 mod thread;
 mod time;

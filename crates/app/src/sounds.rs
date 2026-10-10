@@ -117,7 +117,6 @@ impl Sound {
 /// Plays the sound the preferences choose for an alert in `category`, if
 /// alerts, sound and the category are on. A sound already playing starts
 /// over, as buzz-app rewinds its cached `Audio`.
-#[allow(dead_code, reason = "notifications.rs calls it")]
 pub fn play(category: Category, preferences: &Preferences) {
     if let Some(sound) = preferences.sound_for(category) {
         Player::global().start(Slot::Alert(sound), sound);

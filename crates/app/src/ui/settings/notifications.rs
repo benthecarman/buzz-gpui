@@ -6,8 +6,8 @@
 use super::{SettingsPage, header, inline_header, note, preference_row, rows_group, section};
 use crate::community::AppState;
 use crate::notifications::Preferences;
+use crate::sounds::{self, Sound};
 use crate::ui::overlay::{self, Align};
-use crate::ui::sounds::{self, Sound};
 use buzz_relay_client::{Category, Partition, Store};
 use buzz_ui::{ActiveTheme, Button, ButtonShape, ButtonSize, IconName, Menu, MenuItem, Switch};
 use gpui_kit::prelude::FluentBuilder;

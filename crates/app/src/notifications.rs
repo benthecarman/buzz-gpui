@@ -12,8 +12,8 @@
 
 use crate::community::{AppState, Community};
 use crate::runtime::Runtime;
+use crate::sounds::Sound;
 use crate::ui::navigation::{self, Place, Target};
-use crate::ui::sounds::Sound;
 use buzz_relay_client::{
     Category, ChannelSummary, ChannelType, IncomingMessage, Partition, Profiles, Store,
 };
@@ -180,7 +180,8 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
         return;
     }
     let store = cx.global::<AppState>().store.clone();
-    if !Preferences::load(&store, &this.partition()).allows(item.category) {
+    let preferences = Preferences::load(&store, &this.partition());
+    if !preferences.allows(item.category) {
         return;
     }
     let key = (this.origin.to_string(), item.message_id.to_hex());
@@ -207,6 +208,7 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
     if !cx.default_global::<Shown>().admit(key, Instant::now()) {
         return;
     }
+    crate::sounds::play(item.category, &preferences);
     show(title, body, target, cx);
 }
 

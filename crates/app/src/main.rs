@@ -11,6 +11,7 @@ mod notifications;
 mod runtime;
 #[cfg(unix)]
 mod single_instance;
+mod sounds;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod tray;
 mod ui;

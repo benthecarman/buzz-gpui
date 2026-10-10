@@ -219,7 +219,7 @@ impl SettingsPage {
     fn quiet(&mut self) {
         self.sound_menu = None;
         self.retention_menu = false;
-        crate::ui::sounds::stop_preview();
+        crate::sounds::stop_preview();
         // Leaving Profile hides the private key, as unmounting it does.
         self.profile.nsec_revealed = false;
         self.profile.nsec_message = None;
