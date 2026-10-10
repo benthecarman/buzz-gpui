@@ -10,15 +10,18 @@ use buzz_relay_client::emoji::suggest_shortcode;
 use buzz_relay_client::messages::{media_byte_limit, normalize_shortcode};
 use buzz_relay_client::upload::{self, UploadError, UploadFile, sniff_image};
 use buzz_relay_client::{CatalogStatus, CustomEmoji};
+use buzz_ui::tokens::radius;
 use buzz_ui::{
     ActiveTheme, ButtonVariant, Icon, IconName, Tab, TabVariant, Tabs, TextField, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::path::Path;
 use std::sync::Arc;
 
 const NOT_AN_IMAGE: &str = "Choose an image file for custom emoji.";
+const UPLOAD_FAILED: &str = "Failed to upload emoji image.";
 
 /// Emitted after a save, for the page's toast.
 pub struct EmojiAdded(pub String);
@@ -43,6 +46,10 @@ pub struct CustomEmojiSettings {
     uploading: bool,
     saving: bool,
     error: Option<SharedString>,
+    /// Upload, which takes focus when Clear, Save or the empty state's
+    /// action replace the focused control.
+    upload_focus: FocusHandle,
+    focus_upload: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -72,6 +79,8 @@ impl CustomEmojiSettings {
             uploading: false,
             saving: false,
             error: None,
+            upload_focus: cx.focus_handle(),
+            focus_upload: false,
             _subscriptions: subscriptions,
         }
     }
@@ -159,7 +168,13 @@ impl CustomEmojiSettings {
                         this.chosen = Some(chosen);
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => {
+                        this.error = Some(if error.is_empty() {
+                            UPLOAD_FAILED.into()
+                        } else {
+                            error.into()
+                        })
+                    }
                 }
                 cx.notify();
             });
@@ -170,6 +185,7 @@ impl CustomEmojiSettings {
     fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chosen = None;
         self.error = None;
+        self.focus_upload = true;
         self.name
             .update(cx, |state, cx| state.set_value("", window, cx));
         cx.notify();
@@ -213,7 +229,12 @@ impl CustomEmojiSettings {
         cx.notify();
     }
 
-    fn add_view(&self, mine: &[CustomEmoji], cx: &mut Context<Self>) -> AnyElement {
+    fn add_view(
+        &self,
+        mine: &[CustomEmoji],
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let c = *cx.colors();
         let busy = self.uploading || self.saving;
         let upload_label = if self.uploading {
@@ -223,10 +244,27 @@ impl CustomEmojiSettings {
         } else {
             "Upload image"
         };
-        let upload = button("emoji-upload", upload_label)
-            .icon(IconName::CloudUpload)
-            .disabled(busy)
-            .on_click(cx.listener(|this, _, window, cx| this.choose(window, cx)));
+        let focused = self.upload_focus.is_focused(window);
+        let upload = div()
+            .track_focus(&self.upload_focus)
+            .rounded(radius::CONTROL)
+            .when(focused, |d| {
+                d.shadow(vec![
+                    BoxShadow::new(px(0.), px(0.), c.border_focus).spread_radius(px(2.)),
+                ])
+            })
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !busy && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    this.choose(window, cx);
+                }
+            }))
+            .child(
+                button("emoji-upload", upload_label)
+                    .icon(IconName::CloudUpload)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.choose(window, cx))),
+            );
         let error = self.error.clone().map(|error| {
             div()
                 .px(inset())
@@ -421,6 +459,7 @@ impl CustomEmojiSettings {
                         .child(button("emoji-add", "Add emoji").on_click(cx.listener(
                             |this, _, _, cx| {
                                 this.view = Some(View::Add);
+                                this.focus_upload = true;
                                 cx.notify();
                             },
                         ))),
@@ -452,7 +491,10 @@ impl CustomEmojiSettings {
 }
 
 impl Render for CustomEmojiSettings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_upload) {
+            window.focus(&self.upload_focus, cx);
+        }
         let mut parts = vec![
             header(
                 "Custom emoji",
@@ -503,7 +545,7 @@ impl Render for CustomEmojiSettings {
                     ),
                 )
                 .child(match view {
-                    View::Add => self.add_view(&mine, cx),
+                    View::Add => self.add_view(&mine, window, cx),
                     View::Mine => self.mine_view(&snapshot.status, &mine, &community, cx),
                 })
                 .into_any_element(),
