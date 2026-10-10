@@ -7,6 +7,7 @@
 //! [`ImageSource::Custom`] instead. GPUI's asset cache keeps one load per
 //! URL and redraws the view that asked once it lands.
 
+mod attachments;
 mod audio;
 mod comments;
 mod engine;
@@ -15,6 +16,7 @@ mod review;
 mod seek;
 mod video;
 
+pub use attachments::attachments;
 pub use audio::{audio_attachment, forget_local, set_local, voice_draft, voice_note};
 pub use review::{open_review, review_overlay};
 pub use video::video_preview;
