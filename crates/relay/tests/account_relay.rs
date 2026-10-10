@@ -1,6 +1,6 @@
 //! Profile and status against the local test relay. Skipped unless
-//! `BUZZ_TEST_RELAY` points at `.test-relay`. Leaving is not exercised: it
-//! would end a fixture identity's membership.
+//! `BUZZ_TEST_RELAY` points at `.test-relay`. Leaving uses a throwaway
+//! identity, admitted with an invite.
 
 use buzz_identity::Identity;
 use buzz_relay_client::*;
@@ -104,4 +104,81 @@ async fn saves_status_and_profile() {
     );
 
     session.dispose().await;
+}
+
+/// A throwaway identity joins with an invite, publishes its first profile
+/// over HTTP, opens a session and leaves. Leaving again finds it absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn joins_with_an_invite_then_leaves() {
+    let Some((origin, _)) = fixture() else {
+        eprintln!("BUZZ_TEST_RELAY not set; skipping");
+        return;
+    };
+    let dir = std::env::var("BUZZ_TEST_RELAY").unwrap();
+    let identities: Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/identities.json")).unwrap())
+            .unwrap();
+    let alice =
+        Identity::from_nsec(identities["identities"]["alice"]["nsec"].as_str().unwrap()).unwrap();
+    let owner = RelayHttp::new(origin.clone(), Arc::new(alice));
+    let minted = owner
+        .post(
+            "/api/invites",
+            serde_json::json!({"ttl_secs": 600, "max_uses": 1}).to_string(),
+        )
+        .await
+        .unwrap();
+    let minted: Value = serde_json::from_slice(&minted).unwrap();
+    let code = minted["code"].as_str().unwrap();
+
+    let newcomer = Arc::new(Identity::ephemeral());
+    let http = RelayHttp::new(origin.clone(), newcomer.clone());
+    assert!(!community::probe(&http).await.unwrap());
+    let claimed = community::claim(&http, code, None, false).await.unwrap();
+    assert_eq!(claimed, community::Claimed::Joined);
+
+    // The profile step: nothing there yet, then the published profile.
+    let found = community::inspect_profile(&http).await.unwrap().unwrap();
+    assert_eq!(found.profile, None);
+    let profile = ProfileEdit {
+        name: "Throwaway".into(),
+        picture: String::new(),
+        about: "Here to leave.".into(),
+    };
+    community::publish_profile(&http, &profile, &found)
+        .await
+        .unwrap();
+    let saved = community::inspect_profile(&http).await.unwrap().unwrap();
+    assert_eq!(saved.profile, Some(profile));
+
+    let session = Session::open(
+        &tokio::runtime::Handle::current(),
+        origin.clone(),
+        newcomer.clone(),
+        Store::in_memory().unwrap(),
+    );
+    let mut snapshot = session.snapshot();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        snapshot.wait_for(|s| s.roster == RosterStatus::Ready),
+    )
+    .await
+    .expect("the roster loads")
+    .unwrap();
+    assert_eq!(session.leave().await, Ok(account::LeaveOutcome::Left));
+    session.dispose().await;
+    assert!(!community::probe(&http).await.unwrap(), "membership ended");
+
+    // A second leave, e.g. after a lost reply, still lets the app drop it.
+    let again = Session::open(
+        &tokio::runtime::Handle::current(),
+        origin,
+        newcomer,
+        Store::in_memory().unwrap(),
+    );
+    assert_eq!(
+        again.leave().await,
+        Ok(account::LeaveOutcome::AlreadyAbsent)
+    );
+    again.dispose().await;
 }

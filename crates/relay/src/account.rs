@@ -173,9 +173,11 @@ pub fn leave_outcome(
         Err(PublishError::Uncertain(message)) => return Err(message),
     };
     match message.as_str() {
-        "invalid: you are not a relay member" | "invalid: relay membership is not enabled" => {
-            Ok(LeaveOutcome::AlreadyAbsent)
-        }
+        // The relay's HTTP API turns non-members away before the leave
+        // handler, with the second code; buzz-app only knows the first.
+        "invalid: you are not a relay member"
+        | "invalid: relay membership is not enabled"
+        | "relay_membership_required" => Ok(LeaveOutcome::AlreadyAbsent),
         "blocked: you are banned from this community" => Ok(LeaveOutcome::Revoked),
         "invalid: relay owner cannot leave" => {
             Err("You own this community, so you can't leave it.".into())
@@ -265,6 +267,10 @@ mod tests {
         );
         assert_eq!(
             refused("invalid: relay membership is not enabled"),
+            Ok(LeaveOutcome::AlreadyAbsent)
+        );
+        assert_eq!(
+            refused("relay_membership_required"),
             Ok(LeaveOutcome::AlreadyAbsent)
         );
         assert_eq!(
