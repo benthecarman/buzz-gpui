@@ -410,16 +410,16 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | v1 payload parsing (unknown `v` fails closed, client_id 1..64, ≤10k keys / 128 KiB, `ov_s/c/b` groups, `esc:` unescape) | read-state-model.ts:43-133 | DONE (read_state.rs:294-364) | - | - |
 | Encode for publish (sorted/escaped keys, override registers, re-parse, ≤40 KiB) | read-state-model.ts:225-258 | DONE (read_state.rs:474-505) | - | - |
 | Codec: NIP-44 v2 to self, tags exactly `[d,t]`, ±60 s skew, 96 KiB / 128 KiB decode limits | read-state-host.ts:23-35; read-state.ts:291-318 | DONE (read_state.rs:523-578) | - | - |
-| Post-sign decode confirms payload, coordinate, created_at | read-state.ts:555-567 | DIFFERENT | Only a `debug_assert` (read_state.rs:2334-2337); optional runtime check | S |
-| Event ≤64 KiB and decode re-check before `POST /events` | read-state-model.ts:6; src-tauri/src/relay.rs:548-562 | PARTIAL | `READ_STATE_EVENT_BYTES` unused (read_state.rs:38); run_publish posts without a check (session/unread.rs:495-506) | S |
-| Timestamp refusal classification (exact error + 400, or 503 `sent:false`) | read-state-host.ts:4-15; transport.ts:1289 | PARTIAL | `publish_outcome` passes only `{"error":msg}` (session/unread.rs:195-202), so 503 `sent:false` never matches (read_state.rs:1469-1481) | S |
+| Post-sign decode confirms payload, coordinate, created_at | read-state.ts:555-567 | DONE (read_state.rs) | - | - |
+| Event ≤64 KiB and decode re-check before `POST /events` | read-state-model.ts:6; src-tauri/src/relay.rs:548-562 | DONE (session/unread.rs `run_publish`) | - | - |
+| Timestamp refusal classification (exact error + 400, or 503 `sent:false`) | read-state-host.ts:4-15; transport.ts:1289 | DONE (session/unread.rs `publish_outcome`) | - | - |
 
 ### Merge rules
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Max-per-key merge, 10k combined cap, `effectiveFrontier`, `overrideActive` | read-state-model.ts:144-190 | DONE (read_state.rs:368-417) | - | - |
-| Publishing with overrides present | read-state.ts:531-533 (blocked: "Synchronized override publication is not enabled") | DIFFERENT | Port strips overrides and publishes frontiers (read_state.rs:14-22, 2313-2326); confirm intended | S |
+| Publishing with overrides present | read-state.ts:531-533 (blocked: "Synchronized override publication is not enabled") | DIFFERENT | Kept on purpose (relay.md §9.3 #9): this client publishes frontiers only and keeps inherited floors, so a peer's override never stops read sync the way the reference's block does | S |
 
 ### Local journal
 
@@ -443,15 +443,15 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Capability/status/completeness snapshot; NIP-11 complete snapshot or bounded 500 read | read-state.ts:33-46, 146-155, 356-409; read-state-snapshot.ts:9-77 | DONE (read_state.rs:614-687, 1263-1300, 1857-1918; session/unread.rs:434-471) | - | - |
-| Snapshot response capped at 8 MiB + 4 KiB | read-state-snapshot.ts:81-100 | PARTIAL | Only the generic 8 MiB cap (http.rs:11); a maximal snapshot fails TooLarge | S |
-| Read priorities: foreground on first ensure, background on reconnect | read-state.ts:702-703; unread.ts:1492, 2312-2314 | DIFFERENT | Marker refresh always default, repair always background (session/unread.rs:460, 616) | S |
+| Snapshot response capped at 8 MiB + 4 KiB | read-state-snapshot.ts:81-100 | DONE (session/unread.rs `read_snapshot`) | - | - |
+| Read priorities: foreground on first ensure, background on reconnect | read-state.ts:702-703; unread.ts:1492, 2312-2314 | DONE (session/unread.rs) | - | - |
 | Live read-state route, ingest newest per coordinate, 4096 slot cap | read-state.ts:319-355, 817-839; live.ts:600-608 | DONE (live.rs:493; session/mod.rs:767, 1185; session/unread.rs:386-395; read_state.rs:1769-1852) | - | - |
 | Mutations with fences, revision, recent, localUnread | read-state.ts:410-490, 722-814 | DONE (read_state.rs:1922-2041) | - | - |
 | 5000 ms non-resetting debounce; failed revision waits for retry | read-state.ts:113, 264-290, 575-590 | DONE (read_state.rs:51, 1727-1765, 2115-2130; session/unread.rs:550-585) | - | - |
 | Flush: retry saved pending first, fresh own-slot read, slot conflict, save signed bytes before send, 10 s timeouts | read-state.ts:491-592 | DONE (read_state.rs:509-515, 2075-2349; session/unread.rs:43, 495-521) | - | - |
 | `publishPending` readback and once-per-flush timestamp renewal | read-state.ts:593-670 | DONE (read_state.rs:2133-2288) | - | - |
 | `stale()` on disconnect; refresh then repair on reconnect | read-state.ts:840-843; unread.ts:2312-2321 | DONE (session/unread.rs:296-326) | - | - |
-| `retrySync()` / `refresh()` user actions | unread.ts:1838-1847 | PARTIAL | `retry_reads` only via generic `Session::retry` (session/mod.rs:717-729); no dedicated control | S |
+| `retrySync()` / `refresh()` user actions | unread.ts:1838-1847 | DONE (`Session::retry_read_sync`, `Session::refresh_unread`) | - | - |
 
 ### Unread computation
 
@@ -462,13 +462,13 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | `mentionsViewer`, relevance/category/priority predicates, follows | unread.ts:372-389, 487-561, 625-642 | DONE (unread.rs:1140-1154, 1267-1356) | - | - |
 | `isUnread` / `afterFrontier` rules | unread.ts:513-556 | DONE (unread.rs:1360-1407) | - | - |
 | Per-target snapshot (null counts without evidence, latestMessage, manual, freshness) | unread.ts:693-766 | DONE (unread.rs:1476-1574) | - | - |
-| Snapshot selector cache of 4096 | unread.ts:886-903 | DIFFERENT | Clears whole cache when full (unread.rs:1598-1600); harmless | S |
-| DM vs mention classification ("direct wins in DMs") | unread.ts:625-639 | DIFFERENT (bug) | `mentions` counts DM entries (unread.rs:1536-1538): DM rows get a numeric pill and tray `mentions + direct` double-counts DMs (crates/app/src/main_window.rs:277-285) | S |
-| Thread-activity projection (unread replies by root, preview with edits) | unread.ts:775-854 | PARTIAL | Engine ported (unread.rs:1688-1796) but preview is raw content (unread.rs:1726) and `UnreadCounts` has no activity, so the session never exposes it (session/unread.rs:49-87) | M |
+| Snapshot selector cache of 4096 | unread.ts:886-903 | DONE (unread.rs: as in the reference, which drops every entry without a listener when full; this port has no listeners) | - | - |
+| DM vs mention classification ("direct wins in DMs") | unread.ts:625-639 | DONE (unread.rs: direct wins in DMs, so the tray no longer counts DMs twice) | - | - |
+| Thread-activity projection (unread replies by root, preview with edits) | unread.ts:775-854 | DONE (unread.rs folded previews; `Session::thread_activity`; `ChannelUnread::threads`) | - | - |
 | Channel-list changes republish/purge/repair | unread.ts:1108-1209 | DONE (unread.rs:2067-2143) | - | - |
 | Evidence repair (128 channels per read, limit 500, progressive) | unread.ts:1492-1556 | DONE (unread.rs:2190-2248; session/unread.rs:591-660) | - | - |
 | Mute does not change unread | docs §5i.7 | DONE (unread.rs:17-20) | - | - |
-| Explicit follow / unfollow | unread.ts:1849-1876 | PARTIAL | Engine done (unread.rs:2531-2567); no `Session` API | S |
+| Explicit follow / unfollow | unread.ts:1849-1876 | DONE (`Session::follow_thread`, `Session::thread_following`) | - | - |
 
 ### Lookups and attention
 
@@ -513,7 +513,7 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | "Mark all as read" in community rail menu with disabled reasons and toasts | src/features/communities/CommunityRailItem.tsx:280-315 | MISSING. Not done here: it needs the rail item's context menu (Communities). The session API exists. | Rail context menu (API exists) | S |
 | Channel activity popover (hover 250/150 ms; "Working now" with timers; "Unread threads" rows with per-row "Mark as read"; stale note) | src/bundled/channels/ChannelActivityPopover.tsx:33-357 | DONE (crates/app/src/ui/channel_activity.rs): working rows show no timer, as the port captures no agent turns. | Needs `activity()` and `markThrough` in session | L |
 | `UnreadOptions` panel (mark unread on device, mark read through loaded, sync status, Refresh, Retry read sync) | UnreadBadge.tsx:100-177 | MISSING. Not done here: the channel settings panel has no unread options yet; the session APIs exist. | Channel settings panel | M |
-| `channel-activity.ts` values for Recent sort (kinds incl. 45001/45003, limit:1 per channel in batches of 128) | src/features/relay/channel-activity.ts:1-145 | PARTIAL. Not done here: Recent is a sidebar section preference (Sidebar sections and preferences). | Model ported (sidebar.rs:541-683), not wired; sidebar sorts by name; search "recent" uses sampled `unread.latest` (crates/app/src/ui/search.rs:541-548) | M |
+| `channel-activity.ts` values for Recent sort (kinds incl. 45001/45003, limit:1 per channel in batches of 128) | src/features/relay/channel-activity.ts:1-145 | PARTIAL. Not done here: Recent is a sidebar section preference (Sidebar sections and preferences). | Data wired (session/activity.rs, `Session::track_channel_activity`, `ChannelSummary::last_activity_at`); the sidebar must sort by it | M |
 
 ## Sidebar, channel discovery, navigation and DMs
 
@@ -822,12 +822,12 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | Purge/revoke; post-revocation reads fenced | threads.ts:277-299 | DONE (threads.rs:548-568; session/threads.rs:136-162) | - | - |
 | Repair on re-establish; coalesced refreshes | threads.ts:300-305, 590-593 | DONE (session/threads.rs:202-212; threads.rs:573-578) | - | - |
 | 401/403 denies the channel | session.ts | DONE (session/threads.rs:156-161) | - | - |
-| Cap of 64 owned thread views | session.ts:1785, 1934 | MISSING | No cap (session/threads.rs:51-109) | S |
+| Cap of 64 owned thread views | session.ts:1785, 1934 | DONE (session/threads.rs) | - | - |
 | `threadReference` | thread-reference.ts:1-13 | DONE (fold/thread.rs:18-39; unread.rs:140-158) | - | - |
 | Follow storage (newest 1000, per partition) | thread-follows.ts:1-63 | DONE (store.rs:804-836; unread.rs:2531-2546) | - | - |
 | Forget follows on leave | thread-follows.ts:65-68 | DONE (store.rs:397-409) | - | - |
-| Follow/Unfollow thread action | unread.ts follow; docs/port/ui.md:1421 | PARTIAL | `Unread::follow` exists; no Session API or menu item | S |
-| Duplicate follows model | n/a | DIFFERENT | threads/follows.rs is dead code with a different key (`thread-follows.v1` vs `thread-follows`); threads.rs:61-64 docs claim wiring | S |
+| Follow/Unfollow thread action | unread.ts follow; docs/port/ui.md:1421 | PARTIAL | Data done (`Session::follow_thread`, `Session::thread_following`); add the menu item | S |
+| Duplicate follows model | n/a | DONE (threads/follows.rs removed; follows live in unread.rs) | - | - |
 
 ### Typing
 

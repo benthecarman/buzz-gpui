@@ -1575,6 +1575,8 @@ impl Actor {
         self.typing.clear();
         self.profiles.clear();
         self.emoji_clear();
+        self.activity.values.clear();
+        self.activity_cancel();
         if let Some(discovery) = &mut self.discovery {
             discovery.clear_cached();
         }

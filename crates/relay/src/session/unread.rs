@@ -27,7 +27,7 @@ use crate::read_state::{
     ReadSyncStatus, ReadTarget, RefreshRequest, SnapshotDescriptor, TIMESTAMP_REFUSAL,
     parse_snapshot_response,
 };
-use crate::reader::{Events, ReadError, ReadOptions};
+use crate::reader::{Events, Priority, ReadError, ReadOptions};
 use crate::socket::Filter;
 use crate::store::{Partition, SqliteReadJournal, SqliteThreadFollows};
 use crate::unread::{
@@ -92,6 +92,7 @@ pub struct ChannelUnread {
     pub priority: bool,
     pub count: u32,
     pub attention: u32,
+    /// Unread mentions outside DMs; a direct message is never a mention.
     pub mentions: u32,
     /// Marked unread by hand, here or on another device.
     pub manual: Manual,
@@ -187,6 +188,8 @@ pub(super) enum Mark {
     MessageUnread(String, EventId),
     /// The sidebar's "Mark as Unread": this device only.
     ChannelUnread(String),
+    /// Clears a device-local "Mark as Unread" (`clearUnreadLocal`).
+    ClearChannelUnread(String),
     /// A channel or thread, read through one of its messages.
     Through {
         channel: String,
@@ -198,6 +201,7 @@ pub(super) enum Mark {
 struct RepairRun {
     repair: EvidenceRepair,
     next: usize,
+    priority: Priority,
 }
 
 struct RepliesPage {
@@ -258,6 +262,9 @@ pub(super) struct Reads {
     /// Live dropped; refresh again when it is back.
     reconnecting: bool,
     repair_wanted: bool,
+    /// The next repair's read priority: foreground when asked for, in the
+    /// background after a reconnect.
+    repair_priority: Priority,
     repair: Option<RepairRun>,
     /// The startup sample finished since the last (re)connect.
     sampled: bool,
@@ -296,12 +303,18 @@ async fn read_snapshot(
     viewer: &str,
     community: &str,
     verifier: &Verifier,
+    priority: Priority,
 ) -> Result<Vec<Verified>, String> {
     let body = serde_json::to_string(filters).expect("filters serialize");
     let bytes = http
-        .post("/query", body)
+        .post_with("/query", body, priority)
         .await
         .map_err(|error| error.to_string())?;
+    // The envelope is bounded before parsing; the events keep their own
+    // 8 MiB budget.
+    if bytes.len() > crate::read_state::READ_SNAPSHOT_BODY_BYTES {
+        return Err("Read-state snapshot response exceeds capacity".into());
+    }
     let raw: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     parse_snapshot_response(&raw, viewer, community, verifier).map_err(|error| error.to_string())
 }
@@ -313,12 +326,17 @@ fn publish_outcome(
     let body = match result {
         Err(_) => return Err(PublishFailure::Other("Read-state publish timed out".into())),
         Ok(Err(HttpError::Status {
-            status, message, ..
+            status,
+            message,
+            not_sent,
+            ..
         })) => {
-            return Err(PublishFailure::from_response(
-                status,
-                &serde_json::json!({ "error": message }),
-            ));
+            let body = if not_sent {
+                serde_json::json!({ "error": message, "sent": false })
+            } else {
+                serde_json::json!({ "error": message })
+            };
+            return Err(PublishFailure::from_response(status, &body));
         }
         Ok(Err(error)) => return Err(PublishFailure::Other(error.to_string())),
         Ok(Ok(body)) => body,
@@ -398,6 +416,7 @@ impl Actor {
             roster_ready: false,
             reconnecting: false,
             repair_wanted: true,
+            repair_priority: Priority::Foreground,
             repair: None,
             sampled: false,
             lookup: None,
@@ -409,7 +428,7 @@ impl Actor {
             seen: None,
             counts: Arc::new(UnreadCounts::default()),
         });
-        self.refresh_reads();
+        self.refresh_reads(Priority::Foreground);
         self.update_reading();
     }
 
@@ -445,8 +464,11 @@ impl Actor {
             return;
         }
         reads.refreshed = false;
-        reads.repair_wanted |= reads.unread.reconnect();
-        self.refresh_reads();
+        if reads.unread.reconnect() {
+            reads.repair_wanted = true;
+            reads.repair_priority = Priority::Background;
+        }
+        self.refresh_reads(Priority::Background);
         self.schedule_dwell(Vec::new());
         self.schedule_thread_dwell();
     }
@@ -462,7 +484,32 @@ impl Actor {
         }
         reads.refreshed = false;
         reads.repair_wanted = true;
-        self.refresh_reads();
+        reads.repair_priority = Priority::Background;
+        self.refresh_reads(Priority::Background);
+    }
+
+    /// "Refresh" (`unread.refresh`): markers and then the evidence sample,
+    /// both in the foreground.
+    pub(super) fn refresh_unread(&mut self) {
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        reads.refreshed = false;
+        reads.repair_wanted = true;
+        reads.repair_priority = Priority::Foreground;
+        self.refresh_reads(Priority::Foreground);
+    }
+
+    /// "Retry read sync" (`unread.retrySync`): re-read markers, then publish
+    /// what is waiting.
+    pub(super) fn retry_read_sync(&mut self) {
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        if let Some(command) = reads.sync.flush() {
+            self.run_publish(command);
+        }
+        self.refresh_reads(Priority::Background);
     }
 
     /// The user asked to retry: rerun a failed refresh, repair or publish.
@@ -481,7 +528,7 @@ impl Actor {
             self.run_publish(command);
         }
         if failed {
-            self.refresh_reads();
+            self.refresh_reads(Priority::Background);
         }
         self.pump_repair();
     }
@@ -571,7 +618,7 @@ impl Actor {
 
     // ----- marker refresh -----
 
-    fn refresh_reads(&mut self) {
+    fn refresh_reads(&mut self, priority: Priority) {
         let Some(reads) = &mut self.reads else {
             return;
         };
@@ -594,10 +641,24 @@ impl Actor {
         self.runtime.spawn(async move {
             let read = async {
                 if request.complete {
-                    read_snapshot(&http, &request.filters, &viewer, &community, &verifier).await
+                    read_snapshot(
+                        &http,
+                        &request.filters,
+                        &viewer,
+                        &community,
+                        &verifier,
+                        priority,
+                    )
+                    .await
                 } else {
                     reader
-                        .read(request.filters.clone(), ReadOptions::default())
+                        .read(
+                            request.filters.clone(),
+                            ReadOptions {
+                                priority,
+                                fresh: false,
+                            },
+                        )
                         .await
                         .map(|events| events.to_vec())
                         .map_err(|error| error.message)
@@ -638,6 +699,16 @@ impl Actor {
             PublishCommand::Publish(event) => {
                 let http = self.http.clone();
                 let body = serde_json::to_string(&*event).expect("events serialize");
+                // Only the exact own, encrypted coordinate leaves, at most
+                // 64 KiB (`relay_publish_read_state`).
+                if body.len() > crate::read_state::READ_STATE_EVENT_BYTES
+                    || crate::read_state::decode_read_state(&self.identity, &event).is_err()
+                {
+                    let _ = commands.send(Message::ReadPublished(Err(PublishFailure::Other(
+                        "Invalid read-state event".into(),
+                    ))));
+                    return;
+                }
                 self.runtime.spawn(async move {
                     let result =
                         tokio::time::timeout(READ_TIMEOUT, http.post("/events", body)).await;
@@ -753,7 +824,12 @@ impl Actor {
             return;
         };
         reads.repair_wanted = false;
-        reads.repair = Some(RepairRun { repair, next: 0 });
+        let priority = std::mem::replace(&mut reads.repair_priority, Priority::Foreground);
+        reads.repair = Some(RepairRun {
+            repair,
+            next: 0,
+            priority,
+        });
         self.repair_next();
     }
 
@@ -766,7 +842,11 @@ impl Actor {
             return;
         };
         run.next += 1;
-        self.spawn_read(vec![filter], ReadOptions::background(), Message::Repair);
+        let options = ReadOptions {
+            priority: run.priority,
+            fresh: false,
+        };
+        self.spawn_read(vec![filter], options, Message::Repair);
     }
 
     pub(super) fn repaired(&mut self, result: Result<Events, ReadError>) {
@@ -962,6 +1042,9 @@ impl Actor {
                 .map(drop),
             Mark::MessageUnread(channel, id) => unread
                 .mark_message_unread(sync, &channel, &id.to_hex(), now)
+                .map(drop),
+            Mark::ClearChannelUnread(channel) => unread
+                .clear_unread_local(sync, &ReadTarget::channel(channel), now)
                 .map(drop),
             Mark::ChannelUnread(channel) => unread
                 .mark_unread_local(sync, &ReadTarget::channel(channel), now)

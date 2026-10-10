@@ -1,4 +1,4 @@
-//! Thread views (`threads.ts`, `thread-window.ts`, `thread-follows.ts`;
+//! Thread views (`threads.ts`, `thread-window.ts`;
 //! spec §5c).
 //!
 //! Everything here is pure and synchronous: [`ThreadState`] never performs
@@ -58,20 +58,14 @@
 //! [`reply_tree`]) and rebuilt only when the replies change, so the UI can
 //! render nesting without walking ancestry itself.
 //!
-//! Thread follows ([`ThreadFollows`]) are a separate model: the session
-//! loads it from `Store::partition_pref(THREAD_FOLLOWS_PREF)`, calls
-//! [`ThreadFollows::observe`] with accepted batches and saves
-//! [`ThreadFollows::to_json`] after [`ThreadFollows::follow`].
+//! Thread follows live with unread (`Unread::follow`, saved by
+//! `SqliteThreadFollows`), as in the reference's `unread.ts`.
 
-mod follows;
 mod window;
 
 #[cfg(test)]
 mod tests;
 
-pub use follows::{
-    InvalidThread, THREAD_FOLLOW_LIMIT, THREAD_FOLLOWS_PREF, ThreadFollows, follow_key,
-};
 pub use window::{
     CONTENT_KINDS, DEPTH_LIMIT, EVIDENCE_LIMIT, INITIAL_WINDOW_SIZE, MAX_CURSOR_TIME, PAGE_SIZE,
     STRICT_WINDOW_KINDS, TARGET_OVERLAY_KINDS, TOMBSTONE_KINDS, ThreadBounds, ThreadCursor,

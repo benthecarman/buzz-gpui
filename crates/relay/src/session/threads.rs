@@ -10,6 +10,9 @@ use nostr::prelude::{EventId, PublicKey};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
+/// Thread views one session may own.
+const MAX_THREAD_VIEWS: usize = 64;
+
 /// An open thread panel. Dropping it disposes the view.
 pub struct ThreadView {
     pub snapshot: watch::Receiver<Arc<ThreadSnapshot>>,
@@ -87,6 +90,15 @@ impl Actor {
         exact: bool,
         view: watch::Sender<Arc<ThreadSnapshot>>,
     ) {
+        // At most 64 views a session owns (`session.ts` `thread`).
+        self.threads.retain(|_, thread| !thread.view.is_closed());
+        if self.threads.len() >= MAX_THREAD_VIEWS {
+            let mut refused = ThreadSnapshot::idle(exact);
+            refused.status = crate::threads::ThreadStatus::Error;
+            refused.error = Some("Relay view capacity unavailable".into());
+            view.send_replace(Arc::new(refused));
+            return;
+        }
         let (Some(relay), Ok(viewer)) = (
             self.relay_author(),
             PublicKey::from_hex(&self.identity.pubkey_hex()),

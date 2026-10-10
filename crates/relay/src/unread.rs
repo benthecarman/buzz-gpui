@@ -1559,7 +1559,9 @@ impl<F: ThreadFollowStore> Unread<F> {
             if self.priority(index, entry, dm) {
                 attention += 1;
             }
-            if entry.mentioned {
+            // DM events p-tag the recipient: direct wins inside DMs, so a
+            // direct message is never also a mention.
+            if entry.mentioned && !dm {
                 mentions += 1;
             }
         }
@@ -1717,6 +1719,24 @@ impl<F: ThreadFollowStore> Unread<F> {
         attention
     }
 
+    /// Every retained message's folded text, replies included.
+    fn folded_previews(&self, channel_id: &str) -> HashMap<nostr::prelude::EventId, String> {
+        let relay = self
+            .relay_author
+            .as_deref()
+            .and_then(|key| nostr::prelude::PublicKey::from_hex(key).ok())
+            .unwrap_or_else(|| nostr::prelude::Keys::generate().public_key());
+        let events: Vec<Verified> = self.events.iter().map(|(_, event)| event.clone()).collect();
+        let options = crate::fold::FoldOptions {
+            include_replies: true,
+            ..Default::default()
+        };
+        crate::fold::fold_messages(channel_id, &relay, &events, &options)
+            .into_iter()
+            .map(|row| (row.id, row.content.clone()))
+            .collect()
+    }
+
     fn compute_activity(
         &self,
         channel_id: &str,
@@ -1739,6 +1759,9 @@ impl<F: ThreadFollowStore> Unread<F> {
         let state = reads.state();
         let mut grouped: BTreeMap<String, ThreadActivityItem> = BTreeMap::new();
         let mut wants = Vec::new();
+        // Previews show the folded text, edits applied; folded only when
+        // something unread is presented, which most publishes lack.
+        let mut presented: Option<HashMap<nostr::prelude::EventId, String>> = None;
         for entry in index.channel(channel_id) {
             wants.extend(self.want(index, entry, dm, state));
             let Some(root) = &entry.root_id else { continue };
@@ -1748,6 +1771,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                 continue;
             }
             let event = &entry.event;
+            let presented = presented.get_or_insert_with(|| self.folded_previews(channel_id));
             let item = ThreadActivityItem {
                 channel_id: channel_id.to_owned(),
                 root_id: root.clone(),
@@ -1755,7 +1779,10 @@ impl<F: ThreadFollowStore> Unread<F> {
                 author_id: event.pubkey_hex(),
                 workflow_owner_id: workflow_owner(event, self.authority.as_deref()),
                 created_at: event.created_at_secs(),
-                preview: preview_text(event),
+                preview: presented
+                    .get(&event.id)
+                    .cloned()
+                    .unwrap_or_else(|| preview_text(event)),
                 unread_count: 1,
             };
             match grouped.get_mut(root) {
@@ -3423,6 +3450,44 @@ mod tests {
 
     fn room() -> ReadTarget {
         ReadTarget::channel("room")
+    }
+
+    #[test]
+    fn direct_messages_are_never_mentions() {
+        let mut h = H::new();
+        h.grant(&[("dm", Some("dm"))]);
+        let viewer = h.vpk();
+        let direct = h.alice("dm", "hi", 10, tags(&[&["p", &viewer]]));
+        h.emit(&[direct]);
+        let snapshot = h.snapshot(&ReadTarget::channel("dm"));
+        assert_eq!(snapshot.observed_count, Some(1));
+        assert_eq!(snapshot.mention_count, Some(0), "direct wins in DMs");
+    }
+
+    #[test]
+    fn thread_activity_previews_show_the_edited_text() {
+        let mut h = H::new();
+        h.grant(&[("room", Some("stream"))]);
+        let root = h.mine("room", "root", 10, vec![]);
+        let reply = h.alice(
+            "room",
+            "first draft",
+            11,
+            reply_tags(&root.id_hex(), &root.id_hex()),
+        );
+        let edit = h.by(
+            &h.alice.clone(),
+            kinds::EDIT,
+            Some("room"),
+            "final words",
+            12,
+            tags(&[&["e", &reply.id_hex()]]),
+        );
+        h.emit(&[root, reply, edit]);
+        let activity = h.unread.activity("room", &h.reads);
+        let items = activity.items.as_ref().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].preview, "final words");
     }
 
     #[test]

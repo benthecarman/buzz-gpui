@@ -167,6 +167,9 @@ async fn writes_follow_participation_provenance_and_reports() {
 
     // Someone who has not joined may read a public channel but not write.
     let bob = fixture.session("bob").await;
+    // A channel bob has not joined is a preview once resolved.
+    let resolved = bob.resolve_channels(vec![channel.clone()]).await.unwrap();
+    assert!(resolved.iter().any(|c| c.id == channel && c.read_only));
     let preview = bob.open_channel(&channel);
     bob.select(Some(channel.clone()));
     let mut shown = preview.snapshot.clone();

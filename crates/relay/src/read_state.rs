@@ -90,6 +90,8 @@ pub enum ReadStateError {
     #[error("Read-state signing failed: {0}")]
     Signing(String),
     #[error("{0}")]
+    Signer(&'static str),
+    #[error("{0}")]
     CorruptJournal(&'static str),
     #[error("Read-state storage: {0}")]
     Storage(String),
@@ -2331,10 +2333,25 @@ impl<J: ReadStateJournal> ReadStateSync<J> {
         let (revision, slot) = (journal.revision, journal.slot.clone());
         self.attempted_revision = Some(revision);
         let event = sign_read_state(identity, &slot, created_at, &blob, now)?;
-        debug_assert_eq!(
-            decode_read_state(identity, &event).map(|parsed| parsed.state),
-            parse_blob(&blob).map(|parsed| parsed.state),
-        );
+        // The signed output must be exactly the intent: same author,
+        // coordinate and version, and a payload that decodes to this state.
+        if event.pubkey != identity.public_key()
+            || read_coordinate(&event) != Some(format!("read-state:{slot}").as_str())
+            || event.created_at.as_secs() != u64::from(created_at)
+        {
+            return Err(ReadStateError::Signer(
+                "Read-state signer changed identity or version",
+            ));
+        }
+        let decoded = decode_read_state(identity, &event).ok();
+        let intended = parse_blob(&blob)?;
+        if decoded.is_none_or(|decoded| {
+            decoded.client_id != journal.client_id || decoded.state != intended.state
+        }) {
+            return Err(ReadStateError::Signer(
+                "Read-state signer changed the payload",
+            ));
+        }
         let pending = PendingPublish { event, revision };
         let saved = pending.clone();
         // The exact bytes are durable before they are sent.

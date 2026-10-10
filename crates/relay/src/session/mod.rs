@@ -15,6 +15,7 @@
 
 mod account;
 mod actions;
+mod activity;
 mod channels;
 mod feedback;
 mod gifs;
@@ -431,6 +432,7 @@ impl Session {
             access_revision: 0,
             known_channels: std::collections::HashSet::new(),
             send_observers: Vec::new(),
+            activity: activity::Activity::default(),
             store,
             clock: Arc::new(MessageClock::new()),
             outbox: None,
@@ -783,6 +785,47 @@ impl Session {
         self.mark(Mark::MessageRead(channel.to_string(), id)).await
     }
 
+    /// Clears a device-local "mark unread" (`clearUnreadLocal`).
+    pub async fn clear_unread_local(&self, channel: &str) -> Result<(), String> {
+        self.mark(Mark::ClearChannelUnread(channel.to_string()))
+            .await
+    }
+
+    /// "Refresh": re-reads read markers and the unread sample in the
+    /// foreground (`unread.refresh`).
+    pub fn refresh_unread(&self) {
+        let _ = self.commands.send(Message::With(Box::new(|actor| {
+            actor.refresh_unread();
+        })));
+    }
+
+    /// "Retry read sync": re-reads markers, then publishes what waits
+    /// (`unread.retrySync`).
+    pub fn retry_read_sync(&self) {
+        let _ = self.commands.send(Message::With(Box::new(|actor| {
+            actor.retry_read_sync();
+        })));
+    }
+
+    /// The channel's unread thread activity (`activity`): unread replies in
+    /// followed threads, mentions and broadcasts, grouped by root, newest
+    /// first, with edited previews. For the activity popover.
+    pub async fn thread_activity(
+        &self,
+        channel: &str,
+    ) -> Option<Arc<crate::unread::ThreadActivitySnapshot>> {
+        let (reply, answer) = oneshot::channel();
+        let channel = channel.to_string();
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            let activity = actor
+                .reads
+                .as_mut()
+                .map(|reads| reads.unread.activity(&channel, &reads.sync));
+            let _ = reply.send(activity);
+        })));
+        answer.await.ok().flatten()
+    }
+
     /// Shows a loaded message (and its loaded replies) as unread for the
     /// rest of this channel visit, and the channel as unread on this
     /// device until it is next opened. Never synced.
@@ -1028,6 +1071,8 @@ struct Actor {
     access_revision: u64,
     /// Channels readable at the last access check.
     known_channels: std::collections::HashSet<String>,
+    /// Channel activity for the "recent" sidebar order.
+    activity: activity::Activity,
     /// Send observers, attached to the outbox once it exists.
     send_observers: Vec<(
         u64,
@@ -1573,6 +1618,7 @@ impl Actor {
         self.refresh_visibility();
         self.sidebar_probe();
         self.refresh_session_windows();
+        self.refresh_activity();
         // Saved membership the pass confirmed makes saved heads readable.
         for channel in self.open_channels() {
             self.ensure(&channel);
@@ -1680,6 +1726,9 @@ impl Actor {
             self.recent.remove(&id);
         }
         self.purge_retained();
+        self.activity.values.clear();
+        self.activity_cancel();
+        self.refresh_activity();
         if !lost.is_empty() {
             let lost: std::collections::HashSet<String> = lost.iter().cloned().collect();
             self.reader.invalidate(move |filters| {
@@ -1783,7 +1832,11 @@ impl Actor {
                     Vec::new()
                 };
                 if !events.is_empty() {
-                    self.accept(&events);
+                    let visible = self.accept(&events);
+                    let connected = self.live.as_ref().is_some_and(Live::is_connected);
+                    if connected && self.activity_accept(&visible) {
+                        self.publish();
+                    }
                 }
                 if !pulses.is_empty() && self.live.as_ref().is_some_and(Live::is_connected) {
                     self.typing_accept(&pulses);
@@ -1813,6 +1866,8 @@ impl Actor {
                     let mut people = self.channel_people();
                     people.extend(self.timelines.values().flat_map(Timeline::people));
                     self.ensure_profiles(people);
+                    self.activity_cancel();
+                    self.refresh_activity();
                     // Sets replaced while we were away arrive with the
                     // whole catalog.
                     self.emoji_reconnect();
@@ -1844,6 +1899,7 @@ impl Actor {
                 self.set_live(false);
                 self.presence_connected(false);
                 self.channels_disconnected();
+                self.activity_cancel();
                 self.reads_disconnected();
                 self.publish_live();
             }
@@ -2492,6 +2548,7 @@ impl Actor {
                         .into_iter()
                         .map(|mut channel| {
                             channel.preview = self.preview(&channel.id);
+                            channel.last_activity_at = self.activity.values.last(&channel.id);
                             channel
                         })
                         .collect::<Vec<_>>(),
