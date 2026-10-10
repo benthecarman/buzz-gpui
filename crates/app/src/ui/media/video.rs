@@ -1313,6 +1313,7 @@ fn gesture_badge(kind: Gesture, at: Instant, c: &buzz_ui::Colors, reduce: bool) 
             .into_any_element(),
     };
     let badge = div()
+        .flex_none()
         .flex()
         .items_center()
         .justify_center()
