@@ -1,18 +1,24 @@
 //! The team dialogs: import a team snapshot (`TeamImportDialog.tsx`),
 //! export a saved team (`TeamExportDialog.tsx`), deploy it to a channel
-//! (`TeamDeployDialog.tsx`), and share it (`TeamShareDialog` in
-//! `CommunityCatalog.tsx`, with the export entry of the full share dialog).
+//! (`TeamDeployDialog.tsx`), and share it (`TeamDirectShare` in
+//! `DirectShare.tsx`) through the snapshot share dialog.
 
 use super::catalog::{
-    CatalogShareSwitch, CatalogState, Content, SharePending, TEAM_SHARE_DESCRIPTION,
-    community_agents, default_policy, persona,
+    CatalogShareSwitch, CatalogState, Content, TEAM_SHARE_DESCRIPTION, community_agents,
+    default_policy, persona,
 };
 use super::editor::Dismissed;
 use super::form::{Options, field};
+use super::share;
+use super::snapshot_preview;
+use super::snapshots::{self, LayerDialog};
 use super::team_file::{self, Format};
 use super::team_ops::{self, ImportOptions, MemoryLevel};
-use super::teams::{ExportTeam, TeamsState};
+use super::teams::TeamsState;
 use crate::community::{AppState, IdentityState};
+use crate::snapshot::Kind;
+use crate::snapshot::manifest::MemoryLevel as SnapshotLevel;
+use crate::snapshot::share::EncodedSnapshot;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_host::api::TeamSnapshot;
 use buzz_relay_client::catalog::{CatalogKind, TeamSource, team_catalog_content};
@@ -82,7 +88,8 @@ fn error_text(error: &Option<SharedString>, cx: &App) -> Option<Div> {
 
 pub struct TeamImportDialog {
     teams: Entity<TeamsState>,
-    snapshot: TeamSnapshot,
+    /// `None` while a received file is being validated.
+    snapshot: Option<TeamSnapshot>,
     restore: bool,
     keep: bool,
     open: bool,
@@ -103,7 +110,42 @@ impl TeamImportDialog {
     ) -> Self {
         Self {
             teams,
-            snapshot,
+            snapshot: Some(snapshot),
+            restore: false,
+            keep: false,
+            open: false,
+            started: false,
+            busy: false,
+            done: false,
+            error: None,
+        }
+    }
+
+    /// A received team file, validated by the host before it shows.
+    pub fn reading(
+        teams: Entity<TeamsState>,
+        content: String,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.spawn(async move |this, cx| {
+            let host = cx.update(|cx| team_ops::import_host(cx));
+            let result = match host {
+                Some(host) => team_ops::preview(&host, content, cx).await,
+                None => Err("Team preview is unavailable".into()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(snapshot) => this.snapshot = Some(snapshot),
+                    Err(error) => this.error = Some(error.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        Self {
+            teams,
+            snapshot: None,
             restore: false,
             keep: false,
             open: false,
@@ -115,6 +157,9 @@ impl TeamImportDialog {
     }
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
         if self.busy {
             return;
         }
@@ -141,7 +186,6 @@ impl TeamImportDialog {
             keep_allowlist: self.keep,
             restore_memory: self.restore,
         };
-        let snapshot = self.snapshot.clone();
         cx.spawn(async move |this, cx| {
             let result =
                 team_ops::import_team(host, kit, community, identity, snapshot, options, cx)
@@ -168,8 +212,33 @@ impl TeamImportDialog {
 
 impl Render for TeamImportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.snapshot.clone() {
+            Some(snapshot) => self.preview(&snapshot, window, cx),
+            None => Dialog::new("team-import", "Import team snapshot")
+                .on_close(cx.listener(|_, _, _, cx| cx.emit(Dismissed)))
+                .child(match &self.error {
+                    Some(error) => div()
+                        .text_body_sm()
+                        .text_color(cx.colors().text_danger)
+                        .child(error.clone()),
+                    None => div().text_body_sm().child("Reading the team snapshot…"),
+                })
+                .footer(
+                    Button::new("close-import", "Close")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
+                ),
+        }
+    }
+}
+
+impl TeamImportDialog {
+    fn preview(
+        &mut self,
+        snapshot: &TeamSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Dialog {
         let c = *cx.colors();
-        let snapshot = &self.snapshot;
         let close = cx.listener(|_, _, _, cx| cx.emit(Dismissed));
         let mut dialog = Dialog::new(
             "team-import",
@@ -785,73 +854,133 @@ pub fn team_content(teams: Entity<TeamsState>, team: Team) -> Content {
     })
 }
 
-/// "Share {team}": the team's catalog switch, and its export.
-pub struct TeamShareDialog {
-    team: Team,
-    switch: Entity<CatalogShareSwitch>,
-    pending: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl EventEmitter<Dismissed> for TeamShareDialog {}
-impl EventEmitter<ExportTeam> for TeamShareDialog {}
-
-impl TeamShareDialog {
-    pub fn new(
-        teams: Entity<TeamsState>,
-        catalog: Entity<CatalogState>,
-        team: Team,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let switch = Self::switch(teams, catalog, &team, cx);
-        Self {
-            _subscriptions: vec![cx.subscribe(&switch, |this, _, SharePending(pending), cx| {
-                this.pending = *pending;
-                cx.notify();
-            })],
-            switch,
-            team,
-            pending: false,
-        }
-    }
-
-    /// The saved team's catalog switch, for any share dialog to embed.
-    pub fn switch(
-        teams: Entity<TeamsState>,
-        catalog: Entity<CatalogState>,
-        team: &Team,
-        cx: &mut App,
-    ) -> Entity<CatalogShareSwitch> {
-        let content = team_content(teams, team.clone());
-        let (id, name) = (team.id.clone(), team.name.clone());
-        cx.new(|cx| {
-            CatalogShareSwitch::new(
-                catalog,
-                CatalogKind::Team,
-                id,
-                name,
-                TEAM_SHARE_DESCRIPTION,
-                content,
-                cx,
-            )
-        })
-    }
-
-    pub fn team(&self) -> &Team {
-        &self.team
-    }
-}
-
-impl Render for TeamShareDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut dialog = Dialog::new("team-share", format!("Share {}", self.team.name));
-        if !self.pending {
-            dialog = dialog.on_close(cx.listener(|_, _, _, cx| cx.emit(Dismissed)));
-        }
-        dialog.child(self.switch.clone()).footer(
-            Button::new("export-team", "Export team")
-                .disabled(self.pending)
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(ExportTeam))),
+/// The saved team's "Share to catalog" switch, for a share dialog.
+pub fn team_switch(
+    teams: Entity<TeamsState>,
+    catalog: Entity<CatalogState>,
+    team: &Team,
+    cx: &mut App,
+) -> Entity<CatalogShareSwitch> {
+    let content = team_content(teams, team.clone());
+    let (id, name) = (team.id.clone(), team.name.clone());
+    cx.new(|cx| {
+        CatalogShareSwitch::new(
+            catalog,
+            CatalogKind::Team,
+            id,
+            name,
+            TEAM_SHARE_DESCRIPTION,
+            content,
+            cx,
         )
+    })
+}
+
+/// Opens a team dialog in the snapshot layer; it closes on `Dismissed`.
+pub fn show_in_layer<V: LayerDialog + EventEmitter<Dismissed>>(view: Entity<V>, cx: &mut App) {
+    cx.subscribe(&view, |_, _: &Dismissed, cx| snapshots::close(cx))
+        .detach();
+    snapshots::show(view, cx);
+}
+
+/// "Share {team}" (`TeamDirectShare`): send the team in a direct message,
+/// copy a link, export it, or share it to the community catalog.
+pub fn open_share(
+    teams: Entity<TeamsState>,
+    catalog: Entity<CatalogState>,
+    team: Team,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let community = teams.read(cx).community.clone();
+    let switch = team_switch(teams.clone(), catalog, &team, cx);
+    let encode: share::Encode = {
+        let (teams, team) = (teams.clone(), team.clone());
+        Rc::new(move |level, cx: &mut App| {
+            let state = teams.read(cx);
+            let (kit, community) = (state.kit.clone(), state.community.clone());
+            let team = team.clone();
+            let memory = match level {
+                SnapshotLevel::None => MemoryLevel::None,
+                SnapshotLevel::Core => MemoryLevel::Core,
+                SnapshotLevel::Everything => MemoryLevel::Everything,
+            };
+            cx.spawn(async move |cx| {
+                if team.portable.is_none() {
+                    return Err("Team export is unavailable".to_string());
+                }
+                let json = team_ops::export_team(kit, community, team.clone(), memory, cx).await?;
+                Ok(EncodedSnapshot {
+                    bytes: team_file::encode(&json, Format::Png)?,
+                    file_name: team_file::file_name(&team.name, Format::Png),
+                })
+            })
+        })
+    };
+    let on_export = {
+        let (teams, team) = (teams.clone(), team.clone());
+        Rc::new(move |_: &mut Window, cx: &mut App| {
+            let dialog = cx.new(|cx| TeamExportDialog::new(teams.clone(), team.clone(), cx));
+            show_in_layer(dialog, cx);
+        })
+    };
+    let source = share::ShareSource {
+        kind: Kind::Team,
+        display_name: team.name.clone().into(),
+        source_id: team.id.clone(),
+        has_memory_options: true,
+        excluded: team.agents.clone(),
+        encode,
+        on_export,
+        review: None,
+        catalog: Some(switch.into()),
+    };
+    share::open(community, source, window, cx);
+}
+
+/// Hooks the community catalog and teams into the snapshot dialogs: the
+/// agent share dialog's catalog switch, and previews of received team
+/// files.
+pub fn register(cx: &mut App) {
+    share::set_agent_catalog_controls(
+        Rc::new(
+            |host, agent, _, cx| match CatalogShareSwitch::agent(host.clone(), agent, cx) {
+                Some(switch) => switch.into(),
+                None => cx.new(|_| NoControls).into(),
+            },
+        ),
+        cx,
+    );
+    snapshot_preview::set_team_preview(
+        Rc::new(|bytes, window, cx| {
+            let content = team_file::decode(&bytes)?;
+            let community = AppState::current(cx).ok_or("Choose a community to import a team.")?;
+            let teams = TeamsState::of(&community, cx);
+            let dialog = cx.new(|cx| TeamImportDialog::reading(teams, content, window, cx));
+            show_in_layer(dialog, cx);
+            Ok(())
+        }),
+        cx,
+    );
+}
+
+/// No catalog controls: the agent is not set up in this community.
+struct NoControls;
+
+impl Render for NoControls {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+impl LayerDialog for TeamImportDialog {
+    fn closable(&self) -> bool {
+        !self.busy
+    }
+}
+
+impl LayerDialog for TeamExportDialog {
+    fn closable(&self) -> bool {
+        !self.busy
     }
 }

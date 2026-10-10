@@ -31,7 +31,6 @@ use std::sync::Arc;
 
 /// Agent sharing lives in the agent's Share dialog, which embeds
 /// [`CatalogShareSwitch::agent`].
-#[allow(dead_code)]
 pub const AGENT_SHARE_DESCRIPTION: &str = "Anyone in this community can find and use a copy. Your agent instruction is shared as plaintext. Memories and secrets aren’t included.";
 pub const TEAM_SHARE_DESCRIPTION: &str = "Anyone in this community can find and add a copy of this team. Both the team instructions and every member’s instructions are shared as plaintext. Memories and secrets aren’t included.";
 /// View state holding which local copy each catalog entry produced.
@@ -217,9 +216,6 @@ pub type Choose = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Projects the current local definition; may refuse with a reason.
 pub type Content = Rc<dyn Fn(&mut App) -> Task<Result<String, String>>>;
 
-/// The switch is publishing; a containing dialog stays open meanwhile.
-pub struct SharePending(pub bool);
-
 /// One coordinate's "Share to catalog" switch (`CatalogShareSwitch`). The
 /// switch shows the newest intent; its notice tells a queued, accepted
 /// or refused relay delivery apart.
@@ -236,8 +232,6 @@ pub struct CatalogShareSwitch {
     checking: Option<EventId>,
     _observe: Subscription,
 }
-
-impl EventEmitter<SharePending> for CatalogShareSwitch {}
 
 impl CatalogShareSwitch {
     pub fn new(
@@ -268,7 +262,6 @@ impl CatalogShareSwitch {
     /// agent is not set up in the current community. The agent is read
     /// from its host when sharing, never from relay data. The agent's
     /// Share dialog embeds it.
-    #[allow(dead_code)]
     pub fn agent(
         host: Entity<HostConnection>,
         agent: &Agent,
@@ -316,7 +309,6 @@ impl CatalogShareSwitch {
 
     fn busy(&mut self, pending: bool, cx: &mut Context<Self>) {
         self.pending = pending;
-        cx.emit(SharePending(pending));
         cx.notify();
     }
 

@@ -219,7 +219,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Pending sends survive restart ("Retry the earlier message to confirm its delivery before editing.") | FA/SnapshotShareDialog.tsx:121-162, 385-389; FA/snapshot-recovery.ts | DONE (ui/agents/share.rs, snapshot/share.rs; journaled in the session outbox) | — | M |
 | "What's included" select and plaintext warning; "Share memories?" confirmation | FA/SnapshotShareDialog.tsx:390-427, 457-478 | DONE (ui/agents/share.rs) | — | S |
 | "Copy link" (upload, copy URL + HTML; "Copying…" / "Copied") | FA/SnapshotShareDialog.tsx:428-439; FA/snapshot-link.ts | DONE (ui/agents/share.rs; plain text is the URL, the named link rides as clipboard metadata, see the paste row) | Rich clipboard | M |
-| Export switch inside Share; "Share to catalog" switch; error copy | FA/SnapshotShareDialog.tsx:145-307, 348-350; BA/DirectShare.tsx:164-227 | PARTIAL: export switch and error copy done (ui/agents/share.rs) | "Share to catalog": the community catalog supplies the controls through share::set_agent_catalog_controls (built with the catalog, §11) | S |
+| Export switch inside Share; "Share to catalog" switch; error copy | FA/SnapshotShareDialog.tsx:145-307, 348-350; BA/DirectShare.tsx:164-227 | DONE (ui/agents/share.rs, ui/agents/catalog.rs, ui/agents/team_dialogs.rs) | — | S |
 
 ## 11. Community catalog (`BA/CommunityCatalog.tsx`, `FA/catalog*.ts`)
 
@@ -233,18 +233,18 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Agent detail (avatar, "Added by", metadata grid, instructions); team detail (members, expandable rows) | BA/CommunityCatalog.tsx:652-711, 811-892 | DONE (ui/agents/catalog.rs) | — | S |
 | "Add agent" pre-fills the create form; "Added to My Agents" remembered per community; "Add team" / "Added to my teams" | BA/CommunityCatalog.tsx:338-427, 555-590; FA/catalog.ts:334-357 | DONE (ui/agents/catalog.rs, ui/agents/create.rs, ui/agents/teams.rs) | — | M |
 | Non-stock ACP transport blocked ("…uses the X transport, which this app can't run yet…") | FA/catalog-protocol.ts:111-123; BA/CommunityCatalog.tsx:713-722 | DONE (relay/src/catalog.rs, ui/agents/catalog.rs) | — | S |
-| Team "Share {team}" dialog | BA/CommunityCatalog.tsx:302-336 | MISSING | Needs teams; Interim catalog-only dialog in ui/agents/team_dialogs.rs (`TeamShareDialog`); the coordinator wires the full share dialog | S |
+| Team "Share {team}" dialog | BA/CommunityCatalog.tsx:302-336 | DONE (ui/agents/team_dialogs.rs, ui/agents/share.rs) | — | S |
 
 ## 12. Teams (`BA/Team*Dialog.tsx`, `FA/team-*.ts`; native `ST/agents.rs:1676-1823`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Team snapshot format (size limits, `buzz_team_snapshot` chunk, checksum errors) | FA/team-encoding.ts:1-93 | DONE (ui/agents/team_file.rs) | Channel-templates/teams model first | L |
+| Team snapshot format (size limits, `buzz_team_snapshot` chunk, checksum errors) | FA/team-encoding.ts:1-93 | DONE (ui/agents/team_file.rs) | — | L |
 | "Import team snapshot" dialog: members, "Restore member memories", "Respond-to allowlist" Clear/Keep, "Creating team…", "Team imported" | BA/TeamImportDialog.tsx:40-157 | DONE (ui/agents/team_dialogs.rs) | — | M |
 | Resumable team import (receipt, profile publish, team record) | FA/team-bundles.ts:27-101; FA/team-import.ts:9-120 | PARTIAL (ui/agents/team_ops.rs, relay/src/session/teams.rs) | Member memory restore needs the host memory write the agent snapshot import adds (`team_ops::restore_member_memory`); until then it reports "Memory restoration is unavailable" | L |
 | "Export {team}" dialog (memories, confirmation, JSON/PNG, `.team.{fmt}`) | BA/TeamExportDialog.tsx:11-156 | DONE (ui/agents/team_dialogs.rs) | — | M |
 | "Deploy team to channel" dialog and behaviour (apply instructions, restart if stale, publish profile, add to channel, start; per-member failures) | BA/TeamDeployDialog.tsx:16-122; FA/team-deployment.ts:24-98 | DONE (ui/agents/team_dialogs.rs, ui/agents/team_ops.rs) | — | M |
-| Team direct share, catalog switch, export | BA/DirectShare.tsx:232-314 | MISSING | Switch (`TeamShareDialog::switch`) and export dialog (`TeamExportDialog`) built in ui/agents/team_dialogs.rs; direct share waits for the share dialog | S |
+| Team direct share, catalog switch, export | BA/DirectShare.tsx:232-314 | DONE (ui/agents/team_dialogs.rs, ui/agents/share.rs) | — | S |
 | Native team instructions, capture, export, preview | ST/agents.rs:1676-1823 | DONE (host/teams.rs) | Host requests | M |
 
 ## 13. Old agent library and discovery (`BA/AgentLibrary.tsx`, `FA/library.ts`, `relay-library.ts`, `inventory.ts`, `known.ts`, `choices.ts`)

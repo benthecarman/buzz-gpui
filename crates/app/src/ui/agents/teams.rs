@@ -5,7 +5,7 @@
 
 use super::catalog::{AddAgent, AddTeam, CatalogDialog, CatalogState, HasTeam, community_agents};
 use super::editor::Dismissed;
-use super::team_dialogs::{TeamDeployDialog, TeamExportDialog, TeamImportDialog, TeamShareDialog};
+use super::team_dialogs::{self, TeamDeployDialog, TeamImportDialog};
 use super::team_editor::TeamEditor;
 use super::team_file;
 use super::team_ops::{self, ImportOptions};
@@ -16,7 +16,7 @@ use buzz_relay_client::catalog::{
     Publication, TeamPublication, catalog_team_snapshot, unsupported_transport_message,
 };
 use buzz_relay_client::session::{TeamKit, TeamsStatus, TeamsView};
-use buzz_relay_client::teams::{Team, TeamEntry};
+use buzz_relay_client::teams::TeamEntry;
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonSize, Icon, IconButton,
     IconButtonSize, IconName, Menu, MenuItem, MenuSize, Surface, TypeStyled, tokens::radius,
@@ -123,8 +123,6 @@ enum Modal {
     },
     Import(Entity<TeamImportDialog>),
     Deploy(Entity<TeamDeployDialog>),
-    Share(Entity<TeamShareDialog>),
-    Export(Entity<TeamExportDialog>),
     Catalog(Entity<CatalogDialog>),
 }
 
@@ -146,6 +144,7 @@ pub struct TeamsSection {
 
 impl TeamsSection {
     pub fn new(add_agent: AddAgent, cx: &mut Context<Self>) -> Self {
+        team_dialogs::register(cx);
         let mut section = Self {
             add_agent,
             community: None,
@@ -332,25 +331,14 @@ impl TeamsSection {
         self.show(&dialog, Modal::Deploy(dialog.clone()), cx);
     }
 
-    fn open_share(&mut self, entry: TeamEntry, cx: &mut Context<Self>) {
+    /// "Share {team}" in the snapshot share dialog.
+    fn open_share(&mut self, entry: TeamEntry, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(teams), Some(catalog)) = (self.teams.clone(), self.catalog.clone()) else {
             return;
         };
-        let dialog = cx.new(|cx| TeamShareDialog::new(teams, catalog, entry.team, cx));
-        self.show(&dialog, Modal::Share(dialog.clone()), cx);
-        self._modal
-            .push(cx.subscribe(&dialog, |this, dialog, _: &ExportTeam, cx| {
-                let team = dialog.read(cx).team().clone();
-                this.open_export(team, cx);
-            }));
-    }
-
-    pub fn open_export(&mut self, team: Team, cx: &mut Context<Self>) {
-        let Some(teams) = self.teams.clone() else {
-            return;
-        };
-        let dialog = cx.new(|cx| TeamExportDialog::new(teams, team, cx));
-        self.show(&dialog, Modal::Export(dialog.clone()), cx);
+        self.menu = None;
+        team_dialogs::open_share(teams, catalog, entry.team, window, cx);
+        cx.notify();
     }
 
     fn delete(&mut self, cx: &mut Context<Self>) {
@@ -398,9 +386,6 @@ impl TeamsSection {
 
 /// The team editor asks for a team file (`onImport`).
 pub struct ImportFile;
-
-/// The share dialog asks for the export dialog.
-pub struct ExportTeam;
 
 /// A short key for a member that is not available here.
 fn short_key(pubkey: &str) -> String {
@@ -496,9 +481,9 @@ impl TeamsSection {
                 .child(MenuItem::new("deploy-team", "Deploy to channel").on_click(
                     cx.listener(move |this, _, _, cx| this.open_deploy(deploy.clone(), cx)),
                 ))
-                .child(MenuItem::new("share-team", "Share").on_click(
-                    cx.listener(move |this, _, _, cx| this.open_share(share.clone(), cx)),
-                ))
+                .child(MenuItem::new("share-team", "Share").on_click(cx.listener(
+                    move |this, _, window, cx| this.open_share(share.clone(), window, cx),
+                )))
                 .child(
                     MenuItem::new("edit-team", "Edit team").on_click(cx.listener(
                         move |this, _, window, cx| this.open_editor(Some(edit.clone()), window, cx),
@@ -603,8 +588,6 @@ impl TeamsSection {
             Modal::Editor(editor) => (editor.clone().into_any_element(), None),
             Modal::Import(dialog) => (dialog.clone().into_any_element(), None),
             Modal::Deploy(dialog) => (dialog.clone().into_any_element(), None),
-            Modal::Share(dialog) => (dialog.clone().into_any_element(), None),
-            Modal::Export(dialog) => (dialog.clone().into_any_element(), None),
             Modal::Catalog(dialog) => (dialog.clone().into_any_element(), None),
             Modal::Delete { entry, busy, error } => {
                 let dialog =

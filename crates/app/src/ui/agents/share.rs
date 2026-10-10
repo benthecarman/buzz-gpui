@@ -76,7 +76,6 @@ impl Global for Hooks {}
 
 /// Hook for the community catalog: the controls the agent share dialog
 /// shows under "Share settings".
-#[allow(dead_code)]
 pub(crate) fn set_agent_catalog_controls(controls: AgentCatalogControls, cx: &mut App) {
     cx.default_global::<Hooks>().agent_catalog = Some(controls);
 }

@@ -35,7 +35,6 @@ struct TeamHook(TeamPreview);
 impl Global for TeamHook {}
 
 /// Hook for team snapshots: what "Add team" opens once the file is read.
-#[allow(dead_code)]
 pub(crate) fn set_team_preview(preview: TeamPreview, cx: &mut App) {
     cx.set_global(TeamHook(preview));
 }
