@@ -39,7 +39,7 @@ mod unread;
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use catalog::CommunityCatalog;
 pub use feedback::{FeedbackState, PendingFeedback};
-pub use inbox::{InboxFeed, InboxFeedStatus, InboxState};
+pub use inbox::{EXPIRED as INBOX_EXPIRED, InboxFeed, InboxFeedStatus, InboxState};
 pub use incoming::IncomingMessage;
 pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};

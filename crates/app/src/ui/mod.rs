@@ -22,6 +22,7 @@ mod form_fields;
 
 mod gif_picker;
 mod identity;
+mod inbox;
 mod jump;
 pub mod launch;
 mod link_preview;

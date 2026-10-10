@@ -204,6 +204,28 @@ impl Store {
         })
     }
 
+    /// Every saved view key starting with `prefix`, newest first, with
+    /// its value; for listing composer drafts (`listDraftViews`).
+    pub fn view_states(
+        &self,
+        partition: &Partition,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT key, value_json FROM view_state
+                 WHERE origin = ?1 AND viewer = ?2 AND substr(key, 1, length(?3)) = ?3
+                 ORDER BY updated_ms DESC, key",
+            )?;
+            let rows = statement
+                .query_map(params![partition.origin, partition.viewer, prefix], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
     pub fn partition_pref(
         &self,
         partition: &Partition,
@@ -656,6 +678,20 @@ mod tests {
         assert_eq!(store.view_state(&b, "draft:general").unwrap(), None);
         store.set_view_state(&a, "draft:general", None).unwrap();
         assert_eq!(store.view_state(&a, "draft:general").unwrap(), None);
+    }
+
+    #[test]
+    fn view_states_list_one_prefix_in_one_partition() {
+        let store = Store::in_memory().unwrap();
+        let a = partition("https://a.example");
+        let b = partition("https://b.example");
+        store.set_view_state(&a, "draft:one", Some("1")).unwrap();
+        store
+            .set_view_state(&a, "selected-channel", Some("2"))
+            .unwrap();
+        store.set_view_state(&b, "draft:two", Some("3")).unwrap();
+        let drafts = store.view_states(&a, "draft:").unwrap();
+        assert_eq!(drafts, vec![("draft:one".to_owned(), "1".to_owned())]);
     }
 
     fn signed(keys: &Keys, content: &str) -> crate::Verified {

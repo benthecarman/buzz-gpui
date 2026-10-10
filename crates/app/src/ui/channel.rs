@@ -294,6 +294,11 @@ impl ChannelPage {
         self.input.clone()
     }
 
+    /// The composer itself, for hosts that follow its sends (Inbox drafts).
+    pub fn composer_entity(&self) -> Entity<super::composer::Composer> {
+        self.composer.clone()
+    }
+
     /// The first page has not arrived yet (the launch surface waits).
     pub fn first_page_loading(&self, cx: &App) -> bool {
         self.model.read(cx).snapshot.status == TimelineStatus::Loading

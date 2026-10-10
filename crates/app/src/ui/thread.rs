@@ -264,6 +264,11 @@ impl ThreadPanel {
         self.root_id
     }
 
+    /// The composer itself, for hosts that follow its sends (Inbox drafts).
+    pub fn composer_entity(&self) -> Entity<super::composer::Composer> {
+        self.composer.clone()
+    }
+
     /// The row actions, wired to this panel's composer.
     fn message_actions(
         community: &Entity<Community>,
