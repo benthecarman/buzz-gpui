@@ -147,9 +147,14 @@ impl ProjectsPage {
         let current = AppState::current(cx);
         if current.as_ref().map(|c| c.entity_id()) != self.community.as_ref().map(|c| c.entity_id())
         {
-            self._community = current
-                .as_ref()
-                .map(|community| cx.observe(community, |this, _, cx| this.sync(cx)));
+            self._community = current.as_ref().map(|community| {
+                // Re-render too: leaving a repository's channel revokes
+                // the content shown.
+                cx.observe(community, |this, _, cx| {
+                    this.sync(cx);
+                    cx.notify();
+                })
+            });
             self.community = current;
             self.generation += 1;
             self.state = State::Waiting;
@@ -580,7 +585,13 @@ impl ProjectsPage {
                                         }))
                                     }),
                             )
-                            .child(div().my(rems(0.25)).child(entity.description.clone()))
+                            .child(
+                                div()
+                                    .my(rems(0.25))
+                                    .when(!entity.description.is_empty(), |d| {
+                                        d.child(entity.description.clone())
+                                    }),
+                            )
                             .child(small(format_public_key(&entity.owner), &c)),
                     )
             });
