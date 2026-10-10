@@ -314,6 +314,7 @@ mod tests {
             sidebar: Default::default(),
             hidden_dms: std::sync::Arc::new([]),
             emoji: Default::default(),
+            statuses: Default::default(),
         }
     }
 }
