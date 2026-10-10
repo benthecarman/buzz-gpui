@@ -5,12 +5,13 @@ mod board;
 mod companion;
 mod dialogs;
 pub mod layout;
+mod routes;
 mod shell;
 
 use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::channel_tabs::{TabState, ThreadTarget};
-use super::navigation::{History, Place, Request, Target};
+use super::navigation::{ChannelRoute, History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
 use super::profile_card::{self, ProfileCard};
@@ -86,6 +87,8 @@ pub struct Workspace {
     profile: Option<(String, Point<Pixels>)>,
     dialog: Option<dialogs::OpenDialog>,
     _page_events: Option<Subscription>,
+    /// Messages shows a route rather than a conversation.
+    route: Option<ChannelRoute>,
 }
 
 impl Workspace {
@@ -130,6 +133,7 @@ impl Workspace {
             profile: None,
             dialog: None,
             _page_events: None,
+            route: None,
         };
         workspace.handle_settings_actions(window, cx);
         workspace.sync(window, cx);
@@ -288,6 +292,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.page = Page::MESSAGES;
+        self.route = None;
         if self
             .channel
             .as_ref()
@@ -374,6 +379,7 @@ impl Workspace {
 
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
+        self.route = None;
         if let Some(spec) = pages::spec(page, cx) {
             if let Some(build) = spec.build
                 && !self.views.contains_key(&page)
@@ -454,7 +460,7 @@ impl Render for Workspace {
                         .justify_center()
                         .text_body_sm()
                         .text_color(c.text_subtle)
-                        .child("Select a channel to read it.")
+                        .child(self.route_placeholder())
                         .into_any_element(),
                 },
                 page => self.page_view(page),
@@ -519,6 +525,15 @@ impl Workspace {
             .community
             .as_ref()
             .map(|community| community.read(cx).origin.to_string());
+        if self.page == Page::MESSAGES
+            && self.channel.is_none()
+            && let Some(route) = &self.route
+        {
+            return Some(Target {
+                community,
+                place: Place::Channels(route.clone()),
+            });
+        }
         let place = match (self.page, &self.channel) {
             (Page::MESSAGES, Some(channel)) => {
                 let channel = channel.read(cx).channel_id().to_string();
@@ -615,6 +630,7 @@ impl Workspace {
             }
         }
         match target.place {
+            Place::Channels(route) => self.show_route(route, window, cx),
             Place::Page(page) => {
                 self.show_page(page, window, cx);
                 if page == Page::MESSAGES && self.channel.is_none() {

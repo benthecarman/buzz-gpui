@@ -328,16 +328,18 @@ impl Workspace {
             return Some(own.clone().into_any_element());
         }
         let community = self.community.clone()?;
-        let snapshot = community.read(cx).snapshot.clone();
         let weak = cx.entity().downgrade();
         let weak_page = weak.clone();
         let (weak_create, weak_message) = (weak.clone(), weak.clone());
-        let can_create = snapshot
+        let weak_removed = weak.clone();
+        let can_create = community
+            .read(cx)
+            .snapshot
             .relay
             .as_ref()
             .is_some_and(|relay| relay.supports_channel_creation);
         Some(sidebar::render(
-            &snapshot,
+            &community,
             SidebarProps {
                 page: self.page,
                 // Another page shows no channel as selected.
@@ -361,7 +363,12 @@ impl Workspace {
                 on_new_message: Arc::new(move |window, cx| {
                     let _ = weak_message.update(cx, |this, cx| this.open_new_message(window, cx));
                 }),
+                on_channel_removed: Arc::new(move |channel, window, cx| {
+                    let _ = weak_removed
+                        .update(cx, |this, cx| this.channel_removed(channel, window, cx));
+                }),
             },
+            window,
             cx,
         ))
     }

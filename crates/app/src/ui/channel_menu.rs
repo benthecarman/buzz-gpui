@@ -38,6 +38,38 @@ enum Modal {
     Confirm(Action),
 }
 
+/// A lifecycle confirmation's button label and description
+/// (`ChannelLifecycleDialog.tsx`).
+pub fn lifecycle_text(action: Action) -> (&'static str, &'static str) {
+    match action {
+        Action::Archive => (
+            "Archive channel",
+            "Archive this channel for everyone and remove it from the sidebar. Messages are \
+             kept. Find it in search and open Settings to unarchive it later.",
+        ),
+        Action::Unarchive => (
+            "Unarchive channel",
+            "Unarchive this channel for everyone and return it to the sidebar. Members can \
+             send messages again.",
+        ),
+        Action::Leave => (
+            "Leave channel",
+            "Leave this channel and remove it from your sidebar. You may need an invitation \
+             to rejoin a private channel.",
+        ),
+        Action::Hide => (
+            "Hide conversation",
+            "Hide this conversation from your sidebar only. Messages and membership are \
+             kept; other participants are not removed.",
+        ),
+        Action::Delete => (
+            "Delete channel",
+            "Delete this channel for everyone. You cannot undo this action from Buzz.",
+        ),
+        Action::Join => ("Join channel", ""),
+    }
+}
+
 /// The header's "Channel members" and "Channel actions" buttons, with the
 /// menu and dialogs they open.
 pub struct ChannelActions {
@@ -160,7 +192,6 @@ impl ChannelActions {
         let item = |id: &'static str, label: &'static str, icon: IconName| {
             MenuItem::new(id, label).icon(icon).icon_size(14.)
         };
-        let link = format!("buzz://channel/{}", self.channel.id);
         let panels = self
             .menu_panels
             .iter()
@@ -175,22 +206,24 @@ impl ChannelActions {
                         open(window, cx);
                         cx.notify();
                     }))
-            });
+            })
+            .collect::<Vec<_>>();
+        // The sidebar's row actions: move, mute, read, copy link.
+        let shared = super::sidebar::header_actions(
+            &self.community,
+            &self.channel,
+            Self::dismiss_menu(cx),
+            cx,
+        );
         let mut menu = Menu::new()
             .child(
                 item("view-details", "View channel details", IconName::Info)
                     .on_click(cx.listener(|this, _, window, cx| this.open_details(window, cx))),
             )
             .children(panels)
-            .child(
-                item("copy-link", "Copy link", IconName::Link).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
-                        this.menu_open = false;
-                        cx.notify();
-                    },
-                )),
-            );
+            .when(!shared.is_empty(), |menu| {
+                menu.child(MenuSeparator::new()).children(shared)
+            });
         let confirm = |action: Action| {
             cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx| {
                 this.menu_open = false;
@@ -279,33 +312,7 @@ impl ChannelActions {
     }
 
     fn confirmation(&self, action: Action, cx: &mut Context<Self>) -> AnyElement {
-        let (label, description) = match action {
-            Action::Archive => (
-                "Archive channel",
-                "Archive this channel for everyone and remove it from the sidebar. Messages are \
-                 kept. Find it in search and open Settings to unarchive it later.",
-            ),
-            Action::Unarchive => (
-                "Unarchive channel",
-                "Unarchive this channel for everyone and return it to the sidebar. Members can \
-                 send messages again.",
-            ),
-            Action::Leave => (
-                "Leave channel",
-                "Leave this channel and remove it from your sidebar. You may need an invitation \
-                 to rejoin a private channel.",
-            ),
-            Action::Hide => (
-                "Hide conversation",
-                "Hide this conversation from your sidebar only. Messages and membership are \
-                 kept; other participants are not removed.",
-            ),
-            Action::Delete => (
-                "Delete channel",
-                "Delete this channel for everyone. You cannot undo this action from Buzz.",
-            ),
-            Action::Join => ("Join channel", ""),
-        };
+        let (label, description) = lifecycle_text(action);
         // `ChannelLifecycleDialog.tsx`: only Delete is destructive.
         let destructive = action == Action::Delete;
         let profiles = &self.community.read(cx).snapshot.profiles;

@@ -68,6 +68,45 @@ pub enum Place {
         message: Option<EventId>,
         thread: Option<EventId>,
     },
+    /// Messages without a conversation of its own (`routes.ts`).
+    Channels(ChannelRoute),
+}
+
+/// The Channels page's routes that are not a conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelRoute {
+    /// Writing a new direct message.
+    NewMessage,
+    /// No conversation: after the open one was left with none to follow.
+    Empty,
+    /// A session draft under `parent`; buzz-app no longer nests sessions
+    /// and explains where to start one.
+    #[allow(dead_code)]
+    NewSession { parent: String },
+}
+
+// Nothing in this app links to a session draft yet; Sessions will.
+#[allow(dead_code)]
+impl ChannelRoute {
+    /// Validates route params as `isChannelRoute` does: `"new-message"`,
+    /// `"empty"`, or exactly `{kind: "new-session", parentId}` with a
+    /// non-blank parent.
+    pub fn parse(params: &serde_json::Value) -> Option<Self> {
+        match params {
+            serde_json::Value::String(route) if route == "new-message" => Some(Self::NewMessage),
+            serde_json::Value::String(route) if route == "empty" => Some(Self::Empty),
+            serde_json::Value::Object(map) => {
+                let parent = map.get("parentId")?.as_str()?;
+                (map.get("kind")?.as_str()? == "new-session"
+                    && !parent.trim().is_empty()
+                    && map.keys().all(|key| key == "kind" || key == "parentId"))
+                .then(|| Self::NewSession {
+                    parent: parent.to_owned(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Target {
@@ -350,6 +389,34 @@ mod tests {
             history.back(),
             Some(Target::channel(Some("ws://other".into()), "a"))
         );
+    }
+
+    #[test]
+    fn parses_channel_routes() {
+        use serde_json::json;
+        assert_eq!(
+            ChannelRoute::parse(&json!("new-message")),
+            Some(ChannelRoute::NewMessage)
+        );
+        assert_eq!(
+            ChannelRoute::parse(&json!("empty")),
+            Some(ChannelRoute::Empty)
+        );
+        assert_eq!(
+            ChannelRoute::parse(&json!({"kind": "new-session", "parentId": "c1"})),
+            Some(ChannelRoute::NewSession {
+                parent: "c1".into()
+            })
+        );
+        for invalid in [
+            json!("other"),
+            json!({"kind": "new-session", "parentId": " "}),
+            json!({"kind": "new-session", "parentId": "c1", "extra": 1}),
+            json!({"kind": "other", "parentId": "c1"}),
+            json!(null),
+        ] {
+            assert_eq!(ChannelRoute::parse(&invalid), None, "{invalid}");
+        }
     }
 
     #[test]
