@@ -1,4 +1,4 @@
-use crate::input::EditorMode;
+use crate::input::{EditorMode, InputModeKind};
 use std::{collections::BTreeMap, ops::Range};
 
 use gpui::{App, Context, HighlightStyle, Hsla, WeakEntity};
@@ -89,12 +89,12 @@ struct DecorationCollectionId(usize);
 /// This is the GPUI Component counterpart of Monaco's
 /// [`IEditorDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html).
 #[derive(Clone, Debug)]
-pub struct TextDecorationCollection {
-    state: WeakEntity<InputBaseState<EditorMode>>,
+pub struct TextDecorationCollection<M: InputModeKind = EditorMode> {
+    state: WeakEntity<InputBaseState<M>>,
     id: DecorationCollectionId,
 }
 
-impl TextDecorationCollection {
+impl<M: InputModeKind> TextDecorationCollection<M> {
     /// Replace all decorations in this collection.
     ///
     /// This corresponds to Monaco's
@@ -102,7 +102,7 @@ impl TextDecorationCollection {
     pub fn set(&self, decorations: Vec<TextDecoration>, cx: &mut App) {
         let _ = self.state.update(cx, |state, cx| {
             let decorations = normalize(&state.text, decorations);
-            if state.extras.decorations.set(self.id, decorations) {
+            if state.decorations.set(self.id, decorations) {
                 cx.notify();
             }
         });
@@ -115,7 +115,7 @@ impl TextDecorationCollection {
     pub fn append(&self, decorations: Vec<TextDecoration>, cx: &mut App) {
         let _ = self.state.update(cx, |state, cx| {
             let decorations = normalize(&state.text, decorations);
-            if state.extras.decorations.append(self.id, decorations) {
+            if state.decorations.append(self.id, decorations) {
                 cx.notify();
             }
         });
@@ -137,7 +137,6 @@ impl TextDecorationCollection {
         self.state
             .read_with(cx, |state, _| {
                 state
-                    .extras
                     .decorations
                     .get(self.id)
                     .unwrap_or_default()
@@ -155,17 +154,17 @@ impl TextDecorationCollection {
 /// [`Self::clear`] to empty it or [`Self::dispose`] to release it permanently.
 /// Operations on a disposed collection or a dropped editor are harmless no-ops.
 #[derive(Clone, Debug)]
-pub struct RangeDecorationCollection {
-    state: WeakEntity<InputBaseState<EditorMode>>,
+pub struct RangeDecorationCollection<M: InputModeKind = EditorMode> {
+    state: WeakEntity<InputBaseState<M>>,
     id: DecorationCollectionId,
 }
 
-impl RangeDecorationCollection {
+impl<M: InputModeKind> RangeDecorationCollection<M> {
     /// Replace only this owner's decorations, clipping ranges to UTF-8 boundaries.
     pub fn set(&self, decorations: Vec<RangeDecoration>, cx: &mut App) {
         let _ = self.state.update(cx, |state, cx| {
             let decorations = normalize(&state.text, decorations);
-            if state.extras.range_decorations.set(self.id, decorations) {
+            if state.range_decorations.set(self.id, decorations) {
                 cx.notify();
             }
         });
@@ -175,7 +174,7 @@ impl RangeDecorationCollection {
     pub fn append(&self, decorations: Vec<RangeDecoration>, cx: &mut App) {
         let _ = self.state.update(cx, |state, cx| {
             let decorations = normalize(&state.text, decorations);
-            if state.extras.range_decorations.append(self.id, decorations) {
+            if state.range_decorations.append(self.id, decorations) {
                 cx.notify();
             }
         });
@@ -189,13 +188,7 @@ impl RangeDecorationCollection {
     /// Release this collection, invalidating all of its cloned handles.
     pub fn dispose(&self, cx: &mut App) {
         let _ = self.state.update(cx, |state, cx| {
-            if state
-                .extras
-                .range_decorations
-                .entries
-                .remove(&self.id)
-                .is_some()
-            {
+            if state.range_decorations.entries.remove(&self.id).is_some() {
                 cx.notify();
             }
         });
@@ -206,7 +199,6 @@ impl RangeDecorationCollection {
         self.state
             .read_with(cx, |state, _| {
                 state
-                    .extras
                     .range_decorations
                     .get(self.id)
                     .unwrap_or_default()
@@ -493,7 +485,7 @@ fn normalize<T: TrackedDecoration>(text: &Rope, decorations: Vec<T>) -> Vec<T> {
         .collect()
 }
 
-impl InputBaseState<EditorMode> {
+impl<M: InputModeKind> InputBaseState<M> {
     /// Create an independently owned collection of geometric range decorations.
     ///
     /// Ranges use UTF-8 byte offsets and the same tracking as text decorations:
@@ -511,9 +503,8 @@ impl InputBaseState<EditorMode> {
         &mut self,
         decorations: Vec<RangeDecoration>,
         cx: &mut Context<Self>,
-    ) -> RangeDecorationCollection {
+    ) -> RangeDecorationCollection<M> {
         let id = self
-            .extras
             .range_decorations
             .create(normalize(&self.text, decorations));
         cx.notify();
@@ -543,9 +534,9 @@ impl InputBaseState<EditorMode> {
         &mut self,
         decorations: Vec<TextDecoration>,
         cx: &mut Context<Self>,
-    ) -> TextDecorationCollection {
+    ) -> TextDecorationCollection<M> {
         let decorations = normalize(&self.text, decorations);
-        let id = self.extras.decorations.create(decorations);
+        let id = self.decorations.create(decorations);
         cx.notify();
         TextDecorationCollection {
             state: cx.entity().downgrade(),

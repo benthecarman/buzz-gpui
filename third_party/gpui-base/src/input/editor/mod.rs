@@ -5,7 +5,7 @@ use super::{EditorMode, InputBaseState, InputModeKind};
 /// State for source-code editing.
 ///
 /// This is the shared editing engine in its code-editor kind. Languages, line
-/// numbers, folding, indent guides, diagnostics, decorations, and the LSP
+/// numbers, folding, indent guides, diagnostics, and the LSP
 /// providers exist on this kind only, so an ordinary input or textarea never
 /// exposes them.
 pub type EditorState = InputBaseState<EditorMode>;
@@ -37,24 +37,10 @@ impl InputModeKind for EditorMode {
 
     fn reset_annotations(state: &mut InputBaseState<Self>) {
         state.extras.hover_popover = None;
-        state.extras.decorations.clear();
-        state.extras.range_decorations.clear();
     }
 
     fn editing_syntax_context(state: &InputBaseState<Self>, offset: usize) -> super::SyntaxContext {
         state.syntax_context_at(offset)
-    }
-
-    fn adjust_annotations(
-        state: &mut InputBaseState<Self>,
-        range: &std::ops::Range<usize>,
-        new_len: usize,
-    ) {
-        state.extras.decorations.adjust_for_edit(range, new_len);
-        state
-            .extras
-            .range_decorations
-            .adjust_for_edit(range, new_len);
     }
 
     fn refresh_language_features(
@@ -233,14 +219,6 @@ impl RenderOnce for Editor {
 
 /// What a code editor exposes to the renderer. See [`crate::input::InputExtras`].
 impl crate::input::InputExtras for super::EditorExtras {
-    fn decoration_layers(&self) -> Vec<&[super::TextDecoration]> {
-        self.decorations.iter().collect()
-    }
-
-    fn range_decorations(&self, ranges: &[std::ops::Range<usize>]) -> Vec<&super::RangeDecoration> {
-        self.range_decorations.intersecting(ranges)
-    }
-
     fn semantic_token_styles(
         &self,
         text: &ropey::Rope,

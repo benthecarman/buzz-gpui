@@ -26,24 +26,23 @@ use std::rc::Rc;
 use gpui::{Div, Entity, Stateful, Window};
 use ropey::Rope;
 
-use super::decorations::DecorationCollections;
 use super::lsp::{ContextMenuContent, HoverDefinition, InlineCompletion};
-use crate::input::{
-    HighlightStyleResolver, InputEdit, InputHighlighter, RangeDecoration, SyntaxContext,
-    TextDecoration,
-};
+use crate::input::{HighlightStyleResolver, InputEdit, InputHighlighter, SyntaxContext};
 use crate::input::{HoverPopoverState, Lsp};
 use gpui::Task;
 
 use super::InputBaseState;
 
 /// A single-line text field: the mode of [`crate::input::InputState`].
+#[derive(Clone, Copy, Debug)]
 pub struct InputMode;
 
 /// Ordinary multi-line text: the mode of [`crate::input::TextareaState`].
+#[derive(Clone, Copy, Debug)]
 pub struct TextareaMode;
 
 /// Source code, with language features: the mode of [`crate::input::EditorState`].
+#[derive(Clone, Copy, Debug)]
 pub struct EditorMode;
 
 mod sealed {
@@ -78,16 +77,6 @@ impl MultiLineMode for EditorMode {}
 /// during an edit. Adding a field an editor renders belongs here and leaves
 /// the engine's callbacks alone.
 pub trait InputExtras: Default + 'static {
-    /// Decoration ranges to paint, innermost collection first.
-    fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
-        Vec::new()
-    }
-
-    /// Geometric decorations intersecting visible, non-folded buffer spans.
-    fn range_decorations(&self, _ranges: &[std::ops::Range<usize>]) -> Vec<&RangeDecoration> {
-        Vec::new()
-    }
-
     /// Semantic-token styles for a visible range, when an LSP supplies them.
     fn semantic_token_styles(
         &self,
@@ -201,7 +190,7 @@ pub trait InputModeKind: sealed::Sealed + Sized + 'static {
     /// Drops cached language-server results, e.g. after the text is replaced.
     fn reset_language_features(_state: &mut InputBaseState<Self>) {}
 
-    /// Drops decorations and hover state when the text is replaced wholesale.
+    /// Drops hover state when the text is replaced wholesale.
     fn reset_annotations(_state: &mut InputBaseState<Self>) {}
 
     /// Syntax context at `offset` for editing decisions.
@@ -210,14 +199,6 @@ pub trait InputModeKind: sealed::Sealed + Sized + 'static {
     /// is `Code`, which preserves character-heuristic behavior.
     fn editing_syntax_context(_state: &InputBaseState<Self>, _offset: usize) -> SyntaxContext {
         SyntaxContext::Code
-    }
-
-    /// Slides decoration ranges along with an edit.
-    fn adjust_annotations(
-        _state: &mut InputBaseState<Self>,
-        _range: &std::ops::Range<usize>,
-        _new_len: usize,
-    ) {
     }
 
     /// Refreshes language-server state after the text changed.
@@ -352,8 +333,6 @@ impl InputModeKind for TextareaMode {
 /// What a code editor adds on top of multi-line text: language features.
 pub struct EditorExtras {
     pub(crate) lsp: Lsp,
-    pub(crate) decorations: DecorationCollections,
-    pub(crate) range_decorations: DecorationCollections<RangeDecoration>,
     pub(crate) inline_completion: InlineCompletion,
     pub(crate) context_menu_content: ContextMenuContent,
     pub(crate) hover_popover: Option<HoverPopoverState>,
@@ -365,8 +344,6 @@ impl Default for EditorExtras {
     fn default() -> Self {
         Self {
             lsp: Lsp::default(),
-            decorations: DecorationCollections::default(),
-            range_decorations: DecorationCollections::default(),
             inline_completion: InlineCompletion::default(),
             context_menu_content: ContextMenuContent::default(),
             hover_popover: None,

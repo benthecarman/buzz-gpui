@@ -21,10 +21,12 @@ use unicode_segmentation::*;
 
 use super::{
     DiagnosticSet, DisplayMap, InputContextMenuCapabilities, InputEditorStyle,
-    InputHighlighterFactory, MASK_CHAR, MaskPattern, NativeMenu, NumberStep, WrappingIndent,
+    InputHighlighterFactory, MASK_CHAR, MaskPattern, NativeMenu, NumberStep, RangeDecoration,
+    WrappingIndent,
     blink_cursor::BlinkCursor,
     change::Change,
     cursor::{CursorSelection, Selections},
+    decorations::DecorationCollections,
     element::{
         EditorScrollbar, EditorScrollbarSnapshot, LongestLineKey, TextElement,
         clamp_horizontal_scroll_offset,
@@ -350,6 +352,10 @@ struct PasteTarget {
 pub struct InputBaseState<M: InputModeKind> {
     /// State only this mode needs. See [`InputModeKind::Extras`].
     pub(crate) extras: M::Extras,
+    /// Styles and range decorations the application set on the text. Every
+    /// mode keeps them, so a text field can style its text as an editor does.
+    pub(crate) decorations: DecorationCollections,
+    pub(crate) range_decorations: DecorationCollections<RangeDecoration>,
     pub(super) focus_handle: FocusHandle,
     pub(super) mode: LayoutMode,
     pub(super) text: Rope,
@@ -713,6 +719,8 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         Self {
             extras: M::Extras::default(),
+            decorations: DecorationCollections::default(),
+            range_decorations: DecorationCollections::default(),
             focus_handle: focus_handle.clone(),
             text: "".into(),
             display_map: DisplayMap::new(text_style.font(), window.rem_size(), None),
@@ -3672,6 +3680,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.silent_replace_text = false;
     }
 
+    /// Slides decoration ranges along with an edit.
+    fn adjust_decorations(&mut self, range: &Range<usize>, new_len: usize) {
+        self.decorations.adjust_for_edit(range, new_len);
+        self.range_decorations.adjust_for_edit(range, new_len);
+    }
+
     /// Apply a batch of edits as one atomic history transaction.
     ///
     /// `edits` are `(byte range in the current pre-edit document, replacement)`
@@ -3757,7 +3771,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             self.mode.adjust_auto_closed_pair(range, new_text.len());
             self.text.replace(range.clone(), new_text);
 
-            M::adjust_annotations(self, range, new_text.len());
+            self.adjust_decorations(range, new_text.len());
             recorded |= self.push_history(
                 &old_text,
                 range,
@@ -4135,9 +4149,11 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         if mask_changed {
             // Masking rewrites the whole document, so ranges recorded against
             // the old text no longer point at anything.
+            self.decorations.clear();
+            self.range_decorations.clear();
             M::reset_annotations(self);
         } else {
-            M::adjust_annotations(self, &range, new_text.len());
+            self.adjust_decorations(&range, new_text.len());
         }
         if mask_changed {
             // A segment-based history entry no longer matches the masked
@@ -4278,7 +4294,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             }
         }
 
-        M::adjust_annotations(self, &range, new_text.len());
+        self.adjust_decorations(&range, new_text.len());
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
             diagnostics.reset(&self.text)
         }
@@ -8115,7 +8131,7 @@ mod tests {
                     state.hover_popover().is_none(),
                     "blur should hide the hover popover"
                 );
-                let decorations = state.extras.decoration_layers();
+                let decorations: Vec<_> = state.decorations.iter().collect();
                 assert!(
                     decorations.iter().any(|layer| !layer.is_empty()),
                     "blur must not discard decorations"
@@ -8713,7 +8729,7 @@ mod tests {
                 );
                 state.set_selected_range(0..0, cx);
                 state.replace_text_in_range(None, "X", window, cx);
-                let layers = state.extras.decoration_layers();
+                let layers: Vec<_> = state.decorations.iter().collect();
                 assert_eq!(layers.into_iter().flatten().next().unwrap().range, 5..8);
             });
         });

@@ -35,7 +35,16 @@ published crate unchanged (without its `Cargo.lock`), so
 workspace uses it through `[patch.crates-io]`. Drop it when upstream has
 equivalents.
 
-Patches: none yet.
+Patches:
+
+- Decorations in every input mode: the text and range decoration stores
+  move from the code editor's extras into the shared `InputBaseState`, and
+  `create_decorations_collection`, `create_range_decorations_collection`
+  and their collection handles work for `InputState` and `TextareaState`
+  too. The handles take the mode as a type parameter that defaults to
+  `EditorMode`, so existing code still compiles. The composer uses this to
+  style Markdown as it is typed. Before, only `EditorState` could hold
+  styled ranges. The renderer already drew decorations in every mode.
 
 Run its tests on their own, since it isn't a workspace member:
 

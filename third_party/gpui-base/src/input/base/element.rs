@@ -823,7 +823,7 @@ impl<M: InputModeKind> TextElement<M> {
                 visible_spans.push(offset..end);
             }
         }
-        for decoration in state.extras.range_decorations(&visible_spans) {
+        for decoration in state.range_decorations.intersecting(&visible_spans) {
             match decoration.style() {
                 RangeDecorationStyle::Fill => {
                     let color = decoration
@@ -2140,7 +2140,7 @@ impl<M: InputModeKind> TextElement<M> {
                     .then(|| {
                         compose_decoration_collections(
                             Vec::new(),
-                            state.extras.decoration_layers().into_iter(),
+                            state.decorations.iter(),
                             visible_byte_range,
                         )
                     })
@@ -2152,7 +2152,7 @@ impl<M: InputModeKind> TextElement<M> {
                 .then(|| {
                     compose_decoration_collections(
                         Vec::new(),
-                        state.extras.decoration_layers().into_iter(),
+                        state.decorations.iter(),
                         visible_byte_range,
                     )
                 })
@@ -2252,7 +2252,7 @@ impl<M: InputModeKind> TextElement<M> {
         if !state.masked {
             styles = compose_decoration_collections(
                 styles,
-                state.extras.decoration_layers().into_iter(),
+                state.decorations.iter(),
                 visible_byte_range.clone(),
             )
             .unwrap_or_default();
@@ -3615,6 +3615,63 @@ mod tests {
             DecorationHarness(state)
         });
         (editor.unwrap(), window)
+    }
+
+    struct TextareaHarness(Entity<crate::input::TextareaState>);
+
+    impl Render for TextareaHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    /// A textarea keeps decorations as an editor does: they follow edits and
+    /// reach the renderer.
+    #[gpui::test]
+    fn textarea_decorations_follow_edits_and_style_text(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let mut textarea = None;
+        let window = cx.open_window(size(px(240.), px(140.)), |window, cx| {
+            let state = cx.new(|cx| {
+                crate::input::TextareaState::new(window, cx).default_value("abc def\nghi")
+            });
+            textarea = Some(state.clone());
+            TextareaHarness(state)
+        });
+        let textarea = textarea.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let bold = HighlightStyle {
+            font_weight: Some(gpui::FontWeight::BOLD),
+            ..Default::default()
+        };
+        cx.update(|window, cx| {
+            let (texts, ranges) = textarea.update(cx, |state, cx| {
+                let texts =
+                    state.create_decorations_collection(vec![TextDecoration::new(4..7, bold)], cx);
+                let ranges = state
+                    .create_range_decorations_collection(vec![RangeDecoration::new(8..11)], cx);
+                state.set_selected_range(0..0, cx);
+                state.replace_text_in_range(None, "X", window, cx);
+                (texts, ranges)
+            });
+            assert_eq!(texts.get_ranges(cx), vec![5..8]);
+            assert_eq!(ranges.get_ranges(cx), vec![9..12]);
+
+            let styles = TextElement::new(textarea.clone())
+                .highlight_lines(&[0, 1], px(0.), 0..12, cx)
+                .unwrap();
+            assert!(styles.contains(&(5..8, bold)));
+            window.draw(cx).clear(cx);
+            let state = textarea.read(cx);
+            let (_, frames) = TextElement::new(textarea.clone()).layout_range_decorations(
+                state.last_layout.as_ref().unwrap(),
+                &state.input_bounds,
+                window,
+                state.input_bounds,
+                cx,
+            );
+            assert_eq!(frames.len(), 1);
+        });
     }
 
     #[gpui::test]
