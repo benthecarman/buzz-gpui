@@ -3,8 +3,11 @@
 //! it, the agents working now and the unread threads, each thread with
 //! its own Mark as read.
 
+use super::agent_activity::row::AgentActivityRow;
 use super::message::display_name;
 use super::{media, navigation};
+use crate::agent_activity::current::{working_details, working_duration};
+use crate::agent_activity::observer::{self, now_ms};
 use crate::community::Community;
 use buzz_relay_client::{
     EventId, Freshness, Media, Profiles, ThreadActivityItem, ThreadActivitySnapshot, message_link,
@@ -15,6 +18,7 @@ use buzz_ui::{
 };
 use gpui_kit::*;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,6 +115,8 @@ struct State {
     marking: HashSet<String>,
     failed: HashSet<String>,
     _pending: Option<Task<()>>,
+    /// Redraws once a second while agents show, for their durations.
+    _ticker: Option<Task<()>>,
 }
 
 impl State {
@@ -140,8 +146,25 @@ impl State {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self._pending = None;
+        self._ticker = None;
         self.open = false;
         cx.notify();
+    }
+
+    /// Keeps "Working now" durations current while it shows.
+    fn tick(&mut self, ticking: bool, cx: &mut Context<Self>) {
+        if !ticking {
+            self._ticker = None;
+        } else if self._ticker.is_none() {
+            self._ticker = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
     }
 }
 
@@ -157,6 +180,8 @@ impl RenderOnce for ActivityRow {
             state.update(cx, |state, cx| state.close(cx));
         }
         let open = state.read(cx).open && active;
+        let ticking = open && !self.agents.is_empty();
+        state.update(cx, |state, cx| state.tick(ticking, cx));
         let popover = open.then(|| popover(&self, &state, cx).into_any_element());
         let hover_state = state.clone();
         let mut row = div()
@@ -269,68 +294,71 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
     }
     if !row.agents.is_empty() {
         list = list.child(section("Working now", cx));
+        let activity = row
+            .community
+            .as_ref()
+            .map(|community| observer::snapshot(community, cx))
+            .unwrap_or_default();
+        let now = now_ms();
+        let channel_name = row
+            .community
+            .as_ref()
+            .and_then(|community| {
+                community
+                    .read(cx)
+                    .snapshot
+                    .channels
+                    .iter()
+                    .find(|channel| channel.id == row.channel)
+                    .map(|channel| channel.name.clone())
+            })
+            .unwrap_or_default();
         for agent in &row.agents {
             let name = display_name(&row.profiles, agent);
             let picture = row.profiles.get(agent).and_then(|p| p.picture.clone());
-            let open = open.clone();
-            let state = state.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("working-{agent}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .p(px(8.))
-                    .my(px(2.))
-                    .rounded(radius::FLOATING_INNER)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(c.affordance_floating_hover))
-                    .child(avatar(
-                        name.clone(),
-                        picture.as_deref(),
-                        true,
-                        row.media.as_ref(),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_baseline()
-                                    .justify_between()
-                                    .gap(px(12.))
-                                    .text_body_sm()
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(c.text_standard)
-                                            .truncate()
-                                            .child(name),
-                                    )
-                                    // Turn start times come from agent
-                                    // activity, which this app does not
-                                    // capture yet.
-                                    .child(
-                                        div().text_caption().text_color(c.text_subtle).child("—"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(c.text_subtle)
-                                    .child("Working"),
-                            ),
-                    )
-                    .on_click(move |_, window, cx| {
-                        state.update(cx, |state, cx| state.close(cx));
-                        open(None, window, cx);
-                    }),
-            );
+            // A current turn's start gives its age; only one captured
+            // trigger gives a destination (`workingAgentDetails`).
+            let details = working_details(&activity, &row.channel, agent);
+            let message = details.as_ref().and_then(|d| d.message_id.clone());
+            let (open, open_state, view_state) = (open.clone(), state.clone(), state.clone());
+            let (agent_key, channel) = (agent.clone(), row.channel.clone());
+            let opened = message.clone();
+            list = list.child(AgentActivityRow {
+                id: SharedString::from(format!("working-{agent}")),
+                name: name.clone(),
+                picture: match (picture, row.media.as_ref()) {
+                    (Some(picture), Some(media)) => Some(media::avatar(&picture, media)),
+                    _ => None,
+                },
+                status: "Working".into(),
+                meta: Some(
+                    details
+                        .as_ref()
+                        .map_or("—".into(), |d| working_duration(d.started_at, now))
+                        .into(),
+                ),
+                scope: None,
+                open_label: format!(
+                    "Open {} for {name} in {}",
+                    if message.is_some() {
+                        "thread"
+                    } else {
+                        "conversation"
+                    },
+                    channel_name
+                )
+                .into(),
+                on_open: Some(Rc::new(move |window, cx| {
+                    open_state.update(cx, |state, cx| state.close(cx));
+                    open(opened.clone(), window, cx);
+                })),
+                // Activity opens beside the channel it is about.
+                on_open_activity: Some(Rc::new(move |window, cx| {
+                    view_state.update(cx, |state, cx| state.close(cx));
+                    navigation::open_url(&format!("buzz://channel/{channel}"), window, cx);
+                    super::agent_activity::open(&agent_key, Some(&channel), None, window, cx);
+                })),
+            });
         }
     }
     if !items.is_empty() {

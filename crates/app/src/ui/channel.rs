@@ -263,7 +263,7 @@ impl ChannelPage {
             unread,
             unread_watch,
             watched: (Vec::new(), Vec::new()),
-            activity: cx.new(|_| AgentChooser::new()),
+            activity: cx.new(AgentChooser::new),
             restore,
             restore_pages: 0,
             reveal_focus: false,
@@ -809,10 +809,16 @@ impl Render for ChannelPage {
             &community.snapshot.thread_typing,
             |root| roots.contains(root),
             &owned,
-        );
+        )
+        .observe(crate::agent_activity::observer::observed(
+            &self.community,
+            &self.channel.id,
+            None,
+            cx,
+        ));
         let mut working: HashMap<EventId, Vec<String>> = HashMap::new();
         for (agent, places) in &activity.agents {
-            for root in places.iter().flatten() {
+            for root in places.roots.iter().flatten().flatten() {
                 if let Ok(root) = EventId::from_hex(root) {
                     working.entry(root).or_default().push(agent.clone());
                 }
@@ -861,7 +867,7 @@ impl Render for ChannelPage {
             self.activity.update(cx, |chooser, cx| {
                 chooser.set(
                     &activity,
-                    None,
+                    (&self.channel.id, None),
                     (&profiles, &media),
                     |root| {
                         items

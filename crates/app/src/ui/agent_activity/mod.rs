@@ -3,9 +3,7 @@
 //! the composer's working indicator and "Working now" popover, the
 //! sidebar's working popover and the profile's latest activity.
 
-pub mod indicator;
 pub mod panel;
-pub mod popover;
 pub mod profile;
 pub mod row;
 mod transcript;
@@ -129,6 +127,23 @@ pub fn agent_label(
             )
         });
     directory.names.name(key, &fallback)
+}
+
+/// The sidebar's working agents in `channel`: the viewer's agents typing
+/// there, and agents with observed working turns or typing there.
+pub fn with_observed(
+    mut agents: Vec<String>,
+    community: &Entity<Community>,
+    channel: &str,
+    cx: &App,
+) -> Vec<String> {
+    let snapshot = crate::agent_activity::observer::snapshot(community, cx);
+    agents.extend(crate::agent_activity::current::working_agents(
+        &snapshot, channel,
+    ));
+    agents.sort();
+    agents.dedup();
+    agents
 }
 
 /// The viewer's agents in `community` (`agentChoices`).

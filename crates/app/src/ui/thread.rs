@@ -246,7 +246,7 @@ impl ThreadPanel {
             unread_watch,
             unread,
             watched: Vec::new(),
-            activity: cx.new(|_| AgentChooser::new()),
+            activity: cx.new(AgentChooser::new),
             older_anchor: None,
             sent: None,
             reveal_child: None,
@@ -774,7 +774,13 @@ impl Render for ThreadPanel {
                 .unwrap_or_default(),
             &root_hex,
             &owned,
-        );
+        )
+        .observe(crate::agent_activity::observer::observed(
+            &self.community,
+            &self.channel,
+            Some(&root_hex),
+            cx,
+        ));
         let members = community
             .snapshot
             .channels
@@ -785,7 +791,7 @@ impl Render for ThreadPanel {
         self.activity.update(cx, |chooser, cx| {
             chooser.set(
                 &activity,
-                Some(&root_hex),
+                (&self.channel, Some(&root_hex)),
                 (&profiles, &media),
                 |_| None,
                 // Already here: the thread is open.

@@ -376,7 +376,7 @@ impl ChannelSidebar {
         let unread = snapshot.unread.channel(&id);
         let dm = channel.channel_type == Some(ChannelType::Dm);
         let profiles = &snapshot.profiles;
-        let agents = crate::ui::agent_activity::popover::with_observed(
+        let agents = crate::ui::agent_activity::with_observed(
             working_agents(snapshot, &id, own_agents),
             &self.community,
             &id,

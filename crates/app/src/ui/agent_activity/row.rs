@@ -10,21 +10,6 @@ use std::rc::Rc;
 
 pub type Action = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// "Working now" and "Unread threads": the section heading of an
-/// activity list (`activitySectionLabel`).
-pub fn section_label(label: &'static str, cx: &App) -> AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .min_h(rems(1.75))
-        .px(rems(0.5))
-        .py(rems(0.125))
-        .text_body_sm()
-        .text_color(cx.colors().text_metadata)
-        .child(label)
-        .into_any_element()
-}
-
 #[derive(IntoElement)]
 pub struct AgentActivityRow {
     pub id: SharedString,

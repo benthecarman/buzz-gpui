@@ -3,8 +3,10 @@
 //! own working agents on the right, as an avatar stack that opens a
 //! "Working now" list.
 
-use super::media;
+use super::agent_activity::row::AgentActivityRow;
 use super::message::display_name;
+use super::{media, navigation};
+use crate::agent_activity::current::{CurrentActivity, Root};
 use crate::hosts::Hosts;
 use buzz_relay_client::{EventId, Media, Profiles};
 use buzz_ui::tokens::shadow;
@@ -61,9 +63,10 @@ pub fn owned_agents(cx: &App) -> HashSet<String> {
 /// Who is active in a conversation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Activity {
-    /// The viewer's working agents by key, each with where it works:
-    /// `None` is the channel conversation, `Some` a thread root.
-    pub agents: BTreeMap<String, Vec<Option<String>>>,
+    /// Working agents by key, each with what it does and where:
+    /// `Some(None)` is the channel conversation, `Some(Some(root))` a
+    /// thread, `None` a thread not yet confirmed.
+    pub agents: BTreeMap<String, CurrentActivity>,
     /// Everyone else typing here, in the order they started.
     pub humans: Vec<String>,
 }
@@ -81,7 +84,7 @@ impl Activity {
         let mut activity = Self::default();
         for person in typing {
             if owned.contains(person) {
-                activity.add(person, None);
+                activity.add(person, Some(None));
             }
         }
         let mut roots: Vec<&String> = threads.keys().filter(|root| in_channel(root)).collect();
@@ -89,7 +92,7 @@ impl Activity {
         for root in roots {
             for person in &threads[root] {
                 if owned.contains(person) {
-                    activity.add(person, Some(root.clone()));
+                    activity.add(person, Some(Some(root.clone())));
                 }
             }
         }
@@ -106,7 +109,7 @@ impl Activity {
         let mut activity = Self::default();
         for person in typing {
             if owned.contains(person) {
-                activity.add(person, Some(root.to_string()));
+                activity.add(person, Some(Some(root.to_string())));
             } else {
                 activity.humans.push(person.clone());
             }
@@ -114,24 +117,48 @@ impl Activity {
         activity
     }
 
-    fn add(&mut self, agent: &str, root: Option<String>) {
-        let roots = self.agents.entry(agent.to_string()).or_default();
-        if !roots.contains(&root) {
-            roots.push(root);
+    /// Adds what the agent activity feed shows working here: observed
+    /// turns with their live labels ("Reading main.rs"), and typing from
+    /// agents that send telemetry (`currentActivity`).
+    pub fn observe(mut self, observed: BTreeMap<String, CurrentActivity>) -> Self {
+        for (agent, detail) in observed {
+            for root in detail.roots {
+                self.add(&agent, root);
+            }
+            if let Some(entry) = self.agents.get_mut(&agent) {
+                entry.label = detail.label;
+            }
+        }
+        let agents = &self.agents;
+        self.humans.retain(|person| !agents.contains_key(person));
+        self
+    }
+
+    fn add(&mut self, agent: &str, root: Root) {
+        let activity = self
+            .agents
+            .entry(agent.to_string())
+            .or_insert_with(|| CurrentActivity {
+                label: "Working".into(),
+                roots: Vec::new(),
+            });
+        if !activity.roots.contains(&root) {
+            activity.roots.push(root);
         }
     }
 }
 
 /// Where an agent works, for the chooser's rows in a channel:
-/// "Channel conversation", "Thread · {excerpt}", at most two, then
-/// "+N more".
-pub fn scope_label(roots: &[Option<String>], excerpt: impl Fn(&str) -> Option<String>) -> String {
+/// "Channel conversation", "Thread · {excerpt}", "Work with unconfirmed
+/// thread", at most two, then "+N more".
+pub fn scope_label(roots: &[Root], excerpt: impl Fn(&str) -> Option<String>) -> String {
     let mut labels: Vec<String> = roots
         .iter()
         .take(2)
         .map(|root| match root {
-            None => "Channel conversation".to_string(),
-            Some(root) => {
+            Some(None) => "Channel conversation".to_string(),
+            None => "Work with unconfirmed thread".to_string(),
+            Some(Some(root)) => {
                 let text = excerpt(root)
                     .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
                     .map(|text| text.chars().take(60).collect::<String>())
@@ -145,6 +172,22 @@ pub fn scope_label(roots: &[Option<String>], excerpt: impl Fn(&str) -> Option<St
         labels.push(format!("+{} more", roots.len() - 2));
     }
     labels.join(" / ")
+}
+
+/// "Alice is working", "Alice, Bob are working".
+pub fn working_label(names: &[SharedString]) -> String {
+    let verb = if names.len() == 1 {
+        " is working"
+    } else {
+        " are working"
+    };
+    let names: Vec<&str> = names.iter().map(SharedString::as_ref).collect();
+    format!("{}{verb}", names.join(", "))
+}
+
+/// Down Arrow on a trigger whose click opens a panel previews the list.
+pub fn opens_preview(key: &str, modified: bool, direct: bool) -> bool {
+    direct && key == "down" && !modified
 }
 
 /// Three dots fading to 35% and back over 1.4 s, 0.2 s apart.
@@ -179,10 +222,14 @@ struct Row {
     pubkey: String,
     name: SharedString,
     picture: Option<String>,
+    /// What it does now ("Working", "Reading main.rs").
+    status: String,
     /// Where it works, in a channel view.
     scope: Option<String>,
     /// The thread its conversation opens, when it works in exactly one.
     thread: Option<EventId>,
+    /// Its activity panel: the thread when known, else the channel.
+    activity: String,
 }
 
 /// The viewer's working agents: an avatar stack that opens "Working now"
@@ -194,28 +241,51 @@ pub struct AgentChooser {
     open: bool,
     /// The trigger or the list is under the pointer.
     hovered: (bool, bool),
+    /// A click on a single agent opens its activity panel instead of the
+    /// list (`clickOpensPanel`), as buzz-app's personal workspace does.
+    pub click_opens_panel: bool,
+    /// The list was opened from the keyboard and has focus.
+    keyboard: bool,
+    /// Focus goes back to the stack on the next frame.
+    refocus: bool,
+    trigger_focus: FocusHandle,
+    list_focus: FocusHandle,
     _pending: Option<Task<()>>,
 }
 
 impl AgentChooser {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             rows: Vec::new(),
             media: None,
             on_open: None,
             open: false,
             hovered: (false, false),
+            click_opens_panel: false,
+            keyboard: false,
+            refocus: false,
+            trigger_focus: cx.focus_handle(),
+            list_focus: cx.focus_handle(),
             _pending: None,
         }
     }
 
-    /// Follows the activity. `thread` is the panel's root, or `None` in a
-    /// channel, where `excerpt` names threads from the loaded rows. Names
+    /// The activity a click opens at once: one agent, where clicks open
+    /// panels. Unknown or several scopes open channel activity.
+    fn direct_target(&self) -> Option<String> {
+        match self.rows.as_slice() {
+            [row] if self.click_opens_panel => Some(row.activity.clone()),
+            _ => None,
+        }
+    }
+
+    /// Follows the activity in `channel`. `thread` is the panel's root, or
+    /// `None` in a channel, where `excerpt` names threads from the loaded rows. Names
     /// and pictures come from `people`.
     pub fn set(
         &mut self,
         activity: &Activity,
-        thread: Option<&str>,
+        (channel, thread): (&str, Option<&str>),
         (profiles, media): (&Profiles, &Media),
         excerpt: impl Fn(&str) -> Option<String>,
         on_open: OnOpen,
@@ -224,22 +294,34 @@ impl AgentChooser {
         let rows: Vec<Row> = activity
             .agents
             .iter()
-            .map(|(pubkey, roots)| {
-                let known: Vec<&String> = roots.iter().flatten().collect();
+            .map(|(pubkey, detail)| {
+                let known: Vec<&String> = detail.roots.iter().flatten().flatten().collect();
                 let conversation = thread
                     .map(str::to_string)
                     .or_else(|| (known.len() == 1).then(|| known[0].clone()));
+                // Unknown or several scopes open channel activity.
+                let root = thread
+                    .map(str::to_string)
+                    .or_else(|| match detail.roots.as_slice() {
+                        [Some(Some(root))] => Some(root.clone()),
+                        _ => None,
+                    });
                 Row {
                     pubkey: pubkey.clone(),
                     name: display_name(profiles, pubkey),
                     picture: profiles.get(pubkey).and_then(|p| p.picture.clone()),
-                    scope: thread.is_none().then(|| scope_label(roots, &excerpt)),
+                    status: detail.label.clone(),
+                    scope: thread
+                        .is_none()
+                        .then(|| scope_label(&detail.roots, &excerpt)),
                     thread: conversation.and_then(|root| EventId::from_hex(&root).ok()),
+                    activity: crate::agent_activity::target(pubkey, Some(channel), root.as_deref()),
                 }
             })
             .collect();
         if rows.is_empty() && self.open {
             self.open = false;
+            self.keyboard = false;
         }
         self.rows = rows;
         self.media = Some(media.clone());
@@ -253,10 +335,21 @@ impl AgentChooser {
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self._pending = None;
+        // A keyboard preview hands focus back to the stack.
+        self.refocus |= std::mem::take(&mut self.keyboard);
         if self.open {
             self.open = false;
             cx.notify();
         }
+    }
+
+    /// Down Arrow: open the list now and move focus into it.
+    fn preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._pending = None;
+        self.keyboard = true;
+        self.open = true;
+        window.focus(&self.list_focus, cx);
+        cx.notify();
     }
 
     fn hover(&mut self, trigger: bool, hovered: bool, cx: &mut Context<Self>) {
@@ -266,7 +359,8 @@ impl AgentChooser {
             self.hovered.1 = hovered;
         }
         let inside = self.hovered.0 || self.hovered.1;
-        if inside == self.open {
+        // A keyboard preview stays until Escape or a choice.
+        if inside == self.open || self.keyboard {
             self._pending = None;
             return;
         }
@@ -297,52 +391,39 @@ impl AgentChooser {
         let c = *cx.colors();
         let rows = self.rows.iter().map(|row| {
             let (target, on_open) = (row.thread, self.on_open.clone());
-            div()
-                .id(SharedString::from(format!("working-agent-{}", row.pubkey)))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .p(px(8.))
-                .my(px(2.))
-                .rounded(buzz_ui::tokens::radius::FLOATING_INNER)
-                .cursor_pointer()
-                .hover(|s| s.bg(c.affordance_floating_hover))
-                .child(div().flex_none().child(self.avatar(row, 30.)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .text_body_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(c.text_standard)
-                                .truncate()
-                                .child(row.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_caption()
-                                .text_color(c.text_subtle)
-                                .child("Working"),
-                        )
-                        .children(row.scope.clone().map(|scope| {
-                            div()
-                                .text_caption()
-                                .text_color(c.text_subtle)
-                                .truncate()
-                                .child(scope)
-                        })),
+            let (chooser, viewer) = (cx.entity().downgrade(), cx.entity().downgrade());
+            let activity = row.activity.clone();
+            AgentActivityRow {
+                id: SharedString::from(format!("working-agent-{}", row.pubkey)),
+                name: row.name.clone(),
+                picture: match (&row.picture, &self.media) {
+                    (Some(picture), Some(media)) => Some(media::avatar(picture, media)),
+                    _ => None,
+                },
+                status: row.status.clone().into(),
+                meta: None,
+                scope: row.scope.clone().map(Into::into),
+                open_label: format!(
+                    "Open {} for {}",
+                    if row.thread.is_some() {
+                        "thread"
+                    } else {
+                        "conversation"
+                    },
+                    row.name
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.close(cx);
+                .into(),
+                on_open: Some(Rc::new(move |window, cx| {
+                    let _ = chooser.update(cx, |this, cx| this.close(cx));
                     if let Some(on_open) = &on_open {
                         on_open(target, window, cx);
                     }
-                }))
+                })),
+                on_open_activity: Some(Rc::new(move |window, cx| {
+                    let _ = viewer.update(cx, |this, cx| this.close(cx));
+                    navigation::open_url(&activity, window, cx);
+                })),
+            }
         });
         Popover::new()
             .width(PopoverWidth::Wide)
@@ -370,34 +451,48 @@ impl AgentChooser {
     }
 }
 
-impl Default for AgentChooser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Render for AgentChooser {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.trigger_focus, cx);
+        }
         if self.rows.is_empty() {
             return div().into_any_element();
         }
         let c = *cx.colors();
         let overflow = self.rows.len().saturating_sub(STACK);
+        // 24px tiles, each 4px over the last (`margin-inline-end:
+        // -space-1`). Placed absolutely: Taffy lets negative margins push
+        // the stack past the composer's edge.
+        let shown = self.rows.len().min(STACK);
+        let tiles = div()
+            .relative()
+            .flex_none()
+            .h(px(24.))
+            .w(px(24. + 20. * shown.saturating_sub(1) as f32))
+            .children(
+                self.rows
+                    .iter()
+                    .take(STACK)
+                    .enumerate()
+                    .map(|(index, row)| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(20. * index as f32))
+                            .size(px(24.))
+                            .p(px(2.))
+                            .rounded(buzz_ui::tokens::radius::CONTROL)
+                            .bg(c.surface_panel)
+                            .shadow(shadow::sm())
+                            .child(self.avatar(row, 20.))
+                    }),
+            );
         let stack = div()
             .flex()
             .items_center()
             .pr(px(4.))
-            .children(self.rows.iter().take(STACK).map(|row| {
-                div()
-                    .flex_none()
-                    .size(px(24.))
-                    .p(px(2.))
-                    .mr(px(-4.))
-                    .rounded(buzz_ui::tokens::radius::CONTROL)
-                    .bg(c.surface_panel)
-                    .shadow(shadow::sm())
-                    .child(self.avatar(row, 20.))
-            }))
+            .child(tiles)
             .when(overflow > 0, |d| {
                 d.child(
                     div()
@@ -407,8 +502,20 @@ impl Render for AgentChooser {
                         .child(format!("+{overflow}")),
                 )
             });
+        let label = match self.rows.as_slice() {
+            [one] => format!("Activity: {} working", one.name),
+            rows => format!("Activity: {} agents working", rows.len()),
+        };
+        let direct = self.direct_target();
+        let has_direct = direct.is_some();
         let trigger = div()
             .id("agent-activity")
+            .track_focus(&self.trigger_focus)
+            .role(Role::Button)
+            .aria_label(label)
+            .when(has_direct, |d| {
+                d.aria_description("Press Down Arrow for working agents and conversation actions.")
+            })
             .flex()
             .items_center()
             .min_h(px(32.))
@@ -419,10 +526,26 @@ impl Render for AgentChooser {
             .hover(|s| s.bg(c.affordance_subtle_hover))
             .child(stack)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover(true, *hovered, cx)))
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let keys = &event.keystroke;
+                if opens_preview(&keys.key, keys.modifiers.modified(), has_direct) {
+                    cx.stop_propagation();
+                    this.preview(window, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this._pending = None;
-                this.open = !this.open;
-                cx.notify();
+                match &direct {
+                    // Hover previews the list; a click goes to the activity.
+                    Some(target) => {
+                        this.close(cx);
+                        navigation::open_url(target, window, cx);
+                    }
+                    None => {
+                        this.open = !this.open;
+                        cx.notify();
+                    }
+                }
             }));
         div()
             .relative()
@@ -438,6 +561,7 @@ impl Render for AgentChooser {
                                 .child(
                                     div()
                                         .id("agent-activity-list")
+                                        .track_focus(&self.list_focus)
                                         .occlude()
                                         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                             this.hover(false, *hovered, cx)
@@ -475,6 +599,19 @@ pub fn overlay(
         .iter()
         .map(|pubkey| display_name(profiles, pubkey))
         .collect();
+    // The live region reads "X is working. Y is typing".
+    let working: Vec<SharedString> = agents
+        .iter()
+        .flat_map(|chooser| chooser.read(cx).rows.iter().map(|row| row.name.clone()))
+        .collect();
+    let status = [
+        (!working.is_empty()).then(|| working_label(&working)),
+        (!names.is_empty()).then(|| label(&names)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(". ");
     let pill = (!humans.is_empty()).then(|| {
         div()
             .mr_auto()
@@ -508,6 +645,9 @@ pub fn overlay(
             .h_0()
             .child(
                 div()
+                    .id("conversation-activity")
+                    .role(Role::Status)
+                    .aria_label(status)
                     .absolute()
                     .bottom(px(8.))
                     .left_0()
@@ -561,24 +701,73 @@ mod tests {
         let activity = Activity::channel(&typing, &threads, |root| root == "root", &owned);
         assert_eq!(activity.humans, vec!["alice".to_string()]);
         assert_eq!(
-            activity.agents["agent"],
-            vec![None, Some("root".to_string())]
+            activity.agents["agent"].roots,
+            vec![Some(None), Some(Some("root".to_string()))]
         );
         let thread = Activity::thread(&threads["root"], "root", &owned);
         assert_eq!(thread.humans, vec!["bob".to_string()]);
-        assert_eq!(thread.agents["agent"], vec![Some("root".to_string())]);
+        assert_eq!(
+            thread.agents["agent"].roots,
+            vec![Some(Some("root".to_string()))]
+        );
+    }
+
+    #[test]
+    fn observed_turns_join_typing_with_their_labels() {
+        let owned: HashSet<String> = ["agent".to_string()].into();
+        let typing = vec!["agent".to_string(), "helper".to_string()];
+        let observed = BTreeMap::from([
+            (
+                "agent".to_string(),
+                CurrentActivity {
+                    label: "Reading main.rs".into(),
+                    roots: vec![Some(None)],
+                },
+            ),
+            (
+                "helper".to_string(),
+                CurrentActivity {
+                    label: "Working".into(),
+                    roots: vec![None],
+                },
+            ),
+        ]);
+        let activity =
+            Activity::channel(&typing, &HashMap::new(), |_| false, &owned).observe(observed);
+        assert_eq!(activity.agents["agent"].label, "Reading main.rs");
+        assert_eq!(activity.agents["agent"].roots, vec![Some(None)]);
+        // An agent at work is not "typing", even when it is not the viewer's.
+        assert!(activity.humans.is_empty());
+        assert_eq!(activity.agents["helper"].roots, vec![None]);
+        assert_eq!(
+            working_label(&["Ada".into(), "Bo".into()]),
+            "Ada, Bo are working"
+        );
+    }
+
+    #[test]
+    fn down_arrow_previews_only_a_clickable_stack() {
+        assert!(opens_preview("down", false, true));
+        assert!(!opens_preview("down", false, false), "hover shows the list");
+        assert!(!opens_preview("down", true, true));
+        assert!(!opens_preview("up", false, true));
     }
 
     #[test]
     fn scopes_name_the_channel_or_threads() {
         let excerpt = |root: &str| (root == "a").then(|| "Fix   the\nbuild".to_string());
-        assert_eq!(scope_label(&[None], excerpt), "Channel conversation");
+        let thread = |root: &str| Some(Some(root.to_string()));
+        assert_eq!(scope_label(&[Some(None)], excerpt), "Channel conversation");
         assert_eq!(
-            scope_label(&[Some("a".into()), Some("bcdefghijk".into())], excerpt),
+            scope_label(&[None], excerpt),
+            "Work with unconfirmed thread"
+        );
+        assert_eq!(
+            scope_label(&[thread("a"), thread("bcdefghijk")], excerpt),
             "Thread · Fix the build / Thread · bcdefghi"
         );
         assert_eq!(
-            scope_label(&[None, Some("a".into()), Some("c".into())], excerpt),
+            scope_label(&[Some(None), thread("a"), thread("c")], excerpt),
             "Channel conversation / Thread · Fix the build / +1 more"
         );
     }

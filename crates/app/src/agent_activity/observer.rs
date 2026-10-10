@@ -132,6 +132,21 @@ pub fn agent_thinking(agent: &str, cx: &App) -> bool {
     })
 }
 
+/// Who works in `channel` (or one thread of it) by observed evidence:
+/// working turns with their live labels, and typing from agents that
+/// send telemetry (`currentActivity` without the owned-typing part,
+/// which the conversation views add from typing).
+pub fn observed(
+    community: &Entity<Community>,
+    channel: &str,
+    thread: Option<&str>,
+    cx: &App,
+) -> std::collections::BTreeMap<String, current::CurrentActivity> {
+    let snapshot = snapshot(community, cx);
+    let entries = current::typing_entries(&community.read(cx).snapshot);
+    current::current_activity(Some(&snapshot), &entries, &HashSet::new(), channel, thread)
+}
+
 pub struct AgentActivity {
     community: WeakEntity<Community>,
     session: Arc<buzz_relay_client::Session>,
@@ -404,17 +419,13 @@ impl AgentActivity {
     }
 
     /// Development only: `BUZZ_DEV_ACTIVITY_FIXTURE` names a JSON file of
-    /// `[{"agent": hex, "plaintext": object}]` taken as live frames once
-    /// the feed first listens, so headless runs can render transcript
-    /// states.
+    /// `[{"agent": hex, "plaintext": object}]` taken as live frames whenever
+    /// the feed listens (again after a renewal, with fresh times), so
+    /// headless runs can render transcript and working states.
     fn dev_fixture(&mut self) {
-        static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let Ok(path) = std::env::var("BUZZ_DEV_ACTIVITY_FIXTURE") else {
             return;
         };
-        if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             tracing::warn!(%path, "no activity fixture");
             return;
