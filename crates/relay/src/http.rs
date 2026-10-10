@@ -4,11 +4,33 @@ use crate::origin::RelayOrigin;
 use crate::socket::Filter;
 use buzz_identity::Identity;
 use nostr::prelude::Event;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 
-/// Larger responses are refused rather than buffered.
-pub const MAX_RESPONSE: usize = 8 << 20;
+/// Larger responses are refused rather than buffered (`relay.rs`).
+pub const MAX_RESPONSE: usize = 16 << 20;
+/// Larger request bodies are refused before anything is signed or sent.
+pub const MAX_REQUEST: usize = 1 << 20;
+/// Requests running at once per relay and identity.
+const LANE_SLOTS: usize = 6;
+/// Requests waiting for a slot before new ones are refused.
+const LANE_QUEUE: usize = 128;
+/// Pause assumed when a quota refusal gives no `retry in Ns` hint.
+const DEFAULT_QUOTA_SECS: u64 = 60;
+const MAX_QUOTA_SECS: u64 = 86_400;
+/// One presence snapshot read at most this often, outside the slots.
+const PRESENCE_GATE: Duration = Duration::from_secs(5);
+
+/// Whose request goes first when the lane is full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Priority {
+    #[default]
+    Foreground,
+    Background,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -21,20 +43,31 @@ pub enum HttpError {
         message: String,
         /// From `Retry-After`, when the relay is rate limiting.
         retry_after: Option<Duration>,
+        /// The relay said it did not act on the request (`sent: false`).
+        not_sent: bool,
     },
     #[error("relay response is too large")]
     TooLarge,
     #[error("relay response is invalid: {0}")]
     Invalid(String),
     /// Not sent: the relay asked us to back off.
-    #[error("relay requests paused; retry in {}s", .retry_after.as_secs())]
+    #[error("Relay requests paused; retry in {}s", .retry_after.as_secs_f64().ceil())]
     Paused { retry_after: Duration },
+    /// Not sent: too many requests already wait for this relay.
+    #[error("Relay API queue capacity reached")]
+    Capacity,
+    /// Not sent: the body is over [`MAX_REQUEST`].
+    #[error("Invalid relay request body")]
+    RequestTooLarge,
 }
 
 impl HttpError {
     /// Whether the request certainly never reached the relay.
     pub fn not_sent(&self) -> bool {
-        matches!(self, Self::Paused { .. })
+        matches!(
+            self,
+            Self::Paused { .. } | Self::Capacity | Self::RequestTooLarge
+        ) || matches!(self, Self::Status { not_sent: true, .. })
     }
 }
 
@@ -47,18 +80,165 @@ pub struct RelayHttp {
 }
 
 /// Admission for every signed request to one relay from one identity
-/// (`http-admission.ts`): at most 6 awaiting a response, and a relay quota
-/// refusal pauses the whole lane so queued requests fail at once instead
-/// of piling onto a relay that already said no.
+/// (`http-admission.ts`): at most 6 running, foreground before background,
+/// at most 128 waiting. A relay quota refusal pauses the whole lane and
+/// fails everything queued at once instead of piling onto a relay that
+/// already said no.
 struct Lane {
-    slots: tokio::sync::Semaphore,
-    paused_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+    state: Mutex<LaneState>,
 }
 
-const LANE_SLOTS: usize = 6;
-/// Pause assumed when a quota refusal gives no `retry in Ns` hint.
-const DEFAULT_QUOTA_PAUSE: Duration = Duration::from_secs(60);
-const MAX_QUOTA_PAUSE: Duration = Duration::from_secs(86_400);
+#[derive(Default)]
+struct LaneState {
+    paused_until: Option<Instant>,
+    active: usize,
+    next_ticket: u64,
+    queue: VecDeque<Ticket>,
+    presence_busy: bool,
+    presence_next: Option<Instant>,
+}
+
+struct Ticket {
+    id: u64,
+    priority: Priority,
+    start: oneshot::Sender<Result<(), HttpError>>,
+}
+
+impl LaneState {
+    fn paused(&self) -> Option<Duration> {
+        let until = self.paused_until?;
+        let now = Instant::now();
+        (until > now).then(|| until - now)
+    }
+
+    /// Starts queued requests that fit (`pump`).
+    fn pump(&mut self) {
+        if let Some(retry_after) = self.paused() {
+            for ticket in self.queue.drain(..) {
+                let _ = ticket.start.send(Err(HttpError::Paused { retry_after }));
+            }
+            return;
+        }
+        while self.active < LANE_SLOTS && !self.queue.is_empty() {
+            let index = self
+                .queue
+                .iter()
+                .position(|ticket| ticket.priority == Priority::Foreground)
+                .unwrap_or(0);
+            let ticket = self.queue.remove(index).expect("queued ticket");
+            if ticket.start.send(Ok(())).is_ok() {
+                self.active += 1;
+            }
+        }
+    }
+}
+
+/// A running request's slot; freeing it starts the next one.
+struct Slot(Arc<Lane>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().expect("lane lock");
+        state.active -= 1;
+        state.pump();
+    }
+}
+
+/// A presence read's lease, outside the six slots.
+struct PresenceLease(Arc<Lane>);
+
+impl Drop for PresenceLease {
+    fn drop(&mut self) {
+        self.0.state.lock().expect("lane lock").presence_busy = false;
+    }
+}
+
+/// Removes a request from the queue if its caller gives up waiting.
+struct Waiting<'a> {
+    lane: &'a Lane,
+    id: Option<u64>,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            let mut state = self.lane.state.lock().expect("lane lock");
+            state.queue.retain(|ticket| ticket.id != id);
+        }
+    }
+}
+
+impl Lane {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(LaneState::default()),
+        })
+    }
+
+    async fn admit(self: &Arc<Self>, priority: Priority) -> Result<Slot, HttpError> {
+        let (id, started) = {
+            let mut state = self.state.lock().expect("lane lock");
+            if let Some(retry_after) = state.paused() {
+                return Err(HttpError::Paused { retry_after });
+            }
+            if state.queue.len() >= LANE_QUEUE {
+                return Err(HttpError::Capacity);
+            }
+            if state.active < LANE_SLOTS && state.queue.is_empty() {
+                state.active += 1;
+                return Ok(Slot(self.clone()));
+            }
+            let (start, started) = oneshot::channel();
+            state.next_ticket += 1;
+            let id = state.next_ticket;
+            state.queue.push_back(Ticket {
+                id,
+                priority,
+                start,
+            });
+            state.pump();
+            (id, started)
+        };
+        let mut waiting = Waiting {
+            lane: self,
+            id: Some(id),
+        };
+        let started = started.await;
+        waiting.id = None;
+        match started {
+            Ok(Ok(())) => Ok(Slot(self.clone())),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(HttpError::Capacity),
+        }
+    }
+
+    fn pause(&self, seconds: u64) {
+        let until = Instant::now() + Duration::from_secs(seconds.min(MAX_QUOTA_SECS) + 1);
+        let mut state = self.state.lock().expect("lane lock");
+        state.paused_until = Some(state.paused_until.map_or(until, |at| at.max(until)));
+        state.pump();
+    }
+
+    /// The presence lease, or how long until one may be tried.
+    fn try_presence(self: &Arc<Self>) -> Result<PresenceLease, Duration> {
+        let mut state = self.state.lock().expect("lane lock");
+        let now = Instant::now();
+        let gate = [state.paused_until, state.presence_next]
+            .into_iter()
+            .flatten()
+            .max()
+            .filter(|at| *at > now);
+        if let Some(at) = gate {
+            return Err(at - now);
+        }
+        if state.presence_busy {
+            return Err(Duration::ZERO);
+        }
+        state.presence_busy = true;
+        state.presence_next = Some(now + PRESENCE_GATE);
+        Ok(PresenceLease(self.clone()))
+    }
+}
 
 impl RelayHttp {
     pub fn new(origin: RelayOrigin, identity: Arc<Identity>) -> Self {
@@ -72,10 +252,7 @@ impl RelayHttp {
             client,
             origin,
             identity,
-            lane: Arc::new(Lane {
-                slots: tokio::sync::Semaphore::new(LANE_SLOTS),
-                paused_until: std::sync::Mutex::new(None),
-            }),
+            lane: Lane::new(),
         }
     }
 
@@ -101,23 +278,53 @@ impl RelayHttp {
     /// `POST /query` returning the raw event array, for callers that verify
     /// it themselves.
     pub async fn query_raw(&self, filters: &[Filter]) -> Result<Vec<serde_json::Value>, HttpError> {
+        self.query_with(filters, Priority::Foreground).await
+    }
+
+    pub async fn query_with(
+        &self,
+        filters: &[Filter],
+        priority: Priority,
+    ) -> Result<Vec<serde_json::Value>, HttpError> {
         let body = serde_json::to_string(filters).expect("filters serialize");
-        let bytes = self.post("/query", body).await?;
+        let bytes = self.post_with("/query", body, priority).await?;
         serde_json::from_slice(&bytes).map_err(|error| HttpError::Invalid(error.to_string()))
     }
 
     /// A signed `POST` with a JSON body. Never retried here: a write that
     /// failed in transport may still have reached the relay.
     pub async fn post(&self, path: &str, body: String) -> Result<Vec<u8>, HttpError> {
-        self.check_paused()?;
-        let _slot = self
+        self.post_with(path, body, Priority::Foreground).await
+    }
+
+    pub async fn post_with(
+        &self,
+        path: &str,
+        body: String,
+        priority: Priority,
+    ) -> Result<Vec<u8>, HttpError> {
+        if body.len() > MAX_REQUEST {
+            return Err(HttpError::RequestTooLarge);
+        }
+        let _slot = self.lane.admit(priority).await?;
+        self.send(path, body).await
+    }
+
+    /// A presence snapshot read on its lossy lease: at most one at a time
+    /// and one per five seconds, outside the ordinary slots. `Paused` when
+    /// the lease is not available yet.
+    pub async fn post_presence(&self, body: String) -> Result<Vec<u8>, HttpError> {
+        if body.len() > MAX_REQUEST {
+            return Err(HttpError::RequestTooLarge);
+        }
+        let _lease = self
             .lane
-            .slots
-            .acquire()
-            .await
-            .expect("lane semaphore stays open");
-        // A pause may have started while this request waited for a slot.
-        self.check_paused()?;
+            .try_presence()
+            .map_err(|retry_after| HttpError::Paused { retry_after })?;
+        self.send("/query", body).await
+    }
+
+    async fn send(&self, path: &str, body: String) -> Result<Vec<u8>, HttpError> {
         let url = self.origin.endpoint(path);
         let auth = self
             .identity
@@ -136,28 +343,13 @@ impl RelayHttp {
         if let Err(HttpError::Status {
             status: 429,
             message,
-            retry_after,
+            ..
         }) = &result
-            && message.starts_with("rate-limited: quota exceeded")
+            && let Some(seconds) = api_quota(message)
         {
-            let pause = quota_pause(message)
-                .or(*retry_after)
-                .unwrap_or(DEFAULT_QUOTA_PAUSE)
-                .min(MAX_QUOTA_PAUSE);
-            *self.lane.paused_until.lock().expect("lane lock") =
-                Some(tokio::time::Instant::now() + pause);
+            self.lane.pause(seconds);
         }
         result
-    }
-
-    fn check_paused(&self) -> Result<(), HttpError> {
-        let paused = *self.lane.paused_until.lock().expect("lane lock");
-        match paused {
-            Some(until) if until > tokio::time::Instant::now() => Err(HttpError::Paused {
-                retry_after: until - tokio::time::Instant::now(),
-            }),
-            _ => Ok(()),
-        }
     }
 
     /// `GET /` as NIP-11 relay information.
@@ -206,8 +398,9 @@ async fn read(mut response: reqwest::Response) -> Result<Vec<u8>, HttpError> {
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        let message = serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
+        let body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+        let message = body
+            .as_ref()
             .and_then(|value| {
                 value
                     .get("error")
@@ -215,35 +408,184 @@ async fn read(mut response: reqwest::Response) -> Result<Vec<u8>, HttpError> {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&bytes).chars().take(200).collect());
+        let not_sent = body
+            .as_ref()
+            .is_some_and(|value| value.get("sent") == Some(&serde_json::Value::Bool(false)));
         return Err(HttpError::Status {
             status: status.as_u16(),
             message,
             retry_after,
+            not_sent,
         });
     }
     Ok(bytes)
 }
 
-/// `rate-limited: quota exceeded; retry in Ns` → N+1 seconds; the extra
-/// second covers the relay's whole-second rounding.
-fn quota_pause(message: &str) -> Option<Duration> {
-    let seconds: u64 = message
-        .rsplit_once("retry in ")?
-        .1
-        .strip_suffix('s')?
-        .parse()
-        .ok()?;
-    Some(Duration::from_secs(seconds + 1))
+/// A relay API quota refusal (`apiFailure`): `rate-limited: quota
+/// exceeded`, optionally `; retry in Ns`, pauses the lane N (default 60,
+/// at most 86 400) seconds plus one.
+pub(crate) fn api_quota(message: &str) -> Option<u64> {
+    let rest = message.strip_prefix("rate-limited: quota exceeded")?;
+    if rest.is_empty() {
+        return Some(DEFAULT_QUOTA_SECS);
+    }
+    if !rest.starts_with(';') {
+        return None;
+    }
+    let seconds = rest
+        .strip_prefix("; retry in ")
+        .and_then(|n| n.strip_suffix('s'))
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(DEFAULT_QUOTA_SECS, |n| n.parse().unwrap_or(MAX_QUOTA_SECS));
+    Some(seconds.min(MAX_QUOTA_SECS))
+}
+
+/// The text kept from a failed relay API response (`apiFailure`): a few
+/// known refusals verbatim, a publication refusal by category, otherwise
+/// only the status.
+pub(crate) fn api_failure_text(status: u16, message: &str) -> String {
+    const KNOWN: &[&str] = &[
+        "Query concurrency limit",
+        "Live stream capacity reached",
+        "Relay unreachable",
+    ];
+    if message.starts_with("rate-limited:") {
+        crate::socket::publication_refusal(message)
+    } else if KNOWN.contains(&message) {
+        message.to_string()
+    } else {
+        format!("Relay request failed ({status})")
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn quota_hint_adds_a_second() {
+    fn failure_text_keeps_only_known_reasons() {
         assert_eq!(
-            super::quota_pause("rate-limited: quota exceeded; retry in 12s"),
-            Some(std::time::Duration::from_secs(13))
+            api_failure_text(503, "Query concurrency limit"),
+            "Query concurrency limit"
         );
-        assert_eq!(super::quota_pause("rate-limited: quota exceeded"), None);
+        assert_eq!(
+            api_failure_text(503, "secret upstream text"),
+            "Relay request failed (503)"
+        );
+        assert_eq!(
+            api_failure_text(503, "rate-limited: shared admission unavailable"),
+            "rate-limited: shared admission unavailable"
+        );
+        assert_eq!(
+            api_failure_text(503, "rate-limited: something new"),
+            "rate-limited: unrecognized reason"
+        );
+    }
+
+    #[test]
+    fn quota_refusals_pause_by_their_hint() {
+        assert_eq!(
+            api_quota("rate-limited: quota exceeded; retry in 12s"),
+            Some(12)
+        );
+        assert_eq!(api_quota("rate-limited: quota exceeded"), Some(60));
+        assert_eq!(
+            api_quota("rate-limited: quota exceeded; retry in 999999s"),
+            Some(86_400)
+        );
+        assert_eq!(api_quota("rate-limited: quota exceeded; soon"), Some(60));
+        assert_eq!(api_quota("rate-limited: quota exceededly"), None);
+        assert_eq!(api_quota("Query concurrency limit"), None);
+    }
+
+    #[tokio::test]
+    async fn the_lane_runs_six_foreground_first() {
+        let lane = Lane::new();
+        let mut slots = Vec::new();
+        for _ in 0..LANE_SLOTS {
+            slots.push(lane.admit(Priority::Background).await.unwrap());
+        }
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let waiter = |priority: Priority, name: &'static str| {
+            let (lane, order) = (lane.clone(), order.clone());
+            tokio::spawn(async move {
+                let slot = lane.admit(priority).await.unwrap();
+                order.lock().unwrap().push(name);
+                slot
+            })
+        };
+        let background = waiter(Priority::Background, "background");
+        while lane.state.lock().unwrap().queue.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let foreground = waiter(Priority::Foreground, "foreground");
+        while lane.state.lock().unwrap().queue.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        // The waiting foreground request takes the first free slot.
+        drop(slots.pop());
+        let held = foreground.await.unwrap();
+        drop(slots.pop());
+        let _ = background.await.unwrap();
+        drop(held);
+        assert_eq!(*order.lock().unwrap(), ["foreground", "background"]);
+    }
+
+    #[tokio::test]
+    async fn the_queue_is_bounded_and_a_pause_fails_it() {
+        let lane = Lane::new();
+        let mut slots = Vec::new();
+        for _ in 0..LANE_SLOTS {
+            slots.push(lane.admit(Priority::Foreground).await.unwrap());
+        }
+        let mut waiting = Vec::new();
+        for _ in 0..LANE_QUEUE {
+            let lane = lane.clone();
+            waiting.push(tokio::spawn(async move {
+                lane.admit(Priority::Foreground).await.map(drop)
+            }));
+        }
+        while lane.state.lock().unwrap().queue.len() < LANE_QUEUE {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            lane.admit(Priority::Foreground).await,
+            Err(HttpError::Capacity)
+        ));
+        // A quota pause fails everything queued at once.
+        lane.pause(5);
+        for waiting in waiting {
+            assert!(matches!(
+                waiting.await.unwrap(),
+                Err(HttpError::Paused { .. })
+            ));
+        }
+        assert!(matches!(
+            lane.admit(Priority::Foreground).await,
+            Err(HttpError::Paused { .. })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn presence_leases_are_lossy_gated_and_outside_the_slots() {
+        let lane = Lane::new();
+        let mut slots = Vec::new();
+        for _ in 0..LANE_SLOTS {
+            slots.push(lane.admit(Priority::Foreground).await.unwrap());
+        }
+        let lease = lane.try_presence().unwrap();
+        assert_eq!(lane.try_presence().err(), Some(PRESENCE_GATE));
+        drop(lease);
+        tokio::time::advance(PRESENCE_GATE).await;
+        let lease = lane.try_presence().unwrap();
+        tokio::time::advance(PRESENCE_GATE).await;
+        assert_eq!(
+            lane.try_presence().err(),
+            Some(Duration::ZERO),
+            "one at a time"
+        );
+        drop(lease);
+        lane.pause(10);
+        assert_eq!(lane.try_presence().err(), Some(Duration::from_secs(11)));
     }
 }

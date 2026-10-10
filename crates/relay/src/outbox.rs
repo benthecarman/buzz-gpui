@@ -243,7 +243,6 @@ pub fn accept_publish(
     use PublishError::{Rejected, Uncertain};
     let body = match result {
         Ok(body) => body,
-        Err(error) if error.not_sent() => return Err(Rejected(error.to_string())),
         Err(HttpError::Status { status: 409, .. }) => {
             return Err(Rejected(
                 "conflict: the relay state changed; reload before writing again".into(),
@@ -253,21 +252,29 @@ pub fn accept_publish(
             status: status @ (400 | 401 | 403 | 404 | 413 | 422),
             ..
         }) => return Err(Rejected(format!("Relay rejected the message ({status})"))),
+        // Only proven non-delivery fails a send: an API quota refusal, or
+        // the relay's own `sent: false`.
         Err(HttpError::Status {
-            status: 429,
+            status,
             message,
+            not_sent,
             ..
-        }) if message
-            .strip_prefix("rate-limited: quota exceeded")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(';')) =>
-        {
-            return Err(Rejected(message));
-        }
-        Err(HttpError::Status { status, .. }) => {
+        }) => {
+            if status == 429
+                && let Some(seconds) = crate::http::api_quota(&message)
+            {
+                return Err(Rejected(format!(
+                    "rate-limited: quota exceeded; retry in {seconds}s"
+                )));
+            }
+            if not_sent {
+                return Err(Rejected(crate::http::api_failure_text(status, &message)));
+            }
             return Err(Uncertain(format!(
                 "Relay delivery could not be confirmed ({status})"
             )));
         }
+        Err(error) if error.not_sent() => return Err(Rejected(error.to_string())),
         Err(_) => return Err(Uncertain("Relay request could not be confirmed".into())),
     };
     if body.len() > MAX_RECEIPT_BYTES {

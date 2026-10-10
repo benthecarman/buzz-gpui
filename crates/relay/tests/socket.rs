@@ -1,7 +1,7 @@
 use buzz_identity::Identity;
 use buzz_relay_client::*;
 use futures::{SinkExt, StreamExt};
-use nostr::prelude::{Event, EventBuilder, FinalizeEvent, Keys, Kind};
+use nostr::prelude::{Event, EventBuilder, FinalizeEvent, Keys, Kind, ToBech32};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +19,37 @@ enum Seen {
     Event(Event),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Auth {
+    /// No NIP-42: everything is allowed at once.
+    Open,
+    /// Challenge on connect and accept a valid answer.
+    Accept,
+    /// Challenge on connect and refuse every answer.
+    Refuse,
+    /// Never challenge, and refuse REQs.
+    Silent,
+}
+
+#[derive(Clone, Copy)]
+struct Behaviour {
+    auth: Auth,
+    /// Answer publications with `OK`; when off they wait forever.
+    ack: bool,
+    /// Close every connection right after accepting it.
+    drop_all: bool,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            auth: Auth::Accept,
+            ack: true,
+            drop_all: false,
+        }
+    }
+}
+
 struct FakeRelay {
     address: String,
     seen: mpsc::UnboundedReceiver<Seen>,
@@ -29,8 +60,7 @@ struct FakeRelay {
 }
 
 impl FakeRelay {
-    /// `require_auth`: send a challenge on connect and refuse REQs until AUTH.
-    async fn start(require_auth: bool) -> Self {
+    async fn start(behaviour: Behaviour) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("ws://{}", listener.local_addr().unwrap());
         let (seen_tx, seen) = mpsc::unbounded_channel();
@@ -39,10 +69,16 @@ impl FakeRelay {
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                seen_tx.send(Seen::Connected).unwrap();
-                let mut authed = !require_auth;
-                if require_auth {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    continue;
+                };
+                let _ = seen_tx.send(Seen::Connected);
+                if behaviour.drop_all {
+                    let _ = ws.close(None).await;
+                    continue;
+                }
+                let mut authed = behaviour.auth == Auth::Open;
+                if matches!(behaviour.auth, Auth::Accept | Auth::Refuse) {
                     ws.send(Message::Text(
                         json!(["AUTH", "challenge-1"]).to_string().into(),
                     ))
@@ -61,9 +97,9 @@ impl FakeRelay {
                             match value[0].as_str().unwrap() {
                                 "AUTH" => {
                                     let event: Event = serde_json::from_value(value[1].clone()).unwrap();
-                                    authed = event.verify().is_ok();
+                                    authed = behaviour.auth == Auth::Accept && event.verify().is_ok();
                                     let ok = json!(["OK", event.id.to_hex(), authed, ""]);
-                                    seen_tx.send(Seen::Auth(event)).unwrap();
+                                    let _ = seen_tx.send(Seen::Auth(event));
                                     ws.send(Message::Text(ok.to_string().into())).await.unwrap();
                                 }
                                 "REQ" => {
@@ -73,20 +109,27 @@ impl FakeRelay {
                                         ws.send(Message::Text(closed.to_string().into())).await.unwrap();
                                         continue;
                                     }
-                                    seen_tx.send(Seen::Req(id.clone(), value[2..].to_vec())).unwrap();
+                                    let _ = seen_tx.send(Seen::Req(id.clone(), value[2..].to_vec()));
                                     ws.send(Message::Text(json!(["EOSE", id]).to_string().into()))
                                         .await
                                         .unwrap();
                                 }
                                 "CLOSE" => {
-                                    seen_tx.send(Seen::Close(value[1].as_str().unwrap().into())).unwrap();
+                                    let _ = seen_tx.send(Seen::Close(value[1].as_str().unwrap().into()));
                                 }
                                 "EVENT" => {
                                     let event: Event = serde_json::from_value(value[1].clone()).unwrap();
-                                    let rejected = event.content == "reject me";
-                                    let ok = json!(["OK", event.id.to_hex(), !rejected, if rejected { "blocked: no" } else { "" }]);
-                                    seen_tx.send(Seen::Event(event)).unwrap();
-                                    ws.send(Message::Text(ok.to_string().into())).await.unwrap();
+                                    let reason = match event.content.as_str() {
+                                        "reject me" => Some("blocked: no"),
+                                        "busy" => Some("rate-limited: quota exceeded; retry in 3s"),
+                                        "oops" => Some("error: internal server error"),
+                                        _ => None,
+                                    };
+                                    let ok = json!(["OK", event.id.to_hex(), reason.is_none(), reason.unwrap_or("")]);
+                                    let _ = seen_tx.send(Seen::Event(event));
+                                    if behaviour.ack {
+                                        ws.send(Message::Text(ok.to_string().into())).await.unwrap();
+                                    }
                                 }
                                 _ => {}
                             }
@@ -109,26 +152,40 @@ impl FakeRelay {
             .expect("relay saw nothing")
             .unwrap()
     }
+
+    /// Nothing more arrives within `wait`.
+    async fn quiet(&mut self, wait: Duration) -> bool {
+        tokio::time::timeout(wait, self.seen.recv()).await.is_err()
+    }
 }
 
 fn options() -> SocketOptions {
     SocketOptions {
-        auth_wait: Duration::from_millis(200),
         min_backoff: Duration::from_millis(20),
-        max_backoff: Duration::from_millis(50),
         publish_timeout: Duration::from_secs(2),
         ..Default::default()
     }
 }
 
-fn socket(relay: &FakeRelay, identity: &Arc<Identity>) -> RelaySocket {
+/// An identity and the same key for signing test events.
+fn viewer() -> (Arc<Identity>, Keys) {
+    let keys = Keys::generate();
+    let identity = Identity::from_nsec(&keys.secret_key().to_bech32().unwrap()).unwrap();
+    (Arc::new(identity), keys)
+}
+
+fn connect(relay: &FakeRelay, identity: &Arc<Identity>, options: SocketOptions) -> RelaySocket {
     RelaySocket::connect(
         &tokio::runtime::Handle::current(),
         RelayOrigin::parse(&relay.address).unwrap(),
         identity.clone(),
         Arc::new(Verifier::default()),
-        options(),
+        options,
     )
+}
+
+fn socket(relay: &FakeRelay, identity: &Arc<Identity>) -> RelaySocket {
+    connect(relay, identity, options())
 }
 
 async fn next_event(subscription: &mut Subscription) -> SubscriptionEvent {
@@ -136,6 +193,15 @@ async fn next_event(subscription: &mut Subscription) -> SubscriptionEvent {
         .await
         .expect("no subscription event")
         .expect("subscription ended")
+}
+
+async fn wait_state(socket: &RelaySocket, test: impl Fn(&SocketState) -> bool) -> SocketState {
+    let mut state = socket.state();
+    tokio::time::timeout(Duration::from_secs(10), state.wait_for(test))
+        .await
+        .expect("state never reached")
+        .unwrap()
+        .clone()
 }
 
 fn filter(value: Value) -> Filter {
@@ -150,8 +216,8 @@ fn note(keys: &Keys, content: &str) -> Event {
 
 #[tokio::test]
 async fn authenticates_before_subscribing() {
-    let mut relay = FakeRelay::start(true).await;
-    let identity = Arc::new(Identity::ephemeral());
+    let mut relay = FakeRelay::start(Behaviour::default()).await;
+    let (identity, _) = viewer();
     let socket = socket(&relay, &identity);
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [9], "#h": ["general"]}))]);
 
@@ -173,15 +239,152 @@ async fn authenticates_before_subscribing() {
         next_event(&mut subscription).await,
         SubscriptionEvent::Eose
     ));
-    let mut state = socket.state();
-    state.wait_for(|s| *s == SocketState::Ready).await.unwrap();
+    wait_state(&socket, |s| *s == SocketState::Ready).await;
 }
 
 #[tokio::test]
-async fn delivers_verified_events_only() {
-    let mut relay = FakeRelay::start(false).await;
-    let identity = Arc::new(Identity::ephemeral());
+async fn a_relay_that_never_asks_is_never_treated_as_open() {
+    let mut relay = FakeRelay::start(Behaviour {
+        auth: Auth::Silent,
+        ..Default::default()
+    })
+    .await;
+    let (identity, keys) = viewer();
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            auth_deadline: Duration::from_millis(300),
+            max_reconnects: Some(0),
+            ..options()
+        },
+    );
+    let _subscription = socket.subscribe(vec![filter(json!({"kinds": [9]}))]);
+    let publication = tokio::spawn({
+        let publisher = socket.publisher();
+        let event = note(&keys, "held");
+        async move { publisher.publish(event).await }
+    });
+    assert!(matches!(relay.next().await, Seen::Connected));
+    // The deadline runs from the start of the attempt; nothing is sent.
+    let failed = wait_state(&socket, |s| matches!(s, SocketState::Failed { .. })).await;
+    assert_eq!(
+        failed,
+        SocketState::Failed {
+            error: "Live reconnect attempts exhausted; retry available".into()
+        }
+    );
+    assert_eq!(
+        publication.await.unwrap(),
+        Err(PublishError::NotSent(
+            "Socket connection interrupted".into()
+        ))
+    );
+    // Queued while stopped, it waits out its own deadline.
+    assert_eq!(
+        socket.publish(note(&keys, "later")).await,
+        Err(PublishError::NotSent("Publication timed out".into()))
+    );
+    assert!(
+        relay.quiet(Duration::from_millis(300)).await,
+        "no REQ or EVENT"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_authentication_is_terminal_until_retried() {
+    let mut relay = FakeRelay::start(Behaviour {
+        auth: Auth::Refuse,
+        ..Default::default()
+    })
+    .await;
+    let (identity, _) = viewer();
     let socket = socket(&relay, &identity);
+    let _subscription = socket.subscribe(vec![filter(json!({"kinds": [9]}))]);
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
+    assert_eq!(
+        wait_state(&socket, |s| matches!(s, SocketState::Failed { .. })).await,
+        SocketState::Failed {
+            error: "Relay rejected live authentication".into()
+        }
+    );
+    assert!(
+        relay.quiet(Duration::from_millis(300)).await,
+        "no reconnect without a retry"
+    );
+    socket.reconnect();
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
+}
+
+#[tokio::test]
+async fn reconnects_back_off_and_stop_after_five() {
+    let mut relay = FakeRelay::start(Behaviour {
+        drop_all: true,
+        ..Default::default()
+    })
+    .await;
+    let (identity, _) = viewer();
+    let started = tokio::time::Instant::now();
+    let socket = socket(&relay, &identity);
+    let mut waits = Vec::new();
+    let mut state = socket.state();
+    loop {
+        let current = tokio::time::timeout(Duration::from_secs(10), state.changed())
+            .await
+            .expect("socket stalled");
+        current.unwrap();
+        match state.borrow_and_update().clone() {
+            SocketState::Waiting { retry_in, error } => {
+                assert_eq!(error, "Live connection closed");
+                waits.push(retry_in);
+            }
+            SocketState::Failed { error } => {
+                assert_eq!(error, "Live reconnect attempts exhausted; retry available");
+                break;
+            }
+            _ => {}
+        }
+    }
+    // 500 ms · 2ⁿ (here 20 ms · 2ⁿ), without jitter, five times.
+    let expected: Vec<Duration> = (0..5).map(|n| Duration::from_millis(20 << n)).collect();
+    assert_eq!(waits, expected);
+    assert!(started.elapsed() >= Duration::from_millis(620));
+    let mut connections = 0;
+    while let Ok(Some(seen)) =
+        tokio::time::timeout(Duration::from_millis(200), relay.seen.recv()).await
+    {
+        assert!(matches!(seen, Seen::Connected));
+        connections += 1;
+    }
+    assert_eq!(connections, 6, "the first attempt and five reconnects");
+
+    // A retry starts a fresh budget at once.
+    socket.reconnect();
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(
+        wait_state(&socket, |s| matches!(s, SocketState::Waiting { .. })).await,
+        SocketState::Waiting { retry_in, .. } if retry_in == Duration::from_millis(20)
+    ));
+}
+
+#[tokio::test]
+async fn invalid_events_are_reported_and_valid_ones_delivered() {
+    let mut relay = FakeRelay::start(Behaviour {
+        auth: Auth::Open,
+        ..Default::default()
+    })
+    .await;
+    let (identity, _) = viewer();
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            open_after: Some(Duration::from_millis(100)),
+            ..options()
+        },
+    );
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [1]}))]);
     assert!(matches!(relay.next().await, Seen::Connected));
     let Seen::Req(id, _) = relay.next().await else {
@@ -197,39 +400,162 @@ async fn delivers_verified_events_only() {
     let mut forged = serde_json::to_value(note(&author, "original")).unwrap();
     forged["content"] = json!("tampered");
     relay.push.send(json!(["EVENT", id, forged])).unwrap();
+    // A frame over 1 MiB is dropped unread.
+    let huge = note(&author, &"x".repeat(1024 * 1024));
+    relay.push.send(json!(["EVENT", id, huge])).unwrap();
     relay.push.send(json!(["EVENT", id, good])).unwrap();
 
+    assert!(matches!(
+        next_event(&mut subscription).await,
+        SubscriptionEvent::Invalid
+    ));
     let SubscriptionEvent::Event(event) = next_event(&mut subscription).await else {
         panic!("expected an event");
     };
-    assert_eq!(event.content, "hello", "the forged event must be dropped");
+    assert_eq!(event.content, "hello", "the oversized frame was dropped");
 
     drop(subscription);
     assert!(matches!(relay.next().await, Seen::Close(closed) if closed == id));
 }
 
 #[tokio::test]
-async fn publish_waits_for_ok_and_reports_rejections() {
-    let mut relay = FakeRelay::start(false).await;
-    let identity = Arc::new(Identity::ephemeral());
-    let keys = Keys::generate();
+async fn publications_map_receipts_and_quota_pauses_dispatch() {
+    let mut relay = FakeRelay::start(Behaviour::default()).await;
+    let (identity, keys) = viewer();
     let socket = socket(&relay, &identity);
-    let mut state = socket.state();
-    state.wait_for(|s| *s == SocketState::Ready).await.unwrap();
-
-    socket.publish(note(&keys, "hi")).await.unwrap();
+    wait_state(&socket, |s| *s == SocketState::Ready).await;
     assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
+
+    assert_eq!(socket.publish(note(&keys, "hi")).await, Ok(String::new()));
     assert!(matches!(relay.next().await, Seen::Event(e) if e.content == "hi"));
     assert_eq!(
         socket.publish(note(&keys, "reject me")).await,
         Err(PublishError::Rejected("blocked: no".into()))
     );
+    assert!(matches!(relay.next().await, Seen::Event(_)));
+    // An internal error may follow a side effect: not proof of failure.
+    assert_eq!(
+        socket.publish(note(&keys, "oops")).await,
+        Err(PublishError::Unconfirmed {
+            message: "Relay publication not confirmed".into(),
+            refusal: Some("error: internal server error".into()),
+        })
+    );
+    assert!(matches!(relay.next().await, Seen::Event(_)));
+
+    // Someone else's event is never published as ours.
+    let stranger = note(&Keys::generate(), "not mine");
+    assert_eq!(
+        socket.publish(stranger).await,
+        Err(PublishError::NotSent(
+            "Publication signer does not match viewer".into()
+        ))
+    );
+
+    // A quota refusal pauses everything sent on this socket for N+1 s.
+    assert!(matches!(
+        socket.publish(note(&keys, "busy")).await,
+        Err(PublishError::Rejected(reason)) if reason.starts_with("rate-limited:")
+    ));
+    assert!(matches!(relay.next().await, Seen::Event(_)));
+    let held = tokio::spawn({
+        let publisher = socket.publisher();
+        let event = note(&keys, "after the pause");
+        async move { publisher.publish(event).await }
+    });
+    assert!(
+        relay.quiet(Duration::from_millis(500)).await,
+        "held by the cooldown"
+    );
+    drop(held);
 }
 
 #[tokio::test]
-async fn resubscribes_after_reconnect_and_fails_publishes_while_down() {
-    let mut relay = FakeRelay::start(true).await;
-    let identity = Arc::new(Identity::ephemeral());
+async fn publication_limits_and_timeouts() {
+    let mut relay = FakeRelay::start(Behaviour {
+        ack: false,
+        ..Default::default()
+    })
+    .await;
+    let (identity, keys) = viewer();
+    let socket = socket(&relay, &identity);
+    wait_state(&socket, |s| *s == SocketState::Ready).await;
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
+
+    let event = note(&keys, "once");
+    let first = tokio::spawn({
+        let publisher = socket.publisher();
+        let event = event.clone();
+        async move { publisher.publish(event).await }
+    });
+    assert!(matches!(relay.next().await, Seen::Event(_)));
+    assert_eq!(
+        socket.publish(event).await,
+        Err(PublishError::NotSent(
+            "Publication already in flight".into()
+        ))
+    );
+    let big = note(&keys, &"x".repeat(64 * 1024));
+    assert_eq!(
+        socket.publish(big).await,
+        Err(PublishError::NotSent(
+            "Publication exceeds frame limit".into()
+        ))
+    );
+
+    // At most three wait for a receipt; the rest stay unsent.
+    let mut rest = Vec::new();
+    for n in 0..31 {
+        let publisher = socket.publisher();
+        let event = note(&keys, &format!("n{n}"));
+        rest.push(tokio::spawn(async move { publisher.publish(event).await }));
+    }
+    for _ in 0..2 {
+        assert!(matches!(relay.next().await, Seen::Event(_)));
+    }
+    assert!(
+        relay.quiet(Duration::from_millis(300)).await,
+        "three unacked"
+    );
+    // 32 are queued now.
+    assert_eq!(
+        socket.publish(note(&keys, "one too many")).await,
+        Err(PublishError::NotSent("Publication capacity reached".into()))
+    );
+
+    // The timeout counts from enqueue; sent ones are unconfirmed.
+    assert_eq!(
+        first.await.unwrap(),
+        Err(PublishError::Unconfirmed {
+            message: "Publication timed out".into(),
+            refusal: None,
+        })
+    );
+    let mut not_sent = 0;
+    for publication in rest {
+        match publication.await.unwrap() {
+            Err(PublishError::NotSent(message)) => {
+                assert_eq!(message, "Publication timed out");
+                not_sent += 1;
+            }
+            Err(PublishError::Unconfirmed { .. }) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    // A slot freed by the first timeout may send one more just in time.
+    assert!((28..=29).contains(&not_sent), "{not_sent}");
+}
+
+#[tokio::test]
+async fn resubscribes_after_reconnect_and_fails_publishes_on_loss() {
+    let mut relay = FakeRelay::start(Behaviour {
+        ack: false,
+        ..Default::default()
+    })
+    .await;
+    let (identity, keys) = viewer();
     let socket = socket(&relay, &identity);
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [9]}))]);
     assert!(matches!(relay.next().await, Seen::Connected));
@@ -241,10 +567,23 @@ async fn resubscribes_after_reconnect_and_fails_publishes_while_down() {
         next_event(&mut subscription).await,
         SubscriptionEvent::Eose
     ));
+    let publication = tokio::spawn({
+        let publisher = socket.publisher();
+        let event = note(&keys, "in flight");
+        async move { publisher.publish(event).await }
+    });
+    assert!(matches!(relay.next().await, Seen::Event(_)));
 
     relay.kick.send(()).unwrap();
-    let mut state = socket.state();
-    state.wait_for(|s| *s != SocketState::Ready).await.unwrap();
+    wait_state(&socket, |s| *s != SocketState::Ready).await;
+    // Never replayed: the sent publication may have landed.
+    assert_eq!(
+        publication.await.unwrap(),
+        Err(PublishError::Unconfirmed {
+            message: "Socket connection interrupted".into(),
+            refusal: None,
+        })
+    );
 
     assert!(matches!(relay.next().await, Seen::Connected));
     assert!(
@@ -267,9 +606,8 @@ async fn resubscribes_after_reconnect_and_fails_publishes_while_down() {
 }
 
 #[tokio::test]
-async fn publish_without_connection_fails_fast() {
-    let identity = Arc::new(Identity::ephemeral());
-    let keys = Keys::generate();
+async fn publish_without_a_connection_is_not_sent() {
+    let (identity, keys) = viewer();
     let socket = RelaySocket::connect(
         &tokio::runtime::Handle::current(),
         RelayOrigin::parse("ws://127.0.0.1:1").unwrap(),
@@ -277,21 +615,22 @@ async fn publish_without_connection_fails_fast() {
         Arc::new(Verifier::default()),
         options(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(2), socket.publish(note(&keys, "x")))
+    let result = tokio::time::timeout(Duration::from_secs(3), socket.publish(note(&keys, "x")))
         .await
-        .expect("publish must not wait for a connection");
-    assert_eq!(result, Err(PublishError::NotConnected));
+        .expect("publish must not wait past its deadline");
+    assert!(
+        matches!(result, Err(PublishError::NotSent(_))),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]
 async fn without_resubscribe_subscriptions_are_reported_lost() {
-    let mut relay = FakeRelay::start(false).await;
-    let identity = Arc::new(Identity::ephemeral());
-    let socket = RelaySocket::connect(
-        &tokio::runtime::Handle::current(),
-        RelayOrigin::parse(&relay.address).unwrap(),
-        identity,
-        Arc::new(Verifier::default()),
+    let mut relay = FakeRelay::start(Behaviour::default()).await;
+    let (identity, _) = viewer();
+    let socket = connect(
+        &relay,
+        &identity,
         SocketOptions {
             resubscribe: false,
             ..options()
@@ -299,6 +638,7 @@ async fn without_resubscribe_subscriptions_are_reported_lost() {
     );
     let mut subscription = socket.subscribe(vec![filter(json!({"kinds": [9]}))]);
     assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
     assert!(matches!(relay.next().await, Seen::Req(..)));
     assert!(matches!(
         next_event(&mut subscription).await,
@@ -311,10 +651,43 @@ async fn without_resubscribe_subscriptions_are_reported_lost() {
         SubscriptionEvent::Lost
     ));
     assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
     // Nothing is re-sent on the new connection.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), relay.seen.recv())
-            .await
-            .is_err()
+    assert!(relay.quiet(Duration::from_millis(500)).await);
+}
+
+#[tokio::test]
+async fn presence_is_lossy_and_honours_the_cooldown() {
+    let mut relay = FakeRelay::start(Behaviour::default()).await;
+    let (identity, keys) = viewer();
+    let cooldown = Cooldown::default();
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            cooldown: cooldown.clone(),
+            ..options()
+        },
     );
+    let publisher = socket.publisher();
+    wait_state(&socket, |s| *s == SocketState::Ready).await;
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
+    assert_eq!(
+        publisher.publish_presence(note(&keys, "online")).await,
+        PresenceSend::Accepted
+    );
+    assert!(matches!(relay.next().await, Seen::Event(_)));
+    // A refusal is unconfirmed, and a quota one pauses the shared cooldown.
+    assert_eq!(
+        publisher.publish_presence(note(&keys, "busy")).await,
+        PresenceSend::Unconfirmed
+    );
+    assert!(matches!(relay.next().await, Seen::Event(_)));
+    assert!(cooldown.remaining() > Duration::from_secs(3));
+    assert!(matches!(
+        publisher.publish_presence(note(&keys, "away")).await,
+        PresenceSend::Cooling(wait) if wait > Duration::from_secs(3)
+    ));
+    assert!(relay.quiet(Duration::from_millis(200)).await);
 }

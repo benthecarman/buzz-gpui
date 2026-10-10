@@ -634,6 +634,7 @@ mod tests {
             status: 403,
             message: "invite_expired".into(),
             retry_after: None,
+            not_sent: false,
         };
         assert!(claim_error(expired).contains("expired"));
     }

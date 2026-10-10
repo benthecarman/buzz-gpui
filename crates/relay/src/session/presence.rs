@@ -13,7 +13,7 @@ use super::{Actor, Message};
 use crate::event::Verified;
 use crate::http::HttpError;
 use crate::presence::{Publication, PublishOutcome, SnapshotRead, SnapshotResult, parse_snapshot};
-use crate::socket::PublishError;
+use crate::socket::PresenceSend;
 use buzz_identity::Purpose;
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,7 +75,7 @@ impl Actor {
     pub(super) fn presence_visible(&mut self, visible: bool) {
         self.presence.set_visible(visible, now_ms());
         if !visible && let Some(live) = &mut self.live {
-            live.watch_presence(Vec::new());
+            let _ = live.watch_presence(Vec::new());
         }
         self.publish_activity();
     }
@@ -85,7 +85,7 @@ impl Actor {
         if self.presence.demand().is_empty()
             && let Some(live) = &mut self.live
         {
-            live.watch_presence(Vec::new());
+            let _ = live.watch_presence(Vec::new());
         }
         self.publish_activity();
     }
@@ -117,8 +117,10 @@ impl Actor {
                 .finish(read, SnapshotResult::Failed { retry_ms: None }, now_ms());
             return;
         };
-        if let Some(live) = &mut self.live {
-            live.watch_presence(read.authors.clone());
+        if let Some(live) = &mut self.live
+            && let Err(error) = live.watch_presence(read.authors.clone())
+        {
+            tracing::warn!(%error, "presence authors refused");
         }
         let (http, verifier, commands) = (
             self.http.clone(),
@@ -126,7 +128,7 @@ impl Actor {
             self.commands.clone(),
         );
         self.runtime.spawn(async move {
-            let response = tokio::time::timeout(PRESENCE_TIMEOUT, http.post("/query", read.body()))
+            let response = tokio::time::timeout(PRESENCE_TIMEOUT, http.post_presence(read.body()))
                 .await
                 .unwrap_or(Err(HttpError::Transport("Presence read timed out".into())));
             let result = match response {
@@ -190,12 +192,11 @@ impl Actor {
         };
         let commands = self.commands.clone();
         self.runtime.spawn(async move {
-            let outcome = match tokio::time::timeout(PRESENCE_TIMEOUT, socket.publish(event)).await
-            {
-                Ok(Ok(())) => PublishOutcome::Accepted,
-                Ok(Err(PublishError::NotConnected)) => PublishOutcome::NotSent,
-                Ok(Err(PublishError::Rejected(reason))) => PublishOutcome::Rejected(reason),
-                Ok(Err(_)) | Err(_) => PublishOutcome::Unconfirmed,
+            let outcome = match socket.publish_presence(event).await {
+                PresenceSend::Accepted => PublishOutcome::Accepted,
+                PresenceSend::NotSent => PublishOutcome::NotSent,
+                PresenceSend::Cooling(wait) => PublishOutcome::Cooling(wait.as_millis() as u64),
+                PresenceSend::Unconfirmed => PublishOutcome::Unconfirmed,
             };
             let _ = commands.send(Message::PresencePublished {
                 publication,
@@ -205,9 +206,6 @@ impl Actor {
     }
 
     pub(super) fn presence_published(&mut self, publication: Publication, outcome: PublishOutcome) {
-        if let PublishOutcome::Rejected(reason) = &outcome {
-            tracing::debug!(%reason, "relay refused presence");
-        }
         let now = now_ms();
         if let Some(state) = self.publisher.finished(publication, outcome, now) {
             self.presence.accepted(state, now);

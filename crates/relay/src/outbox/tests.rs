@@ -1600,6 +1600,7 @@ fn publish_responses_map_to_outcomes() {
             status,
             message: message.into(),
             retry_after: None,
+            not_sent: false,
         })
     };
     let hex = id.to_hex();
@@ -1693,7 +1694,40 @@ fn publish_responses_map_to_outcomes() {
             Err(HttpError::Paused {
                 retry_after: Duration::from_secs(5),
             }),
-            Err(Rejected("relay requests paused; retry in 5s".into())),
+            Err(Rejected("Relay requests paused; retry in 5s".into())),
+        ),
+        (
+            Err(HttpError::Capacity),
+            Err(Rejected("Relay API queue capacity reached".into())),
+        ),
+        // An API quota refusal without a hint is a minute.
+        (
+            status(429, "rate-limited: quota exceeded"),
+            Err(Rejected(
+                "rate-limited: quota exceeded; retry in 60s".into(),
+            )),
+        ),
+        // The relay's own `sent: false` proves non-delivery; only known
+        // reasons are kept.
+        (
+            Err(HttpError::Status {
+                status: 503,
+                message: "rate-limited: shared admission unavailable".into(),
+                retry_after: None,
+                not_sent: true,
+            }),
+            Err(Rejected(
+                "rate-limited: shared admission unavailable".into(),
+            )),
+        ),
+        (
+            Err(HttpError::Status {
+                status: 503,
+                message: "upstream detail".into(),
+                retry_after: None,
+                not_sent: true,
+            }),
+            Err(Rejected("Relay request failed (503)".into())),
         ),
     ];
     for (input, expected) in cases {

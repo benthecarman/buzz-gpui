@@ -25,11 +25,7 @@ const MAX_KEY_BYTES: usize = 64 * 1024;
 /// Verified responses larger than this are refused.
 pub const MAX_RESPONSE_BYTES: usize = 8 << 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Priority {
-    Foreground,
-    Background,
-}
+pub use crate::http::Priority;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ReadOptions {
@@ -91,6 +87,7 @@ impl ReadError {
                 status,
                 message,
                 retry_after,
+                ..
             } => Self {
                 kind: if matches!(status, 401 | 403) {
                     ReadErrorKind::Denied
@@ -108,10 +105,17 @@ impl ReadError {
             },
             HttpError::Paused { retry_after } => Self {
                 kind: ReadErrorKind::Unavailable,
-                message: format!("Relay requests paused; retry in {}s", retry_after.as_secs()),
+                message: HttpError::Paused { retry_after }.to_string(),
                 status: Some(429),
                 retry_after: Some(retry_after),
             },
+            HttpError::Capacity => Self::new(
+                ReadErrorKind::Unavailable,
+                "Relay API queue capacity reached",
+            ),
+            HttpError::RequestTooLarge => {
+                Self::new(ReadErrorKind::InvalidResponse, "Relay read is too large")
+            }
             HttpError::TooLarge | HttpError::Invalid(_) => Self::new(
                 ReadErrorKind::InvalidResponse,
                 "Relay returned an invalid response",
@@ -194,13 +198,21 @@ type Predicate = Box<dyn Fn(&[Filter]) -> bool + Send>;
 
 /// Where reads go. [`RelayHttp`] in the app; fakes in tests.
 pub trait Source: Send + Sync + 'static {
-    fn query(&self, filters: Vec<Filter>) -> BoxFuture<'static, Result<Vec<Value>, HttpError>>;
+    fn query(
+        &self,
+        filters: Vec<Filter>,
+        priority: Priority,
+    ) -> BoxFuture<'static, Result<Vec<Value>, HttpError>>;
 }
 
 impl Source for RelayHttp {
-    fn query(&self, filters: Vec<Filter>) -> BoxFuture<'static, Result<Vec<Value>, HttpError>> {
+    fn query(
+        &self,
+        filters: Vec<Filter>,
+        priority: Priority,
+    ) -> BoxFuture<'static, Result<Vec<Value>, HttpError>> {
         let http = self.clone();
-        Box::pin(async move { http.query_raw(&filters).await })
+        Box::pin(async move { http.query_with(&filters, priority).await })
     }
 }
 
@@ -518,12 +530,13 @@ impl Actor {
             let generation = self.generation;
             let job = self.jobs.get_mut(&key).expect("queued job exists");
             let filters = job.filters.clone();
+            let priority = job.priority;
             let source = self.source.clone();
             let verifier = self.verifier.clone();
             let commands = self.commands.clone();
             let task_key = key.clone();
             let task = tokio::spawn(async move {
-                let result = fetch(source, verifier, filters).await;
+                let result = fetch(source, verifier, filters, priority).await;
                 let _ = commands.send(Command::Finished {
                     key: task_key,
                     generation,
@@ -539,8 +552,12 @@ async fn fetch(
     source: Arc<dyn Source>,
     verifier: Arc<Verifier>,
     filters: Vec<Filter>,
+    priority: Priority,
 ) -> Result<Events, ReadError> {
-    let raw = source.query(filters).await.map_err(ReadError::from_http)?;
+    let raw = source
+        .query(filters, priority)
+        .await
+        .map_err(ReadError::from_http)?;
     // Verification is CPU work; keep it off the I/O threads.
     let events = tokio::task::spawn_blocking(move || verifier.verify_all(&raw))
         .await
@@ -662,7 +679,11 @@ mod scheduling_tests {
     }
 
     impl Source for Fake {
-        fn query(&self, filters: Vec<Filter>) -> BoxFuture<'static, Result<Vec<Value>, HttpError>> {
+        fn query(
+            &self,
+            filters: Vec<Filter>,
+            _priority: Priority,
+        ) -> BoxFuture<'static, Result<Vec<Value>, HttpError>> {
             self.calls.lock().unwrap().push(filters);
             let now = self.running.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(now, SeqCst);

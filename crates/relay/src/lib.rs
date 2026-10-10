@@ -46,7 +46,10 @@ pub use event::{Verified, Verifier, kinds};
 pub use fold::{FoldOptions, MessageProjection, MessageRow, fold_messages};
 pub use http::{HttpError, RelayHttp};
 pub use links::{BuzzLink, message_link, parse_buzz_link, profile_key};
-pub use live::{Live, LiveOptions, LiveUpdate, Phase, RouteKey, RouteStatus};
+pub use live::{
+    Live, LiveConnection, LiveOptions, LiveRoute, LiveRouteStatus, LiveSnapshot, LiveUpdate, Phase,
+    Replay, RouteKey, RouteStatus,
+};
 pub use media::{Media, MediaError};
 pub use messages::{Attachment, CustomEmoji, Draft, EventTemplate, Mentions, MessageError};
 pub use nostr::prelude::{EventId, PublicKey};
@@ -64,18 +67,19 @@ pub use read_state::{
 };
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
-    ChannelUnread, ChannelView, FeedbackState, IncomingMessage, MessageSearch, PendingFeedback,
-    PeoplePage, PublicChannels, READING_DWELL_MS, RelayInfo, RosterStatus, SearchOutcome, Session,
-    SessionSnapshot, SessionStatus, StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus,
-    UnreadCounts, UnreadDetail, UnreadWatch,
+    CatchUpState, ChannelUnread, ChannelView, FeedbackState, HeadCatchUp, IncomingMessage,
+    LiveView, MessageSearch, PendingFeedback, PeoplePage, PublicChannels, READING_DWELL_MS,
+    RelayInfo, RosterRefresh, RosterStatus, SearchOutcome, Session, SessionSnapshot, SessionStatus,
+    StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus, UnreadCounts, UnreadDetail,
+    UnreadWatch,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
     sidebar_sections,
 };
 pub use socket::{
-    Filter, PublishError, RelaySocket, SocketOptions, SocketPublisher, SocketState, Subscription,
-    SubscriptionEvent,
+    Cooldown, Filter, PresenceSend, PublishError, RelaySocket, SocketOptions, SocketPublisher,
+    SocketState, Subscription, SubscriptionEvent,
 };
 pub use store::{
     Partition, SqliteJournal, SqliteReadJournal, SqliteThreadFollows, Store, StoreError,

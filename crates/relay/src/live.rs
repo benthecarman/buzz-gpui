@@ -2,22 +2,26 @@
 //! recover (`live.ts`, spec §3.3–3.6).
 //!
 //! A *route* is a logical interest: the global `profiles` and `membership`
-//! feeds, presence, a single channel, or a batch of up to ten joined
-//! channels. A *wire* is the REQ currently carrying a route; replacing a
-//! wire keeps the old one open until the new one reaches EOSE, so no events
-//! are missed while a batch changes shape.
+//! feeds, presence, the agent observer, a single channel, or a batch of up
+//! to ten joined channels. A *wire* is the REQ currently carrying a route;
+//! replacing a wire keeps the established one open until the new one reaches
+//! EOSE, so no events are missed while a batch changes shape.
 //!
-//! After a reconnect every route is rebuilt with a fresh five-minute
-//! look-back rather than resumed; the session follows up with HTTP
-//! catch-up reads for anything older.
+//! Every attempt to connect rebuilds the routes with a fresh five-minute
+//! look-back rather than resuming; the session follows up with HTTP
+//! catch-up reads for anything older. Nothing is dispatched until the
+//! socket has authenticated, and a shared quota cooldown gates every
+//! dispatch.
 
 use crate::event::{Verified, Verifier, kinds};
 use crate::origin::RelayOrigin;
-use crate::socket::{Filter, RelaySocket, SocketOptions, SocketState, SubscriptionEvent};
+use crate::socket::{
+    Cooldown, Filter, RelaySocket, SocketOptions, SocketState, SubscriptionEvent, quota_hint,
+};
 use buzz_identity::Identity;
 use futures::StreamExt;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -34,7 +38,7 @@ pub struct LiveOptions {
     pub setup_deadline: Duration,
     pub recovery_interval: Duration,
     pub max_quota_retries: u32,
-    pub max_presence_authors: usize,
+    pub socket: SocketOptions,
 }
 
 impl Default for LiveOptions {
@@ -48,10 +52,20 @@ impl Default for LiveOptions {
             setup_deadline: Duration::from_secs(10),
             recovery_interval: Duration::from_secs(60),
             max_quota_retries: 3,
-            max_presence_authors: 256,
+            socket: SocketOptions {
+                resubscribe: false,
+                ..Default::default()
+            },
         }
     }
 }
+
+/// Most channel interests the session may name (`liveChannels`).
+pub const MAX_INTERESTS: usize = 1024;
+/// Most people whose presence is followed live.
+pub const MAX_PRESENCE_AUTHORS: usize = 256;
+/// Prioritized channels set up first.
+pub const MAX_PRIORITIZED: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RouteKey {
@@ -65,6 +79,22 @@ pub enum RouteKey {
     Batch(u64),
 }
 
+impl RouteKey {
+    fn global(&self) -> bool {
+        !matches!(self, Self::Channel(_) | Self::Batch(_))
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Profiles => "profiles",
+            Self::Membership => "membership",
+            Self::Presence => "presence",
+            Self::Observer => "observer",
+            Self::Channel(_) | Self::Batch(_) => "channel",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// Stored events sent before EOSE.
@@ -74,7 +104,9 @@ pub enum Phase {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RouteStatus {
+    /// Waiting for its turn, a cooldown or the connection.
     Pending,
+    /// Sent, waiting for EOSE.
     SettingUp,
     Live,
     Error(String),
@@ -82,13 +114,75 @@ pub enum RouteStatus {
     Limited,
 }
 
+/// The connection as the user sees it (`LiveSnapshot.status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveConnection {
+    Connecting,
+    Connected,
+    /// Lost; reconnecting by itself.
+    Retrying,
+    /// Stopped until the user retries.
+    Error,
+}
+
+/// What the replay before EOSE proves. EOSE establishes a stream; it never
+/// proves the history complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replay {
+    Unknown,
+    /// The replay hit its limit: older live traffic may be missing.
+    Limited,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveRouteStatus {
+    Pending,
+    Live,
+    Error,
+    Limited,
+}
+
+/// One route as the session reports it: one entry per channel, so a batch
+/// shows up as its channels (`LiveRoute`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveRoute {
+    /// `profiles`, `membership`, `presence`, `observer` or `channel:<id>`.
+    pub id: String,
+    pub channel: Option<String>,
+    pub status: LiveRouteStatus,
+    pub replay: Replay,
+    /// The last failure; kept while a retry is pending, until EOSE.
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveSnapshot {
+    pub status: LiveConnection,
+    pub routes: Vec<LiveRoute>,
+    pub error: Option<String>,
+}
+
+impl Default for LiveSnapshot {
+    fn default() -> Self {
+        Self {
+            status: LiveConnection::Connecting,
+            routes: Vec::new(),
+            error: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LiveUpdate {
-    /// Verified events, with the channels the carrying route covers.
+    /// Verified events with their provenance (`LiveProvenance`).
     Events {
         events: Vec<Verified>,
         phase: Phase,
-        scope: Arc<[String]>,
+        /// The one channel this traffic belongs to, when unambiguous.
+        channel: Option<String>,
+        /// The carrying wire's channels, for traffic with no single channel.
+        /// Never alert attribution.
+        sources: Arc<[String]>,
     },
     Presence(Vec<Verified>),
     /// Agent activity (24200) or turn metrics (44200) for the viewer.
@@ -112,7 +206,9 @@ pub enum LiveUpdate {
     Connected,
     /// The socket dropped; everything live is stale until `Connected`.
     Disconnected,
-    /// Route statuses changed; read them with [`Live::statuses`].
+    /// The minute tick: a repair hint (roster and unread), not evidence.
+    Recover,
+    /// The snapshot changed; read it with [`Live::snapshot`].
     Status,
 }
 
@@ -120,42 +216,58 @@ struct Route {
     key: RouteKey,
     channels: Vec<String>,
     since: u64,
+    /// The archive's metrics floor across a renewal (`metricsSince`).
+    metrics_since: Option<u64>,
     status: RouteStatus,
+    /// Kept through a pending retry until EOSE.
+    error: Option<String>,
+    replay: Replay,
     wire: Option<u64>,
-    /// The wire being replaced, kept until `wire` reaches EOSE.
+    /// The established wire being replaced, kept until `wire` reaches EOSE.
     previous: Option<u64>,
+    /// A failed renewal kept `previous`; the minute tick tries again.
+    retry_renewal: bool,
     setup_deadline: Option<Instant>,
     quota_retries: u32,
-    replayed: u64,
+    /// Events received before EOSE.
+    count: u64,
     /// Replacement wires ask only for new events.
     live_only: bool,
+    /// Insertion order, for ties in setup order.
+    order: u64,
 }
 
 struct Wire {
     route: RouteKey,
     scope: Arc<[String]>,
-    eose: bool,
+    /// Reached EOSE: an established stream a failed renewal may keep.
+    established: bool,
 }
 
 pub struct Live {
     socket: RelaySocket,
     socket_state: watch::Receiver<SocketState>,
+    cooldown: Cooldown,
     viewer: String,
     options: LiveOptions,
     connected: bool,
+    connection: LiveConnection,
+    connection_error: Option<String>,
+    /// Invalid input from the session, shown until the next valid update.
+    input_error: Option<String>,
     routes: BTreeMap<RouteKey, Route>,
     wires: HashMap<u64, Wire>,
     streams: StreamMap<u64, crate::socket::Subscription>,
     next_wire: u64,
     next_batch: u64,
+    next_order: u64,
     /// Inputs, kept so routes can be rebuilt after a reconnect.
-    interests: BTreeSet<String>,
-    joined: BTreeSet<String>,
+    interests: Vec<String>,
+    joined: HashSet<String>,
     prioritized: Vec<String>,
     presence_authors: Vec<String>,
     observer_kinds: Vec<u16>,
-    cooldown: Option<Instant>,
-    recovery: Instant,
+    recovery: Option<Instant>,
     outbox: VecDeque<LiveUpdate>,
 }
 
@@ -168,40 +280,47 @@ impl Live {
         options: LiveOptions,
     ) -> Self {
         let viewer = identity.pubkey_hex();
-        let socket = RelaySocket::connect(
-            runtime,
-            origin,
-            identity,
-            verifier,
-            SocketOptions {
-                resubscribe: false,
-                ..Default::default()
-            },
-        );
-        Self {
+        let socket_options = SocketOptions {
+            resubscribe: false,
+            ..options.socket.clone()
+        };
+        let cooldown = socket_options.cooldown.clone();
+        let socket = RelaySocket::connect(runtime, origin, identity, verifier, socket_options);
+        let mut live = Self {
             socket_state: socket.state(),
             socket,
+            cooldown,
             viewer,
-            recovery: Instant::now() + options.recovery_interval,
             options,
             connected: false,
+            connection: LiveConnection::Connecting,
+            connection_error: None,
+            input_error: None,
             routes: BTreeMap::new(),
             wires: HashMap::new(),
             streams: StreamMap::new(),
             next_wire: 1,
             next_batch: 1,
-            interests: BTreeSet::new(),
-            joined: BTreeSet::new(),
+            next_order: 0,
+            interests: Vec::new(),
+            joined: HashSet::new(),
             prioritized: Vec::new(),
             presence_authors: Vec::new(),
             observer_kinds: Vec::new(),
-            cooldown: None,
+            recovery: None,
             outbox: VecDeque::new(),
-        }
+        };
+        live.sync();
+        live
     }
 
     pub fn socket(&self) -> &RelaySocket {
         &self.socket
+    }
+
+    /// The quota cooldown shared by every dispatch on this connection.
+    pub fn cooldown(&self) -> &Cooldown {
+        &self.cooldown
     }
 
     pub fn is_connected(&self) -> bool {
@@ -215,43 +334,127 @@ impl Live {
             .collect()
     }
 
+    /// The connection and every route, a batch expanded to its channels.
+    pub fn snapshot(&self) -> LiveSnapshot {
+        let mut routes: Vec<&Route> = self.routes.values().collect();
+        routes.sort_by_key(|route| route.order);
+        let routes = routes
+            .into_iter()
+            .flat_map(|route| {
+                let status = match route.status {
+                    RouteStatus::Pending | RouteStatus::SettingUp => LiveRouteStatus::Pending,
+                    RouteStatus::Live => LiveRouteStatus::Live,
+                    RouteStatus::Error(_) => LiveRouteStatus::Error,
+                    RouteStatus::Limited => LiveRouteStatus::Limited,
+                };
+                let entry = |channel: Option<&String>| LiveRoute {
+                    id: channel.map_or_else(
+                        || route.key.name().to_string(),
+                        |id| format!("channel:{id}"),
+                    ),
+                    channel: channel.cloned(),
+                    status,
+                    replay: route.replay,
+                    error: route.error.clone(),
+                };
+                if route.key.global() {
+                    vec![entry(None)]
+                } else {
+                    route.channels.iter().map(|id| entry(Some(id))).collect()
+                }
+            })
+            .collect();
+        LiveSnapshot {
+            status: if self.input_error.is_some() {
+                LiveConnection::Error
+            } else {
+                self.connection
+            },
+            routes,
+            error: self
+                .input_error
+                .clone()
+                .or_else(|| self.connection_error.clone()),
+        }
+    }
+
     /// Sets which channels need live traffic. `joined` channels may share
     /// batched routes; `prioritized` ones (open or previewed, at most 64)
-    /// get their own routes and are set up first.
+    /// get their own routes and are set up first. Interests are bounded
+    /// IDs, never truncated: invalid input is refused whole.
     pub fn update(
         &mut self,
         interests: impl IntoIterator<Item = String>,
         joined: impl IntoIterator<Item = String>,
         prioritized: Vec<String>,
-    ) {
-        self.interests = interests.into_iter().collect();
-        self.joined = joined.into_iter().collect();
-        self.prioritized = prioritized.into_iter().take(64).collect();
-        if self.connected {
-            self.sync();
+    ) -> Result<(), String> {
+        let checked = (|| {
+            let interests = live_channels(interests.into_iter().collect())?;
+            let joined = live_channels(joined.into_iter().collect())?;
+            if joined.iter().any(|id| interests.binary_search(id).is_err()) {
+                return Err("Joined scope outside live interests".to_string());
+            }
+            live_channels(prioritized.clone())?;
+            let mut seen = HashSet::new();
+            let prioritized: Vec<String> = prioritized
+                .into_iter()
+                .filter(|id| seen.insert(id.clone()))
+                .take(MAX_PRIORITIZED)
+                .collect();
+            Ok((interests, joined, prioritized))
+        })();
+        let (interests, joined, prioritized) = match checked {
+            Ok(input) => input,
+            Err(error) => {
+                self.input_error = Some(error.clone());
+                self.outbox.push_back(LiveUpdate::Status);
+                return Err(error);
+            }
+        };
+        let joined: HashSet<String> = joined.into_iter().collect();
+        let cleared = self.input_error.take().is_some();
+        if interests == self.interests && joined == self.joined && prioritized == self.prioritized {
+            if cleared {
+                self.outbox.push_back(LiveUpdate::Status);
+            }
+            return Ok(());
         }
+        self.interests = interests;
+        self.joined = joined;
+        self.prioritized = prioritized;
+        self.sync();
+        Ok(())
     }
 
-    /// Authors whose presence to follow live (at most 256).
-    pub fn watch_presence(&mut self, mut authors: Vec<String>) {
+    /// Authors whose presence to follow live (at most 256 lowercase hex
+    /// keys; anything else is refused whole).
+    pub fn watch_presence(&mut self, authors: Vec<String>) -> Result<(), String> {
+        if authors.len() > MAX_PRESENCE_AUTHORS || authors.iter().any(|key| !is_hex64(key)) {
+            let error = "Invalid live presence authors".to_string();
+            self.input_error = Some(error.clone());
+            self.outbox.push_back(LiveUpdate::Status);
+            return Err(error);
+        }
+        let mut authors = authors;
         authors.sort();
         authors.dedup();
-        authors.truncate(self.options.max_presence_authors);
         if authors == self.presence_authors {
-            return;
+            return Ok(());
         }
         self.presence_authors = authors;
-        if self.connected {
-            self.remove_route(&RouteKey::Presence);
-            if !self.presence_authors.is_empty() {
-                self.add_route(RouteKey::Presence, Vec::new());
+        if self.routes.contains_key(&RouteKey::Presence) {
+            if self.presence_authors.is_empty() {
+                self.remove_route(&RouteKey::Presence);
+            } else {
+                self.replace(&RouteKey::Presence, None);
             }
-            self.pump();
         }
+        self.sync();
+        Ok(())
     }
 
     /// Agent kinds to receive live while they are archived; empty stops
-    /// the route (`observer`, relay.md §3.3). Only kinds 24200 and 44200.
+    /// the route (`archive`, relay.md §3.3). Only kinds 24200 and 44200.
     pub fn watch_observer(&mut self, mut kinds: Vec<u16>) {
         kinds.retain(|kind| matches!(*kind, kinds::AGENT_ACTIVITY | kinds::AGENT_METRICS));
         kinds.sort_unstable();
@@ -259,28 +462,63 @@ impl Live {
         if kinds == self.observer_kinds {
             return;
         }
+        let keep_metrics = self.observer_kinds.contains(&kinds::AGENT_METRICS)
+            && kinds.contains(&kinds::AGENT_METRICS);
         self.observer_kinds = kinds;
-        if self.connected {
+        if self.routes.contains_key(&RouteKey::Observer) {
+            self.renew_telemetry(keep_metrics);
+        }
+        self.sync();
+    }
+
+    /// Renews the observer route for new kinds. Stored metrics can bridge
+    /// the gap; ephemeral activity cannot, and nothing older than a minute
+    /// is replayed.
+    fn renew_telemetry(&mut self, keep_metrics: bool) {
+        if !keep_metrics {
             self.remove_route(&RouteKey::Observer);
-            if !self.observer_kinds.is_empty() {
-                self.add_route(RouteKey::Observer, Vec::new());
-            }
-            self.sync();
-            self.pump();
+            return;
+        }
+        let Some(route) = self.routes.get_mut(&RouteKey::Observer) else {
+            return;
+        };
+        if route.wire.is_some() {
+            route.metrics_since = Some(
+                route
+                    .metrics_since
+                    .unwrap_or_else(|| route.since.max(now_secs().saturating_sub(60))),
+            );
+        }
+        let wires: Vec<u64> = route
+            .wire
+            .take()
+            .into_iter()
+            .chain(route.previous.take())
+            .collect();
+        route.status = RouteStatus::Pending;
+        route.setup_deadline = None;
+        route.count = 0;
+        route.quota_retries = 0;
+        route.error = None;
+        route.retry_renewal = false;
+        for wire in wires {
+            self.close_wire(wire);
         }
     }
 
-    /// The user's "Retry live updates": routes in error get another go.
+    /// The user's "Retry live updates": a fresh reconnect budget, and
+    /// failed routes get another go. The relay's cooldown still applies.
     pub fn retry(&mut self) {
-        self.cooldown = None;
-        for route in self.routes.values_mut() {
-            if matches!(route.status, RouteStatus::Error(_)) {
-                route.status = RouteStatus::Pending;
-                route.quota_retries = 0;
-            }
-        }
         if self.connected {
+            for route in self.routes.values_mut() {
+                if matches!(route.status, RouteStatus::Error(_)) {
+                    route.status = RouteStatus::Pending;
+                    route.count = 0;
+                    route.quota_retries = 0;
+                }
+            }
             self.pump();
+            self.outbox.push_back(LiveUpdate::Status);
         } else {
             self.socket.reconnect();
         }
@@ -297,137 +535,161 @@ impl Live {
                 .values()
                 .filter_map(|route| route.setup_deadline)
                 .min();
-            let cooldown = self.cooldown;
+            let pending = self
+                .routes
+                .values()
+                .any(|route| route.status == RouteStatus::Pending);
+            let cooldown = self.cooldown.until().filter(|_| pending && self.connected);
+            let recovery = self.recovery.filter(|_| self.connected);
             tokio::select! {
                 changed = self.socket_state.changed() => {
                     if changed.is_err() {
                         return LiveUpdate::Disconnected;
                     }
-                    let ready = *self.socket_state.borrow_and_update() == SocketState::Ready;
-                    self.connection_changed(ready);
+                    let state = self.socket_state.borrow_and_update().clone();
+                    self.connection_changed(state);
                 }
                 Some((wire, event)) = self.streams.next(), if !self.streams.is_empty() => {
                     self.wire_event(wire, event);
                 }
                 _ = sleep_until(setup) => self.expire_setups(),
-                _ = sleep_until(cooldown) => {
-                    self.cooldown = None;
-                    self.pump();
-                }
-                _ = tokio::time::sleep_until(self.recovery) => self.recover(),
+                _ = sleep_until(cooldown) => self.pump(),
+                _ = sleep_until(recovery) => self.recover(),
             }
         }
     }
 
-    fn connection_changed(&mut self, ready: bool) {
-        if ready == self.connected {
-            return;
+    fn connection_changed(&mut self, state: SocketState) {
+        let was_connected = self.connected;
+        self.connected = state == SocketState::Ready;
+        match state {
+            SocketState::Ready => {
+                self.connection = LiveConnection::Connected;
+                self.connection_error = None;
+            }
+            SocketState::Connecting { .. } | SocketState::Authenticating => {
+                self.connection = LiveConnection::Connecting;
+                self.connection_error = None;
+            }
+            SocketState::Waiting { error, .. } => {
+                self.connection = LiveConnection::Retrying;
+                self.connection_error = Some(error);
+            }
+            SocketState::Failed { error } => {
+                self.connection = LiveConnection::Error;
+                self.connection_error = Some(error);
+            }
         }
-        self.connected = ready;
-        // Rebuilt from inputs either way: a fresh look-back after a
-        // reconnect, nothing while disconnected.
-        self.routes.clear();
-        self.wires.clear();
-        self.streams = StreamMap::new();
-        if ready {
-            self.recovery = Instant::now() + self.options.recovery_interval;
-            self.add_route(RouteKey::Profiles, Vec::new());
-            self.add_route(RouteKey::Membership, Vec::new());
-            if !self.presence_authors.is_empty() {
-                self.add_route(RouteKey::Presence, Vec::new());
-            }
-            if !self.observer_kinds.is_empty() {
-                self.add_route(RouteKey::Observer, Vec::new());
-            }
+        if self.connected && !was_connected || !self.connected {
+            // Rebuilt from inputs with a fresh look-back for every
+            // connection; pending while there is none.
+            self.routes.clear();
+            self.wires.clear();
+            self.streams = StreamMap::new();
             self.sync();
+        }
+        if self.connected && !was_connected {
+            self.recovery = Some(Instant::now() + self.options.recovery_interval);
             self.outbox.push_back(LiveUpdate::Connected);
-        } else {
+        } else if was_connected && !self.connected {
+            self.recovery = None;
             self.outbox.push_back(LiveUpdate::Disconnected);
         }
+        self.outbox.push_back(LiveUpdate::Status);
     }
 
-    /// Reconciles channel routes with the inputs without rebalancing
-    /// healthy batches.
+    fn scope(route: &Route) -> &[String] {
+        &route.channels
+    }
+
+    /// Reconciles routes with the inputs (`sync`). A wire's scope never
+    /// changes: a batch that loses channels is replaced, and navigation only
+    /// reorders setup; it never rebalances healthy subscriptions.
     fn sync(&mut self) {
-        let capacity = self.options.channel_capacity
-            - usize::from(!self.presence_authors.is_empty())
-            - usize::from(!self.observer_kinds.is_empty());
-        let wanted: Vec<String> = self
+        let mut ranked: Vec<&String> = self
             .prioritized
             .iter()
-            .filter(|id| self.interests.contains(*id))
-            .cloned()
-            .chain(
-                self.interests
-                    .iter()
-                    .filter(|id| !self.prioritized.contains(id))
-                    .cloned(),
-            )
+            .filter(|id| self.interests.binary_search(id).is_ok())
             .collect();
-        let (served, limited) = wanted.split_at(wanted.len().min(capacity));
-        let singleton = |id: &String| !self.joined.contains(id) || self.prioritized.contains(id);
-        let singles: BTreeSet<String> = served.iter().filter(|id| singleton(id)).cloned().collect();
-        let batched: BTreeSet<String> =
-            served.iter().filter(|id| !singleton(id)).cloned().collect();
-
-        // Drop channel routes no longer wanted in their current class.
-        let stale: Vec<RouteKey> = self
-            .routes
-            .keys()
-            .filter(|key| match key {
-                RouteKey::Channel(id) => !singles.contains(id) && !limited.contains(id),
-                _ => false,
-            })
-            .cloned()
-            .collect();
-        for key in stale {
-            self.remove_route(&key);
+        let mut seen: HashSet<&String> = ranked.iter().copied().collect();
+        ranked.extend(self.interests.iter().filter(|id| seen.insert(id)));
+        let capacity = self
+            .options
+            .channel_capacity
+            .saturating_sub(usize::from(!self.observer_kinds.is_empty()))
+            .saturating_sub(usize::from(!self.presence_authors.is_empty()));
+        let admitted: HashSet<String> = ranked.into_iter().take(capacity).cloned().collect();
+        let mut remaining: Vec<String> = self.interests.clone();
+        let mut globals: Vec<RouteKey> = vec![RouteKey::Profiles, RouteKey::Membership];
+        if !self.observer_kinds.is_empty() {
+            globals.push(RouteKey::Observer);
         }
-        for id in limited {
-            let key = RouteKey::Channel(id.clone());
-            if !self.routes.contains_key(&key) {
-                self.routes.insert(
-                    key.clone(),
-                    Route {
-                        status: RouteStatus::Limited,
-                        ..self.route(key, vec![id.clone()])
-                    },
-                );
-            }
-        }
-        for id in &singles {
-            let key = RouteKey::Channel(id.clone());
-            if !self.routes.contains_key(&key) {
-                self.add_route(key, vec![id.clone()]);
-            }
+        if !self.presence_authors.is_empty() {
+            globals.push(RouteKey::Presence);
         }
 
-        // Shrink batches that lost members; collect what is already batched.
-        let mut covered = BTreeSet::new();
-        let batches: Vec<RouteKey> = self
+        let mut keys: Vec<(u64, RouteKey)> = self
             .routes
-            .keys()
-            .filter(|key| matches!(key, RouteKey::Batch(_)))
-            .cloned()
+            .values()
+            .map(|route| (route.order, route.key.clone()))
             .collect();
-        for key in batches {
-            let channels = self.routes[&key].channels.clone();
-            let survivors: Vec<String> = channels
-                .iter()
-                .filter(|id| batched.contains(*id))
-                .cloned()
-                .collect();
-            if survivors.is_empty() {
-                self.remove_route(&key);
-            } else if survivors.len() < channels.len() {
-                covered.extend(survivors.iter().cloned());
-                self.replace(&key, Some(survivors));
+        keys.sort();
+        for (_, key) in keys {
+            let route = &self.routes[&key];
+            let ids = Self::scope(route).to_vec();
+            let batch = matches!(key, RouteKey::Batch(_));
+            let limited = route.status == RouteStatus::Limited;
+            let stale = if ids.is_empty() {
+                !globals.contains(&key)
             } else {
-                covered.extend(survivors);
+                ids.iter().any(|id| {
+                    !remaining.contains(id)
+                        || limited == admitted.contains(id)
+                        || (batch && !self.joined.contains(id))
+                })
+            };
+            if stale {
+                let survivors: Vec<String> = ids
+                    .iter()
+                    .filter(|id| {
+                        remaining.contains(id)
+                            && admitted.contains(*id)
+                            && self.joined.contains(*id)
+                    })
+                    .cloned()
+                    .collect();
+                if batch
+                    && !survivors.is_empty()
+                    && (route.status == RouteStatus::Live || route.live_only)
+                {
+                    remaining.retain(|id| !survivors.contains(id));
+                    self.replace(&key, Some(survivors));
+                } else {
+                    self.remove_route(&key);
+                }
+            } else {
+                remaining.retain(|id| !ids.contains(id));
+                globals.retain(|global| *global != key);
             }
         }
-        let fresh: Vec<String> = batched.difference(&covered).cloned().collect();
-        for chunk in fresh.chunks(self.options.batch_size) {
+        for key in globals {
+            let live_only = key == RouteKey::Presence;
+            self.add_route(key, Vec::new()).live_only = live_only;
+        }
+        let mut batch = Vec::new();
+        for id in remaining {
+            if !admitted.contains(&id) {
+                let route = self.add_route(RouteKey::Channel(id.clone()), vec![id]);
+                route.status = RouteStatus::Limited;
+                route.error =
+                    Some("Live channel capacity reached; finite reads remain available".into());
+            } else if !self.joined.contains(&id) || self.prioritized.contains(&id) {
+                self.add_route(RouteKey::Channel(id.clone()), vec![id]);
+            } else {
+                batch.push(id);
+            }
+        }
+        for chunk in batch.chunks(self.options.batch_size) {
             let key = RouteKey::Batch(self.next_batch);
             self.next_batch += 1;
             self.add_route(key, chunk.to_vec());
@@ -436,24 +698,27 @@ impl Live {
         self.outbox.push_back(LiveUpdate::Status);
     }
 
-    fn route(&self, key: RouteKey, channels: Vec<String>) -> Route {
-        Route {
-            key,
+    fn add_route(&mut self, key: RouteKey, channels: Vec<String>) -> &mut Route {
+        self.next_order += 1;
+        let route = Route {
+            key: key.clone(),
             channels,
             since: now_secs().saturating_sub(self.options.lookback.as_secs()),
+            metrics_since: None,
             status: RouteStatus::Pending,
+            error: None,
+            replay: Replay::Unknown,
             wire: None,
             previous: None,
+            retry_renewal: false,
             setup_deadline: None,
             quota_retries: 0,
-            replayed: 0,
+            count: 0,
             live_only: false,
-        }
-    }
-
-    fn add_route(&mut self, key: RouteKey, channels: Vec<String>) {
-        let route = self.route(key.clone(), channels);
-        self.routes.insert(key, route);
+            order: self.next_order,
+        };
+        self.routes.insert(key.clone(), route);
+        self.routes.get_mut(&key).expect("route was just added")
     }
 
     fn remove_route(&mut self, key: &RouteKey) {
@@ -465,29 +730,38 @@ impl Live {
     }
 
     fn close_wire(&mut self, wire: u64) {
-        // Dropping the subscription sends CLOSE; the wire is fenced first so
-        // late frames for it are ignored.
+        // Fenced first so late frames are ignored; dropping the
+        // subscription sends CLOSE.
         self.wires.remove(&wire);
         self.streams.remove(&wire);
     }
 
-    /// Re-sends a route on a fresh wire asking only for new events, keeping
-    /// the old wire until the new one is established.
+    /// Re-sends a route on a fresh wire asking only for new events. The
+    /// established wire stays until the new one reaches EOSE; a replacement
+    /// that was still setting up is retired instead, so at most two wires
+    /// carry a route.
     fn replace(&mut self, key: &RouteKey, channels: Option<Vec<String>>) {
         let Some(route) = self.routes.get_mut(key) else {
             return;
         };
+        let retire = if route.previous.is_some() {
+            route.wire.take()
+        } else {
+            route.previous = route.wire.take();
+            None
+        };
         if let Some(channels) = channels {
             route.channels = channels;
         }
-        if let Some(previous) = route.previous.take() {
-            self.wires.remove(&previous);
-            self.streams.remove(&previous);
-        }
-        let route = self.routes.get_mut(key).expect("route exists");
-        route.previous = route.wire.take();
-        route.live_only = true;
         route.status = RouteStatus::Pending;
+        route.live_only = true;
+        route.count = 0;
+        route.quota_retries = 0;
+        route.setup_deadline = None;
+        route.retry_renewal = false;
+        if let Some(wire) = retire {
+            self.close_wire(wire);
+        }
     }
 
     fn filters(&self, route: &Route) -> Vec<Filter> {
@@ -496,106 +770,125 @@ impl Live {
         } else {
             self.options.replay_limit
         };
+        let since = route.metrics_since.unwrap_or(route.since);
         let channel = |ids: Vec<&String>| {
             object(json!({
                 "kinds": kinds::CHANNEL_KINDS,
                 "#h": ids,
-                "since": route.since,
+                "since": since,
                 "limit": limit,
             }))
         };
+        let replay = self.options.replay_limit;
         match &route.key {
             RouteKey::Profiles => vec![
                 object(
-                    json!({"kinds": [kinds::PROFILE, kinds::AGENT_METADATA, kinds::MANAGED_AGENT], "since": route.since, "limit": limit}),
+                    json!({"kinds": [kinds::PROFILE, kinds::AGENT_METADATA, kinds::MANAGED_AGENT], "since": since, "limit": limit}),
                 ),
                 object(
-                    json!({"kinds": [kinds::USER_STATUS], "#d": ["general"], "since": route.since, "limit": limit}),
+                    json!({"kinds": [kinds::USER_STATUS], "#d": ["general"], "since": route.since, "limit": replay}),
                 ),
                 object(
-                    json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": ["buzz:custom-emoji"], "since": route.since, "limit": limit}),
+                    json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": ["buzz:custom-emoji"], "since": route.since, "limit": replay}),
                 ),
             ],
             RouteKey::Membership => vec![
                 object(
-                    json!({"kinds": [kinds::MEMBER_ADDED, kinds::MEMBER_REMOVED], "#p": [self.viewer], "since": route.since, "limit": limit}),
+                    json!({"kinds": [kinds::MEMBER_ADDED, kinds::MEMBER_REMOVED], "#p": [self.viewer], "since": since, "limit": limit}),
                 ),
                 object(
-                    json!({"kinds": [kinds::APP_DATA], "authors": [self.viewer], "#t": ["read-state"], "since": route.since, "limit": limit}),
+                    json!({"kinds": [kinds::APP_DATA], "authors": [self.viewer], "#t": ["read-state"], "since": route.since, "limit": replay}),
                 ),
                 object(
-                    json!({"kinds": [kinds::REMINDERS], "authors": [self.viewer], "since": route.since, "limit": limit}),
+                    json!({"kinds": [kinds::REMINDERS], "authors": [self.viewer], "since": route.since, "limit": replay}),
                 ),
             ],
             RouteKey::Presence => vec![object(json!({
                 "kinds": [kinds::PRESENCE],
                 "authors": self.presence_authors,
-                "since": route.since,
-                "limit": 0,
+                "since": since,
+                "limit": limit,
             }))],
-            // From the moment of dispatch and without a limit: the archive
-            // only takes fresh envelopes.
+            // Without a limit: the archive only takes fresh envelopes.
             RouteKey::Observer => vec![object(json!({
                 "kinds": self.observer_kinds,
                 "#p": [self.viewer],
-                "since": now_secs(),
+                "since": since,
             }))],
-            RouteKey::Channel(_) => vec![channel(route.channels.iter().collect())],
-            // One filter per channel on first open; replacements use one
-            // filter naming all survivors.
-            RouteKey::Batch(_) if route.live_only => vec![channel(route.channels.iter().collect())],
-            RouteKey::Batch(_) => route.channels.iter().map(|id| channel(vec![id])).collect(),
+            // One filter per channel on a first setup, so each keeps its own
+            // replay allowance; replacements name every channel at once.
+            RouteKey::Channel(_) | RouteKey::Batch(_) if route.live_only => {
+                vec![channel(route.channels.iter().collect())]
+            }
+            RouteKey::Channel(_) | RouteKey::Batch(_) => {
+                route.channels.iter().map(|id| channel(vec![id])).collect()
+            }
         }
     }
 
-    /// Starts pending routes: globals first, then prioritized channels, at
-    /// most `setup_concurrency` awaiting EOSE.
+    /// Starts pending routes once authenticated: globals first, then by
+    /// priority, at most `setup_concurrency` awaiting EOSE, none while the
+    /// relay's cooldown runs.
     fn pump(&mut self) {
-        if !self.connected || self.cooldown.is_some_and(|until| until > Instant::now()) {
+        if !self.connected {
             return;
         }
-        let rank = |key: &RouteKey, prioritized: &[String]| match key {
-            RouteKey::Profiles | RouteKey::Membership => 0,
-            RouteKey::Presence | RouteKey::Observer => 1,
-            RouteKey::Channel(id) => match prioritized.iter().position(|p| p == id) {
-                Some(index) => 2 + index,
-                None => 100,
-            },
-            RouteKey::Batch(_) => 101,
+        let rank = |route: &Route, prioritized: &[String]| -> (i64, u64) {
+            let scope = Self::scope(route);
+            let rank = if scope.is_empty() {
+                -2
+            } else {
+                scope
+                    .iter()
+                    .map(|id| {
+                        prioritized
+                            .iter()
+                            .position(|p| p == id)
+                            .unwrap_or(prioritized.len()) as i64
+                    })
+                    .min()
+                    .unwrap_or(prioritized.len() as i64)
+            };
+            (rank, route.order)
         };
-        loop {
-            let setting_up = self
-                .routes
-                .values()
-                .filter(|route| route.status == RouteStatus::SettingUp)
-                .count();
-            if setting_up >= self.options.setup_concurrency {
+        let active = self
+            .routes
+            .values()
+            .filter(|route| route.status == RouteStatus::SettingUp)
+            .count();
+        let mut order: Vec<((i64, u64), RouteKey)> = self
+            .routes
+            .values()
+            .filter(|route| route.status == RouteStatus::Pending)
+            .map(|route| (rank(route, &self.prioritized), route.key.clone()))
+            .collect();
+        order.sort();
+        let room = self.options.setup_concurrency.saturating_sub(active);
+        for (_, key) in order.into_iter().take(room) {
+            if self.cooldown.until().is_some() {
                 return;
             }
-            let Some(key) = self
-                .routes
-                .values()
-                .filter(|route| route.status == RouteStatus::Pending)
-                .min_by_key(|route| rank(&route.key, &self.prioritized))
-                .map(|route| route.key.clone())
-            else {
-                return;
-            };
-            let filters = self.filters(&self.routes[&key]);
-            let subscription = self.socket.subscribe(filters);
             let wire = self.next_wire;
             self.next_wire += 1;
             let route = self.routes.get_mut(&key).expect("pending route exists");
+            if key == RouteKey::Observer {
+                route.since = now_secs();
+                route.metrics_since = route
+                    .metrics_since
+                    .map(|floor| floor.max(route.since.saturating_sub(240)));
+            }
             route.wire = Some(wire);
             route.status = RouteStatus::SettingUp;
             route.setup_deadline = Some(Instant::now() + self.options.setup_deadline);
-            route.replayed = 0;
+            let scope: Arc<[String]> = route.channels.clone().into();
+            let filters = self.filters(&self.routes[&key]);
+            let subscription = self.socket.subscribe(filters);
             self.wires.insert(
                 wire,
                 Wire {
-                    route: key.clone(),
-                    scope: route.channels.clone().into(),
-                    eose: false,
+                    route: key,
+                    scope,
+                    established: false,
                 },
             );
             self.streams.insert(wire, subscription);
@@ -603,66 +896,129 @@ impl Live {
     }
 
     fn wire_event(&mut self, wire: u64, event: SubscriptionEvent) {
-        let Some(state) = self.wires.get_mut(&wire) else {
+        let Some(state) = self.wires.get(&wire) else {
             return;
         };
         let key = state.route.clone();
-        let is_current = self
-            .routes
-            .get(&key)
-            .is_some_and(|route| route.wire == Some(wire));
-        match event {
-            SubscriptionEvent::Event(event) => {
-                let scope = state.scope.clone();
-                let phase = if state.eose || self.routes.get(&key).is_some_and(|r| r.live_only) {
-                    Phase::Live
-                } else {
-                    Phase::Replay
-                };
-                if !state.eose
-                    && let Some(route) = self.routes.get_mut(&key)
-                {
-                    route.replayed += 1;
+        let wire_scope = state.scope.clone();
+        let Some(route) = self.routes.get(&key) else {
+            return;
+        };
+        let current = route.wire == Some(wire);
+        let previous = route.previous == Some(wire);
+        if !current && !previous {
+            return;
+        }
+        if previous
+            && !matches!(
+                event,
+                SubscriptionEvent::Event(_) | SubscriptionEvent::Invalid
+            )
+        {
+            // Only the previous wire's own end matters; its EOSE does not.
+            if matches!(
+                event,
+                SubscriptionEvent::Closed(_) | SubscriptionEvent::Lost
+            ) {
+                self.close_wire(wire);
+                if let Some(route) = self.routes.get_mut(&key) {
+                    route.previous = None;
                 }
-                self.deliver(&key, scope, phase, event);
+            }
+            return;
+        }
+        match event {
+            SubscriptionEvent::Event(event) => self.deliver(&key, &wire_scope, previous, event),
+            SubscriptionEvent::Invalid => {
+                self.fail(&key, "Relay supplied invalid live traffic".into(), false);
             }
             SubscriptionEvent::Eose => {
-                state.eose = true;
-                if !is_current {
+                let route = self.routes.get_mut(&key).expect("current route exists");
+                if route.status != RouteStatus::SettingUp {
                     return;
                 }
-                let route = self.routes.get_mut(&key).expect("current route exists");
+                if let Some(state) = self.wires.get_mut(&wire) {
+                    state.established = true;
+                }
                 route.status = RouteStatus::Live;
                 route.setup_deadline = None;
-                route.quota_retries = 0;
+                route.metrics_since = None;
+                route.error = None;
+                route.replay = if route.count >= self.options.replay_limit {
+                    Replay::Limited
+                } else {
+                    Replay::Unknown
+                };
                 let channels = route.channels.clone();
                 if let Some(previous) = route.previous.take() {
                     self.close_wire(previous);
                 }
+                self.outbox.push_back(LiveUpdate::Status);
                 if !matches!(key, RouteKey::Presence | RouteKey::Observer) {
                     self.outbox.push_back(LiveUpdate::Established {
                         route: key,
                         channels,
                     });
                 }
-                self.outbox.push_back(LiveUpdate::Status);
                 self.pump();
             }
             SubscriptionEvent::Closed(reason) => {
-                self.wires.remove(&wire);
-                if is_current {
-                    self.closed(&key, wire, reason);
-                } else if let Some(route) = self.routes.get_mut(&key)
-                    && route.previous == Some(wire)
-                {
-                    route.previous = None;
-                }
+                let transient = reason.starts_with("rate-limited:") || reason.starts_with("error:");
+                self.fail(&key, reason, transient);
             }
             SubscriptionEvent::Lost | SubscriptionEvent::Resubscribed => {}
         }
     }
 
-    fn deliver(&mut self, key: &RouteKey, scope: Arc<[String]>, phase: Phase, event: Verified) {
+    /// Attributes and forwards one event (`onmessage` EVENT).
+    fn deliver(&mut self, key: &RouteKey, ids: &Arc<[String]>, previous: bool, event: Verified) {
+        let Some(route) = self.routes.get_mut(key) else {
+            return;
+        };
+        let h: Vec<&String> = event.tags_named("h").filter_map(|tag| tag.get(1)).collect();
+        let destination = match h.as_slice() {
+            [one] => Some((*one).clone()),
+            [] if matches!(
+                event.kind_u16(),
+                kinds::CHANNEL_METADATA | kinds::CHANNEL_MEMBERS
+            ) =>
+            {
+                event.tag("d").map(str::to_string)
+            }
+            _ => None,
+        };
+        let channel = match destination {
+            Some(id) if ids.contains(&id) => Some(id),
+            _ if h.is_empty() && matches!(key, RouteKey::Channel(_)) => ids.first().cloned(),
+            _ => None,
+        };
+        if !ids.is_empty() && !h.is_empty() && !h.iter().any(|id| ids.contains(id)) {
+            return;
+        }
+        if previous {
+            // The old wire's traffic must fit the narrowed scope; untagged
+            // auxiliaries cannot inherit it, so the replacement delivers
+            // fresh copies instead.
+            let retained = &route.channels;
+            let outside = match &channel {
+                Some(id) => !retained.contains(id),
+                None => ids.iter().any(|id| !retained.contains(id)),
+            };
+            if outside {
+                return;
+            }
+        }
+        if event.kind_u16() == kinds::TYPING && channel.is_none() {
+            return;
+        }
+        if !previous && route.status == RouteStatus::SettingUp && !route.live_only {
+            route.count += 1;
+        }
+        let phase = if route.live_only || route.status == RouteStatus::Live {
+            Phase::Live
+        } else {
+            Phase::Replay
+        };
         match key {
             RouteKey::Presence => {
                 if event.kind_u16() == kinds::PRESENCE
@@ -672,7 +1028,13 @@ impl Live {
                 }
             }
             RouteKey::Observer => {
+                let floor = if event.kind_u16() == kinds::AGENT_METRICS {
+                    route.metrics_since.unwrap_or(route.since)
+                } else {
+                    route.since
+                };
                 if self.observer_kinds.contains(&event.kind_u16())
+                    && event.created_at_secs() >= floor
                     && event
                         .tags_named("p")
                         .any(|tag| tag.get(1) == Some(&self.viewer))
@@ -680,82 +1042,90 @@ impl Live {
                     self.outbox.push_back(LiveUpdate::Observer(vec![event]));
                 }
             }
-            RouteKey::Profiles | RouteKey::Membership => {
+            _ => {
+                if matches!(
+                    event.kind_u16(),
+                    kinds::AGENT_ACTIVITY | kinds::AGENT_METRICS
+                ) {
+                    return;
+                }
                 self.outbox.push_back(LiveUpdate::Events {
                     events: vec![event],
                     phase,
-                    scope,
+                    sources: if channel.is_none() {
+                        ids.clone()
+                    } else {
+                        Arc::new([])
+                    },
+                    channel,
                 });
-            }
-            RouteKey::Channel(_) | RouteKey::Batch(_) => {
-                // Events naming channels outside this wire's scope are not
-                // ours to deliver; events with no channel (reactions on some
-                // relays) are attributed to the wire's scope.
-                let in_scope = match event.channel() {
-                    Some(channel) => scope.iter().any(|id| id == channel),
-                    None => {
-                        event.tags_named("h").next().is_none() && event.kind_u16() != kinds::TYPING
-                    }
-                };
-                if in_scope {
-                    self.outbox.push_back(LiveUpdate::Events {
-                        events: vec![event],
-                        phase,
-                        scope,
-                    });
-                }
             }
         }
     }
 
-    fn closed(&mut self, key: &RouteKey, wire: u64, reason: String) {
-        let reason: String = reason.chars().take(512).collect();
-        self.streams.remove(&wire);
+    /// A route's wire failed (`fail`). Only a transient failure of an
+    /// unchanged, established scope keeps the old wire; quota refusals
+    /// pause every dispatch and retry quietly a few times.
+    fn fail(&mut self, key: &RouteKey, reason: String, transient: bool) {
         let max_retries = self.options.max_quota_retries;
         let Some(route) = self.routes.get_mut(key) else {
             return;
         };
-        route.wire = None;
+        let previous = route.previous;
+        let retain = transient
+            && previous.is_some_and(|wire| {
+                self.wires
+                    .get(&wire)
+                    .is_some_and(|w| w.established && *w.scope == *route.channels)
+            });
+        let mut closing: Vec<u64> = route.wire.take().into_iter().collect();
+        if retain {
+            route.retry_renewal = !reason.starts_with("rate-limited:");
+        } else {
+            closing.extend(route.previous.take());
+            route.retry_renewal = false;
+        }
         route.setup_deadline = None;
+        route.status = RouteStatus::Error(reason.clone());
+        route.error = Some(reason.clone());
         let channels = route.channels.clone();
-        let mut pause = None;
+        let mut stop_unsent = None;
         if reason.starts_with("rate-limited:") {
-            let hint = quota_retry(&reason);
-            match hint {
-                // Quietly retried once the cooldown passes.
-                Some(seconds) if seconds <= 60 && route.quota_retries < max_retries => {
-                    route.quota_retries += 1;
+            let seconds = quota_hint(&reason).unwrap_or(5);
+            if seconds > 60 {
+                stop_unsent = Some("Unsupported live cooldown; automatic setup stopped");
+                self.cooldown
+                    .pause(seconds.min(crate::socket::MAX_COOLDOWN_SECS));
+            } else {
+                self.cooldown.pause(seconds);
+                route.quota_retries += 1;
+                if route.quota_retries <= max_retries {
                     route.status = RouteStatus::Pending;
-                    pause = Some(seconds);
-                }
-                _ => {
-                    route.status = RouteStatus::Error(
-                        "Live request cooldown retries exhausted; retry available".into(),
-                    );
-                    pause = Some(hint.unwrap_or(5).min(60));
+                } else {
+                    stop_unsent = Some("Live request cooldown retries exhausted; retry available");
                 }
             }
-        } else if reason.starts_with("restricted: not a channel member") {
-            route.status = RouteStatus::Error(reason.clone());
+        }
+        for wire in closing {
+            self.close_wire(wire);
+        }
+        if let Some(error) = stop_unsent {
+            // Never drain the unsent queue into a cooldown already refused.
+            for queued in self.routes.values_mut() {
+                if queued.status == RouteStatus::Pending && queued.wire.is_none() {
+                    queued.status = RouteStatus::Error(error.into());
+                    queued.error = Some(error.into());
+                }
+            }
+        }
+        if reason == "restricted: not a channel member" {
             self.outbox
                 .push_back(LiveUpdate::Denied { channels, reason });
         } else if reason.starts_with("restricted: channel access revoked") {
-            route.status = RouteStatus::Error(reason);
             self.outbox.push_back(LiveUpdate::AccessHint { channels });
-        } else {
-            route.status = RouteStatus::Error(reason);
-        }
-        if let Some(seconds) = pause {
-            // One extra second covers the relay's whole-second rounding.
-            self.pause(Duration::from_secs(seconds + 1));
         }
         self.outbox.push_back(LiveUpdate::Status);
         self.pump();
-    }
-
-    fn pause(&mut self, duration: Duration) {
-        let until = Instant::now() + duration;
-        self.cooldown = Some(self.cooldown.map_or(until, |current| current.max(until)));
     }
 
     fn expire_setups(&mut self) {
@@ -767,55 +1137,68 @@ impl Live {
             .map(|route| route.key.clone())
             .collect();
         for key in expired {
-            let route = self.routes.get_mut(&key).expect("route exists");
-            route.setup_deadline = None;
-            if let Some(wire) = route.wire.take() {
-                self.close_wire(wire);
-            }
-            let route = self.routes.get_mut(&key).expect("route exists");
-            // A replacement that timed out keeps its working previous wire.
-            route.status = if route.previous.is_some() {
-                RouteStatus::Live
-            } else {
-                RouteStatus::Error("Live subscription setup timed out; retry available".into())
-            };
+            self.fail(
+                &key,
+                "Live subscription setup timed out; retry available".into(),
+                true,
+            );
         }
-        self.outbox.push_back(LiveUpdate::Status);
-        self.pump();
     }
 
     /// The minute tick: renews healthy batches on fresh wires so a relay
-    /// that silently pruned a subscription is noticed, and lets the session
-    /// re-check rosters.
+    /// that silently pruned a subscription is noticed, retries failed
+    /// renewals that kept their wire, and asks the session to repair.
     fn recover(&mut self) {
-        self.recovery = Instant::now() + self.options.recovery_interval;
+        self.recovery = Some(Instant::now() + self.options.recovery_interval);
         if !self.connected {
             return;
         }
-        let batches: Vec<RouteKey> = self
-            .routes
-            .values()
-            .filter(|route| {
-                matches!(route.key, RouteKey::Batch(_))
-                    && route.status == RouteStatus::Live
-                    && route.previous.is_none()
-            })
-            .map(|route| route.key.clone())
-            .collect();
-        for key in batches {
-            self.replace(&key, None);
+        let keys: Vec<RouteKey> = self.routes.keys().cloned().collect();
+        for key in keys {
+            let route = &self.routes[&key];
+            if matches!(key, RouteKey::Batch(_))
+                && route.status == RouteStatus::Live
+                && route.previous.is_none()
+            {
+                self.replace(&key, None);
+            } else if matches!(route.status, RouteStatus::Error(_))
+                && route.retry_renewal
+                && route
+                    .previous
+                    .is_some_and(|wire| self.wires.contains_key(&wire))
+            {
+                let route = self.routes.get_mut(&key).expect("route exists");
+                route.status = RouteStatus::Pending;
+                route.retry_renewal = false;
+            }
         }
         self.pump();
+        self.outbox.push_back(LiveUpdate::Status);
+        self.outbox.push_back(LiveUpdate::Recover);
     }
 }
 
-/// `rate-limited: quota exceeded; retry in Ns` → N.
-fn quota_retry(reason: &str) -> Option<u64> {
-    reason
-        .strip_prefix("rate-limited: quota exceeded; retry in ")?
-        .strip_suffix('s')?
-        .parse()
-        .ok()
+/// Bounded channel IDs, deduplicated and sorted (`liveChannels`).
+fn live_channels(mut ids: Vec<String>) -> Result<Vec<String>, String> {
+    let valid = |id: &String| {
+        (1..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    };
+    if ids.len() > MAX_INTERESTS || !ids.iter().all(valid) {
+        return Err("Invalid live channel interests (maximum 1024 bounded IDs)".into());
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn object(value: Value) -> Filter {
@@ -840,15 +1223,18 @@ async fn sleep_until(deadline: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn parses_quota_hints() {
+    fn interests_are_bounded_ids_never_truncated() {
         assert_eq!(
-            super::quota_retry("rate-limited: quota exceeded; retry in 7s"),
-            Some(7)
+            live_channels(vec!["b".into(), "a".into(), "b".into()]),
+            Ok(vec!["a".into(), "b".into()])
         );
-        assert_eq!(
-            super::quota_retry("rate-limited: shared admission unavailable"),
-            None
-        );
+        assert!(live_channels(vec!["has space".into()]).is_err());
+        assert!(live_channels(vec![String::new()]).is_err());
+        assert!(live_channels(vec!["x".repeat(129)]).is_err());
+        assert!(live_channels((0..1025).map(|i| format!("c{i}")).collect()).is_err());
+        assert!(live_channels((0..1024).map(|i| format!("c{i}")).collect()).is_ok());
     }
 }

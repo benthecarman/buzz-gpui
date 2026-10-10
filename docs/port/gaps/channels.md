@@ -51,22 +51,22 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | One socket per (origin, viewer); URL `wss://host` | transport.ts:1172-1205; live.ts:204-214 | DONE (live.rs:157-174; origin.rs:293) | - | - |
 | AUTH kind 22242 with exactly `relay` + `challenge`, challenge 1–4096 bytes | live.ts:720-747; src-tauri/src/relay.rs:260-285 | DONE (crates/identity/src/lib.rs:223-234; socket.rs:578-592) | - | - |
-| Every REQ held until AUTH OK; never treated as open relay | live.ts:523, 748-760 | DIFFERENT | No challenge within 1.5 s marks relay open and sends REQs (socket.rs:90, 348-351, 383-394); remove or dev-only | S |
-| 10 s auth deadline from socket creation ("Live authentication timed out") | live.ts:698-701 | PARTIAL | Deadline only after AUTH is sent (socket.rs:352-353, 418-420) | S |
-| `OK false` for AUTH is terminal ("Relay rejected live authentication") | live.ts:748-752, 679-686 | DIFFERENT | Logged (socket.rs:558-566), times out, reconnects forever; add terminal error state | S |
-| Signing failure / signer ≠ viewer is terminal | live.ts:736-745 | DIFFERENT | Logged (socket.rs:587-590); 1.5 s fallback then sends unauthenticated REQs | S |
+| Every REQ held until AUTH OK; never treated as open relay | live.ts:523, 748-760 | DONE (socket.rs) | - | - |
+| 10 s auth deadline from socket creation ("Live authentication timed out") | live.ts:698-701 | DONE (socket.rs) | - | - |
+| `OK false` for AUTH is terminal ("Relay rejected live authentication") | live.ts:748-752, 679-686 | DONE (socket.rs) | - | - |
+| Signing failure / signer ≠ viewer is terminal | live.ts:736-745 | DONE (socket.rs) | - | - |
 
 ### Reconnect, liveness, recovery
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Backoff `500*2^n` ms, no jitter | live.ts:677 | DIFFERENT | 500 ms·2^(n-1) capped 8 s with 50–100 % jitter (socket.rs:93-94, 654-666) | S |
-| ≤5 auto-reconnects then "Live reconnect attempts exhausted; retry available"; counter resets only in `retry()` | live.ts:671-677, 1055-1058 | DIFFERENT | Unbounded; counter resets on every Ready (socket.rs:274-292, 372-375) | S |
-| No client heartbeat | live.ts (absent); docs/port/relay.md:700-701 | DIFFERENT | Port pings every 25 s, reconnects after 70 s silence (socket.rs:91-92, 412-417); keep and document | S |
+| Backoff `500*2^n` ms, no jitter | live.ts:677 | DONE (socket.rs) | - | - |
+| ≤5 auto-reconnects then "Live reconnect attempts exhausted; retry available"; counter resets only in `retry()` | live.ts:671-677, 1055-1058 | DONE (socket.rs; live.rs) | - | - |
+| No client heartbeat | live.ts (absent); docs/port/relay.md:700-701 | DONE (socket.rs; kept and documented as a port addition) | - | - |
 | On reconnect rebuild routes with `since=now-300`, `limit 500` | live.ts:653-660, 430 | DONE (live.rs:295-317, 408-421) | - | - |
-| Live `retry()` keeps the server cooldown | live.ts:1055-1069, 24-59 | DIFFERENT | `retry()` sets `cooldown = None` (live.rs:247-260), skipping the quota pause | S |
+| Live `retry()` keeps the server cooldown | live.ts:1055-1069, 24-59 | DONE (live.rs) | - | - |
 | 60 s tick renews multi-channel batches with `limit:0` | live.ts:345-368 | DONE (live.rs:743-762) | - | - |
-| Tick re-pends retained renewals and calls `recover()` (roster refresh + `unread.reconnect()`) | live.ts:353-367 | MISSING | `recover()` emits no LiveUpdate; no periodic roster/unread repair | M |
+| Tick re-pends retained renewals and calls `recover()` (roster refresh + `unread.reconnect()`) | live.ts:353-367 | DONE (live.rs; session/mod.rs, session/unread.rs) | - | - |
 
 ### Subscription management
 
@@ -76,20 +76,20 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 | REQ filters per route (channel kinds `#h`; profiles; membership incl. read-state and 30300; presence `limit 0`) | live.ts:200-203, 572-635 | DONE (live.rs:462-511) | - | - |
 | Observer/telemetry route (24200/44200 `#p viewer`, archive capture, settings retry) | live.ts:302-320, 567-588, 852-866; native.ts:539-659 | MISSING | With agent activity feature | M |
 | `prioritize` ≤64 ids; singletons; globals first; `SETUP_CONCURRENCY=4` | live.ts:22, 521-553, 1031-1035 | DONE (live.rs:214-226, 515-565) | - | - |
-| Setup deadline 10 s ("Live subscription setup timed out; retry available"); keep previous wire and re-pend | live.ts:455-473, 558-565 | PARTIAL | With a previous wire the route is marked `Live` without error and never renewed again (live.rs:714-738) | S |
-| Replacement keeps previous wire until EOSE; previous-wire events filtered to narrowed scope | live.ts:323-344, 832-842 | PARTIAL | Previous-wire events use the old wider scope (live.rs:578, 643-659) | S |
-| Interest validation (≤1024 ids, id regex, presence authors 64-hex ≤256, throw not truncate) | live.ts:148-181 | PARTIAL | No validation; presence authors truncated (live.rs:214-236) | S |
+| Setup deadline 10 s ("Live subscription setup timed out; retry available"); keep previous wire and re-pend | live.ts:455-473, 558-565 | DONE (live.rs) | - | - |
+| Replacement keeps previous wire until EOSE; previous-wire events filtered to narrowed scope | live.ts:323-344, 832-842 | DONE (live.rs) | - | - |
+| Interest validation (≤1024 ids, id regex, presence authors 64-hex ≤256, throw not truncate) | live.ts:148-181 | DONE (live.rs) | - | - |
 | Dropping a route fences its wire then sends CLOSE | live.ts:288-297 | DONE (socket.rs:167-171, 453-460; live.rs:436-441) | - | - |
 
 ### Frame handling
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Inbound frames over 1 MiB or non-string dropped | live.ts:707-710 | PARTIAL | Binary ignored (socket.rs:364-367); no size cap; set `max_message_size` 1 MiB | S |
-| Invalid live EVENT fails the route ("Relay supplied invalid live traffic") | live.ts:805-811 | DIFFERENT | Dropped with warning (socket.rs:509-516) | S |
+| Inbound frames over 1 MiB or non-string dropped | live.ts:707-710 | DONE (socket.rs) | - | - |
+| Invalid live EVENT fails the route ("Relay supplied invalid live traffic") | live.ts:805-811 | DONE (socket.rs; live.rs) | - | - |
 | Channel attribution incl. multi-`h` events delivered with `sourceChannels` | live.ts:812-879 | PARTIAL | Multi-`h` events dropped (event.rs:173-185; live.rs:647-652) | S |
 | Replay vs live phase tagging | live.ts:870-878 | DONE (live.rs:579-583) | - | - |
-| EOSE: route live, previous wire closed, `established`; `replay:"limited"` when ≥500 | live.ts:880-892 | PARTIAL | `replayed` count (live.rs:124, 584-588) never exposed | S |
+| EOSE: route live, previous wire closed, `established`; `replay:"limited"` when ≥500 | live.ts:880-892 | DONE (live.rs; `LiveSnapshot` routes) | - | - |
 | CLOSED: reason ≤512 chars; "restricted: not a channel member" = denied | live.ts:504-518, 893-903 | DONE (live.rs:664-697) | - | - |
 | CLOSED on previous wire closes only that wire | live.ts:797-802 | DONE (live.rs:613-622) | - | - |
 | NOTICE logged; OK matched to AUTH, presence, publications | live.ts:718, 748-790 | DONE (socket.rs:547-597) | - | - |
@@ -99,19 +99,19 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Shared cooldown `pause(N)` = now+(N+1) s, gates REQ dispatch, survives socket replacement; ≤3 quiet retries for hint ≤60 s | live.ts:23, 26-59, 475-492 | DONE (live.rs:516, 675-683, 700-712) | - | - |
-| Missing hint treated as 5 s and retried | live.ts:479 | DIFFERENT | Route errors immediately "retries exhausted" (live.rs:684-689) | S |
-| Hint >60 s: all unsent pending routes error "Unsupported live cooldown; automatic setup stopped"; pause min(N, 86400) | live.ts:480-489 | DIFFERENT | Only this route errors; pause capped 60 s (live.rs:684-689) | S |
-| Retries exhausted stops every unsent pending route | live.ts:492-501 | PARTIAL | Only failing route stops | S |
-| Transient CLOSED on renewal keeps wire and re-pends next tick | live.ts:455-472, 353-360, 898-902 | PARTIAL | `error:` routes stay in Error; never re-pended (live.rs:698-699, 743-762) | S |
+| Missing hint treated as 5 s and retried | live.ts:479 | DONE (live.rs) | - | - |
+| Hint >60 s: all unsent pending routes error "Unsupported live cooldown; automatic setup stopped"; pause min(N, 86400) | live.ts:480-489 | DONE (live.rs) | - | - |
+| Retries exhausted stops every unsent pending route | live.ts:492-501 | DONE (live.rs) | - | - |
+| Transient CLOSED on renewal keeps wire and re-pends next tick | live.ts:455-472, 353-360, 898-902 | DONE (live.rs) | - | - |
 
 ### Socket publications and presence
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Socket publications (≤32 pending, ≤3 unacked, dup refused, 64 KiB frame, 10 s incl. pre-auth, receipt ≤16 KiB, `sent` kept) | socket-requests.ts:26-140 | PARTIAL | 15 s timeout and correlation only; pre-auth publish = NotConnected; all pending = Unknown on loss (socket.rs:89, 430-433, 461-472) | S |
-| OK false proves non-delivery only for specific prefixes | socket-requests.ts:109-130 | DIFFERENT | Any OK false = Rejected; `duplicate:` = accepted (socket.rs:567-575) | S |
-| Publication `rate-limited` pauses the shared live cooldown | live.ts:778-790 | MISSING | Presence refusals pause only presence (presence.rs:558-561) | S |
-| Presence publish: 5 s gate, 10 s receipt timeout; no-hint quota pauses 86400 s | live.ts:922-985, 761-777 | PARTIAL | No-hint pause capped at 60 s (presence.rs:35) | S |
+| Socket publications (≤32 pending, ≤3 unacked, dup refused, 64 KiB frame, 10 s incl. pre-auth, receipt ≤16 KiB, `sent` kept) | socket-requests.ts:26-140 | DONE (socket.rs) | - | - |
+| OK false proves non-delivery only for specific prefixes | socket-requests.ts:109-130 | DONE (socket.rs) | - | - |
+| Publication `rate-limited` pauses the shared live cooldown | live.ts:778-790 | DONE (socket.rs) | - | - |
+| Presence publish: 5 s gate, 10 s receipt timeout; no-hint quota pauses 86400 s | live.ts:922-985, 761-777 | DONE (socket.rs; presence.rs; session/presence.rs) | - | - |
 | Presence snapshot over `/query` (relay-signed, one `p`, 10 s, 1 MiB, absent = offline) | transport.ts:310-353, 1131-1171 | DONE (session/presence.rs:115-147; presence.rs:137-180) | - | - |
 
 ### HTTP transport, NIP-98 and admission
@@ -120,12 +120,12 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | No redirects, 10 s connect, 30 s total; NIP-11 GET with `Accept: application/nostr+json` | src-tauri/src/relay.rs:640-653, 708-769; native.ts:99-124 | DONE (http.rs:65-70, 164-180) | - | - |
 | NIP-98 kind 27235 (`u`, `method`, `payload`, `nonce`) per request | src-tauri/src/relay.rs:717-756 | DONE (crates/identity/src/lib.rs:238-257; http.rs:121-131) | - | - |
-| Size caps: 16 MiB response, 1 MiB request | src-tauri/src/relay.rs:40-41, 662-666 | DIFFERENT | 8 MiB response (http.rs:11), no request cap | S |
+| Size caps: 16 MiB response, 1 MiB request | src-tauri/src/relay.rs:40-41, 662-666 | DONE (http.rs) | - | - |
 | One invalid event rejects the whole read | transport.ts:221-243 | DONE (reader.rs:538-549; `RelayHttp::query` drops silently, http.rs:91-99) | - | - |
 | API lane: 6 concurrent per (origin, viewer) | http-admission.ts:148; host-admission.ts:6-38 | DONE (http.rs:49-61, 111-120) | - | - |
-| Lane queue: foreground first, ≤128 queued ("Relay API queue capacity reached") | http-admission.ts:139-154, 173-182, 204 | PARTIAL | FIFO semaphore, unbounded waiters (http.rs:113-118) | S |
+| Lane queue: foreground first, ≤128 queued ("Relay API queue capacity reached") | http-admission.ts:139-154, 173-182, 204 | DONE (http.rs) | - | - |
 | 429 quota pauses lane N+1 s (no hint 61 s, max 86400), fails queued work "Relay requests paused; retry in Ns" | http-admission.ts:34-51, 188-196, 242-264 | DONE (http.rs:136-161, 229-237) | - | - |
-| Presence lossy lease outside the 6 slots | http-admission.ts:157-169 | PARTIAL | Presence reads take a normal slot (session/presence.rs:121) | S |
+| Presence lossy lease outside the 6 slots | http-admission.ts:157-169 | DONE (http.rs; session/presence.rs) | - | - |
 | Error text (4 KiB body, known messages else "Relay request failed (N)", error kinds) | http-admission.ts:31-113; errors.ts:1-36 | DONE (reader.rs:60-125) | - | - |
 
 ### Write receipts
@@ -161,7 +161,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | MISSING | Dev-only; tracing spans | S |
-| Frame traffic log and `relayDebug` | live.ts:280-286, 689, 718; debug.ts:1-7 | PARTIAL | Tracing only for loss, NOTICE, bad signatures (socket.rs:282, 495, 514, 595) | S |
+| Frame traffic log and `relayDebug` | live.ts:280-286, 689, 718; debug.ts:1-7 | DONE (socket.rs: `relay-ws` trace target for every frame) | - | - |
 | `yieldToHost` batches of 12 | yield.ts:1-12; transport.ts:234-241 | DONE (reader.rs:544-547, `spawn_blocking`) | - | - |
 | Budgets (32 KiB input, byteSize, ByteLru) | budget.ts:1-71 | DONE (outbox.rs:51, 749; unread.rs:319) | - | - |
 | Dev browser broker transport and SSE live | transport.ts:356-1085; broker-live.ts:1-558 | DIFFERENT | Deliberately not ported (no browser host) | - |
@@ -312,7 +312,7 @@ Key findings:
 | ≤3 concurrent deliveries; 10 s deadline from enqueue | outbox.ts:90, 407-428 | DONE (outbox.rs:54-55, 1262-1337) | - | - |
 | Failure classes, no downgrade, "Retry blocked/failed:" prefixes, timeout text | outbox.ts:381-406, 500-532 | DONE (outbox.rs:1472-1526) | - | - |
 | acceptPublish status mapping, 16 KiB receipt | transport.ts:1313-1359 | DONE (outbox.rs:239-296) | - | - |
-| Quota refusal (`sent:false` + `rate-limited:` or `quota:"api"` = rejected) | transport.ts:1326-1339 | PARTIAL | Only 429 + "rate-limited: quota exceeded" recognised (outbox.rs:256-265; http.rs:136-149); read `sent`/`quota` fields | S |
+| Quota refusal (`sent:false` + `rate-limited:` or `quota:"api"` = rejected) | transport.ts:1326-1339 | DONE (outbox.rs; http.rs) | - | - |
 | `accepted:false` with "duplicate:" | transport.ts:1352-1357 (failed) | DIFFERENT | Counted as accepted (outbox.rs:292), on purpose per spec §9.3 #3 | - |
 | Event older than 15 min: strong read by id instead of re-post | native.ts:835-858 | DONE (outbox.rs:298-314) | - | - |
 | Echo polling at 0/500/1500/4000/10000 ms | session.ts:579-602; outbox.ts:531-532 | DONE (outbox.rs:56-62, 1562-1607) | - | - |

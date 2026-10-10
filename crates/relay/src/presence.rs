@@ -30,9 +30,6 @@ const COALESCE_MS: u64 = 100;
 const READ_GATE_MS: u64 = 5_000;
 /// At most one publication per this interval (`live.ts` send gate).
 const SEND_GATE_MS: u64 = 5_000;
-/// Longest a refused publication pauses presence, whatever the relay says.
-/// The reference paused all live traffic for a day (§9.3 #5).
-const MAX_PAUSE_MS: u64 = 60_000;
 
 /// A status on the wire. Unknown is the absence of evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -447,9 +444,10 @@ pub enum PublishOutcome {
     Accepted,
     /// Not sent: the socket was not connected.
     NotSent,
-    /// `OK false`. `rate-limited:` reasons pause presence only.
-    Rejected(String),
-    /// No answer in time, or the connection dropped first.
+    /// Not sent: the relay's quota cooldown runs this many more ms.
+    Cooling(u64),
+    /// Refused (a quota refusal pauses the shared cooldown at the
+    /// socket), no answer in time, or the connection dropped first.
     Unconfirmed,
 }
 
@@ -575,27 +573,12 @@ impl PresencePublisher {
             }
             PublishOutcome::Accepted => minute(),
             PublishOutcome::NotSent => 5_000 + random_below(1_000),
-            PublishOutcome::Rejected(reason) if reason.starts_with("rate-limited:") => {
-                rate_limit_ms(reason)
-                    .unwrap_or(MAX_PAUSE_MS)
-                    .min(MAX_PAUSE_MS)
-                    + 50
-            }
-            PublishOutcome::Rejected(_) | PublishOutcome::Unconfirmed => minute(),
+            PublishOutcome::Cooling(ms) => ms + 50,
+            PublishOutcome::Unconfirmed => minute(),
         };
         self.next = Some(now + delay);
         (outcome == PublishOutcome::Accepted).then_some(publication.state)
     }
-}
-
-/// `rate-limited: quota exceeded; retry in Ns` → N s in ms.
-fn rate_limit_ms(reason: &str) -> Option<u64> {
-    reason
-        .strip_prefix("rate-limited: quota exceeded; retry in ")?
-        .strip_suffix('s')?
-        .parse::<u64>()
-        .ok()
-        .map(|seconds| seconds.saturating_mul(1000))
 }
 
 #[cfg(test)]
@@ -912,23 +895,17 @@ mod tests {
     }
 
     #[test]
-    fn refusals_pause_presence_for_at_most_a_minute() {
+    fn refusals_wait_a_minute_and_cooldowns_their_length() {
         let mut publisher = PresencePublisher::default();
         publisher.set_connected(true, 0);
         let publication = publisher.due(1_000).unwrap();
-        publisher.finished(
-            publication,
-            PublishOutcome::Rejected("rate-limited: presence".into()),
-            1_000,
-        );
-        assert_eq!(publisher.deadline(), Some(1_000 + MAX_PAUSE_MS + 50));
+        publisher.finished(publication, PublishOutcome::Unconfirmed, 1_000);
+        assert!((61_000..=66_000).contains(&publisher.deadline().unwrap()));
 
+        // The shared cooldown, not the refusal, decides how long a quota
+        // pause lasts.
         let publication = publisher.due(70_000).unwrap();
-        publisher.finished(
-            publication,
-            PublishOutcome::Rejected("rate-limited: quota exceeded; retry in 7s".into()),
-            70_000,
-        );
+        publisher.finished(publication, PublishOutcome::Cooling(7_000), 70_000);
         assert_eq!(publisher.deadline(), Some(77_050));
 
         let publication = publisher.due(80_000).unwrap();

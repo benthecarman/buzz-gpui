@@ -300,6 +300,7 @@ mod tests {
                     status: 400,
                     message: message.into(),
                     retry_after: None,
+                    not_sent: false,
                 }),
                 &id,
             )

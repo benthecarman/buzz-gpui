@@ -54,7 +54,8 @@ async fn channel_batches_deliver_new_messages() {
         [general.clone(), random.clone()],
         [general.clone(), random.clone()],
         Vec::new(),
-    );
+    )
+    .unwrap();
     until(&mut live, |u| {
         matches!(u, LiveUpdate::Connected).then_some(())
     })

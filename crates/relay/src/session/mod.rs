@@ -42,7 +42,9 @@ use crate::emoji::{EmojiDirectory, EmojiSnapshot, catalog_filter};
 use crate::event::{Verified, Verifier, kinds};
 use crate::fold::{LocalDelivery, MessageClock};
 use crate::http::RelayHttp;
-use crate::live::{Live, LiveOptions, LiveUpdate};
+use crate::live::{
+    Live, LiveConnection, LiveOptions, LiveRoute, LiveRouteStatus, LiveSnapshot, LiveUpdate,
+};
 use crate::media::Media;
 use crate::messages::{self, Attachment, Author, Compose, Mentions};
 use crate::origin::RelayOrigin;
@@ -99,11 +101,130 @@ pub struct RelayInfo {
     pub read_state_snapshot: Option<SnapshotDescriptor>,
 }
 
+/// The last roster pass (`RosterRefresh`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RosterRefresh {
+    #[default]
+    Idle,
+    Pending,
+    Verified,
+    /// Interrupted (by a revocation or reconnect); another pass is owed.
+    Deferred,
+    Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatchUpState {
+    Pending,
+    Verified,
+    /// Not needed now (the channel is not open) or interrupted.
+    Deferred,
+    Error,
+}
+
+/// A channel's catch-up after the live stream was (re)established.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadCatchUp {
+    pub channel: String,
+    pub state: CatchUpState,
+    pub error: Option<String>,
+}
+
+/// Live updates as the "Live updates need attention" notice reads them
+/// (`session.live`): the connection and its routes, the roster pass and
+/// per-channel catch-up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveView {
+    pub live: LiveSnapshot,
+    pub roster: RosterRefresh,
+    pub heads: Vec<HeadCatchUp>,
+}
+
+impl LiveView {
+    /// The first error worth showing for `channel` (`LiveStatus.tsx`):
+    /// the connection, the roster, the channel's catch-up, then its route
+    /// or a global route. Quiet while quota recovery runs by itself.
+    pub fn issue(&self, channel: Option<&str>) -> Option<String> {
+        let route = channel.and_then(|id| {
+            self.live
+                .routes
+                .iter()
+                .find(|route| route.channel.as_deref() == Some(id))
+        });
+        let head = channel.and_then(|id| self.heads.iter().find(|head| head.channel == id));
+        let relevant: Vec<&LiveRoute> = route
+            .into_iter()
+            .chain(
+                self.live
+                    .routes
+                    .iter()
+                    .filter(|route| route.channel.is_none()),
+            )
+            .collect();
+        let recovering = |route: &LiveRoute| {
+            self.live.status == LiveConnection::Connected
+                && route.status == LiveRouteStatus::Pending
+                && route
+                    .error
+                    .as_deref()
+                    .and_then(crate::socket::quota_hint)
+                    .is_some_and(|seconds| seconds <= 60)
+        };
+        let actionable: Vec<&&LiveRoute> =
+            relevant.iter().filter(|route| !recovering(route)).collect();
+        let roster_error = match &self.roster {
+            RosterRefresh::Error(error) => Some(error.clone()),
+            _ => None,
+        };
+        let error = self
+            .live
+            .error
+            .clone()
+            .or(roster_error)
+            .or_else(|| head.and_then(|head| head.error.clone()))
+            .or_else(|| actionable.iter().find_map(|route| route.error.clone()));
+        let issue = matches!(
+            self.live.status,
+            LiveConnection::Retrying | LiveConnection::Error
+        ) || error.is_some()
+            || actionable.iter().any(|route| {
+                matches!(
+                    route.status,
+                    LiveRouteStatus::Error | LiveRouteStatus::Limited
+                )
+            })
+            || head.is_some_and(|head| head.state == CatchUpState::Error)
+            || matches!(
+                self.roster,
+                RosterRefresh::Error(_) | RosterRefresh::Deferred
+            );
+        if !issue {
+            return None;
+        }
+        Some(match error {
+            Some(error) if error.contains("rate-limited: quota exceeded") => {
+                "A relay request was rate-limited; recovery needs attention.".into()
+            }
+            Some(error) => error,
+            None if matches!(
+                self.roster,
+                RosterRefresh::Error(_) | RosterRefresh::Deferred
+            ) =>
+            {
+                "Channel list needs refreshing.".into()
+            }
+            None => "Live updates are unavailable.".into(),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionSnapshot {
     pub status: SessionStatus,
     /// The live socket is authenticated; otherwise views may be stale.
     pub live: bool,
+    /// Live connection, routes and catch-up. Replaced only when it changes.
+    pub live_status: Arc<LiveView>,
     pub relay: Option<RelayInfo>,
     pub roster: RosterStatus,
     /// Channels the viewer is a member of, DMs included.
@@ -218,6 +339,7 @@ impl Session {
         let snapshot = watch::Sender::new(Arc::new(SessionSnapshot {
             status: SessionStatus::Connecting,
             live: false,
+            live_status: Arc::default(),
             relay: None,
             roster: RosterStatus::Loading,
             channels: Arc::new([]),
@@ -291,6 +413,8 @@ impl Session {
             sidebar: sidebar::SidebarPrefs::new(runtime),
             watches: HashMap::new(),
             view_reports: HashMap::new(),
+            roster_refresh: RosterRefresh::Idle,
+            live_view: Arc::default(),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -726,6 +850,8 @@ struct Actor {
     watches: HashMap<u64, unread::WatchState>,
     /// What each open channel view last reported it shows.
     view_reports: HashMap<String, (Vec<EventId>, bool)>,
+    roster_refresh: RosterRefresh,
+    live_view: Arc<LiveView>,
 }
 
 impl Actor {
@@ -1176,7 +1302,9 @@ impl Actor {
             .chain(prioritized.iter().cloned())
             .filter(|id| discovery.can_access(id))
             .collect();
-        live.update(interests, joined, prioritized);
+        if let Err(error) = live.update(interests, joined, prioritized) {
+            tracing::warn!(%error, "live interests refused");
+        }
     }
 
     // ----- live -----
@@ -1186,14 +1314,15 @@ impl Actor {
             LiveUpdate::Events {
                 events,
                 phase,
-                scope,
+                channel,
+                ..
             } => {
                 // Typing pulses never enter history, unread or caches.
                 let (pulses, events): (Vec<Verified>, Vec<Verified>) = events
                     .into_iter()
                     .partition(|event| event.kind_u16() == kinds::TYPING);
                 let candidates = if phase == crate::live::Phase::Live {
-                    self.incoming_candidates(&events, &scope)
+                    self.incoming_candidates(&events, channel.as_deref())
                 } else {
                     Vec::new()
                 };
@@ -1210,7 +1339,12 @@ impl Actor {
             }
             LiveUpdate::Presence(events) => self.presence_live(&events),
             LiveUpdate::Observer(events) => self.observed(events),
-            LiveUpdate::Status => {}
+            LiveUpdate::Status => self.publish_live(),
+            LiveUpdate::Recover => {
+                // A repair hint, not evidence: re-read the roster and unread.
+                self.start_scan(ScanOptions::default());
+                self.reads_recover();
+            }
             LiveUpdate::Established { route, channels } => {
                 if matches!(route, crate::RouteKey::Profiles) {
                     // Profiles changed while we were away are re-read.
@@ -1259,6 +1393,23 @@ impl Actor {
                 }
                 self.reads_disconnected();
             }
+        }
+    }
+
+    fn catch_up_states(&self) -> Vec<HeadCatchUp> {
+        Vec::new()
+    }
+
+    /// Rebuilds the live view and publishes it if it changed.
+    fn publish_live(&mut self) {
+        let next = LiveView {
+            live: self.live.as_ref().map(Live::snapshot).unwrap_or_default(),
+            roster: self.roster_refresh.clone(),
+            heads: self.catch_up_states(),
+        };
+        if *self.live_view != next {
+            self.live_view = Arc::new(next);
+            self.publish();
         }
     }
 
@@ -1677,6 +1828,7 @@ impl Actor {
         let next = SessionSnapshot {
             status: self.snapshot.borrow().status.clone(),
             live: self.live.as_ref().is_some_and(Live::is_connected),
+            live_status: self.live_view.clone(),
             relay: self.relay.clone(),
             roster: self.roster.clone(),
             channels,
@@ -1706,6 +1858,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.emoji, &next.emoji)
                 && Arc::ptr_eq(&current.sidebar, &next.sidebar)
                 && Arc::ptr_eq(&current.statuses, &next.statuses)
+                && Arc::ptr_eq(&current.live_status, &next.live_status)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);

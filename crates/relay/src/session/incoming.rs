@@ -92,9 +92,10 @@ impl Actor {
     pub(super) fn incoming_candidates(
         &mut self,
         events: &[Verified],
-        scope: &[String],
+        channel: Option<&str>,
     ) -> Vec<Verified> {
-        let Some(reads) = &self.reads else {
+        // Only traffic attributed to one channel can notify.
+        let (Some(reads), Some(scope)) = (&self.reads, channel) else {
             return Vec::new();
         };
         let viewer = self.identity.pubkey_hex();
@@ -106,9 +107,7 @@ impl Actor {
                     kinds::CHAT | kinds::AGENT_MESSAGE | kinds::DIFF
                 ) && event.pubkey_hex() != viewer
                     && event.tags_named("h").count() == 1
-                    && event
-                        .channel()
-                        .is_some_and(|channel| scope.iter().any(|id| id == channel))
+                    && event.channel() == Some(scope)
                     && !reads.unread.retains(&event.id_hex())
             })
             .filter(|event| self.incoming.first_sight(event.id))

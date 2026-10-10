@@ -451,6 +451,20 @@ impl Actor {
         self.schedule_thread_dwell();
     }
 
+    /// The live minute tick (`recover` → `unread.reconnect()`): once evidence
+    /// was asked for, refresh markers and repair it in the background.
+    pub(super) fn reads_recover(&mut self) {
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        if reads.reconnecting || !reads.unread.reconnect() {
+            return;
+        }
+        reads.refreshed = false;
+        reads.repair_wanted = true;
+        self.refresh_reads();
+    }
+
     /// The user asked to retry: rerun a failed refresh, repair or publish.
     pub(super) fn retry_reads(&mut self) {
         let Some(reads) = &mut self.reads else {

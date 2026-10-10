@@ -57,11 +57,15 @@ async fn reads_a_channel_over_both_transports() {
     let info = http.information().await.unwrap();
     assert_eq!(info["self"].as_str().map(str::len), Some(64));
 
+    // By id: other tests keep posting to #general, so the seeded message
+    // is not always among the newest.
+    let welcome = fixture.seed["events"]["welcome"].as_str().unwrap();
     let events = http
-        .query(&[filter(json!({"kinds": [9], "#h": [general], "limit": 50}))])
+        .query(&[filter(
+            json!({"kinds": [9], "#h": [general], "ids": [welcome], "limit": 1}),
+        )])
         .await
         .unwrap();
-    let welcome = fixture.seed["events"]["welcome"].as_str().unwrap();
     assert!(
         events.iter().any(|e| e.id.to_hex() == welcome),
         "{events:?}"
@@ -75,7 +79,7 @@ async fn reads_a_channel_over_both_transports() {
         SocketOptions::default(),
     );
     let mut subscription = socket.subscribe(vec![filter(
-        json!({"kinds": [9], "#h": [general], "limit": 50}),
+        json!({"kinds": [9], "#h": [general], "ids": [welcome], "limit": 1}),
     )]);
     let mut seen = Vec::new();
     loop {
