@@ -100,7 +100,7 @@ impl ClaudeCode {
             Some(Arc::new(AppRelay {
                 http: RelayHttp::new(community.origin.clone(), identity.clone()),
                 identity: identity.clone(),
-                snapshot: community.session.snapshot(),
+                snapshot: Some(community.session.snapshot()),
             }) as Arc<dyn OwnerRelay>)
         });
         self.runtime.set_relay(relay);
@@ -290,7 +290,9 @@ fn event_of(event: &crate::agents2::attention::EventData) -> BuzzEvent {
 struct AppRelay {
     http: RelayHttp,
     identity: Arc<Identity>,
-    snapshot: tokio::sync::watch::Receiver<Arc<SessionSnapshot>>,
+    /// The session's view: channels and profiles. `None` reads only
+    /// over HTTP.
+    snapshot: Option<tokio::sync::watch::Receiver<Arc<SessionSnapshot>>>,
 }
 
 fn filters(values: Vec<Value>) -> Vec<buzz_relay_client::socket::Filter> {
@@ -314,7 +316,7 @@ fn profile_name(content: &str) -> Option<String> {
 
 impl OwnerRelay for AppRelay {
     fn channel(&self, id: &str) -> Option<ChannelInfo> {
-        let snapshot = self.snapshot.borrow().clone();
+        let snapshot = self.snapshot.as_ref()?.borrow().clone();
         snapshot
             .channels
             .iter()
@@ -349,7 +351,11 @@ impl OwnerRelay for AppRelay {
         pubkeys: Vec<String>,
         _members: Vec<String>,
     ) -> BoxFuture<'static, HashMap<String, String>> {
-        let profiles = self.snapshot.borrow().profiles.clone();
+        let profiles = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.borrow().profiles.clone())
+            .unwrap_or_default();
         let mut names = HashMap::new();
         let mut missing = Vec::new();
         for pubkey in pubkeys {

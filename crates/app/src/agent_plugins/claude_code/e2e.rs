@@ -138,8 +138,8 @@ async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
+/// A host embedded as the app embeds it, with the GUI's side connected.
+async fn connect_host() -> (Arc<HostClient<HostProtocol>>, Spawner) {
     fake_on_path();
     let state = scratch("host");
     let host = AgentHost::start(HostConfig {
@@ -176,10 +176,16 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
         .await
         .unwrap();
     let spawn: Spawner = Arc::new(HostSpawner {
-        client,
+        client: client.clone(),
         sinks,
         owner: super::PROCESS_OWNER,
     });
+    (client, spawn)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
+    let (_client, spawn) = connect_host().await;
 
     // Setup reads the version and account through the host.
     let setup = ClaudeSetup::new(Some(spawn.clone()));
@@ -289,4 +295,168 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
     wait_for("the file", || agent.published.lock().unwrap().len() == 2).await;
     assert_eq!(agent.published.lock().unwrap()[1].content, "from a file");
     runtime.dispose();
+}
+
+/// Against the TLS test relay with a throwaway agent owned by alice: the
+/// owner reads its core memory back, and a mention's turn publishes its
+/// reply through the Buzz tools as the agent. Skipped unless
+/// `BUZZ_TEST_RELAY` names the test relay's state directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
+    use crate::agents2::AgentHandle;
+    use crate::agents2::runtime::HostLink;
+    use buzz_host::api::{AppAgentRequest, AppAgentResponse, Request, Response};
+    use buzz_identity::{Identity, Purpose};
+    use buzz_relay_client::{RelayHttp, RelayOrigin};
+    use serde_json::json;
+
+    let Some(dir) = std::env::var_os("BUZZ_TEST_RELAY").map(PathBuf::from) else {
+        eprintln!("BUZZ_TEST_RELAY not set; skipping");
+        return;
+    };
+    let read = |path: PathBuf| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+    };
+    let identities = read(dir.join("identities.json"));
+    let tls = read(dir.join("tls/relay.json"));
+    // The bundle trusts the test relay's CA as well as the usual roots.
+    // SAFETY: before this test makes any TLS connection; no other test in
+    // this binary connects over TLS.
+    unsafe { std::env::set_var("SSL_CERT_FILE", tls["ca_bundle"].as_str().unwrap()) };
+    let alice = Arc::new(
+        Identity::from_nsec(identities["identities"]["alice"]["nsec"].as_str().unwrap()).unwrap(),
+    );
+    let relay = tls["relay_ws_url"].as_str().unwrap().to_owned();
+    let general = tls["channels"]["general"].as_str().unwrap().to_owned();
+    let (client, spawn) = connect_host().await;
+    let ask = |request: AppAgentRequest| {
+        let client = client.clone();
+        async move {
+            match client.request(Request::AppAgent(request)).await {
+                Ok(Response::AppAgent(response)) => response,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    };
+    let AppAgentResponse::Prepared { pubkey } = ask(AppAgentRequest::CreatePrepare {
+        request_id: "claude-code-relay".into(),
+        destination: relay.clone(),
+        owner: alice.pubkey_hex(),
+        agent_type: format!("{}/{}", super::PLUGIN, super::TYPE_ID),
+        name: "Claude Code Test".into(),
+    })
+    .await
+    else {
+        panic!("expected prepared");
+    };
+    ask(AppAgentRequest::CreateCommit {
+        request_id: "claude-code-relay".into(),
+        auth: alice.attest_agent(&pubkey).unwrap(),
+    })
+    .await;
+    let http = RelayHttp::new(RelayOrigin::parse(&relay).unwrap(), alice.clone());
+    let now = || chrono::Utc::now().timestamp() as u64;
+    let post = |kind: u16, tags: Vec<Vec<String>>, content: String| {
+        let (alice, http) = (alice.clone(), http.clone());
+        async move {
+            let unsigned = alice
+                .template(Purpose::Content, kind, now(), tags, content)
+                .unwrap();
+            let signed = alice.sign(Purpose::Content, unsigned).unwrap();
+            let receipt = http
+                .post("/events", serde_json::to_string(&signed).unwrap())
+                .await
+                .unwrap();
+            let receipt: Value = serde_json::from_slice(&receipt).unwrap();
+            assert_eq!(receipt["accepted"], true, "kind {kind} refused: {receipt}");
+            signed
+        }
+    };
+    let membership = vec![
+        vec!["h".to_string(), general.clone()],
+        vec!["p".to_string(), pubkey.clone()],
+    ];
+    post(9000, membership.clone(), String::new()).await;
+
+    let handle = AgentHandle {
+        pubkey: pubkey.clone(),
+        name: "Claude Code Test".into(),
+        owner: alice.pubkey_hex(),
+        host: HostLink {
+            client: client.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        },
+        wrote: Default::default(),
+    };
+    // Core memory, written as the agent, is read back with the owner's key.
+    handle
+        .remember("core", "I am the relay test agent.", 0)
+        .await
+        .unwrap();
+    let owner = Arc::new(super::AppRelay {
+        http: http.clone(),
+        identity: alice.clone(),
+        snapshot: None,
+    });
+    let memories = owner.memories(&pubkey).await.unwrap();
+    assert!(
+        memories
+            .iter()
+            .any(|memory| memory.slug == "core" && memory.body == "I am the relay test agent."),
+        "{memories:?}"
+    );
+
+    // alice mentions it; its turn replies in her thread as the agent.
+    let mention = post(
+        9,
+        vec![
+            vec!["h".into(), general.clone()],
+            vec!["p".into(), pubkey.clone()],
+        ],
+        format!("@Claude Code Test ping {}", now()),
+    )
+    .await;
+    let event: BuzzEvent = serde_json::from_value(serde_json::to_value(&mention).unwrap()).unwrap();
+    let runtime = ClaudeRuntime::new(Some(scratch("relay-sessions").join("sessions.json")));
+    runtime.set_relay(Some(owner));
+    let config = Config {
+        workspace: scratch("relay-workspace").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    runtime
+        .run(Run {
+            wake: Wake::Mention {
+                event: event.clone(),
+            },
+            channel: Some(general.clone()),
+            agent: Arc::new(handle),
+            config: config.value(),
+            spawn,
+        })
+        .await;
+    let filter = json!({ "kinds": [9], "authors": [pubkey], "#e": [event.id], "limit": 5 });
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let replies = http
+            .query(&[filter.as_object().unwrap().clone()])
+            .await
+            .unwrap();
+        if replies.iter().any(|reply| reply.content == "pong") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent's reply was not published"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    runtime.dispose();
+
+    // Clean up: alice removes it from #general and its key is deleted.
+    post(9001, membership, String::new()).await;
+    ask(AppAgentRequest::Delete {
+        pubkey: pubkey.clone(),
+    })
+    .await;
+    ask(AppAgentRequest::Forget { pubkey }).await;
 }
