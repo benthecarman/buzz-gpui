@@ -1643,6 +1643,43 @@ impl<F: ThreadFollowStore> Unread<F> {
         self.events.contains(id)
     }
 
+    /// Retained edits of `ids` by those messages' authors
+    /// (`retainedEditIds`), so the inbox history also checks their
+    /// deletions.
+    pub fn retained_edit_ids(&mut self, ids: &[String]) -> Vec<String> {
+        let targets: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut memo = HashMap::new();
+        let mut candidates = Vec::new();
+        for (_, event) in self.events.iter() {
+            if event.kind_u16() != kinds::EDIT {
+                continue;
+            }
+            let find = |id: &str| self.events.get(id).cloned();
+            let Some(channels) = owners(event, &find, &mut memo, &mut HashSet::new()) else {
+                continue;
+            };
+            if channels.iter().any(|channel| !self.allowed(channel)) {
+                continue;
+            }
+            let target = e_targets(event).into_iter().find_map(|id| {
+                targets
+                    .contains(id)
+                    .then(|| self.events.get(id))
+                    .flatten()
+                    .filter(|target| is_content(target.kind_u16()) && target.pubkey == event.pubkey)
+                    .cloned()
+            });
+            if let Some(target) = target {
+                candidates.push((event.clone(), target));
+            }
+        }
+        candidates
+            .into_iter()
+            .filter(|(edit, target)| !self.deleted(edit) && !self.deleted(target))
+            .map(|(edit, _)| edit.id_hex())
+            .collect()
+    }
+
     /// A retained evidence event (`unread.event`), for visibility checks.
     pub fn event(&self, id: &str) -> Option<&Verified> {
         self.events.get(id).or_else(|| self.lookup_events.get(id))

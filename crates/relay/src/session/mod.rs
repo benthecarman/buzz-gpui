@@ -20,6 +20,7 @@ mod catalog;
 mod channels;
 mod feedback;
 mod gifs;
+mod inbox;
 mod incoming;
 mod live_feed;
 mod members;
@@ -38,6 +39,7 @@ mod unread;
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use catalog::CommunityCatalog;
 pub use feedback::{FeedbackState, PendingFeedback};
+pub use inbox::{InboxFeed, InboxFeedStatus, InboxState};
 pub use incoming::IncomingMessage;
 pub use live_feed::LiveBatch;
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
@@ -293,6 +295,7 @@ pub struct Session {
     media: Media,
     direct: account::Direct,
     reminders: Arc<reminders::Shared>,
+    inbox: watch::Receiver<Arc<inbox::InboxState>>,
     /// Details saves by channel, kept through panel close and reopen.
     details: std::sync::Mutex<HashMap<String, crate::lifecycle::DetailsAttempt>>,
     task: tokio::task::JoinHandle<()>,
@@ -416,8 +419,10 @@ impl Session {
             lifecycle: tokio::sync::Mutex::new(()),
         };
         let (reminder_owner, reminders) = reminders::new();
+        let (inbox_owner, inbox_view) = inbox::new();
         let actor = Actor {
             reminders: reminder_owner,
+            inbox: inbox_owner,
             runtime: runtime.clone(),
             origin: origin.clone(),
             identity,
@@ -489,6 +494,7 @@ impl Session {
             media,
             direct,
             reminders,
+            inbox: inbox_view,
             details: Default::default(),
             task,
         }
@@ -1118,6 +1124,8 @@ struct Actor {
     activity: activity::Activity,
     /// The viewer's reminders (kind 30300).
     reminders: reminders::Owner,
+    /// The inbox and its history read.
+    inbox: inbox::Owner,
     /// Send observers, attached to the outbox once it exists.
     send_observers: Vec<(
         u64,
@@ -1950,6 +1958,7 @@ impl Actor {
                 self.set_live(true);
                 self.observer_status();
                 self.reminders_recover();
+                self.inbox_reconnect();
                 self.presence_connected(true);
                 self.start_scan(ScanOptions::default());
                 self.reads_reconnected();
@@ -1958,6 +1967,7 @@ impl Actor {
                 self.set_live(false);
                 self.observer_status();
                 self.reminders_stale();
+                self.inbox_stale();
                 self.presence_connected(false);
                 self.channels_disconnected();
                 self.activity_cancel();
@@ -2689,6 +2699,7 @@ impl Actor {
             !same
         });
         self.publish_watches();
+        self.inbox_publish();
         self.after_publish();
     }
 }
