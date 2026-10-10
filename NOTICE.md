@@ -38,7 +38,8 @@ to its space glyph (`crates/ui/src/fonts.rs` explains why). Copyright 2022
 Google Inc. Licensed under the SIL Open Font License 1.1; see
 `assets/fonts/buzz-color-emoji/OFL.txt`.
 
-`assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf` is JetBrains Mono 2.304
+`assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf` and
+`JetBrainsMono-SemiBold.ttf` (the terminal's bold) are JetBrains Mono 2.304
 ([JetBrains/JetBrainsMono](https://github.com/JetBrains/JetBrainsMono)),
 unchanged. Copyright 2020 The JetBrains Mono Project Authors. Licensed under
 the SIL Open Font License 1.1; see `assets/fonts/jetbrains-mono/OFL.txt`.

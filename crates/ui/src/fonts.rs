@@ -1,5 +1,5 @@
 //! Bundled fonts: Inter (static 400/500/600/700, roman and italic),
-//! JetBrains Mono 400 and Noto Color Emoji, all SIL OFL 1.1 (see
+//! JetBrains Mono 400 and 600 and Noto Color Emoji, all SIL OFL 1.1 (see
 //! `assets/fonts/*/OFL.txt`).
 //!
 //! buzz-app loads Inter as a variable font. GPUI's Linux text stack picks
@@ -43,6 +43,8 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/inter/Inter-Bold.ttf"),
     include_bytes!("../../../assets/fonts/inter/Inter-BoldItalic.ttf"),
     include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
+    // The terminal's bold, as buzz-app's terminal loads 600 too.
+    include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-SemiBold.ttf"),
     EMOJI_FONT,
 ];
 
