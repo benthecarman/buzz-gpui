@@ -169,7 +169,7 @@ impl ChannelActions {
                             (this.on_removed)(window, cx);
                         }
                     }
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => this.error = Some(error.to_string().into()),
                 }
                 cx.notify();
             });
@@ -644,7 +644,7 @@ impl JoinNotice {
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
                 if let Err(error) = result {
-                    this.error = Some(error.into());
+                    this.error = Some(error.to_string().into());
                 }
                 cx.notify();
             });

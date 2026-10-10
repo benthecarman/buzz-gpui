@@ -14,8 +14,8 @@ use crate::dm;
 use crate::event::{Verified, kinds};
 use crate::http::RelayHttp;
 use crate::lifecycle::{
-    self, Action, CONFIRM_DELAYS, ChannelDetails, ChannelState, DetailsDraft, LifecyclePermissions,
-    NewChannel, RUN_TIMEOUT,
+    self, Action, ActionError, AttemptStatus, CONFIRM_DELAYS, ChannelDetails, ChannelState,
+    DetailsAttempt, DetailsDraft, LifecyclePermissions, NewChannel, RUN_TIMEOUT,
 };
 use crate::members::{self, MemberChange, Person};
 use crate::messages::EventTemplate;
@@ -28,6 +28,7 @@ use nostr::prelude::{Event, EventId};
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 const CLOSED: &str = "The session has closed";
@@ -155,32 +156,126 @@ impl Session {
     }
 
     /// The editable details, with the version a save must still match.
+    /// The fresh metadata also updates discovery.
     pub async fn channel_details(&self, channel: &str) -> Result<ChannelDetails, String> {
-        let state = self.channel_state(channel).await?;
-        state
-            .details(&self.viewer)
-            .map_err(|error| error.to_string())
+        let (ops, channel) = (self.ops(), channel.to_owned());
+        self.run(async move {
+            let ctx = ops.context().await?;
+            let state = ops.state(&ctx, &channel).await?;
+            let details = state
+                .details(&ctx.viewer)
+                .map_err(|error| error.to_string())?;
+            ops.adopt(ctx.epoch, vec![state.metadata]).await?;
+            Ok(details)
+        })
+        .await
+    }
+
+    /// The save this session still owns for a channel, if any.
+    pub fn details_attempt(&self, channel: &str) -> Option<DetailsAttempt> {
+        self.details.lock().ok()?.get(channel).cloned()
+    }
+
+    fn set_details_attempt(&self, channel: &str, attempt: Option<DetailsAttempt>) {
+        if let Ok(mut attempts) = self.details.lock() {
+            match attempt {
+                Some(attempt) => attempts.insert(channel.to_owned(), attempt),
+                None => attempts.remove(channel),
+            };
+        }
     }
 
     /// Saves details edited from `version`; refused when the channel
-    /// changed since.
+    /// changed since. A save that may have reached the relay stays
+    /// [`AttemptStatus::Unconfirmed`] until [`Self::check_channel_details`]
+    /// confirms it, and no other save starts meanwhile.
     pub async fn save_channel_details(
         &self,
         channel: &str,
         version: EventId,
         draft: DetailsDraft,
     ) -> Result<(), String> {
-        let (ops, channel) = (self.ops(), channel.to_owned());
-        self.run(async move { ops.save_details(&channel, version, draft).await })
-            .await
+        if self.details_attempt(channel).is_some() {
+            return Err("Check the previous change before saving again.".into());
+        }
+        self.set_details_attempt(
+            channel,
+            Some(DetailsAttempt {
+                draft: draft.clone(),
+                status: AttemptStatus::Saving,
+            }),
+        );
+        let published = Arc::new(AtomicBool::new(false));
+        let (ops, id, flag) = (self.ops(), channel.to_owned(), published.clone());
+        let saving = draft.clone();
+        let result = self
+            .run(async move { ops.save_details(&id, version, saving, &flag).await })
+            .await;
+        match result {
+            Err(_) if published.load(Ordering::SeqCst) => {
+                self.set_details_attempt(
+                    channel,
+                    Some(DetailsAttempt {
+                        draft,
+                        status: AttemptStatus::Unconfirmed,
+                    }),
+                );
+                Err(lifecycle::UNCERTAIN_SAVE.into())
+            }
+            result => {
+                self.set_details_attempt(channel, None);
+                result
+            }
+        }
+    }
+
+    /// Re-reads the channel for an unconfirmed save, without resending it.
+    pub async fn check_channel_details(&self, channel: &str) -> Result<(), String> {
+        let draft = self
+            .details_attempt(channel)
+            .filter(|attempt| attempt.status == AttemptStatus::Unconfirmed)
+            .ok_or("No unconfirmed change to check.")?
+            .draft;
+        let (ops, id) = (self.ops(), channel.to_owned());
+        self.run(async move {
+            let ctx = ops.context().await?;
+            let state = ops.state(&ctx, &id).await?;
+            let confirmed = lifecycle::details_confirmed(&state, &draft);
+            ops.adopt(ctx.epoch, vec![state.metadata]).await?;
+            if confirmed {
+                Ok(())
+            } else {
+                Err(lifecycle::UNCERTAIN_SAVE.to_owned())
+            }
+        })
+        .await?;
+        self.set_details_attempt(channel, None);
+        Ok(())
     }
 
     /// Joins, leaves, archives, unarchives, deletes or hides, and waits
-    /// until the relay shows it.
-    pub async fn channel_action(&self, action: Action, channel: &str) -> Result<(), String> {
-        let (ops, channel) = (self.ops(), channel.to_owned());
-        self.run(async move { ops.lifecycle(action, &channel).await })
-            .await
+    /// until the relay shows it. Once the command may have reached the
+    /// relay, a failure is [`ActionError::Unconfirmed`].
+    pub async fn channel_action(&self, action: Action, channel: &str) -> Result<(), ActionError> {
+        let published = Arc::new(AtomicBool::new(false));
+        let (ops, channel, flag) = (self.ops(), channel.to_owned(), published.clone());
+        let outcome = self
+            .runtime
+            .spawn(async move {
+                tokio::time::timeout(RUN_TIMEOUT, ops.lifecycle(action, &channel, &flag)).await
+            })
+            .await;
+        let reason = match outcome {
+            Ok(Ok(Ok(()))) => return Ok(()),
+            Ok(Ok(Err(reason))) => reason,
+            Ok(Err(_)) => "The relay did not answer in time.".to_owned(),
+            Err(_) => return Err(ActionError::Failed(CLOSED.to_owned())),
+        };
+        Err(if published.load(Ordering::SeqCst) {
+            ActionError::Unconfirmed(reason)
+        } else {
+            ActionError::Failed(reason)
+        })
     }
 
     /// Creates a stream through the outbox and returns its id once the
@@ -267,6 +362,15 @@ impl Session {
             .channels)
     }
 
+    /// [`Session::search_public_channel_page`] by its other name.
+    pub async fn find_public_channels(
+        &self,
+        query: &str,
+        exact: bool,
+    ) -> Result<PublicChannels, String> {
+        self.search_public_channel_page(query, exact).await
+    }
+
     /// [`Session::search_public_channels`], saying whether the relay's
     /// page of channels was full (`searchPublic`'s `partial`).
     pub async fn search_public_channel_page(
@@ -334,6 +438,21 @@ async fn publish(ctx: &Context, template: EventTemplate) -> Result<bool, String>
         Err(PublishError::Rejected(message)) => Err(message),
         Err(PublishError::Uncertain(_)) => Ok(false),
     }
+}
+
+/// [`publish`], raising `published` while the command may have reached
+/// the relay: from the post until a refusal.
+async fn publish_tracked(
+    ctx: &Context,
+    template: EventTemplate,
+    published: &AtomicBool,
+) -> Result<bool, String> {
+    published.store(true, Ordering::SeqCst);
+    let result = publish(ctx, template).await;
+    if result.is_err() {
+        published.store(false, Ordering::SeqCst);
+    }
+    result
 }
 
 /// Evaluates `$check` (an `Option`) at each confirmation delay until it
@@ -482,7 +601,12 @@ impl Ops {
 
     // ----- lifecycle -----
 
-    async fn lifecycle(&self, action: Action, channel: &str) -> Result<(), String> {
+    async fn lifecycle(
+        &self,
+        action: Action,
+        channel: &str,
+        published: &AtomicBool,
+    ) -> Result<(), String> {
         let ctx = self.context().await?;
         let mut adopted = Vec::new();
         if action == Action::Join {
@@ -507,14 +631,17 @@ impl Ops {
             }
         }
         let template = lifecycle::template(action, channel, now()).map_err(|e| e.to_string())?;
-        publish(&ctx, template).await?;
+        publish_tracked(&ctx, template, published).await?;
         let filter = lifecycle::confirm_filter(action, &ctx.relay, &ctx.viewer, channel);
         let events = confirm!({
             let events = read(&ctx, vec![filter.clone()]).await?;
             lifecycle::confirmed(action, &events, &ctx.relay, &ctx.viewer, channel)
                 .then_some(events)
         })
-        .ok_or(UNCONFIRMED)?;
+        .ok_or(
+            "The relay accepted the request, but the change is not confirmed. Refresh channels \
+             before trying again.",
+        )?;
         let channel = channel.to_owned();
         match action {
             Action::Join | Action::Archive | Action::Unarchive => {
@@ -539,6 +666,7 @@ impl Ops {
         channel: &str,
         version: EventId,
         draft: DetailsDraft,
+        published: &AtomicBool,
     ) -> Result<(), String> {
         let ctx = self.context().await?;
         let state = self.state(&ctx, channel).await?;
@@ -546,17 +674,14 @@ impl Ops {
             .details(&ctx.viewer)
             .map_err(|error| error.to_string())?;
         if !details.can_edit {
-            return Err("Only channel owners and admins can edit details.".into());
+            return Err("You no longer have permission to edit this channel.".into());
         }
         if details.version != version {
-            return Err(
-                "Channel details changed since you opened them. Review the current details and try again."
-                    .into(),
-            );
+            return Err("Channel details changed. Reload details before saving your edits.".into());
         }
         let template = lifecycle::edit_details(channel, &draft, &details.draft, now())
             .map_err(|error| error.to_string())?;
-        publish(&ctx, template).await?;
+        publish_tracked(&ctx, template, published).await?;
         let state = confirm!({
             let state = self.state(&ctx, channel).await?;
             lifecycle::details_confirmed(&state, &draft).then_some(state)

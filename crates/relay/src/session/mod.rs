@@ -135,6 +135,8 @@ pub struct Session {
     next_thread: std::sync::atomic::AtomicU64,
     media: Media,
     direct: account::Direct,
+    /// Details saves by channel, kept through panel close and reopen.
+    details: std::sync::Mutex<HashMap<String, crate::lifecycle::DetailsAttempt>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -270,6 +272,7 @@ impl Session {
             next_thread: std::sync::atomic::AtomicU64::new(1),
             media,
             direct,
+            details: Default::default(),
             task,
         }
     }

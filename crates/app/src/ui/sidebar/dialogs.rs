@@ -185,7 +185,7 @@ impl ChannelSidebar {
                     Err(message) => {
                         if let Some(Dialog::Lifecycle { busy, error, .. }) = &mut this.dialog {
                             *busy = false;
-                            *error = Some(message.into());
+                            *error = Some(message.to_string().into());
                         }
                     }
                 }
