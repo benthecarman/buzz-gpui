@@ -141,6 +141,11 @@ impl LiveMarkdown {
             .collect()
     }
 
+    /// The bare URLs of the text, which Mod+K edits as links.
+    pub fn bare_links(&self) -> Vec<Range<usize>> {
+        self.scanner.bare.clone()
+    }
+
     /// The matched spans of `kind`, by their markers.
     pub fn pairs(&self, kind: Kinds) -> Vec<Pair> {
         self.scanner
@@ -316,6 +321,8 @@ struct Scanner {
     spans: Vec<(Range<usize>, Kinds)>,
     /// Each matched span's opening and closing markers, for formatting.
     pairs: Vec<Pair>,
+    /// Bare URLs (GFM autolink literals).
+    bare: Vec<Range<usize>>,
     delims: Vec<Delim>,
     pipes: Vec<usize>,
     /// Each `[` of the paragraph with the `]` that closes it, by `[`, and
@@ -337,6 +344,7 @@ impl Scanner {
     ) {
         self.spans.clear();
         self.pairs.clear();
+        self.bare.clear();
         self.blocks(text);
         for chip in chips {
             self.push(chip, CHIP);
@@ -635,6 +643,7 @@ impl Scanner {
                     match starts_word.then(|| bare_url(text, i, end)).flatten() {
                         Some(url_end) => {
                             self.push(i..url_end, LINK);
+                            self.bare.push(i..url_end);
                             i = url_end;
                         }
                         None => i += 1,

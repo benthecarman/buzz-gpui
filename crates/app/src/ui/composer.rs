@@ -11,6 +11,7 @@ pub mod attachments;
 mod blocks;
 mod channels;
 mod format;
+mod link;
 mod live_markdown;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
@@ -56,6 +57,24 @@ const MENTION_LIMIT: usize = 50;
 /// The typing pause before `#` searches open channels.
 const PUBLIC_SEARCH_DELAY: Duration = Duration::from_millis(180);
 const EMOJI_LIMIT: usize = 100;
+
+actions!(composer, [InsertLink]);
+
+/// Mod+K edits a link in the composer (`EditableInput.tsx`), over the
+/// app-wide search it opens elsewhere. GPUI ranks a binding without a
+/// context above any with one, so this one has none either: bound after
+/// the app's, it is tried first, and with no composer focused nothing
+/// handles it and search runs.
+struct ComposerKeys;
+
+impl Global for ComposerKeys {}
+
+fn bind_keys(cx: &mut App) {
+    if cx.try_global::<ComposerKeys>().is_none() {
+        cx.bind_keys([KeyBinding::new("secondary-k", InsertLink, None)]);
+        cx.set_global(ComposerKeys);
+    }
+}
 
 pub enum ComposerEvent {
     Submit(Submission),
@@ -170,6 +189,8 @@ pub struct Composer {
     /// another composer's (`revision`); `None` when storage failed.
     revision: Option<Option<String>>,
     draft_issue: Option<DraftIssue>,
+    /// The link dialog, with the text it was opened on.
+    link: Option<(Entity<link::LinkDialog>, String)>,
     /// "Retry message preparation" was pressed: a ready catalog clears the
     /// error.
     retrying_preparation: bool,
@@ -296,6 +317,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        bind_keys(cx);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(placeholder.clone())
@@ -402,6 +424,7 @@ impl Composer {
             revision: None,
             draft_issue: None,
             retrying_preparation: false,
+            link: None,
             drag_over: false,
             notice: None,
             save_draft: None,
@@ -1584,6 +1607,10 @@ impl Composer {
             let state = self.input.read(cx);
             (state.value().to_string(), state.selected_range())
         };
+        if format == Format::Link {
+            self.open_link(window, cx);
+            return;
+        }
         let Some(kind) = format.kind() else {
             self.leave_pending(window, cx);
             let (text, selection) = {
@@ -1672,6 +1699,97 @@ impl Composer {
             has(&active),
         );
         self.apply_edit(edit, window, cx);
+    }
+
+    /// "Add link" / "Edit link" on the selection, Mod+K or the toolbar.
+    fn open_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending || self.edit_status.locked || self.input_disabled(cx) {
+            return;
+        }
+        self.leave_pending(window, cx);
+        let (text, selection) = {
+            let state = self.input.read(cx);
+            (state.value().to_string(), state.selected_range())
+        };
+        // Code stays literal.
+        if self
+            .markdown
+            .pairs(live_markdown::CODE)
+            .iter()
+            .any(|pair| pair.open.start <= selection.start && selection.end <= pair.close.end)
+        {
+            return;
+        }
+        let target = link::target(
+            &text,
+            selection,
+            &self.markdown.pairs(live_markdown::LINK),
+            &self.markdown.bare_links(),
+        );
+        let dialog = cx.new(|cx| link::LinkDialog::new(target, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, dialog, event: &link::LinkEvent, window, cx| {
+                this.link_event(dialog, event, window, cx)
+            },
+        ));
+        self.link = Some((dialog, text));
+        cx.notify();
+    }
+
+    fn link_event(
+        &mut self,
+        dialog: &Entity<link::LinkDialog>,
+        event: &link::LinkEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, opened)) = &self.link else {
+            return;
+        };
+        let current = self.input.read(cx).value().to_string();
+        let target = dialog.read(cx).target.clone();
+        let replacement = match event {
+            link::LinkEvent::Close => {
+                self.close_link(window, cx);
+                return;
+            }
+            link::LinkEvent::Save { text, href } => link::markdown(text, href),
+            link::LinkEvent::Remove => target.text.clone(),
+        };
+        let too_long = current.chars().count() - current[target.range.clone()].chars().count()
+            + replacement.chars().count()
+            > MAX_CHARS;
+        if current != *opened || too_long {
+            let error = match event {
+                link::LinkEvent::Remove => "The draft changed. Close and try again.",
+                _ => {
+                    "The draft changed or this link exceeds the message limit. Close and try again."
+                }
+            };
+            dialog.update(cx, |dialog, cx| {
+                dialog.error = Some(error.into());
+                cx.notify();
+            });
+            return;
+        }
+        let end = target.range.start + replacement.len();
+        self.apply_edit(
+            format::Edit {
+                changes: vec![(target.range, replacement)],
+                selection: end..end,
+            },
+            window,
+            cx,
+        );
+        self.close_link(window, cx);
+    }
+
+    fn close_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.link = None;
+        self.focus(window, cx);
+        cx.notify();
     }
 
     /// Runs a block key (`blocks`) at the selection; whether it applied.
@@ -3802,6 +3920,7 @@ impl Render for Composer {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(cx.listener(|this, _: &InsertLink, window, cx| this.open_link(window, cx)))
             .capture_action(cx.listener(|this, _: &Backspace, window, cx| {
                 if this.block_edit(blocks::backspace, window, cx) {
                     cx.stop_propagation();
@@ -3943,6 +4062,11 @@ impl Render for Composer {
             .children(self.toasts(window, cx))
             .children(self.outsiders_dialog(window, cx))
             .children(self.preview_dialog(window, cx))
+            .children(
+                self.link.as_ref().map(|(dialog, _)| {
+                    overlay::modal(window, dialog.clone(), None).into_any_element()
+                }),
+            )
     }
 }
 
