@@ -283,6 +283,8 @@ impl Inner {
             .outbox
             .clone()
             .ok_or_else(|| "Workflow publishing unavailable".to_string())?;
+        // Commands come from the UI thread; the outbox spawns on tokio.
+        let _runtime = self.runtime.enter();
         let id = outbox
             .send(
                 Draft {
