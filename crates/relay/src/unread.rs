@@ -500,8 +500,9 @@ pub enum Freshness {
     Stale,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Manual {
+    #[default]
     None,
     /// Marked unread on this device.
     LocalOnly,

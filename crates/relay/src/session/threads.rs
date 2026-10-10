@@ -25,6 +25,19 @@ impl ThreadView {
     pub fn refresh(&self) {
         let _ = self.commands.send(Message::ThreadRefresh(self.id));
     }
+
+    /// Reports what the panel shows, as [`super::ChannelView::viewport`]
+    /// does for a channel: the replies fully in view (at most 128) and
+    /// whether the panel sits at its newest reply. Visible replies that
+    /// stay in view for [`super::READING_DWELL_MS`] are read, and at the
+    /// bottom the thread is caught up. Report nothing and `false` while the
+    /// window or the panel is not focused.
+    pub fn viewport(&self, visible: Vec<EventId>, at_bottom: bool) {
+        let id = self.id;
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            actor.thread_viewport(id, visible, at_bottom)
+        })));
+    }
 }
 
 impl Drop for ThreadView {
@@ -40,6 +53,11 @@ pub(super) struct OpenThread {
 }
 
 impl OpenThread {
+    /// What the panel shows now.
+    pub fn snapshot(&self) -> Arc<ThreadSnapshot> {
+        self.view.borrow().clone()
+    }
+
     fn publish(&mut self) {
         if let Some(snapshot) = self.state.take_snapshot() {
             self.view.send_replace(snapshot);

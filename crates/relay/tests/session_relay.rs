@@ -316,6 +316,8 @@ async fn messages_arriving_while_reading_stay_read() {
         t.status == TimelineStatus::Ready
     })
     .await;
+    // The view, in a focused window, sits at its newest message.
+    view.viewport(Vec::new(), true);
 
     next_second().await;
     let content = format!("reading test {}", std::process::id());

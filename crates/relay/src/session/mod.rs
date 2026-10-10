@@ -29,7 +29,9 @@ pub use actions::{MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use incoming::IncomingMessage;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
-pub use unread::{ChannelUnread, READING_DWELL_MS, UnreadCounts};
+pub use unread::{
+    ChannelUnread, READING_DWELL_MS, ThreadUnread, UnreadCounts, UnreadDetail, UnreadWatch,
+};
 
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
 use crate::emoji::{EmojiDirectory, EmojiSnapshot, catalog_filter};
@@ -157,6 +159,22 @@ impl ChannelView {
         &self.channel
     }
 
+    /// Reads the newest page again after it failed (`channels.ensure`).
+    pub fn retry(&self) {
+        let channel = self.channel.clone();
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            if actor.relay.is_none() {
+                actor.connect();
+            } else if actor
+                .timelines
+                .get(&channel)
+                .is_some_and(|timeline| !timeline.loading_head)
+            {
+                actor.load_head(&channel, false);
+            }
+        })));
+    }
+
     /// Reports what the view shows while its channel is selected: the
     /// message rows fully in view (at most 128, newest last) and whether
     /// the list sits at its newest message. Rows that stay in view for
@@ -260,6 +278,8 @@ impl Session {
             incoming_sender: incoming.clone(),
             hidden_dms: Arc::new([]),
             sidebar: sidebar::SidebarPrefs::new(runtime),
+            watches: HashMap::new(),
+            view_reports: HashMap::new(),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -326,6 +346,27 @@ impl Session {
             view,
         });
         ThreadView {
+            snapshot,
+            id,
+            commands: self.commands.clone(),
+        }
+    }
+
+    /// Follows the unread state of rows in `channel` that a view shows; see
+    /// [`UnreadWatch::set`].
+    pub fn watch_unread(&self, channel: &str) -> UnreadWatch {
+        let id = self
+            .next_thread
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (sender, snapshot) = watch::channel(Arc::new(UnreadDetail::default()));
+        let channel = channel.to_string();
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            actor
+                .watches
+                .insert(id, unread::WatchState::new(channel, sender));
+            actor.publish_watches();
+        })));
+        UnreadWatch {
             snapshot,
             id,
             commands: self.commands.clone(),
@@ -478,6 +519,21 @@ impl Session {
     /// Never synced.
     pub async fn mark_channel_unread(&self, channel: &str) -> Result<(), String> {
         self.mark(Mark::ChannelUnread(channel.to_string())).await
+    }
+
+    /// Reads the channel, or with `root` that thread, through `message`.
+    pub async fn mark_through(
+        &self,
+        channel: &str,
+        root: Option<EventId>,
+        message: EventId,
+    ) -> Result<(), String> {
+        self.mark(Mark::Through {
+            channel: channel.to_string(),
+            root,
+            message,
+        })
+        .await
     }
 }
 
@@ -645,6 +701,10 @@ struct Actor {
     incoming_sender: broadcast::Sender<IncomingMessage>,
     hidden_dms: Arc<[String]>,
     sidebar: sidebar::SidebarPrefs,
+    /// Open [`UnreadWatch`]es by id.
+    watches: HashMap<u64, unread::WatchState>,
+    /// What each open channel view last reported it shows.
+    view_reports: HashMap<String, (Vec<EventId>, bool)>,
 }
 
 impl Actor {
@@ -722,6 +782,7 @@ impl Actor {
             } => self.open_thread(id, channel, message, exact, view),
             Message::CloseThread(id) => {
                 self.threads.remove(&id);
+                self.thread_closed(id);
             }
             Message::ThreadMore(id) => self.thread_more(id, false),
             Message::ThreadRefresh(id) => self.thread_more(id, true),
@@ -1273,6 +1334,7 @@ impl Actor {
         if timeline.viewers > 0 {
             return;
         }
+        self.view_reports.remove(channel);
         self.closed.push_back(channel.to_string());
         while self.closed.len() > RETAINED_CLOSED {
             if let Some(evicted) = self.closed.pop_front() {
@@ -1619,6 +1681,7 @@ impl Actor {
             }
             !same
         });
+        self.publish_watches();
         self.after_publish();
     }
 }

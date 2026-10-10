@@ -7,14 +7,16 @@
 //! sidebar's [`UnreadCounts`].
 //!
 //! Reading: while a channel is selected and has an open [`ChannelView`],
-//! the viewer is reading it. Like the reference's dwell hook
+//! the viewer may be reading it. Like the reference's dwell hook
 //! (`use-reading.ts`), each report of what the view shows takes a reading
 //! lease and, after [`READING_DWELL_MS`], catches up the channel bottom and
-//! observes the visible rows, then ends the lease. Until the view reports
-//! otherwise it is assumed to sit at the bottom, so new top-level messages
-//! that arrive while reading are read rather than counted.
+//! observes the visible rows, then ends the lease. Nothing is read until
+//! the view reports what it shows; while it reports the bottom, new
+//! top-level messages that arrive are read rather than counted. An open
+//! [`ThreadView`] reads its thread the same way, with its own lease.
 //!
 //! [`ChannelView`]: super::ChannelView
+//! [`ThreadView`]: super::ThreadView
 
 use super::{Actor, Message};
 use crate::ChannelType;
@@ -29,8 +31,9 @@ use crate::reader::{Events, ReadError, ReadOptions};
 use crate::socket::Filter;
 use crate::store::{Partition, SqliteReadJournal, SqliteThreadFollows};
 use crate::unread::{
-    CONTENT_KINDS, ChannelInfo, EvidenceRepair, HomesRequest, LookupBatch, ReadingLease,
-    RepliesPaging, ReplyTarget, Unread, UnreadOptions, replies_paging, thread_reference,
+    CONTENT_KINDS, ChannelInfo, EvidenceRepair, Freshness, HomesRequest, LookupBatch, Manual,
+    ReadingLease, RepliesPaging, ReplyTarget, ThreadActivitySnapshot, Unread, UnreadOptions,
+    replies_paging, thread_reference,
 };
 use nostr::prelude::EventId;
 use serde_json::Value;
@@ -66,6 +69,9 @@ pub struct UnreadCounts {
     /// The newest message's text per channel, from the same evidence. For
     /// search's "Recent activity" detail.
     pub previews: HashMap<String, String>,
+    /// Unread threads per channel (`unread.activity`), newest first, for
+    /// channels that have any.
+    pub activity: HashMap<String, Arc<ThreadActivitySnapshot>>,
 }
 
 impl UnreadCounts {
@@ -87,6 +93,90 @@ pub struct ChannelUnread {
     pub count: u32,
     pub attention: u32,
     pub mentions: u32,
+    /// Marked unread by hand, here or on another device.
+    pub manual: Manual,
+    /// The counts are from before a disconnect.
+    pub stale: bool,
+    /// Threads with unread replies for the viewer (`activity().items`).
+    pub threads: u32,
+    pub threads_stale: bool,
+}
+
+/// One thread's unread state, for its summary in the timeline
+/// (`useThreadUnread`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadUnread {
+    pub manual: Manual,
+    /// Observed unread replies; `None` without evidence.
+    pub observed: Option<u32>,
+    pub stale: bool,
+}
+
+/// What an [`UnreadWatch`] reports for the rows a view shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnreadDetail {
+    /// Thread roots asked for, by root.
+    pub threads: HashMap<EventId, ThreadUnread>,
+    /// Messages asked for that are unread (`attention().unread`).
+    pub unread: HashSet<EventId>,
+    /// Messages asked for that the viewer marked unread for this visit.
+    pub forced: HashSet<EventId>,
+}
+
+/// Follows the unread state of the rows one view shows. Dropping it ends
+/// the watch.
+pub struct UnreadWatch {
+    pub snapshot: tokio::sync::watch::Receiver<Arc<UnreadDetail>>,
+    pub(super) id: u64,
+    pub(super) commands: tokio::sync::mpsc::UnboundedSender<Message>,
+}
+
+impl UnreadWatch {
+    /// The thread roots and messages to report on, replacing the last set.
+    pub fn set(&self, threads: Vec<EventId>, messages: Vec<EventId>) {
+        let id = self.id;
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            if let Some(watch) = actor.watches.get_mut(&id) {
+                watch.threads = threads;
+                watch.messages = messages;
+                watch.seen = None;
+            }
+            actor.publish_watches();
+        })));
+    }
+}
+
+impl Drop for UnreadWatch {
+    fn drop(&mut self) {
+        let id = self.id;
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            actor.watches.remove(&id);
+        })));
+    }
+}
+
+pub(super) struct WatchState {
+    pub(super) channel: String,
+    threads: Vec<EventId>,
+    messages: Vec<EventId>,
+    /// `(unread stamp, read-state changes)` behind the last report.
+    seen: Option<(u64, u64)>,
+    sender: tokio::sync::watch::Sender<Arc<UnreadDetail>>,
+}
+
+impl WatchState {
+    pub(super) fn new(
+        channel: String,
+        sender: tokio::sync::watch::Sender<Arc<UnreadDetail>>,
+    ) -> Self {
+        Self {
+            channel,
+            threads: Vec::new(),
+            messages: Vec::new(),
+            seen: None,
+            sender,
+        }
+    }
 }
 
 /// Explicit read actions from the UI.
@@ -97,6 +187,12 @@ pub(super) enum Mark {
     MessageUnread(String, EventId),
     /// The sidebar's "Mark as Unread": this device only.
     ChannelUnread(String),
+    /// A channel or thread, read through one of its messages.
+    Through {
+        channel: String,
+        root: Option<EventId>,
+        message: EventId,
+    },
 }
 
 struct RepairRun {
@@ -126,10 +222,27 @@ struct Reading {
     visible: Vec<String>,
 }
 
+/// A thread panel being read: its visible replies, and the newest reply
+/// when the panel sits at its bottom.
+struct ThreadReading {
+    view: u64,
+    channel: String,
+    visible: Vec<String>,
+    bottom: Option<(String, String)>,
+}
+
 struct Dwell {
     lease: ReadingLease,
     ids: Vec<String>,
     bottom: bool,
+    due: u64,
+}
+
+struct ThreadDwell {
+    lease: ReadingLease,
+    ids: Vec<String>,
+    /// `(newest reply, root)` to catch the thread up through.
+    bottom: Option<(String, String)>,
     due: u64,
 }
 
@@ -153,6 +266,8 @@ pub(super) struct Reads {
     lookup_after: Option<u64>,
     reading: Option<Reading>,
     dwell: Option<Dwell>,
+    thread_reading: Option<ThreadReading>,
+    thread_dwell: Option<ThreadDwell>,
     /// `(unread stamp, read-state changes, sampled)` behind `counts`.
     seen: Option<(u64, u64, bool)>,
     counts: Arc<UnreadCounts>,
@@ -289,6 +404,8 @@ impl Actor {
             lookup_after: None,
             reading: None,
             dwell: None,
+            thread_reading: None,
+            thread_dwell: None,
             seen: None,
             counts: Arc::new(UnreadCounts::default()),
         });
@@ -312,6 +429,9 @@ impl Actor {
         if let Some(dwell) = reads.dwell.take() {
             reads.unread.end_reading(dwell.lease);
         }
+        if let Some(dwell) = reads.thread_dwell.take() {
+            reads.unread.end_reading(dwell.lease);
+        }
         self.publish();
     }
 
@@ -328,6 +448,7 @@ impl Actor {
         reads.repair_wanted |= reads.unread.reconnect();
         self.refresh_reads();
         self.schedule_dwell(Vec::new());
+        self.schedule_thread_dwell();
     }
 
     /// The user asked to retry: rerun a failed refresh, repair or publish.
@@ -559,10 +680,15 @@ impl Actor {
             .filter(|_| reads.lookup.is_none() && reads.unread.lookups_pending());
         // A running publication defers the debounce; it is not due yet.
         let publish = reads.sync.deadline().filter(|_| !reads.sync.publishing());
-        [publish, reads.dwell.as_ref().map(|dwell| dwell.due), lookup]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            publish,
+            reads.dwell.as_ref().map(|dwell| dwell.due),
+            reads.thread_dwell.as_ref().map(|dwell| dwell.due),
+            lookup,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub(super) fn reads_tick(&mut self) {
@@ -580,6 +706,14 @@ impl Actor {
             .is_some_and(|dwell| dwell.due <= now)
         {
             self.fire_dwell();
+        }
+        if self
+            .reads
+            .as_ref()
+            .and_then(|reads| reads.thread_dwell.as_ref())
+            .is_some_and(|dwell| dwell.due <= now)
+        {
+            self.fire_thread_dwell();
         }
         if let Some(reads) = &mut self.reads
             && reads.lookup_after.is_some_and(|after| after <= now)
@@ -818,6 +952,19 @@ impl Actor {
             Mark::ChannelUnread(channel) => unread
                 .mark_unread_local(sync, &ReadTarget::channel(channel), now)
                 .map(drop),
+            Mark::Through {
+                channel,
+                root,
+                message,
+            } => {
+                let target = match root {
+                    Some(root) => ReadTarget::thread(channel, root.to_hex()),
+                    None => ReadTarget::channel(channel),
+                };
+                unread
+                    .mark_through(sync, &target, &message.to_hex(), now)
+                    .map(drop)
+            }
         };
         self.publish();
         result.map_err(|error| error.to_string())
@@ -851,17 +998,29 @@ impl Actor {
         let _ = reads
             .unread
             .enter_channel(&mut reads.sync, &channel, now_ms());
+        // Nothing is in view until the view says so: a hidden or unfocused
+        // window reads nothing.
+        let (visible, at_bottom) = self
+            .view_reports
+            .get(&channel)
+            .map(|(visible, at_bottom)| (visible.iter().map(EventId::to_hex).collect(), *at_bottom))
+            .unwrap_or_default();
         reads.reading = Some(Reading {
             channel,
-            at_bottom: true,
-            visible: Vec::new(),
+            at_bottom,
+            visible,
         });
         self.schedule_dwell(Vec::new());
         self.publish();
     }
 
-    /// What the view of `channel` shows now.
+    /// What the view of `channel` shows now. Kept while the view is open,
+    /// for when the channel is selected again.
     pub(super) fn viewport(&mut self, channel: &str, visible: Vec<EventId>, at_bottom: bool) {
+        let start = visible.len().saturating_sub(VIEW_IDS);
+        let visible = visible[start..].to_vec();
+        self.view_reports
+            .insert(channel.to_owned(), (visible.clone(), at_bottom));
         let Some(reading) = self
             .reads
             .as_mut()
@@ -870,10 +1029,118 @@ impl Actor {
         else {
             return;
         };
-        let start = visible.len().saturating_sub(VIEW_IDS);
-        reading.visible = visible[start..].iter().map(EventId::to_hex).collect();
+        reading.visible = visible.iter().map(EventId::to_hex).collect();
         reading.at_bottom = at_bottom;
         self.schedule_dwell(Vec::new());
+    }
+
+    /// What thread panel `view` shows now: its fully visible replies, and
+    /// whether it sits at its newest reply.
+    pub(super) fn thread_viewport(&mut self, view: u64, visible: Vec<EventId>, at_bottom: bool) {
+        let Some(thread) = self.threads.get(&view) else {
+            return;
+        };
+        let channel = thread.channel.clone();
+        let snapshot = thread.snapshot();
+        // A missing root must not mean catching up the thread
+        // (`ThreadPanel.tsx`): only a loaded root has a bottom.
+        let bottom = at_bottom
+            .then(|| {
+                let root = snapshot.root.as_ref()?;
+                let newest = snapshot
+                    .replies
+                    .iter()
+                    .max_by(|a, b| a.created_at.cmp(&b.created_at).then(b.id.cmp(&a.id)))?;
+                Some((newest.id.to_hex(), root.id.to_hex()))
+            })
+            .flatten();
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        let start = visible.len().saturating_sub(VIEW_IDS);
+        let visible: Vec<String> = visible[start..].iter().map(EventId::to_hex).collect();
+        if visible.is_empty() && bottom.is_none() {
+            if reads
+                .thread_reading
+                .as_ref()
+                .is_some_and(|reading| reading.view == view)
+            {
+                reads.thread_reading = None;
+                if let Some(dwell) = reads.thread_dwell.take() {
+                    reads.unread.end_reading(dwell.lease);
+                }
+            }
+            return;
+        }
+        reads.thread_reading = Some(ThreadReading {
+            view,
+            channel,
+            visible,
+            bottom,
+        });
+        self.schedule_thread_dwell();
+    }
+
+    /// Thread panel `view` closed: it reads nothing more.
+    pub(super) fn thread_closed(&mut self, view: u64) {
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        if reads
+            .thread_reading
+            .as_ref()
+            .is_some_and(|reading| reading.view == view)
+        {
+            reads.thread_reading = None;
+            if let Some(dwell) = reads.thread_dwell.take() {
+                reads.unread.end_reading(dwell.lease);
+            }
+        }
+    }
+
+    fn schedule_thread_dwell(&mut self) {
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        if let Some(dwell) = reads.thread_dwell.take() {
+            reads.unread.end_reading(dwell.lease);
+        }
+        let Some(reading) = &reads.thread_reading else {
+            return;
+        };
+        let Ok(lease) = reads.unread.reading(&reading.channel, &reads.sync) else {
+            return;
+        };
+        reads.unread.view(&lease, &reading.visible, &reads.sync);
+        reads.thread_dwell = Some(ThreadDwell {
+            lease,
+            ids: reading.visible.clone(),
+            bottom: reading.bottom.clone(),
+            due: now_ms() + READING_DWELL_MS,
+        });
+    }
+
+    /// The thread dwell elapsed: catch up the thread through its newest
+    /// reply (`catchUp(bottom, rootId)`) and observe what stayed in view.
+    fn fire_thread_dwell(&mut self) {
+        let now = now_ms();
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        let Some(mut dwell) = reads.thread_dwell.take() else {
+            return;
+        };
+        let (sync, unread) = (&mut reads.sync, &mut reads.unread);
+        if let Some((newest, root)) = &dwell.bottom
+            && let Err(error) = unread.catch_up(sync, &mut dwell.lease, newest, Some(root), now)
+        {
+            tracing::debug!(%error, root, "thread catch-up skipped");
+        }
+        for id in &dwell.ids {
+            let _ = unread.observe(sync, &mut dwell.lease, std::slice::from_ref(id), now);
+        }
+        unread.end_reading(dwell.lease);
+        self.publish();
     }
 
     /// Restarts the dwell over what is in view plus `arrived`, under a new
@@ -960,7 +1227,9 @@ impl Actor {
                 counts.latest.insert(id.clone(), latest.created_at);
                 counts.previews.insert(id.clone(), latest.preview.clone());
             }
-            if !snapshot.unread() {
+            let activity = reads.unread.activity(id, &reads.sync);
+            let threads = activity.items.as_ref().map_or(0, Vec::len) as u32;
+            if !snapshot.unread() && threads == 0 {
                 continue;
             }
             let badge = snapshot.badge(*dm);
@@ -971,10 +1240,19 @@ impl Actor {
                 count: snapshot.observed_count.unwrap_or(0),
                 attention: snapshot.attention_count.unwrap_or(0),
                 mentions: snapshot.mention_count.unwrap_or(0),
+                manual: snapshot.manual,
+                stale: snapshot.freshness == Freshness::Stale,
+                threads,
+                threads_stale: activity.freshness == Freshness::Stale,
             };
-            counts.mentions += row.mentions;
-            if *dm {
-                counts.direct += row.count;
+            if threads > 0 {
+                counts.activity.insert(id.clone(), activity);
+            }
+            if row.unread {
+                counts.mentions += row.mentions;
+                if *dm {
+                    counts.direct += row.count;
+                }
             }
             counts.channels.insert(id.clone(), row);
         }
@@ -984,6 +1262,53 @@ impl Actor {
             reads.counts = Arc::new(counts);
         }
         reads.counts.clone()
+    }
+
+    /// Reports each [`UnreadWatch`] whose rows' unread state may have
+    /// changed since its last report.
+    pub(super) fn publish_watches(&mut self) {
+        let Some(reads) = &mut self.reads else {
+            return;
+        };
+        for watch in self.watches.values_mut() {
+            let key = (reads.unread.stamp(), reads.sync.changes());
+            if watch.seen == Some(key) {
+                continue;
+            }
+            let channel = watch.channel.as_str();
+            let mut detail = UnreadDetail::default();
+            for root in &watch.threads {
+                let snapshot = reads
+                    .unread
+                    .snapshot(&ReadTarget::thread(channel, root.to_hex()), &reads.sync);
+                detail.threads.insert(
+                    *root,
+                    ThreadUnread {
+                        manual: snapshot.manual,
+                        observed: snapshot.observed_count,
+                        stale: snapshot.freshness == Freshness::Stale,
+                    },
+                );
+            }
+            for id in &watch.messages {
+                let attention = reads.unread.attention(channel, &id.to_hex(), &reads.sync);
+                if attention.unread {
+                    detail.unread.insert(*id);
+                }
+                if attention.forced {
+                    detail.forced.insert(*id);
+                }
+            }
+            // Computing may have queued lookups, which change the stamp.
+            watch.seen = Some((reads.unread.stamp(), reads.sync.changes()));
+            watch.sender.send_if_modified(|current| {
+                let changed = **current != detail;
+                if changed {
+                    *current = Arc::new(detail);
+                }
+                changed
+            });
+        }
     }
 
     /// Re-checks held notification candidates, then starts queued
