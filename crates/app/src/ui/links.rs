@@ -231,7 +231,7 @@ pub enum Reference {
     /// never-valid channels look the same.
     Withheld,
     Found {
-        channel: ChannelSummary,
+        channel: Box<ChannelSummary>,
         joined: bool,
     },
 }
@@ -256,7 +256,7 @@ pub fn reference(directory: &Directory, id: &str, cx: &mut App) -> Reference {
     if let Some(channel) = directory.channels.iter().find(|c| c.id == id) {
         let joined = channel.members.iter().any(|m| *m == directory.viewer());
         return Reference::Found {
-            channel: channel.clone(),
+            channel: Box::new(channel.clone()),
             joined,
         };
     }
@@ -286,7 +286,7 @@ fn request(session: Arc<Session>, key: (String, String), cx: &mut App) {
             Ok(found) => match found.into_iter().find(|c| c.id == key.1) {
                 Some(channel) => Reference::Found {
                     joined: channel.members.contains(&viewer),
-                    channel,
+                    channel: Box::new(channel),
                 },
                 None => Reference::Withheld,
             },

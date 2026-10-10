@@ -302,6 +302,7 @@ mod tests {
         SessionSnapshot {
             status: SessionStatus::Connecting,
             live: false,
+            cached: false,
             live_status: Default::default(),
             relay: None,
             roster: buzz_relay_client::RosterStatus::Loading,

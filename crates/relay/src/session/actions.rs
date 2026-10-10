@@ -1074,7 +1074,13 @@ impl Ops {
 
 impl Actor {
     fn context(&self) -> Result<Context, String> {
-        let relay = self.relay.as_ref().ok_or(NOT_CONNECTED)?.authority.clone();
+        // A saved snapshot reads nothing (`cachedOnly`).
+        let unavailable = if self.cached {
+            super::channels::RECONNECT_TO_UPDATE
+        } else {
+            NOT_CONNECTED
+        };
+        let relay = self.relay.as_ref().ok_or(unavailable)?.authority.clone();
         Ok(Context {
             reader: self.reader.clone(),
             http: self.http.clone(),

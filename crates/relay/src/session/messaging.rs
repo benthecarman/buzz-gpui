@@ -233,7 +233,7 @@ impl Session {
             let drafts = messages::remove(
                 &author,
                 &[id.to_hex()],
-                |_| Some(target.event().as_ref()),
+                |_| Some(target.event()),
                 Some(AgentOwner {
                     agent_id: &agent,
                     owner_id: &viewer,

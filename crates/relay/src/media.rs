@@ -108,6 +108,22 @@ impl Media {
         &self.0.origin
     }
 
+    /// Warms avatars before they show (`media.prepare`): this relay's
+    /// thumbnails or public images, fetched in the background into the
+    /// cache.
+    pub fn prefetch_avatars(&self, urls: Vec<String>) {
+        for url in urls {
+            let url = self.thumbnail(&url).unwrap_or(url);
+            if self.0.cache.lock().expect("media cache").contains(&url) {
+                continue;
+            }
+            let media = self.clone();
+            self.0.runtime.spawn(async move {
+                let _ = media.fetch(&url).await;
+            });
+        }
+    }
+
     pub(crate) fn identity(&self) -> &Arc<Identity> {
         &self.0.identity
     }
@@ -252,6 +268,10 @@ struct Cache {
 }
 
 impl Cache {
+    fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
     fn get(&mut self, key: &str) -> Option<Arc<[u8]>> {
         self.tick += 1;
         let tick = self.tick;

@@ -3358,7 +3358,7 @@ mod tests {
         contexts.insert(format!("ov_c:{message}"), json!(0));
         contexts.insert(format!("ov_b:{message}"), json!(10));
         let peer = signed(&identity, &"e".repeat(32), Value::Object(contexts));
-        relay.put((*peer.event().clone()).clone());
+        relay.put(peer.event().clone());
         assert!(sync.accept(&relay.events(), &identity, None));
         assert!(sync.state().overrides.contains_key(&message));
         sync.apply(ReadUpdate::observe("other", 20), None, T)

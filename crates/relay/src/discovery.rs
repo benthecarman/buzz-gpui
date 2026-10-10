@@ -94,6 +94,10 @@ pub struct ChannelSummary {
     pub members: Vec<String>,
     /// DM only: members other than the viewer. Empty for notes to self.
     pub participants: Option<Vec<String>>,
+    /// The newest conversational message, for the sidebar
+    /// (`messagePreview`). Filled by the session from its windows, live
+    /// tails and heads; discovery leaves it empty.
+    pub preview: Option<String>,
 }
 
 /// Which version of each channel's roster a pass started from, by event id.
@@ -672,6 +676,7 @@ impl DiscoveryState {
             participants: (channel_type == Some(ChannelType::Dm)).then(|| {
                 sorted_unique(roster_members(roster).filter(|member| *member != self.viewer))
             }),
+            preview: None,
         })
     }
 

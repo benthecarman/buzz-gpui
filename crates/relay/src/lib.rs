@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod archive;
+pub mod budget;
 pub mod community;
 pub mod discovery;
 pub mod dm;

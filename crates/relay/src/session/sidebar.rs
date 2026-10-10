@@ -505,7 +505,7 @@ impl Actor {
         let _ = self.sidebar.queue.send(Box::pin(job));
     }
 
-    fn partition(&self) -> Partition {
+    pub(super) fn partition(&self) -> Partition {
         Partition::new(&self.origin, &self.identity.pubkey_hex())
     }
 
@@ -561,7 +561,7 @@ impl Actor {
                 if let Ok(data) = &result
                     && actor.sidebar.store.finish_read(ticket, Ok(data.clone()))
                 {
-                    actor.save_startup(data);
+                    actor.save_sidebar_startup(data);
                 } else if let Err(error) = result {
                     actor.sidebar.store.finish_read(ticket, Err(error));
                 }
@@ -579,7 +579,7 @@ impl Actor {
         }
     }
 
-    fn save_startup(&self, data: &SidebarPreferences) {
+    fn save_sidebar_startup(&self, data: &SidebarPreferences) {
         let value = json!({"savedAt": now_ms(), "data": startup_json(data)});
         if let Err(error) =
             self.store
@@ -612,7 +612,7 @@ impl Actor {
                 if let Ok(()) = &outcome
                     && let Some(data) = actor.sidebar.store.confirmed().cloned()
                 {
-                    actor.save_startup(&data);
+                    actor.save_sidebar_startup(&data);
                 }
                 if !actor.sidebar.store.has_pending_moves()
                     && std::mem::take(&mut actor.sidebar.read_after_writes)

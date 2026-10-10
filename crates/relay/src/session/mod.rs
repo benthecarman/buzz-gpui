@@ -15,6 +15,7 @@
 
 mod account;
 mod actions;
+mod channels;
 mod feedback;
 mod gifs;
 mod incoming;
@@ -37,6 +38,7 @@ pub use unread::{
     ChannelUnread, READING_DWELL_MS, ThreadUnread, UnreadCounts, UnreadDetail, UnreadWatch,
 };
 
+use crate::budget::ByteLru;
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
 use crate::emoji::{EmojiDirectory, EmojiSnapshot, catalog_filter};
 use crate::event::{Verified, Verifier, kinds};
@@ -60,7 +62,7 @@ use crate::socket::Filter;
 use crate::store::{Partition, SqliteJournal, Store};
 use crate::typing::Typing;
 use crate::user_status::{StatusDirectory, Statuses};
-use crate::window::{Cursor, page_filter, parse_page};
+use crate::window::Cursor;
 use crate::{ChannelSummary, Events};
 use buzz_identity::Identity;
 use nostr::prelude::{EventId, PublicKey};
@@ -73,13 +75,18 @@ use unread::{Mark, Reads};
 
 /// Closed channels kept warm for a quick return.
 const RETAINED_CLOSED: usize = 3;
+/// Recently accepted events kept as visibility evidence (`session.ts`
+/// `recent`).
+const RECENT_EVENTS: usize = 4096;
+const RECENT_BYTES: usize = 8 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
     Connecting,
     Ready,
-    /// Could not reach the relay or it did not identify itself. Retried
-    /// automatically with backoff, or at once with [`Session::retry`].
+    /// Could not reach the relay or it did not identify itself. Waits for
+    /// [`Session::retry`] (or, while a saved snapshot shows,
+    /// [`Session::online`]).
     Failed(String),
 }
 
@@ -223,6 +230,10 @@ pub struct SessionSnapshot {
     pub status: SessionStatus,
     /// The live socket is authenticated; otherwise views may be stale.
     pub live: bool,
+    /// Showing this device's saved roster and conversations while the
+    /// relay has not answered (offline resume). Nothing is writable;
+    /// "Reconnect to update saved conversations."
+    pub cached: bool,
     /// Live connection, routes and catch-up. Replaced only when it changes.
     pub live_status: Arc<LiveView>,
     pub relay: Option<RelayInfo>,
@@ -295,12 +306,8 @@ impl ChannelView {
         let _ = self.commands.send(Message::With(Box::new(move |actor| {
             if actor.relay.is_none() {
                 actor.connect();
-            } else if actor
-                .timelines
-                .get(&channel)
-                .is_some_and(|timeline| !timeline.loading_head)
-            {
-                actor.load_head(&channel, false);
+            } else if actor.timelines.contains_key(&channel) && !actor.demand_channel(&channel) {
+                actor.load_head(&channel);
             }
         })));
     }
@@ -339,6 +346,7 @@ impl Session {
         let snapshot = watch::Sender::new(Arc::new(SessionSnapshot {
             status: SessionStatus::Connecting,
             live: false,
+            cached: false,
             live_status: Arc::default(),
             relay: None,
             roster: RosterStatus::Loading,
@@ -394,7 +402,16 @@ impl Session {
             closed: VecDeque::new(),
             profiles: ProfileDirectory::default(),
             selected: None,
-            connect_attempt: 0,
+            connecting: false,
+            cached: false,
+            next_generation: 0,
+            channels: channels::Channels::default(),
+            recent: ByteLru::new(RECENT_EVENTS, RECENT_BYTES),
+            waiting: HashMap::new(),
+            media: media.clone(),
+            emoji_generation: 0,
+            access_revision: 0,
+            known_channels: std::collections::HashSet::new(),
             store,
             clock: Arc::new(MessageClock::new()),
             outbox: None,
@@ -512,8 +529,54 @@ impl Session {
         let _ = self.commands.send(Message::Select(channel));
     }
 
+    /// "Try again": connects when the relay has not answered (or a saved
+    /// snapshot shows); otherwise retries live updates, the roster and
+    /// read sync.
     pub fn retry(&self) {
         let _ = self.commands.send(Message::Retry);
+    }
+
+    /// "Retry live updates" (`session.live.retry`): a fresh reconnect
+    /// budget, failed routes, the roster and owed catch-ups again. The
+    /// relay's quota cooldown still applies.
+    pub fn retry_live(&self) {
+        let _ = self.commands.send(Message::RetryLive);
+    }
+
+    /// The network came back (the browser's `online`): a session showing
+    /// a saved snapshot connects again.
+    pub fn online(&self) {
+        let _ = self.commands.send(Message::Online);
+    }
+
+    /// The window became visible: a saved snapshot connects again,
+    /// otherwise the roster is re-read.
+    pub fn visible(&self) {
+        let _ = self.commands.send(Message::Visible);
+    }
+
+    /// Hover or keyboard intent on a channel row (`channels.prepare`):
+    /// warms its head so opening it shows at once.
+    pub fn prepare(&self, channel: &str) {
+        let _ = self.commands.send(Message::Prepare(channel.to_string()));
+    }
+
+    /// "Retry messages": reads the channel's head again.
+    pub fn refresh_channel(&self, channel: &str) {
+        let _ = self
+            .commands
+            .send(Message::RefreshChannel(channel.to_string()));
+    }
+
+    /// Forgets every cached head, tail and saved conversation of this
+    /// community, here and on disk (Developer settings "Clear cache").
+    /// Open channels load again; a session that had not connected tries
+    /// again.
+    pub async fn clear_cache(&self) {
+        let (reply, done) = oneshot::channel();
+        if self.commands.send(Message::ClearCache(reply)).is_ok() {
+            let _ = done.await;
+        }
     }
 
     /// Follows these people's presence (at most 256; the viewer first,
@@ -737,28 +800,37 @@ enum Message {
     Close(String),
     LoadOlder(String),
     Select(Option<String>),
+    Prepare(String),
+    RefreshChannel(String),
     Retry,
+    RetryLive,
+    Online,
+    Visible,
+    ClearCache(oneshot::Sender<()>),
     Write {
         write: Write,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    Connected(Result<RelayInfo, String>),
+    /// The device cache, read and verified off the actor.
+    Restored(Option<Box<channels::Restored>>),
+    StartupSaved,
+    Connected(Result<RelayInfo, ConnectError>),
     ScanRead {
         epoch: u64,
         result: Result<Events, ReadError>,
     },
     Page {
         channel: String,
-        generation: u64,
         sent: Option<Cursor>,
-        catch_up: bool,
-        result: Result<Events, ReadError>,
+        purpose: channels::PageFor,
+        epoch: u64,
+        access: u64,
+        result: Result<channels::PageRead, ReadError>,
     },
     Profiles {
         ids: Vec<String>,
         result: Result<Events, ReadError>,
     },
-    Reconnect,
     Mark {
         mark: Mark,
         reply: oneshot::Sender<Result<(), String>>,
@@ -795,9 +867,20 @@ enum Message {
     /// change its state.
     With(Box<dyn FnOnce(&mut Actor) + Send>),
     RefreshEmoji,
-    EmojiRead(Result<Events, ReadError>),
+    EmojiRead {
+        generation: u64,
+        result: Result<Events, ReadError>,
+    },
     /// Stop for good; reply once nothing more will be written.
     Dispose(oneshot::Sender<()>),
+}
+
+/// Why connecting failed.
+#[derive(Debug)]
+struct ConnectError {
+    message: String,
+    /// The relay refused this viewer (401/403): nothing saved may show.
+    denied: bool,
 }
 
 struct Actor {
@@ -823,9 +906,21 @@ struct Actor {
     timelines: HashMap<String, Timeline>,
     /// Closed channels kept warm, most recent last.
     closed: VecDeque<String>,
+    /// Views opened before the relay identified itself, by channel.
+    waiting: HashMap<String, Vec<watch::Sender<Arc<TimelineSnapshot>>>>,
     profiles: ProfileDirectory,
     selected: Option<String>,
-    connect_attempt: u32,
+    /// NIP-11 is being read.
+    connecting: bool,
+    /// Showing the saved snapshot without a relay (offline resume).
+    cached: bool,
+    /// Window generations come from one counter, so a window recreated
+    /// after eviction never accepts a read meant for its predecessor.
+    next_generation: u64,
+    channels: channels::Channels,
+    /// Recently accepted events, as visibility evidence.
+    recent: ByteLru<Verified>,
+    media: Media,
     store: Store,
     /// Shared by the outbox and every timeline, so sends sort after what
     /// is shown.
@@ -842,6 +937,8 @@ struct Actor {
     /// The catalog read is in flight.
     emoji_reading: bool,
     statuses: StatusDirectory,
+    /// Bumped when the catalog is cleared or re-read; fences old reads.
+    emoji_generation: u64,
     incoming: incoming::Incoming,
     incoming_sender: broadcast::Sender<IncomingMessage>,
     hidden_dms: Arc<[String]>,
@@ -852,12 +949,16 @@ struct Actor {
     view_reports: HashMap<String, (Vec<EventId>, bool)>,
     roster_refresh: RosterRefresh,
     live_view: Arc<LiveView>,
+    /// The discovery access revision last acted on.
+    access_revision: u64,
+    /// Channels readable at the last access check.
+    known_channels: std::collections::HashSet<String>,
 }
 
 impl Actor {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
         self.sidebar_restore();
-        self.connect();
+        self.begin_restore();
         loop {
             let deadline = [
                 self.reads_deadline(),
@@ -952,25 +1053,50 @@ impl Actor {
                 self.update_interests();
                 self.update_reading();
             }
+            Message::Prepare(channel) => self.prepare(&channel),
+            Message::RefreshChannel(channel) => {
+                if self.timelines.contains_key(&channel) && !self.demand_channel(&channel) {
+                    self.load_head(&channel);
+                }
+            }
             Message::Retry => {
                 if self.relay.is_none() {
                     self.connect();
                 } else {
-                    if let Some(live) = &mut self.live {
-                        live.retry();
-                    }
-                    self.start_scan(ScanOptions {
-                        strong: true,
-                        ..Default::default()
-                    });
+                    self.retry_live();
                     self.retry_reads();
                 }
             }
-            Message::Reconnect => {
-                if self.relay.is_none() {
+            Message::RetryLive => self.retry_live(),
+            Message::Online => {
+                if self.cached {
                     self.connect();
                 }
             }
+            Message::Visible => {
+                if self.cached {
+                    self.connect();
+                } else {
+                    self.start_scan(ScanOptions {
+                        force_metadata: true,
+                        ..Default::default()
+                    });
+                }
+            }
+            Message::ClearCache(reply) => {
+                let cleared = self.clear_cache();
+                let reconnect = self.relay.is_none();
+                let commands = self.commands.clone();
+                self.runtime.spawn(async move {
+                    let _ = cleared.await;
+                    if reconnect {
+                        let _ = commands.send(Message::Online);
+                    }
+                    let _ = reply.send(());
+                });
+            }
+            Message::Restored(restored) => self.restored(restored.map(|restored| *restored)),
+            Message::StartupSaved => self.startup_saved(),
             Message::Connected(result) => self.connected(result),
             Message::Write {
                 write: Write::Dismiss(id),
@@ -1000,23 +1126,21 @@ impl Actor {
             Message::ScanRead { epoch, result } => {
                 if epoch == self.epoch {
                     self.scan_read(result);
+                } else {
+                    // A revocation interrupted the pass; another is owed.
+                    self.scan = None;
+                    self.roster_refresh = RosterRefresh::Deferred;
+                    self.start_scan(ScanOptions::default());
                 }
             }
             Message::Page {
                 channel,
-                generation,
                 sent,
-                catch_up,
+                purpose,
+                epoch,
+                access,
                 result,
-            } => {
-                if let Ok(events) = &result
-                    && self.reads_accept(events)
-                {
-                    self.publish();
-                }
-                self.page(&channel, generation, sent, catch_up, result);
-                self.reading_loaded(&channel);
-            }
+            } => self.page_read(channel, sent, purpose, (epoch, access), result),
             Message::Profiles { ids, result } => {
                 self.profiles.finished(&ids);
                 if let Ok(events) = result {
@@ -1027,6 +1151,9 @@ impl Actor {
                         .cloned()
                         .collect();
                     if self.profiles.accept(&events) {
+                        if self.channels.discovery_observed {
+                            self.save_startup();
+                        }
                         self.publish();
                     }
                 }
@@ -1059,7 +1186,10 @@ impl Actor {
             } => self.presence_published(publication, outcome),
             Message::With(run) => run(self),
             Message::RefreshEmoji => self.read_emoji(),
-            Message::EmojiRead(result) => {
+            Message::EmojiRead { generation, result } => {
+                if generation != self.emoji_generation {
+                    return;
+                }
                 self.emoji_reading = false;
                 let result = result.as_deref().map_err(|error| error.message.clone());
                 if self.emoji.finished(result) {
@@ -1072,43 +1202,73 @@ impl Actor {
 
     // ----- connection -----
 
-    /// Reads NIP-11 to learn the relay's signing key, then starts live
-    /// traffic and the roster scan.
+    /// Reads NIP-11 to learn the relay's signing key (`service.retry`),
+    /// within 8 s. A failure waits for the user's retry, or for the network
+    /// to come back while a saved snapshot shows.
     fn connect(&mut self) {
+        if self.connecting || self.relay.is_some() {
+            return;
+        }
+        self.connecting = true;
         self.set_status(SessionStatus::Connecting);
         let http = self.http.clone();
         let commands = self.commands.clone();
         self.runtime.spawn(async move {
             let info = tokio::time::timeout(Duration::from_secs(8), http.information()).await;
             let result = match info {
-                Ok(Ok(info)) => relay_info(&info),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err("Relay connection timed out. Try again.".to_string()),
+                Ok(Ok(info)) => relay_info(&info).map_err(|message| ConnectError {
+                    message,
+                    denied: false,
+                }),
+                Ok(Err(error)) => Err(ConnectError {
+                    denied: matches!(
+                        error,
+                        crate::http::HttpError::Status {
+                            status: 401 | 403,
+                            ..
+                        }
+                    ),
+                    message: error.to_string(),
+                }),
+                Err(_) => Err(ConnectError {
+                    message: "Relay connection timed out. Try again.".to_string(),
+                    denied: false,
+                }),
             };
             let _ = commands.send(Message::Connected(result));
         });
     }
 
-    fn connected(&mut self, result: Result<RelayInfo, String>) {
+    fn connected(&mut self, result: Result<RelayInfo, ConnectError>) {
+        self.connecting = false;
         let info = match result {
             Ok(info) => info,
             Err(error) => {
-                self.connect_attempt += 1;
-                let delay = Duration::from_secs(2u64.pow(self.connect_attempt.min(5)));
-                self.set_status(SessionStatus::Failed(error));
-                let commands = self.commands.clone();
-                self.runtime.spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    let _ = commands.send(Message::Reconnect);
-                });
+                if error.denied {
+                    // Refused: nothing saved for this viewer may show.
+                    drop(self.clear_cache());
+                    self.discovery = None;
+                    self.cached = false;
+                    self.channels.cached_author = None;
+                }
+                self.set_status(SessionStatus::Failed(error.message));
+                self.publish();
                 return;
             }
         };
-        self.connect_attempt = 0;
-        self.discovery = Some(DiscoveryState::new(
-            self.identity.pubkey_hex(),
-            info.authority.clone(),
-        ));
+        self.confirm_cached_author(&info.authority);
+        self.cached = false;
+        if self.discovery.is_none() {
+            self.discovery = Some(DiscoveryState::new(
+                self.identity.pubkey_hex(),
+                info.authority.clone(),
+            ));
+        }
+        self.access_revision = self
+            .discovery
+            .as_ref()
+            .map_or(0, DiscoveryState::access_revision);
+        self.remember_known();
         self.relay = Some(info);
         self.live = Some(Live::connect(
             &self.runtime,
@@ -1139,6 +1299,54 @@ impl Actor {
         self.start_scan(ScanOptions::default());
         self.read_emoji();
         self.statuses_schedule();
+        // Views opened before the relay answered start now.
+        for (channel, views) in std::mem::take(&mut self.waiting) {
+            for view in views {
+                self.open(&channel, view);
+            }
+        }
+        // Saved heads shown while offline revalidate.
+        for channel in self.open_channels() {
+            self.ensure(&channel);
+        }
+        self.update_interests();
+        self.publish();
+    }
+
+    /// "Retry live updates" (`live.retry`).
+    fn retry_live(&mut self) {
+        if matches!(
+            self.roster_refresh,
+            RosterRefresh::Error(_) | RosterRefresh::Deferred
+        ) {
+            self.start_scan(ScanOptions {
+                strong: true,
+                ..Default::default()
+            });
+        }
+        for channel in self.demanded_open() {
+            self.demand_channel(&channel);
+        }
+        if let Some(live) = &mut self.live {
+            live.retry();
+        }
+    }
+
+    /// Open windows, the selected one first.
+    fn demanded_open(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .selected
+            .iter()
+            .filter(|id| self.timelines.contains_key(*id))
+            .cloned()
+            .collect();
+        ids.extend(
+            self.timelines
+                .keys()
+                .filter(|id| Some(*id) != self.selected.as_ref())
+                .cloned(),
+        );
+        ids
     }
 
     fn set_status(&mut self, status: SessionStatus) {
@@ -1163,14 +1371,25 @@ impl Actor {
     // ----- roster -----
 
     fn start_scan(&mut self, options: ScanOptions) {
+        if self.relay.is_none() {
+            return;
+        }
         let Some(discovery) = &self.discovery else {
             return;
         };
         if self.scan.is_some() {
-            self.rescan = Some(options);
+            let pending = self.rescan.unwrap_or_default();
+            self.rescan = Some(ScanOptions {
+                strong: pending.strong || options.strong,
+                force_metadata: pending.force_metadata || options.force_metadata,
+            });
             return;
         }
         self.scan = Some(RosterScan::new(discovery, options));
+        if !matches!(self.roster_refresh, RosterRefresh::Pending) {
+            self.roster_refresh = RosterRefresh::Pending;
+            self.publish_live();
+        }
         self.scan_next();
     }
 
@@ -1206,18 +1425,27 @@ impl Actor {
         let mut denied_all = false;
         match result {
             Ok(events) => {
+                self.channels.discovery_observed = true;
                 if let Err(error) = scan.accept(discovery, &events) {
                     self.roster = RosterStatus::Error(error.to_string());
+                    self.roster_refresh = RosterRefresh::Error(error.to_string());
                 }
             }
             Err(error) => {
                 denied_all = scan.fail(discovery, error.kind == ReadErrorKind::Denied);
+                self.roster_refresh = if error.kind == ReadErrorKind::Cancelled {
+                    RosterRefresh::Deferred
+                } else {
+                    RosterRefresh::Error(error.message.clone())
+                };
                 self.roster = RosterStatus::Error(error.message);
             }
         }
         let done = scan.stage() == ScanStage::Done;
         if denied_all {
-            self.purge_denied();
+            // The roster itself was refused: nothing saved stays either.
+            self.retain_saved_heads(std::collections::HashSet::new());
+            self.check_access();
         }
         if done {
             self.scan_done();
@@ -1228,27 +1456,90 @@ impl Actor {
 
     fn scan_done(&mut self) {
         let scan = self.scan.take();
-        if scan.is_some_and(|scan| scan.certified())
-            || !matches!(self.roster, RosterStatus::Error(_))
-        {
+        let certified = scan.as_ref().is_some_and(RosterScan::certified);
+        if certified || !matches!(self.roster, RosterStatus::Error(_)) {
             self.roster = RosterStatus::Ready;
         }
-        self.purge_denied();
+        if !matches!(
+            self.roster_refresh,
+            RosterRefresh::Error(_) | RosterRefresh::Deferred
+        ) {
+            self.roster_refresh = RosterRefresh::Verified;
+        }
+        self.check_access();
+        if certified && let Some(discovery) = &self.discovery {
+            // Only a complete roster proves which saved heads are stale.
+            let joined = discovery.channels().into_iter().map(|c| c.id).collect();
+            self.retain_saved_heads(joined);
+        }
         self.update_interests();
         self.reads_channels(true);
         self.ensure_profiles(self.channel_people());
         self.refresh_visibility();
         self.sidebar_probe();
+        self.refresh_session_windows();
+        // Saved membership the pass confirmed makes saved heads readable.
+        for channel in self.open_channels() {
+            self.ensure(&channel);
+        }
+        self.save_startup();
+        self.publish_live();
         self.publish();
         if let Some(options) = self.rescan.take() {
             self.start_scan(options);
         }
     }
 
-    /// Drops timelines of channels the viewer can no longer read.
-    fn purge_denied(&mut self) {
+    /// Acts on a change of channel access (`revokeAccess`): what can no
+    /// longer be read goes, and everything retained is filtered again.
+    fn check_access(&mut self) {
         let Some(discovery) = &self.discovery else {
             return;
+        };
+        let revision = discovery.access_revision();
+        if revision == self.access_revision {
+            return;
+        }
+        self.access_revision = revision;
+        // Channels something was kept for that are no longer readable.
+        let lost: Vec<String> = self
+            .known_channels
+            .iter()
+            .chain(self.timelines.keys())
+            .filter(|id| !discovery.can_access(id))
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        self.purge_denied();
+        for id in &lost {
+            self.bump_access(id);
+            self.channels_forget(id);
+        }
+        self.revoke_access(&lost);
+        self.remember_known();
+    }
+
+    /// The channels this session keeps anything for, to tell which a
+    /// revocation took away.
+    fn remember_known(&mut self) {
+        let Some(discovery) = &self.discovery else {
+            return;
+        };
+        self.known_channels = discovery
+            .channels()
+            .into_iter()
+            .map(|channel| channel.id)
+            .chain(self.timelines.keys().cloned())
+            .filter(|id| discovery.can_access(id))
+            .collect();
+    }
+
+    /// Drops timelines of channels the viewer can no longer read. Returns
+    /// whether any went.
+    fn purge_denied(&mut self) -> bool {
+        let Some(discovery) = &self.discovery else {
+            return false;
         };
         let denied: Vec<String> = self
             .timelines
@@ -1258,16 +1549,77 @@ impl Actor {
             .collect();
         self.threads_purge();
         if denied.is_empty() {
-            return;
+            return false;
         }
         self.epoch += 1;
         for id in denied {
+            self.bump_access(&id);
+            self.channels_forget(&id);
             if let Some(mut timeline) = self.timelines.remove(&id) {
-                timeline.fail("Conversation is unavailable".into());
+                self.next_generation += 1;
+                timeline.deny("Conversation is unavailable".into(), self.next_generation);
                 timeline.publish();
             }
             self.closed.retain(|closed| closed != &id);
         }
+        true
+    }
+
+    /// What a revocation drops besides windows: reads in flight, typing,
+    /// evidence that is no longer visible, and, when a channel was lost,
+    /// the profiles and catalog that might have come from it. Open windows
+    /// then load again.
+    fn revoke_access(&mut self, lost: &[String]) {
+        self.epoch += 1;
+        self.typing.clear();
+        let revoked: Vec<String> = {
+            let all: Vec<Verified> = self.recent.iter().map(|(_, event)| event.clone()).collect();
+            let visible: std::collections::HashSet<EventId> =
+                self.visible(&all, false).iter().map(|e| e.id).collect();
+            all.iter()
+                .filter(|event| event.kind_u16() == kinds::PROFILE || !visible.contains(&event.id))
+                .map(Verified::id_hex)
+                .collect()
+        };
+        for id in revoked {
+            self.recent.remove(&id);
+        }
+        self.purge_retained();
+        if !lost.is_empty() {
+            let lost: std::collections::HashSet<String> = lost.iter().cloned().collect();
+            self.reader.invalidate(move |filters| {
+                filters.iter().any(|filter| {
+                    ["#h", "#d"].iter().any(|key| {
+                        filter
+                            .get(*key)
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|ids| {
+                                ids.iter()
+                                    .any(|id| id.as_str().is_some_and(|id| lost.contains(id)))
+                            })
+                    })
+                })
+            });
+            // Names and emoji seen only in a lost channel must not stay.
+            self.profiles.clear();
+            self.emoji_clear();
+            self.ensure_profiles(self.channel_people());
+            let people: Vec<String> = self.timelines.values().flat_map(Timeline::people).collect();
+            self.ensure_profiles(people);
+        }
+        for channel in self.open_channels() {
+            self.ensure(&channel);
+        }
+        self.publish_activity();
+    }
+
+    /// Channels with an open view.
+    fn open_channels(&self) -> Vec<String> {
+        self.timelines
+            .values()
+            .filter(|timeline| timeline.viewers > 0)
+            .map(|timeline| timeline.id.clone())
+            .collect()
     }
 
     fn channel_people(&self) -> Vec<String> {
@@ -1288,7 +1640,12 @@ impl Actor {
         let (Some(live), Some(discovery)) = (&mut self.live, &self.discovery) else {
             return;
         };
-        let joined: Vec<String> = discovery.channels().into_iter().map(|c| c.id).collect();
+        let joined: Vec<String> = discovery
+            .channels()
+            .into_iter()
+            .filter(|channel| !channel.cached)
+            .map(|c| c.id)
+            .collect();
         let mut prioritized: Vec<String> = self.selected.iter().cloned().collect();
         prioritized.extend(
             self.timelines
@@ -1296,12 +1653,16 @@ impl Actor {
                 .filter(|t| t.viewers > 0 && Some(&t.id) != self.selected.as_ref())
                 .map(|t| t.id.clone()),
         );
+        let readable = |id: &String| {
+            discovery.can_access(id) && !discovery.get(id).is_some_and(|summary| summary.cached)
+        };
         let interests: Vec<String> = joined
             .iter()
             .cloned()
             .chain(prioritized.iter().cloned())
-            .filter(|id| discovery.can_access(id))
+            .filter(readable)
             .collect();
+        prioritized.retain(readable);
         if let Err(error) = live.update(interests, joined, prioritized) {
             tracing::warn!(%error, "live interests refused");
         }
@@ -1329,7 +1690,9 @@ impl Actor {
                 if !events.is_empty() {
                     self.accept(&events);
                 }
-                self.typing_accept(&[events, pulses].concat());
+                if !pulses.is_empty() && self.live.as_ref().is_some_and(Live::is_connected) {
+                    self.typing_accept(&pulses);
+                }
                 let arrived: Vec<String> = candidates
                     .iter()
                     .filter_map(|event| event.channel().map(str::to_owned))
@@ -1347,29 +1710,27 @@ impl Actor {
             }
             LiveUpdate::Established { route, channels } => {
                 if matches!(route, crate::RouteKey::Profiles) {
-                    // Profiles changed while we were away are re-read.
+                    // Profiles changed while we were away are re-read, and
+                    // reads the disconnect cancelled are asked again.
                     for (ids, filter) in self.profiles.refresh() {
                         self.read_profiles(ids, filter);
                     }
+                    let mut people = self.channel_people();
+                    people.extend(self.timelines.values().flat_map(Timeline::people));
+                    self.ensure_profiles(people);
                     // Sets replaced while we were away arrive with the
                     // whole catalog.
-                    self.read_emoji();
+                    self.emoji_reconnect();
                     self.statuses_reconnected();
                 }
                 self.threads_established(&channels);
-                for channel in channels {
-                    if self.timelines.get(&channel).is_some_and(|t| t.stale) {
-                        self.load_head(&channel, true);
-                    }
-                }
+                self.established_channels(&channels);
             }
-            LiveUpdate::Denied { channels, .. } => {
-                if let Some(discovery) = &mut self.discovery {
-                    for id in &channels {
-                        discovery.deny(id);
-                    }
+            LiveUpdate::Denied { channels, reason } => {
+                for id in &channels {
+                    self.deny_channel(id, &reason);
                 }
-                self.purge_denied();
+                self.check_access();
                 self.update_interests();
                 self.reads_channels(false);
                 self.publish();
@@ -1387,17 +1748,11 @@ impl Actor {
             LiveUpdate::Disconnected => {
                 self.set_live(false);
                 self.presence_connected(false);
-                for timeline in self.timelines.values_mut() {
-                    timeline.mark_stale();
-                    timeline.publish();
-                }
+                self.channels_disconnected();
                 self.reads_disconnected();
+                self.publish_live();
             }
         }
-    }
-
-    fn catch_up_states(&self) -> Vec<HeadCatchUp> {
-        Vec::new()
     }
 
     /// Rebuilds the live view and publishes it if it changed.
@@ -1426,10 +1781,109 @@ impl Actor {
         });
     }
 
+    /// Which events of `batch` may be shown (`eventVisibility`): every
+    /// channel an event names must be readable, and an auxiliary event
+    /// (deletion, reaction, edit, moderator delete, thread summary) also
+    /// needs every target it references known and visible. `remote` also
+    /// refuses channels whose membership is only saved.
+    pub(super) fn visible(&self, batch: &[Verified], remote: bool) -> Vec<Verified> {
+        const DEPTH: usize = 32;
+        let by_id: HashMap<EventId, &Verified> = batch.iter().map(|e| (e.id, e)).collect();
+        let local = self.local_events();
+        let local: HashMap<EventId, &Verified> = local.iter().map(|e| (e.id, e)).collect();
+        let readable = |id: &str| {
+            if remote {
+                self.can_read_remote(id)
+            } else {
+                self.discovery.as_ref().is_some_and(|d| d.can_access(id))
+            }
+        };
+        let find = |id: &EventId| -> Option<Verified> {
+            if let Some(event) = by_id.get(id).or_else(|| local.get(id)) {
+                return Some((*event).clone());
+            }
+            let hex = id.to_hex();
+            self.recent
+                .peek(&hex)
+                .cloned()
+                .or_else(|| self.timelines.values().find_map(|t| t.find(id)))
+                .or_else(|| self.thread_event(id))
+                .or_else(|| {
+                    self.reads
+                        .as_ref()
+                        .and_then(|reads| reads.unread.event(&hex).cloned())
+                })
+        };
+        struct Walk<'a> {
+            memo: HashMap<EventId, bool>,
+            visiting: std::collections::HashSet<EventId>,
+            readable: &'a dyn Fn(&str) -> bool,
+            find: &'a dyn Fn(&EventId) -> Option<Verified>,
+        }
+        impl Walk<'_> {
+            fn visible(&mut self, event: &Verified) -> bool {
+                if let Some(known) = self.memo.get(&event.id) {
+                    return *known;
+                }
+                if self.visiting.contains(&event.id) || self.visiting.len() >= DEPTH {
+                    return false;
+                }
+                self.visiting.insert(event.id);
+                let mut channels: Vec<&str> = event
+                    .tags_named("h")
+                    .filter_map(|tag| tag.get(1).map(String::as_str))
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                if matches!(
+                    event.kind_u16(),
+                    kinds::CHANNEL_METADATA | kinds::CHANNEL_ADMINS | kinds::CHANNEL_MEMBERS
+                ) && let Some(id) = event.tag("d")
+                    && !id.is_empty()
+                {
+                    channels.push(id);
+                }
+                let mut allowed = channels.iter().all(|id| (self.readable)(id));
+                if allowed && kinds::AUXILIARY_KINDS.contains(&event.kind_u16()) {
+                    let targets: Vec<EventId> = event
+                        .tags_named("e")
+                        .filter_map(|tag| tag.get(1))
+                        .filter(|id| !id.is_empty())
+                        .map(|id| EventId::from_hex(id).ok())
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default();
+                    let malformed = event
+                        .tags_named("e")
+                        .filter_map(|tag| tag.get(1))
+                        .any(|id| !id.is_empty() && EventId::from_hex(id).is_err());
+                    allowed = !malformed
+                        && (!channels.is_empty() || !targets.is_empty())
+                        && targets.iter().all(|target| {
+                            (self.find)(target).is_some_and(|parent| self.visible(&parent))
+                        });
+                }
+                self.visiting.remove(&event.id);
+                self.memo.insert(event.id, allowed);
+                allowed
+            }
+        }
+        let mut walk = Walk {
+            memo: HashMap::new(),
+            visiting: std::collections::HashSet::new(),
+            readable: &readable,
+            find: &find,
+        };
+        batch
+            .iter()
+            .filter(|event| walk.visible(event))
+            .cloned()
+            .collect()
+    }
+
     /// Every verified event goes through here, in the reference order:
-    /// discovery, membership hints, read state, unread, outbox echo,
-    /// profiles, then channel timelines.
-    fn accept(&mut self, events: &[Verified]) {
+    /// discovery, membership hints, then only what is visible to read
+    /// state, unread, outbox echo, profiles, emoji, channel tails and
+    /// windows, and threads. Returns the visible events.
+    fn accept(&mut self, events: &[Verified]) -> Vec<Verified> {
         let mut publish = false;
         if let Some(discovery) = &mut self.discovery {
             let mut changed = false;
@@ -1443,9 +1897,11 @@ impl Actor {
             }
             if changed {
                 publish = true;
-                self.purge_denied();
+                self.channels.discovery_observed = true;
+                self.check_access();
                 self.update_interests();
                 self.reads_channels(false);
+                self.save_startup();
             }
         }
         let viewer = self.identity.pubkey_hex();
@@ -1464,49 +1920,92 @@ impl Actor {
                 ..Default::default()
             });
         }
-        publish |= self.reads_accept(events);
-        if let Some(outbox) = &self.outbox {
-            outbox.observe(events);
+        // Ephemeral typing, telemetry and private feedback never enter
+        // retained views.
+        let candidates: Vec<Verified> = events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event.kind_u16(),
+                    kinds::AGENT_ACTIVITY | kinds::TYPING | PRODUCT_FEEDBACK
+                )
+            })
+            .cloned()
+            .collect();
+        let visible = self.visible(&candidates, true);
+        if visible.is_empty() {
+            if publish {
+                self.publish();
+            }
+            return visible;
         }
-        publish |= self.profiles.accept(events);
-        publish |= self.emoji.accept(events);
-        publish |= self.statuses.accept(events, unread::now_ms());
+        // Completion evidence from any admitted read ends typing.
+        self.typing_accept(&visible);
+        for event in &visible {
+            self.recent
+                .set(event.id_hex(), event.clone(), event.byte_size());
+        }
+        publish |= self.reads_accept(&visible);
+        if let Some(outbox) = &self.outbox {
+            outbox.observe(&visible);
+        }
+        publish |= self.profiles.accept(&visible);
+        publish |= self.emoji.accept(&visible);
+        publish |= self.statuses.accept(&visible, unread::now_ms());
+        self.accept_tails(&visible);
+        let local = self.local_ids();
         let mut people = Vec::new();
         for timeline in self.timelines.values_mut() {
-            if timeline.accept(events) {
+            if timeline.accept(&visible, &local) {
                 timeline.publish();
                 people.extend(timeline.people());
+                publish = true;
             }
         }
-        self.threads_receive(events);
+        self.threads_receive(&visible);
         self.ensure_profiles(people);
-        self.reading_arrivals(events);
-        if publish {
+        self.reading_arrivals(&visible);
+        if publish || !self.channels_preview_current() {
             self.publish();
         }
+        visible
+    }
+
+    /// Whether the published channel previews still match.
+    fn channels_preview_current(&self) -> bool {
+        let current = self.snapshot.borrow();
+        current
+            .channels
+            .iter()
+            .all(|channel| channel.preview == self.preview(&channel.id))
     }
 
     // ----- timelines -----
 
     fn open(&mut self, channel: &str, view: watch::Sender<Arc<TimelineSnapshot>>) {
-        let author = self
-            .relay_author()
-            .unwrap_or(PublicKey::from_slice(&[1; 32]).expect("valid key"));
         self.closed.retain(|id| id != channel);
-        let timeline = self
-            .timelines
-            .entry(channel.to_string())
-            .or_insert_with(|| Timeline::new(channel.to_string(), author, self.clock.clone()));
+        let Some(timeline) = self.touch(channel) else {
+            // Before the relay (or a saved snapshot) named its identity.
+            self.waiting
+                .entry(channel.to_string())
+                .or_default()
+                .push(view);
+            return;
+        };
         timeline.viewers += 1;
         timeline.attach(view);
-        if timeline.needs_head() {
-            self.load_head(channel, false);
-        }
+        self.ensure(channel);
         self.update_interests();
         self.update_reading();
     }
 
     fn close(&mut self, channel: &str) {
+        if let Some(views) = self.waiting.get_mut(channel) {
+            views.retain(|view| !view.is_closed());
+            if views.is_empty() {
+                self.waiting.remove(channel);
+            }
+        }
         let Some(timeline) = self.timelines.get_mut(channel) else {
             return;
         };
@@ -1525,110 +2024,21 @@ impl Actor {
         self.update_reading();
     }
 
-    fn load_head(&mut self, channel: &str, catch_up: bool) {
-        if self.relay.is_none() {
-            return;
-        }
-        let Some(timeline) = self.timelines.get_mut(channel) else {
+    /// Discovery may learn that an open channel is a session channel,
+    /// whose replies are rows.
+    fn refresh_session_windows(&mut self) {
+        let Some(discovery) = &self.discovery else {
             return;
         };
-        if timeline.loading_head {
-            return;
+        for timeline in self.timelines.values_mut() {
+            timeline.set_session(discovery.is_session(&timeline.id));
+            timeline.publish();
         }
-        timeline.loading_head = true;
-        let generation = timeline.generation;
-        self.read_page(channel.to_string(), generation, None, catch_up);
     }
 
-    fn load_older(&mut self, channel: &str) {
-        let Some(timeline) = self.timelines.get_mut(channel) else {
-            return;
-        };
-        if !timeline.has_more || timeline.loading_older || timeline.history_limited {
-            return;
-        }
-        let Some(cursor) = timeline.cursor.clone() else {
-            return;
-        };
-        timeline.loading_older = true;
-        timeline.publish();
-        let generation = timeline.generation;
-        self.read_page(channel.to_string(), generation, Some(cursor), false);
-    }
-
-    fn read_page(&self, channel: String, generation: u64, sent: Option<Cursor>, catch_up: bool) {
-        let reader = self.reader.clone();
-        let commands = self.commands.clone();
-        let filter = page_filter(&channel, sent.as_ref());
-        let background = catch_up && self.selected.as_deref() != Some(channel.as_str());
-        self.runtime.spawn(async move {
-            let options = if background {
-                ReadOptions::background()
-            } else {
-                ReadOptions::default()
-            };
-            let result = reader.read(vec![filter], options).await;
-            let _ = commands.send(Message::Page {
-                channel,
-                generation,
-                sent,
-                catch_up,
-                result,
-            });
-        });
-    }
-
-    fn page(
-        &mut self,
-        channel: &str,
-        generation: u64,
-        sent: Option<Cursor>,
-        catch_up: bool,
-        result: Result<Events, ReadError>,
-    ) {
-        let Some(authority) = self.relay.as_ref().map(|relay| relay.authority.clone()) else {
-            return;
-        };
-        let Some(timeline) = self.timelines.get_mut(channel) else {
-            return;
-        };
-        if timeline.generation != generation {
-            return;
-        }
-        let head = sent.is_none();
-        if head {
-            timeline.loading_head = false;
-        } else {
-            timeline.loading_older = false;
-        }
-        match result
-            .map_err(|error| (error.kind, error.message))
-            .and_then(|events| {
-                parse_page(channel, &authority, sent.as_ref(), &events)
-                    .map_err(|error| (ReadErrorKind::InvalidResponse, error.to_string()))
-            }) {
-            Ok(page) => {
-                if catch_up {
-                    timeline.merge_head(page.events, page.cursor, page.has_more);
-                } else {
-                    timeline.apply_page(page.events, page.cursor, page.has_more, head);
-                }
-            }
-            Err((ReadErrorKind::Denied, _)) => {
-                if let Some(discovery) = &mut self.discovery {
-                    discovery.deny(channel);
-                }
-                self.purge_denied();
-                self.reads_channels(false);
-                self.publish();
-                return;
-            }
-            Err((ReadErrorKind::Cancelled, _)) => {}
-            Err((_, message)) => timeline.fail(message),
-        }
-        timeline.publish();
-        let people = timeline.people();
-        self.ensure_profiles(people);
+    /// Forgets the memory caches of one channel.
+    fn channels_forget(&mut self, channel: &str) {
+        self.deny_cached(channel);
     }
 
     // ----- writes -----
@@ -1719,7 +2129,7 @@ impl Actor {
             Write::Remove { channel, id } => {
                 let target = find(&channel, &id)?;
                 let ids = vec![id.to_hex()];
-                messages::remove(&author, &ids, |_| Some(target.event().as_ref()), None)
+                messages::remove(&author, &ids, |_| Some(target.event()), None)
                     .map_err(|error| error.to_string())?
             }
             Write::Retry(id) => return outbox.retry(&id, None).map_err(|error| error.to_string()),
@@ -1733,7 +2143,7 @@ impl Actor {
         Ok(())
     }
 
-    /// Shows the outbox's signed operations in their timelines.
+    /// Shows the outbox's operations in their timelines.
     fn local_changed(&mut self) {
         let local = self.local_operations();
         for timeline in self.timelines.values_mut() {
@@ -1743,17 +2153,53 @@ impl Actor {
         self.threads_local(&local);
     }
 
-    /// The outbox's signed operations with their delivery state.
-    fn local_operations(&self) -> Vec<(Verified, LocalDelivery)> {
+    /// The outbox's events, signed or not yet, before visibility.
+    fn local_events(&self) -> Vec<Verified> {
         let Some(outbox) = &self.outbox else {
             return Vec::new();
         };
         outbox
             .visible()
             .iter()
+            .filter_map(|op| match op.signed.clone() {
+                Some(signed) => self.verifier.verify(signed).ok(),
+                None => Verified::local(&op.event),
+            })
+            .collect()
+    }
+
+    fn local_ids(&self) -> std::collections::HashSet<EventId> {
+        self.outbox
+            .as_ref()
+            .map(|outbox| outbox.visible().iter().map(|op| op.id()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The outbox's visible operations with their delivery state
+    /// (`local()`): a send shows at once, before it is even signed.
+    fn local_operations(&self) -> Vec<(Verified, LocalDelivery)> {
+        let Some(outbox) = &self.outbox else {
+            return Vec::new();
+        };
+        let operations = outbox.visible();
+        let events: Vec<(Verified, &Arc<crate::outbox::Operation>)> = operations
+            .iter()
+            .filter(|op| op.kind() != PRODUCT_FEEDBACK)
             .filter_map(|op| {
-                let signed = op.signed.clone()?;
-                let event = self.verifier.verify(signed).ok()?;
+                let event = match op.signed.clone() {
+                    Some(signed) => self.verifier.verify(signed).ok()?,
+                    None => Verified::local(&op.event)?,
+                };
+                Some((event, op))
+            })
+            .collect();
+        let batch: Vec<Verified> = events.iter().map(|(event, _)| event.clone()).collect();
+        let visible: std::collections::HashSet<EventId> =
+            self.visible(&batch, false).iter().map(|e| e.id).collect();
+        events
+            .into_iter()
+            .filter(|(event, _)| visible.contains(&event.id))
+            .map(|(event, op)| {
                 let status = match op.delivery {
                     crate::outbox::Delivery::Sending => crate::fold::Delivery::Sending,
                     crate::outbox::Delivery::Accepted => crate::fold::Delivery::Accepted,
@@ -1761,13 +2207,13 @@ impl Actor {
                     crate::outbox::Delivery::Failed => crate::fold::Delivery::Failed,
                     crate::outbox::Delivery::Seen => crate::fold::Delivery::Seen,
                 };
-                Some((
+                (
                     event,
                     LocalDelivery {
                         status,
                         error: op.error.clone(),
                     },
-                ))
+                )
             })
             .collect()
     }
@@ -1806,12 +2252,30 @@ impl Actor {
         }
         let reader = self.reader.clone();
         let commands = self.commands.clone();
+        let generation = self.emoji_generation;
         self.runtime.spawn(async move {
             let result = reader
                 .read(vec![catalog_filter()], ReadOptions::background())
                 .await;
-            let _ = commands.send(Message::EmojiRead(result));
+            let _ = commands.send(Message::EmojiRead { generation, result });
         });
+    }
+
+    /// The stream was re-established: an in-flight catalog read is
+    /// abandoned and a fresh one starts (`emoji.reconnect`).
+    fn emoji_reconnect(&mut self) {
+        self.emoji_generation += 1;
+        self.emoji_reading = false;
+        self.read_emoji();
+    }
+
+    /// Forgets the catalog (access change or cache clear) and reads it
+    /// again.
+    fn emoji_clear(&mut self) {
+        self.emoji_generation += 1;
+        self.emoji_reading = false;
+        self.emoji = EmojiDirectory::new(self.identity.pubkey_hex());
+        self.read_emoji();
     }
 
     // ----- output -----
@@ -1820,7 +2284,18 @@ impl Actor {
         let channels: Arc<[ChannelSummary]> = self
             .discovery
             .as_ref()
-            .map(|discovery| Arc::<[ChannelSummary]>::from(discovery.channels()))
+            .map(|discovery| {
+                Arc::<[ChannelSummary]>::from(
+                    discovery
+                        .channels()
+                        .into_iter()
+                        .map(|mut channel| {
+                            channel.preview = self.preview(&channel.id);
+                            channel
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
             .unwrap_or_else(|| Arc::new([]));
         let unread = self.unread_counts();
         self.sidebar_check_heads();
@@ -1828,6 +2303,7 @@ impl Actor {
         let next = SessionSnapshot {
             status: self.snapshot.borrow().status.clone(),
             live: self.live.as_ref().is_some_and(Live::is_connected),
+            cached: self.cached,
             live_status: self.live_view.clone(),
             relay: self.relay.clone(),
             roster: self.roster.clone(),
@@ -1846,6 +2322,7 @@ impl Actor {
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
                 && current.live == next.live
+                && current.cached == next.cached
                 && current.relay == next.relay
                 && current.roster == next.roster
                 && Arc::ptr_eq(&current.profiles, &next.profiles)
@@ -1861,7 +2338,13 @@ impl Actor {
                 && Arc::ptr_eq(&current.live_status, &next.live_status)
                 && *current.channels == *next.channels;
             if !same {
-                *current = Arc::new(next);
+                // Unchanged channels keep their snapshot.
+                let channels = if *current.channels == *next.channels {
+                    current.channels.clone()
+                } else {
+                    next.channels.clone()
+                };
+                *current = Arc::new(SessionSnapshot { channels, ..next });
             }
             !same
         });
@@ -1869,6 +2352,9 @@ impl Actor {
         self.after_publish();
     }
 }
+
+/// Product feedback lands in a private sidecar and never in views.
+const PRODUCT_FEEDBACK: u16 = 42000;
 
 /// NIP-11 fields the client uses (spec §1.4). `self` is required: without
 /// it relay-signed events cannot be trusted.

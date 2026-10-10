@@ -104,54 +104,84 @@ pub struct InvalidEvent;
 /// An event whose fields, ID hash and signature were checked. Only
 /// [`Verifier::verify`] creates one.
 #[derive(Clone)]
-pub struct Verified(Arc<Event>);
+pub struct Verified(Arc<Inner>);
+
+struct Inner {
+    event: Event,
+    /// Serialized size, measured once: budgets check it often.
+    bytes: std::sync::OnceLock<usize>,
+}
 
 impl Deref for Verified {
     type Target = Event;
     fn deref(&self) -> &Event {
-        &self.0
+        &self.0.event
     }
 }
 
 impl std::fmt::Debug for Verified {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Verified({} kind {})", self.0.id, self.0.kind)
+        write!(f, "Verified({} kind {})", self.id, self.kind)
     }
 }
 
 impl PartialEq for Verified {
     fn eq(&self, other: &Self) -> bool {
-        self.0.id == other.0.id
+        self.id == other.id
     }
 }
 
 impl Eq for Verified {}
 
 impl Verified {
-    pub fn event(&self) -> &Arc<Event> {
-        &self.0
+    fn new(event: Event) -> Self {
+        Self(Arc::new(Inner {
+            event,
+            bytes: std::sync::OnceLock::new(),
+        }))
+    }
+
+    pub fn event(&self) -> &Event {
+        &self.0.event
+    }
+
+    /// Our own outbox intent before it is signed, so a send shows at once
+    /// as a pending row (`outbox.ts` local snapshot). It carries no
+    /// signature: only for display, never stored, sent or trusted as
+    /// evidence of someone else's words.
+    pub(crate) fn local(unsigned: &nostr::prelude::UnsignedEvent) -> Option<Self> {
+        let id = unsigned.id?;
+        let sig = nostr::prelude::Signature::from_slice(&[0; 64]).ok()?;
+        Some(Self::new(Event::new(
+            id,
+            unsigned.pubkey,
+            unsigned.created_at,
+            unsigned.kind,
+            unsigned.tags.clone(),
+            unsigned.content.clone(),
+            sig,
+        )))
     }
 
     pub fn kind_u16(&self) -> u16 {
-        self.0.kind.as_u16()
+        self.kind.as_u16()
     }
 
     pub fn created_at_secs(&self) -> u64 {
-        self.0.created_at.as_secs()
+        self.created_at.as_secs()
     }
 
     pub fn id_hex(&self) -> String {
-        self.0.id.to_hex()
+        self.id.to_hex()
     }
 
     pub fn pubkey_hex(&self) -> String {
-        self.0.pubkey.to_hex()
+        self.pubkey.to_hex()
     }
 
     /// First value of the first tag with this name.
     pub fn tag(&self, name: &str) -> Option<&str> {
-        self.0
-            .tags
+        self.tags
             .iter()
             .find(|tag| tag.kind() == name)
             .and_then(|tag| tag.as_slice().get(1))
@@ -160,8 +190,7 @@ impl Verified {
 
     /// All tags with this name, as slices including the name.
     pub fn tags_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a [String]> + 'a {
-        self.0
-            .tags
+        self.tags
             .iter()
             .filter(move |tag| tag.kind() == name)
             .map(|tag| tag.as_slice())
@@ -194,7 +223,7 @@ impl Verified {
 
     /// Serialized size, for retention budgets.
     pub fn byte_size(&self) -> usize {
-        self.0.as_json().len()
+        *self.0.bytes.get_or_init(|| self.0.event.as_json().len())
     }
 }
 
@@ -267,7 +296,7 @@ impl Verifier {
                 }
             }
         }
-        Ok(Verified(Arc::new(event)))
+        Ok(Verified::new(event))
     }
 
     /// One bad event rejects the whole batch, as in the reference client.

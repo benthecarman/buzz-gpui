@@ -279,31 +279,46 @@ impl Store {
         })
     }
 
-    /// Replaces the cached head of one channel. Events are stored as their
-    /// signed wire JSON and re-verified when loaded.
+    /// Saves one channel's head (`persistence.ts` `write`): its signed
+    /// events and their authors' profiles as wire JSON, re-verified when
+    /// loaded. A head over the byte budget is not saved. Afterwards the
+    /// whole cache, across every partition, keeps only the newest heads
+    /// within [`MAX_SAVED_HEADS`], [`MAX_SAVED_BYTES`] and a day.
     pub fn save_head(
         &self,
         partition: &Partition,
         channel: &str,
+        saved_ms: i64,
         events: &[crate::Verified],
-        meta_json: &str,
-    ) -> Result<(), StoreError> {
+        profiles: &[crate::Verified],
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let profiles = format!(
+            "[{}]",
+            profiles
+                .iter()
+                .map(|event| event.as_json())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let raw: Vec<String> = events.iter().map(|event| event.as_json()).collect();
+        let bytes = profiles.len() + raw.iter().map(String::len).sum::<usize>() + channel.len();
+        if bytes > MAX_SAVED_BYTES {
+            return Ok(false);
+        }
         self.with(|c| {
             let tx = c.transaction()?;
             tx.execute(
                 "DELETE FROM head_events WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3",
                 params![partition.origin, partition.viewer, channel],
             )?;
-            let mut bytes = meta_json.len();
             {
                 let mut insert = tx.prepare(
                     "INSERT OR REPLACE INTO head_events
                        (origin, viewer, channel_id, event_id, created_at, kind, raw_json)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 )?;
-                for event in events {
-                    let raw = event.as_json();
-                    bytes += raw.len();
+                for (event, raw) in events.iter().zip(&raw) {
                     insert.execute(params![
                         partition.origin,
                         partition.viewer,
@@ -320,75 +335,195 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT (origin, viewer, channel_id) DO UPDATE SET
                    saved_ms = excluded.saved_ms, bytes = excluded.bytes, meta_json = excluded.meta_json",
-                params![partition.origin, partition.viewer, channel, now_ms(), bytes as i64, meta_json],
+                params![
+                    partition.origin,
+                    partition.viewer,
+                    channel,
+                    saved_ms,
+                    bytes as i64,
+                    profiles
+                ],
+            )?;
+            trim_heads(&tx, now_ms)?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// This partition's saved heads, newest first, at most
+    /// [`MAX_SAVED_HEADS`] and none older than a day (`persistence.ts`
+    /// `read`).
+    pub fn load_heads(
+        &self,
+        partition: &Partition,
+        now_ms: i64,
+    ) -> Result<Vec<SavedHead>, StoreError> {
+        self.with(|c| {
+            let metas: Vec<(String, i64, String)> = {
+                let mut query = c.prepare(
+                    "SELECT channel_id, saved_ms, meta_json FROM head_meta
+                     WHERE origin = ?1 AND viewer = ?2 ORDER BY saved_ms DESC",
+                )?;
+                query
+                    .query_map(params![partition.origin, partition.viewer], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?
+                    .collect::<Result<_, _>>()?
+            };
+            let mut heads = Vec::new();
+            for (channel, saved_ms, profiles) in metas {
+                if heads.len() >= MAX_SAVED_HEADS {
+                    break;
+                }
+                if now_ms - saved_ms >= MAX_SAVED_AGE_MS || saved_ms > now_ms {
+                    continue;
+                }
+                let mut query = c.prepare(
+                    "SELECT raw_json FROM head_events WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3
+                     ORDER BY created_at DESC, event_id ASC",
+                )?;
+                let events = query
+                    .query_map(params![partition.origin, partition.viewer, channel], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .map(|raw| {
+                        raw.map(|raw| serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null))
+                    })
+                    .collect::<Result<Vec<serde_json::Value>, _>>()?;
+                // A corrupt profile list is optional data; the history stays.
+                let profiles = serde_json::from_str(&profiles).unwrap_or_default();
+                heads.push(SavedHead {
+                    channel,
+                    saved_ms,
+                    events,
+                    profiles,
+                });
+            }
+            Ok(heads)
+        })
+    }
+
+    /// Forgets one channel's saved head (`remove`).
+    pub fn remove_head(&self, partition: &Partition, channel: &str) -> Result<(), StoreError> {
+        self.with(|c| {
+            let tx = c.transaction()?;
+            for table in ["head_events", "head_meta"] {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3"
+                    ),
+                    params![partition.origin, partition.viewer, channel],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Keeps only these channels' saved heads (`retain`).
+    pub fn retain_heads(
+        &self,
+        partition: &Partition,
+        channels: &std::collections::HashSet<String>,
+    ) -> Result<(), StoreError> {
+        let saved: Vec<String> = self.with(|c| {
+            let mut query =
+                c.prepare("SELECT channel_id FROM head_meta WHERE origin = ?1 AND viewer = ?2")?;
+            Ok(query
+                .query_map(params![partition.origin, partition.viewer], |row| {
+                    row.get(0)
+                })?
+                .collect::<Result<_, _>>()?)
+        })?;
+        for channel in saved.iter().filter(|id| !channels.contains(*id)) {
+            self.remove_head(partition, channel)?;
+        }
+        Ok(())
+    }
+
+    /// Wipes this partition's saved heads and roster snapshot (`clear`).
+    pub fn clear_cache(&self, partition: &Partition) -> Result<(), StoreError> {
+        self.with(|c| {
+            let tx = c.transaction()?;
+            for table in ["head_events", "head_meta"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE origin = ?1 AND viewer = ?2"),
+                    params![partition.origin, partition.viewer],
+                )?;
+            }
+            tx.execute(
+                "UPDATE startup_cache SET discovery_json = NULL WHERE origin = ?1 AND viewer = ?2",
+                params![partition.origin, partition.viewer],
             )?;
             tx.commit()?;
             Ok(())
         })
     }
 
-    /// The cached head: raw event JSON (to re-verify) and its metadata, if
-    /// saved within `max_age_ms`.
-    pub fn load_head(
-        &self,
-        partition: &Partition,
-        channel: &str,
-        max_age_ms: i64,
-    ) -> Result<Option<(Vec<String>, String)>, StoreError> {
+    /// The saved roster snapshot (`readStartup().discovery`), as saved.
+    pub fn startup_discovery(&self, partition: &Partition) -> Result<Option<String>, StoreError> {
         self.with(|c| {
-            let meta: Option<(i64, String)> = c
-                .query_row(
-                    "SELECT saved_ms, meta_json FROM head_meta
-                     WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3",
-                    params![partition.origin, partition.viewer, channel],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            let Some((saved_ms, meta)) = meta else {
-                return Ok(None);
-            };
-            if now_ms() - saved_ms > max_age_ms {
-                return Ok(None);
-            }
-            let mut query = c.prepare(
-                "SELECT raw_json FROM head_events WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3
-                 ORDER BY created_at DESC, event_id ASC",
-            )?;
-            let events = query
-                .query_map(params![partition.origin, partition.viewer, channel], |row| row.get(0))?
-                .collect::<Result<Vec<String>, _>>()?;
-            Ok(Some((events, meta)))
+            Ok(c.query_row(
+                "SELECT discovery_json FROM startup_cache WHERE origin = ?1 AND viewer = ?2",
+                params![partition.origin, partition.viewer],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
         })
     }
 
-    /// Keeps cached heads within a global budget, oldest first out.
-    pub fn trim_heads(&self, max_heads: usize, max_bytes: usize) -> Result<(), StoreError> {
+    /// Saves the roster snapshot (`writeStartup`). A record over the byte
+    /// budget is not saved; then the oldest records across partitions go
+    /// until the rest fit.
+    pub fn save_startup_discovery(
+        &self,
+        partition: &Partition,
+        json: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
         self.with(|c| {
             let tx = c.transaction()?;
-            let heads: Vec<(String, String, String, i64)> = {
+            let preferences: Option<String> = tx
+                .query_row(
+                    "SELECT preferences_json FROM startup_cache WHERE origin = ?1 AND viewer = ?2",
+                    params![partition.origin, partition.viewer],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let bytes = json.len() + preferences.as_ref().map_or(0, String::len);
+            if bytes > MAX_SAVED_BYTES {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO startup_cache (origin, viewer, discovery_json, preferences_json, saved_ms, bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (origin, viewer) DO UPDATE SET
+                   discovery_json = excluded.discovery_json, saved_ms = excluded.saved_ms,
+                   bytes = excluded.bytes",
+                params![partition.origin, partition.viewer, json, preferences, now_ms, bytes as i64],
+            )?;
+            let rows: Vec<(String, String, i64)> = {
                 let mut query = tx.prepare(
-                    "SELECT origin, viewer, channel_id, bytes FROM head_meta ORDER BY saved_ms DESC",
+                    "SELECT origin, viewer, bytes FROM startup_cache ORDER BY saved_ms DESC",
                 )?;
                 query
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                     .collect::<Result<_, _>>()?
             };
-            let mut kept_bytes = 0usize;
-            for (index, (origin, viewer, channel, bytes)) in heads.into_iter().enumerate() {
-                kept_bytes += bytes as usize;
-                if index >= max_heads || kept_bytes > max_bytes {
-                    for table in ["head_events", "head_meta"] {
-                        tx.execute(
-                            &format!(
-                                "DELETE FROM {table} WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3"
-                            ),
-                            params![origin, viewer, channel],
-                        )?;
-                    }
+            let mut total = 0usize;
+            for (origin, viewer, bytes) in rows {
+                total += bytes as usize;
+                if total > MAX_SAVED_BYTES {
+                    tx.execute(
+                        "DELETE FROM startup_cache WHERE origin = ?1 AND viewer = ?2",
+                        params![origin, viewer],
+                    )?;
                 }
             }
             tx.commit()?;
-            Ok(())
+            Ok(true)
         })
     }
 
@@ -413,6 +548,63 @@ pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Saved channel heads kept across every community (`persistence.ts`).
+pub const MAX_SAVED_HEADS: usize = 64;
+/// Bytes of saved heads, and of roster snapshots, across every community.
+pub const MAX_SAVED_BYTES: usize = 8 << 20;
+/// Saved heads and roster snapshots older than this are not used.
+pub const MAX_SAVED_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// One saved head as loaded: unverified wire JSON. Never authority for
+/// membership or freshness; the session re-verifies every event.
+#[derive(Clone, Debug)]
+pub struct SavedHead {
+    pub channel: String,
+    /// When the head was read from the relay, in Unix ms.
+    pub saved_ms: i64,
+    pub events: Vec<serde_json::Value>,
+    /// The authors' kind-0 profiles.
+    pub profiles: Vec<serde_json::Value>,
+}
+
+/// Newest first, drops heads past the global count, byte and age budgets.
+fn trim_heads(tx: &rusqlite::Transaction<'_>, now_ms: i64) -> Result<(), StoreError> {
+    let heads: Vec<(String, String, String, i64, i64)> = {
+        let mut query = tx.prepare(
+            "SELECT origin, viewer, channel_id, bytes, saved_ms FROM head_meta ORDER BY saved_ms DESC",
+        )?;
+        query
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?
+    };
+    let mut total = 0usize;
+    for (count, (origin, viewer, channel, bytes, saved_ms)) in heads.into_iter().enumerate() {
+        total += bytes as usize;
+        if total > MAX_SAVED_BYTES
+            || count >= MAX_SAVED_HEADS
+            || now_ms - saved_ms >= MAX_SAVED_AGE_MS
+        {
+            for table in ["head_events", "head_meta"] {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE origin = ?1 AND viewer = ?2 AND channel_id = ?3"
+                    ),
+                    params![origin, viewer, channel],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -466,46 +658,109 @@ mod tests {
         assert_eq!(store.view_state(&a, "draft:general").unwrap(), None);
     }
 
+    fn signed(keys: &Keys, content: &str) -> crate::Verified {
+        let event = EventBuilder::new(Kind::from_u16(9), content)
+            .tags([Tag::custom("h", ["general"])])
+            .finalize(keys)
+            .unwrap();
+        Verifier::default().verify(event).unwrap()
+    }
+
     #[test]
     fn heads_round_trip_and_purge_clears_only_one_partition() {
         let store = Store::in_memory().unwrap();
         let verifier = Verifier::default();
         let keys = Keys::generate();
-        let events: Vec<_> = (0..3)
-            .map(|i| {
-                let event = EventBuilder::new(Kind::from_u16(9), format!("m{i}"))
-                    .tags([Tag::custom("h", ["general"])])
-                    .finalize(&keys)
-                    .unwrap();
-                verifier.verify(event).unwrap()
-            })
-            .collect();
+        let events: Vec<_> = (0..3).map(|i| signed(&keys, &format!("m{i}"))).collect();
         let a = partition("https://a.example");
         let b = partition("https://b.example");
-        store.save_head(&a, "general", &events, "{}").unwrap();
-        store.save_head(&b, "general", &events[..1], "{}").unwrap();
-        let (raw, meta) = store.load_head(&a, "general", 60_000).unwrap().unwrap();
-        assert_eq!(raw.len(), 3);
-        assert_eq!(meta, "{}");
-        let reverified = verifier.verify_json(&serde_json::from_str(&raw[0]).unwrap());
-        assert!(reverified.is_ok());
+        let now = now_ms();
+        assert!(
+            store
+                .save_head(&a, "general", now, &events, &events[..1], now)
+                .unwrap()
+        );
+        store
+            .save_head(&b, "general", now, &events[..1], &[], now)
+            .unwrap();
+        let heads = store.load_heads(&a, now).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].saved_ms, now);
+        assert_eq!(heads[0].events.len(), 3);
+        assert_eq!(heads[0].profiles.len(), 1);
+        assert!(verifier.verify_json(&heads[0].events[0]).is_ok());
 
         store.purge(&a).unwrap();
-        assert!(store.load_head(&a, "general", 60_000).unwrap().is_none());
-        assert!(store.load_head(&b, "general", 60_000).unwrap().is_some());
+        assert!(store.load_heads(&a, now).unwrap().is_empty());
+        assert_eq!(store.load_heads(&b, now).unwrap().len(), 1);
     }
 
     #[test]
-    fn head_budget_drops_the_oldest() {
+    fn head_budgets_drop_the_oldest_and_the_stale() {
         let store = Store::in_memory().unwrap();
         let a = partition("https://a.example");
-        for channel in ["one", "two", "three"] {
-            store.save_head(&a, channel, &[], "{}").unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        let now = now_ms();
+        for n in 0..=MAX_SAVED_HEADS as i64 {
+            store
+                .save_head(&a, &format!("c{n}"), now - 1_000 + n, &[], &[], now)
+                .unwrap();
         }
-        store.trim_heads(2, usize::MAX).unwrap();
-        assert!(store.load_head(&a, "one", 60_000).unwrap().is_none());
-        assert!(store.load_head(&a, "three", 60_000).unwrap().is_some());
+        let heads = store.load_heads(&a, now).unwrap();
+        assert_eq!(heads.len(), MAX_SAVED_HEADS);
+        assert!(
+            heads.iter().all(|head| head.channel != "c0"),
+            "the oldest went"
+        );
+        // Older than a day: neither loaded nor kept.
+        store
+            .save_head(&a, "old", now - MAX_SAVED_AGE_MS, &[], &[], now)
+            .unwrap();
+        assert!(
+            !store
+                .load_heads(&a, now)
+                .unwrap()
+                .iter()
+                .any(|h| h.channel == "old")
+        );
+
+        store.remove_head(&a, "c1").unwrap();
+        let keep: std::collections::HashSet<String> = ["c2".to_string()].into();
+        store.retain_heads(&a, &keep).unwrap();
+        let heads = store.load_heads(&a, now).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].channel, "c2");
+
+        // Over the byte budget: not saved at all.
+        let keys = Keys::generate();
+        let big = signed(&keys, &"x".repeat(MAX_SAVED_BYTES));
+        assert!(!store.save_head(&a, "big", now, &[big], &[], now).unwrap());
+    }
+
+    #[test]
+    fn startup_snapshots_are_per_partition_and_cleared_with_heads() {
+        let store = Store::in_memory().unwrap();
+        let a = partition("https://a.example");
+        let b = partition("https://b.example");
+        let now = now_ms();
+        assert!(store.save_startup_discovery(&a, "{\"a\":1}", now).unwrap());
+        store.save_startup_discovery(&b, "{\"b\":1}", now).unwrap();
+        store.save_head(&a, "general", now, &[], &[], now).unwrap();
+        assert_eq!(
+            store.startup_discovery(&a).unwrap().as_deref(),
+            Some("{\"a\":1}")
+        );
+        store.clear_cache(&a).unwrap();
+        assert_eq!(store.startup_discovery(&a).unwrap(), None);
+        assert!(store.load_heads(&a, now).unwrap().is_empty());
+        assert_eq!(
+            store.startup_discovery(&b).unwrap().as_deref(),
+            Some("{\"b\":1}")
+        );
+        assert!(
+            !store
+                .save_startup_discovery(&a, &"x".repeat(MAX_SAVED_BYTES + 1), now)
+                .unwrap()
+        );
     }
 }
 

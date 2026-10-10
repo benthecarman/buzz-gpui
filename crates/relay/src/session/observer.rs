@@ -46,7 +46,11 @@ impl Actor {
             return;
         };
         for event in events {
-            if observer.sender.send(event.event().clone()).is_err() {
+            if observer
+                .sender
+                .send(Arc::new(event.event().clone()))
+                .is_err()
+            {
                 // Nobody is listening any more.
                 self.observer = None;
                 self.observe_live();

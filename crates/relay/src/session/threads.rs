@@ -66,6 +66,19 @@ impl OpenThread {
 }
 
 impl Actor {
+    /// An event an open thread view retains, as visibility evidence.
+    pub(super) fn thread_event(&self, id: &EventId) -> Option<Verified> {
+        self.threads.values().find_map(|thread| {
+            let accessible = self
+                .discovery
+                .as_ref()
+                .is_some_and(|discovery| discovery.can_access(&thread.channel));
+            accessible
+                .then(|| thread.state.event(id).cloned())
+                .flatten()
+        })
+    }
+
     pub(super) fn open_thread(
         &mut self,
         id: u64,

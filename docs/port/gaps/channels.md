@@ -41,8 +41,8 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | Connect reads NIP-11: `self` must be 64-hex ("Relay did not advertise its identity"); NIP-29 enables channel creation; read-state snapshot descriptor | native.ts:315-342; src-tauri/src/relay.rs:610-638 | DONE (session/mod.rs:831-844, 1580-1605) | - | - |
 | 8 s connect deadline "Relay connection timed out. Try again." | service.ts:187-197 | DONE (session/mod.rs:836-840) | - | - |
-| A failed connect waits for user retry (or online/visible while cached) | service.ts:165-302 | DIFFERENT | Port auto-retries after 2/4/8/16/32/32 s forever (session/mod.rs:846-861); drive retries from UI + online trigger | S |
-| OS `online` retries a cached session; becoming visible runs `refreshList()` | service.ts:341-363 | MISSING | Network reachability and window activation hooks | S |
+| A failed connect waits for user retry (or online/visible while cached) | service.ts:165-302 | DONE (session/mod.rs; app network.rs, main_window.rs) | - | - |
+| OS `online` retries a cached session; becoming visible runs `refreshList()` | service.ts:341-363 | DONE (session/mod.rs `online`/`visible`; app network.rs, main_window.rs) | - | - |
 | Native origin must be HTTPS without credentials/path/query/fragment | src-tauri/src/relay.rs:58-72 | DIFFERENT | Port also accepts `ws://`/`http://` (origin.rs:270-291); decide for non-dev builds | S |
 
 ### Socket open and NIP-42 AUTH
@@ -87,7 +87,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | Inbound frames over 1 MiB or non-string dropped | live.ts:707-710 | DONE (socket.rs) | - | - |
 | Invalid live EVENT fails the route ("Relay supplied invalid live traffic") | live.ts:805-811 | DONE (socket.rs; live.rs) | - | - |
-| Channel attribution incl. multi-`h` events delivered with `sourceChannels` | live.ts:812-879 | PARTIAL | Multi-`h` events dropped (event.rs:173-185; live.rs:647-652) | S |
+| Channel attribution incl. multi-`h` events delivered with `sourceChannels` | live.ts:812-879 | DONE (live.rs; session/timeline.rs) | - | - |
 | Replay vs live phase tagging | live.ts:870-878 | DONE (live.rs:579-583) | - | - |
 | EOSE: route live, previous wire closed, `established`; `replay:"limited"` when ≥500 | live.ts:880-892 | DONE (live.rs; `LiveSnapshot` routes) | - | - |
 | CLOSED: reason ≤512 chars; "restricted: not a channel member" = denied | live.ts:504-518, 893-903 | DONE (live.rs:664-697) | - | - |
@@ -137,8 +137,8 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Live updates need attention" toast with reason and "Retry live updates"; quiet during quota recovery; diagnostics and "Last rejection" | src/bundled/channels/LiveStatus.tsx:22-98 | MISSING | Snapshot only has `live: bool` (session/mod.rs:96-97); expose route status/errors, build toast | M |
-| Relay connection error with Try again | service.ts:187-197, 290-295 | MISSING | `SessionStatus::Failed` never rendered; `Session::retry` (session/mod.rs:324-326) has no caller | S |
+| "Live updates need attention" toast with reason and "Retry live updates"; quiet during quota recovery; diagnostics and "Last rejection" | src/bundled/channels/LiveStatus.tsx:22-98 | DONE (session/mod.rs `LiveView`; app ui/live_status.rs; the diagnostics text is the channel settings Diagnostics row) | - | - |
+| Relay connection error with Try again | service.ts:187-197, 290-295 | DONE (session/mod.rs; app ui/live_status.rs) | - | - |
 
 ### Native relay host
 
@@ -176,8 +176,8 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 |---|---|---|---|---|
 | One session per community+viewer; dispose stops all work and writes | session.ts:203-218, 2650-2694 | DONE (session/mod.rs:174-263, 627-686) | - | - |
 | Live events go through one ordered pipeline (discovery, read state, unread, outbox echo, profiles, emoji, timelines) | session.ts:517-578 | DONE (session/mod.rs:1150-1204) | - | - |
-| Finite reads (head and older pages) go through the same pipeline as live events | session.ts:417-516 | PARTIAL | Page results only reach `reads_accept` (session/mod.rs:759-771); outbox echo, profiles and emoji never see page events | S |
-| Visibility gate for auxiliary events (5/7/9005/40003/39005 need a known visible target); re-filter retained events on access change | event-access.ts:7-43; store.ts:2256-2335 | PARTIAL | Port only drops timelines of denied channels (session/mod.rs:999-1021); no target-evidence check, no re-filter | M |
+| Finite reads (head and older pages) go through the same pipeline as live events | session.ts:417-516 | DONE (session/channels.rs `admit_page`) | - | - |
+| Visibility gate for auxiliary events (5/7/9005/40003/39005 need a known visible target); re-filter retained events on access change | event-access.ts:7-43; store.ts:2256-2335 | DONE (session/mod.rs `visible`, `revoke_access`; session/channels.rs `purge_retained`) | - | - |
 | 401/403 on a channel read denies that channel | store.ts:476-511, 662-669 | DONE (session/mod.rs:1333-1341) | Disk-head removal comes with persistence | - |
 | One send clock per session shared by outbox and projections | message-order.ts:21-58; store.ts:146 | DONE (session/mod.rs:607-609, 857-866) | - | - |
 
@@ -186,7 +186,7 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Shared identical reads, per-consumer cancel, 3 slots / 1 background, 10 s deadline, 128 pending, 1–4 filters, limit 1–500, 64 KiB key, 8 MiB response | reader.ts:46-299 | DONE (reader.rs:22-26, 131-560) | - | - |
-| `invalidate()` on disconnect, access revocation, cache clear and before catch-up; `promote()` for selected channel catch-up | reader.ts:311-327; session.ts:371-380, 2253, 2291, 2484 | MISSING | `Reader::invalidate`/`promote` exist (reader.rs:313-323) but nothing calls them | S |
+| `invalidate()` on disconnect, access revocation, cache clear and before catch-up; `promote()` for selected channel catch-up | reader.ts:311-327; session.ts:371-380, 2253, 2291, 2484 | DONE (session/mod.rs, session/channels.rs) | - | - |
 | Strict event checks, signature verification, 2048-entry proof memo, one bad event rejects the batch | events.ts:299-380 | DONE (event.rs:205-290) | - | - |
 
 ### Timeline windows: head and older pages
@@ -196,15 +196,15 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 | Page filter: kinds 9/40002/40008/40099, `top_level`, `include_aux`, `include_summaries`, limit 20, `until`/`before_id` | window.ts:7-24 | DONE (window.rs:12, 33-50) | - | - |
 | Signed 39006 bound checks | window.ts:27-80 | DONE (window.rs:53-124) | - | - |
 | Head page replaces retained pages, older page appends; `hasMore = has_more && cursor` | store.ts:610-661 | DONE (session/timeline.rs:139-173) | - | - |
-| Older page over budget (2400 rows / 8 MiB) discarded and sets `historyLimited` | store.ts:638-648 | PARTIAL | Port inserts the page before checking (timeline.rs:154-167) so over-budget events stay in memory; check before inserting | S |
+| Older page over budget (2400 rows / 8 MiB) discarded and sets `historyLimited` | store.ts:638-648 | DONE (session/timeline.rs `apply_older`) | - | - |
 | Load-older guard | store.ts:2054-2072 | DONE (session/mod.rs:1259-1273) | - | - |
 | Errors: first head fails = error; failure with rows keeps rows; "Retry older messages" | store.ts:662-680; ChannelTimeline.tsx:740-758 | DONE (timeline.rs:299-334; crates/app/src/ui/channel.rs:553-575) | - | - |
 | Head newer than 60 s (`FRESH_FOR`) reused without a read | store.ts:99, 1981-1992 | DONE (timeline.rs:16, 133-136) | - | - |
-| Revisit revalidates only while the reader is at the head; a paged-back reader is never replaced | store.ts:1966-1978 | DIFFERENT | `needs_head` ignores `at_head` (timeline.rs:133-136); reopening after 60 s or a disconnect wipes older pages and cursor (session/mod.rs:1219-1221) | S |
-| Session-type channels: flat paging (20 rows, `#e` overlay paging 500/page up to 2000 events / 4 MiB, keep paging until empty) and replies kept as rows | session-window.ts:26-92; store.ts:117-122, 512-536 | MISSING | Every channel uses `page_filter`/`parse_page` (session/mod.rs:1275-1295) and `include_replies` is never set; session channels likely fail with "missing bound" | M |
-| Prepared head cache (64 heads / 4 MiB) and hover/intent prepare | store.ts:179, 537-609, 1994-2040 | MISSING | Head cache plus `prepare(channel)` from the sidebar | M |
+| Revisit revalidates only while the reader is at the head; a paged-back reader is never replaced | store.ts:1966-1978 | DONE (session/channels.rs `ensure`) | - | - |
+| Session-type channels: flat paging (20 rows, `#e` overlay paging 500/page up to 2000 events / 4 MiB, keep paging until empty) and replies kept as rows | session-window.ts:26-92; store.ts:117-122, 512-536 | DONE (session/channels.rs `read_session_window`; session/timeline.rs) | - | - |
+| Prepared head cache (64 heads / 4 MiB) and hover/intent prepare | store.ts:179, 537-609, 1994-2040 | DONE (session/channels.rs; `Session::prepare`) | - | - |
 | Window LRU of 3; mounted readers never evicted | store.ts:137, 356-364 | DONE (session/mod.rs:63, 1226-1242) | - | - |
-| Eviction fences in-flight reads | store.ts:348-355, 398-402 | PARTIAL | Recreated `Timeline` restarts generation at 0 (timeline.rs:108); use a session-wide counter | S |
+| Eviction fences in-flight reads | store.ts:348-355, 398-402 | DONE (session/channels.rs `touch`, session-wide generation) | - | - |
 
 ### Live merge and window limits
 
@@ -212,20 +212,20 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 |---|---|---|---|---|
 | Live kinds accepted into an open window incl. transitive references | store.ts:2170-2199 | DONE (timeline.rs:18-29, 193-225) | - | - |
 | Live events never move cursors | store.ts:2134 | DONE (timeline.rs:193-225) | - | - |
-| Live overflow trimming (newest 2400 rows + local ops, shed oldest quarter under 8 MiB, set `historyLimited`) | store.ts:2204-2240 | MISSING | `traffic` grows without bound in a long-open channel (timeline.rs:193-225) | S |
-| Local outbox ops shown in the window; failed edits/reactions hidden, failed content kept | store.ts:267-303, 2080-2133 | PARTIAL | Rule matches (timeline.rs:229-252) but `open()` never seeds local ops (session/mod.rs:1208-1224); a newly opened channel shows no pending/failed sends until the outbox changes | S |
-| Tails: newest 256 live events per unopened channel (64 channels / 4 MiB), seeding windows and channel preview | store.ts:181-184, 215-266, 2145-2169 | MISSING | Tails plus `preview` on `ChannelSummary` | S |
-| Row profile demand incl. membership actor/target, workflow owner, mention references | membership.ts:39-49; store.ts:426-440 | PARTIAL | timeline.rs:304-316 omits those ids | S |
+| Live overflow trimming (newest 2400 rows + local ops, shed oldest quarter under 8 MiB, set `historyLimited`) | store.ts:2204-2240 | DONE (session/timeline.rs `trim`) | - | - |
+| Local outbox ops shown in the window; failed edits/reactions hidden, failed content kept | store.ts:267-303, 2080-2133 | DONE (session/channels.rs `touch`; session/mod.rs `local_operations`) | - | - |
+| Tails: newest 256 live events per unopened channel (64 channels / 4 MiB), seeding windows and channel preview | store.ts:181-184, 215-266, 2145-2169 | DONE (session/channels.rs; `ChannelSummary::preview`) | - | - |
+| Row profile demand incl. membership actor/target, workflow owner, mention references | membership.ts:39-49; store.ts:426-440 | DONE (session/timeline.rs `rows_people`) | - | - |
 
 ### Gap fill after reconnect
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| On disconnect mark heads/windows cached and cancel pending reads | store.ts:2384-2389; session.ts:2461-2486 | PARTIAL | `mark_stale` works (session/mod.rs:1122-1131); reads are not cancelled | S |
+| On disconnect mark heads/windows cached and cancel pending reads | store.ts:2384-2389; session.ts:2461-2486 | DONE (session/channels.rs `channels_disconnected`) | - | - |
 | Catch-up head per retained window after route established, merged not replaced | session.ts:2527-2551; store.ts:2392-2432 | DONE (session/mod.rs:1084-1100; timeline.rs:177-188) | - | - |
-| Pre-establishment head read cancelled so catch-up is a fresh post-subscribe read | session.ts:2228-2237, 2284-2292 | PARTIAL | `load_head` returns early while `loading_head` (session/mod.rs:1251-1253); the stale read clears `stale` | S |
-| Catch-up scheduling: max 2 concurrent, selected first, promotion, Retry-After pacing | session.ts:2238-2318 | PARTIAL | All stale timelines read at once (session/mod.rs:1275-1295); no Retry-After | S |
-| Per-channel catch-up state shown in "Live updates need attention" toast with Retry | session.ts:893-950; src/bundled/channels/LiveStatus.tsx:6-98 | MISSING | Failed catch-up lands in `TimelineSnapshot.error` shown only as "Retry older messages" (crates/app/src/ui/channel.rs:563) | M |
+| Pre-establishment head read cancelled so catch-up is a fresh post-subscribe read | session.ts:2228-2237, 2284-2292 | DONE (session/channels.rs `catch_up_next`) | - | - |
+| Catch-up scheduling: max 2 concurrent, selected first, promotion, Retry-After pacing | session.ts:2238-2318 | DONE (session/channels.rs) | - | - |
+| Per-channel catch-up state shown in "Live updates need attention" toast with Retry | session.ts:893-950; src/bundled/channels/LiveStatus.tsx:6-98 | DONE (session/mod.rs `LiveView::heads`; app ui/live_status.rs) | - | - |
 | Older pages load over HTTP while socket is down | ChannelTimeline.tsx:637-646 | DONE (session/mod.rs:1259-1273) | - | - |
 
 ### Folding and ordering
@@ -274,12 +274,12 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 |---|---|---|---|---|
 | Partition key `origin:viewer` | partition.ts:1-33 | DONE (store.rs:12-27) | - | - |
 | Leaving purges heads, read state and outbox for that partition | partition-purge.ts:9-28 | DONE (store.rs:103-111, 397-410; crates/app/src/community.rs:211-240) | - | - |
-| Disk head cache (signed events + author profiles; 64 heads / 8 MiB; 24 h; sessions excluded) | persistence.ts:31-204; store.ts:450-475, 596-606 | MISSING | `save_head`/`load_head`/`trim_heads` exist (store.rs:284-395), never called | L |
-| Startup restore of cached heads (last-selected first, re-verify, shown cached, revalidate) | store.ts:685-822, 1936-1993 | MISSING | Load at session open, mark stale, revalidate | M |
-| Disk-head retention follows roster | store.ts:950-962, 2332 | MISSING | Depends on the head cache | S |
-| Startup roster cache (≤2048 rosters + ≤1024 profiles, 24 h, author must match) | store.ts:823-903 | MISSING | `startup_cache` table unused; discovery already supports `cached` (discovery.rs:315, 529, 680) | M |
-| Offline resume: cached-only session shows saved sidebar and heads ("Reconnect to update saved conversations.") | src/features/relay/service.ts:85-130; session.ts:417-431 | MISSING | Port shows Connecting with an empty roster until NIP-11 succeeds | L |
-| Clear cache (Developer settings) and wipe disk heads when connection denied | session.ts:2604-2648; store.ts:1637-1659; service.ts:262-330 | MISSING | Session `clear_cache` plus disk wipe | M |
+| Disk head cache (signed events + author profiles; 64 heads / 8 MiB; 24 h; sessions excluded) | persistence.ts:31-204; store.ts:450-475, 596-606 | DONE (store.rs; session/channels.rs) | - | - |
+| Startup restore of cached heads (last-selected first, re-verify, shown cached, revalidate) | store.ts:685-822, 1936-1993 | DONE (session/channels.rs `restore`, `hydrate`) | - | - |
+| Disk-head retention follows roster | store.ts:950-962, 2332 | DONE (session/mod.rs `scan_done`; session/channels.rs) | - | - |
+| Startup roster cache (≤2048 rosters + ≤1024 profiles, 24 h, author must match) | store.ts:823-903 | DONE (store.rs; session/channels.rs `save_startup`, `restore`) | - | - |
+| Offline resume: cached-only session shows saved sidebar and heads ("Reconnect to update saved conversations.") | src/features/relay/service.ts:85-130; session.ts:417-431 | DONE (session/channels.rs `restored`; `SessionSnapshot::cached`) | - | - |
+| Clear cache (Developer settings) and wipe disk heads when connection denied | session.ts:2604-2648; store.ts:1637-1659; service.ts:262-330 | DONE (`Session::clear_cache`; session/mod.rs `connected`) | - | - |
 
 ### Other
 
@@ -288,7 +288,7 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 | Incoming live messages for notifications (first sight, single `h`, 4096-char preview) | incoming.ts:1-19; session.ts:2324-2448 | DONE (session/incoming.rs:1-203) | - | - |
 | Delivery receipt read (16 KiB cap, strict UTF-8) | receipt.ts:1-21 | DONE (outbox.rs:53, 270-282) | - | - |
 | Generic filtered views for plugins (`projectEvents`, `observe`, `subscribeLive`) | projection.ts:1-104; session.ts:1616-1622, 1924+ | MISSING | Only if plugin-style views are ported | M |
-| Preload avatar media for the channel about to open (last 12 authors) | store.ts:403-425 | MISSING | Performance only | S |
+| Preload avatar media for the channel about to open (last 12 authors) | store.ts:403-425 | DONE (media.rs `prefetch_avatars`; session/channels.rs) | - | - |
 
 ## Outbox, publishing, attachments and media
 
@@ -327,8 +327,8 @@ Key findings:
 | Migration from localStorage / IndexedDB v1 journal | outbox-storage.ts:57-95 | DIFFERENT | Not needed (no earlier native journal) | - |
 | purgeConfirmed on access revocation; dispose | outbox.ts:826-837, 893-913 | DONE (outbox.rs:1011-1036) | - | - |
 | Journal deleted on leave | outbox-storage.ts:27-49 | DONE (store.rs:397-409; crates/app/src/community.rs:237) | - | - |
-| Outbox exists from session start (offline queueing, restored ops visible) | session.ts:264-317 | PARTIAL | Created only after NIP-11 (session/mod.rs:846-888); writes fail "Not connected to the relay yet" (1353-1356) | M |
-| Optimistic row shown at once with `sending` | outbox.ts:747-758 | PARTIAL | Only signed ops reach timelines (session/mod.rs:1462-1468) | M |
+| Outbox exists from session start (offline queueing, restored ops visible) | session.ts:264-317 | DONE (session/mod.rs: as in buzz-app, the outbox comes with the connected transport, and a saved snapshot has none) | - | - |
+| Optimistic row shown at once with `sending` | outbox.ts:747-758 | DONE (event.rs `Verified::local`; session/mod.rs `local_operations`) | - | - |
 
 ### Outbox and delivery UI
 
@@ -661,7 +661,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 |---|---|---|---|---|
 | Kind 0 fold (display_name/name, picture, agent auth tag, fallback name) | src/features/relay/profiles.ts:7-73 | DONE (crates/relay/src/profiles.rs:38-125) | - | - |
 | Profile directory: batched 500-author reads, in-flight dedupe, 1024-entry LRU | src/features/relay/profile-directory.ts:25-160 | DONE (crates/relay/src/profiles.rs:13-15, 183-305) | - | - |
-| Profile directory 2 MiB byte cap | src/features/relay/profile-directory.ts:25 | MISSING (count cap only) | Byte budget | S |
+| Profile directory 2 MiB byte cap | src/features/relay/profile-directory.ts:25 | DONE (profiles.rs; budget.rs) | - | - |
 | Profile selection (per-id stable snapshot) | src/features/relay/profile-selection.ts:1-34 | DONE (snapshot map, crates/relay/src/profiles.rs:183) | - | - |
 | Profile panel (side panel, tabs Info / Runtime / Channels / Memories) | src/bundled/profiles/ProfilePanel.tsx:370-620 | DIFFERENT: popover card with avatar, name, key, about, Message (crates/app/src/ui/profile_card.rs:1-90) | Full panel | L |
 | Copy npub with status text | src/bundled/profiles/ProfilePanel.tsx:521-540 | MISSING | Copy action | S |
@@ -732,8 +732,8 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | Merge: newest set per shortcode, tie smaller URL; `mine` | emoji-directory.ts:89-110 | DONE (emoji.rs:288-313) | - | - |
 | Live set replacements | live.ts | DONE (live.rs:485; session/mod.rs:1190) | - | - |
 | Lazy `ensure()` load | emoji-directory.ts:151-154, 292-303 | DIFFERENT | Read eagerly at session ready (session/mod.rs:892) | S |
-| Reconnect aborts in-flight read and restarts | emoji-directory.ts:285-291 | DIFFERENT | Skips while a read is in flight (session/mod.rs:1516, 1089-1092) | S |
-| Re-read after cache clear | emoji-directory.ts:262-280 | PARTIAL | No clear/re-request path | S |
+| Reconnect aborts in-flight read and restarts | emoji-directory.ts:285-291 | DONE (session/mod.rs `emoji_reconnect`) | - | - |
+| Re-read after cache clear | emoji-directory.ts:262-280 | DONE (session/mod.rs `emoji_clear`) | - | - |
 | Send-time `emoji` tags (errors, skip links, first match) | emoji-directory.ts:292-311; emoji.ts:81-113 | DONE (messages.rs:178-255) | - | - |
 | Add emoji (fresh own-set read, `created_at = max(now, prev+1)`, 12 s, serialized, "Failed to add emoji." / "Timed out while adding emoji.") | emoji-directory.ts:156-227, 242-259 | PARTIAL | Base on `newer(cached, fresh)`; collapse error text; port also rejects non-http(s) URLs (session/account.rs:195-239; emoji.rs:113-141) | S |
 | `suggestShortcode` | emoji.ts:19-30 | DONE (emoji.rs:145-160) | - | - |
@@ -836,8 +836,8 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | 8 s lifetime, 2 s quiet after message, 1024 cap | typing.ts:4-6, 67-88 | DONE (typing.rs) | - | - |
 | Pulse scope validation, access check | typing.ts:89-124 | DONE (typing.rs) | - | - |
 | Completion wins in batch; deadline expiry | typing.ts:31-66, 145-162 | DONE (typing.rs; session/presence.rs:32-47) | - | - |
-| Completion evidence from every admitted read | session.ts:551 | DIFFERENT | Live updates only (session/mod.rs:1068-1079) | S |
-| Clear on revocation and cache clear | session.ts:369, 2617 | PARTIAL | Only on disconnect (session/presence.rs:66-72) | S |
+| Completion evidence from every admitted read | session.ts:551 | DONE (session/mod.rs `accept`) | - | - |
+| Clear on revocation and cache clear | session.ts:369, 2617 | DONE (session/mod.rs `revoke_access`; session/channels.rs `clear_cache`) | - | - |
 
 ### User status (30315)
 

@@ -1641,6 +1641,11 @@ impl<F: ThreadFollowStore> Unread<F> {
         self.events.contains(id)
     }
 
+    /// A retained evidence event (`unread.event`), for visibility checks.
+    pub fn event(&self, id: &str) -> Option<&Verified> {
+        self.events.get(id).or_else(|| self.lookup_events.get(id))
+    }
+
     /// One message's attention (badges' policy; the notification input).
     pub fn attention(
         &mut self,

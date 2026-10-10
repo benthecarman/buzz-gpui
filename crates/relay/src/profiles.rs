@@ -3,10 +3,11 @@
 //! Only the newest kind 0 per author counts. Unchanged profiles keep their
 //! `Arc`, so views can tell at a glance whether anything they show moved.
 
+use crate::budget::ByteLru;
 use crate::event::{Verified, is_newer, kinds};
 use crate::socket::Filter;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Authors per read.
@@ -170,18 +171,34 @@ fn is_hex(value: &str, len: usize) -> bool {
 
 pub type Profiles = Arc<HashMap<String, Arc<Profile>>>;
 
-#[derive(Default)]
+/// Bytes of retained profile events (`profile-directory.ts`).
+pub const MAX_BYTES: usize = 2 << 20;
+
 pub struct ProfileDirectory {
-    events: HashMap<String, Verified>,
-    /// Least recently updated first, for eviction.
-    order: VecDeque<String>,
+    /// Winning signed kind 0 per author, least recently updated first out.
+    events: ByteLru<Verified>,
     snapshot: Profiles,
     in_flight: HashSet<String>,
+}
+
+impl Default for ProfileDirectory {
+    fn default() -> Self {
+        Self {
+            events: ByteLru::new(CAPACITY, MAX_BYTES),
+            snapshot: Profiles::default(),
+            in_flight: HashSet::new(),
+        }
+    }
 }
 
 impl ProfileDirectory {
     pub fn snapshot(&self) -> Profiles {
         self.snapshot.clone()
+    }
+
+    /// The winning signed profile event retained for `pubkey`.
+    pub fn event(&self, pubkey: &str) -> Option<&Verified> {
+        self.events.peek(pubkey)
     }
 
     /// Filters for the ids not already known or being fetched, in chunks of
@@ -194,7 +211,7 @@ impl ProfileDirectory {
         let mut missing: Vec<String> = ids
             .into_iter()
             .filter(|id| {
-                is_hex(id, 64) && !self.events.contains_key(*id) && !self.in_flight.contains(*id)
+                is_hex(id, 64) && !self.events.contains(id) && !self.in_flight.contains(*id)
             })
             .map(str::to_string)
             .collect();
@@ -210,7 +227,7 @@ impl ProfileDirectory {
     /// Re-reads every known id, e.g. after a reconnect. Current profiles
     /// stay until something newer arrives.
     pub fn refresh(&mut self) -> Vec<(Vec<String>, Filter)> {
-        let mut known: Vec<String> = self.events.keys().cloned().collect();
+        let mut known: Vec<String> = self.events.keys();
         known.sort();
         self.in_flight.extend(known.iter().cloned());
         known
@@ -232,32 +249,27 @@ impl ProfileDirectory {
             let pubkey = event.pubkey_hex();
             let newer = self
                 .events
-                .get(&pubkey)
+                .peek(&pubkey)
                 .is_none_or(|current| is_newer(event, current));
             if newer {
-                self.events.insert(pubkey.clone(), event.clone());
-                self.order.retain(|id| id != &pubkey);
-                self.order.push_back(pubkey.clone());
+                self.events
+                    .set(pubkey.clone(), event.clone(), event.byte_size());
                 changed.push(pubkey);
             }
         }
         if changed.is_empty() {
             return false;
         }
-        let mut evicted = Vec::new();
-        while self.order.len() > CAPACITY {
-            if let Some(oldest) = self.order.pop_front() {
-                self.events.remove(&oldest);
-                evicted.push(oldest);
-            }
-        }
         let mut next = (*self.snapshot).clone();
         let mut different = false;
-        for id in evicted {
-            different |= next.remove(&id).is_some();
-        }
+        // Whatever the budgets evicted leaves the snapshot too.
+        next.retain(|id, _| {
+            let kept = self.events.contains(id);
+            different |= !kept;
+            kept
+        });
         for id in changed {
-            let Some(event) = self.events.get(&id) else {
+            let Some(event) = self.events.peek(&id) else {
                 continue;
             };
             let profile = Profile::from_event(event);
@@ -283,7 +295,7 @@ impl ProfileDirectory {
     ) -> bool {
         if self
             .events
-            .get(pubkey)
+            .peek(pubkey)
             .is_none_or(|event| event.id != *failed)
         {
             return false;
@@ -292,11 +304,11 @@ impl ProfileDirectory {
         match previous {
             Some(event) => {
                 next.insert(pubkey.to_string(), Arc::new(Profile::from_event(&event)));
-                self.events.insert(pubkey.to_string(), event);
+                let bytes = event.byte_size();
+                self.events.set(pubkey.to_string(), event, bytes);
             }
             None => {
                 self.events.remove(pubkey);
-                self.order.retain(|id| id != pubkey);
                 next.remove(pubkey);
             }
         }
@@ -306,7 +318,6 @@ impl ProfileDirectory {
 
     pub fn clear(&mut self) {
         self.events.clear();
-        self.order.clear();
         self.in_flight.clear();
         self.snapshot = Profiles::default();
     }
@@ -332,6 +343,24 @@ mod tests {
             .finalize(keys)
             .unwrap();
         Verifier::default().verify(event).unwrap()
+    }
+
+    #[test]
+    fn the_directory_keeps_two_mebibytes_of_the_newest_profiles() {
+        let mut directory = ProfileDirectory::default();
+        let about = "x".repeat(400 * 1024);
+        let keys: Vec<Keys> = (0..6).map(|_| Keys::generate()).collect();
+        for (n, keys) in keys.iter().enumerate() {
+            let content = format!(r#"{{"name":"p{n}","about":"{about}"}}"#);
+            assert!(directory.accept(&[profile(keys, &content, 1, vec![])]));
+        }
+        // Five of about 400 KiB fit; the first one went.
+        let first = keys[0].public_key().to_hex();
+        assert!(directory.event(&first).is_none());
+        assert!(!directory.snapshot().contains_key(&first));
+        let last = keys[5].public_key().to_hex();
+        assert!(directory.snapshot().contains_key(&last));
+        assert_eq!(directory.snapshot().len(), 5);
     }
 
     #[test]
