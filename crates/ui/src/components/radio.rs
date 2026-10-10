@@ -15,6 +15,7 @@ type SelectHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 pub struct Radio {
     id: ElementId,
     label: SharedString,
+    description: Option<SharedString>,
     checked: bool,
     disabled: bool,
     on_select: Option<SelectHandler>,
@@ -25,10 +26,17 @@ impl Radio {
         Self {
             id: id.into(),
             label: label.into(),
+            description: None,
             checked,
             disabled: false,
             on_select: None,
         }
+    }
+
+    /// A quieter line under the label (`.buzz-choice-description`).
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -81,13 +89,27 @@ impl RenderOnce for Radio {
             )
             .child(
                 div()
-                    .text_label_sm()
-                    .text_color(if self.disabled {
-                        c.text_unavailable
-                    } else {
-                        c.text_standard
-                    })
-                    .child(self.label),
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_label_sm()
+                            .text_color(if self.disabled {
+                                c.text_unavailable
+                            } else {
+                                c.text_standard
+                            })
+                            .child(self.label),
+                    )
+                    .when_some(self.description, |this, description| {
+                        this.child(
+                            div()
+                                .text_body_sm()
+                                .text_color(c.text_subtle)
+                                .child(description),
+                        )
+                    }),
             )
             .when_some(self.on_select.filter(|_| !self.disabled), |this, f| {
                 this.on_click(move |_, w, cx| f(w, cx))
