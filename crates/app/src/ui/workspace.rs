@@ -1220,6 +1220,18 @@ impl Workspace {
         let status = self.community.as_ref().and_then(|community| {
             super::status::display(snapshot.statuses.get(&pubkey), community, cx)
         });
+        let activity = self.community.as_ref().and_then(|community| {
+            let channel = self
+                .channel
+                .as_ref()
+                .map(|c| c.read(cx).channel_id().to_string());
+            super::agent_activity::profile::latest_activity(
+                community,
+                &pubkey,
+                channel.as_deref(),
+                cx,
+            )
+        });
         let card = ProfileCard {
             pubkey: &pubkey,
             profile: snapshot.profiles.get(&pubkey).map(|p| &**p),
@@ -1227,7 +1239,7 @@ impl Workspace {
             status,
             on_message,
         }
-        .render(cx);
+        .render_with(activity, cx);
         let viewport = window.viewport_size();
         let x =
             at.x.min(viewport.width - profile_card::WIDTH - px(8.))

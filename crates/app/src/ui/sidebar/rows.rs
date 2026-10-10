@@ -376,7 +376,12 @@ impl ChannelSidebar {
         let unread = snapshot.unread.channel(&id);
         let dm = channel.channel_type == Some(ChannelType::Dm);
         let profiles = &snapshot.profiles;
-        let agents = working_agents(snapshot, &id, own_agents);
+        let agents = crate::ui::agent_activity::popover::with_observed(
+            working_agents(snapshot, &id, own_agents),
+            &self.community,
+            &id,
+            cx,
+        );
         let name: SharedString = channel.name.clone().into();
         let peer = match channel.participants.as_deref() {
             Some([other]) if dm => Some(other.clone()),

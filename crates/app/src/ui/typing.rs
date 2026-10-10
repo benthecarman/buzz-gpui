@@ -148,7 +148,7 @@ pub fn scope_label(roots: &[Option<String>], excerpt: impl Fn(&str) -> Option<St
 }
 
 /// Three dots fading to 35% and back over 1.4 s, 0.2 s apart.
-fn dots(color: Hsla, cx: &App) -> AnyElement {
+pub fn dots(color: Hsla, cx: &App) -> AnyElement {
     const PERIOD: f32 = 1.4;
     let row = div().flex().flex_none().items_center().gap(px(2.));
     let dot = move |opacity: f32| div().size(px(4.)).rounded_full().bg(color).opacity(opacity);

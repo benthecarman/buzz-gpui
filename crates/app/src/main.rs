@@ -76,6 +76,7 @@ fn main() {
         idle::Idle::init(cx);
         agents2::init(cx);
         ui::pages::init(cx);
+        ui::agent_activity::init(cx);
         ui::channel_panels::dev_sample(cx);
         network::init(cx);
         let requests = navigation::init(cx);

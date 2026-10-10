@@ -2,6 +2,7 @@
 
 mod account;
 mod add_community;
+pub mod agent_activity;
 mod agents;
 pub mod agents2;
 mod channel;

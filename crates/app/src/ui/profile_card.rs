@@ -29,8 +29,13 @@ pub struct ProfileCard<'a> {
 }
 
 impl ProfileCard<'_> {
-    pub fn render(self, cx: &App) -> AnyElement {
-        Popover::new().children(self.content(cx)).into_any_element()
+    /// The card with a section of another slice under it, such as an
+    /// agent's latest activity.
+    pub fn render_with(self, extra: Option<AnyElement>, cx: &App) -> AnyElement {
+        Popover::new()
+            .children(self.content(cx))
+            .children(extra)
+            .into_any_element()
     }
 
     /// The same content filling a companion panel, at its 20px inset.
