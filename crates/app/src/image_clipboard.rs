@@ -1,34 +1,18 @@
 //! "Copy image" (buzz-app's `image_clipboard.rs`): one clipboard owned for
 //! the app's lifetime, because on Linux a copied image is only available
 //! while its owner runs. GPUI's own clipboard offers only text on Wayland,
-//! so this goes through `arboard` as buzz-app does.
+//! so this goes through `arboard` as buzz-app does. The pixels come
+//! decoded from buzz-desktop's `media::copy_image`.
 
 use std::sync::{Mutex, OnceLock};
 
-/// The decoded image a clipboard takes.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Rgba {
-    pub width: usize,
-    pub height: usize,
-    pub bytes: Vec<u8>,
-}
-
-/// Decodes PNG, JPEG, GIF or WebP bytes into RGBA.
-pub fn decode(bytes: &[u8]) -> Result<Rgba, String> {
-    let image = image::load_from_memory(bytes).map_err(|_| "Could not copy image".to_string())?;
-    let rgba = image.to_rgba8();
-    Ok(Rgba {
-        width: rgba.width() as usize,
-        height: rgba.height() as usize,
-        bytes: rgba.into_raw(),
-    })
-}
-
-/// Puts the image on the clipboard. Blocking: run it off the UI thread.
+/// Puts RGBA pixels on the clipboard. Blocking: run it off the UI thread.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub fn write(bytes: &[u8]) -> Result<(), String> {
+pub fn write(width: usize, height: usize, rgba: Vec<u8>) -> Result<(), String> {
     static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
-    let image = decode(bytes)?;
+    if width.checked_mul(height).and_then(|n| n.checked_mul(4)) != Some(rgba.len()) {
+        return Err("Could not copy image".into());
+    }
     let mut stored = CLIPBOARD
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -40,15 +24,15 @@ pub fn write(bytes: &[u8]) -> Result<(), String> {
         .as_mut()
         .expect("clipboard initialized")
         .set_image(arboard::ImageData {
-            width: image.width,
-            height: image.height,
-            bytes: std::borrow::Cow::Owned(image.bytes),
+            width,
+            height,
+            bytes: std::borrow::Cow::Owned(rgba),
         })
         .map_err(|_| "Could not copy image".to_string())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub fn write(_bytes: &[u8]) -> Result<(), String> {
+pub fn write(_width: usize, _height: usize, _rgba: Vec<u8>) -> Result<(), String> {
     let _ = (OnceLock::<()>::new(), Mutex::new(()));
     Err("Clipboard unavailable".into())
 }
@@ -59,14 +43,7 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
-    fn decodes_to_rgba() {
-        let mut png = Vec::new();
-        image::RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]))
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
-        let rgba = decode(&png).unwrap();
-        assert_eq!((rgba.width, rgba.height), (2, 3));
-        assert_eq!(&rgba.bytes[..4], &[1, 2, 3, 255]);
-        assert!(decode(b"not an image").is_err());
+    fn refuses_pixels_that_do_not_fill_the_image() {
+        assert_eq!(write(2, 3, vec![0; 4]).unwrap_err(), "Could not copy image");
     }
 }

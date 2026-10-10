@@ -1163,10 +1163,7 @@ impl Review {
             let copied = match pixels {
                 Ok((width, height, rgba)) => {
                     cx.background_executor()
-                        .spawn(async move {
-                            let png = encode_png(width as u32, height as u32, rgba)?;
-                            crate::image_clipboard::write(&png)
-                        })
+                        .spawn(async move { crate::image_clipboard::write(width, height, rgba) })
                         .await
                 }
                 Err(error) => Err(error),
@@ -1661,17 +1658,6 @@ impl Review {
         }
         None
     }
-}
-
-/// PNG bytes for the clipboard.
-fn encode_png(width: u32, height: u32, rgba: Vec<u8>) -> Result<Vec<u8>, String> {
-    let image = image::RgbaImage::from_raw(width, height, rgba)
-        .ok_or_else(|| "Could not encode image".to_string())?;
-    let mut png = Vec::new();
-    image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|_| "Could not encode image".to_string())?;
-    Ok(png)
 }
 
 /// `.mediaReviewUnavailable`.
