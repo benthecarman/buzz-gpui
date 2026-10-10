@@ -154,7 +154,18 @@ pub fn open(cx: &mut App) {
                 close(window, cx);
                 false
             });
-            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            let workspace = cx.new(|cx| {
+                // Becoming visible again rechecks the relay (`visibilitychange`).
+                cx.observe_window_activation(window, |_, window, cx| {
+                    if window.is_window_active() {
+                        for community in cx.global::<AppState>().communities.clone() {
+                            community.read(cx).session.visible();
+                        }
+                    }
+                })
+                .detach();
+                Workspace::new(window, cx)
+            });
             cx.new(|cx| Root::new(workspace, launch, window, cx))
         },
     );

@@ -562,6 +562,17 @@ impl Render for Workspace {
         let header = self.header(window, cx);
         let body = self.body(main, window, cx);
         let gutter = layout::gutter(f32::from(window.viewport_size().width));
+        let live_notice = self
+            .community
+            .as_ref()
+            .filter(|_| self.onboarding.is_none())
+            .and_then(|community| {
+                let channel = self
+                    .channel
+                    .as_ref()
+                    .map(|channel| channel.read(cx).channel_id().to_string());
+                super::live_status::toast(community, channel.as_deref(), window, cx)
+            });
         // No shadow around the frame: that needs a translucent surface,
         // which not every GPU path gives; edges resize from just inside.
         window_border().shadow_size(px(0.)).child(
@@ -594,6 +605,7 @@ impl Render for Workspace {
                         ),
                     )
                     .children(dialog)
+                    .children(live_notice)
                     .children(super::media::review_overlay(cx))
                     .children(super::toasts::render(window, cx)),
             ),

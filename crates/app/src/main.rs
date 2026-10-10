@@ -8,6 +8,7 @@ mod idle;
 mod image_clipboard;
 mod main_window;
 mod mirror;
+mod network;
 mod notifications;
 mod runtime;
 mod shortcuts;
@@ -71,6 +72,7 @@ fn main() {
         idle::Idle::init(cx);
         ui::pages::init(cx);
         ui::channel_panels::dev_sample(cx);
+        network::init(cx);
         let requests = navigation::init(cx);
         if let Some(link) = link {
             let _ = requests.unbounded_send(Request::Url(link).into());

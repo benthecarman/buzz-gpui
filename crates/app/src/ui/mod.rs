@@ -24,6 +24,7 @@ mod jump;
 pub mod launch;
 mod link_preview;
 mod links;
+mod live_status;
 mod markdown;
 mod me;
 mod media;
