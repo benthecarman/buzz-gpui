@@ -197,29 +197,29 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Export {name}" dialog (Cancel / Export; cannot close while exporting) | BA/AgentSnapshots.tsx:216-243 | MISSING | Dialog and menu entry | M |
-| Memories select: Agent only / + core memory / + all memories | BA/AgentSnapshots.tsx:245-265 | MISSING | Memory read | M |
-| File format select: PNG / JSON | BA/AgentSnapshots.tsx:266-279 | MISSING | PNG tEXt encoder | M |
-| Disclosure about portable config and secrets; "Review portable configuration" JSON preview; artwork source | BA/AgentSnapshots.tsx:280-295 | MISSING | — | S |
-| Required "I reviewed the portable configuration…" checkbox, reset when the agent changes | BA/AgentSnapshots.tsx:98-105, 296-307 | MISSING | — | S |
-| Memory plaintext warning and confirmation checkbox | BA/AgentSnapshots.tsx:308-336 | MISSING | — | S |
-| Eligibility rules (buzz-agent only, owner-only, no env or backend) and credential-looking text blocked | FA/snapshot.ts:160-164, 392-452 | MISSING | — | S |
-| PNG embeds the avatar as 512px artwork, else a placeholder; downloads `{name}.agent.{png,json}`; "Agent configuration changed. Review it again before exporting." | BA/AgentSnapshots.tsx:24-33, 163-207 | MISSING | Image resize, save dialog | M |
-| "Import agent snapshot" dialog with "Choose file" (.json, .png, legacy) | BA/AgentSnapshots.tsx:556-662 | MISSING | File picker and parser | M |
-| Legacy-file error (.persona.*, .zip); size limits; parse errors | FA/snapshot.ts:7-25, 187-218, 759-845 | MISSING | — | S |
-| Preview: name, instructions, "No system prompt included.", fresh-keypair note, runtime/response/parallelism/session summary, "Full embedded manifest" | BA/AgentSnapshots.tsx:663-742 | MISSING | — | S |
-| Memory restore option ("Restore memory under the new agent identity"), unavailable fallback, "No memory included — config only." | BA/AgentSnapshots.tsx:680-714; ST/agents.rs:1595-1612 | MISSING | Host memory write | M |
-| "Import is blocked: …" list; runtime mapped to an installed harness ("{runtime} is unavailable. Install it in Settings first.") | BA/AgentSnapshots.tsx:715-720; FA/snapshot.ts:502-603 | MISSING | — | S |
-| Upload embedded artwork; "Creating agent…"; duplicate-identity warning on failure | BA/AgentSnapshots.tsx:507-551, 745 | MISSING | — | S |
-| "Agent imported" result with "Publish profile"; partial memory error and "Retry memory restore" | BA/AgentSnapshots.tsx:438-488, 536-539, 567-636 | MISSING | — | S |
-| Chat attachment card for snapshot files with "Add agent" / "Add team" | src/features/messages/SnapshotAttachment.tsx:11-50; FA/snapshot-preview.ts:15-29 | MISSING | — | M |
-| Link context menu "Preview snapshot"; "Preview snapshot" dialog (loading, error + Retry, Cancel); authenticated read with SHA-256 check; agent vs team detection | src/features/conversation/MessageLink.tsx:276-289; BA/SnapshotPreview.tsx:116-197; FA/snapshot-preview.ts:66-159 | MISSING | — | M |
-| Pasting a copied snapshot link attaches the file | FA/snapshot-clipboard.ts:17-67 | MISSING | — | M |
-| "Share {name}" dialog: review block, recipient picker, Send / "Sending…" / "Retry send", toast "Sent a copy of {name}" | FA/SnapshotShareDialog.tsx:192-383; BA/DirectShare.tsx:69-218; FA/snapshot-send.ts:24-103 | MISSING | — | M |
-| Pending sends survive restart ("Retry the earlier message to confirm its delivery before editing.") | FA/SnapshotShareDialog.tsx:121-162, 385-389; FA/snapshot-recovery.ts | MISSING | — | M |
-| "What's included" select and plaintext warning; "Share memories?" confirmation | FA/SnapshotShareDialog.tsx:390-427, 457-478 | MISSING | — | S |
-| "Copy link" (upload, copy URL + HTML; "Copying…" / "Copied") | FA/SnapshotShareDialog.tsx:428-439; FA/snapshot-link.ts | MISSING | Rich clipboard | M |
-| Export switch inside Share; "Share to catalog" switch; error copy | FA/SnapshotShareDialog.tsx:145-307, 348-350; BA/DirectShare.tsx:164-227 | MISSING | — | S |
+| "Export {name}" dialog (Cancel / Export; cannot close while exporting) | BA/AgentSnapshots.tsx:216-243 | DONE (ui/agents/snapshots.rs; card menu "Share" falls back to it without a community) | Dialog and menu entry | M |
+| Memories select: Agent only / + core memory / + all memories | BA/AgentSnapshots.tsx:245-265 | DONE (ui/agents/snapshots.rs, snapshot/memory.rs) | Memory read | M |
+| File format select: PNG / JSON | BA/AgentSnapshots.tsx:266-279 | DONE (snapshot/png.rs, ui/agents/snapshots.rs) | PNG tEXt encoder | M |
+| Disclosure about portable config and secrets; "Review portable configuration" JSON preview; artwork source | BA/AgentSnapshots.tsx:280-295 | DONE (ui/agents/snapshots.rs) | — | S |
+| Required "I reviewed the portable configuration…" checkbox, reset when the agent changes | BA/AgentSnapshots.tsx:98-105, 296-307 | DONE (ui/agents/snapshots.rs) | — | S |
+| Memory plaintext warning and confirmation checkbox | BA/AgentSnapshots.tsx:308-336 | DONE (ui/agents/snapshots.rs) | — | S |
+| Eligibility rules (buzz-agent only, owner-only, no env or backend) and credential-looking text blocked | FA/snapshot.ts:160-164, 392-452 | DONE (snapshot/manifest.rs) | — | S |
+| PNG embeds the avatar as 512px artwork, else a placeholder; downloads `{name}.agent.{png,json}`; "Agent configuration changed. Review it again before exporting." | BA/AgentSnapshots.tsx:24-33, 163-207 | DONE (snapshot/png.rs, ui/agents/snapshots.rs; saves through the native save dialog) | Image resize, save dialog | M |
+| "Import agent snapshot" dialog with "Choose file" (.json, .png, legacy) | BA/AgentSnapshots.tsx:556-662 | DONE (ui/agents/snapshots.rs; opened by the Add agent sidebar "Import") | File picker and parser | M |
+| Legacy-file error (.persona.*, .zip); size limits; parse errors | FA/snapshot.ts:7-25, 187-218, 759-845 | DONE (snapshot/manifest.rs, ui/agents/snapshots.rs) | — | S |
+| Preview: name, instructions, "No system prompt included.", fresh-keypair note, runtime/response/parallelism/session summary, "Full embedded manifest" | BA/AgentSnapshots.tsx:663-742 | DONE (ui/agents/snapshots.rs) | — | S |
+| Memory restore option ("Restore memory under the new agent identity"), unavailable fallback, "No memory included — config only." | BA/AgentSnapshots.tsx:680-714; ST/agents.rs:1595-1612 | DONE (ui/agents/snapshots.rs, host/snapshot.rs) | Host memory write | M |
+| "Import is blocked: …" list; runtime mapped to an installed harness ("{runtime} is unavailable. Install it in Settings first.") | BA/AgentSnapshots.tsx:715-720; FA/snapshot.ts:502-603 | DONE (snapshot/manifest.rs) | — | S |
+| Upload embedded artwork; "Creating agent…"; duplicate-identity warning on failure | BA/AgentSnapshots.tsx:507-551, 745 | DONE (ui/agents/snapshots.rs) | — | S |
+| "Agent imported" result with "Publish profile"; partial memory error and "Retry memory restore" | BA/AgentSnapshots.tsx:438-488, 536-539, 567-636 | DONE (ui/agents/snapshots.rs) | — | S |
+| Chat attachment card for snapshot files with "Add agent" / "Add team" | src/features/messages/SnapshotAttachment.tsx:11-50; FA/snapshot-preview.ts:15-29 | DONE (ui/agents/snapshot_preview.rs; "Add team" opens through a hook teams register) | — | M |
+| Link context menu "Preview snapshot"; "Preview snapshot" dialog (loading, error + Retry, Cancel); authenticated read with SHA-256 check; agent vs team detection | src/features/conversation/MessageLink.tsx:276-289; BA/SnapshotPreview.tsx:116-197; FA/snapshot-preview.ts:66-159 | DONE (ui/agents/snapshot_preview.rs, ui/links.rs) | — | M |
+| Pasting a copied snapshot link attaches the file | FA/snapshot-clipboard.ts:17-67 | DONE (ui/agents/snapshot_preview.rs, ui/composer.rs; within this app: GPUI on Linux has no text/html clipboard, so the payload travels as clipboard metadata) | — | M |
+| "Share {name}" dialog: review block, recipient picker, Send / "Sending…" / "Retry send", toast "Sent a copy of {name}" | FA/SnapshotShareDialog.tsx:192-383; BA/DirectShare.tsx:69-218; FA/snapshot-send.ts:24-103 | DONE (ui/agents/share.rs, snapshot/send.rs) | — | M |
+| Pending sends survive restart ("Retry the earlier message to confirm its delivery before editing.") | FA/SnapshotShareDialog.tsx:121-162, 385-389; FA/snapshot-recovery.ts | DONE (ui/agents/share.rs, snapshot/share.rs; journaled in the session outbox) | — | M |
+| "What's included" select and plaintext warning; "Share memories?" confirmation | FA/SnapshotShareDialog.tsx:390-427, 457-478 | DONE (ui/agents/share.rs) | — | S |
+| "Copy link" (upload, copy URL + HTML; "Copying…" / "Copied") | FA/SnapshotShareDialog.tsx:428-439; FA/snapshot-link.ts | DONE (ui/agents/share.rs; plain text is the URL, the named link rides as clipboard metadata, see the paste row) | Rich clipboard | M |
+| Export switch inside Share; "Share to catalog" switch; error copy | FA/SnapshotShareDialog.tsx:145-307, 348-350; BA/DirectShare.tsx:164-227 | PARTIAL: export switch and error copy done (ui/agents/share.rs) | "Share to catalog": the community catalog supplies the controls through share::set_agent_catalog_controls (built with the catalog, §11) | S |
 
 ## 11. Community catalog (`BA/CommunityCatalog.tsx`, `FA/catalog*.ts`)
 
