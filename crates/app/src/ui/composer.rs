@@ -166,6 +166,13 @@ pub struct Composer {
     pending_at: usize,
     /// A formatting edit is being applied, so its changes are not typing.
     applying_format: bool,
+    /// The saved draft as this composer last read or wrote it, to notice
+    /// another composer's (`revision`); `None` when storage failed.
+    revision: Option<Option<String>>,
+    draft_issue: Option<DraftIssue>,
+    /// "Retry message preparation" was pressed: a ready catalog clears the
+    /// error.
+    retrying_preparation: bool,
     /// The text before the last edit, to refuse one past the limit.
     accepted: Option<(InputContent, std::ops::Range<usize>)>,
     drag_over: bool,
@@ -190,6 +197,17 @@ struct PendingFormat {
     marker: &'static str,
     kind: live_markdown::Kinds,
     removes: bool,
+}
+
+/// Why the saved draft could not follow the composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftIssue {
+    /// Another composer changed it.
+    Conflict,
+    /// Storage refused the write.
+    Storage,
+    /// A message was accepted but its text could not be cleared.
+    Accepted,
 }
 
 /// Voice note capture (`VoiceCapture.tsx`).
@@ -315,7 +333,16 @@ impl Composer {
                     this.focus(window, cx);
                     cx.notify();
                 }),
-                cx.observe(&community, |_, _, cx| cx.notify()),
+                cx.observe(&community, |this: &mut Self, community, cx| {
+                    if this.retrying_preparation
+                        && community.read(cx).snapshot.emoji.status
+                            == buzz_relay_client::CatalogStatus::Ready
+                    {
+                        this.retrying_preparation = false;
+                        this.error = None;
+                    }
+                    cx.notify()
+                }),
             ];
         let key = draft_key(&channel, thread_root);
         let files = attachments::draft(&community, &key, cx);
@@ -372,6 +399,9 @@ impl Composer {
             pending_at: 0,
             applying_format: false,
             accepted: None,
+            revision: None,
+            draft_issue: None,
+            retrying_preparation: false,
             drag_over: false,
             notice: None,
             save_draft: None,
@@ -557,7 +587,10 @@ impl Composer {
         });
         self.restyle(cx);
         self.save_draft = None;
-        self.write_draft(cx);
+        if !self.persist(true, cx) {
+            // The message went; the sent text is still saved (`accepted`).
+            self.draft_issue = Some(DraftIssue::Accepted);
+        }
         cx.notify();
     }
 
@@ -610,6 +643,8 @@ impl Composer {
             && (self.editing.is_some() || (!files.blocked() && !self.send_pending(cx)))
             && self.input.read(cx).value().chars().count() <= MAX_CHARS
             && !self.edit_status.locked
+            && (self.editing.is_some()
+                || !matches!(self.draft_issue, Some(DraftIssue::Conflict | DraftIssue::Accepted)))
             // An empty edit asks to delete the message instead.
             && (self.has_text(cx) || self.editing.is_some() || !files.items.is_empty())
     }
@@ -644,6 +679,18 @@ impl Composer {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_submit(cx) {
             return;
+        }
+        // Another composer saved this draft meanwhile: settle that first.
+        if self.editing.is_none()
+            && let (Ok(current), Some(revision)) = (self.stored_draft(cx), &self.revision)
+            && current != *revision
+        {
+            let ours = self.draft_json(cx);
+            if current.as_deref() != Some(ours.as_str()) {
+                self.draft_issue = Some(DraftIssue::Conflict);
+                cx.notify();
+                return;
+            }
         }
         let state = self.input.read(cx);
         let content = state.value().trim().to_string();
@@ -1027,6 +1074,8 @@ impl Composer {
             return;
         };
         self.error = recovered.error.clone();
+        self.revision = Some(Some(recovered.draft.clone()));
+        self.draft_issue = None;
         if self.editing.is_some() {
             self.stash = serde_json::from_str::<Draft>(&recovered.draft)
                 .ok()
@@ -1047,16 +1096,26 @@ impl Composer {
         self.community.read(cx).partition()
     }
 
-    fn load_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let saved = cx
-            .global::<AppState>()
+    /// The saved draft as stored now; `Err` when storage cannot be read.
+    fn stored_draft(&self, cx: &App) -> Result<Option<String>, ()> {
+        cx.global::<AppState>()
             .store
             .view_state(&self.partition(cx), &self.draft_key())
+            .map_err(|_| ())
+    }
+
+    fn load_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stored = self.stored_draft(cx);
+        self.revision = stored.clone().ok();
+        if stored.is_err() {
+            self.draft_issue = Some(DraftIssue::Storage);
+        }
+        let saved = stored
             .ok()
             .flatten()
             .and_then(|json| serde_json::from_str::<Draft>(&json).ok());
-        if let Some(draft) = saved {
-            let content = draft.content();
+        let content = saved.map_or_else(|| InputContent::new(""), |draft| draft.content());
+        {
             let end = content.text().len();
             self.input.update(cx, |state, cx| {
                 state.set_value(content, window, cx);
@@ -1079,21 +1138,55 @@ impl Composer {
         }));
     }
 
+    /// Saves the draft unless another composer changed the saved one since
+    /// this one read it (`replaceView`); that is a conflict for the user to
+    /// settle. `force` keeps this composer's draft over the saved one.
     fn write_draft(&mut self, cx: &mut App) {
-        if self.editing.is_some() {
-            return;
+        self.persist(false, cx);
+    }
+
+    fn persist(&mut self, force: bool, cx: &mut App) -> bool {
+        if self.editing.is_some() || (self.draft_issue == Some(DraftIssue::Conflict) && !force) {
+            return false;
         }
         let content = self.input.read(cx).content();
         let value = (!content.text().trim().is_empty())
             .then(|| serde_json::to_string(&Draft::from(&content)).expect("drafts serialize"));
+        let current = self.stored_draft(cx);
+        if !force
+            && let (Ok(current), Some(revision)) = (&current, &self.revision)
+            && current != revision
+            && *current != value
+        {
+            self.draft_issue = Some(DraftIssue::Conflict);
+            return false;
+        }
         let saved = cx.global::<AppState>().store.set_view_state(
             &self.partition(cx),
             &self.draft_key(),
             value.as_deref(),
         );
-        if let Err(error) = saved {
-            tracing::warn!(%error, "could not save the draft");
+        match saved {
+            Ok(()) => {
+                self.revision = Some(value);
+                self.draft_issue = None;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not save the draft");
+                if self.draft_issue != Some(DraftIssue::Accepted) {
+                    self.draft_issue = Some(DraftIssue::Storage);
+                }
+                false
+            }
         }
+    }
+
+    /// "Load saved draft": the other composer's draft wins.
+    fn load_saved_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.draft_issue = None;
+        self.load_draft(window, cx);
+        cx.notify();
     }
 
     // ----- completion -----
@@ -2701,6 +2794,94 @@ impl Composer {
         )
     }
 
+    /// The saved draft's trouble and what to do about it
+    /// (`MessageComposer.tsx`'s recovery notices).
+    fn draft_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let issue = self.draft_issue.filter(|_| self.editing.is_none())?;
+        let c = *cx.colors();
+        let message = match issue {
+            DraftIssue::Accepted => {
+                "Message accepted. Could not update the saved draft. Retry cleanup before sending again."
+            }
+            DraftIssue::Conflict => {
+                "This draft changed elsewhere. Your edits are kept here; choose which draft to keep."
+            }
+            DraftIssue::Storage => {
+                "Could not save this draft on this device. Your edits are kept here."
+            }
+        };
+        let buttons: Vec<AnyElement> = match issue {
+            DraftIssue::Accepted => vec![
+                Button::new("retry-draft-cleanup", "Retry draft cleanup")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.persist(true, cx) {
+                            this.draft_issue = None;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ],
+            DraftIssue::Conflict => vec![
+                Button::new("load-saved-draft", "Load saved draft")
+                    .on_click(cx.listener(|this, _, window, cx| this.load_saved_draft(window, cx)))
+                    .into_any_element(),
+                Button::new("keep-my-draft", "Keep my draft")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.persist(true, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ],
+            DraftIssue::Storage => vec![
+                Button::new("retry-draft-save", "Retry draft save")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.persist(false, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ],
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .px(px(8.))
+                .text_body()
+                .text_color(c.text_standard)
+                .child(message)
+                .child(div().flex().flex_wrap().gap(px(8.)).children(buttons))
+                .into_any_element(),
+        )
+    }
+
+    /// "Retry message preparation": a send failed while the custom emoji
+    /// catalog is in error, which preparing a message needs.
+    fn preparation_retry(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.error.as_ref()?;
+        let community = self.community.read(cx);
+        if !matches!(
+            community.snapshot.emoji.status,
+            buzz_relay_client::CatalogStatus::Error(_)
+        ) {
+            return None;
+        }
+        Some(
+            div()
+                .px(px(8.))
+                .child(
+                    Button::new("retry-preparation", "Retry message preparation")
+                        .disabled(self.input_disabled(cx))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.community.read(cx).session.refresh_emoji();
+                            this.retrying_preparation = true;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// "Preview <name>": the image in a dialog titled with its name.
     fn preview_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.previewing.as_ref()?;
@@ -3733,7 +3914,9 @@ impl Render for Composer {
                     .text_body()
                     .text_color(c.text_standard)
                     .child(error)
-            }));
+            }))
+            .children(self.draft_status(cx))
+            .children(self.preparation_retry(cx));
 
         let picker = self.picker_open.then(|| {
             let dismiss = cx.listener(|this, _: &MouseDownEvent, _, cx| {
