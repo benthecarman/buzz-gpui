@@ -9,10 +9,11 @@
 use super::catalog::community_agents;
 use crate::community::{AppState, Community};
 use crate::hosts::{HostConnection, Hosts};
+use crate::runtime::Runtime;
 use buzz_host::api::{
     Agent, AgentAction, AgentEdit, BundleMember, Harness, HarnessEdit, HarnessKind, MemberMemory,
-    MemberSnapshot, MemoryEntry, ProcessStatus, Request, Response, TeamCatalogEntry, TeamMeta,
-    TeamSnapshot,
+    MemberSnapshot, MemoryEntry, MemoryRestore, ProcessStatus, Request, Response, TeamCatalogEntry,
+    TeamMeta, TeamSnapshot,
 };
 use buzz_host_rpc::ConnectionState;
 use buzz_identity::Identity;
@@ -281,17 +282,86 @@ pub struct Imported {
     pub memory_failures: Vec<String>,
 }
 
+/// Reads the memories `agent` wrote to this identity, on tokio.
+async fn read_memories(
+    agent: &Agent,
+    identity: &Arc<Identity>,
+    cx: &mut AsyncApp,
+) -> Result<crate::snapshot::memory::Listing, String> {
+    let origin = buzz_relay_client::RelayOrigin::parse(&agent.relay_url)
+        .map_err(|_| "Invalid agent community".to_string())?;
+    let (identity, pubkey) = (identity.clone(), agent.pubkey.clone());
+    cx.update(|cx| Runtime::handle(cx))
+        .spawn(async move { crate::snapshot::memory::read(origin, identity, &pubkey).await })
+        .await
+        .unwrap_or_else(|_| Err("The request was cancelled.".into()))
+}
+
 /// Restores an imported member's snapshot memories under its new
-/// identity. Memory writes are another host request, wired up where the
-/// agent snapshot import adds it (`writeSnapshotMemory`); until then a
-/// host cannot restore team memories.
+/// identity (`writeSnapshotMemory`), and confirms each entry by reading
+/// it back with the owner key. Answers how many are confirmed, and why
+/// the others are not.
 async fn restore_member_memory(
-    _host: &Entity<HostConnection>,
-    _agent: &Agent,
-    _entries: &[MemoryEntry],
-    _cx: &mut AsyncApp,
+    host: &Entity<HostConnection>,
+    agent: &Agent,
+    entries: &[MemoryEntry],
+    identity: &Arc<Identity>,
+    cx: &mut AsyncApp,
 ) -> Result<(usize, Vec<String>), String> {
-    Err("Memory restoration is unavailable".into())
+    let previous = read_memories(agent, identity, cx).await?;
+    if previous.partial {
+        return Err("Memory listing is incomplete; restore was not started".into());
+    }
+    // A retry keeps entries that are already current.
+    let mut unchanged = 0;
+    let mut writes = Vec::new();
+    for entry in entries {
+        match previous.get(&entry.slug) {
+            Some(current) if current.body == entry.body => unchanged += 1,
+            current => writes.push(MemoryRestore {
+                slug: entry.slug.clone(),
+                body: entry.body.clone(),
+                after: current.map(|c| c.created_at),
+            }),
+        }
+    }
+    if writes.is_empty() {
+        return Ok((unchanged, Vec::new()));
+    }
+    let response = request(
+        host,
+        Request::RestoreMemory {
+            id: agent.id.clone(),
+            owner: identity.pubkey_hex(),
+            entries: writes,
+        },
+        cx,
+    )
+    .await?;
+    let Response::MemoryRestored {
+        published,
+        mut errors,
+    } = response
+    else {
+        return Err("The host sent an unexpected reply.".into());
+    };
+    let listing = read_memories(agent, identity, cx).await?;
+    let mut confirmed = 0;
+    for restored in published {
+        if !listing.partial
+            && listing
+                .get(&restored.slug)
+                .is_some_and(|current| current.event_id == restored.event_id)
+        {
+            confirmed += 1;
+        } else {
+            errors.push(format!(
+                "{}: memory restore failed; retry this agent",
+                restored.slug
+            ));
+        }
+    }
+    Ok((unchanged + confirmed, errors))
 }
 
 /// The one import path for files, direct shares and catalog adoption
@@ -440,7 +510,7 @@ pub async fn import_team(
             if entries.is_empty() {
                 continue;
             }
-            match restore_member_memory(&host, agent, entries, cx).await {
+            match restore_member_memory(&host, agent, entries, &identity, cx).await {
                 Ok((written, errors)) if errors.is_empty() => {
                     let _ = written;
                 }

@@ -241,7 +241,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 |---|---|---|---|---|
 | Team snapshot format (size limits, `buzz_team_snapshot` chunk, checksum errors) | FA/team-encoding.ts:1-93 | DONE (ui/agents/team_file.rs) | — | L |
 | "Import team snapshot" dialog: members, "Restore member memories", "Respond-to allowlist" Clear/Keep, "Creating team…", "Team imported" | BA/TeamImportDialog.tsx:40-157 | DONE (ui/agents/team_dialogs.rs) | — | M |
-| Resumable team import (receipt, profile publish, team record) | FA/team-bundles.ts:27-101; FA/team-import.ts:9-120 | PARTIAL (ui/agents/team_ops.rs, relay/src/session/teams.rs) | Member memory restore needs the host memory write the agent snapshot import adds (`team_ops::restore_member_memory`); until then it reports "Memory restoration is unavailable" | L |
+| Resumable team import (receipt, profile publish, team record) | FA/team-bundles.ts:27-101; FA/team-import.ts:9-120 | DONE (ui/agents/team_ops.rs, relay/src/session/teams.rs) | — | L |
 | "Export {team}" dialog (memories, confirmation, JSON/PNG, `.team.{fmt}`) | BA/TeamExportDialog.tsx:11-156 | DONE (ui/agents/team_dialogs.rs) | — | M |
 | "Deploy team to channel" dialog and behaviour (apply instructions, restart if stale, publish profile, add to channel, start; per-member failures) | BA/TeamDeployDialog.tsx:16-122; FA/team-deployment.ts:24-98 | DONE (ui/agents/team_dialogs.rs, ui/agents/team_ops.rs) | — | M |
 | Team direct share, catalog switch, export | BA/DirectShare.tsx:232-314 | DONE (ui/agents/team_dialogs.rs, ui/agents/share.rs) | — | S |
