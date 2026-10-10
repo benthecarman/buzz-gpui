@@ -14,6 +14,7 @@ mod clipboard;
 mod format;
 mod link;
 mod live_markdown;
+mod poof;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
 use super::gif_picker::PickedGif;
@@ -176,6 +177,8 @@ pub struct Composer {
     queue: Entity<Queue>,
     /// "Could not attach file", as a toast.
     attach_error: Option<SharedString>,
+    /// Poofs of removed attachments, still playing.
+    bursts: Vec<poof::Burst>,
     /// The draft file whose preview dialog is open.
     previewing: Option<String>,
     /// Why the last send failed (`error`), under the tools.
@@ -421,6 +424,7 @@ impl Composer {
             queue,
             attach_error: None,
             previewing: None,
+            bursts: Vec::new(),
             error: None,
             pending: Vec::new(),
             pending_at: 0,
@@ -2077,6 +2081,19 @@ impl Composer {
         cx.notify();
     }
 
+    /// The poof and plop of a removal, at the button pressed.
+    fn poof(&mut self, event: &ClickEvent, cx: &mut Context<Self>) {
+        self.bursts.retain(|burst| !burst.done());
+        // At most six at once (`slice(-5)` plus the new one).
+        if self.bursts.len() >= 6 {
+            self.bursts.remove(0);
+        }
+        self.bursts
+            .push(poof::Burst::new(event.position(), px(20.)));
+        poof::plop();
+        cx.notify();
+    }
+
     fn retry_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
         self.files.update(cx, |files, cx| files.retry(id, cx));
         cx.notify();
@@ -2823,9 +2840,10 @@ impl Composer {
                 )
             })
             .when(!disabled, |d| {
-                d.on_click(
-                    cx.listener(move |this, _, _, cx| this.remove_attachment(&remove_id, cx)),
-                )
+                d.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    this.poof(event, cx);
+                    this.remove_attachment(&remove_id, cx)
+                }))
             });
         let issue = item.error.clone().map(|error| {
             div()
@@ -3609,11 +3627,10 @@ impl Composer {
                         }
                     })
                     .when(!disabled, |d| {
-                        d.on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.remove_attachment(&remove_id, cx)
-                            }),
-                        )
+                        d.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            this.poof(event, cx);
+                            this.remove_attachment(&remove_id, cx)
+                        }))
                     }),
             )
             .into_any_element()
@@ -4301,6 +4318,11 @@ impl Render for Composer {
             .children(picker)
             .child(shell)
             .children(self.toasts(window, cx))
+            .children({
+                self.bursts.retain(|burst| !burst.done());
+                poof::overlay(&self.bursts, window, cx)
+            })
+            .when(self.has_files(cx), |d| d.child(poof::preload()))
             .children(self.outsiders_dialog(window, cx))
             .children(self.preview_dialog(window, cx))
             .children(

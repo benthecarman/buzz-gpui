@@ -63,6 +63,11 @@ buzz-app's `public/sounds/` (Apache-2.0, © Block, Inc.), unchanged. buzz-app
 shares them with Block Buzz's `desktop/public/sounds/`
 ([block/buzz](https://github.com/block/buzz), Apache-2.0).
 
+`assets/recipient-removal/` holds the five-frame "poof" sprite and the
+`plop.m4a` sound the composer plays when an attachment is removed, from
+buzz-app's `public/recipient-removal/`, unchanged. They are MIT
+© 2023 Emerge Tools, Inc.; the licence is beside them in `LICENSE.txt`.
+
 ## Harness brand marks
 
 The marks in `assets/icons/brand/` identify agent harnesses on the Agents
