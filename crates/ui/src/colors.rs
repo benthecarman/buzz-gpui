@@ -110,6 +110,8 @@ colors! {
     text_link = "--text-link": "#0b5fa8", "#83c4ff";
     /// Linked or selected identity text.
     text_accent = "--text-accent": "#402060", "#ecd9fa";
+    /// Categorical purple, such as GitHub's merged state.
+    text_categorical_purple = "--text-categorical-purple": "#402060", "#ecd9fa";
     /// Sidebar labels at rest.
     text_navigation = "--text-navigation": "#404040", "#c7c7c7";
     /// Unread sidebar labels.

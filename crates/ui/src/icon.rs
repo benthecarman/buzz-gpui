@@ -21,6 +21,8 @@ macro_rules! tabler_icons {
             GooseLogo,
             /// buzz-app's outline Microsoft OneDrive mark, for links.
             OneDriveLogo,
+            /// buzz-app's GitHub open-issue mark.
+            GitHubIssue,
         }
 
         impl IconName {
@@ -31,6 +33,7 @@ macro_rules! tabler_icons {
                 IconName::NotificationFilled,
                 IconName::GooseLogo,
                 IconName::OneDriveLogo,
+                IconName::GitHubIssue,
             ];
 
             /// The embedded asset path.
@@ -41,6 +44,7 @@ macro_rules! tabler_icons {
                     IconName::NotificationFilled => "icons/custom/notification-filled.svg",
                     IconName::GooseLogo => "icons/brand/goose.svg",
                     IconName::OneDriveLogo => "icons/custom/onedrive-logo.svg",
+                    IconName::GitHubIssue => "icons/custom/github-issue.svg",
                 }
             }
 
@@ -52,6 +56,7 @@ macro_rules! tabler_icons {
                     IconName::NotificationFilled => "NotificationFilled",
                     IconName::GooseLogo => "GooseLogo",
                     IconName::OneDriveLogo => "OneDriveLogo",
+                    IconName::GitHubIssue => "GitHubIssue",
                 }
             }
         }
