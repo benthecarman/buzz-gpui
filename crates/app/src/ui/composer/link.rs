@@ -276,6 +276,7 @@ impl Render for LinkDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::prelude::v1::test;
 
     #[test]
     fn validates_like_the_reference() {

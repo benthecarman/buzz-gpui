@@ -10,6 +10,7 @@
 pub mod attachments;
 mod blocks;
 mod channels;
+mod clipboard;
 mod format;
 mod link;
 mod live_markdown;
@@ -37,8 +38,8 @@ use buzz_ui::{
 };
 use format::Format;
 use gpui_kit::component::input::{
-    Backspace, Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent,
-    InputEvent, MoveDown, MoveUp, OutdentInline, Textarea, TextareaState,
+    Backspace, Copy, Cut, Enter, Escape, IndentInline, InlineToken, InlineTokenContext,
+    InputContent, InputEvent, MoveDown, MoveUp, OutdentInline, Textarea, TextareaState,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -2073,8 +2074,9 @@ impl Composer {
         cx.notify();
     }
 
-    /// Images and files from the clipboard. Text pastes as usual.
-    fn paste(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
+    /// Images and files from the clipboard attach; text pastes through
+    /// [`Self::paste_text`].
+    fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut images = Vec::new();
         let mut paths = Vec::new();
         for entry in item.entries() {
@@ -2105,7 +2107,156 @@ impl Composer {
         if !paths.is_empty() {
             self.add_paths(paths, cx);
         }
-        consumed
+        if consumed {
+            return true;
+        }
+        self.paste_text(item, window, cx)
+    }
+
+    /// Pastes text (`paste` in `EditableInput.tsx`): this app's own copy
+    /// brings back its links, other text pastes as itself, and code takes
+    /// what is visible verbatim. A lone link gets a trailing space, and
+    /// pasted identity links become recipients when they are admitted (at
+    /// most 32), otherwise name chips, as channel links become channel
+    /// chips.
+    fn paste_text(
+        &mut self,
+        item: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.input_disabled(cx) {
+            return true;
+        }
+        let (current, selection) = {
+            let state = self.input.read(cx);
+            (state.value().to_string(), state.selected_range())
+        };
+        let in_code = self
+            .markdown
+            .pairs(live_markdown::CODE)
+            .iter()
+            .any(|pair| pair.open.end <= selection.start && selection.end <= pair.close.start);
+        let copied = item
+            .metadata()
+            .and_then(|json| serde_json::from_str::<clipboard::Copied>(json).ok());
+        let mut text = match copied {
+            Some(copied) if !in_code => copied.buzz_composer,
+            _ => match item.text() {
+                Some(text) => text,
+                None => return false,
+            },
+        };
+        if text.is_empty() {
+            return true;
+        }
+        let link = !in_code && clipboard::lone_link(&text);
+        let reuse = link && current[selection.end..].starts_with(' ');
+        if link && !reuse {
+            text.push(' ');
+        }
+        let start = selection.start;
+        self.input.update(cx, |state, cx| {
+            state.replace(text.clone(), window, cx);
+            if reuse {
+                let at = start + text.len() + 1;
+                state.set_selected_range(at..at, cx);
+            }
+        });
+        if !in_code {
+            self.chip_pasted(start, &text, window, cx);
+        }
+        true
+    }
+
+    /// Turns the identity and channel links pasted at `start` into chips.
+    fn chip_pasted(
+        &mut self,
+        start: usize,
+        pasted: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = edit_content(pasted);
+        if found.tokens().is_empty() {
+            return;
+        }
+        // The pasted text must still be where it went (the limit may have
+        // refused it).
+        if self.input.read(cx).value().get(start..start + pasted.len()) != Some(pasted) {
+            return;
+        }
+        let (members, dm) = {
+            let channel = self.summary(cx);
+            (
+                channel.map(|c| c.members.clone()).unwrap_or_default(),
+                channel.is_some_and(|c| c.channel_type == Some(ChannelType::Dm)),
+            )
+        };
+        let mut recipients = self.recipients(cx).len();
+        let caret = self.input.read(cx).selected_range();
+        let mut shift: isize = 0;
+        let mut chips: Vec<(std::ops::Range<usize>, InlineToken)> = Vec::new();
+        for span in found.tokens() {
+            let range = span.range().start + start..span.range().end + start;
+            let token = span.token().clone();
+            let identity = token.text().starts_with("[\\@");
+            // A recipient needs room, the channel's membership (outside a
+            // DM, where anyone is a reference), and a mention boundary.
+            let next = pasted[span.range().end..].chars().next();
+            let boundary = next.is_none_or(|c| c.is_whitespace() || c.is_ascii_punctuation());
+            let admitted = identity
+                && recipients < 32
+                && boundary
+                && !dm
+                && (members.is_empty()
+                    || members.iter().any(|m| m.as_str() == token.id().as_ref()));
+            if admitted {
+                recipients += 1;
+                chips.push((
+                    range,
+                    InlineToken::new(token.id().clone(), token.label().to_string()),
+                ));
+            } else {
+                chips.push((range, token));
+            }
+        }
+        self.applying_format = true;
+        self.input.update(cx, |state, cx| {
+            for (range, token) in chips.iter().rev() {
+                let before = range.len() as isize;
+                let after = token.text().len() as isize;
+                if state
+                    .replace_range_with_token(range.clone(), token.clone(), window, cx)
+                    .is_ok()
+                {
+                    shift += after - before;
+                }
+            }
+            let at = (caret.end as isize + shift).max(0) as usize;
+            state.set_selected_range(at..at, cx);
+        });
+        self.applying_format = false;
+        self.restyle(cx);
+    }
+
+    /// Copy and Cut: the Markdown with chips as their names, plus the
+    /// links for this app's own paste.
+    fn copy(&mut self, cut: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (content, selection) = {
+            let state = self.input.read(cx);
+            (state.content(), state.selected_range())
+        };
+        if selection.is_empty() {
+            return false;
+        }
+        let (text, copied) = clipboard::copy(&content, selection);
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, copied));
+        if cut && !self.input_disabled(cx) {
+            self.input
+                .update(cx, |state, cx| state.replace("", window, cx));
+        }
+        true
     }
 }
 
@@ -3891,8 +4042,8 @@ impl Render for Composer {
                     .overflow_hidden()
                     .child(token.token().label().clone())
             })
-            .on_paste(move |item, _, cx| {
-                weak.update(cx, |this, cx| this.paste(item, cx))
+            .on_paste(move |item, window, cx| {
+                weak.update(cx, |this, cx| this.paste(item, window, cx))
                     .unwrap_or(false)
             });
 
@@ -3972,6 +4123,16 @@ impl Render for Composer {
                 }
             }))
             .on_action(cx.listener(|this, _: &InsertLink, window, cx| this.open_link(window, cx)))
+            .capture_action(cx.listener(|this, _: &Copy, window, cx| {
+                if this.copy(false, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Cut, window, cx| {
+                if this.copy(true, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .capture_action(cx.listener(|this, _: &Backspace, window, cx| {
                 if this.block_edit(blocks::backspace, window, cx) {
                     cx.stop_propagation();
