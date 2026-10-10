@@ -7,6 +7,7 @@
 //! reply or an edit) and reports back with [`Composer::sent`] or
 //! [`Composer::failed`].
 
+mod channels;
 mod live_markdown;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
@@ -21,7 +22,10 @@ use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::members::can_add_members;
 use buzz_relay_client::messages::media_byte_limit;
 use buzz_relay_client::upload::{self, MAX_UPLOAD, UploadError, UploadFile};
-use buzz_relay_client::{Attachment, ChannelSummary, ChannelType, EventId, Mentions, Partition};
+use buzz_relay_client::{
+    Attachment, ChannelSummary, ChannelType, EventId, Mentions, Partition, PublicChannels,
+    RosterStatus,
+};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, ButtonVariant, Dialog, Icon, IconButton,
     IconButtonShape, IconButtonSize, IconName, Spinner, Surface, Tooltip, TypeStyled,
@@ -46,7 +50,8 @@ const MAX_FILES: usize = 10;
 const DRAFT_DELAY: Duration = Duration::from_millis(400);
 /// Completion lists.
 const MENTION_LIMIT: usize = 50;
-const CHANNEL_LIMIT: usize = 20;
+/// The typing pause before `#` searches open channels.
+const PUBLIC_SEARCH_DELAY: Duration = Duration::from_millis(180);
 const EMOJI_LIMIT: usize = 100;
 
 pub enum ComposerEvent {
@@ -102,6 +107,11 @@ pub struct Composer {
     context: Option<ReplyContext>,
     formatting: bool,
     completion: Option<Completion>,
+    public: Option<PublicSearch>,
+    /// Bumped by "Retry suggestions" to search again.
+    public_attempt: u64,
+    /// The last open channels found, kept while the next search runs.
+    recent_public: Vec<ChannelSummary>,
     /// The query start Escape dismissed, until the text moves on.
     dismissed: Option<usize>,
     /// The text length and caret the completion was computed for.
@@ -279,6 +289,9 @@ impl Composer {
             context: None,
             formatting: false,
             completion: None,
+            public: None,
+            public_attempt: 0,
+            recent_public: Vec::new(),
             dismissed: None,
             completion_key: None,
             completion_scroll: ScrollHandle::new(),
@@ -819,14 +832,20 @@ impl Composer {
             return;
         }
         self.dismissed = None;
-        let items = self.suggestions(&query, cx);
-        if items.is_empty() {
+        let (items, status, retry) = if query.trigger == Trigger::Channel {
+            self.search_public(&query.text, cx);
+            self.channel_suggestions(&query, cx)
+        } else {
+            (self.suggestions(&query, cx), None, None)
+        };
+        let count = items.len() + usize::from(retry.is_some());
+        if count == 0 && status.is_none() {
             self.completion = None;
             return;
         }
         let selected = match &self.completion {
             Some(old) if old.query.start == query.start && old.query.trigger == query.trigger => {
-                old.selected.min(items.len() - 1)
+                old.selected.min(count.saturating_sub(1))
             }
             _ => 0,
         };
@@ -834,7 +853,151 @@ impl Composer {
             query,
             items,
             selected,
+            status,
+            retry,
         });
+    }
+
+    /// Starts the open-channel lookup for `#query` after a typing pause,
+    /// unless it already runs (`usePublicChannelSearch`).
+    fn search_public(&mut self, query: &str, cx: &mut Context<Self>) {
+        let needle = query.to_lowercase();
+        let community = self.community.read(cx);
+        if needle.trim().is_empty() || community.snapshot.roster != RosterStatus::Ready {
+            self.public = None;
+            return;
+        }
+        if self
+            .public
+            .as_ref()
+            .is_some_and(|search| search.needle == needle && search.attempt == self.public_attempt)
+        {
+            return;
+        }
+        let session = community.session.clone();
+        let (attempt, wanted) = (self.public_attempt, needle.clone());
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PUBLIC_SEARCH_DELAY).await;
+            let result = session.find_public_channels(&wanted, false).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(search) = &mut this.public else {
+                    return;
+                };
+                if search.needle != wanted || search.attempt != attempt {
+                    return;
+                }
+                if let Ok(found) = &result {
+                    this.recent_public = found.channels.clone();
+                }
+                search.result = Some(result);
+                // Recompute the popup with the answer.
+                this.completion_key = None;
+                cx.notify();
+            });
+        });
+        self.public = Some(PublicSearch {
+            needle,
+            attempt,
+            result: None,
+            _task: task,
+        });
+    }
+
+    /// `#` rows, status line and retry (`ChannelCompletion`).
+    fn channel_suggestions(
+        &self,
+        query: &Query,
+        cx: &App,
+    ) -> (
+        Vec<Suggestion>,
+        Option<SharedString>,
+        Option<channels::Retry>,
+    ) {
+        let community = self.community.read(cx);
+        let snapshot = &community.snapshot;
+        let needle = query.text.to_lowercase();
+        // While the next lookup runs, the last answer's rows that still
+        // match stay, so open channels don't flicker on every keystroke.
+        let kept: Vec<ChannelSummary>;
+        let search = match &self.public {
+            None => channels::Search::Idle,
+            Some(PublicSearch {
+                result: Some(Ok(found)),
+                ..
+            }) => channels::Search::Done(found),
+            Some(PublicSearch {
+                result: Some(Err(_)),
+                ..
+            }) => channels::Search::Failed,
+            Some(PublicSearch { result: None, .. }) => {
+                kept = self
+                    .recent_public
+                    .iter()
+                    .filter(|c| c.name.to_lowercase().contains(needle.trim()))
+                    .cloned()
+                    .collect();
+                channels::Search::Loading(&kept)
+            }
+        };
+        let completion = channels::complete(
+            &snapshot.channels,
+            community.session.viewer(),
+            &snapshot.roster,
+            &query.text,
+            search,
+            name_match,
+        );
+        let items = completion
+            .items
+            .into_iter()
+            .map(|item| Suggestion::Channel {
+                icon: channel_icon(&item.channel),
+                id: item.channel.id,
+                name: item.channel.name.into(),
+                member: item.member,
+                detail: item.detail.map(SharedString::from),
+            })
+            .collect();
+        (
+            items,
+            completion.status.map(SharedString::from),
+            completion.retry,
+        )
+    }
+
+    /// `canSelect`: a joined row must still be joined under that name, an
+    /// open row still open and unjoined.
+    fn can_select(&self, id: &str, name: &str, member: bool, cx: &App) -> bool {
+        let community = self.community.read(cx);
+        let listed = community.snapshot.channels.iter().find(|c| c.id == id);
+        if member {
+            return listed.is_some_and(|c| {
+                c.name == name && channels::joined(c, community.session.viewer())
+            });
+        }
+        let found = match &self.public {
+            Some(PublicSearch {
+                result: Some(Ok(found)),
+                ..
+            }) => &found.channels,
+            _ => &self.recent_public,
+        };
+        listed.is_none_or(|c| c.read_only)
+            && found
+                .iter()
+                .any(|c| c.id == id && c.name == name && channels::open(c))
+    }
+
+    fn retry_completion(&mut self, retry: channels::Retry, cx: &mut Context<Self>) {
+        match retry {
+            channels::Retry::Channels => self.community.read(cx).session.retry(),
+            channels::Retry::Search => {
+                self.public_attempt += 1;
+                self.public = None;
+            }
+        }
+        self.completion_key = None;
+        cx.notify();
     }
 
     fn suggestions(&self, query: &Query, cx: &App) -> Vec<Suggestion> {
@@ -896,48 +1059,8 @@ impl Composer {
                     .map(|(_, s)| s)
                     .collect()
             }
-            Trigger::Channel => {
-                let spaced = query.text.contains(char::is_whitespace);
-                let mut ranked: Vec<(u8, Suggestion)> = snapshot
-                    .channels
-                    .iter()
-                    .filter(|c| {
-                        !c.name.trim().is_empty()
-                            && !c.archived
-                            && !c.hidden
-                            && !matches!(
-                                c.channel_type,
-                                Some(ChannelType::Dm | ChannelType::Session)
-                            )
-                    })
-                    .filter_map(|c| {
-                        let tier = name_match(&c.name, &query.text)?;
-                        (!spaced || tier <= 1).then(|| {
-                            (
-                                tier,
-                                Suggestion::Channel {
-                                    id: c.id.clone(),
-                                    name: c.name.clone().into(),
-                                    icon: channel_icon(c),
-                                    private: c.private,
-                                },
-                            )
-                        })
-                    })
-                    .collect();
-                ranked.sort_by(|(ta, a), (tb, b)| {
-                    let name = |s: &Suggestion| match s {
-                        Suggestion::Channel { name, .. } => name.to_lowercase(),
-                        _ => String::new(),
-                    };
-                    ta.cmp(tb).then(name(a).cmp(&name(b)))
-                });
-                ranked
-                    .into_iter()
-                    .take(CHANNEL_LIMIT)
-                    .map(|(_, s)| s)
-                    .collect()
-            }
+            // `channel_suggestions` owns `#`.
+            Trigger::Channel => Vec::new(),
             Trigger::Emoji => {
                 emoji_picker::search(&query.text, &snapshot.emoji.entries, EMOJI_LIMIT)
                     .into_iter()
@@ -948,8 +1071,10 @@ impl Composer {
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if let Some(completion) = &mut self.completion {
-            let count = completion.items.len() as isize;
+        if let Some(completion) = &mut self.completion
+            && completion.count() > 0
+        {
+            let count = completion.count() as isize;
             completion.selected =
                 ((completion.selected as isize + delta).rem_euclid(count)) as usize;
             self.completion_scroll.scroll_to_item(completion.selected);
@@ -1002,6 +1127,22 @@ impl Composer {
     }
 
     fn accept(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(completion) = &self.completion else {
+            return;
+        };
+        if index == completion.items.len()
+            && let Some(retry) = completion.retry
+        {
+            self.retry_completion(retry, cx);
+            return;
+        }
+        if let Some(Suggestion::Channel {
+            id, name, member, ..
+        }) = completion.items.get(index)
+            && !self.can_select(id, name, *member, cx)
+        {
+            return;
+        }
         let Some(completion) = self.completion.take() else {
             return;
         };
@@ -1627,7 +1768,28 @@ fn find_query(text: &str, caret: usize) -> Option<Query> {
 struct Completion {
     query: Query,
     items: Vec<Suggestion>,
+    /// An index into the items, then the retry row.
     selected: usize,
+    /// The quiet line under the list.
+    status: Option<SharedString>,
+    /// "Retry suggestions", after the items.
+    retry: Option<channels::Retry>,
+}
+
+impl Completion {
+    /// Rows the keyboard moves through.
+    fn count(&self) -> usize {
+        self.items.len() + usize::from(self.retry.is_some())
+    }
+}
+
+/// The open-channel lookup behind `#` completion.
+struct PublicSearch {
+    needle: String,
+    attempt: u64,
+    /// `None` while it runs.
+    result: Option<Result<PublicChannels, String>>,
+    _task: Task<()>,
 }
 
 enum Suggestion {
@@ -1643,7 +1805,9 @@ enum Suggestion {
         id: String,
         name: SharedString,
         icon: IconName,
-        private: bool,
+        /// Joined, rather than an open channel to preview.
+        member: bool,
+        detail: Option<SharedString>,
     },
     Emoji(Candidate),
 }
@@ -2567,10 +2731,7 @@ impl Composer {
                         .into_any_element()
                 }
                 Suggestion::Channel {
-                    name,
-                    icon,
-                    private,
-                    ..
+                    name, icon, detail, ..
                 } => row
                     .h(px(48.))
                     .p(px(8.))
@@ -2590,14 +2751,13 @@ impl Composer {
                             .flex_1()
                             .min_w_0()
                             .child(div().truncate().child(name.clone()))
-                            .when(*private, |d| {
-                                d.child(
-                                    div()
-                                        .text_caption()
-                                        .text_color(c.text_subtle)
-                                        .child("Private channel"),
-                                )
-                            }),
+                            .children(detail.clone().map(|detail| {
+                                div()
+                                    .text_caption()
+                                    .text_color(c.text_subtle)
+                                    .truncate()
+                                    .child(detail)
+                            })),
                     )
                     .when(selected, |d| {
                         d.child(
@@ -2647,6 +2807,41 @@ impl Composer {
                 }
             }
         });
+        let retry_index = completion.items.len();
+        let retry = completion.retry.map(|_| {
+            div()
+                .id("completion-retry")
+                .flex()
+                .items_center()
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(3.))
+                .cursor_pointer()
+                .when(completion.selected == retry_index, |d| {
+                    d.bg(c.affordance_popover_selected)
+                })
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if let Some(completion) = &mut this.completion
+                        && completion.selected != retry_index
+                    {
+                        completion.selected = retry_index;
+                        cx.notify();
+                    }
+                }))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.accept(retry_index, window, cx)),
+                )
+                .child("Retry suggestions")
+        });
+        let status = completion.status.clone().map(|status| {
+            div()
+                .flex_none()
+                .mx(px(8.))
+                .my(px(4.))
+                .text_caption()
+                .text_color(c.text_subtle)
+                .child(status)
+        });
         let (max_width, max_height, padding) = match trigger {
             Trigger::Mention => (px(380.), px(280.), px(12.)),
             Trigger::Channel => (px(480.), px(320.), px(12.)),
@@ -2682,8 +2877,10 @@ impl Composer {
                                 .max_h(max_height)
                                 .overflow_y_scroll()
                                 .track_scroll(&self.completion_scroll)
-                                .children(rows),
-                        ),
+                                .children(rows)
+                                .children(retry),
+                        )
+                        .children(status),
                 )
                 .into_any_element(),
         )
@@ -2780,6 +2977,7 @@ impl Render for Composer {
             .capture_action(cx.listener(|this, action: &Enter, window, cx| {
                 if let Some(completion) = &this.completion
                     && !action.shift
+                    && completion.count() > 0
                 {
                     let index = completion.selected;
                     this.accept(index, window, cx);
@@ -2787,7 +2985,9 @@ impl Render for Composer {
                 }
             }))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                if let Some(completion) = &this.completion {
+                if let Some(completion) = &this.completion
+                    && completion.count() > 0
+                {
                     let index = completion.selected;
                     this.accept(index, window, cx);
                     cx.stop_propagation();
