@@ -309,6 +309,69 @@ impl Identity {
         Ok(header(&event))
     }
 
+    /// Signs a Blossom media authorization that buzz-desktop's upload and
+    /// media services built, after checking it is exactly what
+    /// [`Self::media_auth`] would sign: kind 24242 with the fixed content of
+    /// its verb, an `x` hash only for an upload, one `server`, and an
+    /// expiry at most 60 seconds after a current `created_at`. Anything
+    /// else is refused, so those services cannot mint other tokens.
+    pub fn sign_media_event(
+        &self,
+        kind: u16,
+        created_at: u64,
+        tags: &[Vec<String>],
+        content: &str,
+    ) -> Result<Event, IdentityError> {
+        let now = Timestamp::now().as_secs();
+        let tag = |name: &str| {
+            let mut found = tags
+                .iter()
+                .filter(|tag| tag.first().map(String::as_str) == Some(name));
+            match (found.next(), found.next()) {
+                (Some(tag), None) if tag.len() == 2 => Some(tag[1].as_str()),
+                _ => None,
+            }
+        };
+        let verb = tag("t");
+        let hash = tag("x");
+        let hex = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        let shape_ok = match (verb, content) {
+            (Some("upload"), "Upload attachment") => hash.is_some_and(hex) && tags.len() == 4,
+            (Some("get"), "Get buzz-media") => hash.is_none() && tags.len() == 3,
+            _ => false,
+        };
+        let server_ok = tag("server").is_some_and(|server| {
+            !server.is_empty()
+                && server.len() <= 255
+                && server
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+        });
+        let expiry_ok = tag("expiration")
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|expiry| expiry > created_at && expiry <= created_at + 60);
+        if kind != 24242 || !shape_ok || !server_ok || !expiry_ok || created_at.abs_diff(now) > 300
+        {
+            return Err(IdentityError::NotAllowed);
+        }
+        let tags = tags
+            .iter()
+            .map(|tag| {
+                Tag::parse(tag.clone()).map_err(|error| IdentityError::Signing(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        EventBuilder::new(Kind::from_u16(kind), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .finalize(&self.keys)
+            .map_err(|error| IdentityError::Signing(error.to_string()))
+    }
+
     /// NIP-OA owner attestation for an agent key, as the JSON `auth` tag
     /// the agent host stores: `["auth", owner, "", signature]`.
     pub fn attest_agent(&self, agent_pubkey: &str) -> Result<String, IdentityError> {
@@ -530,5 +593,70 @@ mod tests {
         assert_eq!(event.kind, Kind::HttpAuth);
         let tags: Vec<&str> = event.tags.iter().map(|t| t.kind()).collect();
         assert_eq!(tags, ["u", "method", "payload", "nonce"]);
+    }
+
+    #[test]
+    fn signs_only_blossom_media_tokens() {
+        let identity = Identity::ephemeral();
+        let now = Timestamp::now().as_secs();
+        let hash = "ab".repeat(32);
+        let tag = |name: &str, value: &str| vec![name.to_string(), value.to_string()];
+        let upload = [
+            tag("x", &hash),
+            tag("t", "upload"),
+            tag("server", "relay.example.com"),
+            tag("expiration", &(now + 60).to_string()),
+        ];
+        let event = identity
+            .sign_media_event(24242, now, &upload, "Upload attachment")
+            .unwrap();
+        assert!(event.verify().is_ok());
+        assert_eq!(event.created_at.as_secs(), now);
+        let get = [
+            tag("t", "get"),
+            tag("server", "127.0.0.1:53000"),
+            tag("expiration", &(now + 60).to_string()),
+        ];
+        assert!(
+            identity
+                .sign_media_event(24242, now, &get, "Get buzz-media")
+                .is_ok()
+        );
+        let refused = |kind, created_at, tags: &[Vec<String>], content| {
+            identity
+                .sign_media_event(kind, created_at, tags, content)
+                .unwrap_err()
+        };
+        assert_eq!(
+            refused(9, now, &get, "Get buzz-media"),
+            IdentityError::NotAllowed
+        );
+        assert_eq!(
+            refused(24242, now, &get, "Upload attachment"),
+            IdentityError::NotAllowed
+        );
+        // A delete, a long-lived token, a stale one, or an extra tag.
+        let mut delete = upload.clone();
+        delete[1] = tag("t", "delete");
+        assert_eq!(
+            refused(24242, now, &delete, "Upload attachment"),
+            IdentityError::NotAllowed
+        );
+        let mut long = get.clone();
+        long[2] = tag("expiration", &(now + 3600).to_string());
+        assert_eq!(
+            refused(24242, now, &long, "Get buzz-media"),
+            IdentityError::NotAllowed
+        );
+        assert_eq!(
+            refused(24242, now - 3600, &get, "Get buzz-media"),
+            IdentityError::NotAllowed
+        );
+        let mut extra = get.to_vec();
+        extra.push(tag("p", &hash));
+        assert_eq!(
+            refused(24242, now, &extra, "Get buzz-media"),
+            IdentityError::NotAllowed
+        );
     }
 }
