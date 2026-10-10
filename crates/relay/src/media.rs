@@ -9,11 +9,20 @@
 //! Fetches run on the session's tokio runtime and resolve to the whole
 //! body. Recent bodies stay in a small in-memory cache, standing in for the
 //! webview cache the reference relies on (`max-age=3600`).
+//!
+//! Players, downloads and the clipboard use buzz-desktop's media services
+//! instead, the code buzz-app's Tauri host runs: players stream from its
+//! loopback listener with ranged reads through its block cache, and saves
+//! and copies go through its checks. buzz-desktop serves only HTTPS relays,
+//! so on a plain-HTTP development relay those fall back to [`Media::fetch`].
 
 use crate::origin::RelayOrigin;
+use buzz_desktop::EventTemplate;
+use buzz_desktop::media::stream::MediaStream;
 use buzz_identity::{Identity, MediaVerb};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use url::Url;
@@ -55,6 +64,27 @@ struct Inner {
     public: reqwest::Client,
     slots: Semaphore,
     cache: Mutex<Cache>,
+    /// Started on first use; `None` if it could not bind.
+    stream: OnceLock<Option<MediaStream>>,
+}
+
+/// Signs buzz-desktop's Blossom media tokens with this identity, and
+/// nothing else ([`Identity::sign_media_event`]).
+#[derive(Clone)]
+pub struct MediaSigner(Arc<Identity>);
+
+impl buzz_desktop::Signer for MediaSigner {
+    fn sign(
+        &self,
+        event: EventTemplate,
+    ) -> impl std::future::Future<Output = Result<serde_json::Value, String>> + Send {
+        let signed = self
+            .0
+            .sign_media_event(event.kind, event.created_at, &event.tags, &event.content)
+            .map_err(|error| error.to_string())
+            .and_then(|event| serde_json::to_value(&event).map_err(|error| error.to_string()));
+        std::future::ready(signed)
+    }
 }
 
 impl Media {
@@ -83,7 +113,98 @@ impl Media {
             public,
             slots: Semaphore::new(SLOTS),
             cache: Mutex::new(Cache::default()),
+            stream: OnceLock::new(),
         }))
+    }
+
+    pub(crate) fn signer(&self) -> MediaSigner {
+        MediaSigner(self.0.identity.clone())
+    }
+
+    /// Whether buzz-desktop serves this relay's media: only HTTPS origins.
+    fn desktop_media(&self, url: &str) -> bool {
+        self.is_relay_media(url) && buzz_desktop::media::media_url(url).is_some()
+    }
+
+    /// A loopback `http://127.0.0.1` URL a player can stream `url` from,
+    /// reading ranges as it plays. `None` when buzz-desktop cannot serve
+    /// it; fetch the whole body then.
+    pub fn stream_url(&self, url: &str) -> Option<String> {
+        if !self.desktop_media(url) {
+            return None;
+        }
+        let stream = self.0.stream.get_or_init(|| {
+            MediaStream::start(self.signer(), &self.0.runtime)
+                .inspect_err(|error| tracing::warn!(%error, "could not start the media listener"))
+                .ok()
+        });
+        Some(format!("{}{}", stream.as_ref()?.base(), encode(url)))
+    }
+
+    /// Saves `url` into `directory` (Downloads) under the sender's name,
+    /// never replacing a file there, and returns the saved path
+    /// (`media_download`).
+    pub async fn download(
+        &self,
+        url: &str,
+        name: Option<&str>,
+        directory: PathBuf,
+    ) -> Result<PathBuf, String> {
+        if self.desktop_media(url) {
+            let signer = self.signer();
+            let source = scheme_url(url);
+            let name = name.unwrap_or_default().to_owned();
+            return self
+                .0
+                .runtime
+                .spawn(async move {
+                    buzz_desktop::media::download(&signer, &source, &name, || Some(directory)).await
+                })
+                .await
+                .map_err(|_| "Media download interrupted".to_string())?;
+        }
+        let bytes = self
+            .fetch(url)
+            .await
+            .map_err(|_| "Media download failed".to_string())?;
+        let name = download_name(name, url);
+        self.0
+            .runtime
+            .spawn_blocking(move || save(&directory, &name, &bytes))
+            .await
+            .map_err(|_| "Media download interrupted".to_string())?
+    }
+
+    /// The decoded RGBA pixels of an image, for the clipboard:
+    /// `(width, height, rgba)` (`media_copy_image`).
+    pub async fn copy_image(&self, url: &str) -> Result<(usize, usize, Vec<u8>), String> {
+        if self.desktop_media(url) {
+            let (signer, source) = (self.signer(), scheme_url(url));
+            return self
+                .0
+                .runtime
+                .spawn(async move { buzz_desktop::media::copy_image(&signer, &source).await })
+                .await
+                .map_err(|_| "Could not fetch image".to_string())?;
+        }
+        let bytes = self
+            .fetch(url)
+            .await
+            .map_err(|_| "Could not fetch image".to_string())?;
+        self.0
+            .runtime
+            .spawn_blocking(move || {
+                let image = image::load_from_memory(&bytes)
+                    .map_err(|_| "Could not decode image".to_string())?
+                    .into_rgba8();
+                Ok((
+                    image.width() as usize,
+                    image.height() as usize,
+                    image.into_raw(),
+                ))
+            })
+            .await
+            .map_err(|_| "Could not decode image".to_string())?
     }
 
     /// Whether `url` is this relay's media: same origin, path
@@ -122,15 +243,6 @@ impl Media {
                 let _ = media.fetch(&url).await;
             });
         }
-    }
-
-    pub(crate) fn identity(&self) -> &Arc<Identity> {
-        &self.0.identity
-    }
-
-    /// The client for this relay: no redirects, a 600 s timeout.
-    pub(crate) fn relay_client(&self) -> &reqwest::Client {
-        &self.0.relay
     }
 
     pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
@@ -225,6 +337,96 @@ impl Inner {
         }
         Ok(bytes.into())
     }
+}
+
+/// A relay URL, percent-encoded as one path segment (`encodeURIComponent`).
+fn encode(url: &str) -> String {
+    const COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    percent_encoding::utf8_percent_encode(url, COMPONENT).to_string()
+}
+
+/// The `buzz-media://localhost/<relay URL>` source buzz-desktop's download
+/// and copy take (`convertFileSrc(url, "buzz-media")`).
+fn scheme_url(url: &str) -> String {
+    format!("buzz-media://localhost/{}", encode(url))
+}
+
+/// The sender's file name with nothing that could make it a path, else the
+/// URL's last segment.
+fn download_name(name: Option<&str>, url: &str) -> String {
+    let clean = |value: &str| {
+        value
+            .chars()
+            .map(|c| {
+                if c.is_control() || matches!(c, '/' | '\\') {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .trim()
+            .trim_start_matches('.')
+            .trim()
+            .to_string()
+    };
+    name.map(clean)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            url.rsplit('/')
+                .next()
+                .map(clean)
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or_else(|| "File".into())
+}
+
+/// Writes `body` to a new file in `directory`, numbering the name until one
+/// is free, as buzz-desktop's `save_download` does.
+fn save(directory: &std::path::Path, name: &str, body: &[u8]) -> Result<PathBuf, String> {
+    use std::io::Write as _;
+    let (stem, extension) = name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map_or((name, String::new()), |(stem, ext)| {
+            (stem, format!(".{ext}"))
+        });
+    for index in 0..1000 {
+        let candidate = if index == 0 {
+            name.to_owned()
+        } else {
+            format!("{stem} ({index}){extension}")
+        };
+        let path = directory.join(candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                return match file.write_all(body).and_then(|()| file.sync_all()) {
+                    Ok(()) => Ok(path),
+                    Err(_) => {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        Err("Media download failed".into())
+                    }
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err("Media download failed".into()),
+        }
+    }
+    Err("Media download failed".into())
 }
 
 /// `host[:port]` as the relay checks the Blossom `server` tag (`URL.host`).
