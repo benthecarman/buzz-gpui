@@ -282,6 +282,8 @@ pub struct Community {
     presence_demand: Vec<String>,
     /// People an open view (the members dialog) also follows.
     presence_extra: Vec<String>,
+    /// Agents whose messages the open timeline shows, for their badges.
+    presence_rows: Vec<String>,
     _watch: Task<()>,
     _notifications: Option<Task<()>>,
 }
@@ -320,6 +322,7 @@ impl Community {
                 reading: None,
                 presence_demand: Vec::new(),
                 presence_extra: Vec::new(),
+                presence_rows: Vec::new(),
                 _notifications: None,
             }
         });
@@ -349,7 +352,7 @@ impl Community {
                     }),
             )
             .collect();
-        for person in &self.presence_extra {
+        for person in self.presence_extra.iter().chain(&self.presence_rows) {
             if !demand.contains(person) {
                 demand.push(person.clone());
             }
@@ -357,6 +360,15 @@ impl Community {
         if demand != self.presence_demand {
             self.presence_demand = demand.clone();
             self.session.watch_presence(demand);
+        }
+    }
+
+    /// Follows the presence of agents shown in the timeline, replacing the
+    /// previous set.
+    pub fn set_presence_rows(&mut self, people: Vec<String>) {
+        if self.presence_rows != people {
+            self.presence_rows = people;
+            self.follow_presence();
         }
     }
 

@@ -243,6 +243,16 @@ pub fn open_url(url: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// [`open_url`] for a `buzz://` link in a message: `false` when this
+/// window cannot take it, so the link can say so.
+pub fn try_open_url(url: &str, window: &mut Window, cx: &mut App) -> bool {
+    if workspace(cx).is_none() || crate::deep_links::parse(url).is_none() {
+        return false;
+    }
+    open_url(url, window, cx);
+    true
+}
+
 /// A mention clicked inside the window: shows the person's card at the
 /// pointer.
 pub fn show_profile(pubkey: String, at: Point<Pixels>, window: &mut Window, cx: &mut App) {

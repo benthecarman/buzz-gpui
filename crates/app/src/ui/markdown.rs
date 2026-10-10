@@ -1805,7 +1805,11 @@ impl MarkdownPlugin for Objects {
             Node::Image(image) => {
                 let text = match image.url.strip_prefix("buzz-emoji:") {
                     // Copied as its `:shortcode:` (`copy-emoji.ts`).
-                    Some(_) => image.alt.clone(),
+                    Some(index) => index
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| self.emoji.get(index))
+                        .map_or_else(|| image.alt.clone(), |e| format!(":{}:", e.shortcode)),
                     None if image.url.starts_with("buzz-spoiler:")
                         || image.url.starts_with("buzz-footnote:") =>
                     {

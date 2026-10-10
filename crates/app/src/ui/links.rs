@@ -542,6 +542,14 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     let target = url.to_string();
     let middle = target.clone();
     let internal = !external;
+    // "This Buzz link couldn’t be opened here." after a failed open.
+    let unavailable = window.use_keyed_state(
+        SharedString::from(format!("{id}-unavailable")),
+        cx,
+        |_, _| false,
+    );
+    let shown_unavailable = *unavailable.read(cx);
+    let (open_state, middle_state) = (unavailable.clone(), unavailable);
     let menu_state =
         window.use_keyed_state(SharedString::from(format!("{id}-menu")), cx, |_, _| {
             None::<Point<Pixels>>
@@ -576,7 +584,11 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             if internal {
-                navigation::open_url(&target, window, cx)
+                let opened = navigation::try_open_url(&target, window, cx);
+                open_state.update(cx, |state, cx| {
+                    *state = !opened;
+                    cx.notify();
+                });
             } else {
                 cx.open_url(&target)
             }
@@ -584,7 +596,11 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     if internal {
         element = element.on_mouse_down(MouseButton::Middle, move |_, window, cx| {
             cx.stop_propagation();
-            navigation::open_url(&middle, window, cx)
+            let opened = navigation::try_open_url(&middle, window, cx);
+            middle_state.update(cx, |state, cx| {
+                *state = !opened;
+                cx.notify();
+            });
         });
     } else {
         let state = menu_state.clone();
@@ -625,7 +641,19 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         });
     }
     let shown = hover_state.read(cx).open;
-    let mut wrapper = div().relative().child(element);
+    let mut wrapper = div()
+        .relative()
+        .flex()
+        .items_baseline()
+        .child(element)
+        .when(shown_unavailable, |d| {
+            d.child(
+                div()
+                    .whitespace_nowrap()
+                    .text_color(c.text_standard)
+                    .child(" This Buzz link couldn’t be opened here."),
+            )
+        });
     if let (true, Some(card)) = (shown, card) {
         let state = hover_state.clone();
         wrapper = wrapper.child(

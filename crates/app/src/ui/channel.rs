@@ -270,6 +270,25 @@ impl ChannelPage {
         }
         // The edge's state may have changed.
         self.list.splice(0..1, 1);
+        // Agent avatars show presence, so the session watches their authors.
+        let agents = {
+            let community = self.community.read(cx);
+            let profiles = &community.snapshot.profiles;
+            let library = super::identity::AgentLibrary::from_hosts(cx);
+            let mut agents: Vec<String> = Vec::new();
+            for item in &next {
+                let author = item.row.author.to_hex();
+                let agent = item.row.is_agent_envelope()
+                    || profiles.get(&author).is_some_and(|p| p.is_agent)
+                    || library.agents.iter().any(|(key, _, _)| *key == author);
+                if agent && item.row.workflow_owner.is_none() && !agents.contains(&author) {
+                    agents.push(author);
+                }
+            }
+            agents
+        };
+        self.community
+            .update(cx, |community, _| community.set_presence_rows(agents));
         self.items = next;
         cx.notify();
     }
