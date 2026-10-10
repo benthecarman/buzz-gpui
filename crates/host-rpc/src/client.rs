@@ -133,6 +133,17 @@ impl<P: Protocol> HostClient<P> {
     }
 
     pub async fn request(&self, body: P::ClientRequest) -> Result<P::ClientResponse, RpcError> {
+        self.request_within(body, self.shared.options.request_timeout)
+            .await
+    }
+
+    /// As [`Self::request`], waiting up to `timeout` for the answer: for
+    /// requests that wait on a person or an installer.
+    pub async fn request_within(
+        &self,
+        body: P::ClientRequest,
+        timeout: std::time::Duration,
+    ) -> Result<P::ClientResponse, RpcError> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         let pending = {
@@ -150,7 +161,7 @@ impl<P: Protocol> HostClient<P> {
             }
             link.pending.clone()
         };
-        match tokio::time::timeout(self.shared.options.request_timeout, receiver).await {
+        match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RpcError::Disconnected),
             Err(_) => {
