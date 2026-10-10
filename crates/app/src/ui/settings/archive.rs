@@ -34,6 +34,11 @@ fn open(cx: &mut App) -> Result<Arc<Archive>, String> {
     Ok(archive)
 }
 
+/// The archive, if it opened; capture opens it when a community connects.
+pub fn opened(cx: &App) -> Option<Arc<Archive>> {
+    cx.try_global::<ArchiveHost>()?.0.clone()
+}
+
 /// The viewer's archive key and identity in `community`.
 fn partition(community: &Entity<Community>, cx: &App) -> (String, String) {
     let community = community.read(cx);

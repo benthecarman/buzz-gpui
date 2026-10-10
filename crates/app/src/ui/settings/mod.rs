@@ -22,6 +22,7 @@ use crate::ui::agents::{AddHost, DefaultsDialog};
 use crate::ui::overlay;
 pub use agents::{followup_draft, remember_mentioned_agents};
 pub use archive::capture as capture_agent_activity;
+pub use archive::opened as agent_archive;
 use buzz_ui::{
     ActiveTheme, Button, ButtonShape, Icon, IconName, NavigationItem, Toast, ToastTone, TypeStyled,
     tokens::radius,

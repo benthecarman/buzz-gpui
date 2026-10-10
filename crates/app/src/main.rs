@@ -84,6 +84,7 @@ fn main() {
         ui::pages::init(cx);
         ui::agent_activity::init(cx);
         ui::profile_panel::init(cx);
+        ui::channel_usage::init(cx);
         ui::channel_panels::dev_sample(cx);
         network::init(cx);
         let requests = navigation::init(cx);
