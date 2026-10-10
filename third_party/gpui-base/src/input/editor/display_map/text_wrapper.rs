@@ -770,6 +770,11 @@ impl LineLayout {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_background(&self) -> bool {
+        self.has_background
+    }
+
     /// Set the left offset reserved for continuation wrapped lines.
     pub(crate) fn wrap_indent(mut self, wrap_indent: Pixels) -> Self {
         self.wrap_indent = wrap_indent;

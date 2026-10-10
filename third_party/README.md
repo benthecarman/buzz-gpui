@@ -45,6 +45,9 @@ Patches:
   `EditorMode`, so existing code still compiles. The composer uses this to
   style Markdown as it is typed. Before, only `EditorState` could hold
   styled ranges. The renderer already drew decorations in every mode.
+- Backgrounds beside inline tokens: a line with a token (a chip) now
+  paints the background colors of its text runs. Its layout never marked
+  them, so a highlighted background vanished from any line with a chip.
 
 Run its tests on their own, since it isn't a workspace member:
 

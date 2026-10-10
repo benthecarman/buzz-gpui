@@ -1839,6 +1839,7 @@ impl<M: InputModeKind> TextElement<M> {
                         .clone()
                 };
                 let mut lines: SmallVec<[InputLine; 1]> = SmallVec::new();
+                let mut has_bg = false;
                 for range in ranges {
                     let mut fragments = Vec::new();
                     let mut offset = range.start;
@@ -1852,10 +1853,12 @@ impl<M: InputModeKind> TextElement<M> {
                         let local = span.range().start - line_start..span.range().end - line_start;
                         if offset < local.start {
                             let part = offset..local.start;
+                            let part_runs = runs_for_range(runs, run_offset, &part);
+                            has_bg |= has_background(&part_runs);
                             let shaped = window.text_system().shape_line(
                                 text[part.clone()].to_owned().into(),
                                 font_size,
-                                &runs_for_range(runs, run_offset, &part),
+                                &part_runs,
                                 None,
                             );
                             let width = shaped.width;
@@ -1879,10 +1882,12 @@ impl<M: InputModeKind> TextElement<M> {
                     }
                     if offset < range.end {
                         let part = offset..range.end;
+                        let part_runs = runs_for_range(runs, run_offset, &part);
+                        has_bg |= has_background(&part_runs);
                         let shaped = window.text_system().shape_line(
                             text[part.clone()].to_owned().into(),
                             font_size,
-                            &runs_for_range(runs, run_offset, &part),
+                            &part_runs,
                             None,
                         );
                         let width = shaped.width;
@@ -1909,6 +1914,7 @@ impl<M: InputModeKind> TextElement<M> {
                 LineLayout::new()
                     .inline_lines(lines)
                     .wrap_indent(wrap_indent)
+                    .with_background(has_bg)
             })
             .collect()
     }
@@ -3671,6 +3677,42 @@ mod tests {
                 cx,
             );
             assert_eq!(frames.len(), 1);
+        });
+    }
+
+    /// A line with a token paints the backgrounds of its text runs too.
+    #[gpui::test]
+    fn token_lines_paint_decoration_backgrounds(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let mut textarea = None;
+        let window = cx.open_window(size(px(240.), px(140.)), |window, cx| {
+            let state = cx
+                .new(|cx| crate::input::TextareaState::new(window, cx).default_value("hi @bob x"));
+            textarea = Some(state.clone());
+            TextareaHarness(state)
+        });
+        let textarea = textarea.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            textarea.update(cx, |state, cx| {
+                state
+                    .replace_range_with_token(
+                        3..7,
+                        crate::input::InlineToken::new("bob", "@bob"),
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+                let fill = HighlightStyle {
+                    background_color: Some(gpui::red()),
+                    ..Default::default()
+                };
+                state.create_decorations_collection(vec![TextDecoration::new(0..2, fill)], cx);
+            });
+            window.draw(cx).clear(cx);
+            let state = textarea.read(cx);
+            assert!(state.tokens_visible());
+            assert!(state.last_layout.as_ref().unwrap().lines[0].has_background());
         });
     }
 
