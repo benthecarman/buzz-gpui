@@ -133,6 +133,7 @@ impl RenderOnce for Checkbox {
                     div()
                         .flex()
                         .flex_col()
+                        .min_w_0()
                         .py(rems(0.625))
                         .when_some(self.label, |this, label| {
                             this.child(
