@@ -507,9 +507,9 @@ The Claude Code harness preset (claude-agent-acp) exists in the port (host/harne
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Plugin manager: bundled and external plugins, enable/disable, activation with timeout, starting/active/failed status | src/plugins/manager.ts; src/plugins/runtime.ts; src/plugins/timeout.ts; src/plugins/status.ts | MISSING | — | L |
-| Persisted plugin configuration (`buzzodz.plugins.v1`) and module loader | src/plugins/storage.ts; src/plugins/modules.ts | MISSING | — | M |
-| Settings → Plugins UI, plugin import from folder or Git, "External plugins are paused for this launch", recovery screen | src/app/Settings.tsx:219-320 (uses src/plugins) | MISSING | — | M |
+| Plugin manager: bundled and external plugins, enable/disable, activation with timeout, starting/active/failed status | src/plugins/manager.ts; src/plugins/runtime.ts; src/plugins/timeout.ts; src/plugins/status.ts | DONE for bundled plugins (crates/app/src/plugins.rs); external plugins are skipped by decision | - | L |
+| Persisted plugin configuration (`buzzodz.plugins.v1`) and module loader | src/plugins/storage.ts; src/plugins/modules.ts | DONE (crates/app/src/plugins.rs: buzz-app plugin manager registry.json via buzzodz-plugins) | - | M |
+| Settings → Plugins UI, plugin import from folder or Git, "External plugins are paused for this launch", recovery screen | src/app/Settings.tsx:219-320 (uses src/plugins) | DONE (crates/app/src/ui/settings/plugins.rs); import is skipped by decision | - | M |
 | Contribution resolution (match order) and owned-contribution error boundary | src/plugins/contributions.ts; src/plugins/OwnedContribution.tsx | MISSING | — | M |
 | Manifest host capabilities (commands, networkOrigins, processes) and the public author API | src/plugins/api.ts:6-42; src/plugins/author.ts; src/plugins/types.ts | MISSING | — | M |
 | Host service for plugins (request, run command, spawn) | src/features/host/service.ts | MISSING | — | M |

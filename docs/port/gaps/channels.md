@@ -637,7 +637,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Member row menu: View profile, View owner profile, Send message, Make admin/member, Remove | src/bundled/channels/MemberAdministration.tsx:230-300 | DONE (crates/app/src/ui/members.rs:340-400) | - | - |
 | Role change and removal confirmations with exact copy | src/bundled/channels/ChannelMembersDialog.tsx:995-1100 | DONE (crates/app/src/ui/members.rs:550-590) | - | - |
 | "managed by <owner> (you)" attribution | src/bundled/channels/ChannelMembersDialog.tsx:220-235; useMemberOwners.ts | DONE (crates/app/src/ui/members.rs:418-428) | - | - |
-| Archived identities labelled/hidden; "Archived identities could not be checked." | src/bundled/channels/ChannelMembersDialog.tsx:205, 1318-1322 | MISSING | Needs identity archives | S |
+| Archived identities labelled/hidden; "Archived identities could not be checked." | src/bundled/channels/ChannelMembersDialog.tsx:205, 1318-1322 | DONE (crates/app/src/ui/members.rs, crates/app/src/ui/archives.rs) | - | S |
 | "Role unverified" label | src/bundled/channels/ChannelMembersDialog.tsx:935 | MISSING | Label when role cannot be verified | S |
 | Roster load errors ("The member list could not be confirmed." / "could not load."), names-failed note, owners-failed note, "Some agents could not load." | src/bundled/channels/ChannelMembersDialog.tsx:520-565, 1307-1318 | PARTIAL: generic error only | Distinct notes | S |
 | Per-person addition error with Retry / "Retrying…" | src/bundled/channels/ChannelMembersDialog.tsx:1324-1338 | MISSING (single error line) | Per-person retry | S |
@@ -709,14 +709,14 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Inbox page (primary page) with connecting/error/retry states | src/bundled/inbox/index.tsx; InboxPage.tsx:82-115 | MISSING | Page | L |
-| Inbox items computation (mentions, threads, DMs) | src/features/relay/inbox.ts:4-30 | PARTIAL: computed in `UnreadState::inbox` (crates/relay/src/unread.rs:664-700, 1798-1935), no consumer | Expose to UI | S |
-| Inbox history feed (mentions `#p` kinds 9/40002, 50 per page, cursor until/before_id, edit/delete completeness) | src/features/relay/inbox-feed.ts:1-253 | MISSING | History reader | M |
-| Filters (All / Threads / Mentions / DMs / Drafts; From People/Agents; Unread only) | src/bundled/inbox/InboxFilters.tsx:24-120 | MISSING | Filters | M |
-| Inbox detail with channel preview and "Open in channel" | src/bundled/inbox/InboxDetail.tsx:160-240; ChannelPreview.tsx | MISSING | Detail view | M |
-| Drafts view (list, open in origin, delete with confirm) | src/bundled/inbox/DraftsView.tsx:160-440 | MISSING | Drafts list | M |
-| DM labels in inbox | src/bundled/inbox/dm-label.ts | MISSING | Label helper | S |
-| Inbox actions expiry/error copy | src/bundled/inbox/InboxPage.tsx:370-385 | MISSING | Comes with page | S |
+| Inbox page (primary page) with connecting/error/retry states | src/bundled/inbox/index.tsx; InboxPage.tsx:82-115 | DONE (crates/app/src/ui/inbox.rs) | - | L |
+| Inbox items computation (mentions, threads, DMs) | src/features/relay/inbox.ts:4-30 | DONE (crates/relay/src/session/inbox.rs `Session::inbox`) | - | S |
+| Inbox history feed (mentions `#p` kinds 9/40002, 50 per page, cursor until/before_id, edit/delete completeness) | src/features/relay/inbox-feed.ts:1-253 | DONE (crates/relay/src/session/inbox.rs) | - | M |
+| Filters (All / Threads / Mentions / DMs / Drafts; From People/Agents; Unread only) | src/bundled/inbox/InboxFilters.tsx:24-120 | DONE (crates/app/src/ui/inbox.rs, crates/app/src/ui/inbox/model.rs) | - | M |
+| Inbox detail with channel preview and "Open in channel" | src/bundled/inbox/InboxDetail.tsx:160-240; ChannelPreview.tsx | DONE (crates/app/src/ui/inbox/detail.rs) | - | M |
+| Drafts view (list, open in origin, delete with confirm) | src/bundled/inbox/DraftsView.tsx:160-440 | DONE (crates/app/src/ui/inbox/drafts.rs) | - | M |
+| DM labels in inbox | src/bundled/inbox/dm-label.ts | DONE (crates/app/src/ui/inbox/model.rs `dm_label`) | - | S |
+| Inbox actions expiry/error copy | src/bundled/inbox/InboxPage.tsx:370-385 | DONE (crates/app/src/ui/inbox.rs, crates/relay/src/session/inbox.rs) | - | S |
 
 ## Other relay-layer features
 
@@ -757,15 +757,15 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| List read (limit 200) with loading/ready/error and `hydrated` | reminders.ts:241-272 | MISSING | Only `kinds::REMINDERS` (event.rs:34); reminders owner | L |
-| Self-decrypt with validation (one `d`, ≤16 KiB, target dialect, field limits, invalid skipped) | src-tauri/src/relay/reminders.rs:30-64, 94-146; reminders.ts:76-120 | MISSING | Decode and validation | M |
-| Live 30300 on membership route | reminders.ts:314-320; live.ts:610-615 | PARTIAL | Subscribed (live.rs:496), events dropped | S |
-| Head merge (newest, then lowest id) | reminders.ts:172-183 | MISSING | - | S |
-| Create / snooze / complete / cancel (expiration 30-90 days) | reminders.ts:122-130, 273-298 | MISSING | Templates and actions | M |
-| Ordered edits per coordinate; monotonic created_at | reminders.ts:201-224 | MISSING | - | S |
-| Offline/recover gating | reminders.ts:148-153, 300-312 | MISSING | - | S |
-| Signer guard (exact tags, time window, expiration, NIP-44 to self) | src-tauri/src/relay/reminders.rs:66-92, 174-240 | MISSING | `Purpose::AppData` allows only 30078 (crates/identity/src/lib.rs:340) | S |
-| Reminders page, due badge, alarm marker, `buzz-reminders-checked.v1` | docs/port/ui.md:859, 1344 | MISSING | Depends on owner | L |
+| List read (limit 200) with loading/ready/error and `hydrated` | reminders.ts:241-272 | DONE (crates/relay/src/reminders.rs, crates/relay/src/session/reminders.rs) | - | L |
+| Self-decrypt with validation (one `d`, ≤16 KiB, target dialect, field limits, invalid skipped) | src-tauri/src/relay/reminders.rs:30-64, 94-146; reminders.ts:76-120 | DONE (crates/identity/src/reminders.rs via buzz-desktop relay::reminders) | - | M |
+| Live 30300 on membership route | reminders.ts:314-320; live.ts:610-615 | DONE (crates/relay/src/session/reminders.rs) | - | S |
+| Head merge (newest, then lowest id) | reminders.ts:172-183 | DONE (crates/relay/src/reminders.rs) | - | S |
+| Create / snooze / complete / cancel (expiration 30-90 days) | reminders.ts:122-130, 273-298 | DONE (crates/relay/src/reminders.rs, crates/relay/src/session/reminders.rs) | - | M |
+| Ordered edits per coordinate; monotonic created_at | reminders.ts:201-224 | DONE (crates/relay/src/session/reminders.rs) | - | S |
+| Offline/recover gating | reminders.ts:148-153, 300-312 | DONE (crates/relay/src/reminders.rs) | - | S |
+| Signer guard (exact tags, time window, expiration, NIP-44 to self) | src-tauri/src/relay/reminders.rs:66-92, 174-240 | DONE (crates/identity/src/reminders.rs: prepare, seal, admit) | - | S |
+| Reminders page, due badge, alarm marker, `buzz-reminders-checked.v1` | docs/port/ui.md:859, 1344 | DONE (crates/app/src/ui/reminders.rs, crates/app/src/ui/reminders/) | - | L |
 
 ### Work sessions and channel creation
 
@@ -803,12 +803,12 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Availability (authority = NIP-11 self) | identity-archives.ts:49-63 | MISSING | Only `IDENTITY_ARCHIVE` const (event.rs:27) | S |
-| Snapshot read (limit 1, one event, one `-` tag, ≤2 MiB) | identity-archives.ts:68-140 | MISSING | Archives owner | M |
-| Rollback fence | identity-archives.ts:57-59, 100-107 | MISSING | - | S |
-| `archiveHides` in mentions, agent choices, member add, sessions, search | identity-archives.ts:28-34 | MISSING | Filter pickers | M |
-| Consent path (self, owner/admin via 13534, NIP-OA `auth`) | identity-archives.ts:144-179 | MISSING | - | M |
-| 9035/9036 request (20 s timeout, re-read confirm) | identity-archive-protocol.ts:8-48; identity-archives.ts:180-233 | MISSING | Kinds allowed (crates/identity/src/lib.rs:138) | M |
+| Availability (authority = NIP-11 self) | identity-archives.ts:49-63 | DONE (crates/app/src/ui/agents/relay.rs, crates/app/src/ui/archives.rs) | - | S |
+| Snapshot read (limit 1, one event, one `-` tag, ≤2 MiB) | identity-archives.ts:68-140 | DONE (crates/app/src/ui/agents/relay.rs `read_archives`) | - | M |
+| Rollback fence | identity-archives.ts:57-59, 100-107 | DONE (crates/app/src/ui/agents/relay.rs, crates/app/src/ui/archives.rs) | - | S |
+| `archiveHides` in mentions, agent choices, member add, sessions, search | identity-archives.ts:28-34 | DONE (crates/app/src/ui/archives.rs: mentions, member add, search authors; agent choices and sessions are the agents slice) | - | M |
+| Consent path (self, owner/admin via 13534, NIP-OA `auth`) | identity-archives.ts:144-179 | DONE (crates/app/src/ui/agents/relay.rs `consent`) | - | M |
+| 9035/9036 request (20 s timeout, re-read confirm) | identity-archive-protocol.ts:8-48; identity-archives.ts:180-233 | DONE (crates/app/src/ui/agents/relay.rs `request_archive`) | - | M |
 
 ### Threads and follows
 

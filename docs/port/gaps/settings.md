@@ -161,18 +161,18 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 
 ## 12. Plugins (Settings.tsx Plugins section, PluginImport.tsx) and plugin-dependent pieces
 
-These rows all depend on one architecture decision: the port has no plugin
-runtime.
+Bundled plugins are compiled in and switched on and off through buzz-app's plugin
+manager (`crates/app/src/plugins.rs`); external plugins are skipped.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Plugins section: one row per plugin with an enable switch; Channels shows "Required" | `src/app/Settings.tsx:219-364` (rows 277-315) | MISSING | A plugin model, or a fixed list of built-in features that can be turned on and off. | L |
-| Roll back / Reload / Delete per plugin, plus the rollback-blocked reason | `src/app/Settings.tsx:321-357` | MISSING | Depends on the plugin model. | M |
-| "External plugins are paused for this launch…", "Plugin settings couldn’t refresh", "Plugin change wasn’t confirmed", RecoveryScreen, "Plugin settings are unavailable…" | `src/app/Settings.tsx:244-275` | MISSING | Depends on the plugin model. | S |
-| "Load a plugin" → "Load from folder" | `src/app/PluginImport.tsx:120-146` | MISSING | Depends on the plugin model. | M |
-| "Load from Git": repository and branch/tag form, SSH/HTTPS help, Buzz git sign-in for community repositories, "Find plugins" | `src/app/PluginImport.tsx:147-195`; `src/app/Settings.tsx:235-242` | MISSING | Depends on the plugin model. | M |
-| Import preview: source and commit, candidate folders (radio), "Folders skipped (N)", declared host access with new/changed/removed grants, replace and rollback notice, Install/Update plugin, Close preview, discarding the token on unmount | `src/app/PluginImport.tsx:16-30,57-118,207-331` | MISSING | Depends on the plugin model. | M |
-| Plugin contributions shown in Settings: settings cards, notification categories, shortcut groups, account actions | `src/features/settings/service.ts:50-160`; `src/app/NotificationSettings.tsx:174-185`; `src/app/ShortcutSettings.tsx:168-183`; `src/features/account-actions/service.ts` | MISSING | Depends on the plugin model, or native equivalents for each bundled plugin. | L |
+| Plugins section: one row per plugin with an enable switch; Channels shows "Required" | `src/app/Settings.tsx:219-364` (rows 277-315) | DONE (crates/app/src/ui/settings/plugins.rs, crates/app/src/plugins.rs) | - | L |
+| Roll back / Reload / Delete per plugin, plus the rollback-blocked reason | `src/app/Settings.tsx:321-357` | N/A (external plugins are skipped by decision; bundled plugins have no rollback, reload or delete) | - | M |
+| "External plugins are paused for this launch…", "Plugin settings couldn’t refresh", "Plugin change wasn’t confirmed", RecoveryScreen, "Plugin settings are unavailable…" | `src/app/Settings.tsx:244-275` | DONE for bundled plugins (crates/app/src/plugins.rs, crates/app/src/ui/settings/plugins.rs): the recovery screen, "Plugin change wasn’t confirmed" and "Plugin settings are unavailable…"; the paused and refresh notices concern external plugins and catalog polling, which this port does not have | - | S |
+| "Load a plugin" → "Load from folder" | `src/app/PluginImport.tsx:120-146` | N/A (external plugin import is skipped by decision) | - | M |
+| "Load from Git": repository and branch/tag form, SSH/HTTPS help, Buzz git sign-in for community repositories, "Find plugins" | `src/app/PluginImport.tsx:147-195`; `src/app/Settings.tsx:235-242` | N/A (external plugin import is skipped by decision) | - | M |
+| Import preview: source and commit, candidate folders (radio), "Folders skipped (N)", declared host access with new/changed/removed grants, replace and rollback notice, Install/Update plugin, Close preview, discarding the token on unmount | `src/app/PluginImport.tsx:16-30,57-118,207-331` | N/A (external plugin import is skipped by decision) | - | M |
+| Plugin contributions shown in Settings: settings cards, notification categories, shortcut groups, account actions | `src/features/settings/service.ts:50-160`; `src/app/NotificationSettings.tsx:174-185`; `src/app/ShortcutSettings.tsx:168-183`; `src/features/account-actions/service.ts` | DONE (notification categories: crates/app/src/notifications/categories.rs; account action: crates/app/src/ui/account.rs; every contribution is hidden while its plugin is off). Settings cards come from the shared card registry (ui/settings/cards.rs, another slice), which should hide cards with `plugins::enabled_key`; shortcut groups belong to Terminal | - | L |
 | Builderlab identity-binding signer (kind 24243, pinned origin) | `src-tauri/src/identity.rs:969-1032` | MISSING (needed only if Builderlab is ported) | A purpose-bound signer in `crates/identity`. | S |
 | Channel-recipe NIP-44 cipher (`kit_cipher`, used by Templates) | `src-tauri/src/identity.rs:1058-1083` | MISSING (needed only if Templates is ported) | A purpose-bound self-encryption entry point. | S |
 | "Managed by" agent-owner preview (used by Templates) | `src/features/profiles/AgentOwnerPreview.tsx:1-70` | MISSING (needed only if Templates is ported). Owner evidence exists (`ui/members.rs:419-427`). | The preview block. | S |
