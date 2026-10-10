@@ -51,7 +51,7 @@ fn parse_draft(json: &str) -> Option<SavedDraft> {
 
 /// `String(error)` of a JavaScript `Error`, as buzz-app shows read
 /// failures.
-fn js_error(error: &CanvasError) -> String {
+pub(crate) fn js_error(error: &CanvasError) -> String {
     match error {
         CanvasError::Conflict => format!("CanvasConflictError: {error}"),
         CanvasError::Failed(message) => format!("Error: {message}"),

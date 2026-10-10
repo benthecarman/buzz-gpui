@@ -1086,6 +1086,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64 0.22.1",
+ "bech32 0.11.1",
  "blurhash",
  "buzz-agent-controller",
  "buzz-credential-store",

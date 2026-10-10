@@ -74,6 +74,7 @@ pub mod templates;
 mod thread;
 mod time;
 pub mod toasts;
+pub mod todos;
 mod typing;
 mod unread_badge;
 mod window_controls;
