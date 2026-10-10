@@ -2,17 +2,28 @@
 //! address opens a community the identity already belongs to; an invite
 //! link (`buzz://join?relay=…&code=…` or `https://host/invite/<code>`)
 //! shows the community's join policy when it has one, then claims the
-//! invite.
+//! invite. Either way the last step is the viewer's profile there, which
+//! is published unless it is already current.
+//!
+//! The join journal records each step before it talks to the relay, so a
+//! join interrupted after the claim resumes at the profile step instead of
+//! claiming the invite again.
 
 use super::modal::{Dismissed, error};
 use crate::community::{AppState, IdentityState};
 use crate::runtime::Runtime;
-use buzz_relay_client::community::{self, CommunityInput, JoinInfo, JoinPolicy};
-use buzz_relay_client::{RelayHttp, RelayOrigin};
-use buzz_ui::{ActiveTheme, Button, Checkbox, Dialog, Surface, TextField, TypeStyled};
-use gpui_kit::component::input::{InputEvent, InputState};
+use buzz_relay_client::community::{
+    self, CommunityInput, CommunityProfile, JoinInfo, JoinJournal, JoinPolicy, PendingJoin,
+};
+use buzz_relay_client::{ProfileEdit, RelayHttp, RelayOrigin, account};
+use buzz_ui::{ActiveTheme, Button, Checkbox, Dialog, Surface, TextArea, TextField, TypeStyled};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+
+/// Viewer preference holding the local default profile (buzz-app's
+/// `client.profile`), the starting point in a community without one.
+const DEFAULT_PROFILE: &str = "default-profile";
 
 enum Step {
     Address,
@@ -23,18 +34,37 @@ enum Step {
         name: Option<String>,
         policy: JoinPolicy,
     },
+    /// How the viewer appears in the community.
+    Profile {
+        origin: RelayOrigin,
+        /// The community's NIP-11 name, or its host.
+        name: String,
+        /// The kind 0 there now, if any.
+        found: CommunityProfile,
+    },
+}
+
+/// What a check or claim leads to.
+enum Next {
+    /// A member: on to the profile step.
+    Profile(CommunityProfile),
+    NotMember(JoinInfo),
 }
 
 pub struct AddCommunity {
     step: Step,
     field: Entity<InputState>,
+    display_name: Entity<InputState>,
+    about: Entity<TextareaState>,
+    picture: Entity<InputState>,
     agreed: bool,
     age_confirmed: bool,
     busy: bool,
     error: Option<SharedString>,
     /// Shown inside onboarding rather than as a dismissible dialog.
     embedded: bool,
-    _subscription: Subscription,
+    journal: Option<JoinJournal>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<Dismissed> for AddCommunity {}
@@ -43,21 +73,55 @@ impl AddCommunity {
     pub fn new(embedded: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let field = cx.new(|cx| InputState::new(window, cx).placeholder("wss://relay.example.com"));
         field.update(cx, |state, cx| state.focus(window, cx));
-        let subscription =
+        let display_name = cx.new(|cx| InputState::new(window, cx));
+        let about = cx.new(|cx| TextareaState::new(window, cx));
+        let picture = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
+        let subscriptions = vec![
             cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     this.next(window, cx);
                 }
-            });
+            }),
+            cx.subscribe(&display_name, Self::edited),
+            cx.subscribe(&about, Self::edited),
+            cx.subscribe(&picture, Self::edited),
+        ];
+        let journal = match &cx.global::<AppState>().identity {
+            IdentityState::Ready(identity) => Some(JoinJournal::new(
+                cx.global::<AppState>().store.clone(),
+                identity.pubkey_hex(),
+            )),
+            _ => None,
+        };
+        // An unfinished join picks up where it stopped.
+        let mut error = None;
+        match journal.as_ref().map(JoinJournal::latest) {
+            Some(Ok(Some(pending))) => field.update(cx, |state, cx| {
+                state.set_value(pending.community, window, cx);
+            }),
+            Some(Err(message)) => error = Some(message.into()),
+            _ => {}
+        }
         Self {
             step: Step::Address,
             field,
+            display_name,
+            about,
+            picture,
             agreed: false,
             age_confirmed: false,
             busy: false,
-            error: None,
+            error,
             embedded,
-            _subscription: subscription,
+            journal,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn edited<T>(&mut self, _: Entity<T>, event: &InputEvent, cx: &mut Context<Self>) {
+        if matches!(event, InputEvent::Change) {
+            self.error = None;
+            cx.notify();
         }
     }
 
@@ -75,8 +139,14 @@ impl AddCommunity {
         }
     }
 
-    /// Continue: check the relay and either open it, show its policy, or
-    /// claim the invite.
+    fn journal(&self) -> Result<JoinJournal, String> {
+        self.journal
+            .clone()
+            .ok_or_else(|| "Set up your identity first".into())
+    }
+
+    /// Continue: check the relay, then go to the profile step for a
+    /// member, or show the policy or claim the invite for a newcomer.
     fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -97,14 +167,28 @@ impl AddCommunity {
                 return;
             }
         };
+        let pending = match self
+            .journal()
+            .and_then(|journal| journal.get(&input.origin().to_string()))
+        {
+            Ok(pending) => pending,
+            Err(message) => {
+                self.error = Some(message.into());
+                cx.notify();
+                return;
+            }
+        };
         self.busy = true;
         self.error = None;
         let runtime = Runtime::handle(cx);
         cx.spawn_in(window, async move |this, cx| {
             let work = runtime.spawn(async move {
                 let info = community::inspect(&http).await?;
-                let member = community::probe(&http).await?;
-                Ok::<(JoinInfo, bool), String>((info, member))
+                let found = community::inspect_profile(&http).await?;
+                Ok::<_, String>(match found {
+                    Some(found) => (info, Next::Profile(found)),
+                    None => (info.clone(), Next::NotMember(info)),
+                })
             });
             let result = work
                 .await
@@ -113,15 +197,18 @@ impl AddCommunity {
                 this.busy = false;
                 match (result, input) {
                     (Err(message), _) => this.error = Some(message.into()),
-                    (Ok((_, true)), input) => this.finish(input.origin(), cx),
-                    (Ok((_, false)), CommunityInput::Relay(_)) => {
+                    (Ok((info, Next::Profile(found))), input) => {
+                        let origin = input.origin().clone();
+                        this.show_profile(origin, info.name, found, pending, window, cx);
+                    }
+                    (Ok(_), CommunityInput::Relay(_)) => {
                         this.error = Some(
                             "You’re not a member of this community yet. Paste an invite link \
                              to join."
                                 .into(),
                         )
                     }
-                    (Ok((info, false)), CommunityInput::Invite { origin, code }) => {
+                    (Ok((_, Next::NotMember(info))), CommunityInput::Invite { origin, code }) => {
                         match info.policy {
                             Some(policy) => {
                                 this.step = Step::Policy {
@@ -131,7 +218,7 @@ impl AddCommunity {
                                     policy,
                                 };
                             }
-                            None => this.claim(origin, code, None, window, cx),
+                            None => this.claim(origin, code, info.name, None, window, cx),
                         }
                     }
                 }
@@ -142,16 +229,20 @@ impl AddCommunity {
         cx.notify();
     }
 
+    /// Journals the join, then claims the invite. A join already journaled
+    /// may have been admitted by a claim whose answer was lost, so that is
+    /// read first and the invite is not claimed again.
     fn claim(
         &mut self,
         origin: RelayOrigin,
         code: String,
+        name: Option<String>,
         policy: Option<JoinPolicy>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let http = match Self::http(&origin, cx) {
-            Ok(http) => http,
+        let (http, journal) = match Self::http(&origin, cx).and_then(|h| Ok((h, self.journal()?))) {
+            Ok(pair) => pair,
             Err(message) => {
                 self.error = Some(message.into());
                 return;
@@ -161,16 +252,30 @@ impl AddCommunity {
         self.error = None;
         let age = self.age_confirmed;
         let runtime = Runtime::handle(cx);
+        let community = origin.to_string();
         cx.spawn_in(window, async move |this, cx| {
-            let work = runtime
-                .spawn(async move { community::claim(&http, &code, policy.as_ref(), age).await });
+            let work = runtime.spawn(async move {
+                if let Some(pending) = journal.get(&community)?
+                    && let Some(found) = community::inspect_profile(&http).await?
+                {
+                    return Ok((found, pending));
+                }
+                let step = journal.begin(&community, None)?;
+                community::claim(&http, &code, policy.as_ref(), age).await?;
+                let found = community::inspect_profile(&http)
+                    .await?
+                    .ok_or("Membership was not confirmed")?;
+                Ok::<_, String>((found, step))
+            });
             let result = work
                 .await
                 .unwrap_or_else(|_| Err("The join stopped.".into()));
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(_) => this.finish(&origin, cx),
+                    Ok((found, step)) => {
+                        this.show_profile(origin, name, found, Some(step), window, cx)
+                    }
                     Err(message) => this.error = Some(message.into()),
                 }
                 cx.notify();
@@ -180,19 +285,137 @@ impl AddCommunity {
         cx.notify();
     }
 
-    fn finish(&mut self, origin: &RelayOrigin, cx: &mut Context<Self>) {
-        match AppState::add_community(origin.websocket(), cx) {
-            Ok(()) => cx.emit(Dismissed),
-            Err(message) => self.error = Some(message.into()),
+    /// The profile step, filled from the journaled draft, else the
+    /// community profile, else the local default (`showProfile`).
+    fn show_profile(
+        &mut self,
+        origin: RelayOrigin,
+        name: Option<String>,
+        found: CommunityProfile,
+        pending: Option<PendingJoin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let profile = pending
+            .and_then(|pending| pending.profile)
+            .or_else(|| found.profile.clone())
+            .or_else(|| default_profile(cx))
+            .unwrap_or_default();
+        self.display_name
+            .update(cx, |state, cx| state.set_value(profile.name, window, cx));
+        self.about
+            .update(cx, |state, cx| state.set_value(profile.about, window, cx));
+        self.picture
+            .update(cx, |state, cx| state.set_value(profile.picture, window, cx));
+        self.display_name
+            .update(cx, |state, cx| state.focus(window, cx));
+        let name = name.unwrap_or_else(|| {
+            url::Url::parse(&origin.http())
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| origin.to_string())
+        });
+        self.step = Step::Profile {
+            origin,
+            name,
+            found,
+        };
+        self.error = None;
+        cx.notify();
+    }
+
+    fn profile(&self, cx: &App) -> ProfileEdit {
+        ProfileEdit {
+            name: self.display_name.read(cx).value().trim().to_string(),
+            picture: self.picture.read(cx).value().trim().to_string(),
+            about: self.about.read(cx).value().trim().to_string(),
         }
+    }
+
+    /// Publishes the profile unless it is already current, confirms it by
+    /// reading it back, then saves the community and ends the join.
+    fn publish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Step::Profile { origin, .. } = &self.step else {
+            return;
+        };
+        let origin = origin.clone();
+        let profile = self.profile(cx);
+        if self.busy || profile.name.is_empty() {
+            return;
+        }
+        let (http, journal) = match Self::http(&origin, cx).and_then(|h| Ok((h, self.journal()?))) {
+            Ok(pair) => pair,
+            Err(message) => {
+                self.error = Some(message.into());
+                cx.notify();
+                return;
+            }
+        };
+        self.busy = true;
+        self.error = None;
+        let runtime = Runtime::handle(cx);
+        let draft = profile.clone();
+        let community = origin.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let work = runtime.spawn(async move {
+                let step = journal.begin(&community, Some(draft.clone()))?;
+                let found = community::inspect_profile(&http)
+                    .await?
+                    .ok_or("Membership was not confirmed")?;
+                if !found.matches(&draft) {
+                    community::publish_profile(&http, &draft, &found).await?;
+                    // An accepted replaceable event may already be superseded.
+                    let confirmed = community::inspect_profile(&http).await?;
+                    if !confirmed.is_some_and(|confirmed| confirmed.matches(&draft)) {
+                        return Err("Your profile change is not current. Your edits are \
+                                    retained; try again."
+                            .to_owned());
+                    }
+                }
+                Ok::<_, String>(step)
+            });
+            let result = work
+                .await
+                .unwrap_or_else(|_| Err("The join stopped.".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(step) => this.finish(&origin, &profile, &step, cx),
+                    Err(message) => this.error = Some(message.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish(
+        &mut self,
+        origin: &RelayOrigin,
+        profile: &ProfileEdit,
+        step: &PendingJoin,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(message) = AppState::add_community(origin.websocket(), cx) {
+            self.error = Some(message.into());
+            return;
+        }
+        if let Ok(journal) = self.journal()
+            && let Err(message) = journal.finish(step)
+        {
+            tracing::warn!(%message, "could not close the join journal");
+        }
+        seed_default_profile(profile, origin, cx);
+        cx.emit(Dismissed);
     }
 
     fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Step::Policy {
             origin,
             code,
+            name,
             policy,
-            ..
         } = &self.step
         else {
             return;
@@ -202,23 +425,94 @@ impl AddCommunity {
             cx.notify();
             return;
         }
-        let (origin, code, policy) = (origin.clone(), code.clone(), policy.clone());
-        self.claim(origin, code, Some(policy), window, cx);
+        let (origin, code, name, policy) =
+            (origin.clone(), code.clone(), name.clone(), policy.clone());
+        self.claim(origin, code, name, Some(policy), window, cx);
     }
+}
+
+/// The local default profile, if one was saved.
+fn default_profile(cx: &App) -> Option<ProfileEdit> {
+    let state = cx.global::<AppState>();
+    let IdentityState::Ready(identity) = &state.identity else {
+        return None;
+    };
+    let json = state
+        .store
+        .viewer_pref(&identity.pubkey_hex(), DEFAULT_PROFILE)
+        .ok()??;
+    serde_json::from_str(&json).ok()
+}
+
+/// Seeds the local default from the first community profile, as
+/// `communities.joined` does. A picture this community hosts under
+/// `/media/` is not reused elsewhere (`profile-default.ts`).
+fn seed_default_profile(profile: &ProfileEdit, origin: &RelayOrigin, cx: &App) {
+    if default_profile(cx).is_some_and(|saved| !saved.name.is_empty()) {
+        return;
+    }
+    let state = cx.global::<AppState>();
+    let IdentityState::Ready(identity) = &state.identity else {
+        return;
+    };
+    let mut profile = profile.clone();
+    if community_media(&profile.picture, origin) {
+        profile.picture = String::new();
+    }
+    let json = serde_json::to_string(&profile).expect("profiles serialize");
+    if let Err(error) = state
+        .store
+        .set_viewer_pref(&identity.pubkey_hex(), DEFAULT_PROFILE, &json)
+    {
+        tracing::warn!(%error, "could not save the default profile");
+    }
+}
+
+fn community_media(picture: &str, origin: &RelayOrigin) -> bool {
+    let (Ok(picture), Ok(community)) = (url::Url::parse(picture), url::Url::parse(&origin.http()))
+    else {
+        return false;
+    };
+    picture.origin() == community.origin() && picture.path().starts_with("/media/")
 }
 
 impl Render for AddCommunity {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let embedded = self.embedded;
-        let mut dialog = Dialog::new("add-community", "Add a community")
-            .description(
-                "Use your identity across communities. Your profile and conversations stay \
-                 separate in each one.",
-            )
+        let title = match &self.step {
+            Step::Profile { name, .. } => format!("Your profile in {name}"),
+            _ => "Add a community".to_owned(),
+        };
+        let mut dialog = Dialog::new("add-community", title)
+            .when(matches!(self.step, Step::Address), |d| {
+                d.description(
+                    "Use your identity across communities. Your profile and conversations \
+                     stay separate in each one.",
+                )
+            })
             .when(!embedded, |d| {
                 d.on_close(cx.listener(|_, _, _, cx| cx.emit(Dismissed)))
             });
+        let relay_note = |origin: &RelayOrigin| {
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child(format!("Relay: {}", origin.http()))
+        };
+        let back = |id: &'static str, cx: &mut Context<Self>| {
+            Button::new(id, "Back")
+                .ghost()
+                .surface(Surface::Floating)
+                .disabled(self.busy)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.step = Step::Address;
+                    this.error = None;
+                    this.agreed = false;
+                    this.age_confirmed = false;
+                    cx.notify();
+                }))
+        };
         match &self.step {
             Step::Address => {
                 dialog = dialog
@@ -251,17 +545,22 @@ impl Render for AddCommunity {
                             .on_click(cx.listener(|this, _, window, cx| this.next(window, cx))),
                     );
             }
-            Step::Policy { name, policy, .. } => {
+            Step::Policy {
+                origin,
+                name,
+                policy,
+                ..
+            } => {
                 let documents = [("Terms", &policy.terms), ("Privacy", &policy.privacy)];
-                let mut body =
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(rems(1.))
-                        .child(div().text_body_sm().child(format!(
-                            "{} asks new members to accept its terms before joining.",
-                            name.as_deref().unwrap_or("This community")
-                        )));
+                let mut body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(1.))
+                    .child(relay_note(origin))
+                    .child(div().text_body_sm().child(format!(
+                        "{} asks new members to accept its terms before joining.",
+                        name.as_deref().unwrap_or("This community")
+                    )));
                 for (label, text) in documents {
                     if let Some(text) = text {
                         body = body.child(
@@ -313,16 +612,7 @@ impl Render for AddCommunity {
                 body = body.children(self.error.clone().map(|message| error(message, cx)));
                 dialog = dialog
                     .child(body)
-                    .footer_leading(
-                        Button::new("policy-back", "Back")
-                            .ghost()
-                            .surface(Surface::Floating)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.step = Step::Address;
-                                this.error = None;
-                                cx.notify();
-                            })),
-                    )
+                    .footer_leading(back("policy-back", cx))
                     .footer(
                         Button::new("policy-join", "Join community")
                             .prominent()
@@ -330,7 +620,110 @@ impl Render for AddCommunity {
                             .on_click(cx.listener(|this, _, window, cx| this.accept(window, cx))),
                     );
             }
+            Step::Profile { origin, found, .. } => {
+                let profile = self.profile(cx);
+                // Keeping the profile publishes nothing, so it needs no
+                // validation beyond a name.
+                let keeps = found.matches(&profile);
+                let ready = if keeps {
+                    !profile.name.is_empty()
+                } else {
+                    account::validate(&profile).is_ok()
+                };
+                let about_len = self.about.read(cx).value().chars().count();
+                let field =
+                    |label: &'static str, input: AnyElement, hint: Option<String>| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(rems(0.5))
+                            .child(div().text_label_sm().child(label))
+                            .child(input)
+                            .children(hint.map(|hint| {
+                                div().text_body_sm().text_color(c.text_subtle).child(hint)
+                            }))
+                    };
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(1.))
+                    .child(relay_note(origin))
+                    .child(div().text_body_sm().child(if found.profile.is_some() {
+                        "Your existing community profile is loaded. Keep it or update it here."
+                    } else {
+                        "Start with your local profile, or choose how you appear in this \
+                         community."
+                    }))
+                    .child(field(
+                        "Display name",
+                        TextField::new(&self.display_name)
+                            .surface(Surface::Floating)
+                            .disabled(self.busy)
+                            .into_any_element(),
+                        None,
+                    ))
+                    .child(field(
+                        "Profile description (optional)",
+                        TextArea::new(&self.about)
+                            .rows(3)
+                            .surface(Surface::Floating)
+                            .invalid(about_len > account::ABOUT_LIMIT)
+                            .disabled(self.busy)
+                            .into_any_element(),
+                        Some(format!(
+                            "{about_len} of {} characters",
+                            account::ABOUT_LIMIT
+                        )),
+                    ))
+                    .child(field(
+                        "Avatar URL (optional)",
+                        TextField::new(&self.picture)
+                            .surface(Surface::Floating)
+                            .invalid(account::picture_error(&profile.picture).is_some())
+                            .disabled(self.busy)
+                            .into_any_element(),
+                        Some("An HTTPS image URL.".to_owned()),
+                    ))
+                    .children(self.error.clone().map(|message| error(message, cx)));
+                let label = if self.busy {
+                    "Working…"
+                } else if keeps {
+                    "Open community"
+                } else {
+                    "Publish profile & open"
+                };
+                dialog = dialog
+                    .child(body)
+                    .footer_leading(back("profile-back", cx))
+                    .footer(
+                        Button::new("profile-publish", label)
+                            .prominent()
+                            .disabled(self.busy || !ready)
+                            .on_click(cx.listener(|this, _, window, cx| this.publish(window, cx))),
+                    );
+            }
         }
         dialog
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn community_media_stays_out_of_the_default_profile() {
+        let origin = RelayOrigin::parse("wss://relay.example.com").unwrap();
+        assert!(community_media(
+            "https://relay.example.com/media/abc.png",
+            &origin
+        ));
+        assert!(!community_media("https://relay.example.com/a.png", &origin));
+        assert!(!community_media(
+            "https://cdn.example.com/media/abc.png",
+            &origin
+        ));
+        assert!(!community_media("", &origin));
     }
 }

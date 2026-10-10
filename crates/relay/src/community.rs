@@ -1,14 +1,21 @@
 //! Joining a community (`docs/port/relay.md` §1.6–1.7): invite links in
-//! both forms, the NIP-11 and join-policy check, the membership probe, and
-//! the invite claim.
+//! both forms, the NIP-11 and join-policy check, the membership probe, the
+//! invite claim, the profile published on joining, and the journal that
+//! lets an interrupted join resume.
 //!
-//! The parsers are pure. [`inspect`], [`probe`] and [`claim`] run one HTTP
-//! step each over a [`RelayHttp`] for the joining identity, before any
-//! session exists. Ports `invite-link.ts`, `native-api.ts` and the order of
-//! `CommunityDialog.tsx`.
+//! The parsers are pure. [`inspect`], [`inspect_profile`], [`claim`] and
+//! [`publish_profile`] run one HTTP step each over a [`RelayHttp`] for the
+//! joining identity, before any session exists. Ports `invite-link.ts`,
+//! `native-api.ts`, `join-journal.ts` and the order of `CommunityDialog.tsx`.
 
+use crate::account::{self, ProfileEdit};
+use crate::event::{Verifier, kinds};
 use crate::http::{HttpError, RelayHttp};
 use crate::origin::RelayOrigin;
+use crate::outbox::{PublishError, accept_publish};
+use crate::store::Store;
+use buzz_identity::Purpose;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
 use url::Url;
@@ -213,20 +220,248 @@ pub async fn inspect(http: &RelayHttp) -> Result<JoinInfo, String> {
 /// Whether the identity is already a member: a strong read of its own
 /// profile succeeds for members and is refused (401/403) otherwise.
 pub async fn probe(http: &RelayHttp) -> Result<bool, String> {
+    Ok(inspect_profile(http).await?.is_some())
+}
+
+/// The viewer's kind 0 in one community, as the join's profile step sees
+/// it (`inspectProfile`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommunityProfile {
+    /// Name, picture and about as published; `None` without a kind 0.
+    pub profile: Option<ProfileEdit>,
+    /// The kind 0's content, so a publish keeps fields it does not edit.
+    pub existing: Option<String>,
+    pub created_at: Option<u64>,
+}
+
+impl CommunityProfile {
+    /// Whether publishing `profile` would change nothing (`profilesEqual`).
+    pub fn matches(&self, profile: &ProfileEdit) -> bool {
+        self.profile.as_ref().is_some_and(|current| {
+            current.name == profile.name
+                && current.picture == profile.picture
+                && current.about == profile.about
+        })
+    }
+}
+
+/// The newest signed kind 0 by `viewer` in a `/query` answer, read as the
+/// profile step shows it: `display_name`, else `name`.
+pub fn community_profile(events: &[Value], viewer: &str) -> CommunityProfile {
+    let verifier = Verifier::default();
+    let verified: Vec<_> = events
+        .iter()
+        .filter_map(|value| verifier.verify_json(value).ok())
+        .collect();
+    let Some(event) = account::newest_profile(&verified, viewer) else {
+        return CommunityProfile::default();
+    };
+    let fields: serde_json::Map<String, Value> = match serde_json::from_str(&event.content) {
+        Ok(Value::Object(fields)) => fields,
+        _ => Default::default(),
+    };
+    let text = |key: &str| {
+        fields
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    CommunityProfile {
+        profile: Some(ProfileEdit {
+            name: text("display_name")
+                .or_else(|| text("name"))
+                .unwrap_or_default(),
+            picture: text("picture").unwrap_or_default(),
+            about: text("about").unwrap_or_default(),
+        }),
+        existing: Some(event.content.clone()),
+        created_at: Some(event.created_at_secs()),
+    }
+}
+
+/// A strong read of the viewer's own kind 0. `None` when the relay
+/// refuses it (401/403): the identity is not a member.
+pub async fn inspect_profile(http: &RelayHttp) -> Result<Option<CommunityProfile>, String> {
     let viewer = http.identity().pubkey_hex();
     let filter = json!({
-        "kinds": [0],
+        "kinds": [kinds::PROFILE],
         "authors": [viewer],
         "limit": 5,
         "consistency": "strong",
     });
     let filter = filter.as_object().expect("object").clone();
     match timed(http.query_raw(&[filter])).await {
-        Ok(_) => Ok(true),
+        Ok(events) => Ok(Some(community_profile(&events, &viewer))),
         Err(HttpError::Status {
             status: 401 | 403, ..
-        }) => Ok(false),
+        }) => Ok(None),
         Err(error) => Err(format!("Membership could not be checked: {error}")),
+    }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Publishes the viewer's kind 0 in a community just joined (§1.6 step
+/// 5): `found`'s other fields are kept, `name` and `display_name` both
+/// take the name. The caller re-reads to confirm it is current.
+pub async fn publish_profile(
+    http: &RelayHttp,
+    profile: &ProfileEdit,
+    found: &CommunityProfile,
+) -> Result<(), String> {
+    let template =
+        account::profile_template(profile, found.existing.as_deref(), found.created_at, now())
+            .map_err(|error| error.to_string())?;
+    let identity = http.identity();
+    let unsigned = identity
+        .template(
+            Purpose::Content,
+            template.kind,
+            template.created_at,
+            template.tags,
+            template.content,
+        )
+        .map_err(|error| error.to_string())?;
+    let event = identity
+        .sign(Purpose::Content, unsigned)
+        .map_err(|error| error.to_string())?;
+    let body = serde_json::to_string(&event).expect("events serialize");
+    match accept_publish(timed(http.post("/events", body)).await, &event.id) {
+        Ok(_) => Ok(()),
+        Err(PublishError::Rejected(message) | PublishError::Uncertain(message)) => Err(message),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Join journal (`join-journal.ts`)
+
+/// Viewer preference holding unfinished joins.
+const JOURNAL: &str = "community-joins";
+const UNREADABLE: &str =
+    "Could not read unfinished community setup. Restore device storage and try again.";
+const UNSAVED: &str = "Could not save community setup on this device. Free storage and try again.";
+
+/// One join in progress: public progress only. Invite codes, policy
+/// receipts and keys are never journaled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingJoin {
+    /// A fresh id per step, so a late completion of an older step can
+    /// tell it was superseded.
+    pub id: String,
+    /// The community's origin.
+    pub community: String,
+    /// The profile draft, once the profile step was submitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileEdit>,
+}
+
+/// The viewer's unfinished joins, one per community, in the local store.
+/// Written before a claim and before a profile publish, removed once the
+/// community is saved; reopening the join resumes from it.
+#[derive(Clone)]
+pub struct JoinJournal {
+    store: Store,
+    viewer: String,
+}
+
+fn origin_key(community: &str) -> Result<String, String> {
+    RelayOrigin::parse(community)
+        .map(|origin| origin.to_string())
+        .map_err(|error| error.to_string())
+}
+
+impl JoinJournal {
+    pub fn new(store: Store, viewer: impl Into<String>) -> Self {
+        Self {
+            store,
+            viewer: viewer.into(),
+        }
+    }
+
+    /// Every entry, or an error for storage that cannot be read; a corrupt
+    /// journal is never overwritten.
+    fn read(&self) -> Result<Vec<PendingJoin>, String> {
+        let Some(json) = self
+            .store
+            .viewer_pref(&self.viewer, JOURNAL)
+            .map_err(|_| UNREADABLE.to_owned())?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut entries: Vec<PendingJoin> =
+            serde_json::from_str(&json).map_err(|_| UNREADABLE.to_owned())?;
+        for entry in &mut entries {
+            entry.community = origin_key(&entry.community).map_err(|_| UNREADABLE.to_owned())?;
+        }
+        Ok(entries)
+    }
+
+    fn save(&self, entries: &[PendingJoin]) -> Result<(), String> {
+        let json = serde_json::to_string(entries).expect("journal serializes");
+        self.store
+            .set_viewer_pref(&self.viewer, JOURNAL, &json)
+            .map_err(|_| UNSAVED.to_owned())
+    }
+
+    /// The join started last, to resume.
+    pub fn latest(&self) -> Result<Option<PendingJoin>, String> {
+        Ok(self.read()?.pop())
+    }
+
+    pub fn get(&self, community: &str) -> Result<Option<PendingJoin>, String> {
+        let community = origin_key(community)?;
+        Ok(self
+            .read()?
+            .into_iter()
+            .rfind(|entry| entry.community == community))
+    }
+
+    /// Starts a step for `community`, replacing its entry. Without a
+    /// `profile`, an earlier draft carries over.
+    pub fn begin(
+        &self,
+        community: &str,
+        profile: Option<ProfileEdit>,
+    ) -> Result<PendingJoin, String> {
+        let mut entries = self.read()?;
+        let community = origin_key(community)?;
+        let profile = profile.or_else(|| {
+            entries
+                .iter()
+                .rfind(|entry| entry.community == community)
+                .and_then(|entry| entry.profile.clone())
+        });
+        let entry = PendingJoin {
+            id: uuid::Uuid::new_v4().to_string(),
+            community,
+            profile,
+        };
+        entries.retain(|item| item.community != entry.community);
+        entries.push(entry.clone());
+        self.save(&entries)?;
+        Ok(entry)
+    }
+
+    /// The step is still the latest for its community.
+    pub fn current(&self, entry: &PendingJoin) -> bool {
+        self.read().is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|item| item.id == entry.id && item.community == entry.community)
+        })
+    }
+
+    /// The community is saved: the join is over.
+    pub fn finish(&self, entry: &PendingJoin) -> Result<(), String> {
+        let mut entries = self.read()?;
+        entries.retain(|item| item.id != entry.id);
+        self.save(&entries)
     }
 }
 
@@ -401,6 +636,90 @@ mod tests {
             retry_after: None,
         };
         assert!(claim_error(expired).contains("expired"));
+    }
+
+    #[test]
+    fn journals_one_join_per_community_without_secrets() {
+        let store = Store::in_memory().unwrap();
+        let journal = JoinJournal::new(store.clone(), "viewer");
+        assert_eq!(journal.latest().unwrap(), None);
+        let first = journal.begin("wss://a.example", None).unwrap();
+        let other = journal.begin("https://b.example/", None).unwrap();
+        assert_eq!(other.community, "wss://b.example");
+        assert_eq!(journal.latest().unwrap(), Some(other.clone()));
+        assert!(journal.current(&first));
+
+        // A new step replaces the community's entry and keeps its draft.
+        let draft = ProfileEdit {
+            name: "Ada".into(),
+            ..Default::default()
+        };
+        let named = journal
+            .begin("wss://a.example", Some(draft.clone()))
+            .unwrap();
+        assert!(!journal.current(&first), "superseded");
+        let resumed = journal.begin("wss://a.example", None).unwrap();
+        assert!(!journal.current(&named));
+        assert_eq!(resumed.profile, Some(draft));
+        assert_eq!(
+            journal.get("wss://a.example/").unwrap(),
+            Some(resumed.clone())
+        );
+        let stored = store.viewer_pref("viewer", JOURNAL).unwrap().unwrap();
+        assert!(!stored.contains("code") && !stored.contains("receipt"));
+
+        journal.finish(&resumed).unwrap();
+        assert_eq!(journal.get("wss://a.example").unwrap(), None);
+        assert_eq!(journal.latest().unwrap(), Some(other));
+        // Each viewer has their own journal.
+        assert_eq!(
+            JoinJournal::new(store.clone(), "someone").latest().unwrap(),
+            None
+        );
+
+        // A corrupt journal is an error, never silently replaced.
+        store.set_viewer_pref("viewer", JOURNAL, "{").unwrap();
+        assert!(journal.latest().is_err());
+        assert!(journal.begin("wss://a.example", None).is_err());
+        assert_eq!(
+            store.viewer_pref("viewer", JOURNAL).unwrap().as_deref(),
+            Some("{")
+        );
+    }
+
+    #[test]
+    fn reads_the_profile_the_join_would_replace() {
+        let identity = buzz_identity::Identity::ephemeral();
+        let viewer = identity.pubkey_hex();
+        let sign = |content: &str, at: u64| {
+            let unsigned = identity
+                .template(Purpose::Content, 0, at, Vec::new(), content.into())
+                .unwrap();
+            serde_json::to_value(identity.sign(Purpose::Content, unsigned).unwrap()).unwrap()
+        };
+        let events = [
+            sign(r#"{"name":"old"}"#, 10),
+            sign(
+                r#"{"name":"ada","display_name":" Ada ","about":"Hi","nip05":"a@x"}"#,
+                20,
+            ),
+        ];
+        let found = community_profile(&events, &viewer);
+        let profile = found.profile.clone().unwrap();
+        assert_eq!(
+            (profile.name.as_str(), profile.about.as_str()),
+            ("Ada", "Hi")
+        );
+        assert_eq!(found.created_at, Some(20));
+        assert!(found.existing.as_deref().unwrap().contains("nip05"));
+        assert!(found.matches(&profile));
+        assert!(!found.matches(&ProfileEdit {
+            about: String::new(),
+            ..profile
+        }));
+        let none = community_profile(&[], &viewer);
+        assert_eq!(none, CommunityProfile::default());
+        assert!(!none.matches(&ProfileEdit::default()));
     }
 
     #[test]

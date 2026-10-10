@@ -17,12 +17,14 @@ const CONTENT_LIMIT: usize = 16_000;
 /// NIP-43 leave request.
 pub const LEAVE_KIND: u16 = kinds::LEAVE_COMMUNITY;
 
-/// The fields the profile editor owns.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The fields the profile editor owns. Serialized as buzz-app's
+/// `PersonalProfile` (`{name, picture, about?}`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileEdit {
     pub name: String,
     /// Empty, or an HTTPS URL without credentials.
     pub picture: String,
+    #[serde(default)]
     pub about: String,
 }
 
