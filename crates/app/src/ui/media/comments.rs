@@ -17,21 +17,6 @@ use gpui_kit::*;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// `formatMediaTimecode`: `m:ss`, whole seconds.
-pub fn timecode(seconds: f64) -> String {
-    let whole = if seconds.is_finite() {
-        seconds.max(0.).floor() as u64
-    } else {
-        0
-    };
-    format!("{}:{:02}", whole / 60, whole % 60)
-}
-
-/// `⏱ <m:ss> — <text>`.
-pub fn with_timecode(seconds: f64, text: &str) -> String {
-    format!("⏱ {} — {}", timecode(seconds), text)
-}
-
 /// Reads the video's current time.
 pub type VideoTime = Rc<dyn Fn(&App) -> f64>;
 
@@ -125,7 +110,7 @@ impl Comments {
 
     fn send(&mut self, mut submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(time) = self.video_time.as_ref().filter(|_| self.at_frame) {
-            submission.content = with_timecode(time(cx), &submission.content);
+            submission.content = super::timecode::time_reply(time(cx), &submission.content);
         }
         let session = self.community.read(cx).session.clone();
         // The message may itself be a reply: answer its thread's root.
@@ -264,14 +249,24 @@ impl Render for Comments {
             .when(video, |d| {
                 let time = self.video_time.as_ref().map_or(0., |time| time(cx));
                 let weak = cx.entity().downgrade();
+                // `.mediaReviewTimeOption`: the padded time, then the box.
                 d.child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .justify_between()
                         .gap(px(8.))
                         .px(px(16.))
-                        .pb(px(4.))
+                        .pt(px(12.))
+                        .text_caption()
+                        .text_color(c.text_subtle)
+                        .child(
+                            div()
+                                .font_family(buzz_ui::tokens::font::MONO)
+                                .font_weight(FontWeight::MEDIUM)
+                                .font_features(super::tabular())
+                                .child(super::video_time(time)),
+                        )
                         .child(
                             Checkbox::new("comment-at-frame", self.at_frame)
                                 .label("Comment at current frame")
@@ -281,29 +276,9 @@ impl Render for Comments {
                                         cx.notify();
                                     });
                                 }),
-                        )
-                        .child(
-                            div()
-                                .font_family(buzz_ui::tokens::font::MONO)
-                                .text_caption()
-                                .text_color(c.text_subtle)
-                                .child(timecode(time)),
                         ),
                 )
             })
             .child(div().mx(px(-4.)).child(self.composer.clone()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::prelude::v1::test;
-
-    #[test]
-    fn stamps_comments_with_the_video_time() {
-        assert_eq!(timecode(0.), "0:00");
-        assert_eq!(timecode(83.9), "1:23");
-        assert_eq!(with_timecode(5.2, "Nice cut"), "⏱ 0:05 — Nice cut");
     }
 }

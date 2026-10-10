@@ -14,11 +14,13 @@ mod engine;
 pub mod recorder;
 mod review;
 mod seek;
+mod timecode;
 mod video;
 
-pub use attachments::attachments;
+pub use attachments::{RowMedia, attachments};
 pub use audio::{audio_attachment, forget_local, set_local, voice_draft, voice_note};
 pub use review::{open_review, review_overlay};
+pub use timecode::body as text;
 pub use video::video_preview;
 
 use buzz_relay_client::Media;

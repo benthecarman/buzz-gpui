@@ -11,6 +11,23 @@ use gpui_kit::*;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Seeks a page's video to a time chip's seconds.
+pub type OnTime = Rc<dyn Fn(f64, &mut Window, &mut App)>;
+/// Opens an attachment of a row in the viewer, at a time for videos.
+pub type OnOpen = Rc<dyn Fn(&Arc<MessageRow>, &Attachment, f64, &mut Window, &mut App)>;
+
+/// How a page's rows treat media, beyond the timeline default.
+#[derive(Clone, Default)]
+pub struct RowMedia {
+    /// Time chips are buttons calling this (`onMediaTime`); without it
+    /// they are labels.
+    pub on_time: Option<OnTime>,
+    /// Replaces opening a new viewer (`onOpenMediaReview`).
+    pub on_open: Option<OnOpen>,
+    /// The viewer's comments: chips sit on the text's first line.
+    pub inline_time: bool,
+}
+
 /// Attachments in send order; adjacent images share a strip and adjacent
 /// files a group (§4.7). Videos and audio stand alone.
 pub fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl IntoElement {
@@ -32,15 +49,12 @@ pub fn attachments(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Int
                     .flex()
                     .flex_col()
                     .children(members.into_iter().map(|(index, attachment)| {
-                        let (target, url, media) =
-                            (row.clone(), attachment.url.clone(), media.clone());
+                        let (target, item, owner) = (row.clone(), attachment.clone(), rows.clone());
                         super::video_preview(
                             SharedString::from(format!("video-{}-{index}", row.id.to_hex())),
                             attachment,
                             &rows.directory.media,
-                            Rc::new(move |window, cx| {
-                                super::open_review(&target, &url, &media, window, cx)
-                            }),
+                            Rc::new(move |window, cx| open(&owner, &target, &item, 0., window, cx)),
                         )
                     }))
                     .into_any_element()
@@ -107,7 +121,7 @@ fn image_tile(
     c: &buzz_ui::Colors,
 ) -> AnyElement {
     let media = rows.directory.media.clone();
-    let (target, url) = (row.clone(), attachment.url.clone());
+    let (target, item, rows) = (row.clone(), attachment.clone(), rows.clone());
     div()
         .id(SharedString::from(format!(
             "image-{}-{index}",
@@ -133,8 +147,23 @@ fn image_tile(
                 .border_1()
                 .border_color(c.border_image),
         )
-        .on_click(move |_, window, cx| super::open_review(&target, &url, &media, window, cx))
+        .on_click(move |_, window, cx| open(&rows, &target, &item, 0., window, cx))
         .into_any_element()
+}
+
+/// Opens `attachment` in the viewer, or hands it to the page's opener.
+fn open(
+    rows: &Rows,
+    row: &Arc<MessageRow>,
+    attachment: &Attachment,
+    seconds: f64,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match &rows.media.on_open {
+        Some(on_open) => on_open(row, attachment, seconds, window, cx),
+        None => super::open_review(row, &attachment.url, &rows.directory.media, window, cx),
+    }
 }
 
 /// Files, and audio that does not play inline: a card that downloads

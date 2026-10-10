@@ -228,6 +228,8 @@ pub struct Rows {
     pub reaction_error: Option<(EventId, SharedString)>,
     /// Unread and agent activity of the rows shown.
     pub marks: Marks,
+    /// Time chips and viewer opening (`media::RowMedia`).
+    pub media: media::RowMedia,
 }
 
 /// Unread and agent activity the page follows for the rows it shows.
@@ -258,6 +260,7 @@ impl Rows {
             menu_focus: None,
             reaction_error: None,
             marks: Marks::default(),
+            media: media::RowMedia::default(),
         }
     }
 
@@ -491,14 +494,15 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
                 ))),
         );
     }
-    if !row.content.trim().is_empty() || row.diff.is_some() {
+    // The body, after a time chip for timecoded video replies.
+    if let Some(text) = media::text(row, rows, cx) {
         body = body.child(
             div()
                 .id(SharedString::from(format!("md-{id}")))
                 .when(item.head, |d| d.mt(px(4.)))
                 .text_body_sm()
                 .text_color(c.text_standard)
-                .child(renderers::message_body(row, &rows.directory, cx)),
+                .child(text),
         );
     }
     if let Some(notice) = delivery_notice(row, rows, cx) {
