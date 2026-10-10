@@ -227,6 +227,11 @@ pub struct Composer {
     /// A voice note being recorded or prepared, in place of the tools.
     capture: Option<Capture>,
     _capture_task: Option<Task<()>>,
+    /// The recorder row: Discard while recording, Close after a failure.
+    capture_focus: FocusHandle,
+    /// The live waveform's level count and when it last grew by one, for
+    /// the strip's 5px slide.
+    wave_tick: std::cell::Cell<(usize, std::time::Instant)>,
     outsiders_focus: FocusHandle,
     /// The agents the message being sent mentions as recipients, `(pubkey,
     /// chip text)`, kept for the next draft ("Remember mentioned agents").
@@ -465,6 +470,8 @@ impl Composer {
             outsiders_focus: cx.focus_handle(),
             capture: None,
             _capture_task: None,
+            capture_focus: cx.focus_handle(),
+            wave_tick: std::cell::Cell::new((0, std::time::Instant::now())),
             followup: Vec::new(),
             _subscriptions: subscriptions,
         };
@@ -2144,7 +2151,7 @@ impl Composer {
     /// "Record voice note": starts the microphone at once
     /// (`useVoiceCapture`), unless a note is already attached or the
     /// message is full.
-    fn start_capture(&mut self, cx: &mut Context<Self>) {
+    fn start_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let files = self.files.read(cx);
         if self.editing.is_some()
             || self.sending
@@ -2163,12 +2170,14 @@ impl Composer {
             Ok(recorder) => Capture::Recording(recorder),
             Err(error) => Capture::Failed(error.into()),
         });
-        self._capture_task = Some(cx.spawn(async move |this, cx| {
+        // Discard takes focus on start, Close on a failure.
+        window.focus(&self.capture_focus, cx);
+        self._capture_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(120))
                     .await;
-                let going = this.update(cx, |this, cx| {
+                let going = this.update_in(cx, |this, window, cx| {
                     let Some(Capture::Recording(recorder)) = &this.capture else {
                         return false;
                     };
@@ -2176,7 +2185,7 @@ impl Composer {
                         this.capture = Some(Capture::Failed(error.into()));
                     } else if recorder.seconds() >= recorder::MAX_SECONDS {
                         // The five-minute cap finishes the note.
-                        this.finish_capture(cx);
+                        this.finish_capture(window, cx);
                     }
                     cx.notify();
                     true
@@ -2201,7 +2210,7 @@ impl Composer {
     }
 
     /// "Finish voice note": stops, encodes, and attaches the note.
-    fn finish_capture(&mut self, cx: &mut Context<Self>) {
+    fn finish_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Capture::Recording(recorder)) = self.capture.take() else {
             return;
         };
@@ -2216,13 +2225,14 @@ impl Composer {
             let waveform = recorder::waveform(&samples, recorder::WAVEFORM_BUCKETS);
             recorder::encode_mp4(&samples).map(|mp4| (mp4, duration, waveform))
         });
-        self._capture_task = Some(cx.spawn(async move |this, cx| {
+        self._capture_task = Some(cx.spawn_in(window, async move |this, cx| {
             let prepared = prepared.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 match prepared {
                     Ok((mp4, duration, waveform)) if duration > 0. => {
                         this.capture = None;
                         this.add_voice(mp4, duration, waveform, cx);
+                        this.focus(window, cx);
                     }
                     _ => {
                         this.capture = Some(Capture::Failed(
@@ -3681,7 +3691,7 @@ impl Composer {
                     .when(!self.sending, |d| d.cursor_pointer())
                     .tooltip(Tooltip::text("Record voice note"))
                     .child(Icon::new(IconName::Microphone).size(18.))
-                    .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.start_capture(window, cx))),
             )
             .child(
                 div()
@@ -3958,9 +3968,25 @@ impl Composer {
 
     /// The recorder in place of the tools (`VoiceCapture.tsx`): discard,
     /// a divider, the timer, the live waveform and the finish button.
-    fn capture_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn capture_row(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let capture = self.capture.as_ref()?;
         let c = *cx.colors();
+        let failed = matches!(capture, Capture::Failed(_));
+        // The row holds focus for its one focused button: Discard while
+        // recording, Close after a failure. Enter or Space presses it.
+        let focused = self.capture_focus.is_focused(window);
+        let ring = move |button: AnyElement, on: bool| {
+            div()
+                .flex_none()
+                .rounded(px(10.))
+                .border_2()
+                .border_color(if on {
+                    c.border_focus
+                } else {
+                    gpui_kit::transparent_black()
+                })
+                .child(button)
+        };
         let discard = IconButton::new("discard-voice-note", IconName::X)
             .size(IconButtonSize::Sm)
             .icon_size(18.)
@@ -3969,11 +3995,18 @@ impl Composer {
             .on_click(cx.listener(|this, _, window, cx| this.discard_capture(window, cx)));
         let row = div()
             .id("voice-capture")
+            .track_focus(&self.capture_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "escape" | "enter" | "space") {
+                    cx.stop_propagation();
+                    this.discard_capture(window, cx);
+                }
+            }))
             .flex()
             .items_center()
             .gap(px(4.))
             .min_h(px(40.))
-            .child(discard)
+            .child(ring(discard.into_any_element(), focused && !failed))
             .child(
                 div()
                     .flex_none()
@@ -3992,11 +4025,14 @@ impl Composer {
                         .text_color(c.text_danger)
                         .child(error.clone()),
                 )
-                .child(
-                    Button::new("close-voice-note", "Close").on_click(
-                        cx.listener(|this, _, window, cx| this.discard_capture(window, cx)),
-                    ),
-                )
+                .child(ring(
+                    Button::new("close-voice-note", "Close")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.discard_capture(window, cx)),
+                        )
+                        .into_any_element(),
+                    focused,
+                ))
                 .into_any_element(),
             );
         }
@@ -4015,6 +4051,28 @@ impl Composer {
             None => div().child("Preparing voice note…"),
         };
         let levels = recorder.map(|r| r.levels(256)).unwrap_or_default();
+        // Each new level slides the strip in from 5px over one interval
+        // (`VoiceNoteRecorder`), unless motion is reduced.
+        let interval = Duration::from_millis(120);
+        let slide = match recorder {
+            Some(recorder) if live && !cx.reduce_motion() => {
+                let count = recorder.level_count();
+                let (seen, _) = self.wave_tick.get();
+                let now = std::time::Instant::now();
+                if count != seen {
+                    let advanced = count == seen + 1;
+                    self.wave_tick
+                        .set((count, if advanced { now } else { now - interval }));
+                }
+                let elapsed = now.duration_since(self.wave_tick.get().1);
+                let left = 1. - (elapsed.as_secs_f32() / interval.as_secs_f32()).min(1.);
+                if left > 0. {
+                    window.request_animation_frame();
+                }
+                5. * left
+            }
+            _ => 0.,
+        };
         Some(
             row.child(
                 timer
@@ -4032,16 +4090,24 @@ impl Composer {
                     .mx(px(8.))
                     .items_center()
                     .justify_end()
-                    .gap(px(2.))
                     .overflow_hidden()
-                    .children(levels.into_iter().map(move |level| {
+                    .child(
                         div()
+                            .flex()
                             .flex_none()
-                            .w(px(3.))
-                            .h(px(recorder::bar_height(level)))
-                            .rounded_full()
-                            .bg(c.text_standard)
-                    })),
+                            .items_center()
+                            .gap(px(2.))
+                            .relative()
+                            .left(px(slide))
+                            .children(levels.into_iter().map(move |level| {
+                                div()
+                                    .flex_none()
+                                    .w(px(3.))
+                                    .h(px(recorder::bar_height(level)))
+                                    .rounded_full()
+                                    .bg(c.text_standard)
+                            })),
+                    ),
             )
             .child(
                 IconButton::new("finish-voice-note", IconName::StopFilled)
@@ -4051,7 +4117,7 @@ impl Composer {
                     .shape(IconButtonShape::Round)
                     .tooltip("Finish voice note")
                     .disabled(!live)
-                    .on_click(cx.listener(|this, _, _, cx| this.finish_capture(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.finish_capture(window, cx))),
             )
             .into_any_element(),
         )
@@ -4631,7 +4697,7 @@ impl Render for Composer {
                     .child(notice)
             }))
             .children(self.context_box(cx))
-            .children(self.capture_row(cx))
+            .children(self.capture_row(window, cx))
             .when(self.capture.is_none(), |d| {
                 d.child(
                     div()

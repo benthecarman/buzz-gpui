@@ -30,6 +30,8 @@ const MAX_SAMPLES: usize = SAMPLE_RATE as usize * MAX_SECONDS as usize;
 const ENCODE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub const NO_MICROPHONE: &str = "Buzz could not start the voice recorder.";
+pub const UNAVAILABLE: &str = "Voice recording is not available in this environment.";
+pub const DENIED: &str = "Allow Buzz to access your microphone to record a voice note.";
 pub const INTERRUPTED: &str = "The voice recording was interrupted. Record it again.";
 pub const NOT_PREPARED: &str = "Buzz could not prepare this voice note for upload.";
 
@@ -101,14 +103,21 @@ fn source() -> String {
 
 impl Recorder {
     pub fn start() -> Result<Self, String> {
-        super::engine::init()?;
+        // No GStreamer, or no audio source plugin, means no recorder here.
+        super::engine::init().map_err(|_| UNAVAILABLE.to_string())?;
         let description = format!(
             "{} ! audioconvert ! audioresample ! \
              audio/x-raw,format=S16LE,rate={SAMPLE_RATE},channels=1,layout=interleaved ! \
              appsink name=sink sync=false",
             source()
         );
-        let pipeline = gst::parse::launch(&description).map_err(|_| NO_MICROPHONE.to_string())?;
+        let pipeline = gst::parse::launch(&description).map_err(|error| {
+            if error.matches(gst::ParseError::NoSuchElement) {
+                UNAVAILABLE.to_string()
+            } else {
+                NO_MICROPHONE.to_string()
+            }
+        })?;
         let sink = pipeline
             .downcast_ref::<gst::Bin>()
             .and_then(|bin| bin.by_name("sink"))
@@ -155,6 +164,11 @@ impl Recorder {
             .is_ok_and(|c| !c.samples.is_empty() || c.count > 0)
     }
 
+    /// How many levels have been measured.
+    pub fn level_count(&self) -> usize {
+        self.captured.lock().map_or(0, |c| c.levels.len())
+    }
+
     /// The newest `count` levels, oldest first.
     pub fn levels(&self, count: usize) -> Vec<f32> {
         self.captured.lock().map_or(Vec::new(), |c| {
@@ -167,6 +181,10 @@ impl Recorder {
         while let Some(message) = self.bus.pop() {
             if let gst::MessageView::Error(error) = message.view() {
                 tracing::warn!(error = %error.error(), "voice recording failed");
+                // A sandbox or sound server refusing the microphone.
+                if error.error().matches(gst::ResourceError::NotAuthorized) {
+                    return Some(DENIED.into());
+                }
                 return Some(if self.live() {
                     INTERRUPTED.into()
                 } else {
