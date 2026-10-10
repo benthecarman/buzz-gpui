@@ -309,7 +309,7 @@ fn usage<'a>(partition: &Partition, cx: &'a mut App) -> &'a mut Vec<Used> {
 }
 
 /// Most used first, at most `limit`.
-fn most_used(partition: &Partition, limit: usize, cx: &mut App) -> Vec<String> {
+pub(crate) fn most_used(partition: &Partition, limit: usize, cx: &mut App) -> Vec<String> {
     let mut entries = usage(partition, cx).clone();
     entries.sort_by(|a, b| b.count.cmp(&a.count).then(b.used.cmp(&a.used)));
     entries

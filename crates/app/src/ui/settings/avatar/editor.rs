@@ -4,7 +4,10 @@
 
 use super::raster::{self, Hsv};
 use crate::community::Community;
-use crate::ui::emoji_picker::{Candidate, search as search_emoji};
+use crate::ui::emoji_picker::{Candidate, most_used, search as search_emoji};
+
+/// emoji-mart's defaults for an empty history, one row.
+const FREQUENT_DEFAULTS: [&str; 6] = ["👍", "😀", "😘", "😍", "😆", "😜"];
 use buzz_relay_client::account::picture_error;
 use buzz_relay_client::upload::{self, UploadFile};
 use buzz_ui::{
@@ -58,6 +61,7 @@ pub enum Preview {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Category {
+    Frequent,
     People,
     Nature,
     Food,
@@ -69,6 +73,7 @@ enum Category {
 }
 
 impl Category {
+    /// Every category but Frequent, whose emoji depend on use.
     const ALL: [Category; 8] = [
         Category::People,
         Category::Nature,
@@ -82,6 +87,7 @@ impl Category {
 
     fn title(self) -> &'static str {
         match self {
+            Category::Frequent => "Frequently used",
             Category::People => "Smileys & People",
             Category::Nature => "Animals & Nature",
             Category::Food => "Food & Drink",
@@ -95,6 +101,7 @@ impl Category {
 
     fn icon(self) -> IconName {
         match self {
+            Category::Frequent => IconName::Clock,
             Category::People => IconName::Smiley,
             Category::Nature => IconName::Paw,
             Category::Food => IconName::Lemon,
@@ -108,6 +115,7 @@ impl Category {
 
     fn groups(self) -> &'static [Group] {
         match self {
+            Category::Frequent => &[],
             Category::People => &[Group::SmileysAndEmotion, Group::PeopleAndBody],
             Category::Nature => &[Group::AnimalsAndNature],
             Category::Food => &[Group::FoodAndDrink],
@@ -264,7 +272,7 @@ impl AvatarEditor {
             list,
             rows: Rc::default(),
             sections: Vec::new(),
-            active: Category::People,
+            active: Category::Frequent,
             tone: 0,
             tones_open: false,
             conic: raster::render_image(&raster::conic(72)),
@@ -452,6 +460,26 @@ impl AvatarEditor {
             }
         };
         if query.trim().is_empty() {
+            // emoji-mart's Frequent row, at most two lines (`maxFrequentRows`):
+            // the reactions used most in this community, then its defaults.
+            let mut frequent: Vec<&'static Emoji> = match &self.community {
+                Some(community) => {
+                    let partition = community.read(cx).partition();
+                    most_used(&partition, PER_LINE * 2, cx)
+                        .iter()
+                        .filter_map(|used| emojis::get(used))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            for default in FREQUENT_DEFAULTS.iter().filter_map(|d| emojis::get(d)) {
+                if frequent.len() < PER_LINE && !frequent.contains(&default) {
+                    frequent.push(default);
+                }
+            }
+            self.sections.push((Category::Frequent, rows.len()));
+            rows.push(Row::Header(Category::Frequent.title()));
+            push(&mut rows, frequent);
             for (category, emoji) in CATEGORIES.iter() {
                 self.sections.push((*category, rows.len()));
                 rows.push(Row::Header(category.title()));
@@ -473,7 +501,7 @@ impl AvatarEditor {
         }
         self.rows = Rc::new(rows);
         self.list.reset(self.rows.len());
-        self.active = Category::People;
+        self.active = Category::Frequent;
         cx.notify();
     }
 
