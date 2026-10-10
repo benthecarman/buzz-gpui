@@ -9,7 +9,9 @@ use super::{media, membership, navigation, renderers, time};
 use buzz_relay_client::fold::{
     Attachment, AttachmentKind, CustomEmoji, Delivery, MessageRow, ReactionGroup,
 };
-use buzz_relay_client::{ChannelSummary, ChannelType, EventId, PresenceState, Profile, Profiles};
+use buzz_relay_client::{
+    ChannelSummary, ChannelType, EventId, Manual, PresenceState, Profile, Profiles, ThreadUnread,
+};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
     MaterialStyled, Menu, MenuItem, Presence, Surface, Tooltip, TypeStyled,
@@ -226,6 +228,17 @@ pub struct Rows {
     pub menu_focus: Option<FocusHandle>,
     /// A reaction error to show under a row.
     pub reaction_error: Option<(EventId, SharedString)>,
+    /// Unread and agent activity of the rows shown.
+    pub marks: Marks,
+}
+
+/// Unread and agent activity the page follows for the rows it shows.
+#[derive(Clone, Default)]
+pub struct Marks {
+    /// Thread roots' unread state, for their summaries' dot.
+    pub threads: HashMap<EventId, ThreadUnread>,
+    /// The viewer's own agents working in each thread, by root.
+    pub working: HashMap<EventId, Vec<String>>,
 }
 
 impl Rows {
@@ -246,6 +259,7 @@ impl Rows {
             in_thread: false,
             menu_focus: None,
             reaction_error: None,
+            marks: Marks::default(),
         }
     }
 
@@ -498,8 +512,13 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
     if let Some(reactions) = reactions(row, rows, cx) {
         body = body.child(reactions);
     }
-    // Inside a thread the replies are already on screen.
-    if row.reply_count > 0 && layout == Layout::Timeline && rows.actions.on_open_thread.is_some() {
+    // Inside a thread the replies are already on screen. A root with no
+    // replies yet still links to its thread while an agent works there.
+    let working = rows.marks.working.get(&row.id).filter(|w| !w.is_empty());
+    if layout == Layout::Timeline
+        && rows.actions.on_open_thread.is_some()
+        && (row.reply_count > 0 || (row.thread_root_id.is_none() && working.is_some()))
+    {
         body = body.child(thread_summary(row, rows, cx));
     }
 
@@ -2031,6 +2050,17 @@ fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Into
     } else {
         format!("{} replies", row.reply_count)
     };
+    let unread = rows
+        .marks
+        .threads
+        .get(&row.id)
+        .and_then(|thread| thread_unread_label(*thread));
+    let working = rows
+        .marks
+        .working
+        .get(&row.id)
+        .is_some_and(|agents| !agents.is_empty());
+    let replies = row.reply_count > 0;
     let mut summary = div()
         .id(SharedString::from(format!("thread-{}", row.id.to_hex())))
         .flex()
@@ -2047,13 +2077,97 @@ fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Into
         .text_caption()
         .text_color(c.text_standard)
         .hover(|style| style.bg(c.affordance_subtle_hover))
-        .child(avatars)
-        .child(label);
+        .when(replies, |d| d.child(avatars).child(label))
+        .when_some(unread.filter(|_| replies), |d, unread| {
+            d.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "thread-unread-{}",
+                        row.id.to_hex()
+                    )))
+                    .flex_none()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(c.text_standard)
+                    .tooltip(Tooltip::text(unread)),
+            )
+        })
+        .when(working, |d| d.child(working_dots(&row.id.to_hex(), cx)))
+        .when(working && !replies, |d| d.child("View thread"));
     if let Some(open) = rows.actions.on_open_thread.clone() {
         let target = row.clone();
         summary = summary.on_click(move |_, window, cx| open(&target, window, cx));
     }
     summary
+}
+
+/// The thread summary's dot (`MessageRow`'s `unreadLabel`): marked
+/// unread, or observed unread replies.
+pub fn thread_unread_label(thread: ThreadUnread) -> Option<String> {
+    match thread.manual {
+        Manual::LocalOnly => Some("Thread marked unread on this device only".into()),
+        Manual::Remote => Some("Thread marked unread".into()),
+        Manual::None if thread.observed.unwrap_or(0) > 0 => Some(format!(
+            "Observed unread replies{}. Not an exact total.",
+            if thread.stale {
+                "; may be out of date"
+            } else {
+                ""
+            }
+        )),
+        Manual::None => None,
+    }
+}
+
+/// Three dots hopping in turn while an agent works in a thread
+/// (`.threadWorking`: 1.2s, 80ms apart).
+pub fn working_dots(id: &str, cx: &App) -> AnyElement {
+    const PERIOD: f32 = 1.2;
+    let c = *cx.colors();
+    let dots = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .gap(px(2.))
+        .w(px(26.))
+        .h(px(15.))
+        .rounded_full()
+        .bg(c.affordance_subtle_hover);
+    let color = c.text_standard;
+    let dot = move |opacity: f32, rise: f32| {
+        div()
+            .relative()
+            .top(px(-rise))
+            .size(px(3.))
+            .rounded_full()
+            .bg(color)
+            .opacity(opacity)
+    };
+    if cx.reduce_motion() {
+        return dots
+            .children((0..3).map(|_| dot(1., 0.)))
+            .into_any_element();
+    }
+    dots.with_animation(
+        SharedString::from(format!("thread-working-{id}")),
+        Animation::new(Duration::from_millis(1200)).repeat(),
+        move |dots, delta| {
+            dots.children((0..3).map(|n| {
+                let phase = (delta - n as f32 * 0.08 / PERIOD).rem_euclid(1.);
+                // Up at 20%, down by 40%, resting to 100%.
+                let lift = if phase < 0.2 {
+                    phase / 0.2
+                } else if phase < 0.4 {
+                    1. - (phase - 0.2) / 0.2
+                } else {
+                    0.
+                };
+                dot(0.45 + 0.55 * lift, 2. * lift)
+            }))
+        },
+    )
+    .into_any_element()
 }
 
 /// Icon for a channel in headers and the sidebar.

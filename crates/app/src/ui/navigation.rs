@@ -6,11 +6,9 @@
 use super::pages::Page;
 use super::workspace::Workspace;
 use buzz_relay_client::EventId;
-use buzz_ui::ActiveTheme;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::*;
-use std::time::Duration;
 
 actions!(
     buzz_navigation,
@@ -32,19 +30,6 @@ actions!(
 
 /// History keeps at most this many places (`createMemoryHistory`).
 const CAPACITY: usize = 100;
-/// How long a revealed message stays tinted.
-pub const HIGHLIGHT: Duration = Duration::from_millis(2000);
-
-/// A revealed message's tint, bleeding a little past the row.
-pub fn highlighted(row: AnyElement, cx: &App) -> AnyElement {
-    div()
-        .mx(px(-8.))
-        .px(px(8.))
-        .rounded(px(8.))
-        .bg(cx.colors().affordance_accent)
-        .child(row)
-        .into_any_element()
-}
 
 /// A place the window can show.
 #[derive(Clone, Debug, PartialEq, Eq)]

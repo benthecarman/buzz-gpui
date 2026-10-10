@@ -497,7 +497,7 @@ impl Workspace {
                     };
                     let weak = cx.entity().downgrade();
                     let channel_id = channel.clone();
-                    let open_thread: OpenThread = Arc::new(move |row, window, cx| {
+                    let open_thread: OpenThread = Arc::new(move |row, _, window, cx| {
                         let channel = channel_id.clone();
                         let _ = weak.update(cx, |this, cx| {
                             this.open_conversation_thread(channel, row.id, window, cx)

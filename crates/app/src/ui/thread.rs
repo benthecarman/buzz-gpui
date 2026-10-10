@@ -1,20 +1,26 @@
 //! The thread panel in the Messages board's right dock (ui.md §4.11).
 
 use super::composer::{Composer, ComposerEvent, ReplyContext, Submission};
+use super::jump::{self, Jump};
 use super::markdown::Directory;
 use super::message::{self, Item, Layout, Rows};
 use super::message_actions::{Hooks, MessageActions};
-use super::time;
+use super::reading::{self, Reporter};
+use super::typing::{self, Activity, AgentChooser};
+use super::{media, time};
 use crate::community::Community;
 use crate::mirror::mirror;
 use buzz_relay_client::fold::{MessageRow, ReplyTree};
 use buzz_relay_client::session::ThreadView;
 use buzz_relay_client::threads::{Direction, ReadKind};
-use buzz_relay_client::{Profiles, TargetStatus, ThreadSnapshot, ThreadStatus};
+use buzz_relay_client::{
+    Media, Profiles, TargetStatus, ThreadSnapshot, ThreadStatus, UnreadDetail, UnreadWatch,
+};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconName, PanelHeader, Tab, TabVariant,
     Tabs, TypeStyled,
 };
+use chrono::NaiveDate;
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -32,11 +38,41 @@ const MAX_INDENT: usize = 6;
 /// The connector spine runs under the centre of a 32px avatar.
 const SPINE: f32 = 16.;
 
+/// How deep indentation may grow in a panel this wide: it flattens at
+/// depth 3 up to 360px and at depth 4 up to 480px, and not at all up to
+/// 320px (`Messages.module.css`'s `messages` container queries).
+fn max_indent(width: Pixels) -> usize {
+    match f32::from(width) {
+        w if w <= 0. => MAX_INDENT,
+        w if w <= 320. => 0,
+        w if w <= 360. => 3,
+        w if w <= 480. => 4,
+        _ => MAX_INDENT,
+    }
+}
+
 /// Asks the workspace to close the panel.
 pub type OnClose = Arc<dyn Fn(&mut Window, &mut App)>;
 
+/// A reply just sent, kept in sight once it lands.
+struct Sent {
+    parent: Option<EventId>,
+    /// Replies there before it.
+    known: HashSet<EventId>,
+}
+
+/// Replies seen once the thread was complete, to count arrivals for the
+/// jump pill (`previousReplies`).
+#[derive(Default)]
+struct Seen {
+    ids: HashSet<EventId>,
+    latest: u64,
+    complete: bool,
+}
+
 pub struct ThreadPanel {
     community: Entity<Community>,
+    viewer: String,
     channel: String,
     root_id: EventId,
     view: ThreadView,
@@ -53,14 +89,35 @@ pub struct ThreadPanel {
     message_actions: Entity<MessageActions>,
     error: Option<SharedString>,
     on_close: OnClose,
-    /// Exact mode: the message to reveal once its thread has loaded.
-    revealing: Option<EventId>,
-    /// The revealed message, tinted for a moment.
-    highlight: Option<EventId>,
     /// Draws its own "Thread" header. Off inside a tab pane, whose tab
     /// strip names and closes it.
     pub show_header: bool,
+    /// Exact mode: the message to reveal once its thread has loaded.
+    revealing: Option<EventId>,
+    /// The panel, focused when it opens; focus here (the history or the
+    /// composer) is reading.
+    focus: FocusHandle,
+    reporter: Reporter,
+    jump: Jump,
+    seen: Seen,
+    /// Unread replies, for the "(N new)" of collapsed branches.
+    unread_watch: UnreadWatch,
+    unread: Arc<UnreadDetail>,
+    watched: Vec<EventId>,
+    /// The viewer's agents working in this thread.
+    activity: Entity<AgentChooser>,
+    /// The reply at the top while an older page loads, with the ancestors
+    /// it had then: ancestors the page brings are opened around it.
+    older_anchor: Option<(EventId, Vec<EventId>)>,
+    sent: Option<Sent>,
+    /// A newly opened branch's first reply, scrolled into view once laid
+    /// out.
+    reveal_child: Option<EventId>,
+    /// The panel's width, which bounds indentation.
+    width: Pixels,
+    day: NaiveDate,
     _watch: Task<()>,
+    _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -97,14 +154,18 @@ impl ThreadPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let view = community
-            .read(cx)
-            .session
-            .open_thread(&channel, root_id, exact);
+        let (view, unread_watch, viewer) = {
+            let session = &community.read(cx).session;
+            (
+                session.open_thread(&channel, root_id, exact),
+                session.watch_unread(&channel),
+                session.viewer().to_string(),
+            )
+        };
         let snapshot = view.snapshot.borrow().clone();
         let watch = mirror(view.snapshot.clone(), cx, |this: &mut Self, value| {
             this.snapshot = value;
-            this.sync_entries();
+            this.snapshot_changed();
         });
         let list = ListState::new(0, ListAlignment::Top, px(1000.));
         list.set_follow_mode(FollowMode::Tail);
@@ -119,6 +180,7 @@ impl ThreadPanel {
             )
         });
         let input = composer.read(cx).input();
+        let focus = cx.focus_handle();
         let message_actions =
             Self::message_actions(&community, &channel, root_id, &composer, window, cx);
         let mut subscriptions = vec![
@@ -136,28 +198,32 @@ impl ThreadPanel {
                         .update(cx, |actions, cx| actions.retry_edit(cx)),
                 },
             ),
+            // Reading stops when the window is in the background.
+            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
+            cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
         ];
         if exact {
             subscriptions.push(cx.observe_self(|this, cx| this.reveal_target(cx)));
         }
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
-            let Some(this) = weak.upgrade() else {
-                return;
-            };
-            let this = this.read(cx);
-            let snapshot = &this.snapshot;
-            if event.visible_range.start < LOAD_OLDER_WITHIN
-                && event.is_scrolled
-                && snapshot.direction == Some(Direction::Older)
-                && snapshot.status == ThreadStatus::Ready
-                && snapshot.can_load_more
-            {
-                this.view.load_more();
+            if event.visible_range.start < LOAD_OLDER_WITHIN && event.is_scrolled {
+                let _ = weak.update(cx, |this, _| this.load_older());
             }
         });
+        let tasks = vec![
+            time::on_new_day(cx, |_, cx| cx.notify()),
+            mirror(
+                unread_watch.snapshot.clone(),
+                cx,
+                |this: &mut Self, value| this.unread = value,
+            ),
+        ];
+        let unread = unread_watch.snapshot.borrow().clone();
         let mut panel = Self {
             community,
+            viewer,
             channel,
             root_id,
             view,
@@ -171,13 +237,26 @@ impl ThreadPanel {
             message_actions,
             error: None,
             on_close,
-            revealing: exact.then_some(root_id),
-            highlight: None,
             show_header: false,
+            revealing: exact.then_some(root_id),
+            focus,
+            reporter: Reporter::default(),
+            jump: Jump::default(),
+            seen: Seen::default(),
+            unread_watch,
+            unread,
+            watched: Vec::new(),
+            activity: cx.new(|_| AgentChooser::new()),
+            older_anchor: None,
+            sent: None,
+            reveal_child: None,
+            width: px(0.),
+            day: time::today(),
             _watch: watch,
+            _tasks: tasks,
             _subscriptions: subscriptions,
         };
-        panel.sync_entries();
+        panel.snapshot_changed();
         panel
     }
 
@@ -251,9 +330,66 @@ impl ThreadPanel {
         }
     }
 
+    /// Focus moves to the panel as it opens, as to buzz-app's close
+    /// button, so Escape closes it and the keys scroll it.
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let focus = this.read(cx).focus.clone();
+        window.focus(&focus, cx);
+    }
+
+    /// The Reply action opened the thread: focus goes to its composer.
+    pub fn focus_composer(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
         let input = this.read(cx).input.clone();
         input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// The snapshot changed: count arrivals, open ancestors an older page
+    /// brought, and rebuild the rows.
+    fn snapshot_changed(&mut self) {
+        let snapshot = self.snapshot.clone();
+        let complete = snapshot.status == ThreadStatus::Ready && !snapshot.can_load_more;
+        if complete || self.seen.complete {
+            let arrivals = if complete && self.seen.complete {
+                snapshot
+                    .replies
+                    .iter()
+                    .filter(|reply| {
+                        !self.seen.ids.contains(&reply.id) && reply.created_at >= self.seen.latest
+                    })
+                    .count()
+            } else {
+                0
+            };
+            if complete {
+                self.seen = Seen {
+                    ids: snapshot.replies.iter().map(|reply| reply.id).collect(),
+                    latest: snapshot
+                        .replies
+                        .iter()
+                        .map(|reply| reply.created_at)
+                        .max()
+                        .unwrap_or(0)
+                        .max(self.seen.latest),
+                    complete: true,
+                };
+            }
+            if arrivals > 0 && !self.list.is_following_tail() {
+                self.jump.arrived(arrivals);
+            }
+        }
+        if let Some((anchor, before)) = &self.older_anchor
+            && snapshot.status != ThreadStatus::Loading
+        {
+            let added = snapshot
+                .tree
+                .ancestors(anchor)
+                .into_iter()
+                .filter(|id| !before.contains(id));
+            self.expanded.extend(added);
+            self.older_anchor = None;
+        }
+        self.sync_entries();
+        self.follow_sent();
     }
 
     /// Rebuilds the flattened rows, splicing only what changed so the
@@ -276,10 +412,63 @@ impl ThreadPanel {
         self.list
             .splice(prefix..old_end, next.len() - suffix - prefix);
         self.entries = next;
+        self.day = time::today();
+    }
+
+    /// Pages in older replies while the reader is near the top, keeping
+    /// the reply at the top in place and opening ancestors that arrive.
+    fn load_older(&mut self) {
+        let snapshot = &self.snapshot;
+        if snapshot.direction != Some(Direction::Older)
+            || snapshot.status != ThreadStatus::Ready
+            || !snapshot.can_load_more
+        {
+            return;
+        }
+        self.capture_older_anchor();
+        self.view.load_more();
+    }
+
+    fn capture_older_anchor(&mut self) {
+        self.list.pause_following_tail();
+        let top = self.list.logical_scroll_top().item_ix;
+        let anchor =
+            self.entries[top.min(self.entries.len())..]
+                .iter()
+                .find_map(|entry| match entry {
+                    Entry::Reply(reply) => Some(reply.item.row.id),
+                    _ => None,
+                });
+        self.older_anchor = anchor.map(|anchor| (anchor, self.snapshot.tree.ancestors(&anchor)));
+    }
+
+    /// A sent reply has landed: its branch is open, so bring it into view.
+    fn follow_sent(&mut self) {
+        let Some(sent) = &self.sent else {
+            return;
+        };
+        let viewer = &self.viewer;
+        let landed = self.snapshot.replies.iter().find(|reply| {
+            !sent.known.contains(&reply.id)
+                && reply.author.to_hex() == *viewer
+                && reply.reply_parent_id.filter(|p| Some(*p) != self.root()) == sent.parent
+        });
+        let Some(landed) = landed.map(|reply| reply.id) else {
+            return;
+        };
+        self.sent = None;
+        if let Some(index) = self.entries.iter().position(|e| e.row_id() == Some(landed)) {
+            self.list.scroll_to_reveal_item(index);
+        }
+    }
+
+    fn root(&self) -> Option<EventId> {
+        self.snapshot.root.as_ref().map(|root| root.id)
     }
 
     /// Once the thread around the selected message has loaded, opens the
-    /// branches above it, scrolls to it and tints it.
+    /// branches above it, scrolls to it and moves focus to the panel
+    /// (`useMessageReveal`: focus, no tint).
     fn reveal_target(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.revealing else {
             return;
@@ -304,29 +493,30 @@ impl ThreadPanel {
             item_ix: index,
             offset_in_item: px(0.),
         });
-        self.highlight = Some(id);
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(super::navigation::HIGHLIGHT)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.highlight = None;
-                cx.notify();
-            });
-        })
-        .detach();
         cx.notify();
     }
 
+    /// Opens a collapsed branch; its first reply comes into view.
     fn expand(&mut self, id: EventId, cx: &mut Context<Self>) {
         self.list.pause_following_tail();
         self.expanded.insert(id);
         self.sync_entries();
+        self.reveal_child = self
+            .snapshot
+            .tree
+            .children_of(&id)
+            .first()
+            .map(|row| row.id);
         cx.notify();
     }
 
+    /// Targets a reply, or the root with `None`. Choosing the target again
+    /// clears it.
     fn reply_to(&mut self, id: Option<EventId>, window: &mut Window, cx: &mut Context<Self>) {
-        self.reply_parent = id;
+        self.reply_parent = match id {
+            Some(id) if self.reply_parent == Some(id) => None,
+            other => other,
+        };
         self.input.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
@@ -349,6 +539,20 @@ impl ThreadPanel {
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.clone();
         let mentions = submission.mentions.clone();
+        // Keep the new reply in sight: open its branch, or follow the end
+        // for a reply to the root.
+        self.sent = Some(Sent {
+            parent,
+            known: self.snapshot.replies.iter().map(|reply| reply.id).collect(),
+        });
+        match parent {
+            Some(parent) => {
+                self.expanded.insert(parent);
+                self.expanded.extend(self.snapshot.tree.ancestors(&parent));
+                self.sync_entries();
+            }
+            None => self.list.set_follow_mode(FollowMode::Tail),
+        }
         cx.spawn_in(window, async move |this, cx| {
             let result = session
                 .send(
@@ -363,23 +567,17 @@ impl ThreadPanel {
                 match result {
                     Ok(()) => {
                         this.error = None;
-                        // Keep the new reply in sight: open its branch, or
-                        // follow the end for a reply to the root.
-                        match parent {
-                            Some(parent) => {
-                                this.expanded.insert(parent);
-                                this.expanded.extend(this.snapshot.tree.ancestors(&parent));
-                                if this.reply_parent == Some(parent) {
-                                    this.reply_parent = None;
-                                }
-                                this.sync_entries();
-                            }
-                            None => this.list.set_follow_mode(FollowMode::Tail),
+                        // A background send may land after the reader chose
+                        // another target.
+                        if parent.is_some() && this.reply_parent == parent {
+                            this.reply_parent = None;
                         }
+                        this.follow_sent();
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
                     }
                     Err(error) => {
+                        this.sent = None;
                         this.error = Some(error.into());
                         this.composer.update(cx, |composer, cx| composer.failed(cx));
                     }
@@ -400,16 +598,17 @@ impl ThreadPanel {
         self.reply_parent.is_none() || self.selected_parent().is_some()
     }
 
-    fn retry(&self) {
+    /// An older page failed while the root is shown: retry that page.
+    fn older_page_status(&self) -> bool {
         let snapshot = &self.snapshot;
-        if snapshot.direction == Some(Direction::Older)
+        snapshot.direction == Some(Direction::Older)
             && snapshot.read_kind == Some(ReadKind::Older)
             && snapshot.root.is_some()
-        {
-            self.view.load_more();
-        } else {
-            self.view.refresh();
-        }
+    }
+
+    fn retry_older(&mut self) {
+        self.capture_older_anchor();
+        self.view.load_more();
     }
 
     fn composer_view(&self, read_only: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -458,14 +657,84 @@ impl ThreadPanel {
             }
         });
     }
+
+    /// After each layout: reports what the reader sees, follows the panel
+    /// width, shows or hides the jump pill and follows unread replies.
+    fn after_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let width = self.list.viewport_bounds().size.width;
+        if width != self.width {
+            let deeper = max_indent(width) != max_indent(self.width);
+            self.width = width;
+            if deeper {
+                self.list.remeasure();
+            }
+            cx.notify();
+        }
+        if let Some(child) = self.reveal_child.take()
+            && let Some(index) = self.entries.iter().position(|e| e.row_id() == Some(child))
+        {
+            self.list.scroll_to_reveal_item(index);
+            cx.notify();
+        }
+        let entries = &self.entries;
+        let view = reading::view(&self.list, |ix| entries.get(ix).and_then(Entry::row_id));
+        let input = self.input.read(cx).focus_handle(cx);
+        let active = window.is_window_active()
+            && (self.focus.contains_focused(window, cx) || input.contains_focused(window, cx));
+        if let Some((visible, at_bottom)) = self.reporter.next(&view, active) {
+            self.view.viewport(visible, at_bottom);
+        }
+        let away = reading::distance_from_bottom(&self.list) >= jump::DISTANCE;
+        if self.jump.shown() != away {
+            self.jump.set(away);
+            cx.notify();
+        }
+        let replies: Vec<EventId> = self.snapshot.replies.iter().map(|reply| reply.id).collect();
+        if self.watched != replies {
+            self.unread_watch.set(Vec::new(), replies.clone());
+            self.watched = replies;
+        }
+    }
+
+    /// Keyboard scrolling of the focused thread history; Up, Page Up and
+    /// Home also page in older replies near the top.
+    fn key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let keys = &event.keystroke;
+        let page = self.list.viewport_bounds().size.height * 0.875;
+        let line = px(40.);
+        match keys.key.as_str() {
+            "up" => self.list.scroll_by(-line),
+            "down" => self.list.scroll_by(line),
+            "pageup" => self.list.scroll_by(-page),
+            "pagedown" => self.list.scroll_by(page),
+            "space" if keys.modifiers.shift => self.list.scroll_by(-page),
+            "space" => self.list.scroll_by(page),
+            "home" => self.list.scroll_to(ListOffset::default()),
+            "end" => self.list.set_follow_mode(FollowMode::Tail),
+            _ => return,
+        }
+        cx.stop_propagation();
+        if self.list.logical_scroll_top().item_ix < LOAD_OLDER_WITHIN {
+            self.load_older();
+        }
+        cx.notify();
+    }
 }
 
 impl Render for ThreadPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // "Today" became "Yesterday": the day labels are rebuilt.
+        if self.day != time::today() {
+            self.sync_entries();
+        }
         self.sync_composer(window, cx);
         let c = *cx.colors();
         let snapshot = self.snapshot.clone();
+        let owned = Rc::new(typing::owned_agents(cx));
+        let narrow = window.viewport_size().width <= typing::NARROW;
         let community = self.community.read(cx);
+        let profiles = community.snapshot.profiles.clone();
+        let media = community.session.media().clone();
         let viewer = community.session.viewer().to_string();
         let read_only = community
             .snapshot
@@ -473,6 +742,38 @@ impl Render for ThreadPanel {
             .iter()
             .find(|channel| channel.id == self.channel)
             .is_some_and(|channel| channel.read_only);
+        let root_hex = snapshot
+            .root
+            .as_ref()
+            .map_or_else(|| self.root_id.to_hex(), |root| root.id.to_hex());
+        let activity = Activity::thread(
+            community
+                .snapshot
+                .thread_typing
+                .get(&root_hex)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            &root_hex,
+            &owned,
+        );
+        let members = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.id == self.channel)
+            .map(|channel| channel.members.clone());
+        let directory = Directory::of(community, members.as_deref(), cx);
+        self.activity.update(cx, |chooser, cx| {
+            chooser.set(
+                &activity,
+                Some(&root_hex),
+                (&profiles, &media),
+                |_| None,
+                // Already here: the thread is open.
+                Rc::new(|_, _, _| {}),
+                cx,
+            )
+        });
 
         let weak = cx.entity().downgrade();
         let header = self.show_header.then(|| {
@@ -496,100 +797,202 @@ impl Render for ThreadPanel {
                 .text_color(c.text_subtle)
                 .child(text)
         };
+        let retry = |id: &'static str, older: bool, cx: &mut Context<Self>| {
+            Button::new(id, "Retry thread")
+                .size(ButtonSize::Sm)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    match older {
+                        true => this.retry_older(),
+                        false => this.view.refresh(),
+                    }
+                    cx.notify();
+                }))
+        };
+        let older_page = self.older_page_status();
 
         let body = if self.entries.is_empty() {
             div().flex_1().into_any_element()
         } else {
-            let members = community
-                .snapshot
-                .channels
-                .iter()
-                .find(|channel| channel.id == self.channel)
-                .map(|channel| channel.members.clone());
-            let mut rows = Rows::new(
-                viewer.clone(),
-                Directory::of(community, members.as_deref(), cx),
-            );
+            let branch = Rc::new(Branch {
+                media: media.clone(),
+                owned: owned.clone(),
+                unread: self.unread.unread.clone(),
+                max: max_indent(self.width),
+            });
+            let mut rows = Rows::new(viewer.clone(), directory);
             rows.in_thread = true;
             let actions = self.message_actions.clone();
             MessageActions::fill(&actions, &mut rows, cx);
             let rows = Rc::new(rows);
             let entries = self.entries.clone();
             let weak = cx.entity().downgrade();
-            let highlight = self.highlight;
-            list(self.list.clone(), move |index, _, cx| {
-                let Some(entry) = entries.get(index) else {
-                    return div().into_any_element();
-                };
-                let row = render_entry(entry, &rows, &weak, cx);
-                div()
-                    .px(px(24.))
-                    .child(match highlight.is_some() && entry.row_id() == highlight {
-                        true => super::navigation::highlighted(row, cx),
-                        false => row,
+            let older_error = snapshot
+                .error
+                .clone()
+                .filter(|_| older_page)
+                .map(SharedString::from);
+            let first_reply = entries
+                .iter()
+                .position(|entry| !matches!(entry, Entry::Root(_) | Entry::Missing));
+            let narrow_panel = f32::from(self.width) > 0. && f32::from(self.width) <= 320.;
+            let after_layout = {
+                let weak = weak.clone();
+                canvas(
+                    move |_, window, cx| {
+                        let _ = weak.update(cx, |this, cx| this.after_layout(window, cx));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0()
+            };
+            let jump = self.jump.render(
+                "thread-jump-to-latest",
+                typing::has_agents(&self.activity, cx),
+                cx.listener(|this, _, window, cx| {
+                    this.list.set_follow_mode(FollowMode::Tail);
+                    this.jump.set(false);
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                }),
+                cx,
+            );
+            div()
+                .id("thread-history")
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        if !this.focus.contains_focused(window, cx) {
+                            window.focus(&this.focus, cx);
+                        }
+                    }),
+                )
+                .child(
+                    list(self.list.clone(), move |index, _, cx| {
+                        let Some(entry) = entries.get(index) else {
+                            return div().into_any_element();
+                        };
+                        // The older page's error heads the replies.
+                        let status = (Some(index) == first_reply)
+                            .then(|| older_error.clone())
+                            .flatten()
+                            .map(|error| {
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .py(px(8.))
+                                    .text_caption()
+                                    .text_color(c.text_subtle)
+                                    .child(error)
+                                    .child({
+                                        let weak = weak.clone();
+                                        Button::new("retry-older", "Retry thread")
+                                            .size(ButtonSize::Sm)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = weak.update(cx, |this, cx| {
+                                                    this.retry_older();
+                                                    cx.notify();
+                                                });
+                                            })
+                                    })
+                            });
+                        div()
+                            .pl(px(24.))
+                            .pr(if narrow_panel { px(12.) } else { px(24.) })
+                            .children(status)
+                            .child(render_entry(entry, &rows, &branch, &weak, cx))
+                            .into_any_element()
                     })
-                    .into_any_element()
-            })
-            .flex_1()
-            .w_full()
-            .into_any_element()
+                    .flex_1()
+                    .w_full(),
+                )
+                .child(after_layout)
+                .children(jump)
+                .into_any_element()
         };
 
-        let loading_older = snapshot.status == ThreadStatus::Loading
-            && snapshot.read_kind == Some(ReadKind::Older)
-            && snapshot.root.is_some();
         let mut status: Vec<AnyElement> = Vec::new();
         if snapshot.status == ThreadStatus::Loading && self.entries.is_empty() {
             status.push(note("Loading thread…".into()).into_any_element());
         }
-        if let Some(error) = &snapshot.error {
+        let unavailable = snapshot.target_status == Some(TargetStatus::Unavailable);
+        if unavailable {
+            status.push(note("Selected message unavailable.".into()).into_any_element());
+        }
+        let other_error = snapshot.error.clone().filter(|_| !older_page);
+        if let Some(error) = &other_error {
             status.push(note(error.clone().into()).into_any_element());
-        } else if snapshot.limited {
+        } else if snapshot.limited && snapshot.error.is_none() {
             status.push(note("Thread history limit reached.".into()).into_any_element());
         }
-        if snapshot.error.is_some() {
+        if other_error.is_some() || unavailable {
             status.push(
                 div()
                     .px(px(16.))
                     .pb(px(12.))
-                    .child(
-                        Button::new("retry-thread", "Retry thread")
-                            .size(ButtonSize::Sm)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.retry();
-                                cx.notify();
-                            })),
-                    )
+                    .child(retry("retry-thread", false, cx))
+                    .into_any_element(),
+            );
+        }
+        // The older page's error shows with the replies; with none to show
+        // it falls back here.
+        if older_page
+            && self.entries.len() <= 1
+            && let Some(error) = &snapshot.error
+        {
+            status.push(note(error.clone().into()).into_any_element());
+            status.push(
+                div()
+                    .px(px(16.))
+                    .pb(px(12.))
+                    .child(retry("retry-older-empty", true, cx))
                     .into_any_element(),
             );
         }
 
+        let typing = typing::overlay(
+            &activity.humans,
+            Some(self.activity.clone()),
+            &profiles,
+            narrow,
+            cx,
+        );
+
+        // The panel itself takes focus, so Escape and the scrolling keys
+        // work before its rows load.
         div()
             .id("thread-panel")
+            .aria_label("Thread")
+            .track_focus(&self.focus)
             .flex()
             .flex_col()
             .size_full()
             .text_body_sm()
             .text_color(c.text_standard)
+            // The agent list closes on Escape before the composer sees it.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.activity.read(cx).is_open() {
+                    this.activity.update(cx, |chooser, cx| chooser.close(cx));
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     this.close(window, cx);
+                } else if this.focus.is_focused(window) {
+                    // Only the panel's own focus: keys in its composer edit.
+                    this.key(event, cx);
                 }
             }))
             .children(header)
-            .when(loading_older, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .justify_center()
-                        .h(px(32.))
-                        .items_center()
-                        .text_caption()
-                        .text_color(c.text_subtle)
-                        .child("Loading earlier replies…"),
-                )
-            })
             .child(body)
             .children(status)
             .child(div().h(px(12.)).flex_none())
@@ -602,7 +1005,12 @@ impl Render for ThreadPanel {
                     .child(error)
             }))
             .when(snapshot.root.is_some(), |this| {
-                this.child(self.composer_view(read_only, cx))
+                this.child(
+                    div()
+                        .relative()
+                        .children(typing)
+                        .child(self.composer_view(read_only, cx)),
+                )
             })
     }
 }
@@ -630,6 +1038,7 @@ enum Entry {
 }
 
 impl Entry {
+    /// The message this row shows, which reading observes.
     fn row_id(&self) -> Option<EventId> {
         match self {
             Entry::Root(item) => Some(item.row.id),
@@ -656,7 +1065,8 @@ struct Summary {
     parent: Arc<MessageRow>,
     depth: usize,
     rails: Vec<bool>,
-    count: usize,
+    /// Every reply under the parent.
+    descendants: Vec<EventId>,
     participants: Vec<String>,
 }
 
@@ -679,7 +1089,7 @@ impl Entry {
                 Arc::ptr_eq(&a.parent, &b.parent)
                     && a.depth == b.depth
                     && a.rails == b.rails
-                    && a.count == b.count
+                    && a.descendants == b.descendants
                     && a.participants == b.participants
             }
             _ => false,
@@ -784,7 +1194,7 @@ impl Walk<'_> {
                     parent: row.clone(),
                     depth,
                     rails: rails.clone(),
-                    count: descendants.len(),
+                    descendants: descendants.iter().map(|reply| reply.id).collect(),
                     participants,
                 }));
             }
@@ -802,32 +1212,46 @@ impl Walk<'_> {
     }
 }
 
-fn indent(depth: usize) -> f32 {
-    INDENT * depth.min(MAX_INDENT) as f32
+/// What reply rows share beyond [`Rows`].
+struct Branch {
+    media: Media,
+    /// The viewer's agents, drawn as squircles.
+    owned: Rc<HashSet<String>>,
+    /// Replies that are unread, for "(N new)".
+    unread: HashSet<EventId>,
+    /// Indentation stops growing at this depth.
+    max: usize,
 }
 
-/// A 1px connector segment at the spine of `level`'s parent.
-fn rail(level: usize, color: Hsla) -> Div {
-    div()
-        .absolute()
-        .left(px(indent(level - 1) + SPINE))
-        .w(px(1.))
-        .bg(color)
-}
+impl Branch {
+    fn indent(&self, depth: usize) -> f32 {
+        INDENT * depth.min(self.max) as f32
+    }
 
-/// Pass-through lines for every branch that continues past this row.
-fn rails(rails: &[bool], color: Hsla) -> Vec<Div> {
-    rails
-        .iter()
-        .enumerate()
-        .filter(|(index, continues)| **continues && *index < MAX_INDENT)
-        .map(|(index, _)| rail(index + 1, color).top_0().bottom_0())
-        .collect()
+    /// A 1px connector segment at the spine of `level`'s parent.
+    fn rail(&self, level: usize, color: Hsla) -> Div {
+        div()
+            .absolute()
+            .left(px(self.indent(level - 1) + SPINE))
+            .w(px(1.))
+            .bg(color)
+    }
+
+    /// Pass-through lines for every branch that continues past this row.
+    fn rails(&self, rails: &[bool], color: Hsla) -> Vec<Div> {
+        rails
+            .iter()
+            .enumerate()
+            .filter(|(index, continues)| **continues && *index < self.max)
+            .map(|(index, _)| self.rail(index + 1, color).top_0().bottom_0())
+            .collect()
+    }
 }
 
 fn render_entry(
     entry: &Entry,
     rows: &Rc<Rows>,
+    branch: &Rc<Branch>,
     panel: &WeakEntity<ThreadPanel>,
     cx: &mut App,
 ) -> AnyElement {
@@ -847,15 +1271,18 @@ fn render_entry(
             .text_color(c.text_subtle)
             .child("Earlier reply unavailable in loaded history.")
             .into_any_element(),
-        Entry::Reply(reply) => render_reply(reply, rows, cx),
-        Entry::Summary(summary) => render_summary(summary, &rows.directory.profiles, panel, cx),
+        Entry::Reply(reply) => render_reply(reply, rows, branch, cx),
+        Entry::Summary(summary) => {
+            render_summary(summary, &rows.directory.profiles, branch, panel, cx)
+        }
     }
 }
 
-fn render_reply(reply: &Reply, rows: &Rc<Rows>, cx: &mut App) -> AnyElement {
+fn render_reply(reply: &Reply, rows: &Rc<Rows>, branch: &Branch, cx: &mut App) -> AnyElement {
     let c = *cx.colors();
     let line = c.border_standard;
     let depth = reply.depth;
+    let max = branch.max;
     let layout = if depth > 0 {
         Layout::Nested
     } else {
@@ -864,14 +1291,14 @@ fn render_reply(reply: &Reply, rows: &Rc<Rows>, cx: &mut App) -> AnyElement {
     // The day divider is drawn here so connectors can run through it.
     let mut divider = None;
     if let Some(day) = &reply.item.day {
-        let mut lines = rails(&reply.rails[..depth.saturating_sub(1)], line);
-        if depth > 0 && depth <= MAX_INDENT {
-            lines.push(rail(depth, line).top_0().bottom_0());
+        let mut lines = branch.rails(&reply.rails[..depth.saturating_sub(1)], line);
+        if depth > 0 && depth <= max {
+            lines.push(branch.rail(depth, line).top_0().bottom_0());
         }
         divider = Some(
             div()
                 .relative()
-                .pl(px(indent(depth)))
+                .pl(px(branch.indent(depth)))
                 .children(lines)
                 .child(message::day_divider(day.clone(), cx)),
         );
@@ -884,12 +1311,13 @@ fn render_reply(reply: &Reply, rows: &Rc<Rows>, cx: &mut App) -> AnyElement {
     let avatar = if depth > 0 { 24. } else { 32. };
     let mut message_row = div()
         .relative()
-        .pl(px(indent(depth)))
-        .children(rails(&reply.rails[..depth.saturating_sub(1)], line));
-    if depth > 0 && depth <= MAX_INDENT {
+        .pl(px(branch.indent(depth)))
+        .children(branch.rails(&reply.rails[..depth.saturating_sub(1)], line));
+    if depth > 0 && depth <= max {
         // The elbow into this row's avatar, and the parent's spine past it.
         message_row = message_row.child(
-            rail(depth, line)
+            branch
+                .rail(depth, line)
                 .top_0()
                 .h(px(top + avatar / 2.))
                 .w(px(INDENT - SPINE - 4.))
@@ -900,12 +1328,16 @@ fn render_reply(reply: &Reply, rows: &Rc<Rows>, cx: &mut App) -> AnyElement {
                 .rounded_bl(px(12.)),
         );
         if reply.rails[depth - 1] {
-            message_row = message_row.child(rail(depth, line).top_0().bottom_0());
+            message_row = message_row.child(branch.rail(depth, line).top_0().bottom_0());
         }
     }
-    if reply.open && depth < MAX_INDENT {
-        message_row =
-            message_row.child(rail(depth + 1, line).top(px(top + avatar + 4.)).bottom_0());
+    if reply.open && depth < max {
+        message_row = message_row.child(
+            branch
+                .rail(depth + 1, line)
+                .top(px(top + avatar + 4.))
+                .bottom_0(),
+        );
     }
     let message_row = message_row.child(message::render_in(layout, &item, rows, cx));
     div()
@@ -916,40 +1348,68 @@ fn render_reply(reply: &Reply, rows: &Rc<Rows>, cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
+/// A collapsed branch (`ReplyBranch` + `ReplySummary`): a link-variant
+/// small button with up to three avatars, "N replies" and "(N new)".
 fn render_summary(
     summary: &Summary,
     profiles: &Profiles,
+    branch: &Branch,
     panel: &WeakEntity<ThreadPanel>,
     cx: &mut App,
 ) -> AnyElement {
     let c = *cx.colors();
-    let mut avatars = div().flex();
-    for (index, author) in summary.participants.iter().take(3).enumerate() {
+    let mut avatars = div().flex().items_center().pr(px(4.));
+    for author in summary.participants.iter().take(3) {
+        let profile = profiles.get(author);
         let mut avatar =
-            Avatar::new(message::display_name(profiles, author)).size(AvatarSize::Small);
-        if let Some(picture) = profiles.get(author).and_then(|p| p.picture.clone()) {
-            avatar = avatar.image(picture);
+            Avatar::new(message::display_name(profiles, author)).size(AvatarSize::Px(21.));
+        if profile.is_some_and(|p| p.is_agent) || branch.owned.contains(author) {
+            avatar = avatar.squircle();
+        }
+        if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
+            avatar = avatar.image(media::avatar(picture, &branch.media));
         }
         avatars = avatars.child(
             div()
-                .when(index > 0, |d| d.ml(px(-4.)))
+                .mr(px(-4.))
                 .rounded_full()
                 .p(px(1.5))
                 .bg(c.surface_panel)
                 .child(avatar),
         );
     }
-    let label = if summary.count == 1 {
+    if summary.participants.len() > 3 {
+        avatars = avatars.child(
+            div()
+                .mr(px(-4.))
+                .size(px(24.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(c.affordance_selected)
+                .text_caption()
+                .text_color(c.text_subtle)
+                .child(format!("+{}", summary.participants.len() - 3)),
+        );
+    }
+    let count = summary.descendants.len();
+    let label = if count == 1 {
         "1 reply".to_string()
     } else {
-        format!("{} replies", summary.count)
+        format!("{count} replies")
     };
+    let new = summary
+        .descendants
+        .iter()
+        .filter(|id| branch.unread.contains(id))
+        .count();
     let target = summary.parent.id;
     let panel = panel.clone();
     div()
         .relative()
-        .pl(px(indent(summary.depth) + 40.))
-        .children(rails(&summary.rails, c.border_standard))
+        .pl(px(branch.indent(summary.depth) + 40.))
+        .children(branch.rails(&summary.rails, c.border_standard))
         .child(
             div()
                 .id(SharedString::from(format!(
@@ -957,23 +1417,40 @@ fn render_summary(
                     summary.parent.id.to_hex()
                 )))
                 .flex()
+                .flex_wrap()
                 .items_center()
+                .self_start()
                 .gap(px(8.))
-                .ml(px(-4.))
-                .mt(px(4.))
-                .p(px(4.))
-                .pr(px(6.))
                 .min_h(px(32.))
-                .rounded(px(10.))
+                .px(px(16.))
+                .py(px(6.))
+                .rounded(buzz_ui::tokens::radius::ICON_BUTTON)
                 .cursor_pointer()
-                .text_caption()
+                .text_label_sm()
                 .text_color(c.text_standard)
-                .hover(|style| style.bg(c.affordance_subtle_hover))
+                .hover(|style| style.underline())
                 .child(avatars)
                 .child(label)
+                .when(new > 0, |d| d.child(format!("({new} new)")))
                 .on_click(move |_, _, cx| {
                     let _ = panel.update(cx, |this, cx| this.expand(target, cx));
                 }),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn narrow_panels_flatten_indentation_sooner() {
+        assert_eq!(max_indent(px(300.)), 0);
+        assert_eq!(max_indent(px(340.)), 3);
+        assert_eq!(max_indent(px(420.)), 4);
+        assert_eq!(max_indent(px(600.)), MAX_INDENT);
+        // Before the first layout the panel is taken to be wide.
+        assert_eq!(max_indent(px(0.)), MAX_INDENT);
+    }
 }

@@ -15,8 +15,8 @@ use super::members::MembersDialog;
 use super::modal::Dismissed;
 use super::overlay::{self, Align, Dismiss};
 use crate::community::Community;
-use buzz_relay_client::lifecycle::{Action, LifecyclePermissions};
-use buzz_relay_client::{ChannelSummary, ChannelType, Visibility};
+use buzz_relay_client::lifecycle::{Action, ActionError, LifecyclePermissions};
+use buzz_relay_client::{ChannelSummary, ChannelType};
 use buzz_ui::{
     ActiveTheme, Button, ButtonSize, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
     MenuLabel, MenuSeparator, TypeStyled,
@@ -466,13 +466,19 @@ impl Render for ChannelActions {
 // Join notice
 
 /// "Read-only preview · You haven’t joined this conversation.", with Join
-/// for public streams and forums.
+/// for streams and forums (`ChannelJoinNotice`).
 pub struct JoinNotice {
     community: Entity<Community>,
     channel: ChannelSummary,
     pending: bool,
     error: Option<SharedString>,
 }
+
+/// A join started; the page focuses its composer once the channel is
+/// writable.
+pub struct Joining;
+
+impl EventEmitter<Joining> for JoinNotice {}
 
 impl JoinNotice {
     pub fn new(community: Entity<Community>, channel: ChannelSummary) -> Self {
@@ -490,6 +496,7 @@ impl JoinNotice {
         }
         self.pending = true;
         self.error = None;
+        cx.emit(Joining);
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.id.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -497,7 +504,7 @@ impl JoinNotice {
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
                 if let Err(error) = result {
-                    this.error = Some(error.to_string().into());
+                    this.error = Some(join_error(error).into());
                 }
                 cx.notify();
             });
@@ -513,8 +520,7 @@ impl Render for JoinNotice {
         let joinable = matches!(
             self.channel.channel_type,
             Some(ChannelType::Stream | ChannelType::Forum)
-        ) && self.channel.visibility == Some(Visibility::Public)
-            && !self.channel.archived;
+        ) && !self.channel.archived;
         div()
             .flex()
             .flex_wrap()
@@ -535,5 +541,16 @@ impl Render for JoinNotice {
                 )
                 .children(self.error.clone())
             })
+    }
+}
+
+/// The join's failure as `ChannelJoinNotice` words it.
+fn join_error(error: ActionError) -> String {
+    match error {
+        ActionError::Unconfirmed(_) => {
+            "Join may have taken effect, but it is not confirmed yet. Try again to check.".into()
+        }
+        ActionError::Failed(error) if error.is_empty() => "Couldn’t join this channel.".into(),
+        ActionError::Failed(error) => error,
     }
 }

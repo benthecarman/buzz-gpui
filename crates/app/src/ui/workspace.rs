@@ -83,6 +83,10 @@ pub struct Workspace {
     thread_exact: bool,
     /// Waits for the channel's first page to reveal a message in it.
     _revealing: Option<Subscription>,
+    /// A routed channel the viewer has not joined, being looked up.
+    resolving: Option<(Target, Task<()>)>,
+    /// A place that could not open, kept for Retry navigation.
+    failure: Option<Target>,
     /// The person whose card a mention opened, and where.
     profile: Option<(String, Point<Pixels>)>,
     dialog: Option<dialogs::OpenDialog>,
@@ -130,6 +134,8 @@ impl Workspace {
             pending_listing: false,
             thread_exact: false,
             _revealing: None,
+            resolving: None,
+            failure: None,
             profile: None,
             dialog: None,
             _page_events: None,
@@ -253,22 +259,22 @@ impl Workspace {
         if self.apply_pending(window, cx) {
             return;
         }
-        if self.channel.is_some() || self.page != Page::MESSAGES {
+        if self.channel.is_some()
+            || self.page != Page::MESSAGES
+            || self.failure.is_some()
+            || self.resolving.is_some()
+        {
             return;
         }
         let Some(community) = &self.community else {
             return;
         };
         let remembered = community.read(cx).remembered_channel(cx);
-        let channel = remembered.and_then(|id| {
-            community
-                .read(cx)
-                .snapshot
-                .channels
-                .iter()
-                .find(|channel| channel.id == id)
-                .cloned()
-        });
+        let snapshot = community.read(cx).snapshot.clone();
+        let channel = remembered
+            .and_then(|id| snapshot.channels.iter().find(|channel| channel.id == id))
+            .cloned()
+            .or_else(|| super::channel_states::default_channel(&snapshot));
         if let Some(channel) = channel {
             self.select_channel(&channel, window, cx);
         }
@@ -293,6 +299,8 @@ impl Workspace {
     ) {
         self.page = Page::MESSAGES;
         self.route = None;
+        self.failure = None;
+        self.resolving = None;
         if self
             .channel
             .as_ref()
@@ -308,8 +316,14 @@ impl Workspace {
         self.leave_channel_tabs();
         self._revealing = None;
         let weak = cx.entity().downgrade();
-        let open_thread: super::channel::OpenThread = Arc::new(move |row, window, cx| {
-            let _ = weak.update(cx, |this, cx| this.open_thread(row.id, window, cx));
+        let open_thread: super::channel::OpenThread = Arc::new(move |row, reply, window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.open_thread(row.id, window, cx);
+                // Reply writes in the thread; anything else reads it.
+                if reply && let Some(thread) = &this.thread {
+                    ThreadPanel::focus_composer(thread, window, cx);
+                }
+            });
         });
         let page =
             cx.new(|cx| ChannelPage::new(community, channel.clone(), open_thread, window, cx));
@@ -388,6 +402,8 @@ impl Workspace {
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
         self.route = None;
+        self.failure = None;
+        self.resolving = None;
         if let Some(spec) = pages::spec(page, cx) {
             if let Some(build) = spec.build
                 && !self.views.contains_key(&page)
@@ -459,17 +475,31 @@ impl Render for Workspace {
         } else {
             match self.page {
                 Page::SETTINGS => self.settings_page(window, cx).into_any_element(),
+                Page::MESSAGES if self.failure.is_some() => super::channel_states::failure(
+                    cx.listener(|this, _, window, cx| {
+                        if let Some(target) = this.failure.clone() {
+                            this.apply(target, window, cx);
+                        }
+                    }),
+                    cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
+                    cx,
+                ),
                 Page::MESSAGES => match &self.channel {
                     Some(_) => self.board(window, cx),
-                    None => div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_body_sm()
-                        .text_color(c.text_subtle)
-                        .child(self.route_placeholder())
-                        .into_any_element(),
+                    None => {
+                        let snapshot = self
+                            .community
+                            .as_ref()
+                            .map(|community| community.read(cx).snapshot.clone());
+                        super::channel_states::render(
+                            super::channel_states::empty(
+                                snapshot.as_deref(),
+                                self.resolving.is_some() || self.pending.is_some(),
+                            ),
+                            self.route_placeholder(),
+                            cx,
+                        )
+                    }
                 },
                 page => self.page_view(page),
             }
@@ -621,6 +651,8 @@ impl Workspace {
         self.pending_listing = false;
         self._revealing = None;
         self.profile = None;
+        self.resolving = None;
+        self.failure = None;
         if let Some(origin) = &target.community {
             let state = cx.global::<AppState>();
             let index = state
@@ -629,6 +661,8 @@ impl Workspace {
                 .position(|community| community.read(cx).origin.to_string() == *origin);
             let Some(index) = index else {
                 tracing::warn!(%origin, "that community is no longer saved");
+                self.page = Page::MESSAGES;
+                self.failure = Some(target);
                 cx.notify();
                 return;
             };
@@ -655,26 +689,82 @@ impl Workspace {
                 };
                 let snapshot = community.read(cx).snapshot.clone();
                 let Some(summary) = snapshot.channels.iter().find(|c| c.id == *channel) else {
-                    // A link can arrive before the channel list does.
+                    // A link can arrive before the channel list does; one
+                    // the viewer has not joined is looked up exactly.
                     if snapshot.roster == RosterStatus::Ready {
-                        tracing::warn!(%channel, "that channel is not available here");
+                        self.resolve(target.clone(), window, cx);
                     } else {
                         self.pending = Some(target.clone());
                     }
                     cx.notify();
                     return;
                 };
-                self.show_channel(summary, window, cx);
-                match (message, thread) {
-                    (Some(message), Some(thread)) if message == thread => {
-                        self.show_thread(message, false, window, cx)
-                    }
-                    (Some(message), _) => self.reveal(message, window, cx),
-                    (None, _) => self.close_thread(window, cx),
-                }
+                self.open_place(summary, message, thread, window, cx);
             }
         }
         cx.notify();
+    }
+
+    /// Shows a channel, then the message or thread the place names.
+    fn open_place(
+        &mut self,
+        summary: &ChannelSummary,
+        message: Option<EventId>,
+        thread: Option<EventId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_channel(summary, window, cx);
+        match (message, thread) {
+            (Some(message), Some(thread)) if message == thread => {
+                self.show_thread(message, false, window, cx)
+            }
+            (Some(message), _) => self.reveal(message, window, cx),
+            (None, _) => self.close_thread(window, cx),
+        }
+    }
+
+    /// Looks up a routed channel the viewer has not joined
+    /// ("Checking conversation access…"), opening its read-only preview,
+    /// or the failure notice when it cannot be read.
+    fn resolve(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(community), Place::Conversation { channel, .. }) =
+            (&self.community, &target.place)
+        else {
+            return;
+        };
+        self.page = Page::MESSAGES;
+        self.channel = None;
+        self.thread = None;
+        let session = community.read(cx).session.clone();
+        let id = channel.clone();
+        let task = cx.spawn_in(window, {
+            let target = target.clone();
+            async move |this, cx| {
+                let found = session.resolve_channels(vec![id.clone()]).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.resolving = None;
+                    let Place::Conversation {
+                        message, thread, ..
+                    } = target.place
+                    else {
+                        return;
+                    };
+                    match found
+                        .ok()
+                        .and_then(|list| list.into_iter().find(|c| c.id == id))
+                    {
+                        Some(summary) => this.open_place(&summary, message, thread, window, cx),
+                        None => {
+                            tracing::warn!(channel = %id, "that channel is not available here");
+                            this.failure = Some(target);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        self.resolving = Some((target, task));
     }
 
     /// Applies a place that was waiting for its channel list. True while
