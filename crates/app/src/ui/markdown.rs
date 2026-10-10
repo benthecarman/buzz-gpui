@@ -1260,7 +1260,7 @@ fn code_span(value: &str, out: &mut String) {
 
 /// Unicode pictographs, flags and keycaps, plus the row's own
 /// `:shortcodes:`, with whitespace between them and nothing else.
-fn is_emoji_only(content: &str, emoji: &[CustomEmoji]) -> bool {
+pub(crate) fn is_emoji_only(content: &str, emoji: &[CustomEmoji]) -> bool {
     let parts = emoji_parts(content.trim(), emoji);
     if parts.is_empty() {
         return false;

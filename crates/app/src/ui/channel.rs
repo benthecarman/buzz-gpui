@@ -747,10 +747,13 @@ impl ChannelPage {
         let read_only = self.channel.read_only;
         self.composer
             .update(cx, |composer, cx| composer.set_can_send(!read_only, cx));
+        // A channel known only from the cache shows its disabled composer
+        // with the draft, without the join notice.
+        let join = read_only && !self.channel.cached;
         div()
             .flex()
             .flex_col()
-            .when(read_only, |d| d.child(self.join.clone()))
+            .when(join, |d| d.child(self.join.clone()))
             .child(self.composer.clone())
             .into_any_element()
     }

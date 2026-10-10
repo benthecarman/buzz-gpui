@@ -8,6 +8,7 @@
 //! [`Composer::failed`].
 
 pub mod attachments;
+mod blocks;
 mod channels;
 mod format;
 mod live_markdown;
@@ -35,8 +36,8 @@ use buzz_ui::{
 };
 use format::Format;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent, InputEvent,
-    MoveDown, MoveUp, Textarea, TextareaState,
+    Backspace, Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent,
+    InputEvent, MoveDown, MoveUp, OutdentInline, Textarea, TextareaState,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -165,6 +166,8 @@ pub struct Composer {
     pending_at: usize,
     /// A formatting edit is being applied, so its changes are not typing.
     applying_format: bool,
+    /// The text before the last edit, to refuse one past the limit.
+    accepted: Option<(InputContent, std::ops::Range<usize>)>,
     drag_over: bool,
     notice: Option<SharedString>,
     save_draft: Option<Task<()>>,
@@ -368,6 +371,7 @@ impl Composer {
             pending: Vec::new(),
             pending_at: 0,
             applying_format: false,
+            accepted: None,
             drag_over: false,
             notice: None,
             save_draft: None,
@@ -563,6 +567,28 @@ impl Composer {
         cx.notify();
     }
 
+    /// The channel as discovery last described it.
+    fn summary<'a>(&self, cx: &'a App) -> Option<&'a ChannelSummary> {
+        self.community
+            .read(cx)
+            .snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.id == self.channel)
+    }
+
+    /// The text is not editable while a send is admitted or an edit saves,
+    /// in an archived channel (its draft stays), and in one known only from
+    /// the cache (`editingDisabled`).
+    fn input_disabled(&self, cx: &App) -> bool {
+        self.sending
+            || self.edit_status.locked
+            || self.outsiders.as_ref().is_some_and(|prompt| prompt.busy)
+            || self
+                .summary(cx)
+                .is_some_and(|channel| channel.archived || channel.cached)
+    }
+
     fn has_text(&self, cx: &App) -> bool {
         !self.input.read(cx).value().trim().is_empty()
     }
@@ -578,7 +604,8 @@ impl Composer {
 
     fn can_submit(&self, cx: &App) -> bool {
         let files = self.files.read(cx);
-        !self.sending
+        !self.input_disabled(cx)
+            && !self.sending
             && self.can_send
             && (self.editing.is_some() || (!files.blocked() && !self.send_pending(cx)))
             && self.input.read(cx).value().chars().count() <= MAX_CHARS
@@ -807,12 +834,25 @@ impl Composer {
         if !self.applying_format {
             self.settle_pending(window, cx);
         }
-        self.restyle(cx);
+        // The editor holds at most `MAX_CHARS` (`maxLength`): an edit past
+        // it is refused.
         if self.input.read(cx).value().chars().count() > MAX_CHARS {
-            self.notice = Some(format!("Messages hold up to {MAX_CHARS} characters.").into());
-        } else if self.notice.is_some() {
-            self.notice = None;
+            if let Some((content, selection)) = self.accepted.clone() {
+                self.input.update(cx, |state, cx| {
+                    state.set_value(content, window, cx);
+                    state.set_selected_range(selection, cx);
+                });
+            }
+            self.error = Some("Message is too long to insert text".into());
+            self.restyle(cx);
+            cx.notify();
+            return;
         }
+        {
+            let state = self.input.read(cx);
+            self.accepted = Some((state.content(), state.selected_range()));
+        }
+        self.restyle(cx);
         if self.accept_terminator(window, cx) {
             return;
         }
@@ -1541,6 +1581,29 @@ impl Composer {
         self.apply_edit(edit, window, cx);
     }
 
+    /// Runs a block key (`blocks`) at the selection; whether it applied.
+    fn block_edit(
+        &mut self,
+        key: fn(&str, std::ops::Range<usize>) -> Option<format::Edit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.sending || self.edit_status.locked {
+            return false;
+        }
+        let edit = {
+            let state = self.input.read(cx);
+            key(state.value().as_ref(), state.selected_range())
+        };
+        match edit {
+            Some(edit) => {
+                self.apply_edit(edit, window, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Applies a formatting edit as one change to the field.
     fn apply_edit(&mut self, edit: format::Edit, window: &mut Window, cx: &mut Context<Self>) {
         self.applying_format = true;
@@ -1930,6 +1993,23 @@ fn channel_reference(id: &str, name: &str) -> String {
         .collect::<String>()
         .replace('+', "%20");
     format!("[{label}](buzz://channel/{id})")
+}
+
+/// Whether the draft is emoji only, Unicode or the community's
+/// (`usesLargeEmojiPresentation`).
+fn large_emoji(text: &str, entries: &[buzz_relay_client::CustomEmoji]) -> bool {
+    // Prose is never emoji only; skip the catalog for it.
+    if text.trim().is_empty() || (text.chars().any(char::is_alphabetic) && !text.contains(':')) {
+        return false;
+    }
+    let entries: Vec<buzz_relay_client::fold::CustomEmoji> = entries
+        .iter()
+        .map(|entry| buzz_relay_client::fold::CustomEmoji {
+            shortcode: entry.shortcode.clone(),
+            url: entry.url.clone(),
+        })
+        .collect();
+    crate::ui::markdown::is_emoji_only(text, &entries)
 }
 
 /// The picture a draft file shows: an image's own pixels. Other files
@@ -3431,8 +3511,19 @@ impl Render for Composer {
         let has_attachments = self.has_files(cx) && !editing;
         let weak = cx.entity().downgrade();
         let token_colors = c;
+        let large_emoji = {
+            let community = self.community.read(cx);
+            large_emoji(
+                self.input.read(cx).value().as_ref(),
+                &community.snapshot.emoji.entries,
+            )
+        };
         let textarea = Textarea::new(&self.input)
             .appearance(false)
+            .disabled(self.input_disabled(cx))
+            // An emoji-only draft shows at the large emoji size
+            // (`data-single-emoji`).
+            .when(large_emoji, |t| t.text_size(px(42.)).line_height(px(48.)))
             .token(move |token: &InlineTokenContext, _, _| {
                 div()
                     .flex()
@@ -3507,6 +3598,9 @@ impl Render for Composer {
                     let index = completion.selected;
                     this.accept(index, window, cx);
                     cx.stop_propagation();
+                } else if !action.shift && this.block_edit(blocks::enter, window, cx) {
+                    // Enter in a list continues it instead of sending.
+                    cx.stop_propagation();
                 }
             }))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
@@ -3515,6 +3609,29 @@ impl Render for Composer {
                 {
                     let index = completion.selected;
                     this.accept(index, window, cx);
+                    cx.stop_propagation();
+                } else if this.block_edit(blocks::sink, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &OutdentInline, window, cx| {
+                if this.completion.as_ref().is_none_or(|c| c.count() == 0)
+                    && this.block_edit(blocks::lift_items, window, cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Backspace, window, cx| {
+                if this.block_edit(blocks::backspace, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            // Holding Enter repeats it; a repeat never sends (`event.repeat`).
+            .capture_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+                if event.is_held
+                    && event.keystroke.key == "enter"
+                    && !event.keystroke.modifiers.shift
+                {
                     cx.stop_propagation();
                 }
             }))
