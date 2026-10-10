@@ -7,6 +7,7 @@
 //! [`OpenSettings`]. Without one set, the settings panel shows in a modal
 //! here, until the channel's tab pane hosts it.
 
+use super::canvas::CanvasDialog;
 use super::channel_settings::{
     Callback, ChannelRemoved, ChannelSettingsPanel, LifecycleDialog, LifecycleOutcome,
     lifecycle_modal,
@@ -49,6 +50,10 @@ enum Modal {
     },
     Confirm {
         dialog: Entity<LifecycleDialog>,
+        _subscription: Subscription,
+    },
+    Canvas {
+        dialog: Entity<CanvasDialog>,
         _subscription: Subscription,
     },
 }
@@ -141,6 +146,19 @@ impl ChannelActions {
         self.modal = Some(Modal::Settings {
             panel,
             _subscriptions: [removed],
+        });
+        cx.notify();
+    }
+
+    /// "View canvas": the channel's shared Markdown.
+    fn open_canvas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        let (community, channel) = (self.community.clone(), self.channel.id.clone());
+        let dialog = cx.new(|cx| CanvasDialog::new(community, channel, window, cx));
+        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close(cx));
+        self.modal = Some(Modal::Canvas {
+            dialog,
+            _subscription: subscription,
         });
         cx.notify();
     }
@@ -252,6 +270,14 @@ impl ChannelActions {
                     .icon_size(16.)
                     .on_click(cx.listener(|this, _, window, cx| this.open_details(window, cx))),
             )
+            .when(!self.channel.read_only, |menu| {
+                menu.child(
+                    MenuItem::new("view-canvas", "View canvas")
+                        .icon(IconName::FileText)
+                        .icon_size(16.)
+                        .on_click(cx.listener(|this, _, window, cx| this.open_canvas(window, cx))),
+                )
+            })
             .children(panels)
             .when(!shared.is_empty(), |menu| {
                 menu.child(MenuSeparator::new()).children(shared)
@@ -432,6 +458,13 @@ impl Render for ChannelActions {
                 Some(overlay::modal(window, content, Some(close)).into_any_element())
             }
             Some(Modal::Confirm { dialog, .. }) => Some(lifecycle_modal(dialog, window)),
+            Some(Modal::Canvas { dialog, .. }) => {
+                let weak = dialog.downgrade();
+                let dismiss: Dismiss = Rc::new(move |_, cx| {
+                    let _ = weak.update(cx, |dialog, cx| dialog.request_close(cx));
+                });
+                Some(overlay::modal(window, dialog.clone(), Some(dismiss)).into_any_element())
+            }
             None => None,
         };
         div()
