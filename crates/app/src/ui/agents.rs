@@ -24,6 +24,9 @@ mod inventory;
 mod relay;
 pub(crate) mod review;
 pub(crate) mod wake;
+mod share;
+pub(crate) mod snapshot_preview;
+pub(crate) mod snapshots;
 
 pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
 pub(crate) use editor::{Dismissed, Saved};

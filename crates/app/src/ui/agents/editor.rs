@@ -2,7 +2,8 @@
 
 use crate::hosts::HostConnection;
 use buzz_host_rpc::ConnectionState;
-use gpui_kit::{App, Entity, SharedString};
+use buzz_host::api::{AgentEdit, Request, Response};
+use gpui_kit::{App, AppContext, Entity, SharedString, Task};
 
 /// The dialog is done; the page closes it.
 pub struct Dismissed;
@@ -26,6 +27,52 @@ pub fn saved_message(restarted: u32, failures: u32) -> String {
             agents(failures)
         )
     }
+}
+
+/// Creates an agent on `host` in `relay_url`: the host generates its key,
+/// `identity` attests it, and the host saves it, stopped. Retrying with the
+/// same `request_id` reuses the key. Resolves to the new agent's id.
+pub fn create_agent(
+    host: &Entity<HostConnection>,
+    request_id: String,
+    relay_url: String,
+    identity: std::sync::Arc<buzz_identity::Identity>,
+    edit: AgentEdit,
+    cx: &mut App,
+) -> Task<Result<String, String>> {
+    let prepare = host.update(cx, |host, cx| {
+        host.request(
+            Request::CreatePrepare {
+                request_id: request_id.clone(),
+                relay_url,
+                owner: identity.pubkey_hex(),
+            },
+            cx,
+        )
+    });
+    let host = host.downgrade();
+    cx.spawn(async move |cx| match prepare.await {
+        Ok(Response::Prepared { id, pubkey }) => {
+            let auth = identity
+                .attest_agent(&pubkey)
+                .map_err(|error| error.to_string())?;
+            let commit = host
+                .update(cx, |host, cx| {
+                    host.request(
+                        Request::CreateCommit {
+                            request_id,
+                            edit,
+                            auth,
+                        },
+                        cx,
+                    )
+                })
+                .map_err(|_| "The host went away.".to_string())?;
+            commit.await.map(|_| id).map_err(|e| e.to_string())
+        }
+        Ok(_) => Err("The host sent an unexpected reply.".into()),
+        Err(error) => Err(error.to_string()),
+    })
 }
 
 pub fn connected(host: &Entity<HostConnection>, cx: &App) -> bool {

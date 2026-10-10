@@ -16,8 +16,8 @@ mod import;
 mod models;
 mod profile;
 mod setup;
-mod start;
 mod snapshot;
+mod start;
 
 use api::{
     AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
