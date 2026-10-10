@@ -34,6 +34,8 @@ pub struct GifPanel {
     community: Entity<Community>,
     search: Entity<InputState>,
     results: Results,
+    /// The picker's width, borders excluded.
+    width: f32,
     /// Bumped per search, so a slow answer cannot replace a newer one.
     generation: u64,
     _search: Option<Task<()>>,
@@ -92,6 +94,7 @@ impl GifPanel {
             community,
             search,
             results: Results::Loading,
+            width: 360.,
             generation: 0,
             _search: None,
             _subscription: subscription,
@@ -105,6 +108,16 @@ impl GifPanel {
             state.focus(window, cx);
         });
         self.schedule(Duration::ZERO, cx);
+    }
+
+    /// The query, which goes back to the emoji tab.
+    pub fn query(&self, cx: &App) -> String {
+        self.search.read(cx).value().to_string()
+    }
+
+    /// Follows the picker's width.
+    pub fn set_width(&mut self, width: f32) {
+        self.width = width;
     }
 
     fn schedule(&mut self, delay: Duration, cx: &mut Context<Self>) {
@@ -213,6 +226,7 @@ impl GifPanel {
                     columns[side].push(
                         div()
                             .id(("gif", index))
+                            .relative()
                             .w_full()
                             .h(px(height))
                             .rounded(px(8.))
@@ -225,6 +239,14 @@ impl GifPanel {
                                     .size_full()
                                     .rounded(px(8.))
                                     .object_fit(ObjectFit::Cover),
+                            )
+                            // `filter: brightness(1.08)` on hover.
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(px(8.))
+                                    .hover(|s| s.bg(hsla(0., 0., 1., 0.08))),
                             )
                             .on_click(
                                 cx.listener(move |_, _, _, cx| {
@@ -303,7 +325,7 @@ impl GifPanel {
 
 impl Render for GifPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_panel(360., window, cx)
+        self.render_panel(self.width, window, cx)
     }
 }
 
