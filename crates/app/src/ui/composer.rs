@@ -236,6 +236,8 @@ pub struct Composer {
     /// The agents the message being sent mentions as recipients, `(pubkey,
     /// chip text)`, kept for the next draft ("Remember mentioned agents").
     followup: Vec<(String, String)>,
+    /// Plugin tools in the toolbar (`composer_tools`).
+    tools: Vec<AnyView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -415,6 +417,15 @@ impl Composer {
         })
         .detach();
         let markdown = LiveMarkdown::new(&input, cx);
+        let tools = super::composer_tools::build(
+            super::composer_tools::ToolContext {
+                community: community.clone(),
+                channel: channel.clone(),
+                composer: cx.weak_entity(),
+            },
+            window,
+            cx,
+        );
         let mut composer = Self {
             community,
             channel,
@@ -473,6 +484,7 @@ impl Composer {
             capture_focus: cx.focus_handle(),
             wave_tick: std::cell::Cell::new((0, std::time::Instant::now())),
             followup: Vec::new(),
+            tools,
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
@@ -486,6 +498,11 @@ impl Composer {
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// A send is in flight, so the draft cannot change.
+    pub fn sending(&self) -> bool {
+        self.sending
     }
 
     #[allow(dead_code)]
@@ -3698,6 +3715,7 @@ impl Composer {
                         })),
                 ),
             )
+            .children(self.tools.iter().cloned())
             // A plain 32px button: no hover fill, an 18px glyph. While
             // editing it stays but records nothing (`useVoiceCapture`).
             .child(
@@ -4534,18 +4552,22 @@ impl Render for Composer {
                     }
                     _ => token.token().label().clone(),
                 };
+                // A resource link reads as underlined text (`.resource`).
+                let resource = token.token().id().starts_with("buzz:");
                 div()
                     .flex()
                     .items_center()
                     .h(token.line_height())
-                    .max_w(px(256.))
-                    .px(px(3.))
+                    .when(!resource, |d| d.max_w(px(256.)).px(px(3.)))
                     .rounded(px(4.))
                     .bg(if token.is_selected() {
                         token_colors.affordance_subtle_hover
+                    } else if resource {
+                        gpui_kit::transparent_black()
                     } else {
                         token_colors.affordance_subtle
                     })
+                    .when(resource, |d| d.underline())
                     .text_color(token_colors.text_standard)
                     .overflow_hidden()
                     .child(label)

@@ -1,9 +1,12 @@
 //! The Projects plugin (`buzz.projects`, buzz-app's `src/bundled/projects`):
 //! a primary page for the community's NIP-34 repositories and projects,
-//! and entity routes for `buzz://repo|project|pr|issue` links.
+//! entity routes for `buzz://repo|project|pr|issue` links, and the
+//! composer's "Issues and pull requests" picker.
 
 mod page;
+mod resource_picker;
 
+use super::composer_tools::{self, ComposerTool};
 use super::pages::{self, Page, PageRoutes, PageSpec};
 use buzz_relay_client::projects::EntityRoute;
 use buzz_ui::IconName;
@@ -30,6 +33,17 @@ pub fn init(cx: &mut App) {
                 if let Ok(page) = view.clone().downcast::<ProjectsPage>() {
                     page.update(cx, |page, cx| page.open(params, window, cx));
                 }
+            },
+        },
+        cx,
+    );
+    composer_tools::register(
+        ComposerTool {
+            key: "buzz.projects/resources",
+            order: 0,
+            build: |context, window, cx| {
+                cx.new(|cx| resource_picker::ResourcePicker::new(context, window, cx))
+                    .into()
             },
         },
         cx,

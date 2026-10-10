@@ -18,6 +18,7 @@ mod channel_tab_picker;
 mod channel_tabs;
 pub mod channel_usage;
 mod composer;
+mod composer_tools;
 
 mod diff;
 pub(crate) mod emoji_picker;
