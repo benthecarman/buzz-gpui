@@ -563,6 +563,13 @@ impl Workspace {
         // Any navigation closes the narrow drawer.
         self.drawer_open = false;
         if let Some(here) = self.here(cx) {
+            // The first place recorded is the startup restore, not a visit.
+            super::search_kit::record_visit(
+                self.community.as_ref(),
+                &here.place,
+                self.history.current().is_none(),
+                cx,
+            );
             self.history.push(here);
         }
         cx.notify();
@@ -571,7 +578,9 @@ impl Workspace {
     /// Goes to `target` as a new visit.
     pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.history.push(target.clone());
+        let place = target.place.clone();
         self.apply(target, window, cx);
+        super::search_kit::record_visit(self.community.as_ref(), &place, false, cx);
     }
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
