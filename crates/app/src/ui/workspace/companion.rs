@@ -44,7 +44,7 @@ impl Workspace {
     /// The companion's card, if one is open.
     pub(super) fn companion_panel(
         &mut self,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let Companion::Profile { pubkey } = self.companion.clone()?;
@@ -81,6 +81,14 @@ impl Workspace {
             on_message,
         }
         .panel(cx);
+        // An Agents2 agent's sections and Delete (ProfilePanel.tsx).
+        let agents2 = crate::ui::agents2::profile_sections(&pubkey, window, cx);
+        let content = div()
+            .flex()
+            .flex_col()
+            .child(content)
+            .children(agents2)
+            .into_any_element();
         Some(panels::card(
             "companion",
             "Profile",
