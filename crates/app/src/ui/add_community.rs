@@ -52,6 +52,8 @@ pub struct AddCommunity {
     field: Entity<InputState>,
     display_name: Entity<InputState>,
     about: Entity<TextareaState>,
+    /// The loaded profile's picture, carried through unchanged: buzz-app's
+    /// join profile has no field for it.
     picture: Entity<InputState>,
     agreed: bool,
     age_confirmed: bool,
@@ -640,15 +642,6 @@ impl Render for AddCommunity {
                             "{about_len} of {} characters",
                             account::ABOUT_LIMIT
                         )),
-                    ))
-                    .child(field(
-                        "Avatar URL (optional)",
-                        TextField::new(&self.picture)
-                            .surface(Surface::Floating)
-                            .invalid(account::picture_error(&profile.picture).is_some())
-                            .disabled(self.busy)
-                            .into_any_element(),
-                        Some("An HTTPS image URL.".to_owned()),
                     ))
                     .children(self.error.clone().map(|message| error(message, cx)));
                 let label = if self.busy {

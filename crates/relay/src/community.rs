@@ -530,14 +530,17 @@ pub fn claim_error(error: HttpError) -> String {
             "Too many invite attempts. Wait a minute and try again.".into()
         }
         HttpError::Status { message, .. } => match message.as_str() {
-            "invite_invalid" => "This invite is not valid.".into(),
-            "invite_expired" => "This invite has expired. Ask for a new one.".into(),
-            "invite_exhausted" => "This invite has been used up. Ask for a new one.".into(),
-            "join_policy_required" | "join_policy_not_accepted" => {
-                "Accept the community's terms to join.".into()
+            // `CLAIM_REFUSALS` (`CommunityDialog.tsx`).
+            "invite_expired" => "This invite code has expired — ask for a new one.".into(),
+            "invite_exhausted" => {
+                "This invite has reached its use limit. Ask for a new invite.".into()
             }
-            "join_policy_not_configured" => {
-                "This community's join policy changed. Try again.".into()
+            "invite_invalid" => "This invite code is not valid for this community.".into(),
+            "join_policy_required" => "This community requires current policy acceptance. \
+                 Go back and reopen the relay to review it."
+                .into(),
+            "join_policy_not_accepted" => {
+                "The community policy changed. Go back and reopen the relay to review it.".into()
             }
             _ => format!("The invite could not be claimed: {error}"),
         },
