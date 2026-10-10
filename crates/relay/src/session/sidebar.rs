@@ -52,6 +52,14 @@ pub(super) struct SidebarPrefs {
 }
 
 impl SidebarPrefs {
+    /// Whether `channel` is muted, as last confirmed by the relay; `None`
+    /// until the preferences were read (`messages.ts` waits then).
+    pub(super) fn muted(&self, channel: &str) -> Option<bool> {
+        self.store
+            .confirmed()
+            .map(|preferences| preferences.muted.iter().any(|id| id == channel))
+    }
+
     pub(super) fn new(runtime: &tokio::runtime::Handle) -> Self {
         let (queue, mut jobs) = mpsc::unbounded_channel::<BoxFuture<'static, ()>>();
         runtime.spawn(async move {
@@ -382,6 +390,8 @@ impl Session {
                     let outcome =
                         result.and_then(|muted| actor.sidebar.store.finish_mute(ticket, muted));
                     actor.publish();
+                    // Held alerts follow the mutes.
+                    actor.pump_incoming();
                     let _ = reply.send(outcome);
                 })));
             });
@@ -556,6 +566,8 @@ impl Actor {
                     actor.sidebar.store.finish_read(ticket, Err(error));
                 }
                 actor.publish();
+                // Alerts other than mentions wait on the mutes.
+                actor.pump_incoming();
             })));
         });
     }

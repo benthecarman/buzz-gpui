@@ -4,9 +4,12 @@
 //! seen before; after it is accepted, unread decides its attention. Mentions,
 //! direct messages and replies in the viewer's conversations are held until
 //! read state is known and any conversation lookup has decided, then sent on
-//! [`Session::incoming`] if they are still unread and not in view. Anything
-//! older than two minutes is dropped. Channel mute and the user's
-//! notification preferences are the app's to apply.
+//! [`Session::incoming`] if they are still unread, or in view (the app
+//! decides whether those notify). Anything older than two minutes is
+//! dropped. Muted channels hold back everything but explicit mentions, and
+//! nothing but mentions is sent while the mutes are still unknown
+//! (`messages.ts`). The user's notification preferences are the app's to
+//! apply.
 //!
 //! [`Session::incoming`]: super::Session::incoming
 
@@ -44,6 +47,9 @@ pub struct IncomingMessage {
     /// Mentions the viewer: channel mute does not apply.
     pub mentioned: bool,
     pub thread_root: Option<String>,
+    /// The message is in view in the open channel ("Notify while viewing"
+    /// decides whether it still notifies).
+    pub viewing: bool,
 }
 
 pub(super) struct Candidate {
@@ -173,9 +179,20 @@ impl Actor {
             }
             let id = candidate.event.id_hex();
             let attention = reads.unread.attention(&candidate.channel, &id, &reads.sync);
+            // Explicit mentions bypass channel mute; unknown mutes must
+            // not briefly release ordinary alerts.
+            if !attention.mentioned {
+                match self.sidebar.muted(&candidate.channel) {
+                    Some(true) => continue,
+                    Some(false) => {}
+                    None => {
+                        self.incoming.pending.push(candidate);
+                        continue;
+                    }
+                }
+            }
             if attention.status == AttentionStatus::Ineligible
                 || (!attention.pending && attention.category != Some(candidate.category))
-                || attention.viewing
             {
                 continue;
             }
@@ -183,7 +200,9 @@ impl Actor {
                 self.incoming.pending.push(candidate);
                 continue;
             }
-            if !attention.unread {
+            // A row read by the open view's reading dwell still notifies
+            // while in view, if the user asked for that.
+            if !attention.unread && !attention.viewing {
                 continue;
             }
             let event = &candidate.event;
@@ -197,6 +216,7 @@ impl Actor {
                 category: candidate.category,
                 mentioned: attention.mentioned,
                 thread_root: attention.root_id.clone(),
+                viewing: attention.viewing,
             });
         }
     }
