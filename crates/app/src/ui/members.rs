@@ -999,7 +999,7 @@ impl Render for MembersDialog {
 /// Starts an agent the viewer manages here once it is in the channel
 /// (`startAddedAgent`). Anyone else, or an agent another device manages,
 /// is left alone.
-async fn start_added_agent(
+pub(crate) async fn start_added_agent(
     community: &Entity<Community>,
     channel: &str,
     pubkey: &str,

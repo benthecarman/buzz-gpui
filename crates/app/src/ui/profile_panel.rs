@@ -98,6 +98,15 @@ enum Section {
     Memories,
 }
 
+/// The "Add agent to channel" dialog (`ProfileAddChannel`).
+#[derive(Clone, Debug, Default)]
+struct AddChannel {
+    selected: Option<String>,
+    menu: bool,
+    pending: bool,
+    error: Option<SharedString>,
+}
+
 /// `MemorySnapshot["status"]`, with the listing when ready.
 #[derive(Clone, Debug, PartialEq)]
 enum Memories {
@@ -128,6 +137,8 @@ pub struct ProfilePanel {
     memory_generation: u64,
     open_memories: HashSet<String>,
     runtime_notice: Option<(SharedString, bool)>,
+    /// "Add agent to channel", while open.
+    add_channel: Option<AddChannel>,
     focus: FocusHandle,
     _status: StatusWatch,
     _wait: Option<Task<()>>,
@@ -193,6 +204,7 @@ impl ProfilePanel {
             memory_generation: 0,
             open_memories: HashSet::new(),
             runtime_notice: None,
+            add_channel: None,
             focus: cx.focus_handle(),
             _status: status,
             _wait: None,
@@ -387,6 +399,258 @@ impl ProfilePanel {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Adding is offered only for an agent the viewer manages on a ready
+    /// host serving this community, with the channel list loaded.
+    fn can_add_to_channel(&self, cx: &App) -> bool {
+        let roster = matches!(
+            self.community.read(cx).snapshot.roster,
+            RosterStatus::Ready | RosterStatus::Error(_)
+        );
+        roster
+            && self
+                .runtime_agents(cx)
+                .iter()
+                .any(|(host, _)| host.read(cx).status() == crate::hosts::control::Status::Ready)
+    }
+
+    /// Streams and forums the viewer may add the agent to: listed, writable,
+    /// and without it.
+    fn channel_candidates(&self, cx: &App) -> Vec<buzz_relay_client::ChannelSummary> {
+        self.community
+            .read(cx)
+            .snapshot
+            .channels
+            .iter()
+            .filter(|channel| {
+                !channel.archived
+                    && !channel.hidden
+                    && !channel.read_only
+                    && !channel.cached
+                    && matches!(
+                        channel.channel_type,
+                        Some(ChannelType::Stream | ChannelType::Forum)
+                    )
+                    && !channel.members.contains(&self.pubkey)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Adds the agent to the chosen channel and starts it, as the members
+    /// dialog does. The choice is checked again after the host refresh.
+    fn add_to_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.add_channel else {
+            return;
+        };
+        let Some(channel) = dialog.selected.clone() else {
+            return;
+        };
+        if dialog.pending {
+            return;
+        }
+        dialog.pending = true;
+        dialog.error = None;
+        let hosts: Vec<_> = self
+            .runtime_agents(cx)
+            .into_iter()
+            .map(|(host, _)| host)
+            .collect();
+        let community = self.community.clone();
+        let session = self.session(cx);
+        let pubkey = self.pubkey.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            for host in hosts {
+                host.update(cx, |host, cx| host.refresh_status(cx)).await;
+            }
+            let eligible = this
+                .update(cx, |this, cx| {
+                    this.can_add_to_channel(cx)
+                        && this.channel_candidates(cx).iter().any(|c| c.id == channel)
+                })
+                .unwrap_or(false);
+            let result = match eligible {
+                false => {
+                    Err("Channel addition cancelled. Check membership before retrying.".to_string())
+                }
+                true => match session.add_member(&channel, &pubkey).await {
+                    Ok(()) => {
+                        super::members::start_added_agent(&community, &channel, &pubkey, false, cx)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
+            };
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.add_channel = None,
+                    Err(error) => {
+                        if let Some(dialog) = &mut this.add_channel {
+                            dialog.pending = false;
+                            dialog.error = Some(error.into());
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn add_channel_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.add_channel.clone()?;
+        let c = *cx.colors();
+        let available = self.can_add_to_channel(cx);
+        let candidates = match available {
+            true => self.channel_candidates(cx),
+            false => Vec::new(),
+        };
+        let selected = dialog
+            .selected
+            .as_ref()
+            .and_then(|id| candidates.iter().find(|c| &c.id == id))
+            .map(|channel| format!("#{}", channel.name));
+        let roster_ready = self.community.read(cx).snapshot.roster == RosterStatus::Ready;
+        let host_error = self
+            .runtime_agents(cx)
+            .iter()
+            .any(|(host, _)| host.read(cx).status() == crate::hosts::control::Status::Error);
+        let mut field = div().relative().w_full().child(
+            buzz_ui::Select::new("profile-add-channel")
+                .placeholder("Choose a channel")
+                .when_some(selected.clone(), |select, value| select.value(value))
+                .open(dialog.menu)
+                .disabled(dialog.pending || !available)
+                .surface(buzz_ui::Surface::Floating)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(dialog) = &mut this.add_channel {
+                        dialog.menu = !dialog.menu;
+                    }
+                    cx.notify();
+                })),
+        );
+        if dialog.menu {
+            let items = candidates.iter().map(|channel| {
+                let id = channel.id.clone();
+                buzz_ui::MenuItem::new(
+                    SharedString::from(format!("add-channel-{}", channel.id)),
+                    format!("#{}", channel.name),
+                )
+                .checked(dialog.selected.as_deref() == Some(channel.id.as_str()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(dialog) = &mut this.add_channel {
+                        dialog.selected = Some(id.clone());
+                        dialog.menu = false;
+                        dialog.error = None;
+                    }
+                    cx.notify();
+                }))
+            });
+            let weak = cx.entity().downgrade();
+            field = field.child(super::overlay::dropdown(
+                window,
+                super::overlay::Align::Start,
+                div()
+                    .min_w(rems(16.))
+                    .child(buzz_ui::Menu::new().children(items)),
+                std::rc::Rc::new(move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        if let Some(dialog) = &mut this.add_channel {
+                            dialog.menu = false;
+                        }
+                        cx.notify();
+                    });
+                }),
+            ));
+        }
+        let alert = |text: SharedString| div().text_color(c.text_danger).child(text);
+        let content = buzz_ui::Dialog::new("profile-add-channel-dialog", "Add agent to channel")
+            .description(
+                "Choose a channel to add this managed agent. The relay must authorize membership.",
+            )
+            .on_close(cx.listener(|this, _, _, cx| {
+                if !this.add_channel.as_ref().is_some_and(|d| d.pending) {
+                    this.add_channel = None;
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S3)
+                    .child(div().text_label().child("Channel"))
+                    .child(field)
+                    .when(!roster_ready, |this| {
+                        this.child(
+                            "Channel discovery is incomplete; only loaded channels are offered.",
+                        )
+                    })
+                    .when(host_error, |this| {
+                        let hosts: Vec<_> = self
+                            .runtime_agents(cx)
+                            .into_iter()
+                            .map(|(host, _)| host)
+                            .collect();
+                        this.child(alert(
+                            "Could not refresh local agents. Retry to get current host status."
+                                .into(),
+                        ))
+                        .child(
+                            div().child(
+                                Button::new("profile-add-retry-agents", "Retry agents")
+                                    .size(ButtonSize::Sm)
+                                    .disabled(dialog.pending)
+                                    .on_click(move |_, _, cx| {
+                                        for host in &hosts {
+                                            host.update(cx, |host, cx| {
+                                                host.refresh_status(cx).detach()
+                                            });
+                                        }
+                                    }),
+                            ),
+                        )
+                    })
+                    .when(!available && !host_error && !dialog.pending, |this| {
+                        this.child(alert(
+                            "This agent or channel is no longer eligible. Check its status before \
+                             adding again."
+                                .into(),
+                        ))
+                    })
+                    .when(available && candidates.is_empty(), |this| {
+                        this.child("No eligible channels in the loaded list.")
+                    })
+                    .children(dialog.error.clone().map(alert)),
+            )
+            .footer(
+                Button::new("profile-add-cancel", "Cancel")
+                    .variant(ButtonVariant::Ghost)
+                    .disabled(dialog.pending)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.add_channel = None;
+                        cx.notify();
+                    })),
+            )
+            .footer(
+                Button::new(
+                    "profile-add-submit",
+                    if dialog.pending {
+                        "Adding…"
+                    } else {
+                        "Add to channel"
+                    },
+                )
+                .disabled(dialog.pending || selected.is_none() || !available)
+                .on_click(cx.listener(|this, _, window, cx| this.add_to_channel(window, cx))),
+            );
+        Some(super::overlay::modal(window, content, None).into_any_element())
     }
 
     fn set_start_on_launch(
@@ -672,6 +936,19 @@ impl ProfilePanel {
                 .filter(visible)
                 .any(|channel| channel.channel_type.is_none());
         let mut items = Vec::new();
+        if self.can_add_to_channel(cx) {
+            items.push(
+                Button::new("profile-add-to-channel", "Add to channel")
+                    .variant(ButtonVariant::Ghost)
+                    .full_width()
+                    .icon_end(IconName::CaretRight)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.add_channel = Some(AddChannel::default());
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
         match &snapshot.roster {
             RosterStatus::Loading => items.push(note("Loading channels…")),
             RosterStatus::Error(_) => items.push(
@@ -1054,6 +1331,7 @@ impl Render for ProfilePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let (sections, selected) = self.sections(cx);
+        let add_channel = self.add_channel_dialog(window, cx);
         let mut tabs = Tabs::new(TabVariant::Panel);
         for section in sections {
             let (id, label) = match section {
@@ -1109,6 +1387,7 @@ impl Render for ProfilePanel {
                         .children(content),
                 ),
             )
+            .children(add_channel)
     }
 }
 
