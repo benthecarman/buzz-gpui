@@ -158,19 +158,37 @@ impl ClaudeTab {
 
 /// `curl … | bash`, `claude` and `~/.local/bin` in code type.
 fn installer_note(c: &Colors) -> Div {
-    let code = |text: &'static str| div().font_family(font::MONO).child(text);
+    // Words wrap one at a time; punctuation stays with the word before it.
+    // `true` marks code.
+    const WORDS: &[&[(&str, bool)]] = &[
+        &[("Runs", false)],
+        &[("the", false)],
+        &[("official", false)],
+        &[("installer,", false)],
+        &[("curl", true)],
+        &[("-fsSL", true)],
+        &[("https://claude.ai/install.sh", true)],
+        &[("|", true)],
+        &[("bash", true), (",", false)],
+        &[("which", false)],
+        &[("puts", false)],
+        &[("claude", true)],
+        &[("in", false)],
+        &[("~/.local/bin", true), (".", false)],
+    ];
     div()
         .flex()
         .flex_wrap()
+        .gap_x(rems(0.25))
         .text_body_sm()
         .text_color(c.text_subtle)
-        .child("Runs the official installer, ")
-        .child(code("curl -fsSL https://claude.ai/install.sh | bash"))
-        .child(", which puts ")
-        .child(code("claude"))
-        .child(" in ")
-        .child(code("~/.local/bin"))
-        .child(".")
+        .children(WORDS.iter().map(|word| {
+            div().flex().children(word.iter().map(|(text, code)| {
+                div()
+                    .when(*code, |this| this.font_family(font::MONO))
+                    .child(*text)
+            }))
+        }))
 }
 
 impl Render for ClaudeTab {
