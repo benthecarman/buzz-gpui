@@ -151,7 +151,7 @@ impl Dialog {
         cx: &mut Context<T>,
     ) -> Self {
         let view = cx.new(|cx| WorkspaceSettings::new(community, target, window, cx));
-        Self::wrap(view, |view| !view.busy(), window, cx)
+        Self::wrap(view, WorkspaceSettings::dismissible, window, cx)
     }
 
     /// The dialog over its scrim.

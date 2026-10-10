@@ -17,6 +17,7 @@ mod rename;
 mod sections;
 pub mod settings;
 mod share;
+mod workspace;
 
 use super::channel_tabs::TabState;
 use super::pages::{self, Navigation, Page, PageSpec, Placement};
