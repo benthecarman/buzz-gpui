@@ -225,27 +225,27 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Catalog reader (kinds 30175/30178, paged, newest version per entry, 5,000-event cap) | FA/catalog.ts:70-304 | MISSING | Relay-crate reader | L |
-| "Share to catalog" switch with agent and team copy | BA/CommunityCatalog.tsx:46-49, 79-163 | MISSING | — | M |
-| Share notices (queued, published, no longer discoverable, stalled + Retry / Dismiss); "Failed to update catalog sharing." | BA/CommunityCatalog.tsx:61-72, 164-236 | MISSING | — | M |
-| Publish and unshare rules; agent and team validation (limits, invisible characters, unsupported runtime, allowlist downgraded) | FA/catalog.ts:387-446; FA/catalog-protocol.ts:152-300 | MISSING | — | M |
-| "Community Catalog" browser dialog (Agents/Teams sidebar, loading/error/"Nothing shared yet") | BA/CommunityCatalog.tsx:495-643 | MISSING | — | M |
-| Agent detail (avatar, "Added by", metadata grid, instructions); team detail (members, expandable rows) | BA/CommunityCatalog.tsx:652-711, 811-892 | MISSING | — | S |
-| "Add agent" pre-fills the create form; "Added to My Agents" remembered per community; "Add team" / "Added to my teams" | BA/CommunityCatalog.tsx:338-427, 555-590; FA/catalog.ts:334-357 | MISSING | — | M |
-| Non-stock ACP transport blocked ("…uses the X transport, which this app can't run yet…") | FA/catalog-protocol.ts:111-123; BA/CommunityCatalog.tsx:713-722 | MISSING | — | S |
-| Team "Share {team}" dialog | BA/CommunityCatalog.tsx:302-336 | MISSING | Needs teams | S |
+| Catalog reader (kinds 30175/30178, paged, newest version per entry, 5,000-event cap) | FA/catalog.ts:70-304 | DONE (relay/src/catalog.rs, relay/src/session/catalog.rs) | Relay-crate reader | L |
+| "Share to catalog" switch with agent and team copy | BA/CommunityCatalog.tsx:46-49, 79-163 | DONE (ui/agents/catalog.rs) | — | M |
+| Share notices (queued, published, no longer discoverable, stalled + Retry / Dismiss); "Failed to update catalog sharing." | BA/CommunityCatalog.tsx:61-72, 164-236 | DONE (ui/agents/catalog.rs) | — | M |
+| Publish and unshare rules; agent and team validation (limits, invisible characters, unsupported runtime, allowlist downgraded) | FA/catalog.ts:387-446; FA/catalog-protocol.ts:152-300 | DONE (relay/src/catalog.rs) | — | M |
+| "Community Catalog" browser dialog (Agents/Teams sidebar, loading/error/"Nothing shared yet") | BA/CommunityCatalog.tsx:495-643 | DONE (ui/agents/catalog.rs) | — | M |
+| Agent detail (avatar, "Added by", metadata grid, instructions); team detail (members, expandable rows) | BA/CommunityCatalog.tsx:652-711, 811-892 | DONE (ui/agents/catalog.rs) | — | S |
+| "Add agent" pre-fills the create form; "Added to My Agents" remembered per community; "Add team" / "Added to my teams" | BA/CommunityCatalog.tsx:338-427, 555-590; FA/catalog.ts:334-357 | DONE (ui/agents/catalog.rs, ui/agents/create.rs, ui/agents/teams.rs) | — | M |
+| Non-stock ACP transport blocked ("…uses the X transport, which this app can't run yet…") | FA/catalog-protocol.ts:111-123; BA/CommunityCatalog.tsx:713-722 | DONE (relay/src/catalog.rs, ui/agents/catalog.rs) | — | S |
+| Team "Share {team}" dialog | BA/CommunityCatalog.tsx:302-336 | MISSING | Needs teams; Interim catalog-only dialog in ui/agents/team_dialogs.rs (`TeamShareDialog`); the coordinator wires the full share dialog | S |
 
 ## 12. Teams (`BA/Team*Dialog.tsx`, `FA/team-*.ts`; native `ST/agents.rs:1676-1823`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Team snapshot format (size limits, `buzz_team_snapshot` chunk, checksum errors) | FA/team-encoding.ts:1-93 | MISSING (no teams model) | Channel-templates/teams model first | L |
-| "Import team snapshot" dialog: members, "Restore member memories", "Respond-to allowlist" Clear/Keep, "Creating team…", "Team imported" | BA/TeamImportDialog.tsx:40-157 | MISSING | — | M |
-| Resumable team import (receipt, profile publish, team record) | FA/team-bundles.ts:27-101; FA/team-import.ts:9-120 | MISSING | — | L |
-| "Export {team}" dialog (memories, confirmation, JSON/PNG, `.team.{fmt}`) | BA/TeamExportDialog.tsx:11-156 | MISSING | — | M |
-| "Deploy team to channel" dialog and behaviour (apply instructions, restart if stale, publish profile, add to channel, start; per-member failures) | BA/TeamDeployDialog.tsx:16-122; FA/team-deployment.ts:24-98 | MISSING | — | M |
-| Team direct share, catalog switch, export | BA/DirectShare.tsx:232-314 | MISSING | — | S |
-| Native team instructions, capture, export, preview | ST/agents.rs:1676-1823 | MISSING | Host requests | M |
+| Team snapshot format (size limits, `buzz_team_snapshot` chunk, checksum errors) | FA/team-encoding.ts:1-93 | DONE (ui/agents/team_file.rs) | Channel-templates/teams model first | L |
+| "Import team snapshot" dialog: members, "Restore member memories", "Respond-to allowlist" Clear/Keep, "Creating team…", "Team imported" | BA/TeamImportDialog.tsx:40-157 | DONE (ui/agents/team_dialogs.rs) | — | M |
+| Resumable team import (receipt, profile publish, team record) | FA/team-bundles.ts:27-101; FA/team-import.ts:9-120 | PARTIAL (ui/agents/team_ops.rs, relay/src/session/teams.rs) | Member memory restore needs the host memory write the agent snapshot import adds (`team_ops::restore_member_memory`); until then it reports "Memory restoration is unavailable" | L |
+| "Export {team}" dialog (memories, confirmation, JSON/PNG, `.team.{fmt}`) | BA/TeamExportDialog.tsx:11-156 | DONE (ui/agents/team_dialogs.rs) | — | M |
+| "Deploy team to channel" dialog and behaviour (apply instructions, restart if stale, publish profile, add to channel, start; per-member failures) | BA/TeamDeployDialog.tsx:16-122; FA/team-deployment.ts:24-98 | DONE (ui/agents/team_dialogs.rs, ui/agents/team_ops.rs) | — | M |
+| Team direct share, catalog switch, export | BA/DirectShare.tsx:232-314 | MISSING | Switch (`TeamShareDialog::switch`) and export dialog (`TeamExportDialog`) built in ui/agents/team_dialogs.rs; direct share waits for the share dialog | S |
+| Native team instructions, capture, export, preview | ST/agents.rs:1676-1823 | DONE (host/teams.rs) | Host requests | M |
 
 ## 13. Old agent library and discovery (`BA/AgentLibrary.tsx`, `FA/library.ts`, `relay-library.ts`, `inventory.ts`, `known.ts`, `choices.ts`)
 
