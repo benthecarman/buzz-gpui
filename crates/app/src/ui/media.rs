@@ -10,6 +10,7 @@
 mod attachments;
 mod audio;
 mod comments;
+mod controls;
 mod engine;
 pub mod recorder;
 mod review;
@@ -17,22 +18,24 @@ mod seek;
 mod timecode;
 mod video;
 
-pub use attachments::{RowMedia, attachments};
-pub use audio::{audio_attachment, forget_local, set_local, voice_draft, voice_note};
-pub use review::{open_review, review_overlay};
+pub use attachments::{RowMedia, attachments, thread_media};
+pub use audio::{audio_attachment, forget_local, pause_audio, set_local, voice_draft, voice_note};
+// The composer's draft thumbnails use these.
+#[allow(unused_imports)]
+pub use engine::{Frame, Probe, probe_file};
+pub use review::{dismiss_review, review_overlay};
+// The composer opens its draft attachments here.
+#[allow(unused_imports)]
+pub use review::open_local_preview;
 pub use timecode::body as text;
-pub use video::video_preview;
 
 use buzz_relay_client::Media;
-use buzz_ui::{ActiveTheme, TypeStyled};
+use buzz_ui::TypeStyled;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-/// How long a loaded thumbnail takes to fade in over its blurhash.
-const FADE: Duration = Duration::from_millis(180);
 /// Blurhash previews decode to this many pixels a side (`BLURHASH_SIZE`).
 const BLURHASH_SIZE: u32 = 32;
 
@@ -160,17 +163,10 @@ fn blurhash_image(hash: &str) -> Option<Arc<RenderImage>> {
     render_image(BLURHASH_SIZE, BLURHASH_SIZE, pixels)
 }
 
-/// Fade-in progress of one thumbnail, kept while it stays on screen.
-struct Fade {
-    started: Option<Instant>,
-    /// Shown at full opacity: it was already loaded when first drawn, or
-    /// its fade finished.
-    settled: bool,
-}
-
 /// A thumbnail's pixels (`ImagePixels`): the blurhash, when there is one,
-/// while the original loads, then the original fading in over it. Fills
-/// its parent with `object-fit: cover`.
+/// until the original is decoded, which then replaces it at once. If the
+/// original fails, the blurhash (or the tile's own fill) stays. Fills its
+/// parent with `object-fit: cover`.
 pub fn thumbnail(url: &str, blurhash: Option<&str>, media: &Media) -> impl IntoElement {
     let remote = Remote {
         url: url.to_string().into(),
@@ -179,33 +175,9 @@ pub fn thumbnail(url: &str, blurhash: Option<&str>, media: &Media) -> impl IntoE
     };
     let hash = blurhash.map(SharedString::from);
     Lazy::new("pixels", move |window, cx| {
-        let c = *cx.colors();
-        let image = decoded(&remote, window, cx);
-        if let Some(Err(_)) = image {
-            return unavailable(&c).into_any_element();
-        }
-        let loaded = image.is_some();
-        let fade = window.use_keyed_state("fade", cx, |_, _| Fade {
-            started: None,
-            settled: loaded,
-        });
-        let opacity = fade.update(cx, |fade, cx| {
-            if fade.settled || cx.reduce_motion() {
-                return 1.;
-            }
-            if !loaded {
-                return 0.;
-            }
-            let started = *fade.started.get_or_insert_with(Instant::now);
-            let progress = started.elapsed().as_secs_f32() / FADE.as_secs_f32();
-            fade.settled = progress >= 1.;
-            progress.min(1.)
-        });
-        // Loading itself redraws the view once it lands; only the fade ticks.
-        if loaded && opacity < 1. {
-            window.request_animation_frame();
-        }
-        let preview = (opacity < 1.)
+        let image = decoded(&remote, window, cx).and_then(Result::ok);
+        let preview = image
+            .is_none()
             .then(|| {
                 hash.as_ref()
                     .and_then(|hash| window.use_asset::<Blurhash>(hash, cx).flatten())
@@ -217,22 +189,21 @@ pub fn thumbnail(url: &str, blurhash: Option<&str>, media: &Media) -> impl IntoE
             .when_some(preview, |this, preview| {
                 this.child(img(preview).absolute().inset_0().size_full())
             })
-            .when_some(image.and_then(Result::ok), |this, image| {
+            .when_some(image, |this, image| {
                 this.child(
                     img(image)
                         .absolute()
                         .inset_0()
                         .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .opacity(opacity),
+                        .object_fit(ObjectFit::Cover),
                 )
             })
             .into_any_element()
     })
 }
 
-/// The "Image unavailable" tile (`.imageUnavailable`).
-fn unavailable(c: &buzz_ui::Colors) -> Div {
+/// A thumbnail whose URL cannot be loaded at all (`.imageUnavailable`).
+pub(super) fn unavailable_tile(c: &buzz_ui::Colors) -> Div {
     div()
         .size_full()
         .flex()
@@ -368,85 +339,59 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
         Some(ImageFormat::Tiff)
     } else if starts(b"\0\0\x01\0") {
         Some(ImageFormat::Ico)
+    } else if is_svg(bytes) {
+        Some(ImageFormat::Svg)
     } else {
         None
     }
 }
 
-/// Saves an attachment to the Downloads folder without overwriting
-/// anything there, then opens it with the system handler
-/// (`media_download` in the reference host).
-pub fn download(url: String, name: Option<String>, media: Media, cx: &mut App) {
-    let directory = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
-    cx.spawn(async move |cx| {
-        let bytes = match media.fetch(&url).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::warn!(%error, "attachment download failed");
-                return;
-            }
-        };
-        let name = file_name(name.as_deref(), &url);
-        let path = cx
-            .background_executor()
-            .spawn(async move {
-                let path = unused_path(&directory, &name);
-                std::fs::write(&path, &bytes).map(|()| path)
-            })
-            .await;
-        match path {
-            Ok(path) => {
-                cx.update(|cx| cx.open_with_system(&path));
-            }
-            Err(error) => tracing::warn!(%error, "could not save the attachment"),
+/// An SVG document: optional BOM, XML declaration, comments or doctype,
+/// then an `<svg` root.
+fn is_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let Ok(text) = std::str::from_utf8(head)
+        .or_else(|error| std::str::from_utf8(&head[..error.valid_up_to()]))
+    else {
+        return false;
+    };
+    let mut rest = text.trim_start_matches('\u{feff}').trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("<?") {
+            let Some(end) = after.find("?>") else {
+                return false;
+            };
+            rest = after[end + 2..].trim_start();
+        } else if let Some(after) = rest.strip_prefix("<!--") {
+            let Some(end) = after.find("-->") else {
+                return false;
+            };
+            rest = after[end + 3..].trim_start();
+        } else if let Some(after) = rest.strip_prefix("<!") {
+            let Some(end) = after.find('>') else {
+                return false;
+            };
+            rest = after[end + 1..].trim_start();
+        } else {
+            return rest.starts_with("<svg");
         }
-    })
-    .detach();
-}
-
-/// A safe file name: the sender's name without path separators or control
-/// characters, else the URL's last segment.
-fn file_name(name: Option<&str>, url: &str) -> String {
-    let clean = |value: &str| {
-        value
-            .chars()
-            .map(|c| {
-                if c.is_control() || matches!(c, '/' | '\\') {
-                    ' '
-                } else {
-                    c
-                }
-            })
-            .collect::<String>()
-            .trim()
-            .trim_start_matches('.')
-            .trim()
-            .to_string()
-    };
-    name.map(clean)
-        .filter(|name| !name.is_empty())
-        .or_else(|| {
-            url.rsplit('/')
-                .next()
-                .map(clean)
-                .filter(|name| !name.is_empty())
-        })
-        .unwrap_or_else(|| "File".into())
-}
-
-fn unused_path(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let path = directory.join(name);
-    if !path.exists() {
-        return path;
     }
-    let (stem, extension) = match name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-        _ => (name, String::new()),
-    };
-    (1..)
-        .map(|n| directory.join(format!("{stem} ({n}){extension}")))
-        .find(|path| !path.exists())
-        .expect("some name is free")
+}
+
+/// Saves an attachment into Downloads without replacing anything there
+/// (`media_download`), and returns where.
+pub(super) async fn save(
+    media: &Media,
+    url: &str,
+    name: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let directory = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+    media
+        .download(url, name, directory)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(%error, "attachment download failed");
+        })
 }
 
 #[cfg(test)]
@@ -464,14 +409,20 @@ mod tests {
             image_format(b"RIFF\0\0\0\0WEBPVP8 "),
             Some(ImageFormat::Webp)
         );
-        assert_eq!(image_format(b"<svg"), None);
+        assert_eq!(image_format(b"GIF89a"), Some(ImageFormat::Gif));
     }
 
     #[test]
-    fn names_downloads_safely() {
-        assert_eq!(file_name(Some("../a/b.pdf"), "https://x/y"), "a b.pdf");
-        assert_eq!(file_name(None, "https://x/media/abc.png"), "abc.png");
-        assert_eq!(file_name(Some("  "), "https://x/"), "File");
+    fn sniffs_svg_documents() {
+        assert_eq!(
+            image_format(b"<?xml version=\"1.0\"?>\n<!-- c -->\n<svg xmlns=\"x\"/>"),
+            Some(ImageFormat::Svg)
+        );
+        assert_eq!(
+            image_format(b"<!DOCTYPE svg>\n<svg/>"),
+            Some(ImageFormat::Svg)
+        );
+        assert_eq!(image_format(b"<html><svg/>"), None);
     }
 
     #[test]

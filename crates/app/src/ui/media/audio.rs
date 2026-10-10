@@ -3,10 +3,14 @@
 //!
 //! One clip plays at a time (`claimAudio`), so playback lives in a single
 //! app-wide [`Audio`] entity. Rows read it while rendering, which makes
-//! GPUI redraw them as it ticks.
+//! GPUI redraw them as it ticks. HTTPS relay clips stream from the
+//! loopback listener; others are fetched whole.
 
-use super::engine::{Engine, Event, Kind};
-use super::seek::{OnSeek, seek_area};
+use super::Lazy;
+use super::controls::hover_time;
+use super::engine::{Engine, Event, Kind, Source};
+use super::seek::{OnHover, OnSeek, seek_area, seek_area_hover};
+use super::video::finite_duration;
 use super::{media_time, tabular, video_time};
 use buzz_relay_client::Media;
 use buzz_relay_client::fold::Attachment;
@@ -25,24 +29,40 @@ use std::time::Duration;
 const TICK: Duration = Duration::from_millis(50);
 /// Voice note speeds, in the order the button cycles them.
 const VOICE_RATES: [f64; 4] = [1., 1.5, 2., 0.5];
-/// Voice note waveform bars: 3px wide with a 2px gap, as many as fit the
-/// card's 210px track (`floor((width + 2) / 5)`).
-const VOICE_BARS: usize = 42;
+/// Voice note bars before the track is measured, and at most.
+const DEFAULT_BARS: usize = 38;
+const MAX_BARS: usize = 64;
+/// One spinner turn on the voice card (`spin 800ms`).
+const SPIN: Duration = Duration::from_millis(800);
+/// An ended clip this much shorter than its container claimed corrects
+/// its length (old voice notes carried a 1 fps video track).
+const CORRECTION_MIN: f64 = 0.05;
+const CORRECTION_MAX: f64 = 1.5;
 
 #[derive(Default)]
 pub struct Audio {
     track: Option<Track>,
     /// Measured lengths, which win over the sender's `duration` hint.
     durations: HashMap<String, f64>,
+    /// Lengths corrected when a clip ended short of them.
+    corrected: HashMap<String, f64>,
+    /// Clips whose length is being read (`preload="metadata"`).
+    probing: HashSet<String>,
     failed: HashSet<String>,
     rates: HashMap<String, f64>,
     /// Clips that play from memory, not the relay: voice note drafts.
     local: HashMap<String, Arc<[u8]>>,
+    /// The seek bar under the mouse: `(url, position)`.
+    hover: Option<(String, f32)>,
+    /// Voice note waveform widths, by card.
+    widths: HashMap<ElementId, f32>,
 }
 
 struct Track {
     url: String,
     voice: bool,
+    /// The view whose row started it, which pauses it when it goes away.
+    owner: Option<EntityId>,
     engine: Option<Engine>,
     playing: bool,
     ended: bool,
@@ -61,11 +81,14 @@ struct Status {
     loading: bool,
     position: f64,
     duration: Option<f64>,
+    /// The clip's length was read: seeking works (`metadataReady`).
+    measured: bool,
     failed: bool,
     rate: f64,
 }
 
 fn status(url: &str, tagged: Option<f64>, cx: &App) -> Status {
+    let tagged = finite_duration(tagged);
     let Some(audio) = cx.try_global::<AudioGlobal>() else {
         return Status {
             duration: tagged,
@@ -75,40 +98,38 @@ fn status(url: &str, tagged: Option<f64>, cx: &App) -> Status {
     };
     let audio = audio.0.read(cx);
     let track = audio.track.as_ref().filter(|track| track.url == url);
+    let measured = audio
+        .corrected
+        .get(url)
+        .or(audio.durations.get(url))
+        .copied();
     Status {
         playing: track.is_some_and(|track| track.playing),
-        loading: track.is_some_and(|track| track.engine.is_none()),
+        loading: track.is_some_and(|track| track.engine.is_none() && track.playing),
         position: track.map_or(0., |track| track.position),
-        duration: audio.durations.get(url).copied().or(tagged),
+        duration: measured.or(tagged),
+        measured: measured.is_some(),
         failed: audio.failed.contains(url),
         rate: audio.rates.get(url).copied().unwrap_or(1.),
     }
 }
 
-fn audio(window: &mut Window, cx: &mut App) -> Entity<Audio> {
+fn audio(cx: &mut App) -> Entity<Audio> {
     if let Some(audio) = cx.try_global::<AudioGlobal>() {
         return audio.0.clone();
     }
     let audio = cx.new(|_| Audio::default());
     cx.set_global(AudioGlobal(audio.clone()));
     // Rows drawn before it existed do not watch it yet.
-    window.refresh();
+    cx.refresh_windows();
     audio
 }
 
 /// Lets `key` play `bytes` from memory, for a draft that is not uploaded
 /// yet.
 pub fn set_local(key: &str, bytes: Arc<[u8]>, cx: &mut App) {
-    let audio = match cx.try_global::<AudioGlobal>() {
-        Some(audio) => audio.0.clone(),
-        None => {
-            let audio = cx.new(|_| Audio::default());
-            cx.set_global(AudioGlobal(audio.clone()));
-            audio
-        }
-    };
     let key = key.to_string();
-    audio.update(cx, |audio, _| {
+    audio(cx).update(cx, |audio, _| {
         audio.local.insert(key, bytes);
     });
 }
@@ -127,23 +148,107 @@ pub fn forget_local(key: &str, cx: &mut App) {
     });
 }
 
-fn toggle(url: &str, voice: bool, media: &Media, window: &mut Window, cx: &mut App) {
-    let (url, media) = (url.to_string(), media.clone());
-    audio(window, cx).update(cx, |audio, cx| audio.toggle(url, voice, media, cx));
+/// Pauses the playing clip when the conversation that started it is no
+/// longer shown (`useConversationPresentation`): any clip for `None`, else
+/// only one started from the view `owner`.
+pub fn pause_audio(owner: Option<EntityId>, cx: &mut App) {
+    let Some(audio) = cx.try_global::<AudioGlobal>().map(|audio| audio.0.clone()) else {
+        return;
+    };
+    audio.update(cx, |audio, cx| {
+        let Some(track) = audio.track.as_mut() else {
+            return;
+        };
+        if owner.is_some() && track.owner != owner {
+            return;
+        }
+        match track.engine.as_ref() {
+            Some(engine) => {
+                engine.pause();
+                track.playing = false;
+            }
+            // Still loading: cancel.
+            None => audio.track = None,
+        }
+        cx.notify();
+    });
 }
 
-fn seek(url: &str, voice: bool, media: &Media, seconds: f64, window: &mut Window, cx: &mut App) {
+fn toggle(url: &str, voice: bool, media: &Media, owner: Option<EntityId>, cx: &mut App) {
     let (url, media) = (url.to_string(), media.clone());
-    audio(window, cx).update(cx, |audio, cx| audio.seek(url, voice, media, seconds, cx));
+    audio(cx).update(cx, |audio, cx| audio.toggle(url, voice, media, owner, cx));
+}
+
+fn seek(
+    url: &str,
+    voice: bool,
+    media: &Media,
+    seconds: f64,
+    owner: Option<EntityId>,
+    cx: &mut App,
+) {
+    let (url, media) = (url.to_string(), media.clone());
+    audio(cx).update(cx, |audio, cx| {
+        audio.seek(url, voice, media, seconds, owner, cx)
+    });
+}
+
+/// Reads the length of a clip without a trusted one, once.
+fn probe(url: &str, media: &Media, cx: &mut App) {
+    let audio = audio(cx);
+    let (url, media) = (url.to_string(), media.clone());
+    audio.update(cx, |audio, cx| {
+        if audio.durations.contains_key(&url) || !audio.probing.insert(url.clone()) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let source = match media.stream_url(&url) {
+                Some(uri) => Ok(Source::Uri(uri)),
+                None => media
+                    .fetch(&url)
+                    .await
+                    .map(Source::Bytes)
+                    .map_err(|error| error.to_string()),
+            };
+            let duration = match source {
+                Ok(source) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            super::engine::probe_source(source, Kind::Metadata)
+                                .ok()
+                                .and_then(|probe| probe.duration)
+                        })
+                        .await
+                }
+                Err(_) => None,
+            };
+            let _ = this.update(cx, |audio, cx| {
+                audio.probing.remove(&url);
+                if let Some(duration) = finite_duration(duration) {
+                    audio.durations.entry(url).or_insert(duration);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    });
 }
 
 impl Audio {
-    fn toggle(&mut self, url: String, voice: bool, media: Media, cx: &mut Context<Self>) {
+    fn toggle(
+        &mut self,
+        url: String,
+        voice: bool,
+        media: Media,
+        owner: Option<EntityId>,
+        cx: &mut Context<Self>,
+    ) {
         match self.track.as_mut().filter(|track| track.url == url) {
-            // Pressing again while it downloads cancels.
+            // Pressing again while it loads cancels.
             Some(track) if track.engine.is_none() => self.track = None,
             Some(track) => {
                 let engine = track.engine.as_mut().expect("loaded");
+                track.owner = owner;
                 if track.playing {
                     engine.pause();
                     track.playing = false;
@@ -153,22 +258,22 @@ impl Audio {
                         track.position = 0.;
                         track.ended = false;
                     }
-                    engine.play();
-                    track.playing = true;
+                    track.playing = engine.play();
                 }
             }
-            None => self.start(url, voice, media, true, 0., cx),
+            None => self.start(url, voice, media, true, 0., owner, cx),
         }
         cx.notify();
     }
 
-    /// Seeks the playing clip, or loads a clip paused at `seconds`.
+    /// Seeks the clip, or loads it paused at `seconds`.
     fn seek(
         &mut self,
         url: String,
         voice: bool,
         media: Media,
         seconds: f64,
+        owner: Option<EntityId>,
         cx: &mut Context<Self>,
     ) {
         match self.track.as_mut().filter(|track| track.url == url) {
@@ -179,7 +284,7 @@ impl Audio {
                     engine.seek(seconds);
                 }
             }
-            None => self.start(url, voice, media, false, seconds, cx),
+            None => self.start(url, voice, media, false, seconds, owner, cx),
         }
         cx.notify();
     }
@@ -202,6 +307,7 @@ impl Audio {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
         url: String,
@@ -209,6 +315,7 @@ impl Audio {
         media: Media,
         play: bool,
         position: f64,
+        owner: Option<EntityId>,
         cx: &mut Context<Self>,
     ) {
         self.failed.remove(&url);
@@ -216,17 +323,22 @@ impl Audio {
         let local = self.local.get(&url).cloned();
         let task = cx.spawn(async move |this, cx| {
             let url = task_url;
-            let bytes = match local {
-                Some(bytes) => Ok(bytes),
-                None => media.fetch(&url).await,
+            let source = match (local, media.stream_url(&url)) {
+                (Some(bytes), _) => Ok(Source::Bytes(bytes)),
+                (None, Some(uri)) => Ok(Source::Uri(uri)),
+                (None, None) => media
+                    .fetch(&url)
+                    .await
+                    .map(Source::Bytes)
+                    .map_err(|error| error.to_string()),
             };
-            let engine = match bytes {
-                Ok(bytes) => {
+            let engine = match source {
+                Ok(source) => {
                     cx.background_executor()
-                        .spawn(async move { Engine::new(bytes, Kind::Audio) })
+                        .spawn(async move { Engine::new(source, Kind::Audio) })
                         .await
                 }
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(error),
             };
             let loaded = this.update(cx, |this, cx| this.loaded(&url, engine, cx));
             if !matches!(loaded, Ok(true)) {
@@ -243,6 +355,7 @@ impl Audio {
         self.track = Some(Track {
             url,
             voice,
+            owner,
             engine: None,
             playing: play,
             ended: false,
@@ -269,8 +382,9 @@ impl Audio {
                 if track.position > 0. {
                     engine.seek(track.position);
                 }
-                if track.playing {
-                    engine.play();
+                if track.playing && !engine.play() {
+                    track.playing = false;
+                    self.failed.insert(url.to_string());
                 }
                 track.engine = Some(engine);
                 true
@@ -293,6 +407,7 @@ impl Audio {
             return true;
         };
         let before = (track.playing, track.position);
+        let known = self.corrected.get(url).or(self.durations.get(url)).copied();
         for event in engine.poll() {
             match event {
                 Event::Ready => {}
@@ -305,10 +420,18 @@ impl Audio {
                         track.position = 0.;
                     } else {
                         track.ended = true;
-                        track.position = engine
-                            .duration()
-                            .or(self.durations.get(url).copied())
-                            .unwrap_or(track.position);
+                        // Where it really ended; a container that claimed a
+                        // little more is corrected (`onEnded`).
+                        let ended = finite_duration(engine.position()).unwrap_or(track.position);
+                        let gap = known.map(|known| known - ended);
+                        if !self.corrected.contains_key(url)
+                            && gap.is_some_and(|gap| gap > CORRECTION_MIN && gap <= CORRECTION_MAX)
+                        {
+                            self.corrected.insert(url.to_string(), ended);
+                            track.position = ended;
+                        } else {
+                            track.position = known.unwrap_or(ended);
+                        }
                     }
                 }
                 Event::Failed(_) => {
@@ -319,7 +442,7 @@ impl Audio {
                 }
             }
         }
-        if let Some(duration) = engine.duration() {
+        if let Some(duration) = finite_duration(engine.duration()) {
             self.durations.insert(url.to_string(), duration);
         }
         if track.playing
@@ -335,85 +458,119 @@ impl Audio {
 }
 
 /// An inline audio player (`AudioAttachment`): play button, elapsed time,
-/// seek bar and length in a pill.
+/// seek bar with a hover time and the length, in a pill. The length is
+/// read ahead when the sender gave none (`preload="metadata"`).
 pub fn audio_attachment(
     id: impl Into<ElementId>,
     attachment: &Attachment,
     media: &Media,
     cx: &App,
 ) -> AnyElement {
+    let (attachment, media) = (attachment.clone(), media.clone());
     let c = *cx.colors();
     let url = attachment.url.clone();
     let state = status(&url, attachment.duration, cx);
     if state.failed {
         return unavailable("Audio unavailable", &c).into_any_element();
     }
-    let label = |verb: &str| match &attachment.name {
-        Some(name) => format!("{verb} {name}"),
-        None => format!("{verb} audio"),
-    };
-    let (play_url, play_media) = (url.clone(), media.clone());
-    let seek_to: Option<OnSeek> = state.duration.map(|duration| {
-        let (url, media) = (url.clone(), media.clone());
-        Rc::new(move |fraction: f32, window: &mut Window, cx: &mut App| {
-            seek(&url, false, &media, fraction as f64 * duration, window, cx)
-        }) as OnSeek
-    });
-    let progress = progress(&state);
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .w(px(384.))
-        .max_w_full()
-        .mt(px(8.))
-        .px(px(8.))
-        .py(px(4.))
-        .border_1()
-        .border_color(c.border_standard)
-        .rounded(px(32.))
-        .bg(c.surface_inset)
-        .text_color(c.text_standard)
-        .child(
-            IconButton::new(
-                "play",
-                if state.playing {
-                    IconName::PauseFilled
-                } else {
-                    IconName::PlayFilled
-                },
+    let hover = cx
+        .try_global::<AudioGlobal>()
+        .and_then(|audio| audio.0.read(cx).hover.clone())
+        .filter(|(hovered, _)| *hovered == url)
+        .map(|(_, at)| at);
+    Lazy::new(id, move |window, cx| {
+        let owner = Some(window.current_view());
+        if state.duration.is_none() {
+            probe(&url, &media, cx);
+        }
+        let label = |verb: &str| match &attachment.name {
+            Some(name) => format!("{verb} {name}"),
+            None => format!("{verb} audio"),
+        };
+        let (play_url, play_media) = (url.clone(), media.clone());
+        let seek_to: Option<OnSeek> = state.duration.map(|duration| {
+            let (url, media) = (url.clone(), media.clone());
+            Rc::new(move |fraction: f32, _: &mut Window, cx: &mut App| {
+                seek(&url, false, &media, fraction as f64 * duration, owner, cx)
+            }) as OnSeek
+        });
+        let hover_url = url.clone();
+        let on_hover: OnHover = Rc::new(move |at, _, cx| {
+            let audio = audio(cx);
+            audio.update(cx, |audio, cx| {
+                let next = at.map(|at| (hover_url.clone(), at));
+                let ours = audio.hover.as_ref().is_some_and(|(u, _)| *u == hover_url);
+                if (next.is_some() || ours) && audio.hover != next {
+                    audio.hover = next;
+                    cx.notify();
+                }
+            });
+        });
+        let progress = progress(&state);
+        div()
+            .id("audio")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .w(px(384.))
+            .max_w_full()
+            .mt(px(8.))
+            .px(px(8.))
+            .py(px(4.))
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(px(32.))
+            .bg(c.surface_inset)
+            .text_color(c.text_standard)
+            .child(
+                IconButton::new(
+                    "play",
+                    if state.playing {
+                        IconName::PauseFilled
+                    } else {
+                        IconName::PlayFilled
+                    },
+                )
+                .size(IconButtonSize::Sm)
+                .tooltip(label(if state.playing { "Pause" } else { "Play" }))
+                .on_click(move |_, _, cx| toggle(&play_url, false, &play_media, owner, cx)),
             )
-            .size(IconButtonSize::Sm)
-            .tooltip(label(if state.playing { "Pause" } else { "Play" }))
-            .on_click(move |_, window, cx| toggle(&play_url, false, &play_media, window, cx)),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_caption()
-                .font_features(tabular())
-                .child(video_time(state.position)),
-        )
-        .child(
-            div()
-                .relative()
-                .flex_1()
-                .min_w(px(20.))
-                .h(px(32.))
-                .when(state.duration.is_none(), |this| this.opacity(0.4))
-                .child(track_line(progress, c.border_prominent, c.text_standard))
-                .child(seek_area("seek", seek_to)),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_caption()
-                .font_features(tabular())
-                .text_color(c.text_subtle)
-                .child(state.duration.map_or("—:—".into(), video_time)),
-        )
-        .into_any_element()
+            .child(
+                div()
+                    .flex_none()
+                    .text_caption()
+                    .font_features(tabular())
+                    .child(video_time(state.position)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w(px(20.))
+                    .h(px(32.))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .when(state.duration.is_none(), |this| this.opacity(0.4))
+                            .child(track_line(progress, c.border_prominent, c.text_standard)),
+                    )
+                    .child(seek_area_hover("seek", seek_to, on_hover))
+                    .when_some(hover.zip(state.duration), |d, (at, duration)| {
+                        d.child(hover_time(at, duration, &c))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_caption()
+                    .font_features(tabular())
+                    .text_color(c.text_subtle)
+                    .child(state.duration.map_or("—:—".into(), video_time)),
+            )
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// The voice note card (`VoiceNoteCard`): play button, waveform scrubber,
@@ -439,6 +596,11 @@ pub fn voice_draft(
     voice_card(id.into(), attachment, media, true, cx)
 }
 
+/// `floor((width + 2) / 5)` bars of 3px with 2px gaps, 1 to 64.
+fn bar_count(width: f32) -> usize {
+    (((width + 2.) / 5.).floor() as usize).clamp(1, MAX_BARS)
+}
+
 fn voice_card(
     id: ElementId,
     attachment: &Attachment,
@@ -450,159 +612,229 @@ fn voice_card(
     let url = attachment.url.clone();
     let state = status(&url, attachment.duration, cx);
     let duration = state.duration.unwrap_or(0.);
-    let heights = bar_heights(attachment.waveform.as_deref(), VOICE_BARS);
+    let width = cx
+        .try_global::<AudioGlobal>()
+        .and_then(|audio| audio.0.read(cx).widths.get(&id).copied());
+    let heights = bar_heights(
+        attachment.waveform.as_deref(),
+        width.map_or(DEFAULT_BARS, bar_count),
+    );
     let progress = progress(&state);
-    let (play_url, play_media) = (url.clone(), media.clone());
-    let seek_to: Option<OnSeek> = (duration > 0.).then(|| {
-        let (url, media) = (url.clone(), media.clone());
-        Rc::new(move |fraction: f32, window: &mut Window, cx: &mut App| {
-            seek(&url, true, &media, fraction as f64 * duration, window, cx)
-        }) as OnSeek
-    });
-    let bars = |color: Hsla| {
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .children(heights.iter().map(move |height| {
-                div()
-                    .flex_none()
-                    .w(px(3.))
-                    .h(px(*height))
-                    .rounded_full()
-                    .bg(color)
-            }))
-    };
-    let (icon, label) = if state.failed {
-        (IconName::WarningCircle, "Retry voice note")
-    } else if state.loading {
-        (IconName::CircleNotch, "Cancel loading voice note")
-    } else if state.playing {
-        (IconName::Pause, "Pause voice note")
-    } else {
-        (IconName::Play, "Play voice note")
-    };
-    let rate_url = url.clone();
-    let rate = state.rate;
-    div()
-        .id(id)
-        .group("voice-note")
-        .relative()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(10.))
-        .w(px(336.))
-        .max_w_full()
-        .my(px(4.))
-        .px(px(10.))
-        .py(px(8.))
-        .border_1()
-        .border_color(c.border_standard)
-        .rounded(px(16.))
-        .bg(c.surface_inset)
-        .hover(|s| {
-            s.border_color(c.border_prominent)
-                .bg(c.affordance_panel_hover)
-        })
-        .text_color(c.text_standard)
-        .child(
-            IconButton::new("play", icon)
-                .variant(ButtonVariant::Prominent)
-                .size(IconButtonSize::Sm)
-                .icon_size(18.)
-                .tooltip(label)
-                .on_click(move |_, window, cx| toggle(&play_url, true, &play_media, window, cx)),
-        )
-        .child(
+    let media = media.clone();
+    let key = id.clone();
+    Lazy::new(id, move |window, _| {
+        let owner = Some(window.current_view());
+        let (play_url, play_media) = (url.clone(), media.clone());
+        // Seeking needs the clip's metadata, read on the first play.
+        let seek_to: Option<OnSeek> = (duration > 0. && (state.measured || draft)).then(|| {
+            let (url, media) = (url.clone(), media.clone());
+            Rc::new(move |fraction: f32, _: &mut Window, cx: &mut App| {
+                seek(&url, true, &media, fraction as f64 * duration, owner, cx)
+            }) as OnSeek
+        });
+        let bars = |color: Hsla| {
             div()
-                .relative()
-                .flex_1()
-                .min_w_0()
-                .h(px(24.))
-                .overflow_hidden()
-                .child(bars(c.text_unavailable))
-                .child(
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .children(heights.iter().map(move |height| {
                     div()
+                        .flex_none()
+                        .w(px(3.))
+                        .h(px(*height))
+                        .rounded_full()
+                        .bg(color)
+                }))
+        };
+        let label = if state.failed {
+            "Retry voice note"
+        } else if state.loading {
+            "Cancel loading voice note"
+        } else if state.playing {
+            "Pause voice note"
+        } else {
+            "Play voice note"
+        };
+        let glyph = if state.failed {
+            Icon::new(IconName::WarningCircle)
+                .size(18.)
+                .into_any_element()
+        } else if state.loading {
+            svg()
+                .path(IconName::CircleNotch.path())
+                .flex_none()
+                .size(px(18.))
+                .text_color(c.text_inverse)
+                .with_animation(
+                    "voice-spinner",
+                    Animation::new(SPIN).repeat(),
+                    |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+                )
+                .into_any_element()
+        } else if state.playing {
+            Icon::new(IconName::Pause).size(20.).into_any_element()
+        } else {
+            Icon::new(IconName::Play).size(20.).into_any_element()
+        };
+        let rate_url = url.clone();
+        let rate = state.rate;
+        let measure_key = key.clone();
+        let inner_width = width.unwrap_or(210.);
+        div()
+            .id("voice-note")
+            .group("voice-note")
+            .relative()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(10.))
+            .w(px(336.))
+            .max_w_full()
+            .my(px(4.))
+            .px(px(10.))
+            .py(px(8.))
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(px(16.))
+            .bg(c.surface_inset)
+            .hover(|s| {
+                s.border_color(c.border_prominent)
+                    .bg(c.affordance_panel_hover)
+            })
+            .text_color(c.text_standard)
+            .child(
+                IconButton::new("play", IconName::Play)
+                    .variant(ButtonVariant::Prominent)
+                    .size(IconButtonSize::Sm)
+                    .child(glyph)
+                    .tooltip(label)
+                    .on_click(move |_, _, cx| toggle(&play_url, true, &play_media, owner, cx)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(24.))
+                    .overflow_hidden()
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                let width = f32::from(bounds.size.width);
+                                let audio = audio(cx);
+                                let known = audio.read(cx).widths.get(&measure_key).copied();
+                                if known != Some(width) {
+                                    let key = measure_key.clone();
+                                    audio.update(cx, |audio, cx| {
+                                        audio.widths.insert(key, width);
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
                         .absolute()
-                        .top_0()
-                        .left_0()
-                        .bottom_0()
-                        .w(relative(progress))
-                        .overflow_hidden()
-                        .child(
+                        .inset_0()
+                        .size_full(),
+                    )
+                    .child(bars(c.text_unavailable))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .bottom_0()
+                            .w(relative(progress))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .w(px(inner_width))
+                                    .child(bars(c.text_standard)),
+                            ),
+                    )
+                    .child(seek_area("seek", seek_to)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(48.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_caption()
+                            .font_features(tabular())
+                            .text_color(c.text_subtle)
+                            .when(!draft, |d| d.group_hover("voice-note", |s| s.opacity(0.)))
+                            .child(media_time(if state.playing {
+                                (duration - state.position).max(0.)
+                            } else {
+                                duration
+                            })),
+                    )
+                    .when(!draft, |d| {
+                        d.child(
                             div()
                                 .absolute()
                                 .inset_0()
-                                .w(px(210.))
-                                .child(bars(c.text_standard)),
-                        ),
-                )
-                .child(seek_area("seek", seek_to)),
-        )
-        .child(
-            div()
-                .relative()
-                .flex_none()
-                .w(px(48.))
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_caption()
-                        .font_features(tabular())
-                        .text_color(c.text_subtle)
-                        .when(!draft, |d| d.group_hover("voice-note", |s| s.opacity(0.)))
-                        .child(media_time(if state.playing {
-                            (duration - state.position).max(0.)
-                        } else {
-                            duration
-                        })),
-                )
-                .when(!draft, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .opacity(0.)
-                            .group_hover("voice-note", |s| s.opacity(1.))
-                            .child(
-                                Button::new(
-                                    "speed",
-                                    if rate == 0.5 {
-                                        ".5×".to_string()
-                                    } else {
-                                        format!("{rate}×")
-                                    },
-                                )
-                                .variant(ButtonVariant::Prominent)
-                                .size(ButtonSize::Xs)
-                                .full_width()
-                                .tooltip("Playback speed")
-                                .on_click(move |_, window, cx| {
-                                    audio(window, cx)
-                                        .update(cx, |audio, cx| audio.cycle_rate(&rate_url, cx))
-                                }),
-                            ),
-                    )
-                }),
-        )
-        .when(state.failed, |this| {
-            this.child(
-                div()
-                    .w_full()
-                    .text_caption()
-                    .text_color(c.text_danger)
-                    .child("Audio unavailable. Retry playback."),
+                                .flex()
+                                .items_center()
+                                .opacity(0.)
+                                .group_hover("voice-note", |s| s.opacity(1.))
+                                .child(
+                                    Button::new(
+                                        "speed",
+                                        if rate == 0.5 {
+                                            ".5×".to_string()
+                                        } else {
+                                            format!("{rate}×")
+                                        },
+                                    )
+                                    .variant(ButtonVariant::Prominent)
+                                    .size(ButtonSize::Xs)
+                                    .full_width()
+                                    .tooltip(format!(
+                                        "Playback speed {rate} times; change to {} times",
+                                        next_rate(rate)
+                                    ))
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            audio(cx).update(cx, |audio, cx| {
+                                                audio.cycle_rate(&rate_url, cx)
+                                            })
+                                        },
+                                    ),
+                                ),
+                        )
+                    }),
             )
-        })
-        .into_any_element()
+            .when(state.failed, |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_caption()
+                        .text_color(c.text_danger)
+                        .child("Audio unavailable. Retry playback."),
+                )
+            })
+            .into_any_element()
+    })
+    .into_any_element()
+}
+
+/// `nextVoiceNotePlaybackRate`.
+fn next_rate(rate: f64) -> f64 {
+    VOICE_RATES
+        .iter()
+        .position(|r| *r == rate)
+        .map_or(1., |i| VOICE_RATES[(i + 1) % VOICE_RATES.len()])
 }
 
 fn progress(state: &Status) -> f32 {
@@ -678,6 +910,7 @@ fn bar_heights(waveform: Option<&[u8]>, count: usize) -> Vec<f32> {
     let Some(samples) = waveform.filter(|w| !w.is_empty()) else {
         return vec![3.; count];
     };
+    let samples = &samples[..samples.len().min(100)];
     let peaks: Vec<f32> = (0..count)
         .map(|index| {
             let start = index * samples.len() / count;
@@ -714,5 +947,19 @@ mod tests {
         // Fewer samples than bars repeat them; more are max-pooled.
         assert_eq!(bar_heights(Some(&[100]), 3), vec![20.; 3]);
         assert_eq!(bar_heights(Some(&[10, 100, 0, 0]), 2), vec![20., 3.]);
+    }
+
+    #[test]
+    fn fits_bars_to_the_track() {
+        assert_eq!(bar_count(208.), 42);
+        assert_eq!(bar_count(0.), 1);
+        assert_eq!(bar_count(1_000.), MAX_BARS);
+    }
+
+    #[test]
+    fn cycles_voice_speeds() {
+        assert_eq!(next_rate(1.), 1.5);
+        assert_eq!(next_rate(0.5), 1.);
+        assert_eq!(next_rate(3.), 1.);
     }
 }

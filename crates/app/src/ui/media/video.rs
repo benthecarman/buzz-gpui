@@ -1,32 +1,136 @@
-//! Video: the inline preview (`MediaAttachment.tsx`, ui.md §4.7) and the
-//! player inside the media viewer (`VideoPlayer.tsx`).
+//! Video: the inline preview (`MediaAttachment.tsx`) and the player in the
+//! media viewer (`VideoPlayer.tsx`). One [`VideoPlayer`] serves both. The
+//! inline one shows its poster and loads only when played, with the media
+//! glass controls over the picture; the viewer's autoplays, with gestures
+//! on the picture and the controls in a bar below it.
 
-use super::engine::{self, Engine, Event, Kind};
-use super::seek::{OnSeek, seek_area};
-use super::{Lazy, Remote, render_image, tabular, video_time};
-use crate::ui::overlay::{self, Align};
-use buzz_relay_client::Media;
+use super::engine::{self, Engine, Event, Kind, Source};
+use super::{Lazy, Remote, render_image, tabular};
+use crate::community::AppState;
 use buzz_relay_client::fold::Attachment;
+use buzz_relay_client::{EventId, Media};
 use buzz_ui::{
-    ActiveTheme, Button, ButtonSize, ButtonVariant, IconButton, IconButtonSize, IconName, Menu,
-    MenuItem, TypeStyled,
+    ActiveTheme, Appearance, ButtonVariant, Icon, IconButton, IconButtonSize, IconName, ThemeScope,
+    TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Frame polling while the viewer is open.
+/// Frame polling while a player is loaded.
 const TICK: Duration = Duration::from_millis(16);
 /// Speeds the menu offers, fastest first (`speeds`).
-const SPEEDS: [f64; 8] = [2., 1.75, 1.5, 1.25, 1., 0.75, 0.5, 0.25];
-/// Arrow keys skip this far (`seekVideoBy`).
+pub(super) const SPEEDS: [f64; 8] = [2., 1.75, 1.5, 1.25, 1., 0.75, 0.5, 0.25];
+/// The device preference holding the chosen speed (`speedKey`).
+const SPEED_KEY: &str = "buzz.video.playback-speed";
+/// Arrow keys and double clicks skip this far (`seekVideoBy`).
 pub const SKIP_SECONDS: f64 = 10.;
+/// Pointer stillness before playing controls hide (`useMediaControls`).
+pub const IDLE: Duration = Duration::from_millis(2200);
+/// How long a gesture badge shows (`video-feedback-*`).
+const FEEDBACK: Duration = Duration::from_millis(650);
+/// A click toggles playback only once no double click follows.
+const CLICK_DELAY: Duration = Duration::from_millis(250);
+/// Holding the right half this long plays at 2x until release.
+const HOLD_DELAY: Duration = Duration::from_millis(350);
+/// Controls fade in and out over this (`160ms ease-out`).
+const CONTROLS_FADE: Duration = Duration::from_millis(160);
+/// The longest length believed (`MAX_ATTACHMENT_DURATION_SECONDS`).
+pub const MAX_DURATION: f64 = 86_400.;
+/// Viewer players narrower than this put the timeline on its own row
+/// (`@container video-player (max-width: 25rem)`).
+const NARROW_PLAYER: f32 = 400.;
+/// Inline controls drop the length and their vertical padding at this
+/// preview width (`@container media-preview (max-width: 22rem)`).
+const NARROW_PREVIEW: f32 = 352.;
+
+/// A length worth showing: finite, positive and at most a day.
+pub fn finite_duration(seconds: Option<f64>) -> Option<f64> {
+    seconds.filter(|s| s.is_finite() && *s > 0. && *s <= MAX_DURATION)
+}
+
+/// The chosen speed, shared by every player (`buzz:video-playback-speed`).
+struct Speed(f64);
+
+impl Global for Speed {}
+
+/// The saved playback speed (`savedSpeed`), 1 when unset or unknown.
+pub fn playback_speed(cx: &mut App) -> f64 {
+    if let Some(speed) = cx.try_global::<Speed>() {
+        return speed.0;
+    }
+    let saved = cx
+        .try_global::<AppState>()
+        .and_then(|state| state.store.device_pref(SPEED_KEY).ok().flatten())
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| SPEEDS.contains(value))
+        .unwrap_or(1.);
+    cx.set_global(Speed(saved));
+    saved
+}
+
+/// Saves `speed` and hands it to every open player.
+pub(super) fn set_playback_speed(speed: f64, cx: &mut App) {
+    cx.set_global(Speed(speed));
+    if let Some(state) = cx.try_global::<AppState>()
+        && let Err(error) = state.store.set_device_pref(SPEED_KEY, &speed.to_string())
+    {
+        tracing::warn!(%error, "could not save the playback speed");
+    }
+    cx.refresh_windows();
+}
+
+fn current_speed(cx: &App) -> f64 {
+    cx.try_global::<Speed>().map_or(1., |speed| speed.0)
+}
+
+/// Where a player reads its video.
+#[derive(Clone)]
+pub enum Clip {
+    /// An attachment, streamed from the relay or fetched whole.
+    Remote {
+        attachment: Attachment,
+        media: Media,
+    },
+    /// A file on this computer: a composer draft.
+    Local(PathBuf),
+}
+
+impl Clip {
+    /// A signed poster the sender attached.
+    fn poster(&self) -> Option<ImageSource> {
+        match self {
+            Self::Remote { attachment, media } => attachment
+                .preview_url
+                .as_ref()
+                .map(|url| super::image(url, media)),
+            Self::Local(_) => None,
+        }
+    }
+
+    /// The stream for HTTPS relay media; the whole body for anything else.
+    async fn source(self) -> Result<Source, String> {
+        match self {
+            Self::Remote { attachment, media } => match media.stream_url(&attachment.url) {
+                Some(uri) => Ok(Source::Uri(uri)),
+                None => media
+                    .fetch(&attachment.url)
+                    .await
+                    .map(Source::Bytes)
+                    .map_err(|error| error.to_string()),
+            },
+            Self::Local(path) => Source::file(&path),
+        }
+    }
+}
 
 /// A video's first frame and length, decoded once per URL for previews
-/// that have no signed poster.
+/// without a signed poster or size. Streamed media is probed with ranged
+/// reads, so only the start (and the index) is fetched.
 struct Probed {
     poster: Option<Arc<RenderImage>>,
     size: Option<Size<f32>>,
@@ -42,14 +146,19 @@ impl Asset for VideoProbe {
     #[allow(clippy::manual_async_fn)]
     fn load(source: Remote, _: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
         async move {
-            let bytes = source
-                .media
-                .fetch(&source.url)
-                .await
-                .map_err(|error| SharedString::from(error.to_string()))?;
+            let source = match source.media.stream_url(&source.url) {
+                Some(uri) => Source::Uri(uri),
+                None => Source::Bytes(
+                    source
+                        .media
+                        .fetch(&source.url)
+                        .await
+                        .map_err(|error| SharedString::from(error.to_string()))?,
+                ),
+            };
             let (sender, receiver) = futures::channel::oneshot::channel();
             std::thread::spawn(move || {
-                let _ = sender.send(engine::probe(bytes));
+                let _ = sender.send(engine::probe_source(source, Kind::Poster));
             });
             let probe = receiver
                 .await
@@ -69,25 +178,40 @@ impl Asset for VideoProbe {
     }
 }
 
-/// Opens the media viewer on a video.
-pub type OpenReview = Rc<dyn Fn(&mut Window, &mut App)>;
+/// Opens the viewer from an inline preview at a time, handing it the
+/// preview so the viewer's position comes back to it.
+pub type OpenReview = Rc<dyn Fn(f64, WeakEntity<VideoPlayer>, &mut Window, &mut App)>;
 
-/// The inline video preview: poster, centred play button, an expand
-/// button on hover and the length in a chip. Playing opens the viewer.
+/// The inline video preview (`MediaAttachment`, `data-video-preview`):
+/// `min(24rem, 100%, ratio × 11.25rem)` wide, 16px corners, a centred play
+/// button, media glass controls and an expand button that opens the
+/// viewer at the current time. `seek` asks it to play from a time (a
+/// thread's time chip); a new request number seeks again.
 pub fn video_preview(
     id: impl Into<ElementId>,
     attachment: &Attachment,
     media: &Media,
+    seek: Option<(f64, u64)>,
     open: OpenReview,
 ) -> impl IntoElement {
     let attachment = attachment.clone();
     let media = media.clone();
     Lazy::new(id, move |window, cx| {
         let c = *cx.colors();
+        let clip = Clip::Remote {
+            attachment: attachment.clone(),
+            media: media.clone(),
+        };
+        // A chip seek made before this preview existed is not replayed.
+        let player = window.use_keyed_state("player", cx, |_, cx| {
+            let mut player = VideoPlayer::new(clip, Mode::Inline, 0., cx);
+            player.applied_seek = seek.map(|(_, request)| request);
+            player
+        });
         let dims = attachment
             .dimensions
             .map(|d| size(d.width as f32, d.height as f32));
-        let probed =
+        let probe =
             (attachment.preview_url.is_none() || dims.is_none() || attachment.duration.is_none())
                 .then(|| {
                     let remote = Remote {
@@ -97,91 +221,47 @@ pub fn video_preview(
                     };
                     window.use_asset::<VideoProbe>(&remote, cx)
                 })
-                .flatten()
-                .and_then(Result::ok);
-        let natural = dims.or(probed.as_ref().and_then(|p| p.size));
+                .flatten();
+        let (probed, probe_failed) = match probe {
+            Some(Ok(probed)) => (Some(probed), false),
+            Some(Err(_)) => (None, true),
+            None => (None, false),
+        };
+        let measured = player.read(cx).natural;
+        let natural = dims.or(probed.as_ref().and_then(|p| p.size)).or(measured);
+        let duration = finite_duration(attachment.duration)
+            .or(probed.as_ref().and_then(|p| finite_duration(p.duration)));
+        let poster = probed.as_ref().and_then(|p| p.poster.clone());
+        let failed = player.update(cx, |player, _| {
+            player.hint_duration = duration;
+            player.captured = poster.map(ImageSource::from);
+            player.open = Some(open.clone());
+            if let Some((seconds, request)) = seek {
+                player.request_seek(seconds, request);
+            }
+            player.failed()
+        });
+        // A failed probe means the file cannot play either.
+        if failed || (probe_failed && attachment.preview_url.is_none()) {
+            return unavailable("Video unavailable", &c).into_any_element();
+        }
         let ratio = natural
             .filter(|s| s.width > 0. && s.height > 0.)
             .map_or(16. / 9., |s| s.width / s.height);
-        // `min(24rem, 100%, ratio × 11.25rem)`, height from the ratio.
         let width = (ratio * 180.).min(384.);
-        let duration = attachment
-            .duration
-            .or(probed.as_ref().and_then(|p| p.duration));
-        let poster: Option<ImageSource> = match &attachment.preview_url {
-            Some(url) => Some(super::image(url, &media)),
-            None => probed
-                .as_ref()
-                .and_then(|p| p.poster.clone())
-                .map(ImageSource::from),
-        };
-        let open_click = open.clone();
         div()
-            .id("video")
-            .group("video-preview")
             .relative()
             .w(px(width))
             .h(px(width / ratio))
             .max_w_full()
+            .max_h(px(256.))
             .my(px(4.))
             .rounded(px(16.))
             .overflow_hidden()
             .bg(c.surface_inverse)
-            .cursor_pointer()
-            .on_click(move |_, window, cx| open_click(window, cx))
-            .when_some(poster, |this, poster| {
-                this.child(
-                    img(poster)
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
-            })
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        IconButton::new("play", IconName::PlayFilled)
-                            .variant(ButtonVariant::Media)
-                            .size(IconButtonSize::Md)
-                            .tooltip("Play video"),
-                    ),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(8.))
-                    .right(px(8.))
-                    .opacity(0.)
-                    .group_hover("video-preview", |s| s.opacity(1.))
-                    .child(
-                        IconButton::new("expand", IconName::ArrowsOut)
-                            .variant(ButtonVariant::Media)
-                            .size(IconButtonSize::Sm)
-                            .tooltip("Open video fullscreen"),
-                    ),
-            )
-            .when_some(duration, |this, duration| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(12.))
-                        .bottom(px(12.))
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded_full()
-                        .bg(c.surface_inverse)
-                        .text_color(c.text_inverse)
-                        .text_caption()
-                        .font_features(tabular())
-                        .child(video_time(duration)),
-                )
-            })
+            .child(super::review::track_tile(&attachment.url))
+            // The pixels and their controls are always dark (`.mediaPreviewPixels.dark`).
+            .child(ThemeScope::new(Appearance::Dark, move |_, _| player))
             .child(
                 div()
                     .absolute()
@@ -194,54 +274,263 @@ pub fn video_preview(
     })
 }
 
+/// `.attachmentUnavailable`: a quiet bordered note in place of the media.
+pub(super) fn unavailable(text: &'static str, c: &buzz_ui::Colors) -> Div {
+    div().flex().child(
+        div()
+            .mt(px(8.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(px(12.))
+            .bg(c.affordance_subtle)
+            .text_body_sm()
+            .text_color(c.text_standard)
+            .child(text),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// In a message row.
+    Inline,
+    /// In the media viewer, or a draft's preview dialog.
+    Review,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
+    /// Inline, before the first play: only the poster.
+    Idle,
     Loading,
     Ready,
     Failed,
 }
 
-/// The viewer's video player (`VideoPlayer`): decoded frames, then a
-/// media-glass control bar with play, volume, time, seek bar, length,
-/// speed and an expand toggle that gives the video the whole window.
+/// Which hover popup of the controls is open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Popup {
+    Volume,
+    Speed,
+}
+
+/// A gesture's transient badge (`useVideoGestures` feedback).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gesture {
+    Play,
+    Pause,
+    Forward,
+    Backward,
+    /// Held while the right half is pressed.
+    Speed,
+}
+
+/// A timecoded comment on the timeline (`VideoMarker`).
+#[derive(Clone)]
+pub struct Marker {
+    pub id: EventId,
+    pub seconds: f64,
+    pub label: String,
+    pub author: SharedString,
+    pub picture: Option<ImageSource>,
+    pub text: String,
+}
+
+/// Called when a marker is clicked, after the player seeks to it.
+pub type OnMarker = Rc<dyn Fn(EventId, &mut Window, &mut App)>;
+/// Extra chrome in the viewer's control bar: the reactions.
+pub type Chrome = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
+/// An opacity easing toward shown or hidden.
+pub(super) struct Fade {
+    shown: bool,
+    from: f32,
+    changed: Option<Instant>,
+}
+
+impl Fade {
+    pub(super) fn new(shown: bool) -> Self {
+        Self {
+            shown,
+            from: if shown { 1. } else { 0. },
+            changed: None,
+        }
+    }
+
+    /// The current opacity, and whether it still moves.
+    pub(super) fn level(&mut self, shown: bool, duration: Duration, instant: bool) -> (f32, bool) {
+        if shown != self.shown {
+            self.from = self.value(duration);
+            self.shown = shown;
+            self.changed = Some(Instant::now());
+        }
+        if instant {
+            self.changed = None;
+        }
+        let value = self.value(duration);
+        let target = if self.shown { 1. } else { 0. };
+        (value, (value - target).abs() > f32::EPSILON)
+    }
+
+    fn value(&self, duration: Duration) -> f32 {
+        let target = if self.shown { 1. } else { 0. };
+        let Some(changed) = self.changed else {
+            return target;
+        };
+        let t = (changed.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.);
+        let eased = 1. - (1. - t) * (1. - t);
+        self.from + (target - self.from) * eased
+    }
+}
+
+/// A click waiting to see whether a double click follows.
+struct PendingClick {
+    at: Instant,
+    was_paused: bool,
+    committed: bool,
+}
+
+/// A press on the right half that may become a 2x hold.
+struct Hold {
+    at: Instant,
+    /// Set once the hold took effect: the playing state to restore.
+    held: Option<bool>,
+}
+
 pub struct VideoPlayer {
-    attachment: Attachment,
-    media: Media,
+    pub(super) clip: Clip,
+    pub(super) mode: Mode,
     engine: Option<Engine>,
-    bytes: Option<Arc<[u8]>>,
     state: State,
-    playing: bool,
+    started: bool,
+    pub(super) playing: bool,
     ended: bool,
-    position: f64,
-    duration: Option<f64>,
-    volume: f32,
-    muted: bool,
-    rate: f64,
-    speed_menu: bool,
-    pub expanded: bool,
+    pub(super) position: f64,
+    pub(super) duration: Option<f64>,
+    /// The sender's or the probe's length, until the engine knows.
+    hint_duration: Option<f64>,
+    pub(super) volume: f32,
+    pub(super) muted: bool,
+    /// The volume slider animates only after a mute click.
+    pub(super) volume_motion: bool,
+    pub(super) popup: Option<Popup>,
+    pub(super) popup_hovered: bool,
+    /// "Playback paused. Press play to try again."
+    pub(super) notice: Option<SharedString>,
     frame: Option<Arc<RenderImage>>,
+    /// The size of the decoded frames.
+    natural: Option<Size<f32>>,
     /// Frames replaced since the last draw, to free from the atlas.
     retired: Vec<Arc<RenderImage>>,
+    /// A first frame decoded for the inline poster.
+    captured: Option<ImageSource>,
     /// The player's bounds as last drawn.
-    bounds: Rc<Cell<Bounds<Pixels>>>,
-    _task: Task<()>,
+    pub(super) bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The timeline position under the mouse.
+    pub(super) hover: Option<f32>,
+    /// Last pointer activity over the player; `None` once it left.
+    activity: Option<Instant>,
+    pub(super) feedback: Option<(Gesture, Instant)>,
+    click: Option<PendingClick>,
+    hold: Option<Hold>,
+    /// The time to start from once loaded.
+    start_at: f64,
+    applied_seek: Option<u64>,
+    pub(super) markers: Vec<Marker>,
+    pub(super) on_marker: Option<OnMarker>,
+    pub(super) chrome: Option<Chrome>,
+    /// The inline preview's opener, from its row.
+    open: Option<OpenReview>,
+    pub(super) timeline_focus: FocusHandle,
+    pub(super) volume_focus: FocusHandle,
+    pub(super) controls_fade: Fade,
+    center_fade: Fade,
+    expand_fade: Fade,
+    _task: Option<Task<()>>,
 }
 
 impl VideoPlayer {
-    pub fn new(attachment: Attachment, media: Media, cx: &mut Context<Self>) -> Self {
-        let (url, fetch_media) = (attachment.url.clone(), media.clone());
-        let task = cx.spawn(async move |this, cx| {
-            let loaded = match fetch_media.fetch(&url).await {
-                Ok(bytes) => {
-                    let decoder = bytes.clone();
+    /// A player at `start` seconds. The viewer's loads and autoplays now;
+    /// an inline one waits for play.
+    pub fn new(clip: Clip, mode: Mode, start: f64, cx: &mut Context<Self>) -> Self {
+        playback_speed(cx);
+        let mut player = Self {
+            clip,
+            mode,
+            engine: None,
+            state: State::Idle,
+            started: false,
+            playing: false,
+            ended: false,
+            position: start.max(0.),
+            duration: None,
+            hint_duration: None,
+            volume: 1.,
+            muted: false,
+            volume_motion: false,
+            popup: None,
+            popup_hovered: false,
+            notice: None,
+            frame: None,
+            natural: None,
+            retired: Vec::new(),
+            captured: None,
+            bounds: Rc::default(),
+            hover: None,
+            activity: Some(Instant::now()),
+            feedback: None,
+            click: None,
+            hold: None,
+            start_at: start.max(0.),
+            applied_seek: None,
+            markers: Vec::new(),
+            on_marker: None,
+            chrome: None,
+            open: None,
+            timeline_focus: cx.focus_handle(),
+            volume_focus: cx.focus_handle(),
+            controls_fade: Fade::new(mode == Mode::Review),
+            center_fade: Fade::new(true),
+            expand_fade: Fade::new(false),
+            _task: None,
+        };
+        if mode == Mode::Inline {
+            player.activity = None;
+        } else {
+            // `autoPlay`.
+            player.playing = true;
+            player.load(cx);
+        }
+        player
+    }
+
+    pub(super) fn failed(&self) -> bool {
+        self.state == State::Failed
+    }
+
+    pub(super) fn loading(&self) -> bool {
+        matches!(self.state, State::Loading) && self.frame.is_none()
+    }
+
+    /// Starts the pipeline; it plays once loaded if `playing` is set.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        if self.state != State::Idle {
+            return;
+        }
+        self.state = State::Loading;
+        let clip = self.clip.clone();
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let engine = match clip.source().await {
+                Ok(source) => {
                     cx.background_executor()
-                        .spawn(async move { Engine::new(decoder, Kind::Video) })
+                        .spawn(async move { Engine::new(source, Kind::Video) })
                         .await
-                        .map(|engine| (engine, bytes))
                 }
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(error),
             };
             if !matches!(
-                this.update(cx, |this, cx| this.loaded(loaded, cx)),
+                this.update(cx, |this, cx| this.loaded(engine, cx)),
                 Ok(true)
             ) {
                 return;
@@ -252,41 +541,23 @@ impl VideoPlayer {
                     break;
                 }
             }
-        });
-        Self {
-            attachment,
-            media,
-            engine: None,
-            bytes: None,
-            state: State::Loading,
-            playing: true,
-            ended: false,
-            position: 0.,
-            duration: None,
-            volume: 1.,
-            muted: false,
-            rate: 1.,
-            speed_menu: false,
-            expanded: false,
-            frame: None,
-            retired: Vec::new(),
-            bounds: Rc::default(),
-            _task: task,
-        }
+        }));
     }
 
-    fn loaded(
-        &mut self,
-        loaded: Result<(Engine, Arc<[u8]>), String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn loaded(&mut self, engine: Result<Engine, String>, cx: &mut Context<Self>) -> bool {
         cx.notify();
-        match loaded {
-            Ok((engine, bytes)) => {
-                // `autoPlay`.
-                engine.play();
+        match engine {
+            Ok(mut engine) => {
+                engine.set_volume(self.volume as f64);
+                engine.set_muted(self.muted);
+                engine.set_rate(current_speed(cx));
+                if self.start_at > 0. {
+                    engine.seek(self.start_at);
+                }
+                if self.playing && !engine.play() {
+                    self.refused();
+                }
                 self.engine = Some(engine);
-                self.bytes = Some(bytes);
                 true
             }
             Err(error) => {
@@ -297,11 +568,22 @@ impl VideoPlayer {
         }
     }
 
+    fn refused(&mut self) {
+        self.playing = false;
+        self.notice = Some("Playback paused. Press play to try again.".into());
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
+        let mut changed = self.timers(cx);
+        let held = self.hold.as_ref().is_some_and(|hold| hold.held.is_some());
+        let speed = if held { 2. } else { current_speed(cx) };
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
-        let mut changed = false;
+        if engine.rate() != speed {
+            engine.set_rate(speed);
+            changed = true;
+        }
         for event in engine.poll() {
             changed = true;
             match event {
@@ -310,6 +592,9 @@ impl VideoPlayer {
                     self.playing = false;
                     self.ended = true;
                     engine.pause();
+                    if let Some(duration) = self.duration {
+                        self.position = duration;
+                    }
                 }
                 Event::Failed(_) => {
                     self.state = State::Failed;
@@ -322,13 +607,15 @@ impl VideoPlayer {
         if let Some(frame) = engine.take_frame()
             && let Some(image) = render_image(frame.width, frame.height, frame.bgra)
         {
+            self.natural = Some(size(frame.width as f32, frame.height as f32));
             self.retired.extend(self.frame.replace(image));
             changed = true;
         }
         if self.duration.is_none() {
-            self.duration = engine.duration();
+            self.duration = finite_duration(engine.duration());
         }
-        if let Some(position) = engine.position()
+        if self.playing
+            && let Some(position) = engine.position()
             && (position - self.position).abs() > 0.01
             && !self.ended
         {
@@ -340,38 +627,99 @@ impl VideoPlayer {
         }
     }
 
+    /// Gesture and idle deadlines; `true` when something changed.
+    fn timers(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        if let Some(click) = self.click.as_mut()
+            && !click.committed
+            && click.at.elapsed() >= CLICK_DELAY
+        {
+            click.committed = true;
+            self.toggle(cx);
+            changed = true;
+        }
+        if let Some(hold) = self.hold.as_mut()
+            && hold.held.is_none()
+            && hold.at.elapsed() >= HOLD_DELAY
+        {
+            hold.held = Some(self.playing);
+            self.click = None;
+            self.feedback = Some((Gesture::Speed, Instant::now()));
+            if !self.playing {
+                self.play(cx);
+            }
+            changed = true;
+        }
+        if self
+            .feedback
+            .is_some_and(|(kind, at)| kind != Gesture::Speed && at.elapsed() >= FEEDBACK)
+        {
+            self.feedback = None;
+            changed = true;
+        }
+        if self
+            .activity
+            .is_some_and(|at| at.elapsed() >= IDLE && at.elapsed() < IDLE + TICK * 2)
+        {
+            changed = true;
+        }
+        changed
+    }
+
     /// Seconds into the video, for comments at the current frame.
     pub fn position(&self) -> f64 {
         self.position
     }
 
-    pub fn toggle(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.engine.as_mut() else {
-            return;
-        };
-        if self.playing {
-            engine.pause();
-        } else {
-            if self.ended {
-                engine.seek(0.);
-                self.position = 0.;
-                self.ended = false;
+    pub fn duration(&self) -> Option<f64> {
+        self.duration.or(self.hint_duration)
+    }
+
+    pub fn play(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
+        self.started = true;
+        self.playing = true;
+        match self.engine.as_mut() {
+            None => self.load(cx),
+            Some(engine) => {
+                if self.ended {
+                    engine.seek(0.);
+                    self.position = 0.;
+                    self.ended = false;
+                }
+                if !engine.play() {
+                    self.refused();
+                }
             }
-            engine.play();
         }
-        self.playing = !self.playing;
         cx.notify();
     }
 
+    pub fn pause(&mut self, cx: &mut Context<Self>) {
+        self.playing = false;
+        if let Some(engine) = &self.engine {
+            engine.pause();
+        }
+        cx.notify();
+    }
+
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        if self.playing {
+            self.pause(cx);
+        } else {
+            self.play(cx);
+        }
+    }
+
     pub fn seek_to(&mut self, seconds: f64, cx: &mut Context<Self>) {
-        let Some(engine) = self.engine.as_mut() else {
-            return;
-        };
-        let seconds = match self.duration {
+        let seconds = match self.duration() {
             Some(duration) => seconds.clamp(0., duration),
             None => seconds.max(0.),
         };
-        engine.seek(seconds);
+        match self.engine.as_mut() {
+            Some(engine) => engine.seek(seconds),
+            None => self.start_at = seconds,
+        }
         self.position = seconds;
         self.ended = false;
         cx.notify();
@@ -381,9 +729,54 @@ impl VideoPlayer {
         self.seek_to(self.position + delta, cx);
     }
 
-    fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
+    /// Seeks and plays (a time chip, a marker click).
+    pub fn play_from(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        self.seek_to(seconds, cx);
+        self.play(cx);
+    }
+
+    /// Plays from a thread's time chip, once per request number
+    /// (`useVideoPosition`).
+    fn request_seek(&mut self, seconds: f64, request: u64) {
+        if self.applied_seek == Some(request) {
+            return;
+        }
+        self.applied_seek = Some(request);
+        self.start_at = seconds.max(0.);
+        self.position = self.start_at;
+        self.ended = false;
+        self.started = true;
+        self.playing = true;
+        self.notice = None;
+        if let Some(engine) = self.engine.as_mut() {
+            engine.seek(self.start_at);
+            if !engine.play() {
+                self.refused();
+            }
+        }
+        // Loading needs the context; the next tick of the row starts it.
+    }
+
+    /// The viewer's position, handed back to the inline preview it came
+    /// from (`onTime`).
+    pub fn follow(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        if (seconds - self.position).abs() < 0.01 {
+            return;
+        }
+        if let Some(engine) = self.engine.as_mut() {
+            engine.seek(seconds);
+        } else {
+            self.start_at = seconds;
+        }
+        self.position = seconds;
+        self.ended = false;
+        cx.notify();
+    }
+
+    pub(super) fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         self.volume = volume.clamp(0., 1.);
         self.muted = false;
+        self.volume_motion = false;
         if let Some(engine) = &self.engine {
             engine.set_volume(self.volume as f64);
             engine.set_muted(false);
@@ -391,15 +784,13 @@ impl VideoPlayer {
         cx.notify();
     }
 
-    fn toggle_mute(&mut self, cx: &mut Context<Self>) {
-        if self.muted || self.volume == 0. {
-            self.muted = false;
-            if self.volume == 0. {
-                self.volume = 1.;
-            }
-        } else {
-            self.muted = true;
+    pub(super) fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        let silent = self.muted || self.volume == 0.;
+        self.muted = !silent;
+        if !self.muted && self.volume == 0. {
+            self.volume = 1.;
         }
+        self.volume_motion = true;
         if let Some(engine) = &self.engine {
             engine.set_volume(self.volume as f64);
             engine.set_muted(self.muted);
@@ -407,228 +798,566 @@ impl VideoPlayer {
         cx.notify();
     }
 
-    fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
-        self.rate = rate;
-        self.speed_menu = false;
+    pub(super) fn set_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
+        self.popup = None;
+        set_playback_speed(speed, cx);
         if let Some(engine) = self.engine.as_mut() {
-            engine.set_rate(rate);
+            engine.set_rate(speed);
         }
         cx.notify();
     }
 
-    /// Every frame still held, for the closing viewer to free.
+    /// The pointer moved over the player, or pressed or scrolled in it.
+    pub(super) fn active(&mut self, cx: &mut Context<Self>) {
+        let was_idle = self.idle();
+        self.activity = Some(Instant::now());
+        if was_idle {
+            cx.notify();
+        }
+    }
+
+    fn left(&mut self, cx: &mut Context<Self>) {
+        self.activity = None;
+        self.hover = None;
+        self.end_hold(cx);
+        cx.notify();
+    }
+
+    /// No pointer over the player, or still for [`IDLE`].
+    fn idle(&self) -> bool {
+        self.activity.is_none_or(|at| at.elapsed() >= IDLE)
+    }
+
+    /// Shows or schedules closing a hover popup (`openOnHover`, 100ms).
+    pub(super) fn hover_popup(&mut self, popup: Popup, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.popup = Some(popup);
+            self.popup_hovered = true;
+            cx.notify();
+            return;
+        }
+        self.popup_hovered = false;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.popup_hovered && this.popup == Some(popup) {
+                    this.popup = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Every frame still held, for a closing viewer to free.
     pub fn take_frames(&mut self) -> Vec<Arc<RenderImage>> {
         let mut frames = std::mem::take(&mut self.retired);
         frames.extend(self.frame.take());
         frames
     }
 
-    pub fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
-        self.expanded = !self.expanded;
+    /// The picture's aspect ratio once known.
+    pub fn natural(&self) -> Option<Size<f32>> {
+        self.natural
+    }
+
+    /// The last decoded frame, for the viewer's shared-element motion.
+    pub fn frame(&self) -> Option<Arc<RenderImage>> {
+        self.frame.clone()
+    }
+
+    pub fn set_markers(&mut self, markers: Vec<Marker>, on_marker: OnMarker) {
+        self.markers = markers;
+        self.on_marker = Some(on_marker);
+    }
+
+    pub fn set_chrome(&mut self, chrome: Option<Chrome>) {
+        self.chrome = chrome;
+    }
+
+    /// A press on the picture: the right half may become a 2x hold.
+    fn press(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.click = self.click.take().filter(|click| !click.committed);
+        self.end_hold(cx);
+        let bounds = self.bounds.get();
+        if position.x >= bounds.center().x {
+            self.hold = Some(Hold {
+                at: Instant::now(),
+                held: None,
+            });
+        }
+    }
+
+    fn end_hold(&mut self, cx: &mut Context<Self>) {
+        let Some(hold) = self.hold.take() else {
+            return;
+        };
+        if let Some(was_playing) = hold.held {
+            if self
+                .feedback
+                .is_some_and(|(kind, _)| kind == Gesture::Speed)
+            {
+                self.feedback = None;
+            }
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_rate(current_speed(cx));
+            }
+            if !was_playing {
+                self.pause(cx);
+            }
+            // The release that ends a hold is not a click.
+            self.click = Some(PendingClick {
+                at: Instant::now(),
+                was_paused: true,
+                committed: true,
+            });
+            cx.notify();
+        }
+    }
+
+    /// A click on the picture: the badge shows now, playback toggles once
+    /// no double click follows; a double click seeks by the half it hit.
+    fn picture_click(&mut self, event: &ClickEvent, cx: &mut Context<Self>) {
+        let held = self
+            .click
+            .as_ref()
+            .is_some_and(|click| click.committed && click.at.elapsed() < CLICK_DELAY);
+        if event.click_count() >= 2 {
+            let pending = self.click.take();
+            if held && pending.as_ref().is_some_and(|click| click.was_paused) {
+                return;
+            }
+            if let Some(click) = pending
+                && click.committed
+            {
+                // A slow double click: undo the toggle that already ran.
+                if click.was_paused {
+                    self.pause(cx);
+                } else {
+                    self.play(cx);
+                }
+            }
+            let delta = match event.mouse_position() {
+                Some(position) if position.x < self.bounds.get().center().x => -SKIP_SECONDS,
+                _ => SKIP_SECONDS,
+            };
+            self.seek_by(delta, cx);
+            self.feedback = Some((
+                if delta > 0. {
+                    Gesture::Forward
+                } else {
+                    Gesture::Backward
+                },
+                Instant::now(),
+            ));
+            cx.notify();
+            return;
+        }
+        if held {
+            return;
+        }
+        let was_paused = !self.playing;
+        self.click = Some(PendingClick {
+            at: Instant::now(),
+            was_paused,
+            committed: false,
+        });
+        self.feedback = Some((
+            if was_paused {
+                Gesture::Play
+            } else {
+                Gesture::Pause
+            },
+            Instant::now(),
+        ));
         cx.notify();
     }
 
-    /// Hands the video to the desktop's player, for codecs GStreamer here
-    /// lacks.
-    fn open_externally(&self, cx: &mut Context<Self>) {
-        let (url, name, media, bytes) = (
-            self.attachment.url.clone(),
-            self.attachment.name.clone(),
-            self.media.clone(),
-            self.bytes.clone(),
+    fn inline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
+        if self.state == State::Idle && self.playing {
+            // A time chip asked for playback before the first play.
+            self.load(cx);
+        }
+        let hovered = self.activity.is_some();
+        let focused = window.last_input_was_keyboard()
+            && (self.timeline_focus.is_focused(window) || self.volume_focus.is_focused(window));
+        let open_menu = self.popup.is_some();
+        let reveal = hovered || focused || open_menu;
+        let reduce = cx.reduce_motion();
+        let (center, center_moving) =
+            self.center_fade
+                .level(!self.playing || reveal, CONTROLS_FADE, reduce);
+        let (controls, controls_moving) = self.controls_fade.level(
+            reveal || (self.started && !self.playing),
+            CONTROLS_FADE,
+            reduce,
         );
-        cx.spawn(async move |_, cx| {
-            let bytes = match bytes {
-                Some(bytes) => bytes,
-                None => match media.fetch(&url).await {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        tracing::warn!(%error, "could not fetch the video");
-                        return;
-                    }
+        let (expand, expand_moving) = self.expand_fade.level(reveal, CONTROLS_FADE, reduce);
+        if center_moving || controls_moving || expand_moving {
+            window.request_animation_frame();
+        }
+        let width = f32::from(self.bounds.get().size.width);
+        let narrow = width > 0. && width <= NARROW_PREVIEW;
+        let poster = (!self.started)
+            .then(|| self.clip.poster().or(self.captured.clone()))
+            .flatten();
+        let bounds = self.bounds.clone();
+        div()
+            .id("inline-video")
+            .relative()
+            .size_full()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.active(cx);
+                } else {
+                    this.left(cx);
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.active(cx)))
+            .child(
+                canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+            )
+            .when_some(
+                self.frame.clone().filter(|_| self.started),
+                |this, frame| {
+                    this.child(
+                        img(frame)
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
                 },
-            };
-            let path = std::env::temp_dir().join(external_name(name.as_deref(), &url));
-            let written = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { std::fs::write(&path, &bytes) }
-                })
-                .await;
-            match written {
-                Ok(()) => cx.update(|cx| cx.open_with_system(&path)),
-                Err(error) => tracing::warn!(%error, "could not save the video"),
-            }
-        })
-        .detach();
+            )
+            .when_some(poster, |this, poster| {
+                this.child(
+                    img(poster)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+            })
+            .children(self.notice_view(&c))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div().opacity(center).child(
+                            IconButton::new(
+                                "play",
+                                if self.playing {
+                                    IconName::PauseFilled
+                                } else {
+                                    IconName::PlayFilled
+                                },
+                            )
+                            .variant(ButtonVariant::Media)
+                            .size(IconButtonSize::Md)
+                            .tooltip(if self.playing {
+                                "Pause video"
+                            } else {
+                                "Play video"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(6.))
+                    .right(px(6.))
+                    .bottom(px(6.))
+                    .opacity(controls)
+                    .when(controls == 0., |d| d.invisible())
+                    .child(self.controls(true, narrow, window, cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(8.))
+                    .right(px(8.))
+                    .opacity(expand)
+                    .when(expand == 0., |d| d.invisible())
+                    .child(
+                        IconButton::new("expand", IconName::ArrowsOut)
+                            .variant(ButtonVariant::Media)
+                            .size(IconButtonSize::Sm)
+                            .tooltip("Open video fullscreen")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pause(cx);
+                                if let Some(open) = this.open.clone() {
+                                    let weak = cx.entity().downgrade();
+                                    let seconds = this.position;
+                                    window.defer(cx, move |window, cx| {
+                                        open(seconds, weak, window, cx)
+                                    });
+                                }
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
-    fn controls(&self, cx: &mut Context<Self>, window: &Window) -> impl IntoElement {
+    fn notice_view(&self, c: &buzz_ui::Colors) -> Option<Div> {
+        self.notice.clone().map(|notice| {
+            div()
+                .absolute()
+                .top(px(12.))
+                .left(px(12.))
+                .right(px(12.))
+                .p(px(8.))
+                .rounded(px(8.))
+                .bg(c.surface_inset)
+                .text_caption()
+                .text_color(c.text_standard)
+                .child(notice)
+        })
+    }
+
+    fn review(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let c = *cx.colors();
-        let progress = match self.duration {
-            Some(duration) if duration > 0. => (self.position / duration).clamp(0., 1.) as f32,
-            _ => 0.,
-        };
-        let player = cx.entity().downgrade();
-        let seek: Option<OnSeek> = self.duration.map(|duration| {
-            let player = player.clone();
-            Rc::new(move |fraction: f32, _: &mut Window, cx: &mut App| {
-                let _ = player.update(cx, |this, cx| this.seek_to(fraction as f64 * duration, cx));
-            }) as OnSeek
-        });
-        let volume_seek: OnSeek = Rc::new(move |fraction: f32, _: &mut Window, cx: &mut App| {
-            let _ = player.update(cx, |this, cx| this.set_volume(fraction, cx));
-        });
-        let audible = if self.muted { 0. } else { self.volume };
-        let silent = audible == 0.;
+        let focused = window.last_input_was_keyboard()
+            && (self.timeline_focus.is_focused(window) || self.volume_focus.is_focused(window));
+        let hide = self.playing
+            && self.idle()
+            && !focused
+            && self.popup.is_none()
+            && self.hold.as_ref().is_none_or(|hold| hold.held.is_none());
+        let (opacity, moving) = self
+            .controls_fade
+            .level(!hide, CONTROLS_FADE, cx.reduce_motion());
+        let feedback = self.feedback;
+        if moving || feedback.is_some_and(|(kind, _)| kind != Gesture::Speed) {
+            window.request_animation_frame();
+        }
+        let width = f32::from(self.bounds.get().size.width);
+        let narrow = width > 0. && width < NARROW_PLAYER;
+        let poster = self.frame.is_none().then(|| self.clip.poster()).flatten();
+        let bounds = self.bounds.clone();
+        let chrome = self.chrome.clone().map(|chrome| chrome(window, cx));
         div()
-            .id("controls")
-            .absolute()
-            .left(px(16.))
-            .right(px(16.))
-            .bottom(px(12.))
+            .id("video-player")
+            .relative()
+            .size_full()
+            .bg(c.bg_media_canvas)
+            .overflow_hidden()
+            .text_color(c.text_standard)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.active(cx);
+                } else {
+                    this.left(cx);
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.active(cx)))
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.active(cx)))
+            .child(
+                canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .id("video-picture")
+                    .absolute()
+                    .inset_0()
+                    .when_some(self.frame.clone(), |this, frame| {
+                        this.child(
+                            img(frame)
+                                .absolute()
+                                .inset_0()
+                                .size_full()
+                                .object_fit(ObjectFit::Contain),
+                        )
+                    })
+                    .when_some(poster, |this, poster| {
+                        this.child(
+                            img(poster)
+                                .absolute()
+                                .inset_0()
+                                .size_full()
+                                .object_fit(ObjectFit::Contain),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.active(cx);
+                            this.press(event.position, cx)
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_hold(cx)),
+                    )
+                    .on_click(
+                        cx.listener(|this, event: &ClickEvent, _, cx| {
+                            this.picture_click(event, cx)
+                        }),
+                    ),
+            )
+            .when(self.loading() && poster_missing(&self.clip), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_body_sm()
+                        .text_color(c.text_subtle)
+                        .child("Loading media…"),
+                )
+            })
+            .children(feedback.map(|(kind, at)| gesture_badge(kind, at, &c, cx.reduce_motion())))
+            .children(self.notice_view(&c))
+            .child(
+                div()
+                    .id("review-controls")
+                    .absolute()
+                    .left(px(16.))
+                    .right(px(16.))
+                    .bottom(px(12.))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x(px(12.))
+                    .gap_y(px(4.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(32.))
+                    .bg(c.bg_media_glass.opacity(opacity))
+                    .border_1()
+                    .border_color(c.border_media_glass.opacity(opacity))
+                    .when(opacity == 0., |d| d.invisible())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex_grow(1.)
+                            .flex_shrink(1.)
+                            .flex_basis(px(352.))
+                            .min_w_0()
+                            .opacity(opacity)
+                            .child(self.controls(false, narrow, window, cx)),
+                    )
+                    .children(chrome.map(|chrome| div().opacity(opacity).mx_auto().child(chrome))),
+            )
+            .into_any_element()
+    }
+}
+
+fn poster_missing(clip: &Clip) -> bool {
+    clip.poster().is_none()
+}
+
+/// The transient gesture badge: a 40px media glass disc with the play or
+/// pause glyph, a rotate arrow and "10" over the half that was double
+/// clicked, or "2×" at the top while held. It grows from 0.88 to 1.08 and
+/// fades over its last 30%.
+fn gesture_badge(kind: Gesture, at: Instant, c: &buzz_ui::Colors, reduce: bool) -> AnyElement {
+    let t = (at.elapsed().as_secs_f32() / FEEDBACK.as_secs_f32()).min(1.);
+    let (scale, opacity) = if kind == Gesture::Speed || reduce {
+        (1., 1.)
+    } else {
+        let eased = 1. - (1. - t) * (1. - t);
+        let fade = if t <= 0.7 { 1. } else { 1. - (t - 0.7) / 0.3 };
+        (0.88 + 0.2 * eased, fade)
+    };
+    let disc = 40. * scale;
+    let content: AnyElement = match kind {
+        Gesture::Play => Icon::new(IconName::PlayFilled)
+            .size(24. * scale)
+            .into_any_element(),
+        Gesture::Pause => Icon::new(IconName::PauseFilled)
+            .size(24. * scale)
+            .into_any_element(),
+        Gesture::Speed => div().text_label().child("2×").into_any_element(),
+        Gesture::Forward | Gesture::Backward => div()
+            .relative()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .py(px(4.))
-            .rounded(px(32.))
-            .bg(c.bg_media_glass)
-            .border_1()
-            .border_color(c.border_media_glass)
-            .text_color(c.text_on_media)
-            .when(self.playing, |this| {
-                this.opacity(0.)
-                    .group_hover("video-player", |s| s.opacity(1.))
-            })
-            .on_click(|_, _, cx| cx.stop_propagation())
+            .justify_center()
             .child(
-                IconButton::new(
-                    "play",
-                    if self.playing {
-                        IconName::PauseFilled
-                    } else {
-                        IconName::PlayFilled
-                    },
-                )
-                .size(IconButtonSize::Sm)
-                .tooltip(if self.playing {
-                    "Pause video"
+                Icon::new(if kind == Gesture::Forward {
+                    IconName::ArrowClockwise
                 } else {
-                    "Play video"
+                    IconName::ArrowCounterClockwise
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
-            )
-            .child(
-                IconButton::new(
-                    "mute",
-                    if silent {
-                        IconName::SpeakerSlash
-                    } else {
-                        IconName::SpeakerHigh
-                    },
-                )
-                .size(IconButtonSize::Sm)
-                .tooltip(if silent { "Unmute video" } else { "Mute video" })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx))),
+                .size(36. * scale),
             )
             .child(
                 div()
-                    .relative()
-                    .flex_none()
-                    .w(px(64.))
-                    .h(px(32.))
-                    .child(super::audio::track_line(
-                        audible,
-                        c.bg_media_track,
-                        c.text_standard,
-                    ))
-                    .child(seek_area("volume", Some(volume_seek))),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_caption()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12. * 0.8 * scale))
                     .font_features(tabular())
-                    .child(video_time(self.position)),
+                    .child("10"),
             )
+            .into_any_element(),
+    };
+    let badge = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(disc))
+        .rounded_full()
+        .bg(c.bg_media_glass.opacity(opacity))
+        .border_1()
+        .border_color(c.border_media_glass.opacity(opacity))
+        .text_color(c.text_on_media.opacity(opacity))
+        .child(content);
+    let lane = |fraction: f32| {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .child(div().w(relative(fraction)).flex_none())
+            .child(div().w_0().flex().justify_center().child(badge))
+    };
+    match kind {
+        Gesture::Speed => div()
+            .absolute()
+            .top(px(16.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
             .child(
                 div()
-                    .relative()
-                    .flex_1()
-                    .min_w(px(20.))
-                    .h(px(32.))
-                    .child(super::audio::track_line(
-                        progress,
-                        c.bg_media_track,
-                        c.text_standard,
-                    ))
-                    .child(seek_area("timeline", seek)),
+                    .h(px(40.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(c.bg_media_glass)
+                    .border_1()
+                    .border_color(c.border_media_glass)
+                    .text_color(c.text_on_media)
+                    .text_label()
+                    .child("2×"),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_caption()
-                    .font_features(tabular())
-                    .text_color(c.text_subtle)
-                    .child(video_time(self.duration.unwrap_or(0.))),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(
-                        Button::new("speed", format!("{}x", self.rate))
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Sm)
-                            .tooltip(format!("Playback speed: {}x", self.rate))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.speed_menu = !this.speed_menu;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.speed_menu, |this| {
-                        let menu = Menu::new().children(SPEEDS.iter().map(|speed| {
-                            let speed = *speed;
-                            MenuItem::new(
-                                SharedString::from(format!("speed-{speed}")),
-                                format!("{speed}x"),
-                            )
-                            .checked(speed == self.rate)
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_rate(speed, cx)))
-                        }));
-                        let dismiss = cx.entity().downgrade();
-                        this.child(overlay::dropdown(
-                            window,
-                            Align::End,
-                            menu,
-                            Rc::new(move |_, cx| {
-                                let _ = dismiss.update(cx, |this, cx| {
-                                    this.speed_menu = false;
-                                    cx.notify();
-                                });
-                            }),
-                        ))
-                    }),
-            )
-            .child(
-                IconButton::new(
-                    "expand",
-                    if self.expanded {
-                        IconName::ArrowsIn
-                    } else {
-                        IconName::ArrowsOut
-                    },
-                )
-                .size(IconButtonSize::Sm)
-                .tooltip(if self.expanded {
-                    "Exit full window"
-                } else {
-                    "Fill the window"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_expanded(cx))),
-            )
+            .into_any_element(),
+        Gesture::Forward => lane(0.75).into_any_element(),
+        Gesture::Backward => lane(0.25).into_any_element(),
+        Gesture::Play | Gesture::Pause => lane(0.5).into_any_element(),
     }
 }
 
@@ -637,138 +1366,11 @@ impl Render for VideoPlayer {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
-        let c = *cx.colors();
-        let failed = matches!(self.state, State::Failed);
-        let poster = self
-            .frame
-            .is_none()
-            .then(|| {
-                self.attachment
-                    .preview_url
-                    .as_ref()
-                    .map(|url| super::image(url, &self.media))
-            })
-            .flatten();
-        div()
-            .id("video-player")
-            .group("video-player")
-            .relative()
-            .size_full()
-            .bg(c.bg_media_canvas)
-            .overflow_hidden()
-            .text_color(c.text_standard)
-            .when(!failed, |this| {
-                this.on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                    // A click plays or pauses; a double click undoes that and
-                    // skips back or ahead by the half it landed on.
-                    this.toggle(cx);
-                    if event.click_count() == 2
-                        && let Some(position) = event.mouse_position()
-                    {
-                        let middle = this.bounds.get().center().x;
-                        let delta = if position.x < middle {
-                            -SKIP_SECONDS
-                        } else {
-                            SKIP_SECONDS
-                        };
-                        this.seek_by(delta, cx);
-                    }
-                }))
-            })
-            .child({
-                let bounds = self.bounds.clone();
-                canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {})
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-            })
-            .when_some(self.frame.clone(), |this, frame| {
-                this.child(
-                    img(frame)
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .object_fit(ObjectFit::Contain),
-                )
-            })
-            .when_some(poster, |this, poster| {
-                this.child(
-                    img(poster)
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .object_fit(ObjectFit::Contain),
-                )
-            })
-            .when(failed, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(12.))
-                        .text_body_sm()
-                        .child("Can't play this video here")
-                        .child(
-                            Button::new("open-externally", "Open externally")
-                                .size(ButtonSize::Sm)
-                                .icon(IconName::ArrowSquareOut)
-                                .on_click(cx.listener(|this, _, _, cx| this.open_externally(cx))),
-                        ),
-                )
-            })
-            .when(
-                matches!(self.state, State::Loading) && self.frame.is_none(),
-                |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_body_sm()
-                            .text_color(c.text_subtle)
-                            .child("Loading media…"),
-                    )
-                },
-            )
-            .when(!failed, |this| this.child(self.controls(cx, window)))
+        match self.mode {
+            Mode::Inline => self.inline(window, cx),
+            Mode::Review => self.review(window, cx),
+        }
     }
-}
-
-/// A temp file name keeping the attachment's extension, so the desktop
-/// picks the right player.
-fn external_name(name: Option<&str>, url: &str) -> String {
-    let extension = name
-        .and_then(|name| name.rsplit_once('.'))
-        .map(|(_, ext)| ext)
-        .or_else(|| {
-            url.rsplit('/')
-                .next()
-                .and_then(|last| last.rsplit_once('.'))
-                .map(|(_, ext)| ext)
-        })
-        .filter(|ext| {
-            (1..=8).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric())
-        })
-        .unwrap_or("mp4")
-        .to_ascii_lowercase();
-    let stem: String = url
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(16)
-        .collect();
-    format!("buzz-video-{stem}.{extension}")
 }
 
 #[cfg(test)]
@@ -777,21 +1379,20 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
-    fn names_external_copies_by_extension() {
-        assert_eq!(
-            external_name(
-                Some("clip.WEBM"),
-                "https://x/media/0123456789abcdef0123.mp4"
-            ),
-            "buzz-video-0123456789abcdef.webm"
-        );
-        assert_eq!(
-            external_name(None, "https://x/media/abc.mov"),
-            "buzz-video-abc.mov"
-        );
-        assert_eq!(
-            external_name(Some("a/../b"), "https://x/"),
-            "buzz-video-.mp4"
-        );
+    fn trusts_only_believable_lengths() {
+        assert_eq!(finite_duration(Some(12.5)), Some(12.5));
+        assert_eq!(finite_duration(Some(0.)), None);
+        assert_eq!(finite_duration(Some(f64::INFINITY)), None);
+        assert_eq!(finite_duration(Some(90_000.)), None);
+        assert_eq!(finite_duration(None), None);
+    }
+
+    #[test]
+    fn fades_settle_at_their_ends() {
+        let mut fade = Fade::new(false);
+        assert_eq!(fade.level(false, CONTROLS_FADE, false), (0., false));
+        let (level, moving) = fade.level(true, CONTROLS_FADE, false);
+        assert!(moving && level < 0.5);
+        assert_eq!(fade.level(true, CONTROLS_FADE, true), (1., false));
     }
 }

@@ -1,18 +1,25 @@
 //! Audio and video decoding with GStreamer, which Ubuntu ships with the
 //! codecs attachments use (MP4/H.264/AAC, WebM, Ogg/Opus, MP3, WAV).
 //!
-//! Media bytes arrive whole through the authenticated [`Media`] client, so
-//! a `playbin` reads them from memory through a random-access `appsrc`.
+//! HTTPS relay media streams from buzz-desktop's loopback listener
+//! ([`Media::stream_url`]), which reads ranges through its block cache, so
+//! playback starts before the download finishes and seeking fetches only
+//! what it needs. Anything else arrives whole through [`Media::fetch`] and
+//! a `playbin` reads it from memory through a random-access `appsrc`.
+//! Local files (composer drafts) play from their `file://` URI.
+//!
 //! Video frames come out of an `appsink` as BGRA, the layout GPUI's
 //! `RenderImage` holds. Everything here is synchronous; the UI polls.
 //!
-//! [`Media`]: buzz_relay_client::Media
+//! [`Media::stream_url`]: buzz_relay_client::Media::stream_url
+//! [`Media::fetch`]: buzz_relay_client::Media::fetch
 
 use gstreamer as gst;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -28,6 +35,33 @@ pub(super) fn init() -> Result<(), String> {
         .clone()
 }
 
+/// What a pipeline plays.
+#[derive(Clone)]
+pub enum Source {
+    /// A whole body in memory.
+    Bytes(Arc<[u8]>),
+    /// A URI GStreamer reads itself: the loopback stream or a local file.
+    Uri(String),
+}
+
+impl Source {
+    /// A local file, as a `file://` URI.
+    pub fn file(path: &Path) -> Result<Self, String> {
+        let path = path
+            .canonicalize()
+            .map_err(|_| "The file is unavailable".to_string())?;
+        url::Url::from_file_path(&path)
+            .map(|uri| Self::Uri(uri.into()))
+            .map_err(|()| "The file is unavailable".to_string())
+    }
+}
+
+impl From<Arc<[u8]>> for Source {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        Self::Bytes(bytes)
+    }
+}
+
 /// One decoded video frame, tightly packed BGRA.
 pub struct Frame {
     pub width: u32,
@@ -41,6 +75,8 @@ pub enum Kind {
     Video,
     /// Video without sound, paused on its first frame.
     Poster,
+    /// Sound into a null sink, only to read the length.
+    Metadata,
 }
 
 #[derive(Debug, PartialEq)]
@@ -63,39 +99,53 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// A paused pipeline over `bytes`. Errors (a missing decoder, a
-    /// corrupt file) arrive later as [`Event::Failed`].
-    pub fn new(bytes: Arc<[u8]>, kind: Kind) -> Result<Self, String> {
+    /// A paused pipeline over `source`. Errors (a missing decoder, a
+    /// corrupt file, a failed read) arrive later as [`Event::Failed`].
+    pub fn new(source: impl Into<Source>, kind: Kind) -> Result<Self, String> {
         init()?;
+        let source = source.into();
+        let uri = match &source {
+            Source::Bytes(_) => "appsrc://",
+            Source::Uri(uri) => uri.as_str(),
+        };
         let playbin = gst::ElementFactory::make("playbin")
-            .property("uri", "appsrc://")
+            .property("uri", uri)
             .build()
             .map_err(|error| error.to_string())?;
-        playbin.connect("source-setup", false, move |values| {
-            if let Some(source) = values
-                .get(1)
-                .and_then(|value| value.get::<gst::Element>().ok())
-                .and_then(|element| element.downcast::<gst_app::AppSrc>().ok())
-            {
-                feed(&source, bytes.clone());
-            }
-            None
-        });
+        if let Source::Bytes(bytes) = source {
+            playbin.connect("source-setup", false, move |values| {
+                if let Some(source) = values
+                    .get(1)
+                    .and_then(|value| value.get::<gst::Element>().ok())
+                    .and_then(|element| element.downcast::<gst_app::AppSrc>().ok())
+                {
+                    feed(&source, bytes.clone());
+                }
+                None
+            });
+        }
         playbin.set_property_from_str(
             "flags",
             match kind {
-                Kind::Audio => "audio+soft-volume",
+                Kind::Audio | Kind::Metadata => "audio+soft-volume",
                 Kind::Video => "video+audio+soft-volume",
                 Kind::Poster => "video",
             },
         );
-        let frame = (kind != Kind::Audio).then(|| {
+        let frame = matches!(kind, Kind::Video | Kind::Poster).then(|| {
             let slot = Slot::default();
             playbin.set_property("video-sink", video_sink(slot.clone()));
             slot
         });
-        if kind != Kind::Poster {
-            playbin.set_property("audio-sink", audio_sink());
+        match kind {
+            Kind::Audio | Kind::Video => playbin.set_property("audio-sink", audio_sink()),
+            Kind::Metadata => playbin.set_property(
+                "audio-sink",
+                gst::ElementFactory::make("fakesink")
+                    .build()
+                    .map_err(|error| error.to_string())?,
+            ),
+            Kind::Poster => {}
         }
         let bus = playbin.bus().ok_or("The player has no bus")?;
         playbin
@@ -148,8 +198,14 @@ impl Engine {
         }
     }
 
-    pub fn play(&self) {
-        let _ = self.playbin.set_state(gst::State::Playing);
+    /// Starts playing; `false` when the pipeline refuses (`play()`
+    /// rejecting in the reference).
+    pub fn play(&self) -> bool {
+        self.playbin.set_state(gst::State::Playing).is_ok()
+    }
+
+    pub fn rate(&self) -> f64 {
+        self.rate
     }
 
     pub fn pause(&self) {
@@ -224,8 +280,22 @@ pub struct Probe {
 }
 
 /// Decodes the first frame of a video. Blocks; run it off the UI thread.
+#[cfg(test)]
 pub fn probe(bytes: Arc<[u8]>) -> Result<Probe, String> {
-    let mut engine = Engine::new(bytes, Kind::Poster)?;
+    probe_source(Source::Bytes(bytes), Kind::Poster)
+}
+
+/// The first frame and length of a local video file, such as a composer
+/// draft. Blocks; run it off the UI thread.
+#[allow(dead_code)]
+pub fn probe_file(path: &Path) -> Result<Probe, String> {
+    probe_source(Source::file(path)?, Kind::Poster)
+}
+
+/// A clip's first frame (`Poster`) or only its length (`Metadata`), from
+/// any source. Blocks; run it off the UI thread.
+pub fn probe_source(source: Source, kind: Kind) -> Result<Probe, String> {
+    let mut engine = Engine::new(source, kind)?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     while !engine.ready {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -361,4 +431,34 @@ fn audio_sink() -> gst::Element {
         .property("sync", true)
         .build()
         .expect("fakesink is in GStreamer core")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../relay/tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn probes_local_video_files() {
+        let probe = probe_file(&fixture("clip.webm")).expect("the WebM decodes");
+        let frame = probe.frame.expect("a first frame");
+        assert!(frame.width > 0 && frame.height > 0);
+        assert_eq!(frame.bgra.len(), (frame.width * frame.height * 4) as usize);
+        assert!(probe.duration.is_some_and(|d| d > 0.));
+        assert!(probe_file(Path::new("/nonexistent/clip.mp4")).is_err());
+    }
+
+    #[test]
+    fn reads_lengths_from_uris() {
+        let source = Source::file(&fixture("clip.webm")).unwrap();
+        assert!(matches!(&source, Source::Uri(uri) if uri.starts_with("file:///")));
+        let probe = probe_source(source, Kind::Metadata).expect("the WebM decodes");
+        assert!(probe.frame.is_none());
+    }
 }
