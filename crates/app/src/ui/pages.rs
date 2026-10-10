@@ -38,6 +38,8 @@ pub enum Placement {
     Topbar,
     /// A row at the top of the channel sidebar.
     Sidebar,
+    /// No navigation entry (`primary: false`); still in search.
+    Hidden,
 }
 
 /// Which sidebar the shell shows beside a page.

@@ -238,6 +238,8 @@ pub struct Composer {
     followup: Vec<(String, String)>,
     /// Plugin tools in the toolbar (`composer_tools`).
     tools: Vec<AnyView>,
+    /// A new Me conversation's first message carries no files.
+    no_attachments: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -485,10 +487,16 @@ impl Composer {
             wave_tick: std::cell::Cell::new((0, std::time::Instant::now())),
             followup: Vec::new(),
             tools,
+            no_attachments: false,
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
         composer
+    }
+
+    /// Offers no attachments (a new conversation's first message).
+    pub fn without_attachments(&mut self) {
+        self.no_attachments = true;
     }
 
     /// The text field, for focus.
@@ -3680,13 +3688,15 @@ impl Composer {
             .min_h(px(36.))
             .child(self.leading_tools(cx))
             // Disabled, not hidden, while editing (`renderLeadingTools`).
-            .child(
-                IconButton::new("attach", IconName::Paperclip)
-                    .size(IconButtonSize::Sm)
-                    .tooltip("Attach files")
-                    .disabled(editing || self.sending)
-                    .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
-            )
+            .when(!self.no_attachments, |d| {
+                d.child(
+                    IconButton::new("attach", IconName::Paperclip)
+                        .size(IconButtonSize::Sm)
+                        .tooltip("Attach files")
+                        .disabled(editing || self.sending)
+                        .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
+                )
+            })
             .child(
                 div().relative().child(
                     IconButton::new("emoji", IconName::Smiley)
@@ -4708,7 +4718,7 @@ impl Render for Composer {
             )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.drag_over = false;
-                if this.accepts_drop() {
+                if this.accepts_drop() && !this.no_attachments {
                     this.add_paths(paths.paths().to_vec(), cx);
                 }
                 // The pane's drop zone must not attach them again.

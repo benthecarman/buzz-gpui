@@ -276,3 +276,17 @@ async fn invites_and_adds_agents_to_a_session() {
         "This agent is archived. Choose another agent."
     );
 }
+
+/// Development only: claims a throwaway member and writes its nsec to
+/// `BUZZ_NEWCOMER_FILE`, for screenshots that must not touch the seeded
+/// identities. `cargo test --test me_relay -- --ignored mint_newcomer`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn mint_newcomer() {
+    let (Some(fixture), Ok(path)) = (fixture(), std::env::var("BUZZ_NEWCOMER_FILE")) else {
+        return;
+    };
+    let identity = fixture.newcomer().await;
+    std::fs::write(format!("{path}.pk"), identity.pubkey_hex()).unwrap();
+    std::fs::write(path, identity.nsec().as_str()).unwrap();
+}

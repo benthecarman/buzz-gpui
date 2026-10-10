@@ -9,7 +9,7 @@
 //! ([`SessionSnapshot::sidebar`]).
 
 mod dialogs;
-mod menus;
+pub(super) mod menus;
 mod rows;
 
 use super::message::display_name;

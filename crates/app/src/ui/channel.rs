@@ -107,6 +107,9 @@ pub struct ChannelPage {
     pub launchers: Vec<Launcher>,
     /// Channel panels the header menu opens as tabs, set by the workspace.
     pub menu_panels: Vec<super::channel_menu::MenuPanel>,
+    /// A conversation on the Me page: "Message your agents", and only the
+    /// viewer's own agents can be mentioned in.
+    personal: bool,
 }
 
 /// A header button toggling a channel panel (`channelLauncher`).
@@ -188,8 +191,12 @@ impl ChannelPage {
                 }
                 // A DM is named after its people, whose profiles may arrive
                 // later.
-                let placeholder =
-                    composer_placeholder(&this.channel, &community.read(cx).snapshot.profiles);
+                let placeholder = match this.personal {
+                    true => "Message your agents".into(),
+                    false => {
+                        composer_placeholder(&this.channel, &community.read(cx).snapshot.profiles)
+                    }
+                };
                 this.composer.update(cx, |composer, cx| {
                     composer.set_placeholder(placeholder, window, cx)
                 });
@@ -257,6 +264,7 @@ impl ChannelPage {
             secondary: false,
             launchers: Vec::new(),
             menu_panels: Vec::new(),
+            personal: false,
             jump: Jump::default(),
             focus,
             reporter: Reporter::default(),
@@ -275,6 +283,14 @@ impl ChannelPage {
         };
         page.sync_items(window, cx);
         page
+    }
+
+    /// Shows the conversation as Me does (`personalConversation`).
+    pub fn set_personal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.personal = true;
+        self.composer.update(cx, |composer, cx| {
+            composer.set_placeholder("Message your agents".into(), window, cx)
+        });
     }
 
     /// The header's members button and actions menu.
@@ -560,13 +576,56 @@ impl ChannelPage {
             self.restore = None;
             self.jump.set(false);
         }
-        let mentions = submission.mentions.clone();
+        let mut mentions = submission.mentions.clone();
+        // Sessions pick their recipient and add mentioned agents first.
+        let session_send = (self.personal
+            || self.channel.channel_type == Some(buzz_relay_client::ChannelType::Session))
+        .then(|| {
+            let community = self.community.read(cx);
+            let known: Vec<String> = super::identity::AgentLibrary::from_hosts(cx)
+                .agents
+                .into_iter()
+                .map(|(key, _, _)| key)
+                .collect();
+            (
+                known,
+                community.snapshot.profiles.clone(),
+                super::me::recipients::rules(&self.community, cx),
+                super::me::pending::draft_key_for(&self.community, &channel, cx).is_some(),
+            )
+        });
+        let personal = self.personal;
         // A mentioned agent of the viewer's that is stopped wakes for it.
         let wake = (
             self.community.read(cx).origin.clone(),
             super::agents::wake::floor(),
         );
         cx.spawn_in(window, async move |this, cx| {
+            if let Some((known, profiles, rules, starting)) = session_send
+                && submission.editing.is_none()
+            {
+                let prepared = if starting {
+                    Err("Finish setting up this conversation in Me before sending messages.".into())
+                } else {
+                    let mut explicit = mentions.recipients.clone();
+                    explicit.append(&mut mentions.references);
+                    super::me::recipients::prepare(
+                        &session, &channel, explicit, personal, known, profiles, rules,
+                    )
+                    .await
+                };
+                match prepared {
+                    Ok(recipients) => mentions.recipients = recipients,
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.error = Some(error.into());
+                            this.composer.update(cx, |composer, cx| composer.failed(cx));
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
             let result = match &submission.editing {
                 Some(row) => session.edit(&channel, row.id, &submission.content).await,
                 None => {

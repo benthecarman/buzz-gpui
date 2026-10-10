@@ -74,6 +74,8 @@ pub struct ChannelActions {
     open_settings: Option<OpenSettings>,
     /// "Save as template…", made when the menu first opens.
     save_as: Option<Entity<super::templates::SaveAsTemplate>>,
+    /// Only the members button: a Me conversation has its own menu.
+    pub members_only: bool,
 }
 
 impl ChannelActions {
@@ -93,6 +95,7 @@ impl ChannelActions {
             menu_panels: Vec::new(),
             open_settings: None,
             save_as: None,
+            members_only: false,
         }
     }
 
@@ -495,19 +498,21 @@ impl Render for ChannelActions {
                     .selected(matches!(self.modal, Some(Modal::Members { .. })))
                     .on_click(cx.listener(|this, _, window, cx| this.open_members(window, cx))),
             )
-            .child(
-                div()
-                    .relative()
-                    .child(
-                        IconButton::new("more", IconName::DotsThree)
-                            .size(IconButtonSize::Sm)
-                            .when(!self.menu_open, |b| b.tooltip("Channel actions"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_menu(window, cx)),
-                            ),
-                    )
-                    .children(menu),
-            )
+            .when(!self.members_only, |this| {
+                this.child(
+                    div()
+                        .relative()
+                        .child(
+                            IconButton::new("more", IconName::DotsThree)
+                                .size(IconButtonSize::Sm)
+                                .when(!self.menu_open, |b| b.tooltip("Channel actions"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.open_menu(window, cx)),
+                                ),
+                        )
+                        .children(menu),
+                )
+            })
             .children(self.save_as.clone())
             .children(modal)
     }

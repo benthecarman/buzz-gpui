@@ -1,0 +1,196 @@
+//! Who a session message is for (`sessions/recipients.ts`) and which
+//! agents a session may admit (`agents/choices.ts` `selectable`).
+//!
+//! A message in a session with one agent goes to that agent without a
+//! mention; with several, the sender must @mention who should respond.
+//! Classification never grants access: candidates come from the relay's
+//! roster.
+
+use super::super::identity::AgentLibrary;
+use crate::community::Community;
+use buzz_relay_client::session::AgentRules;
+use buzz_relay_client::{ChannelSummary, ChannelType, Profiles, RelayOrigin};
+use gpui_kit::{App, Entity};
+use std::collections::HashSet;
+
+/// The viewer's agents in this community, as a session may admit them
+/// (`selectable`): the agents its hosts run for this relay.
+pub fn rules(community: &Entity<Community>, cx: &App) -> AgentRules {
+    let origin = community.read(cx).origin.clone();
+    let library = AgentLibrary::from_hosts(cx);
+    let mut seen = HashSet::new();
+    let selectable = library
+        .agents
+        .into_iter()
+        .filter(|(_, _, relay)| RelayOrigin::parse(relay).is_ok_and(|other| other == origin))
+        .filter(|(key, _, _)| seen.insert(key.clone()))
+        .map(|(key, _, _)| key)
+        .collect();
+    AgentRules {
+        selectable,
+        archived: Vec::new(),
+    }
+}
+
+/// The session's agents, or `None` while that cannot be told yet
+/// (`sessionAgents`): missing profiles could hide a second agent, so no
+/// sole recipient is guessed.
+pub fn session_agents(
+    channel: &ChannelSummary,
+    profiles: &Profiles,
+    known: &[String],
+    viewer: &str,
+) -> Option<Vec<String>> {
+    if channel.members.is_empty() {
+        return None;
+    }
+    let mut members: Vec<&String> = channel
+        .members
+        .iter()
+        .filter(|key| *key != viewer)
+        .collect();
+    members.dedup();
+    if members
+        .iter()
+        .any(|key| !known.contains(key) && !profiles.contains_key(key.as_str()))
+    {
+        return None;
+    }
+    Some(
+        members
+            .into_iter()
+            .filter(|key| {
+                known.contains(key) || profiles.get(key.as_str()).is_some_and(|p| p.is_agent)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The recipients of a message in `channel` (`sessionRecipients`): the
+/// explicit mentions, or in a session without any, its only agent.
+pub fn session_recipients(
+    channel: &ChannelSummary,
+    profiles: &Profiles,
+    known: &[String],
+    viewer: &str,
+    explicit: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if channel.channel_type != Some(ChannelType::Session) || !explicit.is_empty() {
+        return Ok(explicit);
+    }
+    let agents = session_agents(channel, profiles, known, viewer)
+        .ok_or("Session participants are still loading. Retry or @mention an agent.".to_owned())?;
+    if agents.len() > 1 {
+        return Err(
+            "There are multiple agents in this session. @mention who should respond.".into(),
+        );
+    }
+    Ok(agents)
+}
+
+/// Before a send in a session: the recipients, with any mentioned agent
+/// who is not a member added first (`prepareRecipients`). In Me only the
+/// viewer's own agents may be added.
+pub async fn prepare(
+    session: &buzz_relay_client::Session,
+    channel: &str,
+    explicit: Vec<String>,
+    personal: bool,
+    known: Vec<String>,
+    profiles: Profiles,
+    rules: AgentRules,
+) -> Result<Vec<String>, String> {
+    let summary = session
+        .channels_now()
+        .iter()
+        .find(|c| c.id == channel)
+        .cloned()
+        .ok_or("The session changed. Review its channel and retry.")?;
+    let recipients = if personal {
+        explicit
+    } else {
+        session_recipients(&summary, &profiles, &known, session.viewer(), explicit)?
+    };
+    let missing: Vec<String> = recipients
+        .iter()
+        .filter(|key| !summary.members.contains(key))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        if personal && missing.iter().any(|key| !rules.selectable.contains(key)) {
+            return Err("Only your available agents can be mentioned in Me.".into());
+        }
+        session.add_agents(channel, &missing, &rules).await?;
+    }
+    Ok(recipients)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    fn session(members: &[&str]) -> ChannelSummary {
+        ChannelSummary {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            channel_type: Some(ChannelType::Session),
+            members: members.iter().map(|m| (*m).into()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_agent_is_the_default_recipient() {
+        let known = vec!["agent".to_owned()];
+        let profiles = Profiles::default();
+        let channel = session(&["me", "agent"]);
+        assert_eq!(
+            session_recipients(&channel, &profiles, &known, "me", Vec::new()).unwrap(),
+            ["agent"]
+        );
+        // Explicit mentions win.
+        assert_eq!(
+            session_recipients(&channel, &profiles, &known, "me", vec!["x".into()]).unwrap(),
+            ["x"]
+        );
+    }
+
+    #[test]
+    fn several_or_unknown_members_need_a_mention() {
+        let known = vec!["a".to_owned(), "b".to_owned()];
+        let profiles = Profiles::default();
+        assert_eq!(
+            session_recipients(
+                &session(&["me", "a", "b"]),
+                &profiles,
+                &known,
+                "me",
+                Vec::new()
+            )
+            .unwrap_err(),
+            "There are multiple agents in this session. @mention who should respond."
+        );
+        assert_eq!(
+            session_recipients(
+                &session(&["me", "a", "z"]),
+                &profiles,
+                &known,
+                "me",
+                Vec::new()
+            )
+            .unwrap_err(),
+            "Session participants are still loading. Retry or @mention an agent."
+        );
+        // Not a session: nobody is guessed.
+        let stream = ChannelSummary {
+            channel_type: Some(ChannelType::Stream),
+            ..session(&["me", "a"])
+        };
+        assert!(
+            session_recipients(&stream, &profiles, &known, "me", Vec::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

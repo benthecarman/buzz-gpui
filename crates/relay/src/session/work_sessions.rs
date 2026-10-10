@@ -322,6 +322,8 @@ impl Session {
     ) -> Result<EventId, String> {
         let ctx = self.writer(false).await?;
         let draft = create_draft(id, title, parent)?;
+        // The outbox persists on the I/O runtime, whichever executor runs this.
+        let _runtime = self.runtime.enter();
         ctx.outbox
             .send(draft, SendOptions::default())
             .map_err(|error| error.to_string())
@@ -351,6 +353,7 @@ impl Session {
             return Err("Choose an agent from your agent library.".into());
         }
         let ctx = self.writer(false).await?;
+        let _runtime = self.runtime.enter();
         ctx.outbox
             .send(add_draft(id, pubkey), SendOptions::default())
             .map_err(|error| error.to_string())
@@ -392,9 +395,14 @@ impl Session {
         {
             return Err("This operation is still unconfirmed. Retry to confirm it first.".into());
         }
-        ctx.outbox
-            .dismiss(&id)
+        let dismissed = {
+            let _runtime = self.runtime.enter();
+            ctx.outbox.dismiss(&id)
+        };
+        self.runtime
+            .spawn(dismissed)
             .await
+            .map_err(|_| "The session has closed".to_owned())?
             .map_err(|error| error.to_string())
     }
 
@@ -653,10 +661,12 @@ impl Session {
                 }
                 let operation = match previous {
                     Some(previous) => previous.id(),
-                    None => ctx
-                        .outbox
-                        .send(add_draft(target, key), SendOptions::default())
-                        .map_err(|error| error.to_string())?,
+                    None => {
+                        let _runtime = self.runtime.enter();
+                        ctx.outbox
+                            .send(add_draft(target, key), SendOptions::default())
+                            .map_err(|error| error.to_string())?
+                    }
                 };
                 let ops = self.work_ops();
                 self.runtime
@@ -689,6 +699,34 @@ impl Session {
             self.work_session_refresh(id, expected, true).await?;
         }
         Ok(())
+    }
+
+    /// The id of the message just queued in `channel` with this content:
+    /// the newest such send in the outbox. A session start saves it, so a
+    /// retry confirms that message rather than sending another.
+    pub async fn queued_message(&self, channel: &str, content: &str) -> Option<EventId> {
+        let ctx = self.work_ops().context().await.ok()?;
+        ctx.outbox
+            .visible()
+            .iter()
+            .filter(|op| {
+                op.kind() == kinds::CHAT
+                    && op.has_tag("h", channel)
+                    && op.event.content == content
+                    && op.event.pubkey.to_hex() == ctx.viewer
+            })
+            .max_by_key(|op| op.created_at())
+            .map(|op| op.id())
+    }
+
+    /// Reads the viewer's channel list again (`channels.refreshList`).
+    pub fn refresh_channels(&self) {
+        let _ = self.commands.send(super::Message::With(Box::new(|actor| {
+            actor.start_scan(ScanOptions {
+                strong: false,
+                force_metadata: false,
+            })
+        })));
     }
 
     /// The channel list as last published.
