@@ -2,23 +2,69 @@
 //! or the default profile new communities start from; identity details,
 //! the private key and sign-out.
 
+use super::avatar::{AvatarDismissed, AvatarDone, AvatarEditor, EDITOR_WIDTH, Preview};
 use super::{
-    Modal, SettingsPage, avatar, button, field, form_group, header, inline_header, note,
-    preference_row, rows_group, section,
+    Modal, SettingsPage, button, field, form_group, header, inline_header, note, preference_row,
+    rows_group, section,
 };
 use crate::community::{AppState, Community, IdentityState};
-use crate::ui::media;
+use crate::ui::{media, overlay};
 use buzz_relay_client::account::{ABOUT_LIMIT, picture_error};
-use buzz_relay_client::upload;
 use buzz_relay_client::{ProfileEdit, RelayOrigin};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonVariant, IconButton,
-    IconButtonSize, IconName, Surface, TextArea, TextField, Toast, ToastTone, TypeStyled,
+    IconButtonSize, IconName, Popover, PopoverWidth, Surface, TextArea, TextField, Toast,
+    ToastTone, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
+
+/// The "Edit avatar" popover, 8px under the badge and centred on it. A
+/// press anywhere else closes it without a change.
+fn avatar_popover(
+    window: &Window,
+    editor: Entity<AvatarEditor>,
+    on_dismiss: overlay::Dismiss,
+) -> impl IntoElement {
+    let size = window.viewport_size();
+    div()
+        .absolute()
+        .top_full()
+        .left(relative(0.5))
+        .child(
+            deferred(
+                anchored().position(point(px(0.), px(0.))).child(
+                    div()
+                        .id("avatar-backdrop")
+                        .occlude()
+                        .w(size.width)
+                        .h(size.height)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            on_dismiss(window, cx)
+                        }),
+                ),
+            )
+            .with_priority(2),
+        )
+        .child(
+            deferred(
+                anchored()
+                    .anchor(Anchor::TopCenter)
+                    .snap_to_window_with_margin(px(12.))
+                    .child(
+                        div().id("avatar-popover").occlude().mt(px(8.)).child(
+                            Popover::new()
+                                .width(PopoverWidth::Auto)
+                                .child(div().w(px(EDITOR_WIDTH - 26.)).child(editor)),
+                        ),
+                    ),
+            )
+            .with_priority(3),
+        )
+}
 
 /// Viewer preference holding the default profile (buzz-app's
 /// `client.profile`): what joining a community starts from, and what
@@ -127,11 +173,14 @@ pub(super) struct ProfileForm {
     copy_failed: Option<SharedString>,
     name: Entity<InputState>,
     about: Entity<TextareaState>,
-    picture: Entity<InputState>,
+    /// The avatar URL; the avatar editor changes it.
+    picture: String,
+    /// The open "Edit avatar" popover. Save waits while it is open, as
+    /// buzz-app's `onBusyChange` does.
+    avatar: Option<(Entity<AvatarEditor>, [Subscription; 2])>,
     /// The saved profile the fields started from.
     baseline: ProfileEdit,
     saving: bool,
-    uploading: bool,
     error: Option<SharedString>,
     /// The private key field: masked until revealed.
     nsec: Entity<InputState>,
@@ -148,7 +197,6 @@ impl ProfileForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
         let about = cx.new(|cx| TextareaState::new(window, cx));
-        let picture = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
         let nsec = cx.new(|cx| InputState::new(window, cx).default_value(MASK));
         let changed = |this: &mut SettingsPage, cx: &mut Context<SettingsPage>| {
             this.profile.error = None;
@@ -161,11 +209,6 @@ impl ProfileForm {
                 }
             }),
             cx.subscribe(&about, move |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    changed(this, cx);
-                }
-            }),
-            cx.subscribe(&picture, move |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     changed(this, cx);
                 }
@@ -192,10 +235,10 @@ impl ProfileForm {
             copy_failed: None,
             name,
             about,
-            picture,
+            picture: String::new(),
+            avatar: None,
             baseline: ProfileEdit::default(),
             saving: false,
-            uploading: false,
             error: None,
             nsec,
             nsec_revealed: false,
@@ -230,7 +273,7 @@ impl ProfileForm {
     fn values(&self, cx: &App) -> ProfileEdit {
         ProfileEdit {
             name: self.name.read(cx).value().to_string(),
-            picture: self.picture.read(cx).value().to_string(),
+            picture: self.picture.clone(),
             about: self.about.read(cx).value().to_string(),
         }
     }
@@ -246,9 +289,8 @@ impl ProfileForm {
         self.about.update(cx, |state, cx| {
             state.set_value(values.about.clone(), window, cx)
         });
-        self.picture.update(cx, |state, cx| {
-            state.set_value(values.picture.clone(), window, cx)
-        });
+        self.picture = values.picture.clone();
+        self.avatar = None;
         self.baseline = values;
     }
 }
@@ -409,61 +451,32 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// Picks an image, prepares it and uploads it to the community, then
-    /// puts its URL in the avatar field.
-    fn upload_avatar(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some(community) = AppState::current(cx) else {
+    /// "Edit avatar": opens the popover on the current picture.
+    fn open_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.profile.saving || self.profile.avatar.is_some() {
             return;
-        };
-        let session = community.read(cx).session.clone();
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose an avatar".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.profile.uploading = true;
+        }
+        let community = AppState::current(cx);
+        let picture = self.profile.picture.clone();
+        let editor = cx.new(|cx| AvatarEditor::new(picture, community, window, cx));
+        let subscriptions = [
+            cx.subscribe(&editor, |this, _, AvatarDone(picture), cx| {
+                this.profile.picture = picture.clone();
                 this.profile.error = None;
-                cx.notify();
-            });
-            let file = cx
-                .background_executor()
-                .spawn(async move { avatar::read(&path) })
-                .await;
-            let result = match file {
-                Ok(file) => upload::upload(session.media(), file)
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|blob| {
-                        if blob.mime.starts_with("image/") {
-                            Ok(blob.url)
-                        } else {
-                            Err("The server did not return an avatar image.".to_string())
-                        }
-                    }),
-                Err(error) => Err(error),
-            };
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.profile.uploading = false;
-                match result {
-                    Ok(url) => this
-                        .profile
-                        .picture
-                        .update(cx, |state, cx| state.set_value(url, window, cx)),
-                    Err(error) => this.profile.error = Some(error.into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+                this.close_avatar(cx);
+            }),
+            cx.subscribe(&editor, |this, _, _: &AvatarDismissed, cx| {
+                this.close_avatar(cx)
+            }),
+        ];
+        editor.update(cx, |editor, cx| editor.focus(window, cx));
+        self.profile.avatar = Some((editor, subscriptions));
+        cx.notify();
+    }
+
+    fn close_avatar(&mut self, cx: &mut Context<Self>) {
+        self.profile.avatar = None;
+        cx.notify();
     }
 
     pub(super) fn profile_section(
@@ -729,14 +742,16 @@ impl SettingsPage {
     fn profile_form(
         &mut self,
         community: Option<&Entity<Community>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let c = *cx.colors();
         let form = &self.profile;
         let values = form.values(cx);
         let dirty = form.dirty(cx);
-        let busy = form.saving || form.uploading;
+        // An open avatar editor holds Save, as buzz-app's `onBusyChange`.
+        let editing = form.avatar.is_some();
+        let busy = form.saving || editing;
         let media = community.map(|community| community.read(cx).session.media().clone());
         let name = values.name.trim().to_string();
         let about_len = values.about.encode_utf16().count();
@@ -746,48 +761,86 @@ impl SettingsPage {
             ))
         });
         let picture_error =
-            picture_error(values.picture.trim()).map(|error| SharedString::from(error.to_string()));
+            picture_error(&values.picture).map(|error| SharedString::from(error.to_string()));
 
-        // Compact AvatarEditor: an 80px avatar with the add button over its
-        // lower right edge.
-        let mut avatar = Avatar::new(if name.is_empty() { "?" } else { &name }.to_string())
-            .size(AvatarSize::Px(80.));
-        let picture = values.picture.trim();
-        if picture.starts_with("https://") && picture_error.is_none() {
-            avatar = avatar.image(match &media {
-                Some(media) => media::avatar(picture, media),
-                None => ImageSource::from(SharedString::from(picture.to_string())),
-            });
-        }
-        let editor = div()
-            .relative()
-            .flex_none()
-            .size(rems(5.))
-            .child(avatar)
-            // Uploads go to a community's media server.
-            .when(media.is_some(), |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .right(rems(-0.25))
-                        .bottom(rems(-0.25))
-                        .child(
-                            IconButton::new("avatar-upload", IconName::Plus)
-                                .size(IconButtonSize::Sm)
-                                .variant(ButtonVariant::Prominent)
-                                .shape(buzz_ui::IconButtonShape::Round)
-                                .disabled(busy)
-                                .tooltip(if form.uploading {
-                                    "Uploading…"
-                                } else {
-                                    "Upload an image"
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.upload_avatar(window, cx)
-                                })),
-                        ),
+        // The compact AvatarEditor: an 80px avatar, or the draft while the
+        // editor is open, with the edit badge over its lower right.
+        let draft = form
+            .avatar
+            .as_ref()
+            .map(|(editor, _)| editor.read(cx).preview(cx));
+        let artwork = match draft {
+            Some(Preview::Emoji { art, color }) => div()
+                .size_full()
+                .rounded_full()
+                .overflow_hidden()
+                .bg(color)
+                .children(art.map(|art| img(art).size_full()))
+                .into_any_element(),
+            draft => {
+                let picture = match draft {
+                    Some(Preview::Picture(picture)) => picture,
+                    _ => values.picture.clone(),
+                };
+                let mut avatar = Avatar::new(if name.is_empty() { "?" } else { &name }.to_string())
+                    .size(AvatarSize::Px(80.));
+                if !picture.is_empty()
+                    && buzz_relay_client::account::picture_error(&picture).is_none()
+                {
+                    avatar = avatar.image(match &media {
+                        Some(media) => media::avatar(&picture, media),
+                        None => ImageSource::from(SharedString::from(picture)),
+                    });
+                }
+                avatar.into_any_element()
+            }
+        };
+        let page = cx.entity().downgrade();
+        let dismiss: overlay::Dismiss = Rc::new(move |_, cx| {
+            let _ = page.update(cx, |this, cx| this.close_avatar(cx));
+        });
+        let popover = form
+            .avatar
+            .as_ref()
+            .map(|(editor, _)| avatar_popover(window, editor.clone(), dismiss));
+        let badge = div()
+            .absolute()
+            // `.editBadge`: centred at 85.9375% of the frame.
+            .left(px(80. * 0.859375 - 16.))
+            .top(px(80. * 0.859375 - 16.))
+            .child(
+                IconButton::new(
+                    "avatar-edit",
+                    if values.picture.is_empty() {
+                        IconName::Plus
+                    } else {
+                        IconName::PencilSimple
+                    },
                 )
-            });
+                .size(IconButtonSize::Sm)
+                .variant(ButtonVariant::Prominent)
+                .shape(buzz_ui::IconButtonShape::Round)
+                .disabled(form.saving)
+                .tooltip("Edit avatar")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.profile.avatar.is_some() {
+                        this.close_avatar(cx);
+                    } else {
+                        this.open_avatar(window, cx);
+                    }
+                })),
+            )
+            .children(popover);
+        let editor = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(rems(0.5))
+            .child(div().relative().size(rems(5.)).child(artwork).child(badge))
+            .children(
+                picture_error
+                    .map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
+            );
         let preview = div()
             .flex()
             .items_center()
@@ -830,10 +883,7 @@ impl SettingsPage {
                     button("profile-save", "Save")
                         .prominent()
                         .loading(form.saving)
-                        .disabled(
-                            form.uploading
-                                || buzz_relay_client::account::validate(&values).is_err(),
-                        )
+                        .disabled(editing || buzz_relay_client::account::validate(&values).is_err())
                         .on_click(cx.listener(|this, _, window, cx| this.save_profile(window, cx))),
                 )
         });
@@ -859,22 +909,6 @@ impl SettingsPage {
                     cx,
                 )
                 .into_any_element(),
-                field(
-                    "Avatar URL (optional)",
-                    TextField::new(&form.picture)
-                        .invalid(picture_error.is_some())
-                        .disabled(busy),
-                    Some(if form.uploading {
-                        "Uploading your image…".into()
-                    } else if media.is_none() {
-                        "An HTTPS image URL.".into()
-                    } else {
-                        "An HTTPS image URL, or upload one with the + button.".into()
-                    }),
-                    picture_error,
-                    cx,
-                )
-                .into_any_element(),
             ]
             .into_iter()
             .chain(form.error.clone().map(|error| {
@@ -889,7 +923,6 @@ impl SettingsPage {
             cx,
         )
     }
-
     pub(super) fn sign_out_dialog(
         &self,
         error: Option<SharedString>,

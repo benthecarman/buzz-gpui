@@ -29,6 +29,11 @@ use std::borrow::Cow;
 /// The colour emoji family.
 pub const EMOJI: &str = "Buzz Color Emoji";
 
+/// The colour emoji font itself, for drawing emoji outside GPUI (emoji
+/// avatars).
+pub const EMOJI_FONT: &[u8] =
+    include_bytes!("../../../assets/fonts/buzz-color-emoji/BuzzColorEmoji.ttf");
+
 const FONTS: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/inter/Inter-Regular.ttf"),
     include_bytes!("../../../assets/fonts/inter/Inter-Italic.ttf"),
@@ -38,7 +43,7 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/inter/Inter-Bold.ttf"),
     include_bytes!("../../../assets/fonts/inter/Inter-BoldItalic.ttf"),
     include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
-    include_bytes!("../../../assets/fonts/buzz-color-emoji/BuzzColorEmoji.ttf"),
+    EMOJI_FONT,
 ];
 
 /// Registers the bundled fonts with GPUI's text system.
