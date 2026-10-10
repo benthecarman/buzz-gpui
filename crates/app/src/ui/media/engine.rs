@@ -287,7 +287,6 @@ pub fn probe(bytes: Arc<[u8]>) -> Result<Probe, String> {
 
 /// The first frame and length of a local video file, such as a composer
 /// draft. Blocks; run it off the UI thread.
-#[allow(dead_code)]
 pub fn probe_file(path: &Path) -> Result<Probe, String> {
     probe_source(Source::file(path)?, Kind::Poster)
 }

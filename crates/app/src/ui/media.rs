@@ -20,12 +20,10 @@ mod video;
 
 pub use attachments::{RowMedia, attachments, thread_media};
 pub use audio::{audio_attachment, forget_local, pause_audio, set_local, voice_draft, voice_note};
-// The composer's draft thumbnails use these.
-#[allow(unused_imports)]
-pub use engine::{Frame, Probe, probe_file};
+// The composer's draft thumbnails use this.
+pub use engine::probe_file;
 pub use review::{dismiss_review, review_overlay};
 // The composer opens its draft attachments here.
-#[allow(unused_imports)]
 pub use review::open_local_preview;
 pub use timecode::body as text;
 
@@ -138,7 +136,7 @@ fn natural_size(url: &str, media: &Media, window: &mut Window, cx: &mut App) -> 
 }
 
 /// Packs BGRA pixels into the image type GPUI paints.
-fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<RenderImage>> {
+pub(crate) fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }

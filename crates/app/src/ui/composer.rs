@@ -189,6 +189,9 @@ pub struct Composer {
     queue: Entity<Queue>,
     /// "Could not attach file", as a toast.
     attach_error: Option<SharedString>,
+    /// First frames of video drafts, by file; `None` while decoding or when
+    /// there is none.
+    posters: std::cell::RefCell<std::collections::HashMap<String, Option<Arc<RenderImage>>>>,
     /// Poofs of removed attachments, still playing.
     bursts: Vec<poof::Burst>,
     /// The draft file whose preview dialog is open.
@@ -443,6 +446,7 @@ impl Composer {
             attach_error: None,
             previewing: None,
             bursts: Vec::new(),
+            posters: Default::default(),
             error: None,
             pending: Vec::new(),
             pending_at: 0,
@@ -2641,6 +2645,21 @@ fn preview_source(item: &DraftFile) -> Option<Img> {
     })
 }
 
+/// Whether a draft is a video (`ComposerAttachments`): its type, or its
+/// name before it uploads.
+fn is_video(item: &DraftFile) -> bool {
+    let kind = item
+        .uploaded
+        .as_ref()
+        .map_or(item.mime.as_str(), |a| a.mime.as_str());
+    let lower = item.name.to_ascii_lowercase();
+    kind.starts_with("video/")
+        || (item.uploaded.is_none()
+            && [".mp4", ".mov", ".webm", ".m4v"]
+                .iter()
+                .any(|ext| lower.ends_with(ext)))
+}
+
 /// Name match tiers: exact, prefix, word prefix, substring.
 fn name_match(name: &str, query: &str) -> Option<u8> {
     let query = query.trim_start().to_lowercase();
@@ -2998,7 +3017,7 @@ impl Composer {
             .as_ref()
             .map_or(item.mime.as_str(), |a| a.mime.as_str())
             .to_string();
-        let preview = preview_source(item);
+        let preview = preview_source(item).or_else(|| self.poster(item, cx));
         // A failed file shows its whole chip, preview and all.
         let media = preview.is_some() && item.status != attachments::Status::Error;
         let busy = item.status.busy();
@@ -3102,10 +3121,9 @@ impl Composer {
                         .border(px(0.5))
                         .border_color(c.border_standard),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.previewing = Some(open_id.to_string());
-                    cx.notify();
-                }))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_preview(&open_id, window, cx)),
+                )
         });
         if media {
             return div()
@@ -3413,6 +3431,68 @@ impl Composer {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// A video draft's first frame, decoded once in the background
+    /// (`<video preload="metadata">` at 0.1s).
+    fn poster(&self, item: &DraftFile, cx: &mut Context<Self>) -> Option<Img> {
+        if !is_video(item) {
+            return None;
+        }
+        let Source::Path(path) = &item.source else {
+            return None;
+        };
+        if let Some(poster) = self.posters.borrow().get(&item.id) {
+            return poster
+                .clone()
+                .map(|image| img(image).object_fit(ObjectFit::Cover));
+        }
+        self.posters.borrow_mut().insert(item.id.clone(), None);
+        let (id, path) = (item.id.clone(), path.clone());
+        let probe = cx.background_executor().spawn(async move {
+            media::probe_file(&path)
+                .ok()
+                .and_then(|probe| probe.frame)
+                .and_then(|frame| media::render_image(frame.width, frame.height, frame.bgra))
+        });
+        cx.spawn(async move |this, cx| {
+            let poster = probe.await;
+            let _ = this.update(cx, |this, cx| {
+                this.posters.borrow_mut().insert(id, poster);
+                cx.notify();
+            });
+        })
+        .detach();
+        None
+    }
+
+    /// "Preview <name>": the picture or video in a dialog titled with it.
+    fn open_preview(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .files
+            .read(cx)
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        match &item.source {
+            Source::Path(path) => {
+                let mime = if is_video(&item) && !item.mime.starts_with("video/") {
+                    "video/mp4".to_string()
+                } else {
+                    item.mime.clone()
+                };
+                media::open_local_preview(path, &mime, &item.name, window, cx);
+            }
+            // A pasted picture has no file to open.
+            Source::Bytes(_) => {
+                self.previewing = Some(id.to_string());
+                cx.notify();
+            }
+        }
     }
 
     /// "Preview <name>": the image in a dialog titled with its name.

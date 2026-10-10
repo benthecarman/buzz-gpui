@@ -248,7 +248,6 @@ pub fn open_review(
 
 /// Opens a composer draft (`path`) in a preview dialog titled `name`: the
 /// image, or the video with player controls (`ComposerAttachments`).
-#[allow(dead_code)]
 pub fn open_local_preview(path: &Path, mime: &str, name: &str, window: &mut Window, cx: &mut App) {
     let restore = window.focused(cx);
     let (path, name, image) = (
