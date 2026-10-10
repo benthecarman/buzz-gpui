@@ -8,7 +8,19 @@
 //! against what it returns: a patch that is cut off, binary, in an unknown
 //! format or over 100k stays readable as raw text instead.
 
+use super::navigation;
+use super::overlay;
+use buzz_relay_client::fold::{DiffMeta, MessageRow};
+use buzz_ui::{
+    ActiveTheme, Button, ButtonSize, ButtonVariant, Colors, IconButton, IconButtonSize, IconName,
+    Surface, TypeStyled,
+    tokens::{radius, shadow},
+};
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::*;
 use std::borrow::Cow;
+use std::rc::Rc;
+use std::sync::Arc;
 
 // ── parse (parse.ts, react-diff-view's parseDiff, gitdiff-parser) ──────────
 
@@ -554,6 +566,661 @@ fn gitdiff_parse(source: &str) -> Option<Vec<FileData>> {
     Some(files)
 }
 
+// ── card model (DiffMessage.tsx) ───────────────────────────────────────────
+
+/// What the card shows around the patch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Header {
+    /// The file tag, or "Diff".
+    title: String,
+    /// The commit page, else the repository: HTTPS only.
+    source: Option<String>,
+    /// The short SHA (or "Source" when linked without one).
+    commit_label: Option<String>,
+    description: Option<String>,
+    truncated: bool,
+}
+
+impl Header {
+    fn new(meta: &DiffMeta) -> Self {
+        let repo = meta.repo_url.as_deref().and_then(safe_message_url);
+        let commit = meta.commit_sha.as_deref();
+        let commit_url = repo.as_deref().zip(commit).and_then(|(repo, commit)| {
+            ((7..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| format!("{}/commit/{commit}", repo.strip_suffix('/').unwrap_or(repo)))
+        });
+        let source = commit_url.or(repo);
+        let short = commit.map(|c| c.chars().take(7).collect::<String>());
+        let commit_label = if source.is_some() {
+            Some(
+                short
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Source".into()),
+            )
+        } else {
+            short.filter(|s| !s.is_empty())
+        };
+        Self {
+            title: meta
+                .file_path
+                .clone()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| "Diff".into()),
+            source,
+            commit_label,
+            description: meta.description.clone().filter(|d| !d.is_empty()),
+            truncated: meta.truncated,
+        }
+    }
+}
+
+/// `safeMessageUrl`: credential-free HTTPS, WHATWG-serialized.
+fn safe_message_url(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
+        .then(|| url.into())
+}
+
+/// The split view's rows: a delete followed by an insert share a row
+/// (react-diff-view's `SplitHunk`).
+fn split_rows(changes: &[Change]) -> Vec<(Option<&Change>, Option<&Change>)> {
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < changes.len() {
+        let change = &changes[i];
+        rows.push(match change.kind {
+            ChangeKind::Normal => (Some(change), Some(change)),
+            ChangeKind::Delete => match changes.get(i + 1) {
+                Some(next) if next.kind == ChangeKind::Insert => {
+                    i += 1;
+                    (Some(change), Some(next))
+                }
+                _ => (Some(change), None),
+            },
+            ChangeKind::Insert => (None, Some(change)),
+        });
+        i += 1;
+    }
+    rows
+}
+
+/// Tabs to the browser's 8-column stops, since `pre-wrap` keeps them.
+fn expand_tabs(text: &str) -> Cow<'_, str> {
+    if !text.contains('\t') {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut column = 0;
+    for c in text.chars() {
+        match c {
+            '\t' => {
+                let n = 8 - column % 8;
+                out.extend(std::iter::repeat_n(' ', n));
+                column += n;
+            }
+            '\n' => {
+                out.push(c);
+                column = 0;
+            }
+            _ => {
+                out.push(c);
+                column += 1;
+            }
+        }
+    }
+    out.into()
+}
+
+// ── rendering (DiffMessage.tsx, DiffViewer.tsx, Diffs.module.css) ──────────
+
+/// One `ch` of the 12px mono face (JetBrains Mono advances 0.6em).
+const CH: f32 = 0.75 * 0.6;
+/// `.diff-gutter-col`: 7ch.
+const GUTTER: f32 = 7. * CH;
+
+/// The card for a diff row, or `None` for other rows.
+pub fn card(row: &Arc<MessageRow>) -> Option<AnyElement> {
+    row.diff.as_ref()?;
+    Some(DiffCard { row: row.clone() }.into_any_element())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Unified,
+    Split,
+}
+
+/// A row's patch as [`parse_patch`] read it.
+type Parsed = Rc<Option<Vec<FileData>>>;
+
+/// Per-row state: the parsed patch (re-read only when the content
+/// changes) and the dialog.
+struct State {
+    parsed: Option<(Arc<MessageRow>, Parsed)>,
+    open: bool,
+    view: View,
+    focus: FocusHandle,
+    preview: ScrollHandle,
+}
+
+impl State {
+    fn files(&mut self, row: &Arc<MessageRow>) -> Parsed {
+        match &self.parsed {
+            Some((seen, files)) if Arc::ptr_eq(seen, row) || seen.content == row.content => {
+                files.clone()
+            }
+            _ => {
+                let files = Rc::new(parse_patch(&row.content));
+                self.parsed = Some((row.clone(), files.clone()));
+                files
+            }
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct DiffCard {
+    row: Arc<MessageRow>,
+}
+
+impl RenderOnce for DiffCard {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let c = *cx.colors();
+        let Some(meta) = &self.row.diff else {
+            return div().into_any_element();
+        };
+        let header = Header::new(meta);
+        let id = self.row.id.to_hex();
+        let state =
+            window.use_keyed_state(SharedString::from(format!("diff-{id}")), cx, |_, cx| {
+                State {
+                    parsed: None,
+                    open: false,
+                    view: View::Unified,
+                    focus: cx.focus_handle(),
+                    preview: ScrollHandle::new(),
+                }
+            });
+        let files = state.update(cx, |state, _| state.files(&self.row));
+        let (open, view, focus, preview) = {
+            let s = state.read(cx);
+            (s.open, s.view, s.focus.clone(), s.preview.clone())
+        };
+        let content = &self.row.content;
+        let file_path = meta.file_path.as_deref();
+
+        let expand = {
+            let state = state.clone();
+            let focus = focus.clone();
+            IconButton::new(
+                SharedString::from(format!("diff-expand-{id}")),
+                IconName::ArrowsOut,
+            )
+            .size(IconButtonSize::Sm)
+            .on_click(move |_, window, cx| {
+                state.update(cx, |state, cx| {
+                    state.view = View::Unified;
+                    state.open = true;
+                    cx.notify();
+                });
+                focus.focus(window, cx);
+            })
+        };
+        let source = header
+            .commit_label
+            .clone()
+            .map(|label| match &header.source {
+                Some(url) => {
+                    link(format!("diff-source-{id}"), label, url.clone()).into_any_element()
+                }
+                None => div().child(label).into_any_element(),
+            });
+
+        let card = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .overflow_hidden()
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(radius::CONTROL)
+            .bg(c.surface_panel)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(rems(0.5))
+                    .px(rems(0.75))
+                    .py(rems(0.5))
+                    .bg(c.surface_inset)
+                    .text_mono()
+                    .text_color(c.text_standard)
+                    .child(div().min_w_0().truncate().child(header.title.clone()))
+                    .child(
+                        div()
+                            .ml_auto()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .children(source),
+                    )
+                    .child(expand),
+            )
+            .when_some(header.description.clone(), |this, text| {
+                this.child(note(&c).child(text))
+            })
+            .child(
+                div()
+                    .id(SharedString::from(format!("diff-preview-{id}")))
+                    .max_h(rems(25.))
+                    .overflow_y_scroll()
+                    .track_scroll(&preview)
+                    .on_scroll_wheel(chain_scroll(preview.clone()))
+                    .p(rems(0.75))
+                    .text_color(c.text_standard)
+                    .child(viewer(
+                        &format!("diff-{id}"),
+                        content,
+                        files.as_deref(),
+                        file_path,
+                        View::Unified,
+                        &c,
+                    )),
+            )
+            .when(header.truncated, |this| {
+                this.child(truncated(&format!("diff-notice-{id}"), &header, &c))
+            });
+
+        let dialog = open.then(|| {
+            let close = {
+                let state = state.clone();
+                move |_: &mut Window, cx: &mut App| {
+                    state.update(cx, |state, cx| {
+                        state.open = false;
+                        cx.notify();
+                    });
+                }
+            };
+            let toggle = |label: &'static str, target: View| {
+                let state = state.clone();
+                Button::new(SharedString::from(format!("diff-{label}-{id}")), label)
+                    .size(ButtonSize::Sm)
+                    .surface(Surface::Floating)
+                    .variant(if view == target {
+                        ButtonVariant::Subtle
+                    } else {
+                        ButtonVariant::Ghost
+                    })
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |state, cx| {
+                            state.view = target;
+                            cx.notify();
+                        })
+                    })
+            };
+            let body = div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(rems(0.5))
+                        .mb(rems(1.))
+                        .child(toggle("Unified", View::Unified))
+                        .child(toggle("Split", View::Split)),
+                )
+                .when(header.truncated, |this| {
+                    this.child(truncated(&format!("diff-dialog-notice-{id}"), &header, &c))
+                })
+                .child(viewer(
+                    &format!("diff-dialog-{id}"),
+                    content,
+                    files.as_deref(),
+                    file_path,
+                    view,
+                    &c,
+                ));
+            overlay::modal(
+                window,
+                expanded_dialog(&id, &header.title, body, focus, close, window, &c),
+                None,
+            )
+        });
+
+        div()
+            .min_w_0()
+            .child(card)
+            .children(dialog)
+            .into_any_element()
+    }
+}
+
+/// `size="expanded"`: the window less 24px a side; the body scrolls. Like
+/// buzz-app's dialog, only Escape and the close button dismiss it.
+fn expanded_dialog(
+    id: &str,
+    title: &str,
+    body: Div,
+    focus: FocusHandle,
+    close: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    window: &Window,
+    c: &Colors,
+) -> impl IntoElement {
+    let inset = rems(3.).to_pixels(window.rem_size());
+    let viewport = window.viewport_size();
+    let on_escape = close.clone();
+    div()
+        .id(SharedString::from(format!("diff-dialog-{id}")))
+        .key_context(buzz_ui::DIALOG_CONTEXT)
+        .track_focus(&focus)
+        .on_action(move |_: &buzz_ui::Cancel, window, cx| on_escape(window, cx))
+        .flex()
+        .flex_col()
+        .w(viewport.width - inset)
+        .h(viewport.height - inset)
+        .overflow_hidden()
+        .p(rems(1.5))
+        .bg(c.surface_popover)
+        .border_1()
+        .border_color(c.border_standard)
+        .rounded(radius::PANEL)
+        .shadow(shadow::sm())
+        .text_color(c.text_standard)
+        .text_body()
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(rems(1.))
+                .child(div().min_w_0().text_label().child(title.to_owned()))
+                .child(
+                    IconButton::new("diff-dialog-close", IconName::X)
+                        .size(IconButtonSize::Sm)
+                        .surface(Surface::Floating)
+                        .on_click(move |_, window, cx| close(window, cx)),
+                ),
+        )
+        .child(
+            div()
+                .id("diff-dialog-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .py(rems(1.5))
+                .child(body),
+        )
+}
+
+/// `.description, .notice`.
+fn note(c: &Colors) -> Div {
+    div()
+        .px(rems(0.75))
+        .py(rems(0.5))
+        .text_body_sm()
+        .text_color(c.text_subtle)
+}
+
+/// "Diff truncated." with a link to the source when there is one.
+fn truncated(id: &str, header: &Header, c: &Colors) -> Div {
+    const LEAD: &str = "Diff truncated. ";
+    let Some(url) = header.source.clone() else {
+        return note(c).child(format!(
+            "{LEAD}View the full diff at the source repository."
+        ));
+    };
+    let text = format!("{LEAD}View full diff at the source repository");
+    let range = LEAD.len()..text.len();
+    let styled = StyledText::new(text).with_highlights([(
+        range.clone(),
+        HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: None,
+                wavy: false,
+            }),
+            ..Default::default()
+        },
+    )]);
+    note(c).child(
+        InteractiveText::new(SharedString::from(id.to_owned()), styled)
+            .on_click(vec![range], move |_, window, cx| {
+                navigation::open_url(&url, window, cx)
+            }),
+    )
+}
+
+/// An underlined link in the surrounding colour (`.card a`).
+fn link(id: String, label: String, url: String) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .cursor_pointer()
+        .underline()
+        .child(label)
+        .on_click(move |_, window, cx| navigation::open_url(&url, window, cx))
+}
+
+/// Lets the page scroll once the preview cannot, as a browser chains
+/// wheel scrolling. Runs after the preview applied the delta.
+fn chain_scroll(handle: ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) {
+    move |event, window, cx| {
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        let max = handle.max_offset().y;
+        let before = -handle.offset().y + delta;
+        let consumed = (delta < px(0.) && before < max) || (delta > px(0.) && before > px(0.));
+        if consumed {
+            cx.stop_propagation();
+        }
+    }
+}
+
+/// `DiffViewer`: the raw fallback, the empty state, or each file.
+fn viewer(
+    id: &str,
+    content: &str,
+    files: Option<&[FileData]>,
+    file_path: Option<&str>,
+    view: View,
+    c: &Colors,
+) -> AnyElement {
+    let Some(files) = files else {
+        return raw(id, content);
+    };
+    if files.is_empty() {
+        return div()
+            .text_body_sm()
+            .child("No diff content")
+            .into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(rems(0.75))
+        .text_mono()
+        .children(files.iter().enumerate().map(|(index, file)| {
+            let label = file_label(file, file_path);
+            let kind = file.kind;
+            let changes = file.hunks.iter().flat_map(|hunk| &hunk.changes);
+            let additions = changes
+                .clone()
+                .filter(|c| c.kind == ChangeKind::Insert)
+                .count();
+            let deletions = changes.filter(|c| c.kind == ChangeKind::Delete).count();
+            let show_header =
+                files.len() > 1 || Some(label.as_str()) != file_path || kind != DiffType::Modify;
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .when(show_header, |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(rems(0.5))
+                            .px(rems(0.75))
+                            .py(rems(0.5))
+                            .bg(c.surface_inset)
+                            .child(div().min_w_0().truncate().child(label))
+                            .child(div().flex_none().child(kind.label()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(c.text_success)
+                                    .child(format!("+{additions}")),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(c.text_danger)
+                                    .child(format!("−{deletions}")),
+                            ),
+                    )
+                })
+                .child(if file.hunks.is_empty() {
+                    note(c)
+                        .child("No textual hunks in this diff.")
+                        .into_any_element()
+                } else {
+                    match view {
+                        View::Unified => unified(file, c).into_any_element(),
+                        View::Split => div()
+                            .id(SharedString::from(format!("{id}-file-{index}")))
+                            .overflow_x_scroll()
+                            .restrict_scroll_to_axis()
+                            .child(split(file, c).w_full().min_w(rems(48.)))
+                            .into_any_element(),
+                    }
+                })
+        }))
+        .into_any_element()
+}
+
+/// `pre.raw`: the patch as sent, scrolling sideways.
+fn raw(id: &str, content: &str) -> AnyElement {
+    // A `pre` does not show a final newline as an empty line.
+    let text = content.strip_suffix('\n').unwrap_or(content);
+    div()
+        .id(SharedString::from(format!("{id}-raw")))
+        .overflow_x_scroll()
+        .restrict_scroll_to_axis()
+        .text_mono()
+        .child(
+            div()
+                .whitespace_nowrap()
+                .child(expand_tabs(text).into_owned()),
+        )
+        .into_any_element()
+}
+
+/// The fills and text colour of a change's cells.
+fn tone(kind: ChangeKind, c: &Colors) -> (Option<Hsla>, Hsla) {
+    match kind {
+        ChangeKind::Insert => (Some(c.affordance_success), c.text_success),
+        ChangeKind::Delete => (Some(c.affordance_danger), c.text_danger),
+        ChangeKind::Normal => (None, c.text_standard),
+    }
+}
+
+/// `.diff-gutter`: the line number, right-aligned in 7ch.
+fn gutter(number: Option<u64>, kind: ChangeKind, c: &Colors) -> Div {
+    let (fill, text) = tone(kind, c);
+    div()
+        .flex_none()
+        .w(rems(GUTTER))
+        .px(rems(CH))
+        .flex()
+        .justify_end()
+        .whitespace_nowrap()
+        .text_color(text)
+        .when_some(fill, |this, fill| this.bg(fill))
+        .children(number.map(|n| n.to_string()))
+}
+
+/// `.diff-code`: the line, wrapping anywhere.
+fn code(change: &Change, c: &Colors) -> Div {
+    let (fill, text) = tone(change.kind, c);
+    div()
+        .flex_1()
+        .min_w_0()
+        .pl(rems(0.375))
+        .text_color(text)
+        .when_some(fill, |this, fill| this.bg(fill))
+        .child(expand_tabs(&change.content).into_owned())
+}
+
+fn line_row() -> Div {
+    div().flex().w_full().min_h(rems(1.))
+}
+
+/// The unified table: old and new gutters, then the line.
+fn unified(file: &FileData, c: &Colors) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .children(
+            file.hunks
+                .iter()
+                .flat_map(|hunk| &hunk.changes)
+                .map(|change| {
+                    line_row()
+                        .child(gutter(change.old_line, change.kind, c))
+                        .child(gutter(change.new_line, change.kind, c))
+                        .child(code(change, c))
+                }),
+        )
+}
+
+/// The split table: old and new side by side. A new or deleted file has
+/// one side only.
+fn split(file: &FileData, c: &Colors) -> Div {
+    let monotonous = matches!(file.kind, DiffType::Add | DiffType::Delete);
+    let old_side = |change: Option<&Change>| match change {
+        Some(change) => [gutter(change.old_line, change.kind, c), code(change, c)],
+        None => omitted(c),
+    };
+    let new_side = |change: Option<&Change>| match change {
+        Some(change) => [gutter(change.new_line, change.kind, c), code(change, c)],
+        None => omitted(c),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .children(file.hunks.iter().flat_map(|hunk| {
+            split_rows(&hunk.changes)
+                .into_iter()
+                .map(|(old, new)| {
+                    let row = line_row();
+                    if monotonous {
+                        match old {
+                            Some(_) => row.children(old_side(old)),
+                            None => row.children(new_side(new)),
+                        }
+                    } else {
+                        row.children(old_side(old)).children(new_side(new))
+                    }
+                })
+                .collect::<Vec<_>>()
+        }))
+}
+
+/// `.diff-gutter-omit`: an empty side, marked by a 2px rule at 4.6ch.
+fn omitted(c: &Colors) -> [Div; 2] {
+    [
+        div().flex_none().w(rems(GUTTER)).relative().child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(rems(5.6 * CH))
+                .w(px(2.))
+                .bg(c.border_standard),
+        ),
+        div().flex_1().min_w_0(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +1444,88 @@ mod tests {
     }
 
     #[test]
+    fn pairs_deletes_with_following_inserts_in_split_rows() {
+        let files = parse_patch(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,4 +1,4 @@\n same\n-d1\n-d2\n+i1\n+i2\n same\n",
+        )
+        .unwrap();
+        let rows = split_rows(&files[0].hunks[0].changes);
+        fn text(c: Option<&Change>) -> Option<&str> {
+            c.map(|c| c.content.as_str())
+        }
+        let rows: Vec<_> = rows.into_iter().map(|(o, n)| (text(o), text(n))).collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("same"), Some("same")),
+                (Some("d1"), None),
+                (Some("d2"), Some("i1")),
+                (None, Some("i2")),
+                (Some("same"), Some("same")),
+            ]
+        );
+    }
+
+    fn meta(repo: &str) -> DiffMeta {
+        DiffMeta {
+            file_path: Some("a.ts".into()),
+            repo_url: Some(repo.into()),
+            commit_sha: Some("abcdef0".into()),
+            description: None,
+            truncated: true,
+        }
+    }
+
+    #[test]
+    fn links_the_short_commit_to_its_page() {
+        let header = Header::new(&meta("https://example.com/repo"));
+        assert_eq!(header.title, "a.ts");
+        assert_eq!(header.commit_label.as_deref(), Some("abcdef0"));
+        assert_eq!(
+            header.source.as_deref(),
+            Some("https://example.com/repo/commit/abcdef0")
+        );
+        let header = Header::new(&DiffMeta {
+            commit_sha: Some("0123456789abcdef".into()),
+            ..meta("https://example.com/")
+        });
+        assert_eq!(header.commit_label.as_deref(), Some("0123456"));
+        assert_eq!(
+            header.source.as_deref(),
+            Some("https://example.com/commit/0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_repositories_and_falls_back_to_source() {
+        for repo in [
+            "javascript:alert(1)",
+            "http://example.com/repo",
+            "https://user:pw@example.com/repo",
+        ] {
+            let header = Header::new(&meta(repo));
+            assert_eq!(header.source, None, "{repo}");
+            // Unlinked, the SHA is plain text.
+            assert_eq!(header.commit_label.as_deref(), Some("abcdef0"), "{repo}");
+        }
+        // Not a SHA: the repository itself, labelled "Source" without one.
+        let header = Header::new(&DiffMeta {
+            commit_sha: Some("main".into()),
+            ..meta("https://example.com/repo")
+        });
+        assert_eq!(header.source.as_deref(), Some("https://example.com/repo"));
+        assert_eq!(header.commit_label.as_deref(), Some("main"));
+        let header = Header::new(&DiffMeta {
+            commit_sha: None,
+            ..meta("https://example.com/repo")
+        });
+        assert_eq!(header.commit_label.as_deref(), Some("Source"));
+        let header = Header::new(&DiffMeta::default());
+        assert_eq!(header.title, "Diff");
+        assert_eq!((header.source, header.commit_label), (None, None));
+    }
+
+    #[test]
     fn keeps_raw_content_that_looks_like_markup() {
         // DiffMessage.test.tsx: neither shape renders as Markdown or HTML.
         let markup = "<script>alert(1)</script> ![image](https://example.com/no.png)\n";
@@ -808,5 +1557,12 @@ mod tests {
             let change = &files[0].hunks[0].changes[0];
             assert_eq!((change.kind, change.content.as_str()), (kind, &line[1..]));
         }
+    }
+
+    #[test]
+    fn expands_tabs_to_eight_column_stops() {
+        assert_eq!(expand_tabs("\tx"), "        x");
+        assert_eq!(expand_tabs("ab\tc"), "ab      c");
+        assert_eq!(expand_tabs("plain"), "plain");
     }
 }

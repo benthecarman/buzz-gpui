@@ -6,7 +6,6 @@ mod agents;
 mod channel;
 mod channel_menu;
 mod composer;
-#[cfg_attr(not(test), allow(dead_code))]
 mod diff;
 mod emoji_picker;
 mod gif_picker;

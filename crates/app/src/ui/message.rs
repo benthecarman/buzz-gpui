@@ -292,7 +292,9 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
                 .child(div().text_color(c.text_link).child(link)),
         );
     }
-    if !row.content.trim().is_empty() {
+    if let Some(card) = super::diff::card(row) {
+        body = body.child(div().when(item.head, |d| d.mt(px(4.))).child(card));
+    } else if !row.content.trim().is_empty() {
         body = body.child(
             div()
                 .id(SharedString::from(format!("md-{id}")))
