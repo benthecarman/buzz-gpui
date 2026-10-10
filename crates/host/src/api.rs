@@ -200,6 +200,48 @@ pub enum Request {
     // Agents2 custody
     /// An Agents2 agent's key, held by this host: see [`AppAgentRequest`].
     AppAgent(AppAgentRequest),
+    // teams
+    /// Portable snapshots of the saved agents `members` (pubkeys) in
+    /// `community` (an HTTPS or WSS origin), as a team named by `team`.
+    /// Answers [`Response::TeamSnapshot`].
+    TeamCapture {
+        team: TeamMeta,
+        members: Vec<String>,
+        community: String,
+    },
+    /// Validates a team snapshot file's JSON and answers it normalized as
+    /// [`Response::TeamSnapshot`]. Nothing is created.
+    TeamPreview {
+        content: String,
+    },
+    /// Applies a saved team's instructions to one member before a deploy,
+    /// after reconciling the host's team bindings with `teams`, the
+    /// owner's current team heads in `community`.
+    TeamInstructions {
+        id: String,
+        revision: u64,
+        instructions: String,
+        team: String,
+        community: String,
+        owner: String,
+        teams: BTreeMap<String, TeamCatalogEntry>,
+    },
+    /// [`Request::CreatePrepare`] for one member of a team import. A
+    /// request ID that already created an agent answers that agent with
+    /// `saved`, so an interrupted import resumes without new keys.
+    TeamMemberPrepare {
+        request_id: String,
+        relay_url: String,
+        owner: String,
+    },
+    /// [`Request::CreateCommit`] for a team member: saves the agent bound
+    /// to the imported team with its portable settings.
+    TeamMemberCommit {
+        request_id: String,
+        edit: AgentEdit,
+        auth: String,
+        bundle: Box<BundleMember>,
+    },
 }
 
 // Responses are moved once, from the wire to their caller; boxing the
@@ -247,6 +289,14 @@ pub enum Response {
     },
     // Agents2 custody
     AppAgent(AppAgentResponse),
+    // teams
+    TeamSnapshot(TeamSnapshot),
+    TeamMemberPrepared {
+        id: String,
+        pubkey: String,
+        /// The request already created this agent.
+        saved: bool,
+    },
 }
 
 /// What an install did (buzz-app's `InstallReport`).
@@ -881,6 +931,156 @@ pub struct MemoryRestore {
     /// When the agent already holds this slug: its entry's timestamp, so
     /// the new event supersedes it.
     pub after: Option<u64>,
+}
+
+// teams
+
+/// Mirrors the controller's `TeamMeta`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMeta {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+/// Mirrors the controller's `TeamSnapshot`: a portable team file. Keys,
+/// credentials and local paths never travel.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSnapshot {
+    pub format: String,
+    pub version: u32,
+    pub team: TeamMeta,
+    pub members: Vec<MemberSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberSnapshot {
+    pub format: String,
+    pub version: u32,
+    pub definition: MemberDefinition,
+    pub profile: MemberProfile,
+    pub memory: MemberMemory,
+}
+
+fn channel() -> SessionPolicy {
+    SessionPolicy::Channel
+}
+
+/// Mirrors the controller's team `Definition`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub source_is_builtin: bool,
+    #[serde(default)]
+    pub name_pool: Vec<String>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default = "channel")]
+    pub session_policy: SessionPolicy,
+    #[serde(default)]
+    pub respond_to: Option<String>,
+    #[serde(default)]
+    pub respond_to_allowlist: Vec<String>,
+    #[serde(default)]
+    pub parallelism: Option<u32>,
+    #[serde(default)]
+    pub idle_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_turn_duration_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl Default for MemberDefinition {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            source_is_builtin: false,
+            name_pool: Vec::new(),
+            system_prompt: None,
+            runtime: None,
+            model: None,
+            provider: None,
+            session_policy: SessionPolicy::Channel,
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            parallelism: None,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            effort: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberProfile {
+    pub display_name: String,
+    #[serde(default)]
+    pub about: Option<String>,
+    #[serde(default)]
+    pub avatar_data_url: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+/// `level` is `none`, `core` or `everything`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberMemory {
+    pub level: String,
+    #[serde(default)]
+    pub entries: Vec<MemoryEntry>,
+}
+
+impl Default for MemberMemory {
+    fn default() -> Self {
+        Self {
+            level: "none".into(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEntry {
+    pub slug: String,
+    pub body: String,
+}
+
+/// Mirrors the controller's `TeamCatalogEntry`: one team's current head.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamCatalogEntry {
+    pub created_at: u64,
+    pub event_id: String,
+    pub members: Vec<String>,
+}
+
+/// Mirrors the controller's `BundleMember`: what binds a new agent to the
+/// team it is imported with. Memories are restored separately.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleMember {
+    /// The saved team's ID.
+    pub team: String,
+    pub member: MemberSnapshot,
+    pub instructions: String,
+    pub keep_allowlist: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,6 +19,7 @@ mod profile;
 mod setup;
 mod snapshot;
 mod start;
+mod teams;
 
 use api::{
     AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
@@ -470,6 +471,11 @@ impl AgentHost {
                 edit,
                 auth,
             } => self.create_commit(request_id, edit, auth).await,
+            request @ (Request::TeamCapture { .. }
+            | Request::TeamPreview { .. }
+            | Request::TeamInstructions { .. }
+            | Request::TeamMemberPrepare { .. }
+            | Request::TeamMemberCommit { .. }) => self.team_request(request).await,
             Request::RestoreMemory { id, owner, entries } => {
                 self.restore_memory(id, owner, entries).await
             }
