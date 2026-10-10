@@ -21,7 +21,9 @@ pub struct SelectableText {
     handle: Option<TextSelectionHandle>,
     text: SharedString,
     styled_text: StyledText,
-    document_order: u64,
+    /// `None` takes the next order in paint, as `TextView` does, so runs
+    /// and text views interleave in the order they are painted.
+    document_order: Option<u64>,
     text_style: Option<TextStyleRefinement>,
     selection_color: Option<Hsla>,
 }
@@ -47,7 +49,7 @@ impl SelectableText {
             handle,
             styled_text: StyledText::new(text.clone()),
             text,
-            document_order: 0,
+            document_order: None,
             text_style: None,
             selection_color: None,
         }
@@ -55,7 +57,7 @@ impl SelectableText {
 
     /// Places this run in reading order among the others sharing its handle.
     pub fn document_order(mut self, order: u64) -> Self {
-        self.document_order = order;
+        self.document_order = Some(order);
         self
     }
 
@@ -181,19 +183,13 @@ impl Element for SelectableText {
         global_id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        handle: &mut Self::RequestLayoutState,
+        _: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
         self.styled_text
             .prepaint(global_id, inspector_id, bounds, &mut (), window, cx);
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
-            .with_document_order(self.document_order)
-            .with_text_bounds(vec![bounds])
-            .with_rendered_element(handle, window, cx);
-        handle.register(registration, window, cx);
-        hitbox
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
     fn paint(
@@ -202,16 +198,24 @@ impl Element for SelectableText {
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         handle: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let document_order = self.document_order.unwrap_or_else(|| {
+            crate::GlobalState::global_mut(cx).next_selection_document_order()
+        });
+        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
+            .with_document_order(document_order)
+            .with_text_bounds(vec![bounds])
+            .with_rendered_element(handle, window, cx);
+        handle.register(registration, window, cx);
         let layout = self.styled_text.layout().clone();
         let selected_text_before = TextSelection::selected_text(window, cx);
         let projection = handle.update_runs(
             &[
                 TextSelectionRun::new(self.text.clone(), layout.clone(), bounds)
-                    .with_document_order(self.document_order),
+                    .with_document_order(document_order),
             ],
             cx,
         );

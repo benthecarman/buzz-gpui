@@ -45,6 +45,10 @@ Patches:
   `EditorMode`, so existing code still compiles. The composer uses this to
   style Markdown as it is typed. Before, only `EditorState` could hold
   styled ranges. The renderer already drew decorations in every mode.
+- Selectable text in paint order: a `SelectableText` without an explicit
+  `document_order` takes the next one while painting, as `TextView` does,
+  so a selection dragged across plain runs and text views copies them in
+  the order they are on screen. Before, every such run sorted first.
 - Backgrounds beside inline tokens: a line with a token (a chip) now
   paints the background colors of its text runs. Its layout never marked
   them, so a highlighted background vanished from any line with a chip.
