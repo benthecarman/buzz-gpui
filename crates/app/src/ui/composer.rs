@@ -194,6 +194,10 @@ pub struct Composer {
     /// "Retry message preparation" was pressed: a ready catalog clears the
     /// error.
     retrying_preparation: bool,
+    /// How often the toolbar opened or closed, keying its reveal, and
+    /// whether the last time was from the keyboard (instant).
+    format_toggles: usize,
+    format_keyboard: bool,
     /// The text before the last edit, to refuse one past the limit.
     accepted: Option<(InputContent, std::ops::Range<usize>)>,
     drag_over: bool,
@@ -421,6 +425,8 @@ impl Composer {
             pending_at: 0,
             applying_format: false,
             accepted: None,
+            format_toggles: 0,
+            format_keyboard: false,
             revision: None,
             draft_issue: None,
             retrying_preparation: false,
@@ -2223,6 +2229,12 @@ fn large_emoji(text: &str, entries: &[buzz_relay_client::CustomEmoji]) -> bool {
     crate::ui::markdown::is_emoji_only(text, &entries)
 }
 
+/// The toolbar's reveal: 140ms ease-out, or none (`reveal`).
+fn reveal(instant: bool) -> Animation {
+    Animation::new(Duration::from_millis(if instant { 1 } else { 140 }))
+        .with_easing(|t: f32| 1. - (1. - t).powi(4))
+}
+
 /// The picture a draft file shows: an image's own pixels. Other files
 /// show the file icon.
 fn preview_source(item: &DraftFile) -> Option<Img> {
@@ -3059,6 +3071,7 @@ impl Composer {
                 .tooltip(format.tooltip())
                 .on_click(cx.listener(move |this, _, window, cx| this.format(format, window, cx)))
             };
+            let instant = self.toggle_instant(cx);
             return div()
                 .id("format-tools")
                 .flex()
@@ -3070,10 +3083,8 @@ impl Composer {
                         .size(IconButtonSize::Sm)
                         .variant(ButtonVariant::Subtle)
                         .tooltip("Close formatting")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.formatting = false;
-                            this.focus(window, cx);
-                            cx.notify();
+                        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                            this.toggle_formatting(false, event.is_keyboard(), window, cx);
                         })),
                 )
                 .child(
@@ -3092,8 +3103,14 @@ impl Composer {
                         .overflow_x_scroll()
                         .children(Format::ALL.into_iter().map(|format| button(format, cx))),
                 )
+                .with_animation(
+                    ("format-reveal", self.format_toggles),
+                    reveal(instant),
+                    |tools, delta| tools.opacity(delta),
+                )
                 .into_any_element();
         }
+        let instant = self.toggle_instant(cx);
         let editing = self.editing.is_some();
         div()
             .flex()
@@ -3160,16 +3177,50 @@ impl Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx))),
             )
             .child(
-                IconButton::new("format", IconName::TextAa)
-                    .size(IconButtonSize::Sm)
-                    .tooltip("Formatting")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.formatting = true;
-                        this.focus(window, cx);
-                        cx.notify();
-                    })),
+                div()
+                    .relative()
+                    .child(
+                        IconButton::new("format", IconName::TextAa)
+                            .size(IconButtonSize::Sm)
+                            .tooltip("Formatting")
+                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                this.toggle_formatting(true, event.is_keyboard(), window, cx);
+                            })),
+                    )
+                    .with_animation(
+                        ("format-toggle-reveal", self.format_toggles),
+                        reveal(instant),
+                        |toggle, delta| toggle.opacity(delta).left(px(-8. * (1. - delta))),
+                    ),
+            )
+            // The leading tools slide in as the toolbar closes.
+            .relative()
+            .with_animation(
+                ("tools-reveal", self.format_toggles),
+                reveal(instant),
+                |tools, delta| tools.opacity(delta).left(px(-12. * (1. - delta))),
             )
             .into_any_element()
+    }
+
+    /// Opens or closes the formatting toolbar. Keyboard toggles and reduced
+    /// motion skip the 140ms reveal (`ComposerFormattingTools.tsx`).
+    fn toggle_formatting(
+        &mut self,
+        open: bool,
+        keyboard: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.formatting = open;
+        self.format_toggles += 1;
+        self.format_keyboard = keyboard;
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_instant(&self, cx: &App) -> bool {
+        self.format_toggles == 0 || self.format_keyboard || cx.reduce_motion()
     }
 
     /// `.composerLeadingTools`: the mention button, and once chips name
@@ -3945,9 +3996,8 @@ impl Render for Composer {
                     cx.stop_propagation();
                     cx.notify();
                 } else if this.formatting {
-                    this.formatting = false;
+                    this.toggle_formatting(false, true, window, cx);
                     cx.stop_propagation();
-                    cx.notify();
                 } else if this.editing.is_some() {
                     this.cancel_edit(window, cx);
                     cx.stop_propagation();
