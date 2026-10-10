@@ -641,6 +641,9 @@ pub struct EmojiPicker {
     searching: bool,
     active: Category,
     per_line: usize,
+    /// The composer's width, which a composer picker fits; a reaction
+    /// picker fits the window.
+    container: Option<f32>,
     grid_height: f32,
     tones_open: bool,
     /// The tone a hovered menu option previews.
@@ -725,6 +728,7 @@ impl EmojiPicker {
             searching: false,
             active: Category::Frequent,
             per_line: 6,
+            container: None,
             grid_height: MART_HEIGHT - SEARCH - NAV,
             tones_open: false,
             preview_tone: None,
@@ -1135,11 +1139,23 @@ fn cell(
         .into_any_element()
 }
 
+impl EmojiPicker {
+    /// Fits the picker to its composer's width. True when it changed.
+    pub fn fit(&mut self, width: f32) -> bool {
+        let changed = self.container.is_none_or(|old| (old - width).abs() > 0.5);
+        if changed {
+            self.container = Some(width);
+        }
+        changed
+    }
+}
+
 impl Render for EmojiPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        let viewport = window.viewport_size();
-        let available = f32::from(viewport.width);
+        let available = self
+            .container
+            .unwrap_or_else(|| f32::from(window.viewport_size().width));
         let per_line = mart::per_line(available);
         if per_line != self.per_line {
             self.per_line = per_line;
@@ -1153,7 +1169,7 @@ impl Render for EmojiPicker {
             .as_ref()
             .filter(|gifs| gifs.available == Some(true))
             .map(|gifs| (gifs.showing, gifs.panel.clone()));
-        let height = MART_HEIGHT.min(f32::from(viewport.height) * 0.4);
+        let height = MART_HEIGHT.min(f32::from(window.viewport_size().height) * 0.4);
         // Under tabs, the search's top margin is the tabs' gap instead.
         self.grid_height = (height - SEARCH - if nav_shown { NAV } else { 0. }
             + if tabs.is_some() { 12. } else { 0. })

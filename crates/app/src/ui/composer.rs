@@ -4850,10 +4850,25 @@ impl Render for Composer {
             ))
         });
 
+        // The picker fits the composer's width (`EmojiPicker` layout).
+        let fit = self.picker.clone();
         div()
             .relative()
             .mx(px(16.))
             .mb(px(16.))
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let width = f32::from(bounds.size.width);
+                        if fit.update(cx, |picker, _| picker.fit(width)) {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .children(self.completion_popup(cx))
             .children(self.mention_picker_popup(cx))
             .children(picker)
