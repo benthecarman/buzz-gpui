@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# Vendored crates are patched in, not developed here.
+exclude = ["third_party"]
 default-members = ["crates/app"]
 resolver = "3"
 
@@ -16,3 +18,8 @@ anyhow = "1"
 buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "6958ff1fc2bf1dc682a9e445acdaaa020fb17a58" }
 buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "6958ff1fc2bf1dc682a9e445acdaaa020fb17a58" }
 gpui-kit = "=0.7.1"
+
+# GPUI's Linux platform with this app's patches; third_party/README.md lists
+# them.
+[patch.crates-io]
+gpui-pre-linux = { path = "third_party/gpui-pre-linux" }

@@ -6,6 +6,11 @@ natively, using buzz-app's behavior and documentation as its reference. It
 depends on buzz-app's `buzz-agent-controller` and `buzz-credential-store`
 crates.
 
+`third_party/gpui-pre-linux/` is GPUI's Linux platform crate, gpui-pre-linux
+0.3.8 ([zed-industries/zed](https://github.com/zed-industries/zed),
+Apache-2.0, © Zed Industries, Inc.), with the changes listed in
+`third_party/README.md`; its license is in `third_party/gpui-pre-linux/`.
+
 The app icons in `assets/icons/` are copied from buzz-app's
 `src-tauri/icons`, which copied them from Block Buzz's
 `desktop/src-tauri/icons` ([block/buzz](https://github.com/block/buzz),
