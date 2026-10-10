@@ -102,6 +102,32 @@ pub fn newest_profile<'a>(events: &'a [Verified], viewer: &str) -> Option<&'a Ve
         })
 }
 
+/// The editor's fields in a kind 0's content (`inspectProfile`): the
+/// display name, else the name. Content that is not an object reads as
+/// empty fields.
+pub fn profile_fields(content: &str) -> ProfileEdit {
+    let fields = match serde_json::from_str::<Value>(content) {
+        Ok(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    let text = |key: &str| match fields.get(key) {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Null) | None => None,
+        Some(other) => Some(other.to_string()),
+    };
+    let string = |key: &str| match fields.get(key) {
+        Some(Value::String(text)) => text.clone(),
+        _ => String::new(),
+    };
+    ProfileEdit {
+        name: text("display_name")
+            .or_else(|| text("name"))
+            .unwrap_or_default(),
+        picture: string("picture"),
+        about: string("about"),
+    }
+}
+
 /// The kind 0 that saves `edit` over `existing` (the current kind 0's
 /// content). Unknown fields survive; `name` and `display_name` both take
 /// the display name. Dated after `previous` so it replaces it.
@@ -221,6 +247,23 @@ mod tests {
         let fields: Value = serde_json::from_str(&fresh.content).unwrap();
         assert_eq!(fields.as_object().unwrap().len(), 4);
         assert_eq!(fresh.created_at, 5);
+    }
+
+    #[test]
+    fn reads_the_editor_fields_like_inspect_profile() {
+        assert_eq!(
+            profile_fields(
+                r#"{"name":"al","display_name":"Alice","picture":"https://x/a.png","about":"hi"}"#
+            ),
+            edit("Alice", "https://x/a.png", "hi")
+        );
+        assert_eq!(profile_fields(r#"{"name":"al"}"#), edit("al", "", ""));
+        assert_eq!(
+            profile_fields(r#"{"display_name":null,"name":"al","picture":7}"#),
+            edit("al", "", "")
+        );
+        assert_eq!(profile_fields("[1]"), ProfileEdit::default());
+        assert_eq!(profile_fields("not json"), ProfileEdit::default());
     }
 
     #[test]

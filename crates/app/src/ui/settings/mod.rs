@@ -203,12 +203,12 @@ impl SettingsPage {
     fn follow_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let community = AppState::current(cx);
         self._community_observer = community.as_ref().map(|community| {
-            cx.observe_in(community, window, |this, community, window, cx| {
-                this.profile.sync(Some(&community), window, cx);
+            cx.observe_in(community, window, |this, _, window, cx| {
+                this.sync_profile(window, cx);
                 cx.notify();
             })
         });
-        self.profile.sync(community.as_ref(), window, cx);
+        self.sync_profile(window, cx);
         // A section no longer listed falls back to the default
         // (`Settings.tsx`), e.g. Custom emoji once no community is chosen.
         let has_community = community.is_some();

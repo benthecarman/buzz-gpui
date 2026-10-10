@@ -19,6 +19,8 @@ use std::time::Duration;
 /// A status save gives up after this long (`user-status.ts`).
 const STATUS_TIMEOUT: Duration = Duration::from_secs(12);
 const PROFILE_TIMEOUT: Duration = Duration::from_secs(30);
+/// A profile read gives up after this long (`inspectProfile`).
+const PROFILE_READ_TIMEOUT: Duration = Duration::from_secs(12);
 /// Adding an emoji gives up after this long (`emoji-directory.ts`).
 const EMOJI_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -156,6 +158,29 @@ impl Session {
                 })));
             }
         });
+    }
+
+    /// The viewer's profile here, read fresh (`inspectProfile`). `None`
+    /// when the viewer has never published one in this community.
+    pub async fn own_profile(&self) -> Result<Option<ProfileEdit>, String> {
+        let reader = self.direct.reader.clone();
+        let viewer = self.viewer.clone();
+        self.run(async move {
+            let read = reader.read(
+                vec![account::own_profile_filter(&viewer)],
+                ReadOptions {
+                    fresh: true,
+                    ..Default::default()
+                },
+            );
+            let events = tokio::time::timeout(PROFILE_READ_TIMEOUT, read)
+                .await
+                .map_err(|_| "The request timed out.".to_string())?
+                .map_err(|error| error.message)?;
+            Ok(account::newest_profile(&events, &viewer)
+                .map(|event| account::profile_fields(&event.content)))
+        })
+        .await
     }
 
     /// The viewer's current status, read fresh. `None` when unset, cleared

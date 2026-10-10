@@ -13,7 +13,7 @@ use buzz_relay_client::upload;
 use buzz_relay_client::{ProfileEdit, RelayOrigin};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonVariant, IconButton,
-    IconButtonSize, IconName, Surface, TextArea, TextField, TypeStyled,
+    IconButtonSize, IconName, Surface, TextArea, TextField, Toast, ToastTone, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
@@ -99,9 +99,32 @@ fn without_community_media(
     }
 }
 
+/// The viewer's profile in the selected community, read fresh when the
+/// community is chosen (`inspectProfile`).
+enum Load {
+    Loading,
+    /// Loaded; a community without a kind 0 shows the default profile.
+    Ready,
+    Failed(SharedString),
+}
+
+/// buzz-app's `beginProfileSave`: only the latest save, app-wide, updates
+/// the default profile.
+static PROFILE_SAVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+const NOT_CURRENT: &str =
+    "Your profile change is not current. Your edits are retained; save again to retry.";
+
 /// The profile editor's fields and what they were loaded from.
 pub(super) struct ProfileForm {
     community: Option<EntityId>,
+    load: Load,
+    /// Bumped by every load, so a late result for an earlier community
+    /// or attempt is dropped.
+    attempt: usize,
+    _load: Option<Task<()>>,
+    /// Why the last identity copy failed; its toast stays until dismissed.
+    copy_failed: Option<SharedString>,
     name: Entity<InputState>,
     about: Entity<TextareaState>,
     picture: Entity<InputState>,
@@ -163,6 +186,10 @@ impl ProfileForm {
         ];
         Self {
             community: None,
+            load: Load::Ready,
+            attempt: 0,
+            _load: None,
+            copy_failed: None,
             name,
             about,
             picture,
@@ -212,31 +239,6 @@ impl ProfileForm {
         self.values(cx) != self.baseline
     }
 
-    /// Loads the viewer's profile from `community`, unless the user is
-    /// editing it there.
-    pub(super) fn sync(
-        &mut self,
-        community: Option<&Entity<Community>>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let id = community.map(Entity::entity_id);
-        let switched = id != self.community;
-        if !switched && (self.saving || self.dirty(cx)) {
-            return;
-        }
-        let saved = match community {
-            Some(community) => saved_profile(community, cx),
-            None => default_profile(cx),
-        };
-        if !switched && saved == self.baseline {
-            return;
-        }
-        self.community = id;
-        self.error = None;
-        self.set(saved, window, cx);
-    }
-
     fn set(&mut self, values: ProfileEdit, window: &mut Window, cx: &mut App) {
         self.name.update(cx, |state, cx| {
             state.set_value(values.name.clone(), window, cx)
@@ -251,27 +253,92 @@ impl ProfileForm {
     }
 }
 
-/// The viewer's saved profile in `community`, as the editor's fields.
-fn saved_profile(community: &Entity<Community>, cx: &App) -> ProfileEdit {
-    let community = community.read(cx);
-    let viewer = community.session.viewer();
-    community
-        .snapshot
-        .profiles
-        .get(viewer)
-        .map(|profile| ProfileEdit {
-            name: if profile.name_is_fallback {
-                String::new()
-            } else {
-                profile.name.clone()
-            },
-            picture: profile.picture.clone().unwrap_or_default(),
-            about: profile.about.clone().unwrap_or_default(),
-        })
-        .unwrap_or_default()
-}
-
 impl SettingsPage {
+    /// Follows the selected community: a switch drops any draft and reads
+    /// the viewer's profile there afresh; without a community the form
+    /// edits the default profile.
+    pub(super) fn sync_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let community = AppState::current(cx);
+        let id = community.as_ref().map(Entity::entity_id);
+        if id == self.profile.community && self.profile.attempt > 0 {
+            return;
+        }
+        self.profile.community = id;
+        match community {
+            Some(community) => self.load_profile(&community, window, cx),
+            None => {
+                self.profile.attempt += 1;
+                self.profile._load = None;
+                self.profile.load = Load::Ready;
+                self.profile.error = None;
+                let profile = default_profile(cx);
+                self.profile.set(profile, window, cx);
+            }
+        }
+    }
+
+    /// Reads the viewer's kind 0 in `community`; also "Retry loading
+    /// profile".
+    fn load_profile(
+        &mut self,
+        community: &Entity<Community>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile.attempt += 1;
+        let attempt = self.profile.attempt;
+        self.profile.load = Load::Loading;
+        self.profile.error = None;
+        let session = community.read(cx).session.clone();
+        self.profile._load = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = session.own_profile().await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.profile.attempt != attempt {
+                    return;
+                }
+                match result {
+                    Ok(loaded) => {
+                        let persisted = loaded.unwrap_or_else(|| default_profile(cx));
+                        this.profile.load = Load::Ready;
+                        this.profile.set(persisted, window, cx);
+                    }
+                    Err(error) => this.profile.load = Load::Failed(error.into()),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Copies a public identity value (`copyIdentity`).
+    fn copy_identity(&mut self, value: String, label: &'static str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+        // GPUI reports no failed write; a read-back that differs is one.
+        let failed = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .is_some_and(|text| text != value);
+        if failed {
+            self.profile.copy_failed = Some(
+                format!(
+                    "Couldn’t copy {}. Select it and copy manually.",
+                    label.to_lowercase()
+                )
+                .into(),
+            );
+            cx.notify();
+        } else {
+            self.profile.copy_failed = None;
+            self.show_toast(format!("{label} copied."), cx);
+        }
+    }
+
+    fn retry_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(community) = AppState::current(cx) {
+            self.load_profile(&community, window, cx);
+        }
+    }
+
     fn cancel_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let baseline = self.profile.baseline.clone();
         self.profile.error = None;
@@ -289,6 +356,8 @@ impl SettingsPage {
                 return;
             }
         };
+        use std::sync::atomic::Ordering;
+        let generation = PROFILE_SAVES.fetch_add(1, Ordering::SeqCst) + 1;
         let Some(community) = AppState::current(cx) else {
             // The default profile is local; nothing is published.
             remember_profile(saved.clone(), None, cx);
@@ -296,19 +365,39 @@ impl SettingsPage {
             self.show_toast("Profile updated", cx);
             return;
         };
+        // Nothing to save over until the profile here has loaded.
+        if !matches!(self.profile.load, Load::Ready) || self.profile.saving {
+            return;
+        }
         self.profile.saving = true;
         self.profile.error = None;
         let origin = community.read(cx).origin.clone();
         let session = community.read(cx).session.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = session.publish_profile(edit.clone()).await;
+            // `publish_profile` reads the current kind 0 first, so fields
+            // this editor does not own survive; then a confirming read.
+            let result = match session.publish_profile(saved.clone()).await {
+                Ok(()) => match session.own_profile().await {
+                    Ok(Some(confirmed)) if confirmed == saved => Ok(confirmed),
+                    Ok(_) => Err(NOT_CURRENT.to_string()),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            // Finishes even if Settings closed meanwhile.
+            if result.is_ok() && PROFILE_SAVES.load(Ordering::SeqCst) == generation {
+                let profile = saved.clone();
+                cx.update(|_, cx| remember_profile(profile, Some(&origin), cx))
+                    .ok();
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.profile.saving = false;
                 match result {
-                    Ok(()) => {
-                        let saved = buzz_relay_client::account::validate(&edit).unwrap_or(edit);
-                        remember_profile(saved.clone(), Some(&origin), cx);
-                        this.profile.set(saved, window, cx);
+                    Ok(confirmed) => {
+                        if this.profile.community == Some(community.entity_id()) {
+                            this.profile.load = Load::Ready;
+                            this.profile.set(confirmed, window, cx);
+                        }
                         this.show_toast("Profile updated", cx);
                     }
                     Err(error) => this.profile.error = Some(error.into()),
@@ -393,17 +482,49 @@ impl SettingsPage {
         };
         let mut parts = vec![header("Profile", Some(subtitle.into()), cx).into_any_element()];
         let identity = match &cx.global::<AppState>().identity {
-            IdentityState::Ready(identity) => Some(identity.clone()),
-            _ => None,
+            IdentityState::Ready(identity) => Ok(identity.clone()),
+            IdentityState::Loading => Err("Opening your local identity…"),
+            _ => Err(
+                "Your local identity is unavailable. Connect your identity to edit your profile.",
+            ),
         };
-        let Some(identity) = identity else {
-            parts.push(note("Your identity is unavailable.", cx).into_any_element());
-            return section(parts);
+        let identity = match identity {
+            Ok(identity) => identity,
+            Err(status) => {
+                parts.push(note(status, cx).into_any_element());
+                return section(parts);
+            }
         };
-        parts.push(
-            self.profile_form(community.as_ref(), window, cx)
+        let name = community
+            .as_ref()
+            .map(|community| community.read(cx).name())
+            .unwrap_or_default();
+        parts.push(match &self.profile.load {
+            Load::Ready => self
+                .profile_form(community.as_ref(), window, cx)
                 .into_any_element(),
-        );
+            Load::Loading => {
+                note(format!("Loading your profile in {name}…"), cx).into_any_element()
+            }
+            Load::Failed(error) => div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(rems(0.5))
+                .child(
+                    note(
+                        format!("Your profile in {name} couldn’t be loaded. {error}"),
+                        cx,
+                    )
+                    .text_color(c.text_danger),
+                )
+                .child(div().px(super::inset()).child(
+                    button("profile-retry", "Retry loading profile").on_click(
+                        cx.listener(|this, _, window, cx| this.retry_profile(window, cx)),
+                    ),
+                ))
+                .into_any_element(),
+        });
 
         // Identity details.
         let hex = identity.pubkey_hex();
@@ -416,6 +537,7 @@ impl SettingsPage {
                         what: &'static str,
                         value: String,
                         cx: &mut Context<Self>| {
+            let lower = what.to_lowercase();
             let copied = value.clone();
             preference_row(
                 None,
@@ -432,10 +554,9 @@ impl SettingsPage {
                     IconButton::new(id, IconName::Copy)
                         .size(IconButtonSize::Sm)
                         .variant(ButtonVariant::Ghost)
-                        .tooltip(format!("Copy {what}"))
+                        .tooltip(format!("Copy {lower}"))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                            this.show_toast(format!("Copied {what}"), cx);
+                            this.copy_identity(copied.clone(), what, cx)
                         }))
                         .into_any_element(),
                 ],
@@ -444,7 +565,7 @@ impl SettingsPage {
             .into_any_element()
         };
         let rows = vec![
-            copy_row("copy-hex", "Public key (hex)", "public key", hex, cx),
+            copy_row("copy-hex", "Public key (hex)", "Public key", hex, cx),
             copy_row(
                 "copy-npub",
                 "Nostr address (npub)",
@@ -555,9 +676,11 @@ impl SettingsPage {
                             preference_row(
                                 None,
                                 "Sign out of Buzz",
+                                // buzz-app adds that Builderlab and hosted
+                                // community logins end too; neither exists
+                                // here.
                                 Some(
-                                    "Remove your private key from this device. buzz-app uses \
-                                     the same key, so it signs out too."
+                                    "Remove your private key from this device."
                                         .into_any_element(),
                                 ),
                                 vec![
@@ -577,6 +700,29 @@ impl SettingsPage {
                 )
                 .into_any_element(),
         );
+        // "Identity wasn’t copied": an error toast that stays until
+        // dismissed.
+        if let Some(failure) = self.profile.copy_failed.clone() {
+            let right = window.viewport_size().width - px(16.) - px(384.);
+            parts.push(
+                deferred(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Window)
+                        .position(point(right, px(128.)))
+                        .child(
+                            Toast::new("identity-copy-failed", "Identity wasn’t copied")
+                                .description(failure)
+                                .tone(ToastTone::Error)
+                                .on_dismiss(cx.listener(|this, _, _, cx| {
+                                    this.profile.copy_failed = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .with_priority(3)
+                .into_any_element(),
+            );
+        }
         section(parts)
     }
 
