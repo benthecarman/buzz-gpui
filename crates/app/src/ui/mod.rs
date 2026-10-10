@@ -15,6 +15,7 @@ mod composer;
 
 mod diff;
 pub(crate) mod emoji_picker;
+mod feedback;
 mod form_fields;
 
 mod gif_picker;

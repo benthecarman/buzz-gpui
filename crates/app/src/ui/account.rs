@@ -2,7 +2,9 @@
 //! are, your availability and status, and Settings. Signing out is in
 //! Settings → Profile, as in buzz-app.
 
+use super::feedback::FeedbackDialog;
 use super::media;
+use super::modal::Dismissed;
 use super::overlay::{self, Align, Dismiss};
 use super::settings::OpenSettings;
 use super::status::{Closed, StatusEditor};
@@ -29,6 +31,10 @@ enum Open {
 enum Modal {
     Status {
         editor: Entity<StatusEditor>,
+        _subscription: Subscription,
+    },
+    Feedback {
+        dialog: Entity<FeedbackDialog>,
         _subscription: Subscription,
     },
 }
@@ -191,6 +197,20 @@ impl Account {
         self.open = None;
         self.modal = Some(Modal::Status {
             editor,
+            _subscription,
+        });
+        cx.notify();
+    }
+
+    fn send_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| FeedbackDialog::new(AppState::current(cx), window, cx));
+        let _subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| {
+            this.modal = None;
+            cx.notify();
+        });
+        self.open = None;
+        self.modal = Some(Modal::Feedback {
+            dialog,
             _subscription,
         });
         cx.notify();
@@ -424,6 +444,16 @@ impl Account {
             .child(MenuSeparator::new())
             .child(
                 Self::row(
+                    "account-feedback",
+                    IconName::ChatCircle,
+                    "Send feedback",
+                    None,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.send_feedback(window, cx))),
+            )
+            .child(
+                Self::row(
                     "account-settings",
                     IconName::Gear,
                     "Settings",
@@ -441,6 +471,7 @@ impl Account {
     fn modal(&self, window: &Window) -> Option<AnyElement> {
         let content = match self.modal.as_ref()? {
             Modal::Status { editor, .. } => editor.clone().into_any_element(),
+            Modal::Feedback { dialog, .. } => dialog.clone().into_any_element(),
         };
         Some(overlay::modal(window, content, None).into_any_element())
     }
