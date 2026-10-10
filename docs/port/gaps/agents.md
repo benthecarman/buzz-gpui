@@ -43,7 +43,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Row layout (`.agent-inventory-row`) with chevron details toggle, and a one-column layout at ≤640px | BA/AgentControls.css:16-91; BA/InventoryIdentityCard.tsx:350-385 | DONE (ui/agents/card.rs) | — | M |
 | "Archived (N)" accordion and "All your agents are archived in this community." | BA/InventoryView.tsx:267-300 | DONE (ui/agents.rs) | — | M |
 | "Profiles without identities" section | BA/InventoryView.tsx:302-316 | DONE (ui/agents.rs, ui/agents/discovery.rs) | — | M |
-| Teams slot on the Agents page (channel-templates) | BA/AgentsPage.tsx:345-350; BA/InventoryView.tsx:270 | MISSING | See §12 | M |
+| Teams slot on the Agents page (channel-templates) | BA/AgentsPage.tsx:345-350; BA/InventoryView.tsx:270 | DONE (crates/app/src/ui/agents/teams.rs) | - | M |
 | Community inventory status lines: "Checking community inventory…"; "Agent names and pictures could not be checked for {community}. Refresh to retry."; "Community inventory could not be checked…"; "Showing known community associations. Community checks are not current." | BA/UnifiedInventory.tsx:384-404; BA/use-community-inventory.ts | DONE (ui/agents.rs, ui/agents/discovery.rs) | — | M |
 | Inventory warnings: "{warning} Retry local discovery by reopening the app." | BA/UnifiedInventory.tsx:342-346 | DONE (host/lib.rs, ui/agents.rs) | — | S |
 | "Refresh agents" also refreshes the relay library, archives and community reads | BA/UnifiedInventory.tsx:356-371 | DONE (ui/agents.rs, ui/agents/discovery.rs) | — | S |

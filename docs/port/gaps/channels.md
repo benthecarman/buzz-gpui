@@ -146,7 +146,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | Webview hardening (path allowlist, sign-kind allowlist, `/events` kind gates, shape checks) | src-tauri/src/relay.rs:74-94, 225-323, 654-706 | DIFFERENT | No untrusted webview; signing scoped by `Purpose` (crates/identity/src/lib.rs:396) | - |
 | Workflow runs read `GET /workflows/{id}/runs?limit=20` | src-tauri/src/relay.rs:96-162; native.ts:401-426 | MISSING | With workflows feature | M |
-| Git authorization (27235 token) and project git | src-tauri/src/relay.rs:164-223; native.ts:427-455, 702-710 | MISSING | With projects feature | M |
+| Git authorization (27235 token) and project git | src-tauri/src/relay.rs:164-223; native.ts:427-455, 702-710 | DONE (crates/identity/src/lib.rs `git_auth`; crates/relay/src/session/projects.rs) | - | M |
 | Catalog sign guard (30175/30178, `env_vars` refused) | src-tauri/src/relay/catalog.rs:1-87 | MISSING | With the agent catalog | M |
 
 ### Enterprise
@@ -648,12 +648,12 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Membership settings card visibility (manager / pending / error) | src/bundled/moderation/index.tsx:5-48 | MISSING | Settings section | M |
-| NIP-43 roster (13534, relay-authored) read and role derivation | src/features/communities/roster.ts:1-62; src/bundled/moderation/membership.ts:27-150 | MISSING (kind constant only, crates/relay/src/event.rs:26) | Roster reader and roles | M |
-| Member list with search, Make admin / Make member / Remove with confirmations and copy | src/bundled/moderation/CommunityAdmin.tsx:250-420 | MISSING | Admin UI and member commands | L |
-| Add by npub/hex with role, "already a community member" check | src/bundled/moderation/CommunityAdmin.tsx:425-575 | MISSING | Add-member command | M |
-| Invite links: mint, copy, expiry and max-uses options, retry | src/bundled/moderation/CommunityAdmin.tsx:597-720; src/bundled/moderation/api.ts:37-50 | MISSING | Invite mint API and UI | M |
-| Stale-list guard "The member list is out of date. Retry before making changes." | src/bundled/moderation/CommunityAdmin.tsx:63 | MISSING | Comes with admin UI | S |
+| Membership settings card visibility (manager / pending / error) | src/bundled/moderation/index.tsx:5-48 | DONE (crates/app/src/ui/moderation/mod.rs, crates/app/src/ui/settings/cards.rs) | - | M |
+| NIP-43 roster (13534, relay-authored) read and role derivation | src/features/communities/roster.ts:1-62; src/bundled/moderation/membership.ts:27-150 | DONE (crates/relay/src/moderation.rs, crates/app/src/ui/moderation/store.rs) | - | M |
+| Member list with search, Make admin / Make member / Remove with confirmations and copy | src/bundled/moderation/CommunityAdmin.tsx:250-420 | DONE (crates/app/src/ui/moderation/card.rs, crates/relay/src/session/moderation.rs) | - | L |
+| Add by npub/hex with role, "already a community member" check | src/bundled/moderation/CommunityAdmin.tsx:425-575 | DONE (crates/app/src/ui/moderation/invite.rs) | - | M |
+| Invite links: mint, copy, expiry and max-uses options, retry | src/bundled/moderation/CommunityAdmin.tsx:597-720; src/bundled/moderation/api.ts:37-50 | DONE (crates/app/src/ui/moderation/invite.rs, crates/relay/src/session/moderation.rs) | - | M |
+| Stale-list guard "The member list is out of date. Retry before making changes." | src/bundled/moderation/CommunityAdmin.tsx:63 | DONE (crates/app/src/ui/moderation/card.rs, crates/app/src/ui/moderation/invite.rs) | - | S |
 
 ### Profiles
 
@@ -911,7 +911,7 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | "Channel settings" tab (identity, Escape closes, "Editing is unavailable on this connection.") | BC/ChannelSettingsPanel.tsx:31-224; BC/ChannelsPage.tsx:1561-1585 | DONE (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/workspace/board.rs; every port session can sign, so "Editing is unavailable on this connection." never applies) | Modal "Channel details" dialog (A/channel_menu.rs:379-581) | M |
 | Description and Visibility rows (hidden for DM/session), click to edit | BC/ChannelSettingsPanel.tsx:103-181 | DONE (crates/app/src/ui/channel_settings.rs) | Fields shown directly, disabled for non-editors; Description shown for DMs (A/channel_menu.rs:485-546) | S |
 | Members row with count; Channel ID row with copy ("Channel ID copied") | BC/ChannelSettingsPanel.tsx:182-192, 308-356 | DONE (crates/app/src/ui/channel_settings.rs) | Port has "Copy link" instead (A/channel_menu.rs:157-171) | S |
-| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | PARTIAL (crates/app/src/ui/channel_settings.rs): lifecycle buttons done; Save as template belongs to the templates slice, and the Personal group select needs the Me preferences record | - | M |
+| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | PARTIAL (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/templates/save_as.rs): lifecycle buttons and Save as template done; the Personal group select needs the Me preferences record | - | M |
 | Personal groups settings card ("Manage personal groups", "Reload groups") | BC/ChannelSetupSettings.tsx:1-105 | MISSING: needs the Me preferences (channel-kit) record, which the relay layer cannot read or write yet | - | M |
 | Fresh load, reload keeping explicit choices, "Reload details" on error | BC/ChannelDetailsEditor.tsx:122-168, 292-301 | DONE (crates/app/src/ui/channel_settings.rs) | Loads once; error replaces body, no reload (A/channel_menu.rs:405-423, 484) | S |
 | Save gating (dirty and valid) and inline field errors | BC/ChannelDetailsEditor.tsx:173-197, 492-521; FR/channel-details-protocol.ts:45-76 | DONE (crates/app/src/ui/channel_settings.rs) | Save always enabled; errors only after submit (A/channel_menu.rs:436-449, 565-577; R/lifecycle.rs:613-633) | S |
@@ -969,19 +969,19 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | Name/description, canonical name, Private switch, Create disabled when invalid | BC/CreateChannelDialog.tsx:133-184, 379-412, 446-465 | DONE (crates/app/src/ui/new_channel.rs) | Works (A/new_channel.rs:63-113, 168-185); no inline errors or "Buzz session (" pre-check | S |
 | Temporary duration (ttl) | BC/CreateChannelDialog.tsx:135-138, 225, 550-560 | DONE (crates/app/src/ui/new_channel.rs, crates/relay/src/lifecycle.rs) | NewChannel has no ttl (R/lifecycle.rs:636-668) | M |
 | Privacy confirmation and "Discard changes?" | BC/CreateChannelDialog.tsx:186-199, 341-399 | DONE (crates/app/src/ui/new_channel.rs) | (A/new_channel.rs:140-144, 168-178) | S |
-| Pending creation recovery ("Retry channel", restore after restart) | BC/CreateChannelDialog.tsx:157-175, 411, 434-439; FT/setup.ts:130-190 | MISSING: part of the channel templates setup receipts (`FT/setup.ts`), owned by the templates slice | Waits inside dialog only (R/session/actions.rs:542-572) | M |
-| Group destination ("Create a channel in <group>") | BC/CreateChannelDialog.tsx:142-145, 207-216, 311-327 | MISSING: needs personal groups (the Me preferences record) and the templates setup placement | - | M |
-| Template/teams editor and setup summary | BC/CreateChannelDialog.tsx:253-282, 466-549, 562 | MISSING: owned by the templates slice | - | L |
+| Pending creation recovery ("Retry channel", restore after restart) | BC/CreateChannelDialog.tsx:157-175, 411, 434-439; FT/setup.ts:130-190 | DONE (crates/app/src/ui/new_channel.rs, crates/relay/src/session/kit.rs) | - | M |
+| Group destination ("Create a channel in <group>") | BC/CreateChannelDialog.tsx:142-145, 207-216, 311-327 | MISSING: needs personal groups (the Me preferences record) in the UI; the setup receipts already carry the placement (crates/relay/src/session/kit.rs) | - | M |
+| Template/teams editor and setup summary | BC/CreateChannelDialog.tsx:253-282, 466-549, 562 | DONE (crates/app/src/ui/templates/editor.rs, crates/app/src/ui/new_channel.rs) | - | L |
 | 9007 via outbox, receipt, roster confirm, open channel; gated on relay support | docs/port/relay.md §5m.1 | DONE (R/session/actions.rs:542-572; A/new_channel.rs:79-113; A/workspace.rs:486-489) | - | - |
 
 ### Canvas
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "View canvas" and Canvas dialog (Markdown, saved draft `canvas-draft-v1`, "Save Canvas") | BC/ChannelCanvasDialog.tsx:13-243; BC/ChannelHeaderMenu.tsx:99-108 | MISSING | - | L |
-| Conflict handling ("Canvas changed since this draft began…", "Discard and reload") | BC/ChannelCanvasDialog.tsx:58-124, 155-166, 248-272; FT/canvas-conflict.ts:1-22 | MISSING | - | M |
-| Save protocol (40100 `expected-revision`, 24 KiB, 1 s spacing) | FT/capability.ts:426-528; FT/canvas-signing-contract.json | MISSING | Only kind const (R/event.rs:47) | M |
-| History (paged strong read of 25, restore confirm, >24 KiB not restorable) | BC/CanvasHistory.tsx:26-315; FT/capability.ts:443-486 | MISSING | - | M |
+| "View canvas" and Canvas dialog (Markdown, saved draft `canvas-draft-v1`, "Save Canvas") | BC/ChannelCanvasDialog.tsx:13-243; BC/ChannelHeaderMenu.tsx:99-108 | DONE (crates/app/src/ui/canvas/mod.rs, crates/app/src/ui/channel_menu.rs) | - | L |
+| Conflict handling ("Canvas changed since this draft began…", "Discard and reload") | BC/ChannelCanvasDialog.tsx:58-124, 155-166, 248-272; FT/canvas-conflict.ts:1-22 | DONE (crates/app/src/ui/canvas/mod.rs, crates/relay/src/session/canvas.rs) | - | M |
+| Save protocol (40100 `expected-revision`, 24 KiB, 1 s spacing) | FT/capability.ts:426-528; FT/canvas-signing-contract.json | DONE (crates/relay/src/canvas.rs, crates/relay/src/session/canvas.rs) | - | M |
+| History (paged strong read of 25, restore confirm, >24 KiB not restorable) | BC/CanvasHistory.tsx:26-315; FT/capability.ts:443-486 | DONE (crates/app/src/ui/canvas/history.rs, crates/relay/src/canvas.rs) | - | M |
 
 ### Channel completion (#)
 
@@ -1000,20 +1000,20 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Plugin registration and gating (Templates card, providers) | BT/index.tsx:1-28; FT/provider.ts:1-88 | MISSING | - | M |
-| Channel kit store (30078 NIP-44, 16 KiB, decode checks, model validation) | FT/capability.ts:50-425; FT/model.ts:13-291; FT/host.ts | MISSING | - | L |
-| Template library and dialog | BT/TemplateLibrary.tsx; BT/TemplateSettings.tsx; BT/ChannelTemplatesDialog.tsx | MISSING | - | L |
-| Template selection and fields (agent search, teams, Starting Canvas, group default) | BT/TemplateEditor.tsx:1-270; BT/TemplateFields.tsx:1-232 | MISSING | - | M |
-| Portable team payload (16 KiB chunks, 8 MiB) | FT/team-payload.ts:1-180 | MISSING | - | M |
-| Setup orchestration (`buzz-channel-setup.v2`) | FT/setup.ts:46-409 | MISSING | - | L |
-| Save channel as template; catalog hook | BT/TemplateSettings.tsx:80+; BT/useTemplateCatalog.ts:1-38 | MISSING | - | M |
+| Plugin registration and gating (Templates card, providers) | BT/index.tsx:1-28; FT/provider.ts:1-88 | DONE (crates/app/src/ui/templates/mod.rs) | - | M |
+| Channel kit store (30078 NIP-44, 16 KiB, decode checks, model validation) | FT/capability.ts:50-425; FT/model.ts:13-291; FT/host.ts | DONE (crates/relay/src/kit/mod.rs, crates/relay/src/session/kit.rs; record rules from buzz-desktop `relay::kit`) | - | L |
+| Template library and dialog | BT/TemplateLibrary.tsx; BT/TemplateSettings.tsx; BT/ChannelTemplatesDialog.tsx | DONE (crates/app/src/ui/templates/library.rs, crates/app/src/ui/templates/dialog.rs) | - | L |
+| Template selection and fields (agent search, teams, Starting Canvas, group default) | BT/TemplateEditor.tsx:1-270; BT/TemplateFields.tsx:1-232 | PARTIAL (crates/app/src/ui/templates/fields.rs, crates/app/src/ui/templates/editor.rs): the group default waits for personal groups in the UI | - | M |
+| Portable team payload (16 KiB chunks, 8 MiB) | FT/team-payload.ts:1-180 | DONE (crates/relay/src/kit/payload.rs) | - | M |
+| Setup orchestration (`buzz-channel-setup.v2`) | FT/setup.ts:46-409 | DONE (crates/relay/src/kit/setup.rs, crates/relay/src/session/kit.rs; Canvas seed through crates/relay/src/canvas.rs) | - | L |
+| Save channel as template; catalog hook | BT/TemplateSettings.tsx:80+; BT/useTemplateCatalog.ts:1-38 | DONE (crates/app/src/ui/templates/save_as.rs) | - | M |
 
 ### Channel usage
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "View channel usage" panel and usage archive read (2,000-record cap) | BU/index.tsx:7-46; BU/use-usage-archive.ts:1-160 | MISSING | No agent-activity archive | M |
-| Usage view (agent/session pickers, totals, tokens, cache, USD, per-turn list) | BU/ChannelUsage.tsx:1-301 | MISSING | - | L |
+| "View channel usage" panel and usage archive read (2,000-record cap) | BU/index.tsx:7-46; BU/use-usage-archive.ts:1-160 | DONE (crates/app/src/ui/channel_usage.rs, crates/relay/src/usage.rs, crates/relay/src/archive.rs) | - | M |
+| Usage view (agent/session pickers, totals, tokens, cache, USD, per-turn list) | BU/ChannelUsage.tsx:1-301 | DONE (crates/app/src/ui/channel_usage.rs) | - | L |
 
 ## DONE count
 
