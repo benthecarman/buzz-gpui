@@ -301,15 +301,17 @@ impl Account {
             let hover = c.affordance_subtle_hover;
             let content: Vec<AnyElement> = match &status {
                 Some(status) => vec![
-                    div()
-                        .flex_none()
-                        .text_size(rems(1.25))
-                        .child(if status.emoji.is_empty() {
-                            "💬".to_string()
+                    {
+                        let value = if status.emoji.is_empty() {
+                            "💬"
                         } else {
-                            status.emoji.clone()
-                        })
-                        .into_any_element(),
+                            status.emoji.as_str()
+                        };
+                        match AppState::current(cx) {
+                            Some(community) => super::status::emoji(value, px(20.), &community, cx),
+                            None => div().child(value.to_string()).into_any_element(),
+                        }
+                    },
                     div()
                         .min_w_0()
                         .truncate()

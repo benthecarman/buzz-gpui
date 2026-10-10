@@ -3,13 +3,17 @@
 
 use crate::community::Community;
 use crate::ui::emoji_picker::{self, EmojiPicker, Picked};
+use crate::ui::media;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::{Session, StatusInput, UserStatus};
 use buzz_ui::{
-    ActiveTheme, Button, Dialog, IconButton, IconButtonSize, IconName, Menu, MenuItem, Select,
-    Surface, TextField, TypeStyled, tokens::radius,
+    ActiveTheme, Button, Dialog, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
+    Popover, PopoverPadding, PopoverWidth, Select, Surface, TextField, TypeStyled,
+    tokens::{radius, size},
 };
-use chrono::{DateTime, Datelike, Duration as Days, Local, NaiveTime, TimeZone, Timelike};
+use chrono::{
+    DateTime, Datelike, Duration as Days, Local, Months, NaiveDate, NaiveTime, TimeZone, Timelike,
+};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -118,6 +122,8 @@ pub struct Closed(pub Option<Option<UserStatus>>);
 
 pub struct StatusEditor {
     session: Arc<Session>,
+    /// For custom emoji images.
+    community: Entity<Community>,
     /// The composer's emoji picker, custom emoji included.
     emoji_picker: Entity<EmojiPicker>,
     current: Option<UserStatus>,
@@ -126,6 +132,8 @@ pub struct StatusEditor {
     duration: Duration,
     duration_changed: bool,
     custom: DateTime<Local>,
+    /// The first day of the month the calendar shows.
+    month: NaiveDate,
     picker: Option<Picker>,
     busy: bool,
     error: Option<SharedString>,
@@ -150,7 +158,7 @@ impl StatusEditor {
         });
         text.update(cx, |state, cx| state.focus(window, cx));
         let session = community.read(cx).session.clone();
-        let emoji_picker = cx.new(|cx| EmojiPicker::new(community, window, cx));
+        let emoji_picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx));
         let _subscriptions = vec![
             cx.subscribe(&text, |this, _, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
@@ -182,6 +190,7 @@ impl StatusEditor {
             .unwrap_or(now);
         Self {
             session,
+            community,
             emoji_picker,
             emoji: current
                 .as_ref()
@@ -191,6 +200,7 @@ impl StatusEditor {
             text,
             duration,
             duration_changed: false,
+            month: first_of_month(custom.date_naive()),
             custom,
             picker: None,
             busy: false,
@@ -215,6 +225,9 @@ impl StatusEditor {
     }
 
     fn set_picker(&mut self, picker: Option<Picker>, cx: &mut Context<Self>) {
+        if picker == Some(Picker::Date) {
+            self.month = first_of_month(self.custom.date_naive());
+        }
         self.picker = picker;
         cx.notify();
     }
@@ -366,31 +379,132 @@ impl StatusEditor {
             .into_any_element()
     }
 
+    /// The custom expiry's date: a month calendar (buzz-app's `Calendar`,
+    /// react-day-picker), days before today disabled. Picking a day keeps
+    /// the chosen time.
     fn date_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
         let today = Local::now().date_naive();
         let chosen = self.custom.date_naive();
         let time = self.custom.time();
-        let items = (0..31).map(|offset| {
-            let date = today + Days::days(offset);
-            let at = Local.from_local_datetime(&date.and_time(time)).earliest();
-            MenuItem::new(
-                SharedString::from(format!("date-{offset}")),
-                date.format("%b %-d, %Y").to_string(),
-            )
-            .checked(date == chosen)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(at) = at {
-                    this.set_custom(at, cx);
-                }
-            }))
-        });
-        Menu::new()
+        let month = self.month;
+        let control = size::CONTROL_SM;
+        let nav = |id: &'static str, icon: IconName, to: NaiveDate, cx: &mut Context<Self>| {
+            let hover = c.affordance_subtle_hover;
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(control)
+                .rounded(radius::CONTROL)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(Icon::new(icon).size(16.))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.month = to;
+                    cx.notify();
+                }))
+        };
+        let caption = div()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(control)
+            .mb(rems(0.5))
+            .text_label_sm()
+            .child(month.format("%B %Y").to_string())
             .child(
                 div()
-                    .id("status-dates")
-                    .max_h(rems(18.))
-                    .overflow_y_scroll()
-                    .children(items),
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_between()
+                    .child(nav(
+                        "calendar-previous",
+                        IconName::CaretLeft,
+                        month - Months::new(1),
+                        cx,
+                    ))
+                    .child(nav(
+                        "calendar-next",
+                        IconName::CaretRight,
+                        month + Months::new(1),
+                        cx,
+                    )),
+            );
+        let cell = || div().flex().items_center().justify_center().p(rems(0.125));
+        let weekdays = div()
+            .flex()
+            .children(["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(|name| {
+                cell().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(control)
+                        .text_caption()
+                        .text_color(c.text_subtle)
+                        .child(name),
+                )
+            }));
+        let days: Vec<NaiveDate> = month_days(month);
+        let weeks = days.chunks(7).map(|week| {
+            div().flex().children(week.iter().map(|&date| {
+                let disabled = date < today;
+                let selected = date == chosen;
+                let outside = date.month() != month.month();
+                let at = Local.from_local_datetime(&date.and_time(time)).earliest();
+                let hover = c.affordance_subtle_hover;
+                let day = div()
+                    .id(SharedString::from(format!("day-{date}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(control)
+                    .rounded(radius::CONTROL)
+                    .text_body_sm()
+                    .map(|this| {
+                        if selected {
+                            this.bg(c.affordance_prominent).text_color(c.text_inverse)
+                        } else if disabled {
+                            this.text_color(c.text_unavailable)
+                        } else if outside {
+                            this.text_color(c.text_subtle)
+                        } else {
+                            this
+                        }
+                    })
+                    .when(date == today && !selected, |this| {
+                        this.bg(c.affordance_subtle)
+                    })
+                    .when(!disabled, |this| {
+                        this.cursor_pointer()
+                            .when(!selected, |this| this.hover(move |s| s.bg(hover)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(at) = at {
+                                    this.set_custom(at, cx);
+                                }
+                            }))
+                    })
+                    .child(date.day().to_string());
+                cell().child(day)
+            }))
+        });
+        Popover::new()
+            .width(PopoverWidth::Auto)
+            .padding(PopoverPadding::None)
+            .child(
+                div()
+                    .id("status-calendar")
+                    .p(rems(0.75))
+                    .text_body_sm()
+                    .child(caption)
+                    .child(weekdays)
+                    .children(weeks),
             )
             .into_any_element()
     }
@@ -425,6 +539,54 @@ impl StatusEditor {
     }
 }
 
+fn first_of_month(date: NaiveDate) -> NaiveDate {
+    date.with_day(1).unwrap_or(date)
+}
+
+/// The days a month's calendar shows: whole weeks from Sunday, with the
+/// neighbouring months' days filling the first and last (react-day-picker's
+/// `showOutsideDays`).
+fn month_days(month: NaiveDate) -> Vec<NaiveDate> {
+    let first = first_of_month(month);
+    let last = first + Months::new(1) - Days::days(1);
+    let start = first - Days::days(i64::from(first.weekday().num_days_from_sunday()));
+    let end = last + Days::days(6 - i64::from(last.weekday().num_days_from_sunday()));
+    start.iter_days().take_while(|day| *day <= end).collect()
+}
+
+/// A status emoji: a custom `:shortcode:` as its catalog image, matched
+/// case-insensitively (`StatusEmoji.tsx`); anything else, or an unknown
+/// shortcode, as text.
+pub fn emoji(value: &str, size: Pixels, community: &Entity<Community>, cx: &App) -> AnyElement {
+    let custom = value
+        .strip_prefix(':')
+        .and_then(|rest| rest.strip_suffix(':'))
+        .filter(|code| !code.is_empty() && !code.contains([':', ' ', '\t', '\n']))
+        .and_then(|code| {
+            let community = community.read(cx);
+            community
+                .snapshot
+                .emoji
+                .entries
+                .iter()
+                .find(|entry| entry.shortcode.eq_ignore_ascii_case(code))
+                .map(|entry| media::image(&entry.url, community.session.media()))
+        });
+    match custom {
+        Some(source) => img(source)
+            .flex_none()
+            .size(size)
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        None => div()
+            .flex_none()
+            .text_size(size)
+            .line_height(size)
+            .child(value.to_string())
+            .into_any_element(),
+    }
+}
+
 fn time_label(hour: u32, minute: u32) -> String {
     let twelve = match hour % 12 {
         0 => 12,
@@ -450,7 +612,7 @@ impl Render for StatusEditor {
                     .icon_size(22.)
                     .tooltip("Choose a status emoji")
                     .when(!effective.is_empty(), |this| {
-                        this.child(div().text_size(rems(1.25)).child(effective.clone()))
+                        this.child(emoji(&effective, px(20.), &self.community, cx))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if !emoji_open {
@@ -517,14 +679,20 @@ impl Render for StatusEditor {
                                 window,
                                 cx,
                             )))
-                            .child(div().w(rems(10.)).child(self.field_button(
-                                "status-time",
-                                time,
-                                Picker::Time,
-                                Self::time_menu,
-                                window,
-                                cx,
-                            ))),
+                            .child(
+                                // `minmax(0,1fr) minmax(0,0.8fr)`.
+                                div()
+                                    .flex_none()
+                                    .w(relative(0.8 / 1.8))
+                                    .child(self.field_button(
+                                        "status-time",
+                                        time,
+                                        Picker::Time,
+                                        Self::time_menu,
+                                        window,
+                                        cx,
+                                    )),
+                            ),
                     ),
             );
         }
@@ -622,7 +790,15 @@ impl Render for StatusEditor {
                     .child("Clear status"),
             );
         }
-        dialog
+        // Escape closes an open menu or calendar before the dialog.
+        div()
+            .capture_action(cx.listener(|this, _: &buzz_ui::Cancel, _, cx| {
+                if this.picker.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(dialog)
     }
 }
 
@@ -677,5 +853,20 @@ mod tests {
         assert_eq!(infer(Some(t + 5000), t), Duration::Custom);
         assert_eq!(time_label(0, 30), "12:30 AM");
         assert_eq!(time_label(13, 0), "1:00 PM");
+    }
+
+    #[test]
+    fn calendars_show_whole_weeks() {
+        let day = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        // October 2026 starts on a Thursday and ends on a Saturday.
+        let october = month_days(day(10, 9));
+        assert_eq!(october.first(), Some(&day(9, 27)));
+        assert_eq!(october.last(), Some(&day(10, 31)));
+        assert_eq!(october.len(), 35);
+        // February 2026 starts on a Sunday: four whole weeks.
+        let february = month_days(day(2, 14));
+        assert_eq!(february.first(), Some(&day(2, 1)));
+        assert_eq!(february.len(), 28);
+        assert_eq!(first_of_month(day(12, 31)), day(12, 1));
     }
 }
