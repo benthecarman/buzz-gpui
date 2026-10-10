@@ -212,6 +212,8 @@ async fn creates_edits_and_administers_a_channel() {
         s.channels.iter().any(|c| c.id == id && !c.archived)
     })
     .await;
+    // Leave no throwaway channel behind.
+    alice.channel_action(Action::Delete, &id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -247,6 +249,7 @@ async fn previews_joins_and_leaves_a_public_channel() {
         s.channels.iter().all(|c| c.id != id)
     })
     .await;
+    alice.channel_action(Action::Delete, &id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -396,4 +399,221 @@ async fn claims_an_invite_link() {
         matches!(again, Ok(Claimed::AlreadyMember) | Err(_)),
         "{again:?}"
     );
+}
+
+/// A throwaway community member: claims a fresh invite from alice.
+async fn newcomer(fixture: &Fixture) -> Arc<Identity> {
+    let owner = RelayHttp::new(fixture.origin.clone(), fixture.identity("alice"));
+    let minted = owner
+        .post(
+            "/api/invites",
+            json!({"ttl_secs": 600, "max_uses": 1}).to_string(),
+        )
+        .await
+        .unwrap();
+    let minted: Value = serde_json::from_slice(&minted).unwrap();
+    let identity = Arc::new(Identity::ephemeral());
+    let http = RelayHttp::new(fixture.origin.clone(), identity.clone());
+    let code = minted["code"].as_str().unwrap();
+    community::claim(&http, code, None, false).await.unwrap();
+    identity
+}
+
+/// A throwaway member that is `owner`'s agent: its kind 0 carries
+/// `owner`'s NIP-OA attestation. `None` when the owner link could not be
+/// recorded (see [`link_agent_owner`]).
+async fn agent_of(fixture: &Fixture, owner: &str) -> Option<Session> {
+    let agent = newcomer(fixture).await;
+    let attestation = fixture
+        .identity(owner)
+        .attest_agent(&agent.pubkey_hex())
+        .unwrap();
+    let tag: Vec<String> = serde_json::from_str(&attestation).unwrap();
+    let purpose = buzz_identity::Purpose::Content;
+    let now = nostr::prelude::Timestamp::now().as_secs();
+    let profile = json!({"name": unique("agent")}).to_string();
+    let unsigned = agent.template(purpose, 0, now, vec![tag], profile).unwrap();
+    let event = agent.sign(purpose, unsigned).unwrap();
+    RelayHttp::new(fixture.origin.clone(), agent.clone())
+        .post("/events", serde_json::to_string(&event).unwrap())
+        .await
+        .unwrap();
+    if !link_agent_owner(&agent.pubkey_hex(), &fixture.pubkey(owner)) {
+        return None;
+    }
+    let session = Session::open(
+        &tokio::runtime::Handle::current(),
+        fixture.origin.clone(),
+        agent,
+        Store::in_memory().unwrap(),
+    );
+    let mut snapshot = session.snapshot();
+    until(&mut snapshot, "the agent's roster", |s| {
+        s.roster == RosterStatus::Ready && s.live
+    })
+    .await;
+    Some(session)
+}
+
+/// The relay authorizes an owner from its own agent → owner link, which
+/// it records when an agent authenticates through its owner (NIP-OA
+/// admission, off on the plain test relay). The test writes that link for
+/// its throwaway agent straight into the test relay's database.
+fn link_agent_owner(agent: &str, owner: &str) -> bool {
+    let sql = format!(
+        "UPDATE users SET agent_owner_pubkey = decode('{owner}', 'hex') \
+         WHERE pubkey = decode('{agent}', 'hex')"
+    );
+    let output = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "buzz-gpui-test-postgres",
+            "psql",
+            "-U",
+            "buzz",
+            "-d",
+            "buzz",
+        ])
+        .args(["-tAc", &sql])
+        .output();
+    match output {
+        Ok(output) if output.status.success() && output.stdout.starts_with(b"UPDATE 1") => true,
+        other => {
+            eprintln!("could not link the agent's owner on the test relay: {other:?}");
+            false
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owners_delete_a_channel() {
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    let alice = fixture.session("alice").await;
+    let id = alice
+        .create_channel(NewChannel {
+            name: unique("delete"),
+            description: String::new(),
+            private: false,
+        })
+        .await
+        .unwrap();
+    let bob = fixture.session("bob").await;
+    bob.channel_action(Action::Join, &id).await.unwrap();
+    // A member may not delete it; the owner may.
+    let member = bob.channel_permissions(&id).await.unwrap();
+    assert!(!member.can_delete && !member.delete_unavailable);
+    assert!(bob.channel_action(Action::Delete, &id).await.is_err());
+    assert!(alice.channel_permissions(&id).await.unwrap().can_delete);
+    alice.channel_action(Action::Delete, &id).await.unwrap();
+    assert!(joined(&alice, &id).is_none());
+    assert!(alice.channel_state(&id).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_owner_removes_it_and_deletes_its_channel() {
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    let Some(agent) = agent_of(&fixture, "bob").await else {
+        eprintln!("the owner link needs the test relay's database; skipping");
+        return;
+    };
+    let agent_key = agent.viewer().to_owned();
+    let bob = fixture.session("bob").await;
+    let carol = fixture.session("carol").await;
+    bob.want_profiles(vec![agent_key.clone()]);
+    let mut snapshot = bob.snapshot();
+    let profiles = until(&mut snapshot, "the agent's profile", |s| {
+        s.profiles.contains_key(&agent_key)
+    })
+    .await;
+    assert_eq!(
+        profiles.profiles[&agent_key].attested_owner.as_deref(),
+        Some(bob.viewer())
+    );
+
+    // In alice's channel, bob (a plain member) may remove his own agent
+    // but carol may not.
+    let alice = fixture.session("alice").await;
+    let shared = alice
+        .create_channel(NewChannel {
+            name: unique("owned-agent"),
+            description: String::new(),
+            private: false,
+        })
+        .await
+        .unwrap();
+    for session in [&agent, &bob, &carol] {
+        session.channel_action(Action::Join, &shared).await.unwrap();
+    }
+    let state = bob.channel_state(&shared).await.unwrap();
+    let remove = MemberChange {
+        pubkey: agent_key.clone(),
+        expected: state.role(&agent_key).unwrap(),
+        change: Change::Remove,
+    };
+    assert!(carol.change_member(&shared, remove.clone()).await.is_err());
+    bob.change_member(&shared, remove).await.unwrap();
+    let state = bob.channel_state(&shared).await.unwrap();
+    assert_eq!(state.role(&agent_key), None);
+
+    // The agent's own channel: its owner may delete it, others may not.
+    let owned = agent
+        .create_channel(NewChannel {
+            name: unique("agent-made"),
+            description: String::new(),
+            private: false,
+        })
+        .await
+        .unwrap();
+    bob.channel_action(Action::Join, &owned).await.unwrap();
+    carol.channel_action(Action::Join, &owned).await.unwrap();
+    let permissions = bob.channel_permissions(&owned).await.unwrap();
+    assert!(permissions.can_delete, "{permissions:?}");
+    assert!(!carol.channel_permissions(&owned).await.unwrap().can_delete);
+    bob.channel_action(Action::Delete, &owned).await.unwrap();
+    assert!(joined(&bob, &owned).is_none());
+    // Leave no throwaway channel behind.
+    alice.channel_action(Action::Delete, &shared).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publishes_a_profile_after_claiming_an_invite() {
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    let joiner = newcomer(&fixture).await;
+    let http = RelayHttp::new(fixture.origin.clone(), joiner.clone());
+    let journal = community::JoinJournal::new(Store::in_memory().unwrap(), joiner.pubkey_hex());
+    journal.begin(fixture.origin.websocket(), None).unwrap();
+    let found = community::inspect_profile(&http).await.unwrap().unwrap();
+    assert_eq!(found.profile, None, "a new member has no profile yet");
+    let profile = ProfileEdit {
+        name: unique("Newcomer"),
+        picture: String::new(),
+        about: "Joined by a test".into(),
+    };
+    let step = journal
+        .begin(fixture.origin.websocket(), Some(profile.clone()))
+        .unwrap();
+    community::publish_profile(&http, &profile, &found)
+        .await
+        .unwrap();
+    let confirmed = community::inspect_profile(&http).await.unwrap().unwrap();
+    assert!(confirmed.matches(&profile), "{confirmed:?}");
+    journal.finish(&step).unwrap();
+    assert_eq!(journal.latest().unwrap(), None);
+
+    // Publishing again replaces it.
+    let renamed = ProfileEdit {
+        name: unique("Renamed"),
+        ..profile
+    };
+    community::publish_profile(&http, &renamed, &confirmed)
+        .await
+        .unwrap();
+    let again = community::inspect_profile(&http).await.unwrap().unwrap();
+    assert!(again.matches(&renamed));
 }
