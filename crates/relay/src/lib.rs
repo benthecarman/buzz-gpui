@@ -14,6 +14,7 @@ pub mod feedback;
 pub mod fold;
 pub mod gifs;
 pub mod http;
+pub mod kit;
 pub mod lifecycle;
 pub mod links;
 pub mod live;
