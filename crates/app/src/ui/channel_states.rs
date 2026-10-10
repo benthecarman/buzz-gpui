@@ -315,6 +315,7 @@ mod tests {
             typing_anywhere: Default::default(),
             sidebar: Default::default(),
             hidden_dms: std::sync::Arc::new([]),
+            dm_visibility: Default::default(),
             emoji: Default::default(),
             statuses: Default::default(),
         }

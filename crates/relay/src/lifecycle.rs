@@ -447,12 +447,25 @@ impl LifecyclePermissions {
     /// role does not: Unarchive when archived, else Delete, which implies
     /// Archive (`channel-lifecycle.ts:146-163`).
     pub fn wants_owner_evidence(&self, archived: bool) -> bool {
-        !self.can_hide
-            && if archived {
-                !self.can_unarchive
-            } else {
-                !self.can_delete
-            }
+        let action = if archived {
+            Action::Unarchive
+        } else {
+            Action::Delete
+        };
+        self.wants_evidence_for(archived, action)
+    }
+
+    /// Whether owner-agent evidence could grant `action` (archive,
+    /// unarchive or delete) that a direct role does not: only when it fits
+    /// the archive state.
+    pub fn wants_evidence_for(&self, archived: bool, action: Action) -> bool {
+        let granted = match action {
+            Action::Archive => self.can_archive,
+            Action::Unarchive => self.can_unarchive,
+            Action::Delete => self.can_delete,
+            _ => return false,
+        };
+        !self.can_hide && archived == (action == Action::Unarchive) && !granted
     }
 
     /// The relay lets an owner agent's verified human archive, unarchive
@@ -598,20 +611,20 @@ pub fn join_ready(
     viewer: &str,
     channel: &str,
 ) -> Result<bool, LifecycleError> {
-    let metadata = record(events, kinds::CHANNEL_METADATA, channel, relay_author)?
-        .ok_or_else(|| error("This channel is unavailable."))?;
-    if !crate::discovery::open_metadata(metadata) {
-        return Err(error(
-            "This channel is private. Ask a member for an invitation.",
-        ));
+    // A current roster entry means there is nothing to send.
+    if record(events, kinds::CHANNEL_MEMBERS, channel, relay_author)?
+        .is_some_and(|roster| roster.has_tag("p", viewer))
+    {
+        return Ok(true);
     }
-    if metadata.tag("archived") == Some("true") {
-        return Err(error("This channel is archived."));
+    let joinable =
+        record(events, kinds::CHANNEL_METADATA, channel, relay_author)?.is_some_and(|metadata| {
+            crate::discovery::open_metadata(metadata) && metadata.tag("archived") != Some("true")
+        });
+    if !joinable {
+        return Err(error("Only active public channels can be joined."));
     }
-    Ok(
-        record(events, kinds::CHANNEL_MEMBERS, channel, relay_author)?
-            .is_some_and(|roster| roster.has_tag("p", viewer)),
-    )
+    Ok(false)
 }
 
 /// Strong read of the 39000 and the viewer's 39002 for a join.
@@ -788,8 +801,31 @@ pub struct ChannelDetails {
     pub can_edit: bool,
 }
 
+/// `validateDetailsDraft`: a root session's description is its marker,
+/// so only its name may change.
+pub fn validate_details(draft: &DetailsDraft, base: &DetailsDraft) -> Result<(), LifecycleError> {
+    let mut checked = draft.clone();
+    if crate::discovery::session_metadata(Some(&base.description)).is_some_and(|p| p.is_none())
+        && !draft.description.is_empty()
+    {
+        if draft.description != base.description
+            || draft.private != base.private
+            || draft.ttl != base.ttl
+        {
+            return Err(error("Only the name of a session can be changed here."));
+        }
+        checked.description.clear();
+    }
+    let errors = draft_errors(&checked.name, &checked.description, checked.ttl);
+    match errors.name.or(errors.description).or(errors.lifetime) {
+        Some(message) => Err(error(message)),
+        None => Ok(()),
+    }
+}
+
 /// `detailsTemplate`: name and about always; visibility and ttl only when
-/// they change (an unchanged ttl would reset the relay's cleanup).
+/// they change (an unchanged ttl would reset the relay's cleanup). A
+/// session keeping its marker sends its name alone.
 pub fn edit_details(
     channel: &str,
     draft: &DetailsDraft,
@@ -797,9 +833,20 @@ pub fn edit_details(
     now: u64,
 ) -> Result<EventTemplate, LifecycleError> {
     let channel = channel_id(channel)?;
-    validate_name(&draft.name)?;
-    validate_about(&draft.description)?;
-    validate_ttl(draft.ttl)?;
+    validate_details(draft, base)?;
+    if crate::discovery::session_metadata(Some(&base.description)).is_some()
+        && draft.description == base.description
+    {
+        return Ok(EventTemplate {
+            kind: kinds::EDIT_CHANNEL,
+            created_at: now,
+            tags: vec![
+                vec!["h".to_owned(), channel.to_owned()],
+                vec!["name".to_owned(), draft.name.clone()],
+            ],
+            content: String::new(),
+        });
+    }
     let mut tags = vec![
         vec!["h".to_owned(), channel.to_owned()],
         vec!["name".to_owned(), draft.name.clone()],
@@ -859,25 +906,61 @@ pub fn visibility_filter(relay_author: &str, viewer: &str, strong: bool) -> Filt
 /// Hidden DM ids from the newest valid 30622, or `None` when no list
 /// exists (nothing is hidden). Invalid lists are ignored.
 pub fn hidden_dms(events: &[Verified], relay_author: &str, viewer: &str) -> Option<Vec<String>> {
-    let newest = events
-        .iter()
-        .filter(|event| {
-            event.kind_u16() == kinds::HIDDEN_DMS
-                && event.pubkey_hex() == relay_author
-                && event.tag("d") == Some(viewer)
-        })
-        .reduce(|a, b| if is_newer(b, a) { b } else { a })?;
-    let people: Vec<&[String]> = newest.tags_named("p").collect();
-    let valid = newest.content.is_empty()
-        && people.len() == 1
-        && people[0].get(1).map(String::as_str) == Some(viewer)
-        && newest
-            .tags_named("h")
-            .all(|tag| tag.len() == 2 && is_uuid(&tag[1]));
-    if !valid {
-        return None;
+    visibility_record(events, relay_author, viewer)
+        .ok()
+        .flatten()
+        .map(|record| record.hidden)
+}
+
+/// The viewer's newest relay-signed DM visibility list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibilityRecord {
+    pub id: EventId,
+    pub created_at: u64,
+    pub hidden: Vec<String>,
+}
+
+impl VisibilityRecord {
+    /// `newer`: later `created_at`, a same-second tie to the lower id.
+    pub fn newer_than(&self, other: &Self) -> bool {
+        self.created_at > other.created_at
+            || (self.created_at == other.created_at && self.id < other.id)
     }
-    Some(newest.tags_named("h").map(|tag| tag[1].clone()).collect())
+}
+
+/// `readVisibility`: the newest 30622, or `None` when there is none. A
+/// list that names someone else, has content, or a malformed entry is an
+/// error, never "nothing hidden".
+pub fn visibility_record(
+    events: &[Verified],
+    relay_author: &str,
+    viewer: &str,
+) -> Result<Option<VisibilityRecord>, LifecycleError> {
+    let Some(newest) = record(events, kinds::HIDDEN_DMS, viewer, relay_author)? else {
+        return Ok(None);
+    };
+    let people: Vec<&[String]> = newest.tags_named("p").collect();
+    if !newest.content.is_empty()
+        || people.len() != 1
+        || people[0].len() != 2
+        || people[0][1] != viewer
+    {
+        return Err(error("Invalid DM visibility snapshot"));
+    }
+    let mut hidden = Vec::new();
+    for tag in newest.tags_named("h") {
+        if tag.len() != 2 || !is_uuid(&tag[1]) {
+            return Err(error("Invalid hidden DM"));
+        }
+        if !hidden.contains(&tag[1]) {
+            hidden.push(tag[1].clone());
+        }
+    }
+    Ok(Some(VisibilityRecord {
+        id: newest.id,
+        created_at: newest.created_at_secs(),
+        hidden,
+    }))
 }
 
 #[cfg(test)]

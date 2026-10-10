@@ -17,9 +17,9 @@ use crate::lifecycle::{
     self, Action, ActionError, AttemptStatus, CONFIRM_DELAYS, ChannelDetails, ChannelState,
     DetailsAttempt, DetailsDraft, LifecyclePermissions, NewChannel, RUN_TIMEOUT,
 };
-use crate::members::{self, MemberChange, Person};
+use crate::members::{self, Person};
 use crate::messages::EventTemplate;
-use crate::outbox::{Delivery, Outbox, PublishError, Recovery, SendOptions, accept_publish};
+use crate::outbox::{Delivery, Outbox, PublishError, SendOptions, accept_publish};
 use crate::reader::{ReadOptions, Reader};
 use crate::search::{self, Author, SearchHit, SearchRequest};
 use crate::socket::Filter;
@@ -34,6 +34,31 @@ use tokio::sync::{mpsc, oneshot};
 const CLOSED: &str = "The session has closed";
 const NOT_CONNECTED: &str = "Not connected to the relay yet";
 const UNCONFIRMED: &str = "This may have taken effect, but it is not confirmed yet. Refresh and check before trying again.";
+const DETAILS_ACCESS: &str = "Channel access changed. Reopen channel settings.";
+const LIFECYCLE_ACCESS: &str = "Channel access unavailable; refresh membership";
+const TIMED_OUT: &str = "The request timed out. Try again.";
+
+/// The viewer's hidden DM list as last read (`DmVisibility`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DmVisibilityStatus {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Error(String),
+}
+
+/// How much owner-agent evidence a permission check reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Need {
+    /// Whatever the channel's archive state allows (`"any"`).
+    Any,
+    /// Only what this action needs.
+    Action(Action),
+    /// No profile reads.
+    Skip,
+}
+
 /// Public channels read for a name search (`PUBLIC_CHANNEL_PAGE`).
 const PUBLIC_CHANNEL_PAGE: usize = 500;
 /// Public channel matches kept per search.
@@ -249,21 +274,21 @@ impl Session {
         let (ops, channel) = (self.ops(), channel.to_owned());
         self.run(async move {
             let ctx = ops.context().await?;
-            ops.permissions(&ctx, &channel).await
+            ops.assert_access(&channel, LIFECYCLE_ACCESS).await?;
+            let permissions = ops.permissions(&ctx, &channel, Need::Any).await?;
+            ops.assert_access(&channel, LIFECYCLE_ACCESS).await?;
+            Ok(permissions)
         })
         .await
     }
 
-    /// The editable details, with the version a save must still match.
-    /// The fresh metadata also updates discovery.
+    /// The editable details, with the version a save must still match
+    /// (`channel-details.ts` `load`).
     pub async fn channel_details(&self, channel: &str) -> Result<ChannelDetails, String> {
         let (ops, channel) = (self.ops(), channel.to_owned());
         self.run(async move {
             let ctx = ops.context().await?;
-            let state = ops.state(&ctx, &channel).await?;
-            let details = state
-                .details(&ctx.viewer)
-                .map_err(|error| error.to_string())?;
+            let (details, state) = ops.read_details(&ctx, &channel).await?;
             ops.adopt(ctx.epoch, vec![state.metadata]).await?;
             Ok(details)
         })
@@ -338,7 +363,7 @@ impl Session {
         let (ops, id) = (self.ops(), channel.to_owned());
         self.run(async move {
             let ctx = ops.context().await?;
-            let state = ops.state(&ctx, &id).await?;
+            let (_, state) = ops.read_details(&ctx, &id).await?;
             let confirmed = lifecycle::details_confirmed(&state, &draft);
             ops.adopt(ctx.epoch, vec![state.metadata]).await?;
             if confirmed {
@@ -353,9 +378,15 @@ impl Session {
     }
 
     /// Joins, leaves, archives, unarchives, deletes or hides, and waits
-    /// until the relay shows it. Once the command may have reached the
-    /// relay, a failure is [`ActionError::Unconfirmed`].
+    /// until the relay shows it, one at a time per session. Once the
+    /// command may have reached the relay, a failure is
+    /// [`ActionError::Unconfirmed`].
     pub async fn channel_action(&self, action: Action, channel: &str) -> Result<(), ActionError> {
+        let Ok(_busy) = self.direct.lifecycle.try_lock() else {
+            return Err(ActionError::Failed(
+                "Another channel action is still in progress".into(),
+            ));
+        };
         let published = Arc::new(AtomicBool::new(false));
         let (ops, channel, flag) = (self.ops(), channel.to_owned(), published.clone());
         let outcome = self
@@ -377,26 +408,19 @@ impl Session {
         })
     }
 
+    /// Re-reads the hidden DM list (`refreshVisibility`); one read at a
+    /// time. Its state is [`super::SessionSnapshot::dm_visibility`].
+    pub fn refresh_dm_visibility(&self) {
+        let _ = self.commands.send(Message::With(Box::new(|actor| {
+            actor.refresh_visibility();
+        })));
+    }
+
     /// Creates a stream through the outbox and returns its id once the
     /// viewer is confirmed as its owner.
     pub async fn create_channel(&self, channel: NewChannel) -> Result<String, String> {
         let ops = self.ops();
         self.run(async move { ops.create(channel).await }).await
-    }
-
-    /// Adds someone to a channel through the outbox and waits for the
-    /// roster to list them.
-    pub async fn add_member(&self, channel: &str, pubkey: &str) -> Result<(), String> {
-        let (ops, channel, pubkey) = (self.ops(), channel.to_owned(), pubkey.to_owned());
-        self.run(async move { ops.add_member(&channel, &pubkey).await })
-            .await
-    }
-
-    /// Changes a member's role or removes them, published directly.
-    pub async fn change_member(&self, channel: &str, change: MemberChange) -> Result<(), String> {
-        let (ops, channel) = (self.ops(), channel.to_owned());
-        self.run(async move { ops.change_member(&channel, change).await })
-            .await
     }
 
     /// One page of people to add to a channel (§5g.6).
@@ -509,6 +533,27 @@ async fn post(
     ctx: &Context,
     template: EventTemplate,
 ) -> Result<(Event, Result<Vec<u8>, crate::http::HttpError>), String> {
+    let event = sign_command(ctx, template)?;
+    let result = send_command(ctx, &event).await;
+    Ok((event, result))
+}
+
+async fn send_command(ctx: &Context, event: &Event) -> Result<Vec<u8>, crate::http::HttpError> {
+    let body = serde_json::to_string(event).expect("events serialize");
+    ctx.http.post("/events", body).await
+}
+
+/// Publishes a signed command. A refusal is final; an uncertain outcome
+/// lets the caller try to confirm it anyway.
+async fn publish_signed(ctx: &Context, event: &Event) -> Result<bool, String> {
+    match accept_publish(send_command(ctx, event).await, &event.id) {
+        Ok(_) => Ok(true),
+        Err(PublishError::Rejected(message)) => Err(message),
+        Err(PublishError::Uncertain(_)) => Ok(false),
+    }
+}
+
+fn sign_command(ctx: &Context, template: EventTemplate) -> Result<Event, String> {
     let unsigned = ctx
         .identity
         .template(
@@ -519,39 +564,9 @@ async fn post(
             template.content,
         )
         .map_err(|error| error.to_string())?;
-    let event = ctx
-        .identity
+    ctx.identity
         .sign(Purpose::Content, unsigned)
-        .map_err(|error| error.to_string())?;
-    let body = serde_json::to_string(&event).expect("events serialize");
-    let result = ctx.http.post("/events", body).await;
-    Ok((event, result))
-}
-
-/// Publishes a command. A refusal is final; an uncertain outcome lets the
-/// caller try to confirm it anyway.
-async fn publish(ctx: &Context, template: EventTemplate) -> Result<bool, String> {
-    let (event, result) = post(ctx, template).await?;
-    match accept_publish(result, &event.id) {
-        Ok(_) => Ok(true),
-        Err(PublishError::Rejected(message)) => Err(message),
-        Err(PublishError::Uncertain(_)) => Ok(false),
-    }
-}
-
-/// [`publish`], raising `published` while the command may have reached
-/// the relay: from the post until a refusal.
-async fn publish_tracked(
-    ctx: &Context,
-    template: EventTemplate,
-    published: &AtomicBool,
-) -> Result<bool, String> {
-    published.store(true, Ordering::SeqCst);
-    let result = publish(ctx, template).await;
-    if result.is_err() {
-        published.store(false, Ordering::SeqCst);
-    }
-    result
+        .map_err(|error| error.to_string())
 }
 
 /// Evaluates `$check` (an `Option`) at each confirmation delay until it
@@ -636,6 +651,40 @@ impl Ops {
         .await
     }
 
+    /// `assertAccess`: the channel is still readable to the viewer.
+    async fn assert_access(&self, channel: &str, message: &'static str) -> Result<(), String> {
+        let id = channel.to_owned();
+        let accessible = self
+            .with(move |actor| {
+                actor
+                    .discovery
+                    .as_ref()
+                    .is_some_and(|discovery| discovery.can_access(&id))
+            })
+            .await?;
+        if accessible {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    /// A fresh details read between access checks (`channel-details.ts`
+    /// `read`).
+    async fn read_details(
+        &self,
+        ctx: &Context,
+        channel: &str,
+    ) -> Result<(ChannelDetails, ChannelState), String> {
+        self.assert_access(channel, DETAILS_ACCESS).await?;
+        let state = self.state(ctx, channel).await?;
+        self.assert_access(channel, DETAILS_ACCESS).await?;
+        let details = state
+            .details(&ctx.viewer)
+            .map_err(|error| error.to_string())?;
+        Ok((details, state))
+    }
+
     async fn state(&self, ctx: &Context, channel: &str) -> Result<ChannelState, String> {
         let events = read(ctx, lifecycle::state_filters(&ctx.relay, channel)).await?;
         ChannelState::parse(&events, channel, &ctx.relay).map_err(|error| error.to_string())
@@ -650,13 +699,19 @@ impl Ops {
         &self,
         ctx: &Context,
         channel: &str,
+        need: Need,
     ) -> Result<LifecyclePermissions, String> {
         let state = self.state(ctx, channel).await?;
         let mut permissions = state
             .lifecycle(&ctx.viewer)
             .map_err(|error| error.to_string())?;
         let owners = state.owner_keys();
-        if !permissions.wants_owner_evidence(state.archived) || owners.is_empty() {
+        let wanted = match need {
+            Need::Any => permissions.wants_owner_evidence(state.archived),
+            Need::Action(action) => permissions.wants_evidence_for(state.archived, action),
+            Need::Skip => false,
+        };
+        if !wanted || owners.is_empty() {
             return Ok(permissions);
         }
         let lookup = async {
@@ -688,17 +743,53 @@ impl Ops {
         Ok(permissions)
     }
 
-    /// The verified NIP-OA owner of `agent`, from a fresh strong read of
-    /// its kind 0 (`administration.ts:187-225`).
-    async fn agent_owner(&self, ctx: &Context, agent: &str) -> Result<Option<String>, String> {
-        let events = read(ctx, vec![members::owner_filter(agent)]).await?;
-        Ok(
-            crate::account::newest_profile(&events, agent)
-                .and_then(crate::profiles::attested_owner),
-        )
-    }
-
     // ----- lifecycle -----
+
+    /// `authorize` in `channel-lifecycle.ts` `run`: `Ok(Some(events))`
+    /// when a join finds the viewer already a member.
+    async fn authorize_lifecycle(
+        &self,
+        ctx: &Context,
+        action: Action,
+        channel: &str,
+    ) -> Result<Option<Vec<Verified>>, String> {
+        if action == Action::Join {
+            // Joining starts from a preview: fresh signed metadata must
+            // still say public.
+            let events = read(
+                ctx,
+                lifecycle::join_filters(&ctx.relay, &ctx.viewer, channel),
+            )
+            .await?;
+            let member = lifecycle::join_ready(&events, &ctx.relay, &ctx.viewer, channel)
+                .map_err(|error| error.to_string())?;
+            return Ok(member.then_some(events));
+        }
+        let need = match action {
+            Action::Archive | Action::Unarchive | Action::Delete => Need::Action(action),
+            _ => Need::Skip,
+        };
+        self.assert_access(channel, LIFECYCLE_ACCESS).await?;
+        let permissions = self.permissions(ctx, channel, need).await?;
+        self.assert_access(channel, LIFECYCLE_ACCESS).await?;
+        if permissions.delete_unavailable {
+            let label = if action == Action::Delete {
+                "Delete"
+            } else {
+                "Archive"
+            };
+            return Err(format!(
+                "{label} check unavailable. Retry channel permissions."
+            ));
+        }
+        if !action.allowed(&permissions) {
+            return Err(match (action, permissions.leave_reason) {
+                (Action::Leave, Some(reason)) => reason,
+                _ => "This action is no longer permitted. Refresh channel permissions.".into(),
+            });
+        }
+        Ok(None)
+    }
 
     async fn lifecycle(
         &self,
@@ -707,30 +798,22 @@ impl Ops {
         published: &AtomicBool,
     ) -> Result<(), String> {
         let ctx = self.context().await?;
-        let mut adopted = Vec::new();
-        if action == Action::Join {
-            let events = read(
-                &ctx,
-                lifecycle::join_filters(&ctx.relay, &ctx.viewer, channel),
-            )
-            .await?;
-            let member = lifecycle::join_ready(&events, &ctx.relay, &ctx.viewer, channel)
-                .map_err(|error| error.to_string())?;
-            if member {
-                return self.adopt(ctx.epoch, events).await;
-            }
-            adopted = events;
-        } else {
-            let permissions = self.permissions(&ctx, channel).await?;
-            if !action.allowed(&permissions) {
-                return Err(match (action, permissions.leave_reason) {
-                    (Action::Leave, Some(reason)) => reason,
-                    _ => "You can't do that in this channel.".into(),
-                });
-            }
+        if let Some(events) = self.authorize_lifecycle(&ctx, action, channel).await? {
+            return self.adopt(ctx.epoch, events).await;
         }
         let template = lifecycle::template(action, channel, now()).map_err(|e| e.to_string())?;
-        publish_tracked(&ctx, template, published).await?;
+        let event = sign_command(&ctx, template)?;
+        // Authorized again after signing, as the reference does.
+        if let Some(events) = self.authorize_lifecycle(&ctx, action, channel).await? {
+            return self.adopt(ctx.epoch, events).await;
+        }
+        // From the post until a refusal the command may have taken effect.
+        published.store(true, Ordering::SeqCst);
+        if let Err(error) = publish_signed(&ctx, &event).await {
+            published.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+        let mut adopted = Vec::new();
         let filter = lifecycle::confirm_filter(action, &ctx.relay, &ctx.viewer, channel);
         let events = confirm!({
             let events = read(&ctx, vec![filter.clone()]).await?;
@@ -751,13 +834,31 @@ impl Ops {
             Action::Hide => {
                 let (relay, viewer) = (ctx.relay.clone(), ctx.viewer.clone());
                 self.with(move |actor| {
-                    if let Some(hidden) = lifecycle::hidden_dms(&events, &relay, &viewer) {
-                        actor.set_hidden_dms(hidden);
+                    if let Ok(Some(record)) = lifecycle::visibility_record(&events, &relay, &viewer)
+                    {
+                        actor.adopt_visibility(record);
                     }
                 })
                 .await
             }
         }
+    }
+
+    /// `authorize` in `channel-details.ts` `save`.
+    async fn authorize_details(
+        &self,
+        ctx: &Context,
+        channel: &str,
+        version: EventId,
+    ) -> Result<ChannelDetails, String> {
+        let (details, _) = self.read_details(ctx, channel).await?;
+        if !details.can_edit {
+            return Err("You no longer have permission to edit this channel.".into());
+        }
+        if details.version != version {
+            return Err("Channel details changed. Reload details before saving your edits.".into());
+        }
+        Ok(details)
     }
 
     async fn save_details(
@@ -768,24 +869,21 @@ impl Ops {
         published: &AtomicBool,
     ) -> Result<(), String> {
         let ctx = self.context().await?;
-        let state = self.state(&ctx, channel).await?;
-        let details = state
-            .details(&ctx.viewer)
-            .map_err(|error| error.to_string())?;
-        if !details.can_edit {
-            return Err("You no longer have permission to edit this channel.".into());
-        }
-        if details.version != version {
-            return Err("Channel details changed. Reload details before saving your edits.".into());
-        }
+        let details = self.authorize_details(&ctx, channel, version).await?;
         let template = lifecycle::edit_details(channel, &draft, &details.draft, now())
             .map_err(|error| error.to_string())?;
-        publish_tracked(&ctx, template, published).await?;
+        let event = sign_command(&ctx, template)?;
+        self.authorize_details(&ctx, channel, version).await?;
+        published.store(true, Ordering::SeqCst);
+        if let Err(error) = publish_signed(&ctx, &event).await {
+            published.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
         let state = confirm!({
-            let state = self.state(&ctx, channel).await?;
+            let (_, state) = self.read_details(&ctx, channel).await?;
             lifecycle::details_confirmed(&state, &draft).then_some(state)
         })
-        .ok_or(UNCONFIRMED)?;
+        .ok_or(lifecycle::UNCERTAIN_SAVE)?;
         self.adopt(ctx.epoch, vec![state.metadata]).await
     }
 
@@ -817,108 +915,6 @@ impl Ops {
         .ok_or(UNCONFIRMED)?;
         self.adopt(ctx.epoch, events).await?;
         Ok(id)
-    }
-
-    // ----- members -----
-
-    async fn add_member(&self, channel: &str, pubkey: &str) -> Result<(), String> {
-        let ctx = self.context().await?;
-        let state = self.state(&ctx, channel).await?;
-        let (id, key) = (channel.to_owned(), pubkey.to_owned());
-        let (summary, agent) = self
-            .with(move |actor| {
-                (
-                    actor.discovery.as_ref().and_then(|d| d.get(&id)),
-                    actor
-                        .profiles
-                        .snapshot()
-                        .get(&key)
-                        .is_some_and(|profile| profile.is_agent),
-                )
-            })
-            .await?;
-        let member = state.role(&ctx.viewer).is_some();
-        if !summary.is_some_and(|summary| members::can_add_members(&summary, member)) {
-            return Err("You can't add people to this channel.".into());
-        }
-        if state.role(pubkey).is_some() {
-            return Ok(());
-        }
-        ctx.outbox
-            .ready()
-            .await
-            .map_err(|error| error.to_string())?;
-        let key = members::addition_key(channel, pubkey);
-        let pending = ctx
-            .outbox
-            .pending()
-            .iter()
-            .find(|op| op.recovery.as_ref().is_some_and(|r| r.key == key))
-            .cloned();
-        let op = match pending {
-            Some(op) => {
-                if op.delivery == Delivery::Failed {
-                    ctx.outbox
-                        .retry(&op.id(), None)
-                        .map_err(|error| error.to_string())?;
-                }
-                op.id()
-            }
-            None => {
-                let draft = members::add(channel, pubkey, agent).map_err(|e| e.to_string())?;
-                let recovery = Recovery {
-                    key,
-                    value: pubkey.to_owned(),
-                };
-                ctx.outbox
-                    .send(
-                        draft,
-                        SendOptions {
-                            recovery: Some(recovery),
-                            gate: None,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?
-            }
-        };
-        delivered(&ctx.outbox, op).await?;
-        let state = confirm!({
-            let state = self.state(&ctx, channel).await?;
-            state.role(pubkey).is_some().then_some(state)
-        })
-        .ok_or(UNCONFIRMED)?;
-        ctx.outbox
-            .acknowledge(&op)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.adopt(ctx.epoch, vec![state.metadata, state.roster])
-            .await
-    }
-
-    async fn change_member(&self, channel: &str, change: MemberChange) -> Result<(), String> {
-        let ctx = self.context().await?;
-        let state = self.state(&ctx, channel).await?;
-        // Removing someone's own agent needs its attestation, read fresh.
-        let owner = if change.change == members::Change::Remove
-            && !state.can_manage_member(&ctx.viewer, &change.pubkey)
-            && state.can_remove_member(&ctx.viewer, &change.pubkey, Some(&ctx.viewer))
-        {
-            self.agent_owner(&ctx, &change.pubkey).await?
-        } else {
-            None
-        };
-        members::authorize(&state, &ctx.viewer, &change, owner.as_deref())
-            .map_err(|e| e.to_string())?;
-        let template = members::administration(channel, &change, &ctx.viewer, now())
-            .map_err(|error| error.to_string())?;
-        publish(&ctx, template).await?;
-        let state = confirm!({
-            let state = self.state(&ctx, channel).await?;
-            members::change_confirmed(&state, &change).then_some(state)
-        })
-        .ok_or(UNCONFIRMED)?;
-        self.adopt(ctx.epoch, vec![state.metadata, state.roster])
-            .await
     }
 
     // ----- direct messages -----
@@ -1253,25 +1249,66 @@ impl Actor {
 
     // ----- hidden DMs (30622) -----
 
-    /// Re-reads the viewer's hidden DM list.
+    /// Re-reads the viewer's hidden DM list (`refreshVisibility`): one
+    /// read at a time; a failure or invalid list keeps what is shown and
+    /// reports the error.
     pub(super) fn refresh_visibility(&mut self) {
+        if self.visibility_reading {
+            return;
+        }
         let Ok(ctx) = self.context() else {
             return;
         };
+        self.visibility_reading = true;
+        self.set_visibility_status(DmVisibilityStatus::Loading);
         let commands = self.commands.clone();
         self.runtime.spawn(async move {
             let filter = lifecycle::visibility_filter(&ctx.relay, &ctx.viewer, false);
-            let Ok(events) = read(&ctx, vec![filter]).await else {
-                return;
-            };
-            let hidden =
-                lifecycle::hidden_dms(&events, &ctx.relay, &ctx.viewer).unwrap_or_default();
+            let read = tokio::time::timeout(RUN_TIMEOUT, read(&ctx, vec![filter]))
+                .await
+                .unwrap_or_else(|_| Err(TIMED_OUT.to_owned()));
+            let result = read.and_then(|events| {
+                lifecycle::visibility_record(&events, &ctx.relay, &ctx.viewer)
+                    .map_err(|error| error.to_string())
+            });
             let _ = commands.send(Message::With(Box::new(move |actor| {
-                if actor.epoch == ctx.epoch {
-                    actor.set_hidden_dms(hidden);
+                actor.visibility_reading = false;
+                if actor.epoch != ctx.epoch {
+                    actor.set_visibility_status(DmVisibilityStatus::Idle);
+                    return;
+                }
+                match result {
+                    Ok(Some(record)) => actor.adopt_visibility(record),
+                    Ok(None) => {
+                        if actor.visibility_record.is_none() {
+                            actor.set_hidden_dms(Vec::new());
+                        }
+                        actor.set_visibility_status(DmVisibilityStatus::Ready);
+                    }
+                    Err(error) => actor.set_visibility_status(DmVisibilityStatus::Error(error)),
                 }
             })));
         });
+    }
+
+    /// A newer valid list replaces the shown one; an older one is ignored.
+    fn adopt_visibility(&mut self, record: lifecycle::VisibilityRecord) {
+        if self
+            .visibility_record
+            .as_ref()
+            .is_none_or(|current| record.newer_than(current))
+        {
+            self.set_hidden_dms(record.hidden.clone());
+            self.visibility_record = Some(record);
+        }
+        self.set_visibility_status(DmVisibilityStatus::Ready);
+    }
+
+    fn set_visibility_status(&mut self, status: DmVisibilityStatus) {
+        if self.dm_visibility != status {
+            self.dm_visibility = status;
+            self.publish();
+        }
     }
 
     fn set_hidden_dms(&mut self, mut hidden: Vec<String>) {

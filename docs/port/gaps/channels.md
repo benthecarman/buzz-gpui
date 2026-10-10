@@ -612,18 +612,18 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | `canAddMembers`: stream/forum, not archived, member or open public preview | src/features/channel-members/members.ts:19-29 | DONE (crates/relay/src/members.rs:44) | - | - |
-| `canShareSession`: add to a private session only | src/features/channel-members/members.ts:33-47 | MISSING | Session share path | S |
+| `canShareSession`: add to a private session only | src/features/channel-members/members.ts:33-47 | DONE (members.rs `can_share_session`; `Session::add_session_participant`) | - | - |
 | Add member (9000, `role: bot` for agents) through outbox with recovery key `member-add:<channel>:<pubkey>` | src/features/channel-members/members.ts:90-222 | DONE (crates/relay/src/session/actions.rs:574-640; crates/relay/src/members.rs:55-80) | - | - |
-| Session participants: agents rejected ("Add agents with the session agent picker instead.") | src/features/channel-members/members.ts:119-128 | MISSING | Comes with session share | S |
-| Failed addition older than 15 min must be removed from Outbox first | src/features/channel-members/members.ts:180-186 | MISSING | Expiry check | S |
-| Guarded (agent-profile) invitation retry rule | src/features/channel-members/members.ts:161-164 | MISSING | Guard check | S |
-| Start added managed agent after confirmed membership (`startAddedAgent`, MembershipChanged error) | src/features/channel-members/members.ts:224-294 | MISSING | Call local agent control after add | M |
+| Session participants: agents rejected ("Add agents with the session agent picker instead.") | src/features/channel-members/members.ts:119-128 | DONE (session/members.rs `AddOps::check`) | - | - |
+| Failed addition older than 15 min must be removed from Outbox first | src/features/channel-members/members.ts:180-186 | DONE (session/members.rs `AddOps::add`) | - | - |
+| Guarded (agent-profile) invitation retry rule | src/features/channel-members/members.ts:161-164 | DONE (session/members.rs `AddOps::add`) | - | - |
+| Start added managed agent after confirmed membership (`startAddedAgent`, MembershipChanged error) | src/features/channel-members/members.ts:224-294 | MISSING | Local agent control lives in the app and host, not the relay crate: after `Session::add_member` succeeds the app starts a managed agent it owns | M |
 | Member search (kind 0 prefix, 30 per page, npub/hex exact, rank by name tier, 256 cap) | src/features/channel-members/search.ts:9-58 | DONE (crates/relay/src/members.rs:218-340) | - | - |
 | Administration authority: roles admin/member/guest/owner/bot, canManage/canRemove, authorize, confirmation | src/features/channel-members/administration-protocol.ts:10-207 | DONE (crates/relay/src/members.rs:84-190; crates/relay/src/lifecycle.rs) | - | - |
 | Owner may remove own agent with fresh attestation | src/features/channel-members/administration.ts:200-240 | DONE (crates/relay/src/session/actions.rs:648-660) | - | - |
-| Uncertain administration result: "This request may have taken effect… it will not be sent again." | src/features/channel-members/administration.ts:38 | PARTIAL: confirm loop exists (crates/relay/src/session/actions.rs:665), no no-resend uncertain state | Track uncertain state | S |
-| Single in-flight operation guard ("A member operation is still in progress.") | src/features/channel-members/administration.ts:101 | PARTIAL: dialog busy flag only (crates/app/src/ui/members.rs) | Session-level guard | S |
-| Addition receipt tracking across dialog reopen | src/features/channel-members/operations.ts:15-162 | MISSING | Track pending additions and show their state | M |
+| Uncertain administration result: "This request may have taken effect… it will not be sent again." | src/features/channel-members/administration.ts:38 | DONE (session/members.rs; `Session::member_operation`, `Session::refresh_members`) | - | - |
+| Single in-flight operation guard ("A member operation is still in progress.") | src/features/channel-members/administration.ts:101 | DONE (session/members.rs `Members::begin_operation`) | - | - |
+| Addition receipt tracking across dialog reopen | src/features/channel-members/operations.ts:15-162 | DONE (session/members.rs `Members`, `track_additions`; `Session::member_additions`) | - | - |
 
 ### Channel members dialog
 
@@ -935,10 +935,10 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | `channelVisibility` and `canonicalDetailsName` | FR/channel-details-protocol.ts:26-42 | DONE (R/discovery.rs:180; R/lifecycle.rs:607-611) | - | - |
 | Strong 39000/39001/39002 read, canEdit, TTL parse | FR/channel-details-protocol.ts:98-134, 181-186; FR/channel-details.ts:82-101 | DONE (R/lifecycle.rs:134-152, 194-207, 383-407; buzz-app also rejects non-members) | - | - |
 | 9002 template (visibility/ttl only when changed) | FR/channel-details-protocol.ts:136-178 | DONE (R/lifecycle.rs:709-744) | - | - |
-| Session channels: name-only 9002 `[h,name]` | FR/channel-details-protocol.ts:78-96, 142-154, 189-212 | MISSING | Port always sends `about`; `validate_about` rejects the session marker (R/lifecycle.rs:622-633, 709-744) | S |
-| Authorize before and after signing; error copy | FR/channel-details.ts:166-200 | PARTIAL | Checks once (R/session/actions.rs:511-533); texts differ | S |
+| Session channels: name-only 9002 `[h,name]` | FR/channel-details-protocol.ts:78-96, 142-154, 189-212 | DONE (lifecycle.rs `edit_details`, `validate_details`) | - | - |
+| Authorize before and after signing; error copy | FR/channel-details.ts:166-200 | DONE (session/actions.rs `authorize_details`) | - | - |
 | Confirm by re-read and adopt metadata | FR/channel-details.ts:102-120 | DONE (R/session/actions.rs:534-540; R/lifecycle.rs:747-761) | - | - |
-| Access gate ("Channel access changed. Reopen channel settings.") and 20 s timeout | FR/channel-details.ts:51-81 | PARTIAL | 20 s there (R/session/actions.rs:102-115); no access revocation check | S |
+| Access gate ("Channel access changed. Reopen channel settings.") and 20 s timeout | FR/channel-details.ts:51-81 | DONE (session/actions.rs `read_details`; 20 s in `Session::run`) | - | - |
 
 ### Lifecycle UI
 
@@ -956,11 +956,11 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | Templates archive/unarchive 9002, delete 9008, join 9021, leave 9022, hide 41012 | FR/channel-lifecycle-protocol.ts:23-73 | DONE (R/lifecycle.rs:490-513) | - | - |
 | Permissions incl. last-owner leaveReason | FR/channel-lifecycle-protocol.ts:110-180 | DONE (R/lifecycle.rs:212-290, 330-351; port also cross-checks 39001 vs 39002) | - | - |
 | Owner-agent evidence (kind 0, batches of 4, 5 s) | FR/channel-lifecycle.ts:133-218 | DONE (R/session/actions.rs:405-447) | - | - |
-| Re-authorize after signing, single in-flight guard, error copy | FR/channel-lifecycle.ts:286-363 | PARTIAL | Authorizes once, no global busy guard, generic "You can't do that in this channel." (R/session/actions.rs:459-483) | S |
-| Join preconditions | FR/channel-lifecycle.ts:302-320 | DIFFERENT | Specific texts instead of "Only active public channels can be joined." (R/lifecycle.rs:572-600) | S |
+| Re-authorize after signing, single in-flight guard, error copy | FR/channel-lifecycle.ts:286-363 | DONE (session/actions.rs `authorize_lifecycle`; `Session::channel_action`) | - | - |
+| Join preconditions | FR/channel-lifecycle.ts:302-320 | DONE (lifecycle.rs `join_ready`) | - | - |
 | Confirmation polling 0/250/750/1500 ms | FR/channel-lifecycle.ts:369-424 | DONE (R/lifecycle.rs:23-28, 516-569; R/session/actions.rs:484-509) | - | - |
-| Unconfirmed error text with reason | FR/channel-lifecycle.ts:20-27, 426-428 | DIFFERENT | Different string, no reason, also on timeout (R/session/actions.rs:35, 102-115) | S |
-| DM visibility snapshot (status, newer wins, invalid list = error) | FR/channel-lifecycle.ts:219-282 | PARTIAL | No status or error; invalid lists ignored (R/session/actions.rs:970-1010; R/lifecycle.rs:763-802) | S |
+| Unconfirmed error text with reason | FR/channel-lifecycle.ts:20-27, 426-428 | DONE (lifecycle.rs `ActionError::Unconfirmed`; session/actions.rs `channel_action`) | - | - |
+| DM visibility snapshot (status, newer wins, invalid list = error) | FR/channel-lifecycle.ts:219-282 | DONE (lifecycle.rs `visibility_record`; session/actions.rs `refresh_visibility`; `SessionSnapshot::dm_visibility`) | - | - |
 
 ### Create channel
 

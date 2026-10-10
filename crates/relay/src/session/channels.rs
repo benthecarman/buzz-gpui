@@ -1576,6 +1576,7 @@ impl Actor {
         self.profiles.clear();
         self.emoji_clear();
         self.statuses_clear();
+        self.members_clear();
         self.activity.values.clear();
         self.activity_cancel();
         if let Some(discovery) = &mut self.discovery {

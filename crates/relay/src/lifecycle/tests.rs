@@ -441,3 +441,52 @@ fn reads_the_hidden_dm_list() {
     assert_eq!(hidden_dms(&[bad], &relay, &viewer), None);
     assert_eq!(hidden_dms(&[], &relay, &viewer), None);
 }
+
+#[test]
+fn sessions_rename_with_their_name_alone() {
+    let base = DetailsDraft {
+        name: "Fix the build".into(),
+        description: crate::discovery::SESSION_CHANNEL_DESCRIPTION.into(),
+        private: true,
+        ttl: None,
+    };
+    let renamed = DetailsDraft {
+        name: "Fix the tests".into(),
+        ..base.clone()
+    };
+    let event = edit_details(CHANNEL, &renamed, &base, 1).unwrap();
+    assert_eq!(
+        event.tags,
+        vec![vec!["h", CHANNEL], vec!["name", "Fix the tests"]]
+    );
+    let opened = DetailsDraft {
+        private: false,
+        ..renamed
+    };
+    assert_eq!(
+        edit_details(CHANNEL, &opened, &base, 1).unwrap_err().0,
+        "Only the name of a session can be changed here."
+    );
+}
+
+#[test]
+fn invalid_visibility_lists_are_errors() {
+    let signer = Signer::new();
+    let relay = signer.relay_hex();
+    let viewer = signer.viewer_hex();
+    let bad = signer.relay(
+        kinds::HIDDEN_DMS,
+        T0,
+        &[&["d", &viewer], &["p", &viewer], &["h", "not-a-uuid"]],
+    );
+    assert_eq!(
+        visibility_record(&[bad], &relay, &viewer).unwrap_err().0,
+        "Invalid hidden DM"
+    );
+    let other = signer.relay(kinds::HIDDEN_DMS, T0, &[&["d", &viewer], &["p", &relay]]);
+    assert_eq!(
+        visibility_record(&[other], &relay, &viewer).unwrap_err().0,
+        "Invalid DM visibility snapshot"
+    );
+    assert_eq!(visibility_record(&[], &relay, &viewer), Ok(None));
+}

@@ -33,6 +33,8 @@ pub(super) struct Direct {
     pub status: tokio::sync::Mutex<()>,
     /// Emoji additions run one after another, so none is lost.
     pub emoji: tokio::sync::Mutex<()>,
+    /// One channel lifecycle action at a time.
+    pub lifecycle: tokio::sync::Mutex<()>,
 }
 
 fn now() -> u64 {

@@ -20,6 +20,7 @@ mod channels;
 mod feedback;
 mod gifs;
 mod incoming;
+mod members;
 mod messaging;
 mod observer;
 mod presence;
@@ -30,9 +31,10 @@ mod threads;
 mod timeline;
 mod unread;
 
-pub use actions::{MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
+pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use feedback::{FeedbackState, PendingFeedback};
 pub use incoming::IncomingMessage;
+pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
 pub use statuses::StatusWatch;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
@@ -259,6 +261,8 @@ pub struct SessionSnapshot {
     /// DMs the viewer hid (relay-signed 30622). The sidebar leaves them
     /// out; opening one still works.
     pub hidden_dms: Arc<[String]>,
+    /// Whether [`Self::hidden_dms`] was read, is loading or failed.
+    pub dm_visibility: DmVisibilityStatus,
     /// The community's custom emoji. Replaced only when it changes.
     pub emoji: Arc<EmojiSnapshot>,
     /// Sidebar preferences and local hidden DMs. Replaced only when they
@@ -377,6 +381,7 @@ impl Session {
             thread_typing: Arc::default(),
             typing_anywhere: Arc::default(),
             hidden_dms: Arc::new([]),
+            dm_visibility: DmVisibilityStatus::Idle,
             emoji: Arc::default(),
             sidebar: Arc::default(),
             statuses: Statuses::default(),
@@ -399,6 +404,7 @@ impl Session {
             identity: identity.clone(),
             status: tokio::sync::Mutex::new(()),
             emoji: tokio::sync::Mutex::new(()),
+            lifecycle: tokio::sync::Mutex::new(()),
         };
         let actor = Actor {
             runtime: runtime.clone(),
@@ -451,6 +457,10 @@ impl Session {
             sidebar: sidebar::SidebarPrefs::new(runtime),
             watches: HashMap::new(),
             view_reports: HashMap::new(),
+            dm_visibility: DmVisibilityStatus::Idle,
+            visibility_record: None,
+            visibility_reading: false,
+            members: members::Members::default(),
             roster_refresh: RosterRefresh::Idle,
             live_view: Arc::default(),
         };
@@ -1065,6 +1075,12 @@ struct Actor {
     watches: HashMap<u64, unread::WatchState>,
     /// What each open channel view last reported it shows.
     view_reports: HashMap<String, (Vec<EventId>, bool)>,
+    dm_visibility: DmVisibilityStatus,
+    /// The hidden DM list shown, for newer-wins.
+    visibility_record: Option<crate::lifecycle::VisibilityRecord>,
+    visibility_reading: bool,
+    /// Member additions and administration in flight or unresolved.
+    members: members::Members,
     roster_refresh: RosterRefresh,
     live_view: Arc<LiveView>,
     /// The discovery access revision last acted on.
@@ -1748,6 +1764,7 @@ impl Actor {
             self.profiles.clear();
             self.emoji_clear();
             self.statuses_clear();
+            self.members_clear();
             self.ensure_profiles(self.channel_people());
             let people: Vec<String> = self.timelines.values().flat_map(Timeline::people).collect();
             self.ensure_profiles(people);
@@ -2409,6 +2426,7 @@ impl Actor {
             timeline.publish();
         }
         self.threads_local(&local);
+        self.track_additions();
     }
 
     /// The outbox's events, signed or not yet, before visibility.
@@ -2574,6 +2592,7 @@ impl Actor {
             thread_typing: self.typing.snapshot().threads.clone(),
             typing_anywhere: self.typing.snapshot().anywhere.clone(),
             hidden_dms: self.hidden_dms.clone(),
+            dm_visibility: self.dm_visibility.clone(),
             emoji: self.emoji.snapshot(),
             sidebar: self.sidebar.snapshot(),
             statuses: self.statuses.snapshot(),
@@ -2591,6 +2610,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.thread_typing, &next.thread_typing)
                 && Arc::ptr_eq(&current.typing_anywhere, &next.typing_anywhere)
                 && Arc::ptr_eq(&current.hidden_dms, &next.hidden_dms)
+                && current.dm_visibility == next.dm_visibility
                 && Arc::ptr_eq(&current.emoji, &next.emoji)
                 && Arc::ptr_eq(&current.sidebar, &next.sidebar)
                 && Arc::ptr_eq(&current.statuses, &next.statuses)

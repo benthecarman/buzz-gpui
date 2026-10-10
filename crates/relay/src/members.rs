@@ -75,6 +75,41 @@ pub fn addition_key(channel: &str, pubkey: &str) -> String {
     format!("member-add:{channel}:{pubkey}")
 }
 
+/// A lowercase hex public key.
+pub fn is_key(value: &str) -> bool {
+    is_hex64(value)
+}
+
+/// `canShareSession`: a session share adds only to a private work session
+/// the viewer belongs to, never through ordinary Members.
+pub fn can_share_session(channel: &ChannelSummary, viewer: &str) -> bool {
+    channel.channel_type == Some(ChannelType::Session)
+        && channel.private
+        && !channel.read_only
+        && !channel.cached
+        && !channel.archived
+        && channel.members.iter().any(|member| member == viewer)
+}
+
+/// Whether an outbox operation is an ordinary addition of `pubkey` to
+/// `channel` (a 9000 with no role other than `bot`).
+pub fn is_addition(op: &crate::outbox::Operation, channel: &str, pubkey: &str) -> bool {
+    let tags: Vec<&[String]> = op.event.tags.iter().map(|tag| tag.as_slice()).collect();
+    let has = |name: &str, value: &str| {
+        tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some(name)
+                && tag.get(1).map(String::as_str) == Some(value)
+        })
+    };
+    op.kind() == kinds::PUT_USER
+        && has("h", channel)
+        && has("p", pubkey)
+        && !tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("role")
+                && tag.get(1).map(String::as_str) != Some("bot")
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Administration (§5g.3)
 
@@ -492,6 +527,22 @@ mod tests {
         channel.archived = false;
         channel.channel_type = Some(ChannelType::Dm);
         assert!(!can_add_members(&channel, true));
+    }
+
+    #[test]
+    fn sessions_share_only_privately_with_members() {
+        let mut channel = ChannelSummary {
+            id: CHANNEL.into(),
+            channel_type: Some(ChannelType::Session),
+            private: true,
+            members: vec![key(1)],
+            ..Default::default()
+        };
+        assert!(can_share_session(&channel, &key(1)));
+        assert!(!can_share_session(&channel, &key(2)));
+        assert!(!can_add_members(&channel, true), "never ordinary Members");
+        channel.cached = true;
+        assert!(!can_share_session(&channel, &key(1)));
     }
 
     #[test]
