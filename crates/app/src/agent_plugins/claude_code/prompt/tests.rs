@@ -1,0 +1,232 @@
+//! buzz-app's `prompt.test.ts`.
+
+use super::*;
+use nostr::nips::nip19::ToBech32;
+
+fn alice() -> String {
+    "a".repeat(64)
+}
+fn bob() -> String {
+    "b".repeat(64)
+}
+fn agent() -> String {
+    "c".repeat(64)
+}
+
+fn event(id: &str, content: &str, change: impl FnOnce(&mut BuzzEvent)) -> BuzzEvent {
+    let mut event = BuzzEvent {
+        id: id.repeat(64)[..64].to_string(),
+        pubkey: alice(),
+        kind: 9,
+        created_at: 1_800_000_000,
+        content: content.into(),
+        tags: vec![vec!["h".into(), "chan".into()]],
+        sig: String::new(),
+    };
+    change(&mut event);
+    event
+}
+
+fn name(pubkey: &str) -> Option<String> {
+    if pubkey == alice() {
+        Some("Alice Smith".into())
+    } else if pubkey == agent() {
+        Some("Claude".into())
+    } else {
+        None
+    }
+}
+
+fn tags(list: &[&[&str]]) -> Vec<Vec<String>> {
+    list.iter()
+        .map(|tag| tag.iter().map(|part| part.to_string()).collect())
+        .collect()
+}
+
+fn turn(
+    event: &BuzzEvent,
+    channel: &Channel,
+    thread: Option<&Thread>,
+    context: &[BuzzEvent],
+    total: usize,
+    interest: Option<&str>,
+) -> String {
+    turn_prompt(&TurnInput {
+        event,
+        channel,
+        scope: Scope::Thread,
+        thread,
+        context,
+        total,
+        label: "@mention",
+        interest,
+        name: &name,
+    })
+}
+
+#[test]
+fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
+    let prompt = system_prompt(
+        Scope::Thread,
+        "~/.buzz",
+        "Be terse.",
+        Some(Some("I am Claude.")),
+    );
+    assert!(prompt.starts_with("<base>\n"));
+    assert!(prompt.contains("## Session Model"));
+    assert!(prompt.contains("<workspace>\nCurrent working directory: ~/.buzz\n</workspace>"));
+    assert!(prompt.contains("<agent-instructions>\nBe terse.\n</agent-instructions>"));
+    assert!(prompt.contains("<core-memory>\nI am Claude.\n</core-memory>"));
+    assert!(system_prompt(Scope::Thread, "/w", "", Some(None)).contains("No core memory found."));
+    assert!(!system_prompt(Scope::Channel, "/w", "", None).contains("<core-memory>"));
+    assert!(system_prompt(Scope::Channel, "/w", "", None).contains("per-channel session"));
+}
+
+#[test]
+fn frames_a_new_top_level_mention_as_the_root_of_its_thread() {
+    let mention = event("1", "@Claude what's up?", |event| {
+        event.tags = tags(&[&["h", "chan"], &["p", &agent()]]);
+    });
+    let channel = Channel {
+        id: "chan".into(),
+        name: Some("general".into()),
+        dm: false,
+    };
+    let prompt = turn(&mention, &channel, None, &[], 1, None);
+    assert!(prompt.contains("Scope: thread\nSession scope: thread\nChannel: general (#chan)"));
+    assert!(prompt.contains(&format!("Thread root: {}", mention.id)));
+    assert!(
+        prompt.contains("This is a new top-level message. `send` replies in its thread by default")
+    );
+    assert!(!prompt.contains("<thread-context"));
+    assert!(prompt.contains("<buzz-event type=\"@mention\">"));
+    assert!(prompt.contains(&format!(
+        "From: Alice Smith (npub: {}, hex: {})",
+        npub(&alice()),
+        alice()
+    )));
+    assert!(prompt.contains("Content: @Claude what's up?"));
+    assert!(prompt.contains(&format!("Parsed: mentions=[Claude ({})]", agent())));
+}
+
+#[test]
+fn npubs_match_nip19() {
+    let key = buzz_identity::Identity::ephemeral().public_key();
+    assert_eq!(npub(&key.to_hex()), key.to_bech32().unwrap());
+}
+
+#[test]
+fn includes_the_thread_messages_the_session_has_not_seen() {
+    let root = event("1", "Can someone look at the build?", |_| {});
+    let earlier = event("2", "It fails on main", |event| {
+        event.pubkey = bob();
+        event.created_at = 1_800_000_010;
+    });
+    let reply = event("3", "@Claude please help", |event| {
+        event.created_at = 1_800_000_020;
+        event.tags = tags(&[
+            &["h", "chan"],
+            &["e", &root.id, "", "root"],
+            &["e", &earlier.id, "", "reply"],
+        ]);
+    });
+    let thread = Thread {
+        root_id: root.id.clone(),
+        parent_id: earlier.id.clone(),
+    };
+    let channel = Channel {
+        id: "chan".into(),
+        ..Default::default()
+    };
+    let prompt = turn(
+        &reply,
+        &channel,
+        Some(&thread),
+        &[root.clone(), earlier.clone()],
+        3,
+        Some("Fix builds."),
+    );
+    assert!(prompt.contains(&format!("Thread root: {}\nParent: {}", root.id, earlier.id)));
+    assert!(
+        prompt.contains(
+            "`send` replies in this thread by default, so the conversation stays threaded"
+        )
+    );
+    assert!(prompt.contains("<thread-context included=\"2\" total=\"3\" truncated=\"false\">"));
+    assert!(prompt.contains(&format!(
+        "[1] Alice Smith ({}) (2027-01-15T08:00:00.000Z): Can someone look at the build?",
+        alice()
+    )));
+    assert!(prompt.contains(&format!(
+        "[2] {} (2027-01-15T08:00:10.000Z): It fails on main",
+        bob()
+    )));
+    assert!(prompt.contains(&format!("Parsed: parent={}, root={}", earlier.id, root.id)));
+    assert!(prompt.ends_with("<interest>\nFix builds.\n</interest>"));
+}
+
+#[test]
+fn says_earlier_context_is_already_in_the_session_when_none_is_new() {
+    let message = event("3", "and another thing", |_| {});
+    let dm = Channel {
+        id: "dm".into(),
+        name: None,
+        dm: true,
+    };
+    let prompt = turn(&message, &dm, None, &[], 5, None);
+    assert!(prompt.contains("Scope: dm\nSession scope: dm conversation"));
+    assert!(prompt.contains("Earlier context is already available in this session."));
+    // A DM's session spans its threads, so it names the one to reply in.
+    assert!(prompt.contains(&format!("pass `reply: \"{}\"` to `send`", message.id)));
+}
+
+#[test]
+fn shows_a_dms_recent_messages_as_conversation_context() {
+    let dm = Channel {
+        id: "dm".into(),
+        name: None,
+        dm: true,
+    };
+    let prompt = turn(
+        &event("3", "and this", |_| {}),
+        &dm,
+        None,
+        &[event("1", "hi", |_| {})],
+        2,
+        None,
+    );
+    assert!(prompt.contains("<conversation-context included=\"1\" total=\"2\""));
+}
+
+#[test]
+fn keeps_the_newest_context_and_says_it_is_truncated() {
+    let context: Vec<BuzzEvent> = (0..CONTEXT_LIMIT + 3)
+        .map(|index| event("4", &format!("m{index}"), |_| {}))
+        .collect();
+    let channel = Channel {
+        id: "chan".into(),
+        ..Default::default()
+    };
+    let prompt = turn(
+        &event("5", "now", |_| {}),
+        &channel,
+        None,
+        &context,
+        20,
+        None,
+    );
+    assert!(prompt.contains("included=\"12\" total=\"20\" truncated=\"true\""));
+    assert!(!prompt.contains(": m2\n"));
+    assert!(prompt.contains(": m3\n"));
+}
+
+#[test]
+fn wraps_a_message_that_arrives_mid_turn_and_frames_a_timer() {
+    assert!(steer_prompt("<buzz-event>x</buzz-event>").starts_with(
+        "<new-message-arrived-while-you-were-working>\n<buzz-event>x</buzz-event>\n</new-message-arrived-while-you-were-working>\n\nNote: A new message arrived"
+    ));
+    let timer = timer_prompt("watch/daily", "Summarize", Some("Be brief"));
+    assert!(timer.contains("Timer: watch/daily"));
+    assert!(timer.contains("Prompt: Summarize"));
+    assert!(timer.contains("<interest>\nBe brief\n</interest>"));
+}
