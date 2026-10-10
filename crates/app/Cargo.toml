@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 base64 = "0.22"
+# The terminal panel's VT state (Apache-2.0); drawn by the app itself.
+alacritty_terminal = { version = "0.26", default-features = false }
 blurhash = "0.2"
 buzz-agent-controller.workspace = true
 buzz-credential-store.workspace = true

@@ -143,6 +143,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A panel's shortcut (Mod+J for the terminal): toggles it as its
+    /// header launcher does, while a writable channel shows.
+    pub(crate) fn toggle_channel_panel(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let readable = self
+            .current_summary(cx)
+            .is_some_and(|channel| !channel.read_only);
+        if self.page != Page::MESSAGES || !readable {
+            return;
+        }
+        if let Some(panel) = channel_panels::get(key, cx) {
+            self.toggle_launcher(panel, window, cx);
+        }
+    }
+
     /// The channel menu's panel entries; each opens its panel as a tab.
     fn menu_panels(&self, cx: &mut Context<Self>) -> Vec<MenuPanel> {
         let Some(channel) = self.current_summary(cx) else {
@@ -403,12 +422,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyView> {
         let community = self.community.clone()?;
+        let thread = self
+            .tabs(cx)
+            .thread
+            .filter(|_| self.thread.is_some())
+            .map(|thread| thread.root.to_hex());
         Some((panel.build)(
             channel_panels::Opening {
                 community,
                 channel,
                 target,
                 close,
+                thread,
             },
             window,
             cx,

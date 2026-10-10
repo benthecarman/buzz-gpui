@@ -21,7 +21,8 @@ buzz-gpui (laptop)                              buzzd (dev server)
   directly, as their own identities, through `buzz-acp`. A host never carries
   chat traffic.
 - A host owns everything that is local to a machine: the agent controller and
-  process supervision, agent keys, harness detection, and logs.
+  process supervision, agent keys, harness detection, logs, and the login
+  shells behind channel terminals.
 - The GUI always runs one embedded host for agents on this machine. It talks to
   the embedded host over the same protocol as a remote one, through an
   in-memory transport, so both paths run the same code.
@@ -46,6 +47,10 @@ buzz-gpui (laptop)                              buzzd (dev server)
   for a fresh snapshot. Events carry a sequence number, so the client can drop
   stale ones. Host actions are idempotent, so a client may retry a request
   after a reconnect.
+- Terminal output is pulled, not pushed: a read waits on the host until the
+  shell writes (or about a second passes), so output is never lost to a
+  lagging event broadcast. Terminals belong to the connection that opened
+  them and close with it.
 - Heartbeat: the client pings every 5 s. Three missed pongs close the
   connection, and the client reconnects with backoff.
 

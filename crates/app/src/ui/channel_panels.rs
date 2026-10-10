@@ -24,6 +24,8 @@ pub struct Opening {
     /// The link or channel id it shows.
     pub target: String,
     pub close: Close,
+    /// The root of the thread showing beside the conversation, as hex.
+    pub thread: Option<String>,
 }
 
 /// Where a header launcher shows its panel (`channelPlacement`).

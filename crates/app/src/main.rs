@@ -92,6 +92,7 @@ fn main() {
         ui::settings::personal_groups::init(cx);
         ui::templates::init(cx);
         ui::channel_panels::dev_sample(cx);
+        ui::terminal::init(cx);
         network::init(cx);
         let requests = navigation::init(cx);
         if let Some(link) = link {
