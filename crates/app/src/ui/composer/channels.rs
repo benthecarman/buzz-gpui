@@ -51,6 +51,8 @@ pub enum Search<'a> {
 pub enum Retry {
     Channels,
     Search,
+    /// The `@` directory search, or the channel's membership.
+    People,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

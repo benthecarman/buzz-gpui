@@ -14,6 +14,8 @@ mod clipboard;
 mod format;
 mod link;
 mod live_markdown;
+mod mention_rules;
+mod mentions;
 mod poof;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
@@ -54,10 +56,9 @@ use std::time::Duration;
 const MAX_CHARS: usize = 16_000;
 /// Drafts are saved this long after the last keystroke.
 const DRAFT_DELAY: Duration = Duration::from_millis(400);
-/// Completion lists.
-const MENTION_LIMIT: usize = 50;
 /// The typing pause before `#` searches open channels.
 const PUBLIC_SEARCH_DELAY: Duration = Duration::from_millis(180);
+/// Emoji completion rows.
 const EMOJI_LIMIT: usize = 100;
 
 actions!(composer, [InsertLink]);
@@ -161,6 +162,13 @@ pub struct Composer {
     public: Option<PublicSearch>,
     /// Bumped by "Retry suggestions" to search again.
     public_attempt: u64,
+    /// The community people search behind `@` completion.
+    directory: Option<DirectorySearch>,
+    directory_attempt: u64,
+    /// The last finished search's people, shown while the next one runs.
+    recent_people: Vec<String>,
+    /// A query a complete search found no one for; longer ones can't match.
+    refuted: Option<String>,
     /// The last open channels found, kept while the next search runs.
     recent_public: Vec<ChannelSummary>,
     /// The query start Escape dismissed, until the text moves on.
@@ -413,6 +421,10 @@ impl Composer {
             completion: None,
             public: None,
             public_attempt: 0,
+            directory: None,
+            directory_attempt: 0,
+            recent_people: Vec::new(),
+            refuted: None,
             recent_public: Vec::new(),
             dismissed: None,
             completion_key: None,
@@ -1251,11 +1263,22 @@ impl Composer {
             return;
         }
         self.dismissed = None;
-        let (items, status, retry) = if query.trigger == Trigger::Channel {
-            self.search_public(&query.text, cx);
-            self.channel_suggestions(&query, cx)
-        } else {
-            (self.suggestions(&query, cx), None, None)
+        let mut space = None;
+        let (items, status, retry) = match query.trigger {
+            Trigger::Channel => {
+                self.search_public(&query.text, cx);
+                self.channel_suggestions(&query, cx)
+            }
+            Trigger::Mention => {
+                self.search_people(&query.text, cx);
+                let Some(found) = self.mention_suggestions(&query, cx) else {
+                    self.completion = None;
+                    return;
+                };
+                space = found.space;
+                (found.items, found.status, found.retry)
+            }
+            Trigger::Emoji => (self.suggestions(&query, cx), None, None),
         };
         let count = items.len() + usize::from(retry.is_some());
         if count == 0 && status.is_none() {
@@ -1274,7 +1297,153 @@ impl Composer {
             selected,
             status,
             retry,
+            space,
         });
+    }
+
+    /// Starts the community people search for `@query` after a 200ms
+    /// typing pause (`useMentionDirectory`). Sessions never search, and a
+    /// query that extends one a complete search refuted is not searched.
+    fn search_people(&mut self, query: &str, cx: &mut Context<Self>) {
+        let needle = query.trim().to_string();
+        let community = self.community.read(cx);
+        let channel = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|c| c.id == self.channel);
+        if needle.is_empty()
+            || !mentions::searches_directory(channel)
+            || community.snapshot.roster != RosterStatus::Ready
+        {
+            self.directory = None;
+            return;
+        }
+        if self.directory.as_ref().is_some_and(|search| {
+            search.needle == needle && search.attempt == self.directory_attempt
+        }) {
+            return;
+        }
+        let hex = needle.len() == 64 && needle.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex
+            && self
+                .refuted
+                .as_ref()
+                .is_some_and(|refuted| needle.starts_with(refuted.as_str()) && needle != *refuted)
+        {
+            self.directory = Some(DirectorySearch {
+                needle,
+                attempt: self.directory_attempt,
+                result: Some(Ok((Vec::new(), false))),
+                _task: None,
+            });
+            return;
+        }
+        let session = community.session.clone();
+        let (attempt, wanted) = (self.directory_attempt, needle.clone());
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let result = session.people(&wanted, 1).await.map(|page| {
+                (
+                    page.people
+                        .iter()
+                        .map(|p| p.pubkey.clone())
+                        .collect::<Vec<_>>(),
+                    page.more,
+                )
+            });
+            let _ = this.update(cx, |this, cx| {
+                let Some(search) = &mut this.directory else {
+                    return;
+                };
+                if search.needle != wanted || search.attempt != attempt {
+                    return;
+                }
+                if let Ok((people, more)) = &result {
+                    this.recent_people = people.clone();
+                    if people.is_empty() && !more && wanted.chars().any(char::is_alphanumeric) {
+                        this.refuted = Some(wanted.clone());
+                    }
+                }
+                if let Some(search) = &mut this.directory {
+                    search.result = Some(result.map_err(|error| error.to_string()));
+                }
+                this.completion_key = None;
+                cx.notify();
+            });
+        });
+        self.directory = Some(DirectorySearch {
+            needle,
+            attempt,
+            result: None,
+            _task: Some(task),
+        });
+    }
+
+    /// `@` rows, status line, retry and the Space pick (`MentionCompletion`).
+    /// `None` when the query is prose, not a search.
+    fn mention_suggestions(&self, query: &Query, cx: &App) -> Option<MentionRows> {
+        let community = self.community.read(cx);
+        let snapshot = &community.snapshot;
+        let channel = snapshot.channels.iter().find(|c| c.id == self.channel);
+        let library = crate::ui::identity::AgentLibrary::from_hosts(cx);
+        let history = cx
+            .try_global::<MentionHistory>()
+            .and_then(|h| h.0.get(&community.origin.http()))
+            .map(|h| h.get(&self.channel))
+            .unwrap_or_default();
+        let directory = match &self.directory {
+            None => mentions::Directory::Idle,
+            Some(DirectorySearch {
+                result: Some(Ok((people, more))),
+                ..
+            }) => mentions::Directory::Done {
+                people,
+                more: *more,
+            },
+            Some(DirectorySearch {
+                result: Some(Err(_)),
+                ..
+            }) => mentions::Directory::Failed,
+            Some(DirectorySearch { result: None, .. }) => {
+                mentions::Directory::Loading(&self.recent_people)
+            }
+        };
+        let inputs = mentions::Inputs {
+            channel,
+            roster_ready: snapshot.roster == RosterStatus::Ready,
+            profiles: &snapshot.profiles,
+            library: &library,
+            viewer: community.session.viewer(),
+            origin: Some(&community.origin),
+            presence: &snapshot.presence,
+            history: &history,
+        };
+        let found = mentions::complete(&inputs, &query.text, directory);
+        if found.closed {
+            return None;
+        }
+        let dm = channel.is_some_and(|c| c.channel_type == Some(ChannelType::Dm));
+        Some(MentionRows {
+            items: found
+                .people
+                .into_iter()
+                .map(|person| Suggestion::Person {
+                    pubkey: person.pubkey,
+                    name: person.name.into(),
+                    label: person.label.into(),
+                    picture: person.picture,
+                    agent: person.agent,
+                    member: person.member,
+                    dm,
+                })
+                .collect(),
+            status: found.status.map(SharedString::from),
+            retry: found.retry.then_some(channels::Retry::People),
+            space: found.space,
+        })
     }
 
     /// Starts the open-channel lookup for `#query` after a typing pause,
@@ -1410,6 +1579,12 @@ impl Composer {
     fn retry_completion(&mut self, retry: channels::Retry, cx: &mut Context<Self>) {
         match retry {
             channels::Retry::Channels => self.community.read(cx).session.retry(),
+            channels::Retry::People => {
+                self.directory_attempt += 1;
+                self.directory = None;
+                self.refuted = None;
+                self.community.read(cx).session.retry();
+            }
             channels::Retry::Search => {
                 self.public_attempt += 1;
                 self.public = None;
@@ -1423,61 +1598,8 @@ impl Composer {
         let community = self.community.read(cx);
         let snapshot = &community.snapshot;
         match query.trigger {
-            Trigger::Mention => {
-                let channel = snapshot.channels.iter().find(|c| c.id == self.channel);
-                let members: Vec<String> = channel.map(|c| c.members.clone()).unwrap_or_default();
-                let dm = channel.is_some_and(|c| c.channel_type == Some(ChannelType::Dm));
-                let mut people: Vec<(String, bool)> =
-                    members.iter().map(|key| (key.clone(), true)).collect();
-                let mut others: Vec<&String> = snapshot
-                    .profiles
-                    .keys()
-                    .filter(|key| !members.contains(key))
-                    .collect();
-                others.sort();
-                people.extend(others.into_iter().map(|key| (key.clone(), false)));
-                let mut ranked: Vec<(u8, Suggestion)> = people
-                    .into_iter()
-                    .filter_map(|(pubkey, member)| {
-                        let profile = snapshot.profiles.get(&pubkey);
-                        let name: SharedString = message::display_name(&snapshot.profiles, &pubkey);
-                        // An unnamed outsider is only an identity fallback.
-                        if !member && profile.is_none_or(|p| p.name_is_fallback) {
-                            return None;
-                        }
-                        let tier = name_match(&name, &query.text)?;
-                        Some((
-                            tier,
-                            Suggestion::Person {
-                                pubkey,
-                                name,
-                                picture: profile.and_then(|p| p.picture.clone()),
-                                agent: profile.is_some_and(|p| p.is_agent),
-                                member,
-                                dm,
-                            },
-                        ))
-                    })
-                    .collect();
-                if query.text.contains(' ') && ranked.iter().all(|(tier, _)| *tier > 1) {
-                    // A multi-word query that continues no name is prose.
-                    return Vec::new();
-                }
-                ranked.sort_by(|(ta, a), (tb, b)| {
-                    let key = |s: &Suggestion| match s {
-                        Suggestion::Person { member, name, .. } => (!member, name.to_lowercase()),
-                        _ => (true, String::new()),
-                    };
-                    let (ma, na) = key(a);
-                    let (mb, nb) = key(b);
-                    ma.cmp(&mb).then(ta.cmp(tb)).then(na.cmp(&nb))
-                });
-                ranked
-                    .into_iter()
-                    .take(MENTION_LIMIT)
-                    .map(|(_, s)| s)
-                    .collect()
-            }
+            // `mention_suggestions` owns `@`.
+            Trigger::Mention => Vec::new(),
             // `channel_suggestions` owns `#`.
             Trigger::Channel => Vec::new(),
             Trigger::Emoji => {
@@ -1524,6 +1646,21 @@ impl Composer {
         if !typed {
             return false;
         }
+        if query.trigger == Trigger::Mention {
+            // Space selects only the one exact name of a complete choice
+            // set (`spaceId`).
+            let Some(space) = completion.space.clone() else {
+                return false;
+            };
+            let Some(index) = completion.items.iter().position(
+                |item| matches!(item, Suggestion::Person { pubkey, .. } if *pubkey == space),
+            ) else {
+                return false;
+            };
+            completion.query.end += 1;
+            self.accept(index, window, cx);
+            return true;
+        }
         let wanted = query.text.trim().to_lowercase();
         let exact: Vec<usize> = completion
             .items
@@ -1561,6 +1698,24 @@ impl Composer {
             && !self.can_select(id, name, *member, cx)
         {
             return;
+        }
+        if let Some(Suggestion::Person { pubkey, .. }) = completion.items.get(index)
+            && self.editing.is_none()
+        {
+            let recipients = self.recipients(cx);
+            if recipients.len() >= 32 && !recipients.iter().any(|(key, _)| key == pubkey) {
+                self.error = Some("Choose at most 32 recipients".into());
+                cx.notify();
+                return;
+            }
+            let community = self.community.read(cx);
+            let (origin, channel) = (community.origin.http(), self.channel.clone());
+            let pubkey = pubkey.clone();
+            cx.default_global::<MentionHistory>()
+                .0
+                .entry(origin)
+                .or_default()
+                .remember(&channel, &pubkey);
         }
         let Some(completion) = self.completion.take() else {
             return;
@@ -2544,6 +2699,13 @@ fn find_query(text: &str, caret: usize) -> Option<Query> {
     None
 }
 
+struct MentionRows {
+    items: Vec<Suggestion>,
+    status: Option<SharedString>,
+    retry: Option<channels::Retry>,
+    space: Option<String>,
+}
+
 struct Completion {
     query: Query,
     items: Vec<Suggestion>,
@@ -2553,6 +2715,8 @@ struct Completion {
     status: Option<SharedString>,
     /// "Retry suggestions", after the items.
     retry: Option<channels::Retry>,
+    /// The one person Space selects for this `@` query.
+    space: Option<String>,
 }
 
 impl Completion {
@@ -2561,6 +2725,22 @@ impl Completion {
         self.items.len() + usize::from(self.retry.is_some())
     }
 }
+
+/// The community people search behind `@` completion
+/// (`useMentionDirectory`).
+struct DirectorySearch {
+    needle: String,
+    attempt: u64,
+    /// `None` while it waits or runs: the people and whether there are more.
+    result: Option<Result<(Vec<String>, bool), String>>,
+    _task: Option<Task<()>>,
+}
+
+/// Explicit picks per community and channel (`mention-history.ts`).
+#[derive(Default)]
+struct MentionHistory(std::collections::HashMap<String, mentions::History>);
+
+impl Global for MentionHistory {}
 
 /// The open-channel lookup behind `#` completion.
 struct PublicSearch {
@@ -2574,7 +2754,10 @@ struct PublicSearch {
 enum Suggestion {
     Person {
         pubkey: String,
+        /// The identity's own name, which a pick inserts.
         name: SharedString,
+        /// The name shown, qualified when a namesake is present.
+        label: SharedString,
         picture: Option<String>,
         agent: bool,
         member: bool,
@@ -3838,11 +4021,12 @@ impl Composer {
             match item {
                 Suggestion::Person {
                     pubkey,
-                    name,
+                    label: name,
                     picture,
                     agent,
                     member,
                     dm,
+                    ..
                 } => {
                     let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Default);
                     if *agent {

@@ -46,6 +46,8 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 toml = "0.9"
 toml_edit = "0.25"
+unicode-normalization = "0.1"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.9"
 tracing = "0.1"
