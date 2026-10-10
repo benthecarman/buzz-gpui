@@ -113,6 +113,8 @@ pub struct SessionSnapshot {
     pub typing: Arc<HashMap<String, Vec<String>>>,
     /// Thread root id → people typing in that thread.
     pub thread_typing: Arc<HashMap<String, Vec<String>>>,
+    /// Channel id → people typing anywhere in it, threads included.
+    pub typing_anywhere: Arc<HashMap<String, Vec<String>>>,
     /// DMs the viewer hid (relay-signed 30622). The sidebar leaves them
     /// out; opening one still works.
     pub hidden_dms: Arc<[String]>,
@@ -195,6 +197,7 @@ impl Session {
             presence: Arc::default(),
             typing: Arc::default(),
             thread_typing: Arc::default(),
+            typing_anywhere: Arc::default(),
             hidden_dms: Arc::new([]),
             emoji: Arc::default(),
             sidebar: Arc::default(),
@@ -1588,6 +1591,7 @@ impl Actor {
             presence: self.presence.snapshot(),
             typing: self.typing.snapshot().channels.clone(),
             thread_typing: self.typing.snapshot().threads.clone(),
+            typing_anywhere: self.typing.snapshot().anywhere.clone(),
             hidden_dms: self.hidden_dms.clone(),
             emoji: self.emoji.snapshot(),
             sidebar: self.sidebar.snapshot(),
@@ -1602,6 +1606,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.presence, &next.presence)
                 && Arc::ptr_eq(&current.typing, &next.typing)
                 && Arc::ptr_eq(&current.thread_typing, &next.thread_typing)
+                && Arc::ptr_eq(&current.typing_anywhere, &next.typing_anywhere)
                 && Arc::ptr_eq(&current.hidden_dms, &next.hidden_dms)
                 && Arc::ptr_eq(&current.emoji, &next.emoji)
                 && Arc::ptr_eq(&current.sidebar, &next.sidebar)

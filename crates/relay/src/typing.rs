@@ -24,6 +24,9 @@ pub struct TypingSnapshot {
     pub channels: Arc<HashMap<String, Vec<String>>>,
     /// Thread root id → people typing in that thread.
     pub threads: Arc<HashMap<String, Vec<String>>>,
+    /// Channel id → people typing anywhere in it, threads included, each
+    /// once (the sidebar's DM typing badge).
+    pub anywhere: Arc<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -248,7 +251,12 @@ impl Typing {
         visible.sort_by_key(|(_, order)| *order);
         let mut channels: HashMap<String, Vec<String>> = HashMap::new();
         let mut threads: HashMap<String, Vec<String>> = HashMap::new();
+        let mut anywhere: HashMap<String, Vec<String>> = HashMap::new();
         for (key, _) in visible {
+            let people = anywhere.entry(key.channel.clone()).or_default();
+            if !people.contains(&key.author) {
+                people.push(key.author.clone());
+            }
             let list = match &key.root {
                 Some(root) => threads.entry(root.clone()).or_default(),
                 None => channels.entry(key.channel.clone()).or_default(),
@@ -262,6 +270,10 @@ impl Typing {
         }
         if *self.snapshot.threads != threads {
             self.snapshot.threads = Arc::new(threads);
+            changed = true;
+        }
+        if *self.snapshot.anywhere != anywhere {
+            self.snapshot.anywhere = Arc::new(anywhere);
             changed = true;
         }
         changed
