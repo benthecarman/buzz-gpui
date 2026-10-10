@@ -22,6 +22,7 @@ mod messaging;
 mod observer;
 mod presence;
 mod sidebar;
+mod statuses;
 mod threads;
 mod timeline;
 mod unread;
@@ -29,6 +30,7 @@ mod unread;
 pub use actions::{MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use feedback::{FeedbackState, PendingFeedback};
 pub use incoming::IncomingMessage;
+pub use statuses::StatusWatch;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{
@@ -55,6 +57,7 @@ use crate::reader::{ReadError, ReadErrorKind, ReadOptions, Reader, ReaderOptions
 use crate::socket::Filter;
 use crate::store::{Partition, SqliteJournal, Store};
 use crate::typing::Typing;
+use crate::user_status::{StatusDirectory, Statuses};
 use crate::window::{Cursor, page_filter, parse_page};
 use crate::{ChannelSummary, Events};
 use buzz_identity::Identity;
@@ -127,6 +130,10 @@ pub struct SessionSnapshot {
     /// Sidebar preferences and local hidden DMs. Replaced only when they
     /// change.
     pub sidebar: Arc<crate::sidebar_store::SidebarState>,
+    /// Current statuses of the people held by a
+    /// [`Session::watch_statuses`] watch, and the viewer's once seen.
+    /// Replaced only when it changes.
+    pub statuses: Statuses,
 }
 
 pub struct Session {
@@ -223,6 +230,7 @@ impl Session {
             hidden_dms: Arc::new([]),
             emoji: Arc::default(),
             sidebar: Arc::default(),
+            statuses: Statuses::default(),
         }));
         let (incoming, _) = broadcast::channel(64);
         let receiver = snapshot.subscribe();
@@ -276,6 +284,7 @@ impl Session {
             typing: Typing::new(viewer.clone()),
             emoji: EmojiDirectory::new(viewer.clone()),
             emoji_reading: false,
+            statuses: StatusDirectory::new(viewer.clone()),
             incoming: incoming::Incoming::default(),
             incoming_sender: incoming.clone(),
             hidden_dms: Arc::new([]),
@@ -708,6 +717,7 @@ struct Actor {
     emoji: EmojiDirectory,
     /// The catalog read is in flight.
     emoji_reading: bool,
+    statuses: StatusDirectory,
     incoming: incoming::Incoming,
     incoming_sender: broadcast::Sender<IncomingMessage>,
     hidden_dms: Arc<[String]>,
@@ -723,10 +733,14 @@ impl Actor {
         self.sidebar_restore();
         self.connect();
         loop {
-            let deadline = [self.reads_deadline(), self.presence_deadline()]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                self.reads_deadline(),
+                self.presence_deadline(),
+                self.statuses_deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let outbox_changed = async {
                 match &mut self.outbox_changes {
                     Some(changes) => changes.changed().await.is_ok(),
@@ -753,6 +767,7 @@ impl Actor {
                 () = timer => {
                     self.reads_tick();
                     self.presence_tick();
+                    self.statuses_tick();
                     continue;
                 }
                 Some(update) = live_update => {
@@ -997,6 +1012,7 @@ impl Actor {
         self.sidebar_connected();
         self.start_scan(ScanOptions::default());
         self.read_emoji();
+        self.statuses_schedule();
     }
 
     fn set_status(&mut self, status: SessionStatus) {
@@ -1204,6 +1220,7 @@ impl Actor {
                     // Sets replaced while we were away arrive with the
                     // whole catalog.
                     self.read_emoji();
+                    self.statuses_reconnected();
                 }
                 self.threads_established(&channels);
                 for channel in channels {
@@ -1302,6 +1319,7 @@ impl Actor {
         }
         publish |= self.profiles.accept(events);
         publish |= self.emoji.accept(events);
+        publish |= self.statuses.accept(events, unread::now_ms());
         let mut people = Vec::new();
         for timeline in self.timelines.values_mut() {
             if timeline.accept(events) {
@@ -1671,6 +1689,7 @@ impl Actor {
             hidden_dms: self.hidden_dms.clone(),
             emoji: self.emoji.snapshot(),
             sidebar: self.sidebar.snapshot(),
+            statuses: self.statuses.snapshot(),
         };
         self.snapshot.send_if_modified(|current| {
             let same = current.status == next.status
@@ -1686,6 +1705,7 @@ impl Actor {
                 && Arc::ptr_eq(&current.hidden_dms, &next.hidden_dms)
                 && Arc::ptr_eq(&current.emoji, &next.emoji)
                 && Arc::ptr_eq(&current.sidebar, &next.sidebar)
+                && Arc::ptr_eq(&current.statuses, &next.statuses)
                 && *current.channels == *next.channels;
             if !same {
                 *current = Arc::new(next);

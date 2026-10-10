@@ -66,8 +66,8 @@ pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader
 pub use session::{
     ChannelUnread, ChannelView, FeedbackState, IncomingMessage, MessageSearch, PendingFeedback,
     PeoplePage, PublicChannels, READING_DWELL_MS, RelayInfo, RosterStatus, SearchOutcome, Session,
-    SessionSnapshot, SessionStatus, ThreadUnread, TimelineSnapshot, TimelineStatus, UnreadCounts,
-    UnreadDetail, UnreadWatch,
+    SessionSnapshot, SessionStatus, StatusWatch, ThreadUnread, TimelineSnapshot, TimelineStatus,
+    UnreadCounts, UnreadDetail, UnreadWatch,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
@@ -90,4 +90,4 @@ pub use unread::{
     UnreadError, UnreadOptions, UnreadSnapshot,
 };
 pub use upload::{UploadError, UploadFile};
-pub use user_status::{StatusInput, UserStatus};
+pub use user_status::{StatusInput, Statuses, UserStatus};

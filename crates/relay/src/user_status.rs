@@ -1,10 +1,13 @@
-//! User status (kind 30315, NIP-38; `docs/port/relay.md` §5j): parsing and
-//! the event a save publishes. I/O lives in the session.
+//! User status (kind 30315, NIP-38; `docs/port/relay.md` §5j): parsing,
+//! the event a save publishes, and the statuses of watched people
+//! (`user-status.ts` `createUserStatuses`). I/O lives in the session.
 
 use crate::event::Verified;
 use crate::messages::EventTemplate;
 use crate::socket::Filter;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub const KIND: u16 = crate::event::kinds::USER_STATUS;
 /// Text and emoji limit, in UTF-16 units as the reference counts them.
@@ -84,6 +87,291 @@ pub fn latest_created_at(events: &[Verified], author: &str) -> Option<u64> {
         .filter(|event| event.pubkey_hex() == author && parse(event).is_some())
         .map(Verified::created_at_secs)
         .max()
+}
+
+/// The current statuses of watched people and the viewer, by pubkey.
+/// Cleared and expired statuses are absent.
+pub type Statuses = Arc<HashMap<String, UserStatus>>;
+
+/// Authors per status read (`user-status.ts`).
+pub const READ_BATCH: usize = 100;
+/// A failed read is retried this many times, after these delays, and then
+/// left until something new is watched: statuses are optional decoration,
+/// not worth an endless poll.
+const RETRY_DELAYS_MS: [u64; 3] = [5_000, 15_000, 60_000];
+
+/// The read of several authors' current statuses.
+pub fn batch_filter(authors: &[String]) -> Filter {
+    match json!({"kinds": [KIND], "#d": ["general"], "authors": authors, "limit": authors.len()}) {
+        Value::Object(map) => map,
+        _ => unreachable!(),
+    }
+}
+
+/// A status read the directory asked for. Its result goes back to
+/// [`StatusDirectory::finished`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusRead {
+    pub generation: u64,
+    pub authors: Vec<String>,
+}
+
+struct Record {
+    created_at: u64,
+    id: String,
+    status: UserStatus,
+}
+
+/// The statuses of the people the UI shows (`user-status.ts:44-360`).
+/// Watches are counted, so several views can follow one person. Each
+/// person's newest event is kept, cleared and expired ones included, so an
+/// older replacement can never come back. People no longer watched are
+/// forgotten, except the viewer.
+pub struct StatusDirectory {
+    viewer: String,
+    records: HashMap<String, Record>,
+    watched: HashMap<String, usize>,
+    loaded: HashSet<String>,
+    /// Bumped on reconnect, so reads started before it are dropped.
+    generation: u64,
+    reading: bool,
+    retry_attempt: usize,
+    /// When the failed read may run again; `u64::MAX` once out of retries.
+    retry_at: Option<u64>,
+    snapshot: Statuses,
+    /// The soonest expiry among shown statuses, in seconds.
+    expiry: Option<u64>,
+}
+
+/// The keys a watch of `ids` counts: lowercase hex keys, once each.
+pub fn watch_keys(ids: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = ids
+        .iter()
+        .filter(|id| id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .cloned()
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+impl StatusDirectory {
+    pub fn new(viewer: String) -> Self {
+        Self {
+            viewer,
+            records: HashMap::new(),
+            watched: HashMap::new(),
+            loaded: HashSet::new(),
+            generation: 0,
+            reading: false,
+            retry_attempt: 0,
+            retry_at: None,
+            snapshot: Statuses::default(),
+            expiry: None,
+        }
+    }
+
+    pub fn snapshot(&self) -> Statuses {
+        self.snapshot.clone()
+    }
+
+    /// Follows these people ([`watch_keys`]). Returns the keys counted,
+    /// which [`Self::unwatch`] takes back. A new watch lifts a read that
+    /// ran out of retries.
+    pub fn watch(&mut self, ids: &[String]) -> Vec<String> {
+        let unique = watch_keys(ids);
+        for id in &unique {
+            *self.watched.entry(id.clone()).or_default() += 1;
+        }
+        if !unique.is_empty() && self.retry_at == Some(u64::MAX) {
+            self.retry_at = None;
+        }
+        unique
+    }
+
+    /// Stops one watch of each of these people. Returns whether the
+    /// snapshot changed.
+    pub fn unwatch(&mut self, ids: &[String], now_ms: u64) -> bool {
+        for id in ids {
+            let Some(count) = self.watched.get_mut(id) else {
+                continue;
+            };
+            *count -= 1;
+            if *count == 0 {
+                self.watched.remove(id);
+                // The whole record goes, never only its newest evidence.
+                if *id != self.viewer {
+                    self.loaded.remove(id);
+                    self.records.remove(id);
+                }
+            }
+        }
+        if self.watched.is_empty() {
+            self.retry_at = None;
+            self.retry_attempt = 0;
+        }
+        self.recompute(now_ms)
+    }
+
+    /// Takes status events from reads and live traffic. Returns whether the
+    /// snapshot changed.
+    pub fn accept(&mut self, events: &[Verified], now_ms: u64) -> bool {
+        let mut changed = false;
+        for event in events {
+            if event.kind_u16() != KIND {
+                continue;
+            }
+            let author = event.pubkey_hex();
+            // Live traffic about people off screen does not grow the cache.
+            if !self.watched.contains_key(&author)
+                && author != self.viewer
+                && !self.records.contains_key(&author)
+            {
+                continue;
+            }
+            let Some(status) = parse(event) else {
+                continue;
+            };
+            let (created_at, id) = (event.created_at_secs(), event.id_hex());
+            if let Some(old) = self.records.get(&author)
+                && (old.created_at > created_at || (old.created_at == created_at && old.id <= id))
+            {
+                continue;
+            }
+            self.records.insert(
+                author,
+                Record {
+                    created_at,
+                    id,
+                    status,
+                },
+            );
+            changed = true;
+        }
+        changed && self.recompute(now_ms)
+    }
+
+    /// The next read to run, if one is needed and none is in flight or
+    /// waiting to retry.
+    pub fn next_read(&mut self, now_ms: u64) -> Option<StatusRead> {
+        if self.reading || self.retry_at.is_some_and(|at| at > now_ms) {
+            return None;
+        }
+        let mut missing: Vec<String> = self
+            .watched
+            .keys()
+            .filter(|id| !self.loaded.contains(*id))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        missing.sort();
+        missing.truncate(READ_BATCH);
+        self.reading = true;
+        self.retry_at = None;
+        Some(StatusRead {
+            generation: self.generation,
+            authors: missing,
+        })
+    }
+
+    /// A read finished. A failure is retried while retries remain. Returns
+    /// whether the snapshot changed, or `None` for a read from before a
+    /// reconnect, which is dropped.
+    pub fn finished(
+        &mut self,
+        read: &StatusRead,
+        result: Result<&[Verified], ()>,
+        now_ms: u64,
+    ) -> Option<bool> {
+        if read.generation != self.generation {
+            return None;
+        }
+        self.reading = false;
+        match result {
+            Ok(events) => {
+                let wanted: HashSet<&String> = read.authors.iter().collect();
+                let events: Vec<Verified> = events
+                    .iter()
+                    .filter(|event| wanted.contains(&event.pubkey_hex()))
+                    .cloned()
+                    .collect();
+                let changed = self.accept(&events, now_ms);
+                for id in &read.authors {
+                    if self.watched.contains_key(id) {
+                        self.loaded.insert(id.clone());
+                    }
+                }
+                self.retry_attempt = 0;
+                Some(changed)
+            }
+            Err(()) => {
+                self.retry_at = Some(match RETRY_DELAYS_MS.get(self.retry_attempt) {
+                    Some(delay) if !self.watched.is_empty() => {
+                        self.retry_attempt += 1;
+                        now_ms + delay
+                    }
+                    _ => u64::MAX,
+                });
+                Some(false)
+            }
+        }
+    }
+
+    /// The connection came back: everything watched is read again.
+    pub fn reconnect(&mut self) {
+        self.generation += 1;
+        self.reading = false;
+        self.retry_attempt = 0;
+        self.retry_at = None;
+        self.loaded.clear();
+    }
+
+    /// The next wall-clock time, in milliseconds, there is work: a status
+    /// expiring ([`Self::tick`]) or a retry falling due
+    /// ([`Self::next_read`]).
+    pub fn deadline(&self) -> Option<u64> {
+        [
+            self.expiry.map(|at| at.saturating_mul(1000)),
+            self.retry_at.filter(|at| *at != u64::MAX),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Drops expired statuses. Returns whether the snapshot changed.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        self.recompute(now_ms)
+    }
+
+    fn recompute(&mut self, now_ms: u64) -> bool {
+        let mut expiry: Option<u64> = None;
+        let next: HashMap<String, UserStatus> = self
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                let status = &record.status;
+                !(status.text.is_empty() && status.emoji.is_empty())
+                    && status
+                        .expires_at
+                        .is_none_or(|at| at.saturating_mul(1000) > now_ms)
+            })
+            .map(|(id, record)| {
+                if let Some(at) = record.status.expires_at {
+                    expiry = Some(expiry.map_or(at, |soonest| soonest.min(at)));
+                }
+                (id.clone(), record.status.clone())
+            })
+            .collect();
+        self.expiry = expiry;
+        if *self.snapshot == next {
+            return false;
+        }
+        self.snapshot = Arc::new(next);
+        true
+    }
 }
 
 /// Parses a status event (`user-status.ts:17-41`). Events with an `h` tag,
@@ -258,5 +546,98 @@ mod tests {
         // Cleared.
         let cleared = event(&keys, "", 40, &[&["d", "general"]]);
         assert_eq!(current(&[events[1].clone(), cleared], &me, 50), None);
+    }
+
+    #[test]
+    fn watched_statuses_load_in_batches_and_keep_the_newest() {
+        let viewer = Keys::generate();
+        let bob = Keys::generate();
+        let carol = Keys::generate();
+        let (b, c) = (bob.public_key().to_hex(), carol.public_key().to_hex());
+        let mut directory = StatusDirectory::new(viewer.public_key().to_hex());
+        assert_eq!(
+            directory.watch(&[b.clone(), "nope".into(), b.clone()]),
+            vec![b.clone()]
+        );
+        let read = directory.next_read(0).unwrap();
+        assert_eq!(read.authors, vec![b.clone()]);
+        // One read at a time.
+        assert_eq!(directory.next_read(0), None);
+        let newer = event(&bob, "Lunch", 20, &[&["d", "general"], &["emoji", "🍜"]]);
+        let older = event(&bob, "Old", 10, &[&["d", "general"]]);
+        // Carol is not watched: her status is not kept.
+        let stranger = event(&carol, "Hi", 20, &[&["d", "general"]]);
+        let events = [newer, older.clone(), stranger.clone()];
+        assert_eq!(directory.finished(&read, Ok(&events), 0), Some(true));
+        assert_eq!(directory.snapshot()[&b].text, "Lunch");
+        assert!(!directory.snapshot().contains_key(&c));
+        assert_eq!(directory.next_read(0), None);
+        // An older replacement from live traffic does not win.
+        assert!(!directory.accept(&[older], 0));
+        assert!(!directory.accept(&[stranger], 0));
+        // A clear wins, and the status disappears.
+        let cleared = event(&bob, "", 30, &[&["d", "general"]]);
+        assert!(directory.accept(&[cleared], 0));
+        assert!(directory.snapshot().is_empty());
+    }
+
+    #[test]
+    fn statuses_expire_and_unwatched_people_are_forgotten() {
+        let viewer = Keys::generate();
+        let bob = Keys::generate();
+        let me = viewer.public_key().to_hex();
+        let b = bob.public_key().to_hex();
+        let mut directory = StatusDirectory::new(me.clone());
+        let watched = directory.watch(std::slice::from_ref(&b));
+        let second = directory.watch(std::slice::from_ref(&b));
+        let expiring = event(
+            &bob,
+            "Brb",
+            10,
+            &[&["d", "general"], &["expiration", "100"]],
+        );
+        // The viewer's own status is always kept.
+        let mine = event(&viewer, "Focus", 10, &[&["d", "general"]]);
+        assert!(directory.accept(&[expiring, mine], 50_000));
+        assert_eq!(directory.snapshot().len(), 2);
+        assert_eq!(directory.deadline(), Some(100_000));
+        assert!(!directory.tick(99_999));
+        assert!(directory.tick(100_000));
+        assert_eq!(directory.snapshot().len(), 1);
+        assert_eq!(directory.deadline(), None);
+        // Watches are counted: one view closing keeps the other's.
+        let fresh = event(&bob, "Back", 20, &[&["d", "general"]]);
+        assert!(directory.accept(&[fresh], 100_000));
+        assert!(!directory.unwatch(&second, 100_000));
+        assert!(directory.snapshot().contains_key(&b));
+        assert!(directory.unwatch(&watched, 100_000));
+        assert!(!directory.snapshot().contains_key(&b));
+        assert!(directory.snapshot().contains_key(&me));
+    }
+
+    #[test]
+    fn failed_reads_retry_three_times_then_wait_for_a_watch() {
+        let bob = Keys::generate().public_key().to_hex();
+        let mut directory = StatusDirectory::new(Keys::generate().public_key().to_hex());
+        directory.watch(std::slice::from_ref(&bob));
+        let mut now = 0;
+        for delay in RETRY_DELAYS_MS {
+            let read = directory.next_read(now).unwrap();
+            assert_eq!(directory.finished(&read, Err(()), now), Some(false));
+            assert_eq!(directory.deadline(), Some(now + delay));
+            assert_eq!(directory.next_read(now + delay - 1), None);
+            now += delay;
+        }
+        let read = directory.next_read(now).unwrap();
+        directory.finished(&read, Err(()), now);
+        assert_eq!(directory.deadline(), None);
+        assert_eq!(directory.next_read(u64::MAX - 1), None);
+        // Something new to show tries again.
+        directory.watch(std::slice::from_ref(&bob));
+        let read = directory.next_read(now).unwrap();
+        // A reconnect drops reads already running and reads everyone again.
+        directory.reconnect();
+        assert_eq!(directory.finished(&read, Ok(&[]), now), None);
+        assert_eq!(directory.next_read(now).unwrap().authors, vec![bob]);
     }
 }

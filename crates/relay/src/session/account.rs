@@ -189,6 +189,7 @@ impl Session {
         let http = self.direct.http.clone();
         let identity = self.direct.identity.clone();
         let viewer = self.viewer.clone();
+        let commands = self.commands.clone();
         let work = async move {
             let events = reader
                 .read(
@@ -205,8 +206,15 @@ impl Session {
                 .map_err(|error| error.to_string())?;
             let event = sign(&identity, template)?;
             accept_publish(post(&http, &event).await, &event.id)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            // Shown in the session's statuses at once, as live traffic
+            // would.
+            if let Ok(saved) = Verifier::default().verify(event) {
+                let _ = commands.send(Message::With(Box::new(move |actor| {
+                    actor.status_saved(saved);
+                })));
+            }
+            Ok(())
         };
         self.run(async move {
             tokio::time::timeout(STATUS_TIMEOUT, work)
