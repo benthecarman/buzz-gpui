@@ -10,14 +10,16 @@
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
 use super::media;
 use super::message::{self, channel_icon};
+use super::overlay;
 use crate::community::{AppState, Community};
 use buzz_relay_client::fold::MessageRow;
+use buzz_relay_client::members::can_add_members;
 use buzz_relay_client::messages::media_byte_limit;
 use buzz_relay_client::upload::{self, MAX_UPLOAD, UploadError, UploadFile};
-use buzz_relay_client::{Attachment, ChannelType, EventId, Mentions, Partition};
+use buzz_relay_client::{Attachment, ChannelSummary, ChannelType, EventId, Mentions, Partition};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, ButtonVariant, Icon, IconButton, IconButtonSize, IconName,
-    Spinner, Tooltip, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, Button, ButtonVariant, Dialog, Icon, IconButton,
+    IconButtonSize, IconName, Spinner, Surface, Tooltip, TypeStyled,
 };
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent, InputEvent,
@@ -51,8 +53,9 @@ pub enum ComposerEvent {
 #[derive(Clone)]
 pub struct Submission {
     pub content: String,
-    /// Pubkeys of the chosen mention chips, first use first.
-    pub mentioned: Vec<String>,
+    /// Who the chosen mention chips notify (`p`) and who they only name
+    /// (`mention`), first use first (§5d.3).
+    pub mentions: Mentions,
     pub attachments: Vec<Attachment>,
     /// The message being edited, if any.
     pub editing: Option<Arc<MessageRow>>,
@@ -98,7 +101,70 @@ pub struct Composer {
     drag_over: bool,
     notice: Option<SharedString>,
     save_draft: Option<Task<()>>,
+    /// The send waiting on "Mention people outside this channel?".
+    outsiders: Option<Outsiders>,
+    outsiders_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A send that mentions people outside the channel, held until the user
+/// invites them or sends without them (`useNonmemberMentions.tsx`).
+struct Outsiders {
+    /// Every chosen chip as a recipient.
+    submission: Submission,
+    missing: Vec<String>,
+    can_add: bool,
+    busy: bool,
+    error: Option<SharedString>,
+    /// The text the prompt is about; inviting stops if it changes.
+    draft: String,
+}
+
+/// What a send with mention chips needs (`MessageComposer.tsx:1069-1101`).
+#[derive(Debug, PartialEq)]
+enum Admission {
+    Send(Mentions),
+    /// Some recipients are outside a stream or forum: ask first.
+    Ask {
+        missing: Vec<String>,
+        can_add: bool,
+    },
+}
+
+/// Recipients must be channel members. A DM (or a session) quietly turns
+/// outsiders into references; any other channel asks. With the roster
+/// unknown, everyone stays a recipient and the writer's check reports it.
+fn admission(channel: Option<&ChannelSummary>, viewer: &str, recipients: Vec<String>) -> Admission {
+    let Some(channel) = channel.filter(|c| !c.members.is_empty()) else {
+        return Admission::Send(Mentions {
+            recipients,
+            references: Vec::new(),
+        });
+    };
+    let (members, missing): (Vec<String>, Vec<String>) = recipients
+        .iter()
+        .cloned()
+        .partition(|key| channel.members.contains(key));
+    if missing.is_empty() {
+        return Admission::Send(Mentions {
+            recipients,
+            references: Vec::new(),
+        });
+    }
+    if matches!(
+        channel.channel_type,
+        Some(ChannelType::Dm | ChannelType::Session)
+    ) {
+        return Admission::Send(Mentions {
+            recipients: members,
+            references: missing,
+        });
+    }
+    let member = channel.members.iter().any(|key| key == viewer);
+    Admission::Ask {
+        missing,
+        can_add: can_add_members(channel, member),
+    }
 }
 
 impl Composer {
@@ -163,6 +229,8 @@ impl Composer {
             drag_over: false,
             notice: None,
             save_draft: None,
+            outsiders: None,
+            outsiders_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
@@ -307,13 +375,11 @@ impl Composer {
             self.cancel_edit(window, cx);
             return;
         }
-        let mut mentioned: Vec<String> = Vec::new();
-        for span in state.tokens() {
-            let id = span.token().id().to_string();
-            if span.token().text().starts_with('@') && !mentioned.contains(&id) {
-                mentioned.push(id);
-            }
-        }
+        let mentioned: Vec<String> = self
+            .recipients(cx)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
         let attachments = if self.editing.is_some() {
             Vec::new()
         } else {
@@ -327,12 +393,175 @@ impl Composer {
         };
         self.sending = true;
         self.completion = None;
-        cx.emit(ComposerEvent::Submit(Submission {
+        let mut submission = Submission {
             content,
-            mentioned,
+            mentions: Mentions {
+                recipients: mentioned,
+                references: Vec::new(),
+            },
             attachments,
             editing: self.editing.clone(),
-        }));
+        };
+        if self.editing.is_none() && !submission.mentions.recipients.is_empty() {
+            let community = self.community.read(cx);
+            let channel = community
+                .snapshot
+                .channels
+                .iter()
+                .find(|c| c.id == self.channel);
+            let viewer = community.session.viewer();
+            match admission(channel, viewer, submission.mentions.recipients.clone()) {
+                Admission::Send(mentions) => submission.mentions = mentions,
+                Admission::Ask { missing, can_add } => {
+                    let draft = self.input.read(cx).value().to_string();
+                    self.outsiders = Some(Outsiders {
+                        submission,
+                        missing,
+                        can_add,
+                        busy: false,
+                        error: None,
+                        draft,
+                    });
+                    self.outsiders_focus.focus(window, cx);
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        cx.emit(ComposerEvent::Submit(submission));
+        cx.notify();
+    }
+
+    /// Pubkeys and names of the mention chips, first use first: the
+    /// explicit recipients (`MentionDraft.recipients`).
+    fn recipients(&self, cx: &App) -> Vec<(String, SharedString)> {
+        let mut recipients: Vec<(String, SharedString)> = Vec::new();
+        for span in self.input.read(cx).tokens() {
+            let token = span.token();
+            let id = token.id().to_string();
+            if let Some(name) = token.text().strip_prefix('@')
+                && !recipients.iter().any(|(key, _)| *key == id)
+            {
+                recipients.push((id, SharedString::from(name.to_string())));
+            }
+        }
+        recipients
+    }
+
+    /// Turns every chip for `pubkey` back into plain `@Name` text, so the
+    /// message names them without notifying them (`removeRecipient`).
+    fn remove_recipient(&mut self, pubkey: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        self.input.update(cx, |state, cx| {
+            let content = state.content();
+            let selection = state.selected_range();
+            let mut next = InputContent::new(content.text().clone());
+            for span in content.tokens() {
+                let token = span.token();
+                if token.id() == pubkey && token.text().starts_with('@') {
+                    continue;
+                }
+                if let Ok(with) = next.clone().with_token(span.range().clone(), token.clone()) {
+                    next = with;
+                }
+            }
+            state.set_value(next, window, cx);
+            state.set_selected_range(selection, cx);
+            state.focus(window, cx);
+        });
+        // The draft keeps chips, so it must forget this one too.
+        self.schedule_draft(cx);
+        cx.notify();
+    }
+
+    // ----- mentions outside the channel -----
+
+    /// Close or Escape: nothing is sent and the draft stays.
+    fn close_outsiders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.outsiders.as_ref().is_none_or(|prompt| prompt.busy) {
+            return;
+        }
+        self.outsiders = None;
+        self.sending = false;
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// "Do nothing" / "Send anyway": outsiders become display-only
+    /// references and are not added.
+    fn send_without_outsiders(&mut self, cx: &mut Context<Self>) {
+        if self.outsiders.as_ref().is_none_or(|prompt| prompt.busy) {
+            return;
+        }
+        let Some(prompt) = self.outsiders.take() else {
+            return;
+        };
+        let mut submission = prompt.submission;
+        submission
+            .mentions
+            .recipients
+            .retain(|key| !prompt.missing.contains(key));
+        submission.mentions.references = prompt.missing;
+        cx.emit(ComposerEvent::Submit(submission));
+        cx.notify();
+    }
+
+    /// "Invite": adds each outsider (kind 9000) and waits for the roster,
+    /// then sends with everyone notified. A failure keeps the dialog open.
+    fn invite_outsiders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.outsiders.as_mut().filter(|p| p.can_add && !p.busy) else {
+            return;
+        };
+        prompt.busy = true;
+        prompt.error = None;
+        let missing = prompt.missing.clone();
+        let session = self.community.read(cx).session.clone();
+        let channel = self.channel.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut failure = None;
+            for key in &missing {
+                let changed = this
+                    .update(cx, |this, cx| {
+                        this.outsiders.as_ref().is_none_or(|prompt| {
+                            this.input.read(cx).value().as_ref() != prompt.draft.as_str()
+                        })
+                    })
+                    .unwrap_or(true);
+                if changed {
+                    failure = Some("The draft changed. Close this dialog and send again.".into());
+                    break;
+                }
+                if let Err(error) = session.add_member(&channel, key).await {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                match failure {
+                    Some(error) => {
+                        if let Some(prompt) = &mut this.outsiders {
+                            prompt.busy = false;
+                            prompt.error = Some(
+                                format!(
+                                    "{error} Your draft is kept. Some people may already have \
+                                     been added."
+                                )
+                                .into(),
+                            );
+                        }
+                    }
+                    None => {
+                        if let Some(prompt) = this.outsiders.take() {
+                            cx.emit(ComposerEvent::Submit(prompt.submission));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -962,28 +1191,6 @@ fn edit_content(text: &str) -> InputContent {
     content
 }
 
-/// Splits the chosen chips into notified channel members (`p`) and
-/// display-only references (`mention`), as a DM always does with
-/// outsiders (§5d.3). The reference's "add them to the channel?" prompt
-/// for outsiders is not offered here.
-pub fn mentions(community: &Community, channel: &str, mentioned: &[String]) -> Mentions {
-    let members = community
-        .snapshot
-        .channels
-        .iter()
-        .find(|c| c.id == channel)
-        .map(|c| c.members.as_slice())
-        .unwrap_or_default();
-    let (recipients, references) = mentioned
-        .iter()
-        .cloned()
-        .partition(|key| members.contains(key));
-    Mentions {
-        recipients,
-        references,
-    }
-}
-
 /// `[#name](buzz://channel/<id>)`, as `ChannelCompletion` inserts it.
 fn channel_reference(id: &str, name: &str) -> String {
     let mut label = String::from("\\#");
@@ -1510,22 +1717,7 @@ impl Composer {
             .items_center()
             .gap(px(4.))
             .min_h(px(36.))
-            .child(
-                IconButton::new("mention", IconName::At)
-                    .size(IconButtonSize::Sm)
-                    .tooltip("Mention a member")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let (text, caret) = {
-                            let state = this.input.read(cx);
-                            (state.value().to_string(), state.selected_range().start)
-                        };
-                        let spaced = text[..caret]
-                            .chars()
-                            .next_back()
-                            .is_none_or(|c| c.is_whitespace() || "([{".contains(c));
-                        this.insert_text(if spaced { "@" } else { " @" }, window, cx);
-                    })),
-            )
+            .child(self.leading_tools(cx))
             .when(!editing, |d| {
                 d.child(
                     IconButton::new("attach", IconName::Paperclip)
@@ -1573,6 +1765,194 @@ impl Composer {
                     })),
             )
             .into_any_element()
+    }
+
+    /// `.composerLeadingTools`: the mention button, and once chips name
+    /// recipients, a pill of their avatars that remove them on click.
+    fn leading_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = *cx.colors();
+        let recipients = self.recipients(cx);
+        let community = self.community.read(cx);
+        let media = community.session.media().clone();
+        let disabled = self.sending;
+        let buttons = recipients
+            .iter()
+            .enumerate()
+            .map(|(index, (pubkey, name))| {
+                let profile = community.snapshot.profiles.get(pubkey);
+                let agent = profile.is_some_and(|p| p.is_agent);
+                let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Small);
+                if agent {
+                    avatar = avatar.squircle();
+                }
+                if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
+                    avatar = avatar.image(media::avatar(picture, &media));
+                }
+                let group = SharedString::from(format!("mention-recipient-{index}"));
+                let key = pubkey.clone();
+                div()
+                    .id(("mention-recipient", index))
+                    .group(group.clone())
+                    .absolute()
+                    .top_0()
+                    .left(px(index as f32 * 22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(28.))
+                    .border_2()
+                    .border_color(c.affordance_subtle)
+                    .bg(c.affordance_subtle)
+                    .map(|d| {
+                        if agent {
+                            d.rounded(px(9.))
+                        } else {
+                            d.rounded_full()
+                        }
+                    })
+                    .overflow_hidden()
+                    .tooltip(Tooltip::text(format!(
+                        "Remove explicit mention of {name} ({})",
+                        &pubkey[..8.min(pubkey.len())]
+                    )))
+                    .child(avatar)
+                    .when(!disabled, |d| {
+                        d.cursor_pointer()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .map(|d| {
+                                        if agent {
+                                            d.rounded(px(7.))
+                                        } else {
+                                            d.rounded_full()
+                                        }
+                                    })
+                                    .bg(c.affordance_prominent)
+                                    .text_color(c.text_inverse)
+                                    .opacity(0.)
+                                    .group_hover(group, |s| s.opacity(1.))
+                                    .child(Icon::new(IconName::X).size(16.)),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.remove_recipient(&key, window, cx)
+                            }))
+                    })
+            });
+        let has_recipients = !recipients.is_empty();
+        let count = recipients.len();
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .rounded(px(12.))
+            .when(has_recipients, |d| {
+                d.rounded_full().px(px(2.)).bg(c.affordance_subtle)
+            })
+            .child(
+                IconButton::new("mention", IconName::At)
+                    .size(IconButtonSize::Sm)
+                    .tooltip("Mention a member")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let (text, caret) = {
+                            let state = this.input.read(cx);
+                            (state.value().to_string(), state.selected_range().start)
+                        };
+                        let spaced = text[..caret]
+                            .chars()
+                            .next_back()
+                            .is_none_or(|c| c.is_whitespace() || "([{".contains(c));
+                        this.insert_text(if spaced { "@" } else { " @" }, window, cx);
+                    })),
+            )
+            .when(has_recipients, |d| {
+                d.child(
+                    // 28px buttons overlapping by 6px, then 6px of pill.
+                    div()
+                        .id("mention-recipients")
+                        .relative()
+                        .flex_none()
+                        .w(px(count as f32 * 22. + 12.))
+                        .h(px(28.))
+                        .children(buttons),
+                )
+            })
+    }
+
+    /// "Mention people outside this channel?" (`useNonmemberMentions.tsx`).
+    fn outsiders_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let prompt = self.outsiders.as_ref()?;
+        let c = *cx.colors();
+        let profiles = &self.community.read(cx).snapshot.profiles;
+        let names = prompt
+            .missing
+            .iter()
+            .map(|key| message::display_name(profiles, key).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let verb = if prompt.missing.len() == 1 {
+            "is"
+        } else {
+            "are"
+        };
+        let next = if prompt.can_add {
+            "Invite them to the channel, or send without inviting them."
+        } else {
+            "You cannot add people to this channel. You can still send without inviting them."
+        };
+        let busy = prompt.busy;
+        let dialog = Dialog::new("outsider-mentions", "Mention people outside this channel?")
+            .description(format!("{names} {verb} not in this channel. {next}"))
+            .on_close(cx.listener(|this, _, window, cx| this.close_outsiders(window, cx)))
+            .children(
+                prompt
+                    .error
+                    .clone()
+                    .map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
+            )
+            .footer(
+                Button::new(
+                    "outsiders-skip",
+                    if prompt.can_add {
+                        "Do nothing"
+                    } else {
+                        "Send anyway"
+                    },
+                )
+                .surface(Surface::Floating)
+                .disabled(busy)
+                .on_click(cx.listener(|this, _, _, cx| this.send_without_outsiders(cx))),
+            )
+            .when(prompt.can_add, |d| {
+                d.footer(
+                    Button::new(
+                        "outsiders-invite",
+                        if busy { "Inviting…" } else { "Invite" },
+                    )
+                    .prominent()
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.invite_outsiders(window, cx))),
+                )
+            });
+        let content = div()
+            .track_focus(&self.outsiders_focus)
+            .key_context("OutsiderMentions")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => this.close_outsiders(window, cx),
+                    // The default button, "Do nothing", has the focus.
+                    "enter" => this.send_without_outsiders(cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            .child(dialog);
+        Some(overlay::modal(window, content, None).into_any_element())
     }
 
     fn completion_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1627,7 +2007,7 @@ impl Composer {
                         div().text_color(c.text_subtle).child(if *dm {
                             "Not in DM · Will not be notified"
                         } else {
-                            "Not in channel · Will not be notified"
+                            "Not in channel · Choose whether to add when you send"
                         })
                     };
                     row.h(px(48.))
@@ -1762,7 +2142,7 @@ impl Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         // The caret can move without an edit.
         let key = {
@@ -1960,6 +2340,7 @@ impl Render for Composer {
             .children(self.completion_popup(cx))
             .children(picker)
             .child(shell)
+            .children(self.outsiders_dialog(window, cx))
     }
 }
 
@@ -2252,6 +2633,78 @@ mod tests {
 
     fn query(text: &str) -> Option<(Trigger, String)> {
         find_query(text, text.len()).map(|q| (q.trigger, q.text))
+    }
+
+    fn channel(channel_type: ChannelType, members: &[&str]) -> ChannelSummary {
+        ChannelSummary {
+            id: "c".into(),
+            channel_type: Some(channel_type),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn keys(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn asks_before_mentioning_outsiders_in_streams_and_forums() {
+        let stream = channel(ChannelType::Stream, &["me", "bob"]);
+        assert_eq!(
+            admission(Some(&stream), "me", keys(&["bob"])),
+            Admission::Send(Mentions {
+                recipients: keys(&["bob"]),
+                references: Vec::new(),
+            })
+        );
+        assert_eq!(
+            admission(Some(&stream), "me", keys(&["bob", "carol"])),
+            Admission::Ask {
+                missing: keys(&["carol"]),
+                can_add: true,
+            }
+        );
+        // Not a member: only "Send anyway" is offered.
+        let forum = channel(ChannelType::Forum, &["bob"]);
+        assert_eq!(
+            admission(Some(&forum), "me", keys(&["carol"])),
+            Admission::Ask {
+                missing: keys(&["carol"]),
+                can_add: false,
+            }
+        );
+        let archived = ChannelSummary {
+            archived: true,
+            ..channel(ChannelType::Stream, &["me"])
+        };
+        assert_eq!(
+            admission(Some(&archived), "me", keys(&["carol"])),
+            Admission::Ask {
+                missing: keys(&["carol"]),
+                can_add: false,
+            }
+        );
+    }
+
+    #[test]
+    fn references_outsiders_in_dms_without_asking() {
+        let dm = channel(ChannelType::Dm, &["me", "bob"]);
+        assert_eq!(
+            admission(Some(&dm), "me", keys(&["carol", "bob"])),
+            Admission::Send(Mentions {
+                recipients: keys(&["bob"]),
+                references: keys(&["carol"]),
+            })
+        );
+        // An unknown roster leaves the decision to the writer's check.
+        assert_eq!(
+            admission(None, "me", keys(&["carol"])),
+            Admission::Send(Mentions {
+                recipients: keys(&["carol"]),
+                references: Vec::new(),
+            })
+        );
     }
 
     #[test]

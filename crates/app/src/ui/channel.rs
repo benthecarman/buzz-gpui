@@ -2,7 +2,7 @@
 //! §4.12).
 
 use super::channel_menu::{ChannelActions, JoinNotice};
-use super::composer::{self, Composer, ComposerEvent, Submission};
+use super::composer::{Composer, ComposerEvent, Submission};
 use super::emoji_picker::{self, Dismissed, EmojiPicker, Picked};
 use super::markdown::Directory;
 use super::message::{self, Actions, Command, Hover, Interaction, Item, Popup, Rows};
@@ -327,7 +327,7 @@ impl ChannelPage {
             self.list.set_follow_mode(FollowMode::Tail);
             self.unseen = 0;
         }
-        let mentions = composer::mentions(self.community.read(cx), &channel, &submission.mentioned);
+        let mentions = submission.mentions.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match &submission.editing {
                 Some(row) => session.edit(&channel, row.id, &submission.content).await,

@@ -1,6 +1,6 @@
 //! The thread panel in the Messages board's right dock (ui.md §4.11).
 
-use super::composer::{self, Composer, ComposerEvent, ReplyContext, Submission};
+use super::composer::{Composer, ComposerEvent, ReplyContext, Submission};
 use super::emoji_picker;
 use super::markdown::Directory;
 use super::message::{self, Actions, Interaction, Item, Layout, Rows};
@@ -264,7 +264,7 @@ impl ThreadPanel {
         let parent = self.reply_parent;
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.clone();
-        let mentions = composer::mentions(self.community.read(cx), &channel, &submission.mentioned);
+        let mentions = submission.mentions.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = session
                 .send(
