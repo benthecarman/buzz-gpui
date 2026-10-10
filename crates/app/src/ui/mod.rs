@@ -7,7 +7,7 @@ mod channel;
 mod channel_menu;
 mod composer;
 mod diff;
-mod emoji_picker;
+pub(crate) mod emoji_picker;
 mod gif_picker;
 mod identity;
 mod link_preview;

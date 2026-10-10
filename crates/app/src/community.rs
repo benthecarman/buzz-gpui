@@ -231,6 +231,9 @@ impl AppState {
             let community = community.read(cx);
             (community.session.clone(), community.partition())
         };
+        if purge {
+            crate::ui::emoji_picker::forget_quick_reactions(&partition, cx);
+        }
         let store = cx.global::<Self>().store.clone();
         Runtime::handle(cx).spawn(async move {
             session.dispose().await;
