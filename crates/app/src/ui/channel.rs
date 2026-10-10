@@ -867,6 +867,7 @@ mod tests {
             dimensions: None,
             blurhash: None,
             preview_url: None,
+            insecure: false,
         }];
         assert_eq!(copy_text(&row), "Look\n\nhttps://x.test/media/a.png");
     }

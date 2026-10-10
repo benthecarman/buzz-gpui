@@ -84,6 +84,7 @@ fn attachment(url: &str, kind: AttachmentKind) -> Attachment {
         dimensions: None,
         blurhash: None,
         preview_url: None,
+        insecure: false,
     }
 }
 
@@ -805,9 +806,55 @@ fn unwraps_agent_envelopes_and_projects_images_through_one_url_policy() {
                 preview_url: Some("https://x.test/c-poster.jpg".into()),
                 ..attachment("https://x.test/c.jpg", AttachmentKind::Image)
             },
+            Attachment {
+                name: Some("d.jpg".into()),
+                insecure: true,
+                ..attachment("http://insecure.test/d.jpg", AttachmentKind::File)
+            },
             attachment("https://x.test/a.png", AttachmentKind::Image),
             attachment("https://x.test/b.mp4", AttachmentKind::Video),
             attachment("https://x.test/reference.jpg", AttachmentKind::Image),
+        ]
+    );
+}
+
+/// The reference drops plain-HTTP media; here it stays visible as an
+/// unavailable file, and its body link gives way to the card.
+#[test]
+fn keeps_plain_http_media_as_unavailable_files() {
+    let p = people();
+    let hash = "a".repeat(64);
+    let url = format!("http://127.0.0.1:53000/media/{hash}.png");
+    let event = message(
+        &p.alice,
+        CHANNEL,
+        &format!("Look\n\n![shot.png](<{url}>)\n\n![raw](http://x.test/raw.gif)"),
+        10,
+        &[&[
+            "imeta",
+            &format!("url {url}"),
+            "m image/png",
+            "size 2048",
+            "filename shot.png",
+        ]],
+    );
+    let rows = fold(&p.relay, &[event]);
+    assert_eq!(rows[0].content.trim(), "Look");
+    assert_eq!(
+        rows[0].attachments,
+        [
+            Attachment {
+                mime: Some("image/png".into()),
+                size: Some(2048),
+                name: Some("shot.png".into()),
+                insecure: true,
+                ..attachment(&url, AttachmentKind::File)
+            },
+            Attachment {
+                name: Some("raw.gif".into()),
+                insecure: true,
+                ..attachment("http://x.test/raw.gif", AttachmentKind::File)
+            },
         ]
     );
 }

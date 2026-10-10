@@ -803,7 +803,8 @@ fn image_tile(
 }
 
 /// Files, and audio that does not play inline: a card that downloads
-/// relay media to the Downloads folder or opens other links.
+/// relay media to the Downloads folder or opens other links. Plain-HTTP
+/// media cannot be fetched, so its card only says so.
 fn file_tile(
     row: &Arc<MessageRow>,
     index: usize,
@@ -812,13 +813,15 @@ fn file_tile(
     c: &buzz_ui::Colors,
 ) -> AnyElement {
     let media = rows.directory.media.clone();
-    let relay = media.is_relay_media(&attachment.url);
+    let insecure = attachment.insecure;
+    let relay = !insecure && media.is_relay_media(&attachment.url);
     let name = attachment
         .name
         .clone()
         .or_else(|| mime_label(attachment.mime.as_deref()))
         .unwrap_or_else(|| "File".into());
     let meta = match attachment.size {
+        _ if insecure => "File unavailable".into(),
         Some(size) => file_size(size),
         None if relay => "Download file".into(),
         None => "Open file".into(),
@@ -845,8 +848,10 @@ fn file_tile(
         .border_color(c.border_standard)
         .rounded(px(12.))
         .bg(c.affordance_subtle)
-        .hover(|s| s.bg(c.affordance_subtle_hover))
-        .cursor_pointer()
+        .when(!insecure, |d| {
+            d.hover(|s| s.bg(c.affordance_subtle_hover))
+                .cursor_pointer()
+        })
         .tooltip(Tooltip::text(name.clone()))
         .child(Icon::new(icon).size(24.))
         .child(
@@ -866,6 +871,9 @@ fn file_tile(
         )
         .when(relay, |d| d.child(Icon::new(IconName::Download).size(20.)))
         .on_click(move |_, _, cx| {
+            if insecure {
+                return;
+            }
             if relay {
                 media::download(url.clone(), download_name.clone(), media.clone(), cx);
             } else {

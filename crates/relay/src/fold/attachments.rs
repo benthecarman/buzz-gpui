@@ -53,6 +53,10 @@ pub struct Attachment {
     pub blurhash: Option<String>,
     /// Signed video poster or thumbnail URL.
     pub preview_url: Option<String>,
+    /// Served over plain HTTP. Media stays HTTPS-only, as in the reference
+    /// (`safeMessageUrl`), but where the reference drops it this shows an
+    /// unavailable file card, so the attachment does not vanish.
+    pub insecure: bool,
 }
 
 impl Attachment {
@@ -69,6 +73,16 @@ impl Attachment {
             dimensions: None,
             blurhash: None,
             preview_url: None,
+            insecure: false,
+        }
+    }
+
+    /// A plain-HTTP URL as an unavailable file.
+    fn insecure(url: String, name: Option<String>) -> Self {
+        Self {
+            name,
+            insecure: true,
+            ..Self::bare(url, AttachmentKind::File)
         }
     }
 }
@@ -89,7 +103,7 @@ pub fn parse_attachments(
             continue;
         }
         let fields = imeta_fields(tag);
-        let Some(url) = fields.get("url").and_then(|url| safe_message_url(url)) else {
+        let Some(url) = fields.get("url").and_then(|url| safe_link_url(url)) else {
             continue;
         };
         if !seen.insert(url.clone()) {
@@ -99,6 +113,14 @@ pub fn parse_attachments(
         let filename = field("filename").and_then(safe_attachment_name);
         let basename = url_basename(&url);
         let link_name = link_names.get(&url).cloned();
+        if !url.starts_with("https:") {
+            result.push(Attachment {
+                mime: field("m").map(str::to_owned),
+                size: fields.get("size").copied().and_then(parse_size),
+                ..Attachment::insecure(url, link_name.or(filename).or(basename))
+            });
+            continue;
+        }
         let detection = filename
             .clone()
             .or_else(|| link_name.clone())
@@ -133,7 +155,13 @@ pub fn parse_attachments(
         });
     }
     for url in markdown_images {
-        if seen.insert(url.clone()) {
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        if !url.starts_with("https:") {
+            let name = url_basename(url);
+            result.push(Attachment::insecure(url.clone(), name));
+        } else {
             let kind = if video_extension(url) {
                 AttachmentKind::Video
             } else {
@@ -145,7 +173,8 @@ pub fn parse_attachments(
     result
 }
 
-/// The safe URLs named by this event's `imeta` tags.
+/// The link-safe URLs named by this event's `imeta` tags, plain HTTP
+/// included: their body links give way to an unavailable file card.
 pub(super) fn imeta_urls(event: &Event) -> HashSet<String> {
     event
         .tags
@@ -155,7 +184,7 @@ pub(super) fn imeta_urls(event: &Event) -> HashSet<String> {
         .filter_map(|tag| {
             imeta_fields(tag)
                 .get("url")
-                .and_then(|url| safe_message_url(url))
+                .and_then(|url| safe_link_url(url))
         })
         .collect()
 }
@@ -365,7 +394,8 @@ pub(super) fn safe_attachment_name(value: &str) -> Option<String> {
 pub(super) struct Projected {
     pub content: String,
     pub seams: Vec<usize>,
-    /// Safe image URLs, in document order.
+    /// Link-safe image URLs, in document order. Plain-HTTP ones become
+    /// unavailable file cards.
     pub urls: Vec<String>,
     /// `(url, label)` of attachment links, in document order.
     pub names: Vec<(String, String)>,
@@ -399,7 +429,7 @@ pub(super) fn project_markdown(content: &str, attachment_urls: &HashSet<String>)
     let mut names = Vec::new();
     let mut ranges = Vec::new();
     for image in &scan.images {
-        if let Some(url) = scan.url(image).and_then(safe_message_url)
+        if let Some(url) = scan.url(image).and_then(safe_link_url)
             && !urls.contains(&url)
         {
             urls.push(url);
@@ -408,7 +438,7 @@ pub(super) fn project_markdown(content: &str, attachment_urls: &HashSet<String>)
     }
     if !attachment_urls.is_empty() {
         for link in &scan.links {
-            let Some(url) = scan.url(link).and_then(safe_message_url) else {
+            let Some(url) = scan.url(link).and_then(safe_link_url) else {
                 continue;
             };
             if !attachment_urls.contains(&url) {
