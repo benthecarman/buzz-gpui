@@ -1,6 +1,7 @@
 //! "New message" (`NewMessage.tsx`, `RecipientPicker.tsx`): pick one to
-//! eight people, then open the DM (or group DM) with exactly them. The relay
-//! reuses the conversation for the same people and unhides it.
+//! eight people, then either open the DM (or group DM) with exactly them,
+//! or write the first message here and send it there. The relay reuses the
+//! conversation for the same people and unhides it.
 
 use super::message::display_name;
 use super::modal::{Dismissed, Leading, OpenConversation, error, group_label, note, row};
@@ -9,9 +10,9 @@ use buzz_relay_client::PeoplePage;
 use buzz_relay_client::members::Person;
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, Dialog, Icon, IconName, SearchField, Surface,
-    TypeStyled,
+    TextArea, TypeStyled,
 };
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::time::Duration;
@@ -23,6 +24,8 @@ const MAX_RECIPIENTS: usize = 8;
 pub struct NewMessageDialog {
     community: Entity<Community>,
     input: Entity<InputState>,
+    /// The first message, sent once the conversation is open.
+    message: Entity<TextareaState>,
     selected: Vec<Person>,
     found: Option<(String, Result<PeoplePage, String>)>,
     searching: Option<Task<()>>,
@@ -30,7 +33,7 @@ pub struct NewMessageDialog {
     opening: bool,
     error: Option<SharedString>,
     on_open: OpenConversation,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<Dismissed> for NewMessageDialog {}
@@ -44,16 +47,32 @@ impl NewMessageDialog {
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a person…"));
         input.update(cx, |state, cx| state.focus(window, cx));
-        let subscription =
+        let message = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .submit_on_enter(true)
+                .auto_grow(2, 6)
+        });
+        let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.highlighted = 0;
                     this.search(window, cx);
                 }
-            });
+            }),
+            cx.subscribe_in(
+                &message,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { shift: false, .. } => this.open(true, window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            ),
+        ];
         let mut dialog = Self {
             community,
             input,
+            message,
             selected: Vec::new(),
             found: None,
             searching: None,
@@ -61,7 +80,7 @@ impl NewMessageDialog {
             opening: false,
             error: None,
             on_open,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         };
         dialog.search(window, cx);
         dialog
@@ -103,27 +122,62 @@ impl NewMessageDialog {
             return;
         }
         self.selected.push(person);
+        let placeholder = if self.selected.len() >= MAX_RECIPIENTS {
+            format!("{MAX_RECIPIENTS} people selected")
+        } else {
+            "Add another person…".to_owned()
+        };
         self.input.update(cx, |state, cx| {
             state.set_value("", window, cx);
-            state.set_placeholder("Add another person…", window, cx);
+            state.set_placeholder(placeholder, window, cx);
             state.focus(window, cx);
         });
         self.highlighted = 0;
+        self.update_message_placeholder(window, cx);
         self.search(window, cx);
     }
 
     fn remove(&mut self, pubkey: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.selected.retain(|p| p.pubkey != pubkey);
-        if self.selected.is_empty() {
-            self.input.update(cx, |state, cx| {
-                state.set_placeholder("Find a person…", window, cx);
-            });
-        }
+        let placeholder = if self.selected.is_empty() {
+            "Find a person…"
+        } else {
+            "Add another person…"
+        };
+        self.input.update(cx, |state, cx| {
+            state.set_placeholder(placeholder, window, cx);
+        });
+        self.update_message_placeholder(window, cx);
         cx.notify();
     }
 
-    fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected.is_empty() || self.opening {
+    /// The composer's label (`NewMessage.tsx`): `Message <names>`, or
+    /// nothing until someone is picked.
+    fn update_message_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let names: Vec<String> = self
+            .selected
+            .iter()
+            .map(|p| p.profile.name.clone())
+            .collect();
+        let placeholder = if names.is_empty() {
+            String::new()
+        } else {
+            format!("Message {}", names.join(", "))
+        };
+        self.message.update(cx, |state, cx| {
+            state.set_placeholder(placeholder, window, cx);
+        });
+    }
+
+    fn draft(&self, cx: &App) -> String {
+        self.message.read(cx).value().trim().to_string()
+    }
+
+    /// Opens the conversation with the people picked; with `send`, posts
+    /// the typed message there first.
+    fn open(&mut self, send: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.draft(cx);
+        if self.selected.is_empty() || self.opening || (send && draft.is_empty()) {
             return;
         }
         let pubkeys: Vec<String> = self.selected.iter().map(|p| p.pubkey.clone()).collect();
@@ -131,18 +185,34 @@ impl NewMessageDialog {
         self.opening = true;
         self.error = None;
         cx.spawn_in(window, async move |this, cx| {
-            let result = session.open_dm(pubkeys).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.opening = false;
-                match result {
-                    Ok(id) => {
-                        (this.on_open)(id, window, cx);
-                        cx.emit(Dismissed);
-                    }
-                    Err(error) => this.error = Some(error.into()),
+            let opened = session.open_dm(pubkeys).await;
+            let sent = match &opened {
+                Ok(id) if send => {
+                    let sent = session
+                        .send(id, &draft, Default::default(), Vec::new(), None)
+                        .await;
+                    Some(sent)
                 }
-                cx.notify();
-            });
+                _ => None,
+            };
+            let _ =
+                this.update_in(cx, |this, window, cx| {
+                    this.opening = false;
+                    match (opened, sent) {
+                        (Ok(id), None | Some(Ok(()))) => {
+                            (this.on_open)(id, window, cx);
+                            cx.emit(Dismissed);
+                        }
+                        (Ok(_), Some(Err(error))) => this.error = Some(
+                            format!(
+                                "The conversation is open, but the message was not sent. {error}"
+                            )
+                            .into(),
+                        ),
+                        (Err(error), _) => this.error = Some(error.into()),
+                    }
+                    cx.notify();
+                });
         })
         .detach();
         cx.notify();
@@ -239,6 +309,10 @@ impl Render for NewMessageDialog {
                     .flex_col()
                     .gap(rems(0.75))
                     .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        // The message box keeps its keys; Enter sends it.
+                        if this.message.focus_handle(cx).contains_focused(window, cx) {
+                            return;
+                        }
                         let count = this.candidates(cx).len();
                         match event.keystroke.key.as_str() {
                             "down" if count > 0 => {
@@ -251,7 +325,7 @@ impl Render for NewMessageDialog {
                                 Some(person) if !this.query(cx).is_empty() => {
                                     this.select(person, window, cx)
                                 }
-                                _ => this.open(window, cx),
+                                _ => this.open(false, window, cx),
                             },
                             "backspace" if this.query(cx).is_empty() => {
                                 if let Some(last) = this.selected.last().map(|p| p.pubkey.clone()) {
@@ -278,23 +352,31 @@ impl Render for NewMessageDialog {
                     .child(
                         div()
                             .id("people")
-                            .h(px(300.))
+                            .h(px(240.))
                             .overflow_y_scroll()
                             .child(list),
                     )
+                    .child(
+                        TextArea::new(&self.message)
+                            .surface(Surface::Floating)
+                            .disabled(self.selected.is_empty() || self.opening),
+                    )
                     .children(self.error.clone().map(|message| error(message, cx))),
             )
-            .footer(
-                Button::new("new-message-cancel", "Cancel")
-                    .surface(Surface::Floating)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
-            )
+            // No Cancel: the dialog closes with its X or Escape, and three
+            // buttons do not fit.
             .footer(
                 Button::new("new-message-open", "Open conversation")
+                    .surface(Surface::Floating)
+                    .disabled(self.selected.is_empty() || self.opening)
+                    .on_click(cx.listener(|this, _, window, cx| this.open(false, window, cx))),
+            )
+            .footer(
+                Button::new("new-message-send", "Send message")
                     .prominent()
                     .loading(self.opening)
-                    .disabled(self.selected.is_empty())
-                    .on_click(cx.listener(|this, _, window, cx| this.open(window, cx))),
+                    .disabled(self.selected.is_empty() || self.draft(cx).is_empty())
+                    .on_click(cx.listener(|this, _, window, cx| this.open(true, window, cx))),
             )
     }
 }
