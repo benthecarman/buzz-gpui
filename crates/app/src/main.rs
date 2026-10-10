@@ -50,6 +50,7 @@ fn main() {
             }
         }
     };
+    deep_links::register_scheme();
     let config = config::Config::load();
     let app = gpui_kit::application().with_assets(buzz_ui::Assets);
     app.run(move |cx| {

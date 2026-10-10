@@ -24,11 +24,15 @@ pub enum Link {
 }
 
 /// Parses one of the accepted forms; anything else, unknown hosts included,
-/// is `None`.
+/// is `None`. The scheme is matched in any case, as a URL parser does
+/// (`isBuzzLink`), so `BUZZ://channel/x` in a message opens; links from the
+/// OS stay canonical ([`from_args`]).
 pub fn parse(href: &str) -> Option<Link> {
-    if !href.starts_with("buzz:") {
-        return None;
-    }
+    let href = match href.get(..5) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("buzz:") => format!("buzz:{}", &href[5..]),
+        _ => return None,
+    };
+    let href = href.as_str();
     if let Some(link) = parse_buzz_link(href) {
         return Some(Link::Conversation {
             channel: link.channel,
@@ -78,6 +82,75 @@ fn join(href: &str) -> Option<Link> {
     })
 }
 
+/// Registers this binary for `buzz://` links in the user's applications,
+/// as buzz-app's deep-link plugin repairs portable and unpackaged
+/// installs at launch. Packaged installs register through their desktop
+/// file, and development builds leave any installed handler alone.
+pub fn register_scheme() {
+    if cfg!(debug_assertions) || cfg!(not(any(target_os = "linux", target_os = "freebsd"))) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if exe.starts_with("/usr") || exe.starts_with("/opt") || exe.starts_with("/nix/store") {
+        return;
+    }
+    let Some(applications) = dirs::data_dir().map(|dir| dir.join("applications")) else {
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("buzz-scheme".into())
+        .spawn(move || {
+            let entry = handler_entry(&exe.to_string_lossy());
+            let file = applications.join(HANDLER);
+            if std::fs::read_to_string(&file).ok().as_deref() != Some(entry.as_str()) {
+                let written = std::fs::create_dir_all(&applications)
+                    .and_then(|()| std::fs::write(&file, &entry));
+                if let Err(error) = written {
+                    tracing::warn!(%error, "could not register buzz:// for this binary");
+                    return;
+                }
+                let _ = std::process::Command::new("update-desktop-database")
+                    .arg(&applications)
+                    .status();
+            }
+            let set = std::process::Command::new("xdg-mime")
+                .args(["default", HANDLER, "x-scheme-handler/buzz"])
+                .status();
+            if !set.is_ok_and(|status| status.success()) {
+                tracing::warn!("could not make Buzz the buzz:// handler");
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not register buzz://");
+    }
+}
+
+/// The user desktop file that hands `buzz://` links to this binary.
+const HANDLER: &str = "buzz-gpui-handler.desktop";
+
+fn handler_entry(exe: &str) -> String {
+    // Exec quoting (Desktop Entry spec): quote the path, escape `"`, `` ` ``,
+    // `$` and `\`, and double `%`.
+    let mut quoted = String::from("\"");
+    for c in exe.chars() {
+        match c {
+            '"' | '`' | '$' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            '%' => quoted.push_str("%%"),
+            _ => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    format!(
+        "[Desktop Entry]\nType=Application\nName=Buzz\nExec={quoted} %u\nTerminal=false\n\
+         MimeType=x-scheme-handler/buzz\nNoDisplay=true\n"
+    )
+}
+
 /// The `buzz:` URL on a command line, if any. The newest intent wins, so
 /// the last one counts.
 pub fn from_args(args: impl IntoIterator<Item = String>) -> Option<String> {
@@ -92,6 +165,29 @@ mod tests {
 
     fn id(byte: u8) -> EventId {
         EventId::from_byte_array([byte; 32])
+    }
+
+    #[test]
+    fn in_app_links_match_the_scheme_in_any_case() {
+        let link = Some(Link::Conversation {
+            channel: "general".into(),
+            message: None,
+            thread: None,
+        });
+        assert_eq!(parse("BUZZ://channel/general"), link);
+        assert_eq!(parse("Buzz://channel/general"), link);
+        assert_eq!(parse("buzzz://channel/general"), None);
+        assert_eq!(parse("buz"), None);
+        // The OS hands over canonical links only.
+        assert_eq!(from_args(["BUZZ://channel/general".to_string()]), None);
+    }
+
+    #[test]
+    fn the_handler_runs_this_binary() {
+        let entry = handler_entry("/home/me/My Apps/buzz-gpui");
+        assert!(entry.contains("Exec=\"/home/me/My Apps/buzz-gpui\" %u\n"));
+        assert!(entry.contains("MimeType=x-scheme-handler/buzz\n"));
+        assert!(handler_entry("/a/100%$x").contains("Exec=\"/a/100%%\\$x\" %u"));
     }
 
     #[test]
