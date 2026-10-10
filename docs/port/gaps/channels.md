@@ -552,7 +552,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Collapse / expand section, persisted per scope | src/bundled/channels/SidebarSection.tsx:126-210; src/bundled/channels/useSidebarView.ts:15-47 | DONE (crates/app/src/ui/sidebar.rs, crates/app/src/ui/sidebar/rows.rs) | Toggle state saved in view state | S |
 | Drag and drop channels between sections | src/features/channel-navigation/ChannelSidebarDnd.tsx:1-117 | DONE (crates/app/src/ui/sidebar/rows.rs; GPUI starts a drag after 2px, not 6px) | Drag sources and drop targets per section key | M |
 | Section group icons (emoji / custom emoji) | src/bundled/channels/SidebarGroupIcon.tsx:1-79 | DONE (crates/app/src/ui/sidebar/rows.rs, crates/app/src/ui/sidebar/menus.rs) | Render group icon in header and menus | S |
-| Personal groups dialog ("Personal groups", "Group name", add/remove/save) | src/bundled/channels/ChannelGroupsDialog.tsx:13-237; src/features/relay/sidebar-personal-groups.ts:42-172 | MISSING: needs the channel-kit (Me preferences) record, which the relay layer cannot read or write yet | Dialog and removal/assignment flows with their Outbox-guidance error texts | M |
+| Personal groups dialog ("Personal groups", "Group name", add/remove/save) | src/bundled/channels/ChannelGroupsDialog.tsx:13-237; src/features/relay/sidebar-personal-groups.ts:42-172 | DONE (crates/app/src/ui/settings/personal_groups.rs) | Dialog and removal/assignment flows with their Outbox-guidance error texts | M |
 | Mute / Unmute with optimistic intent | src/features/channel-navigation/ChannelSidebar.tsx:728-744; src/bundled/channels/useOptimisticMute.ts:13-72 | DONE (crates/app/src/ui/sidebar.rs, crates/app/src/ui/sidebar/menus.rs) | Row/header menu item, mute write, optimistic state, muted unread suppression input | M |
 | Sidebar row context menu (right click, ContextMenu key, Shift+F10) | src/bundled/channels/ChannelSidebarItem.tsx:272-344; src/bundled/channels/useChannelRowMenu.ts:1-41 | DONE (crates/app/src/ui/sidebar/rows.rs, crates/app/src/ui/sidebar/menus.rs) | Context menu with move, mute, read, copy link, lifecycle, remove-from-Messages | M |
 | Row menu "Copy link" (`buzz://channel/<encoded id>`, toast "Link copied." / "Couldn't copy the link.") | src/bundled/channels/ChannelCopyLinkMenuItem.tsx:5-24 | DONE (crates/app/src/ui/sidebar/menus.rs; GPUI's clipboard write cannot fail, so there is no failure toast) | Add to row menu, encode id, show toasts | S |
@@ -772,14 +772,14 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Uncertain creation confirmed by strong id read | work-sessions.ts:60-113 | DONE (session/actions.rs:549-559; lifecycle.rs:671-680) | - | - |
-| `delivered()` gives up after 15 s | work-sessions.ts:128-173 | DIFFERENT | Waits indefinitely while Sending (session/actions.rs:331-350) | S |
-| Work-session create (private, parent validation, title 1-120) | work-sessions.ts:543-562 | MISSING | Sessions only read (discovery.rs:640-667) | M |
-| `invite` (top-level session, library agents) | work-sessions.ts:563-584 | MISSING | - | S |
-| `addAgents` (strong roster, parent cascade, archive/library gates, 15-min stale error) | work-sessions.ts:284-317, 388-494 | PARTIAL | Single-channel `add_member` only (session/actions.rs:574-640) | M |
-| Refresh gate with expected members/parent, 15 s | work-sessions.ts:185-283 | PARTIAL | Polls channel state (session/actions.rs:316-330) | S |
-| `memberChannels` (`#p` 39002 limit 500) | work-sessions.ts:320-353 | MISSING | Needed by agent relay removal | S |
-| `listsMember` exact roster read | work-sessions.ts:356-387 | MISSING | - | S |
-| `failed` / `discardFailed` for creation | work-sessions.ts:585-604 | PARTIAL | No discard path for create | S |
+| `delivered()` gives up after 15 s | work-sessions.ts:128-173 | DONE (crates/relay/src/session/work_sessions.rs) | Waits indefinitely while Sending (session/actions.rs:331-350) | S |
+| Work-session create (private, parent validation, title 1-120) | work-sessions.ts:543-562 | DONE (crates/relay/src/session/work_sessions.rs) | Sessions only read (discovery.rs:640-667) | M |
+| `invite` (top-level session, library agents) | work-sessions.ts:563-584 | DONE (crates/relay/src/session/work_sessions.rs) | - | S |
+| `addAgents` (strong roster, parent cascade, archive/library gates, 15-min stale error) | work-sessions.ts:284-317, 388-494 | DONE (crates/relay/src/session/work_sessions.rs) | Single-channel `add_member` only (session/actions.rs:574-640) | M |
+| Refresh gate with expected members/parent, 15 s | work-sessions.ts:185-283 | DONE (crates/relay/src/session/work_sessions.rs) | Polls channel state (session/actions.rs:316-330) | S |
+| `memberChannels` (`#p` 39002 limit 500) | work-sessions.ts:320-353 | DONE (crates/relay/src/session/work_sessions.rs) | Needed by agent relay removal | S |
+| `listsMember` exact roster read | work-sessions.ts:356-387 | DONE (crates/relay/src/session/work_sessions.rs) | - | S |
+| `failed` / `discardFailed` for creation | work-sessions.ts:585-604 | DONE (crates/relay/src/session/work_sessions.rs) | No discard path for create | S |
 
 ### Workflow attribution
 
@@ -788,8 +788,8 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | `workflowOwner` rule | workflow-attribution.ts:5-26 | DONE (unread.rs:202-227; fold/mod.rs:112; session/incoming.rs:195) | - | - |
 | Notification sender "Workflow · owned by X" | workflow-attribution.ts:29-31 | DONE (crates/app/src/notifications.rs:180-188) | - | - |
 | Workflow rows never group | src/features/messages/message-grouping.ts:12-13 | DONE (crates/app/src/ui/message.rs:54-55) | - | - |
-| Message row and thread byline (WorkflowByline) | MessageRow.tsx:231-250, 391, 585; ThreadPanel.tsx:338-343 | MISSING | Render in message.rs / thread.rs | S |
-| Inbox, popover, search, preview labels | InboxPage.tsx:626-705; SearchResults.tsx:552-562 | PARTIAL | Inbox has `workflow_owner_id` (unread.rs:638), unused; search does not compute it | M |
+| Message row and thread byline (WorkflowByline) | MessageRow.tsx:231-250, 391, 585; ThreadPanel.tsx:338-343 | DONE (crates/app/src/ui/message.rs, crates/app/src/ui/thread.rs) | Render in message.rs / thread.rs | S |
+| Inbox, popover, search, preview labels | InboxPage.tsx:626-705; SearchResults.tsx:552-562 | PARTIAL: popover, search, notifications and previews done (crates/app/src/ui/workflows/, channel_activity.rs); the Inbox page does not exist yet | Inbox has `workflow_owner_id` (unread.rs:638), unused; search does not compute it | M |
 
 ### Product feedback (kind 42000)
 
@@ -857,10 +857,10 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Me kit record read/decode/save with revision checks | me-preferences.ts:72-123 | MISSING | Kit owner | L |
-| `placement.has/admit/set` with capacity message | me-preferences.ts:42-69, 198-240 | MISSING | - | M |
-| Section create/assign/delete through sidebar store | me-preferences.ts:124-186 | MISSING | - | M |
-| Projection: personal groups replace legacy sections; Me channels leave main sidebar | sidebar-personal-groups.ts | PARTIAL | Pure model only (sidebar.rs:807-840) | S |
+| Me kit record read/decode/save with revision checks | me-preferences.ts:72-123 | DONE (crates/relay/src/kit.rs, crates/relay/src/session/kit.rs) | Kit owner | L |
+| `placement.has/admit/set` with capacity message | me-preferences.ts:42-69, 198-240 | DONE (crates/relay/src/session/kit.rs) | - | M |
+| Section create/assign/delete through sidebar store | me-preferences.ts:124-186 | DONE (crates/relay/src/session/kit.rs) | - | M |
+| Projection: personal groups replace legacy sections; Me channels leave main sidebar | sidebar-personal-groups.ts | DONE (crates/relay/src/session/sidebar.rs, crates/app/src/ui/sidebar.rs) | Pure model only (sidebar.rs:807-840) | S |
 
 ### Native agent operations and project Git
 
@@ -911,8 +911,8 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | "Channel settings" tab (identity, Escape closes, "Editing is unavailable on this connection.") | BC/ChannelSettingsPanel.tsx:31-224; BC/ChannelsPage.tsx:1561-1585 | DONE (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/workspace/board.rs; every port session can sign, so "Editing is unavailable on this connection." never applies) | Modal "Channel details" dialog (A/channel_menu.rs:379-581) | M |
 | Description and Visibility rows (hidden for DM/session), click to edit | BC/ChannelSettingsPanel.tsx:103-181 | DONE (crates/app/src/ui/channel_settings.rs) | Fields shown directly, disabled for non-editors; Description shown for DMs (A/channel_menu.rs:485-546) | S |
 | Members row with count; Channel ID row with copy ("Channel ID copied") | BC/ChannelSettingsPanel.tsx:182-192, 308-356 | DONE (crates/app/src/ui/channel_settings.rs) | Port has "Copy link" instead (A/channel_menu.rs:157-171) | S |
-| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | PARTIAL (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/templates/save_as.rs): lifecycle buttons and Save as template done; the Personal group select needs the Me preferences record | - | M |
-| Personal groups settings card ("Manage personal groups", "Reload groups") | BC/ChannelSetupSettings.tsx:1-105 | MISSING: needs the Me preferences (channel-kit) record, which the relay layer cannot read or write yet | - | M |
+| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | PARTIAL (crates/app/src/ui/channel_settings.rs, personal_group.rs): lifecycle buttons and the Personal group select done; Save as template belongs to the templates slice | - | M |
+| Personal groups settings card ("Manage personal groups", "Reload groups") | BC/ChannelSetupSettings.tsx:1-105 | DONE (crates/app/src/ui/settings/personal_groups.rs) | - | M |
 | Fresh load, reload keeping explicit choices, "Reload details" on error | BC/ChannelDetailsEditor.tsx:122-168, 292-301 | DONE (crates/app/src/ui/channel_settings.rs) | Loads once; error replaces body, no reload (A/channel_menu.rs:405-423, 484) | S |
 | Save gating (dirty and valid) and inline field errors | BC/ChannelDetailsEditor.tsx:173-197, 492-521; FR/channel-details-protocol.ts:45-76 | DONE (crates/app/src/ui/channel_settings.rs) | Save always enabled; errors only after submit (A/channel_menu.rs:436-449, 565-577; R/lifecycle.rs:613-633) | S |
 | "Discard changes?" (Keep editing / Discard changes) | BC/ChannelDetailsEditor.tsx:218-234, 384-395 | DONE (crates/app/src/ui/channel_settings.rs) | - | S |
@@ -970,7 +970,7 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | Temporary duration (ttl) | BC/CreateChannelDialog.tsx:135-138, 225, 550-560 | DONE (crates/app/src/ui/new_channel.rs, crates/relay/src/lifecycle.rs) | NewChannel has no ttl (R/lifecycle.rs:636-668) | M |
 | Privacy confirmation and "Discard changes?" | BC/CreateChannelDialog.tsx:186-199, 341-399 | DONE (crates/app/src/ui/new_channel.rs) | (A/new_channel.rs:140-144, 168-178) | S |
 | Pending creation recovery ("Retry channel", restore after restart) | BC/CreateChannelDialog.tsx:157-175, 411, 434-439; FT/setup.ts:130-190 | DONE (crates/app/src/ui/new_channel.rs, crates/relay/src/session/kit.rs) | - | M |
-| Group destination ("Create a channel in <group>") | BC/CreateChannelDialog.tsx:142-145, 207-216, 311-327 | MISSING: needs personal groups (the Me preferences record) in the UI; the setup receipts already carry the placement (crates/relay/src/session/kit.rs) | - | M |
+| Group destination ("Create a channel in <group>") | BC/CreateChannelDialog.tsx:142-145, 207-216, 311-327 | DONE (crates/app/src/ui/new_channel.rs, sidebar/rows.rs); the templates setup summary belongs to the templates slice | - | M |
 | Template/teams editor and setup summary | BC/CreateChannelDialog.tsx:253-282, 466-549, 562 | DONE (crates/app/src/ui/templates/editor.rs, crates/app/src/ui/new_channel.rs) | - | L |
 | 9007 via outbox, receipt, roster confirm, open channel; gated on relay support | docs/port/relay.md §5m.1 | DONE (R/session/actions.rs:542-572; A/new_channel.rs:79-113; A/workspace.rs:486-489) | - | - |
 

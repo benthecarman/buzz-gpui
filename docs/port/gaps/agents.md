@@ -370,36 +370,36 @@ The port's header has a "Me" tab with no handler (app/src/ui/workspace.rs:385). 
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Legacy "Sessions (now in Me)" page redirects to Me ("Opening Me…") | BS/index.tsx:6-42 | MISSING | Route alias | S |
-| Me workspace: "Session history" aside with sections nav, session column | BS/SessionsWorkspace.tsx:40-99; BS/SessionsPage.tsx:73-255 | MISSING | Me page | L |
-| Connection states: "Connecting to your community…", "Connect to a community to work with your agents.", error | BS/SessionsPage.tsx:100-120 | MISSING | — | S |
-| "Loading Me placement…", "Loading your conversation…", "This conversation is in Messages." | BS/SessionsPage.tsx:210-220, 450-462 | MISSING | — | S |
-| Section list: "Conversations" / "Sessions" default section, "New conversation" / "New session", "Sections couldn't load." | BS/SessionSections.tsx:140-200 | MISSING | — | M |
-| Section menu: "Session settings…", "Delete section" (+ error) | BS/SessionSections.tsx:215-250 | MISSING | — | S |
-| "New session in {section}" button | BS/SessionSections.tsx:280-290 | MISSING | — | S |
-| Session row with actions menu (button, right-click, ContextMenu key) | BS/SessionSections.tsx:295-300, 600-650 | MISSING | — | S |
-| Session menu: "Share…", "Rename", Move to / Section submenu (+ "New group…" / "New section…"), Copy submenu (name, ID, link) and copy notice, "Session settings…" | BS/SessionSections.tsx:300-400, 474 | MISSING | — | M |
-| "No sessions in this section." | BS/SessionSections.tsx:406 | MISSING | — | S |
-| Move pending: "Saving section…", "Retry move", "Dismiss" | BS/SessionSections.tsx:445-470 | MISSING | — | S |
-| "Create new section" dialog with "Section name" | BS/SessionSections.tsx:530-570 | MISSING | — | S |
-| Session heading (channel name, Archived badge) and New session view titles | FS/SessionPresentation.tsx:10-95 | MISSING | — | S |
-| Session actions menu: "Rename", "Session settings…" | BS/SessionsPage.tsx:383-416 | MISSING | — | S |
-| Tab pane toggle "Open tab pane" / "Close tab pane" | BS/SessionsPage.tsx:417-425 | MISSING | — | M |
-| Session agent control in the header | FS/SessionAgentControl.tsx:7-58 | MISSING | — | S |
-| AgentChoice picker: "Search agents", arrow/Enter keys, presence and admission labels, "No matching agents.", "Loading agents…", "No agents available in this community.", "Change agent: {name}" | FS/AgentChoice.tsx:26-388 | MISSING | — | M |
-| New-session composer "Message your agents" / "Message this session"; draft kept when sending is unavailable; actions menu; start errors | FS/NewSessionComposer.tsx:31-477 | MISSING | — | L |
-| Pending session start survives restart ("Your session start couldn't be saved on this device…") | FS/pending-start.ts; FS/NewSessionComposer.tsx:90-140 | MISSING | — | M |
-| Recipient rules: "Session participants are still loading…", "There are multiple agents in this session. @mention who should respond." | FS/recipients.ts:30-42 | MISSING | — | S |
-| Personal ("Me") vs shared classification and metadata | FS/personal.ts; FS/metadata.ts | MISSING | — | S |
-| "Rename session" dialog (1–120 chars, permission notice) | FS/RenameSession.tsx:19-151 | MISSING | — | S |
-| "Session settings" (section defaults): "Start from a template" / "Custom settings", "Full Canvas", stale-draft notice, "Discard draft and reload saved settings", "Retry settings", "Loading settings…" | FS/WorkspaceSettings.tsx:29-293 | MISSING | — | M |
-| Workspace fields: Project folders (≤20), "Work in a new worktree", Source repository + Browse, Worktree location, Base branch, Canvas | FS/WorkspaceFields.tsx:11-167 | MISSING | — | M |
-| Draft session settings dialog (Canvas before start) | FS/DraftSessionSettings.tsx:16-120 | MISSING | — | S |
-| Workspace validation and section-default errors (24 KiB Canvas, invalid metadata, section removed…) | FS/workspace.ts:20-310 | MISSING | — | S |
-| Open a session at a selected message ("Selected message", loading, "could not be opened") | FS/SessionMessageTarget.tsx:36-214 | MISSING | — | S |
-| Share dialog "Share session" / "Share conversation": "Copy link", "Share to" (+ "Create new channel…"), Private channel, people search, "Who has session access" (Everyone / Selected people), Private vs public with "Make public and share", progress steps, errors | BS/SessionShare.tsx:57-1143; FS/share.ts:30-308 | MISSING | — | L |
-| Share-attempt recovery ("This share is already in progress in another view.") | FS/share-attempt.ts; BS/SessionShare.tsx:278-283 | MISSING | — | S |
-| Session link targets | BS/SessionsPage.tsx:568-578 | MISSING | — | S |
+| Legacy "Sessions (now in Me)" page redirects to Me ("Opening Me…") | BS/index.tsx:6-42 | DONE (crates/app/src/ui/me/mod.rs) | Route alias | S |
+| Me workspace: "Session history" aside with sections nav, session column | BS/SessionsWorkspace.tsx:40-99; BS/SessionsPage.tsx:73-255 | DONE (crates/app/src/ui/me/mod.rs, crates/app/src/ui/me/sections.rs) | Me page | L |
+| Connection states: "Connecting to your community…", "Connect to a community to work with your agents.", error | BS/SessionsPage.tsx:100-120 | DONE (crates/app/src/ui/me/mod.rs) | — | S |
+| "Loading Me placement…", "Loading your conversation…", "This conversation is in Messages." | BS/SessionsPage.tsx:210-220, 450-462 | DONE (crates/app/src/ui/me/mod.rs, crates/app/src/ui/me/board.rs) | — | S |
+| Section list: "Conversations" / "Sessions" default section, "New conversation" / "New session", "Sections couldn't load." | BS/SessionSections.tsx:140-200 | DONE (crates/app/src/ui/me/sections.rs) | — | M |
+| Section menu: "Session settings…", "Delete section" (+ error) | BS/SessionSections.tsx:215-250 | DONE (crates/app/src/ui/me/sections.rs) | — | S |
+| "New session in {section}" button | BS/SessionSections.tsx:280-290 | DONE (crates/app/src/ui/me/sections.rs) | — | S |
+| Session row with actions menu (button, right-click, ContextMenu key) | BS/SessionSections.tsx:295-300, 600-650 | DONE (crates/app/src/ui/me/sections.rs; button and right-click, no ContextMenu key) | — | S |
+| Session menu: "Share…", "Rename", Move to / Section submenu (+ "New group…" / "New section…"), Copy submenu (name, ID, link) and copy notice, "Session settings…" | BS/SessionSections.tsx:300-400, 474 | DONE (crates/app/src/ui/me/sections.rs; GPUI's clipboard write cannot fail, so there is no copy error notice) | — | M |
+| "No sessions in this section." | BS/SessionSections.tsx:406 | DONE (crates/app/src/ui/me/sections.rs) | — | S |
+| Move pending: "Saving section…", "Retry move", "Dismiss" | BS/SessionSections.tsx:445-470 | DONE (crates/app/src/ui/me/sections.rs) | — | S |
+| "Create new section" dialog with "Section name" | BS/SessionSections.tsx:530-570 | DONE (crates/app/src/ui/me/dialogs.rs) | — | S |
+| Session heading (channel name, Archived badge) and New session view titles | FS/SessionPresentation.tsx:10-95 | DONE (crates/app/src/ui/me/board.rs, crates/app/src/ui/me/new_session.rs) | — | S |
+| Session actions menu: "Rename", "Session settings…" | BS/SessionsPage.tsx:383-416 | DONE (crates/app/src/ui/me/board.rs) | — | S |
+| Tab pane toggle "Open tab pane" / "Close tab pane" | BS/SessionsPage.tsx:417-425 | DONE (crates/app/src/ui/me/board.rs) | — | M |
+| Session agent control in the header | FS/SessionAgentControl.tsx:7-58 | N/A: SessionAgentControl is not mounted anywhere in buzz-app | — | S |
+| AgentChoice picker: "Search agents", arrow/Enter keys, presence and admission labels, "No matching agents.", "Loading agents…", "No agents available in this community.", "Change agent: {name}" | FS/AgentChoice.tsx:26-388 | N/A: only SessionAgentControl uses it, and nothing mounts that | — | M |
+| New-session composer "Message your agents" / "Message this session"; draft kept when sending is unavailable; actions menu; start errors | FS/NewSessionComposer.tsx:31-477 | DONE (crates/app/src/ui/me/new_session.rs) | — | L |
+| Pending session start survives restart ("Your session start couldn't be saved on this device…") | FS/pending-start.ts; FS/NewSessionComposer.tsx:90-140 | DONE (crates/app/src/ui/me/pending.rs) | — | M |
+| Recipient rules: "Session participants are still loading…", "There are multiple agents in this session. @mention who should respond." | FS/recipients.ts:30-42 | DONE (crates/app/src/ui/me/recipients.rs, crates/app/src/ui/channel.rs) | — | S |
+| Personal ("Me") vs shared classification and metadata | FS/personal.ts; FS/metadata.ts | DONE (crates/relay/src/kit.rs, crates/relay/src/session/kit.rs) | — | S |
+| "Rename session" dialog (1–120 chars, permission notice) | FS/RenameSession.tsx:19-151 | DONE (crates/app/src/ui/me/rename.rs) | — | S |
+| "Session settings" (section defaults): "Start from a template" / "Custom settings", "Full Canvas", stale-draft notice, "Discard draft and reload saved settings", "Retry settings", "Loading settings…" | FS/WorkspaceSettings.tsx:29-293 | DONE (crates/app/src/ui/me/settings.rs) | — | M |
+| Workspace fields: Project folders (≤20), "Work in a new worktree", Source repository + Browse, Worktree location, Base branch, Canvas | FS/WorkspaceFields.tsx:11-167 | DONE (crates/app/src/ui/me/settings.rs, crates/app/src/ui/me/workspace.rs) | — | M |
+| Draft session settings dialog (Canvas before start) | FS/DraftSessionSettings.tsx:16-120 | DONE (crates/app/src/ui/me/settings.rs) | — | S |
+| Workspace validation and section-default errors (24 KiB Canvas, invalid metadata, section removed…) | FS/workspace.ts:20-310 | DONE (crates/app/src/ui/me/workspace.rs, crates/app/src/ui/me/settings.rs) | — | S |
+| Open a session at a selected message ("Selected message", loading, "could not be opened") | FS/SessionMessageTarget.tsx:36-214 | DIFFERENT (crates/app/src/ui/workspace.rs): a linked message outside the window opens in an exact thread panel beside the conversation, not inline with "Back to latest" | — | S |
+| Share dialog "Share session" / "Share conversation": "Copy link", "Share to" (+ "Create new channel…"), Private channel, people search, "Who has session access" (Everyone / Selected people), Private vs public with "Make public and share", progress steps, errors | BS/SessionShare.tsx:57-1143; FS/share.ts:30-308 | DONE (crates/app/src/ui/me/share.rs, crates/relay/src/session/share.rs; no record of an unconfirmed channel creation, so its notice is left out) | — | L |
+| Share-attempt recovery ("This share is already in progress in another view.") | FS/share-attempt.ts; BS/SessionShare.tsx:278-283 | DONE (crates/relay/src/session/share.rs) | — | S |
+| Session link targets | BS/SessionsPage.tsx:568-578 | DONE (crates/app/src/ui/channel.rs links go through the workspace; a panel link opens on the Messages board, not Me's tab pane) | — | S |
 
 ## 19. Workflows (`src/bundled/workflows/*` = BW, `src/features/workflows/*` = FW)
 
@@ -407,70 +407,70 @@ The port renders workflow-authored messages only (app/src/notifications.rs:180-1
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Workflows" primary page and nav entry | BW/index.tsx:3-13 | MISSING | Page::Workflows | M |
-| Relay workflow protocol, queries, HTTP trigger, types, capability probe | FW/protocol.ts; FW/queries.ts; FW/http.ts; FW/types.ts; FW/host.ts; FW/capability.ts | MISSING | Relay-crate support | L |
-| Page states: "Connecting to your community…", "Connect to a community to browse workflows.", "Workflow operations are unavailable from this host." | BW/WorkflowsPage.tsx:40-50, 95-105 | MISSING | — | S |
-| Channel filter ("All workflows", Community channels), "Reading channels…", errors, partial-list note, "Refresh workflows" | BW/WorkflowsPage.tsx:155-210 | MISSING | — | S |
-| Landing cards with trigger presentation (message, reaction + emoji, diff, schedule summary, webhook) | BW/WorkflowLanding.tsx:440-620; BW/workflowCardPresentation.ts | MISSING | — | M |
-| Card enable switch with "Turn on this workflow?" and frequency warnings ("This workflow may run often") | BW/WorkflowLanding.tsx:520-535, 640-655; BW/workflowActivationWarning.ts | MISSING | — | M |
-| Card menu: "Edit workflow" / "View workflow", "Run now", Delete; read-only reasons | BW/WorkflowLanding.tsx:440-600 | MISSING | — | S |
-| Delete confirmation, "Deleting…", "Deletion unconfirmed" | BW/WorkflowLanding.tsx:600-640 | MISSING | — | S |
-| Landing status ("Reading workflows…", discovery paused, "Workflows loaded.") and "New workflow" | BW/WorkflowLanding.tsx:785-830 | MISSING | — | S |
-| Editor dialog: "Create/View/Edit workflow", "Close editor", actions menu, Form/YAML mode switch and switch-blocked message | BW/WorkflowEditor.tsx:110-240 | MISSING | — | L |
-| Inline workflow name edit (Enter/Escape) | BW/WorkflowEditor.tsx:280-335 | MISSING | — | S |
-| "Enabled in configuration" switch and "Save this workflow enabled?" | BW/WorkflowEditor.tsx:360-370, 470-482 | MISSING | — | S |
-| YAML editor ("Original text is kept until you edit… Schedules use UTC.") | BW/WorkflowEditor.tsx:400-410; BW/workflowYamlDocument.ts | MISSING | — | M |
-| "Workflow settings & activity" accordion with Description | BW/WorkflowEditor.tsx:450-460 | MISSING | — | S |
-| Form flow: trigger node, step nodes, "Add step" / "Add after Step N", inspector, "Remove step" | BW/WorkflowForm.tsx:140-480 | MISSING | — | L |
-| Triggers: Message posted, Reaction added (Emoji), Diff posted, Schedule, Webhook | BW/WorkflowForm.tsx:50-60, 240-320 | MISSING | — | M |
-| Actions: Send Message (text, destination, reply in thread), Delay, Call Webhook | BW/workflowFormTypes.ts:79-81; BW/WorkflowForm.tsx:520-650 | MISSING | — | M |
-| Conditions: Basic/Advanced, operators, Add/Remove, evalexpr, "Replace with basic filters?" | BW/WorkflowConditions.tsx:20-210; BW/workflowConditionExpression.ts | MISSING | — | M |
-| Schedule fields: Repeats, Repeat on, Day of month, Existing interval, warnings | BW/WorkflowScheduleFields.tsx:15-258; BW/workflowSchedule.ts | MISSING | — | M |
-| Cron expression input and parser | BW/CronExpressionInput.tsx; BW/cronExpression.ts | MISSING | — | M |
-| Webhook action fields: URL, HTTP method, Headers, Request body | BW/WorkflowWebhookFields.tsx:20-134 | MISSING | — | S |
-| Webhook secret: "Webhook ready" dialog with reveal and copy; "Continue without this secret?" | BW/WorkflowWebhookSecretDialog.tsx; BW/WorkflowWebhookSecrets.tsx | MISSING | — | M |
-| Form/YAML parse errors ("… — use the YAML editor"); header uniqueness | BW/workflowFormTypes.ts:270-525; BW/WorkflowEditor.tsx:110-120 | MISSING | — | S |
-| Channel workflows view: "Saved configurations", "Refresh configurations", "New workflow", Configured enabled/disabled/Unreadable, "Read runs" / "Hide runs", "Run now", "Configuration details" | BW/WorkflowChannel.tsx:316-560 | MISSING | — | M |
-| Confirmations "Leave this draft?", "Run this workflow now?", "Delete this workflow?" | BW/WorkflowChannel.tsx:555-590; BW/ConfirmAction.tsx | MISSING | — | S |
-| Runs: "Runs", "Refresh runs", states, "Run details and trace", Run ID, "Newest runs" / "Older runs" | BW/WorkflowRuns.tsx:50-124 | MISSING | — | M |
-| "Recent activity" operations: pending/succeeded/rejected/unknown copy, "Delivery details", "Check saved configuration", dismiss confirmation | BW/WorkflowOperations.tsx:10-171 | MISSING | — | M |
-| Deletion notices ("Deleting workflow…", "Couldn't delete…", "Checking deletion…") | BW/WorkflowDeletionNotices.tsx:20-164 | MISSING | — | S |
-| Channel picker combobox "Choose a channel" | BW/WorkflowChannelPicker.tsx:40-68 | MISSING | — | S |
-| Duration formatting | BW/workflowDuration.ts | MISSING | — | S |
+| "Workflows" primary page and nav entry | BW/index.tsx:3-13 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | Page::Workflows | M |
+| Relay workflow protocol, queries, HTTP trigger, types, capability probe | FW/protocol.ts; FW/queries.ts; FW/http.ts; FW/types.ts; FW/host.ts; FW/capability.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | Relay-crate support | L |
+| Page states: "Connecting to your community…", "Connect to a community to browse workflows.", "Workflow operations are unavailable from this host." | BW/WorkflowsPage.tsx:40-50, 95-105 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Channel filter ("All workflows", Community channels), "Reading channels…", errors, partial-list note, "Refresh workflows" | BW/WorkflowsPage.tsx:155-210 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Landing cards with trigger presentation (message, reaction + emoji, diff, schedule summary, webhook) | BW/WorkflowLanding.tsx:440-620; BW/workflowCardPresentation.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Card enable switch with "Turn on this workflow?" and frequency warnings ("This workflow may run often") | BW/WorkflowLanding.tsx:520-535, 640-655; BW/workflowActivationWarning.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Card menu: "Edit workflow" / "View workflow", "Run now", Delete; read-only reasons | BW/WorkflowLanding.tsx:440-600 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Delete confirmation, "Deleting…", "Deletion unconfirmed" | BW/WorkflowLanding.tsx:600-640 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Landing status ("Reading workflows…", discovery paused, "Workflows loaded.") and "New workflow" | BW/WorkflowLanding.tsx:785-830 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Editor dialog: "Create/View/Edit workflow", "Close editor", actions menu, Form/YAML mode switch and switch-blocked message | BW/WorkflowEditor.tsx:110-240 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | L |
+| Inline workflow name edit (Enter/Escape) | BW/WorkflowEditor.tsx:280-335 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| "Enabled in configuration" switch and "Save this workflow enabled?" | BW/WorkflowEditor.tsx:360-370, 470-482 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| YAML editor ("Original text is kept until you edit… Schedules use UTC.") | BW/WorkflowEditor.tsx:400-410; BW/workflowYamlDocument.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| "Workflow settings & activity" accordion with Description | BW/WorkflowEditor.tsx:450-460 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Form flow: trigger node, step nodes, "Add step" / "Add after Step N", inspector, "Remove step" | BW/WorkflowForm.tsx:140-480 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | L |
+| Triggers: Message posted, Reaction added (Emoji), Diff posted, Schedule, Webhook | BW/WorkflowForm.tsx:50-60, 240-320 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Actions: Send Message (text, destination, reply in thread), Delay, Call Webhook | BW/workflowFormTypes.ts:79-81; BW/WorkflowForm.tsx:520-650 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Conditions: Basic/Advanced, operators, Add/Remove, evalexpr, "Replace with basic filters?" | BW/WorkflowConditions.tsx:20-210; BW/workflowConditionExpression.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Schedule fields: Repeats, Repeat on, Day of month, Existing interval, warnings | BW/WorkflowScheduleFields.tsx:15-258; BW/workflowSchedule.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Cron expression input and parser | BW/CronExpressionInput.tsx; BW/cronExpression.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Webhook action fields: URL, HTTP method, Headers, Request body | BW/WorkflowWebhookFields.tsx:20-134 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Webhook secret: "Webhook ready" dialog with reveal and copy; "Continue without this secret?" | BW/WorkflowWebhookSecretDialog.tsx; BW/WorkflowWebhookSecrets.tsx | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Form/YAML parse errors ("… — use the YAML editor"); header uniqueness | BW/workflowFormTypes.ts:270-525; BW/WorkflowEditor.tsx:110-120 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Channel workflows view: "Saved configurations", "Refresh configurations", "New workflow", Configured enabled/disabled/Unreadable, "Read runs" / "Hide runs", "Run now", "Configuration details" | BW/WorkflowChannel.tsx:316-560 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Confirmations "Leave this draft?", "Run this workflow now?", "Delete this workflow?" | BW/WorkflowChannel.tsx:555-590; BW/ConfirmAction.tsx | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Runs: "Runs", "Refresh runs", states, "Run details and trace", Run ID, "Newest runs" / "Older runs" | BW/WorkflowRuns.tsx:50-124 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| "Recent activity" operations: pending/succeeded/rejected/unknown copy, "Delivery details", "Check saved configuration", dismiss confirmation | BW/WorkflowOperations.tsx:10-171 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | M |
+| Deletion notices ("Deleting workflow…", "Couldn't delete…", "Checking deletion…") | BW/WorkflowDeletionNotices.tsx:20-164 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Channel picker combobox "Choose a channel" | BW/WorkflowChannelPicker.tsx:40-68 | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
+| Duration formatting | BW/workflowDuration.ts | DONE (crates/app/src/ui/workflows/, crates/relay/src/workflows/) | — | S |
 
 ## 20. Terminal (`src/bundled/terminal/*` = BT, `ST/terminal/*`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Per-channel "Terminal" companion panel | BT/index.tsx:66-72; BT/TerminalPanel.tsx | MISSING (no companion dock in the port) | Dock and panel | L |
-| Toolbar launcher "Toggle channel terminal" with shortcut in its title | BT/index.tsx:39-64 | MISSING | — | S |
-| Shortcut Mod+J "Toggle channel terminal" in shortcut settings | BT/index.tsx:14-35 | MISSING | — | S |
-| Header "BuzzTerm" with channel and thread labels; "Restart terminal", "End session", "Hide terminal (Cmd/Ctrl+J)" | BT/TerminalPanel.tsx:85-160 | MISSING | — | S |
-| Escape stays inside the terminal | BT/TerminalPanel.tsx:195 | MISSING | — | S |
-| Sessions per channel/thread kept while hidden; 20-session cap; input-full error | BT/sessions.ts:100-200 | MISSING | — | M |
-| Terminal renderer, theme from tokens, JetBrains Mono, resize | BT/renderer.ts; BT/appearance.ts | MISSING | Terminal emulator widget | L |
-| Welcome splash: "buzz" hex wordmark, pointer-reactive, reduced motion | BT/splash.ts; BT/banner.ts | MISSING | — | M |
-| Native PTY: login shell with TERM and BUZZ_CHANNEL_ID / BUZZ_CHANNEL / BUZZ_NPUB / BUZZ_RELAY_URL / BUZZ_TERM_SESSION / BUZZ_THREAD_ID; spawn, read, write, resize, close, close-owner; context validation | ST/terminal/mod.rs:200-324; ST/terminal/unix.rs:20-45; ST/terminal/context.rs | MISSING | — | L |
+| Per-channel "Terminal" companion panel | BT/index.tsx:66-72; BT/TerminalPanel.tsx | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | Dock and panel | L |
+| Toolbar launcher "Toggle channel terminal" with shortcut in its title | BT/index.tsx:39-64 | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | S |
+| Shortcut Mod+J "Toggle channel terminal" in shortcut settings | BT/index.tsx:14-35 | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | S |
+| Header "BuzzTerm" with channel and thread labels; "Restart terminal", "End session", "Hide terminal (Cmd/Ctrl+J)" | BT/TerminalPanel.tsx:85-160 | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | S |
+| Escape stays inside the terminal | BT/TerminalPanel.tsx:195 | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | S |
+| Sessions per channel/thread kept while hidden; 20-session cap; input-full error | BT/sessions.ts:100-200 | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | M |
+| Terminal renderer, theme from tokens, JetBrains Mono, resize | BT/renderer.ts; BT/appearance.ts | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | Terminal emulator widget | L |
+| Welcome splash: "buzz" hex wordmark, pointer-reactive, reduced motion | BT/splash.ts; BT/banner.ts | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | M |
+| Native PTY: login shell with TERM and BUZZ_CHANNEL_ID / BUZZ_CHANNEL / BUZZ_NPUB / BUZZ_RELAY_URL / BUZZ_TERM_SESSION / BUZZ_THREAD_ID; spawn, read, write, resize, close, close-owner; context validation | ST/terminal/mod.rs:200-324; ST/terminal/unix.rs:20-45; ST/terminal/context.rs | DONE (crates/app/src/ui/terminal/, crates/host/src/terminal.rs) | — | L |
 
 ## 21. Mobile pairing (`src/bundled/pairing/*`, `src/features/pairing/client.ts`, `ST/pairing/*`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Settings card "Pair mobile" (Account group) | src/bundled/pairing/index.tsx:3-14 | MISSING (no pairing in app/src/ui/settings) | — | S |
-| Account gate: "Use existing Buzz account", mismatch error, dev-broker note, desktop-only note | src/bundled/pairing/PairingSettings.tsx:90-206 | MISSING | — | S |
-| Community address input ("Enter your community's https:// or wss:// address.") | PairingSettings.tsx:105-115, 220-230 | MISSING | — | S |
-| Steps "Scan QR code", "Enter code on your phone" / "Confirm mobile code", "Pair your mobile app" / "Paired" | PairingSettings.tsx:145-170, 365-400 | MISSING | — | M |
-| QR display (SVG with reveal) | PairingSettings.tsx:255-262; ST/pairing/qr.rs; ST/pairing/qr-reveal.css | MISSING | — | M |
-| Six-digit code entry or comparison | PairingSettings.tsx:263-300 | MISSING | — | S |
-| End states "Check your phone" + "Start a new pairing", "Phone paired" + "Pair another phone"; expired, uncertain, error, cancelled | PairingSettings.tsx:330-356; ST/pairing/mod.rs:20-40 | MISSING | — | S |
-| Client polling and cancel errors | src/features/pairing/client.ts:100-177 | MISSING | — | S |
-| Native pairing session over relay: start, status, confirm, deny, cancel, account | ST/pairing/mod.rs:160-577; ST/pairing/relay.rs; ST/pairing/identity.rs | MISSING | — | L |
+| Settings card "Pair mobile" (Account group) | src/bundled/pairing/index.tsx:3-14 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | S |
+| Account gate: "Use existing Buzz account", mismatch error, dev-broker note, desktop-only note | src/bundled/pairing/PairingSettings.tsx:90-206 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | S |
+| Community address input ("Enter your community's https:// or wss:// address.") | PairingSettings.tsx:105-115, 220-230 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | S |
+| Steps "Scan QR code", "Enter code on your phone" / "Confirm mobile code", "Pair your mobile app" / "Paired" | PairingSettings.tsx:145-170, 365-400 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | M |
+| QR display (SVG with reveal) | PairingSettings.tsx:255-262; ST/pairing/qr.rs; ST/pairing/qr-reveal.css | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | M |
+| Six-digit code entry or comparison | PairingSettings.tsx:263-300 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | S |
+| End states "Check your phone" + "Start a new pairing", "Phone paired" + "Pair another phone"; expired, uncertain, error, cancelled | PairingSettings.tsx:330-356; ST/pairing/mod.rs:20-40 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | S |
+| Client polling and cancel errors | src/features/pairing/client.ts:100-177 | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | S |
+| Native pairing session over relay: start, status, confirm, deny, cancel, account | ST/pairing/mod.rs:160-577; ST/pairing/relay.rs; ST/pairing/identity.rs | DONE (crates/pair-mobile, crates/app/src/ui/settings/pairing/) | — | L |
 
 ## 22. Bestie (`src/bundled/bestie`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Bestie" primary page with placeholder "Meet your Bestie" / "Your companion's home in Buzz. Agent chat isn't connected yet." | src/bundled/bestie/index.tsx:9-53 | MISSING | Page and nav icon | S |
+| "Bestie" primary page with placeholder "Meet your Bestie" / "Your companion's home in Buzz. Agent chat isn't connected yet." | src/bundled/bestie/index.tsx:9-53 | DONE (crates/app/src/ui/bestie.rs; off by default, Settings → Plugins turns it on) | Page and nav icon | S |
 
 ## 23. Builderlab (`src/bundled/builderlab/**` = BB)
 
@@ -510,30 +510,30 @@ The Claude Code harness preset (claude-agent-acp) exists in the port (host/harne
 | Plugin manager: bundled and external plugins, enable/disable, activation with timeout, starting/active/failed status | src/plugins/manager.ts; src/plugins/runtime.ts; src/plugins/timeout.ts; src/plugins/status.ts | DONE for bundled plugins (crates/app/src/plugins.rs); external plugins are skipped by decision | - | L |
 | Persisted plugin configuration (`buzzodz.plugins.v1`) and module loader | src/plugins/storage.ts; src/plugins/modules.ts | DONE (crates/app/src/plugins.rs: buzz-app plugin manager registry.json via buzzodz-plugins) | - | M |
 | Settings → Plugins UI, plugin import from folder or Git, "External plugins are paused for this launch", recovery screen | src/app/Settings.tsx:219-320 (uses src/plugins) | DONE (crates/app/src/ui/settings/plugins.rs); import is skipped by decision | - | M |
-| Contribution resolution (match order) and owned-contribution error boundary | src/plugins/contributions.ts; src/plugins/OwnedContribution.tsx | MISSING | — | M |
-| Manifest host capabilities (commands, networkOrigins, processes) and the public author API | src/plugins/api.ts:6-42; src/plugins/author.ts; src/plugins/types.ts | MISSING | — | M |
-| Host service for plugins (request, run command, spawn) | src/features/host/service.ts | MISSING | — | M |
-| `plugin_host_process_spawn` / `write` / `kill` (streamed stdout/stderr, killed on reload or exit, identity stripped) | ST/host_process.rs:1-431 | MISSING | — | M |
-| `plugin_host_run_command` (bounded stdout, effective PATH) | ST/host_command.rs:178-300 | MISSING | — | S |
-| `plugin_host_request` (HTTP to declared origins) | ST/host_request.rs:39-367 | MISSING | — | S |
-| Trusted plugin security service for agents (`agent_security`: register, default and per-agent policies) | FA/security.ts:1-115; ST/agents.rs:1650-1675 | MISSING | — | M |
+| Contribution resolution (match order) and owned-contribution error boundary | src/plugins/contributions.ts; src/plugins/OwnedContribution.tsx | DONE (crates/app/src/plugins.rs gates pages, panels and renderers by plugin; panels resolve in registration order). No error boundary: Rust views cannot throw | — | M |
+| Manifest host capabilities (commands, networkOrigins, processes) and the public author API | src/plugins/api.ts:6-42; src/plugins/author.ts; src/plugins/types.ts | N/A: external plugins are skipped (GAPS.md, Decided) | — | M |
+| Host service for plugins (request, run command, spawn) | src/features/host/service.ts | N/A: only external plugins and the skipped Builderlab and Hosted communities use it | — | M |
+| `plugin_host_process_spawn` / `write` / `kill` (streamed stdout/stderr, killed on reload or exit, identity stripped) | ST/host_process.rs:1-431 | N/A: only external plugins use it; agent processes go through the host API | — | M |
+| `plugin_host_run_command` (bounded stdout, effective PATH) | ST/host_command.rs:178-300 | N/A: only external plugins and skipped bundles use it | — | S |
+| `plugin_host_request` (HTTP to declared origins) | ST/host_request.rs:39-367 | N/A: only external plugins and skipped bundles use it | — | S |
+| Trusted plugin security service for agents (`agent_security`: register, default and per-agent policies) | FA/security.ts:1-115; ST/agents.rs:1650-1675 | N/A: no bundled plugin registers an agent security policy | — | M |
 
 ## 27. buzz-mcp (`src/buzz-mcp/*`)
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Standalone stdio MCP server (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, `BUZZ_CHANNEL`, `BUZZ_MCP_ROOT`); `dist-buzz-mcp` build | src/buzz-mcp/main.ts:1-53; src/buzz-mcp/node.ts; vite.buzz-mcp.config.ts | MISSING | — | M |
-| Tool `send` (text/path, channel, reply, files, mentions, final) | src/buzz-mcp/tools.ts:28-45 | MISSING | — | S |
-| Tool `react` | src/buzz-mcp/tools.ts:46-51 | MISSING | — | S |
-| Tool `read` (thread, channel latest, search q) | src/buzz-mcp/tools.ts:52-55 | MISSING | — | S |
-| Tool `channels` | src/buzz-mcp/tools.ts:56 | MISSING | — | S |
-| Tool `members` | src/buzz-mcp/tools.ts:57 | MISSING | — | S |
-| Tool `users` | src/buzz-mcp/tools.ts:58 | MISSING | — | S |
-| Tool `dm` | src/buzz-mcp/tools.ts:59 | MISSING | — | S |
-| Tool `mem_get` | src/buzz-mcp/tools.ts:60 | MISSING | — | S |
-| Tool `mem_set` | src/buzz-mcp/tools.ts:61-63 | MISSING | — | S |
-| Tool `canvas` | src/buzz-mcp/tools.ts:64-68 | MISSING | — | S |
-| Client and RPC layer (`callTool`, error text) used by the Claude Code plugin | src/buzz-mcp/client.ts; src/buzz-mcp/rpc.ts | MISSING | — | S |
+| Standalone stdio MCP server (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, `BUZZ_CHANNEL`, `BUZZ_MCP_ROOT`); `dist-buzz-mcp` build | src/buzz-mcp/main.ts:1-53; src/buzz-mcp/node.ts; vite.buzz-mcp.config.ts | N/A: the port's agents use the in-process Buzz tools (crates/app/src/buzz_mcp); none runs the stdio build | — | M |
+| Tool `send` (text/path, channel, reply, files, mentions, final) | src/buzz-mcp/tools.ts:28-45 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `react` | src/buzz-mcp/tools.ts:46-51 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `read` (thread, channel latest, search q) | src/buzz-mcp/tools.ts:52-55 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `channels` | src/buzz-mcp/tools.ts:56 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `members` | src/buzz-mcp/tools.ts:57 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `users` | src/buzz-mcp/tools.ts:58 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `dm` | src/buzz-mcp/tools.ts:59 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `mem_get` | src/buzz-mcp/tools.ts:60 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `mem_set` | src/buzz-mcp/tools.ts:61-63 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Tool `canvas` | src/buzz-mcp/tools.ts:64-68 | DONE (crates/app/src/buzz_mcp/tools.rs) | — | S |
+| Client and RPC layer (`callTool`, error text) used by the Claude Code plugin | src/buzz-mcp/client.ts; src/buzz-mcp/rpc.ts | DONE (crates/app/src/buzz_mcp/rpc.rs) | — | S |
 
 ## 28. Native agent backend (`ST/agents.rs`, `ST/agents/*`, `ST/agent_models.rs`, `ST/goose_models.rs`, `ST/pi_models.rs` vs `host/`)
 
