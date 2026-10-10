@@ -115,6 +115,8 @@ pub struct SettingsPage {
     toasts: usize,
     /// Made on first visit; its saves raise this page's toast.
     custom_emoji: Option<(Entity<emoji::CustomEmojiSettings>, Subscription)>,
+    /// The notification sound select that is open.
+    sound_menu: Option<buzz_relay_client::Category>,
     _app_observer: Subscription,
     _community_observer: Option<Subscription>,
 }
@@ -136,6 +138,7 @@ impl SettingsPage {
             toast: None,
             toasts: 0,
             custom_emoji: None,
+            sound_menu: None,
             _app_observer: cx.observe_global_in::<AppState>(window, |this, window, cx| {
                 this.follow_community(window, cx)
             }),
@@ -146,6 +149,9 @@ impl SettingsPage {
     }
 
     pub fn open(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section != self.section {
+            self.quiet();
+        }
         self.section = section;
         cx.notify();
     }
@@ -281,7 +287,7 @@ impl SettingsPage {
             }
             Section::Communities => self.communities_section(cx),
             Section::Appearance => appearance::render(cx),
-            Section::Notifications => notifications::render(cx),
+            Section::Notifications => self.notifications_section(window, cx),
             Section::Shortcuts => shortcuts::render(cx),
             Section::Agents => self.agents_section(cx),
             Section::About => about::render(cx),

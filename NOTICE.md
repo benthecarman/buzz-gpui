@@ -51,6 +51,13 @@ glyphs from `src/shared/design-system/icons/`, and the avatar squircle and
 presence-cutout shapes from `src/shared/design-system/styles/`, redrawn with
 `currentColor` fills.
 
+## Sounds
+
+`assets/sounds/` holds the twelve notification alert sounds (MP3) from
+buzz-app's `public/sounds/` (Apache-2.0, © Block, Inc.), unchanged. buzz-app
+shares them with Block Buzz's `desktop/public/sounds/`
+([block/buzz](https://github.com/block/buzz), Apache-2.0).
+
 ## Harness brand marks
 
 The marks in `assets/icons/brand/` identify agent harnesses on the Agents

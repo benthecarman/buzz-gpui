@@ -13,6 +13,7 @@
 use crate::community::{AppState, Community};
 use crate::runtime::Runtime;
 use crate::ui::navigation::{self, Place, Target};
+use crate::ui::sounds::Sound;
 use buzz_relay_client::{
     Category, ChannelSummary, ChannelType, IncomingMessage, Partition, Profiles, Store,
 };
@@ -34,8 +35,8 @@ const TITLE_NAME_CHARS: usize = 64;
 const BODY_CHARS: usize = 200;
 const SOURCE_CHARS: usize = 4096;
 
-/// Per-community choices (`buzz-notification-preferences.v1`, without
-/// sounds: banners are always silent here).
+/// Per-community choices (`buzz-notification-preferences.v1`). Banners
+/// are always silent; the app plays the chosen sound itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -43,6 +44,9 @@ pub struct Preferences {
     pub mention: bool,
     pub direct: bool,
     pub thread: bool,
+    /// "Sound": alerts play their category's sound.
+    pub sound: bool,
+    pub sounds: CategorySounds,
 }
 
 impl Default for Preferences {
@@ -52,6 +56,35 @@ impl Default for Preferences {
             mention: true,
             direct: true,
             thread: true,
+            sound: true,
+            sounds: CategorySounds::default(),
+        }
+    }
+}
+
+/// The sound per category; buzz-app defaults each to flutter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CategorySounds {
+    pub mention: Sound,
+    pub direct: Sound,
+    pub thread: Sound,
+}
+
+impl CategorySounds {
+    pub fn get(&self, category: Category) -> Sound {
+        match category {
+            Category::Mention => self.mention,
+            Category::Direct => self.direct,
+            Category::Thread => self.thread,
+        }
+    }
+
+    pub fn set(&mut self, category: Category, sound: Sound) {
+        match category {
+            Category::Mention => self.mention = sound,
+            Category::Direct => self.direct = sound,
+            Category::Thread => self.thread = sound,
         }
     }
 }
@@ -80,6 +113,12 @@ impl Preferences {
                 Category::Direct => self.direct,
                 Category::Thread => self.thread,
             }
+    }
+
+    /// The sound an alert in `category` plays, if any.
+    pub fn sound_for(&self, category: Category) -> Option<Sound> {
+        let sound = self.sounds.get(category);
+        (self.allows(category) && self.sound && sound != Sound::Silent).then_some(sound)
     }
 }
 
