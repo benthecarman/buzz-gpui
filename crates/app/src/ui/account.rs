@@ -485,10 +485,21 @@ impl Profile {
             .as_ref()
             .zip(snapshot.as_ref())
             .and_then(|(viewer, snapshot)| snapshot.profiles.get(viewer).cloned());
+        // Without a community, the default profile new communities start
+        // from (`ProfileButton.tsx`).
+        let local = community
+            .is_none()
+            .then(|| super::settings::default_profile(cx));
         let display_name = profile
             .as_ref()
             .filter(|profile| !profile.name_is_fallback && !profile.name.trim().is_empty())
-            .map(|profile| profile.name.clone());
+            .map(|profile| profile.name.clone())
+            .or_else(|| {
+                local
+                    .as_ref()
+                    .map(|local| local.name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+            });
         let named = display_name.is_some();
         let name = display_name
             .or_else(|| viewer.as_ref().map(|viewer| short_key(viewer)))
@@ -497,8 +508,12 @@ impl Profile {
             .as_ref()
             .and_then(|profile| profile.picture.clone())
             .zip(community.as_ref())
-            .map(|(picture, community)| {
-                media::avatar(&picture, community.read(cx).session.media())
+            .map(|(picture, community)| media::avatar(&picture, community.read(cx).session.media()))
+            .or_else(|| {
+                local
+                    .as_ref()
+                    .filter(|local| local.picture.starts_with("https://"))
+                    .map(|local| ImageSource::from(SharedString::from(local.picture.clone())))
             });
         let presence = viewer
             .as_ref()

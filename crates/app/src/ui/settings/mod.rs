@@ -23,7 +23,7 @@ use buzz_ui::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use profile::ProfileForm;
-pub use profile::sign_out_dialog;
+pub use profile::{default_profile, remember_profile, sign_out_dialog};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -112,6 +112,7 @@ pub struct SettingsPage {
     profile: ProfileForm,
     modal: Option<Modal>,
     toast: Option<(SharedString, usize)>,
+    toast_tone: ToastTone,
     toasts: usize,
     /// Made on first visit; its saves raise this page's toast.
     custom_emoji: Option<(Entity<emoji::CustomEmojiSettings>, Subscription)>,
@@ -136,6 +137,7 @@ impl SettingsPage {
             profile: ProfileForm::new(window, cx),
             modal: None,
             toast: None,
+            toast_tone: ToastTone::Success,
             toasts: 0,
             custom_emoji: None,
             sound_menu: None,
@@ -170,6 +172,16 @@ impl SettingsPage {
     }
 
     fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.show_toast_tone(text, ToastTone::Success, cx);
+    }
+
+    fn show_toast_tone(
+        &mut self,
+        text: impl Into<SharedString>,
+        tone: ToastTone,
+        cx: &mut Context<Self>,
+    ) {
+        self.toast_tone = tone;
         self.toasts += 1;
         let generation = self.toasts;
         self.toast = Some((text.into(), generation));
@@ -189,6 +201,16 @@ impl SettingsPage {
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         cx.notify();
+    }
+
+    /// Closes the sound menu, stops a preview and hides the private key,
+    /// on leaving a section.
+    fn quiet(&mut self) {
+        self.sound_menu = None;
+        crate::ui::sounds::stop_preview();
+        // Leaving Profile hides the private key, as unmounting it does.
+        self.profile.nsec_revealed = false;
+        self.profile.nsec_message = None;
     }
 
     /// The settings sidebar (§5b.2).
@@ -334,7 +356,7 @@ impl Render for SettingsPage {
                     .position(point(right, px(128.)))
                     .child(
                         Toast::new(("settings-toast", *generation), text.clone())
-                            .tone(ToastTone::Success)
+                            .tone(self.toast_tone)
                             .on_dismiss(cx.listener(|this, _, _, cx| {
                                 this.toast = None;
                                 cx.notify();

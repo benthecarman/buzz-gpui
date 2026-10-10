@@ -39,13 +39,6 @@ fn option_label(sound: Sound, category: Category) -> String {
 }
 
 impl SettingsPage {
-    /// Closes the sound menu and stops a preview, e.g. on leaving the
-    /// section.
-    pub(super) fn quiet(&mut self) {
-        self.sound_menu = None;
-        sounds::stop_preview();
-    }
-
     pub(super) fn notifications_section(
         &mut self,
         window: &mut Window,

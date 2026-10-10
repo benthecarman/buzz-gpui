@@ -21,10 +21,6 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-/// Viewer preference holding the local default profile (buzz-app's
-/// `client.profile`), the starting point in a community without one.
-const DEFAULT_PROFILE: &str = "default-profile";
-
 enum Step {
     Address,
     /// The invite's community has a join policy to accept first.
@@ -431,49 +427,19 @@ impl AddCommunity {
     }
 }
 
-/// The local default profile, if one was saved.
+/// The default profile Settings keeps, if one was saved.
 fn default_profile(cx: &App) -> Option<ProfileEdit> {
-    let state = cx.global::<AppState>();
-    let IdentityState::Ready(identity) = &state.identity else {
-        return None;
-    };
-    let json = state
-        .store
-        .viewer_pref(&identity.pubkey_hex(), DEFAULT_PROFILE)
-        .ok()??;
-    serde_json::from_str(&json).ok()
+    let profile = super::settings::default_profile(cx);
+    (profile != ProfileEdit::default()).then_some(profile)
 }
 
-/// Seeds the local default from the first community profile, as
-/// `communities.joined` does. A picture this community hosts under
-/// `/media/` is not reused elsewhere (`profile-default.ts`).
+/// Seeds the default from the first community profile, as
+/// `communities.joined` does.
 fn seed_default_profile(profile: &ProfileEdit, origin: &RelayOrigin, cx: &App) {
     if default_profile(cx).is_some_and(|saved| !saved.name.is_empty()) {
         return;
     }
-    let state = cx.global::<AppState>();
-    let IdentityState::Ready(identity) = &state.identity else {
-        return;
-    };
-    let mut profile = profile.clone();
-    if community_media(&profile.picture, origin) {
-        profile.picture = String::new();
-    }
-    let json = serde_json::to_string(&profile).expect("profiles serialize");
-    if let Err(error) = state
-        .store
-        .set_viewer_pref(&identity.pubkey_hex(), DEFAULT_PROFILE, &json)
-    {
-        tracing::warn!(%error, "could not save the default profile");
-    }
-}
-
-fn community_media(picture: &str, origin: &RelayOrigin) -> bool {
-    let (Ok(picture), Ok(community)) = (url::Url::parse(picture), url::Url::parse(&origin.http()))
-    else {
-        return false;
-    };
-    picture.origin() == community.origin() && picture.path().starts_with("/media/")
+    super::settings::remember_profile(profile.clone(), Some(origin), cx);
 }
 
 impl Render for AddCommunity {
@@ -704,26 +670,5 @@ impl Render for AddCommunity {
             }
         }
         dialog
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::prelude::v1::test;
-
-    #[test]
-    fn community_media_stays_out_of_the_default_profile() {
-        let origin = RelayOrigin::parse("wss://relay.example.com").unwrap();
-        assert!(community_media(
-            "https://relay.example.com/media/abc.png",
-            &origin
-        ));
-        assert!(!community_media("https://relay.example.com/a.png", &origin));
-        assert!(!community_media(
-            "https://cdn.example.com/media/abc.png",
-            &origin
-        ));
-        assert!(!community_media("", &origin));
     }
 }

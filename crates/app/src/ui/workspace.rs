@@ -125,7 +125,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.onboarding.is_some() {
+        // Without a community Settings still opens, as buzz-app's Personal
+        // space allows; without an identity it does not.
+        if matches!(self.onboarding, Some((Step::Identity, _))) {
             return;
         }
         match &self.settings {
@@ -436,7 +438,9 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let dialog = self.dialog(window, cx);
-        let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding {
+        let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding
+            && self.page != Page::Settings
+        {
             onboarding.clone().into_any_element()
         } else {
             match self.page {

@@ -1,5 +1,6 @@
 //! Settings → Profile (§5b.5 item 1): the selected community's profile,
-//! identity details and sign-out.
+//! or the default profile new communities start from; identity details,
+//! the private key and sign-out.
 
 use super::{
     Modal, SettingsPage, avatar, button, field, form_group, header, inline_header, note,
@@ -7,9 +8,9 @@ use super::{
 };
 use crate::community::{AppState, Community, IdentityState};
 use crate::ui::media;
-use buzz_relay_client::ProfileEdit;
 use buzz_relay_client::account::{ABOUT_LIMIT, picture_error};
 use buzz_relay_client::upload;
+use buzz_relay_client::{ProfileEdit, RelayOrigin};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonVariant, IconButton,
     IconButtonSize, IconName, Surface, TextArea, TextField, TypeStyled,
@@ -17,6 +18,86 @@ use buzz_ui::{
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use serde::{Deserialize, Serialize};
+
+/// Viewer preference holding the default profile (buzz-app's
+/// `client.profile`): what joining a community starts from, and what
+/// Settings → Profile edits while no community is selected.
+const DEFAULT_PROFILE: &str = "profile";
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Stored {
+    name: String,
+    picture: String,
+    about: String,
+}
+
+/// The viewer's default profile; empty when none is saved.
+pub fn default_profile(cx: &App) -> ProfileEdit {
+    let state = cx.global::<AppState>();
+    let IdentityState::Ready(identity) = &state.identity else {
+        return ProfileEdit::default();
+    };
+    let stored: Stored = state
+        .store
+        .viewer_pref(&identity.pubkey_hex(), DEFAULT_PROFILE)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    ProfileEdit {
+        name: stored.name,
+        picture: stored.picture,
+        about: stored.about,
+    }
+}
+
+/// Saves `profile` as the default. A picture on `community`'s own media
+/// is replaced by the previous default's, since other communities cannot
+/// show it (`profileDefault`).
+pub fn remember_profile(profile: ProfileEdit, community: Option<&RelayOrigin>, cx: &App) {
+    let profile = without_community_media(profile, &default_profile(cx), community);
+    let state = cx.global::<AppState>();
+    let IdentityState::Ready(identity) = &state.identity else {
+        return;
+    };
+    let json = serde_json::to_string(&Stored {
+        name: profile.name,
+        picture: profile.picture,
+        about: profile.about,
+    })
+    .expect("profiles serialize");
+    if let Err(error) = state
+        .store
+        .set_viewer_pref(&identity.pubkey_hex(), DEFAULT_PROFILE, &json)
+    {
+        tracing::warn!(%error, "could not save the default profile");
+    }
+}
+
+/// buzz-app's `profileDefault`.
+fn without_community_media(
+    profile: ProfileEdit,
+    previous: &ProfileEdit,
+    community: Option<&RelayOrigin>,
+) -> ProfileEdit {
+    let Some(community) = community else {
+        return profile;
+    };
+    let on_community = url::Url::parse(&profile.picture).is_ok_and(|picture| {
+        picture.origin().ascii_serialization() == community.http().trim_end_matches('/')
+            && picture.path().starts_with("/media/")
+    });
+    if on_community {
+        ProfileEdit {
+            picture: previous.picture.clone(),
+            ..profile
+        }
+    } else {
+        profile
+    }
+}
 
 /// The profile editor's fields and what they were loaded from.
 pub(super) struct ProfileForm {
@@ -29,14 +110,23 @@ pub(super) struct ProfileForm {
     saving: bool,
     uploading: bool,
     error: Option<SharedString>,
+    /// The private key field: masked until revealed.
+    nsec: Entity<InputState>,
+    pub(super) nsec_revealed: bool,
+    /// The last reveal or copy outcome; `true` when it failed.
+    pub(super) nsec_message: Option<(SharedString, bool)>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// What the private key field shows while hidden.
+const MASK: &str = "••••••••••••••••";
 
 impl ProfileForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
         let about = cx.new(|cx| TextareaState::new(window, cx));
         let picture = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
+        let nsec = cx.new(|cx| InputState::new(window, cx).default_value(MASK));
         let changed = |this: &mut SettingsPage, cx: &mut Context<SettingsPage>| {
             this.profile.error = None;
             cx.notify();
@@ -57,6 +147,19 @@ impl ProfileForm {
                     changed(this, cx);
                 }
             }),
+            // Read-only: the key can be selected and copied, not edited.
+            cx.subscribe_in(&nsec, window, |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.profile.show_nsec(window, cx);
+                }
+            }),
+            // The key hides when the window loses focus (`PrivateKey.tsx`).
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() && this.profile.nsec_revealed {
+                    this.profile.hide_nsec(window, cx);
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             community: None,
@@ -67,8 +170,34 @@ impl ProfileForm {
             saving: false,
             uploading: false,
             error: None,
+            nsec,
+            nsec_revealed: false,
+            nsec_message: None,
             _subscriptions,
         }
+    }
+
+    /// The private key, or the mask while hidden.
+    fn nsec_text(&self, cx: &App) -> String {
+        match (&cx.global::<AppState>().identity, self.nsec_revealed) {
+            (IdentityState::Ready(identity), true) => identity.nsec().to_string(),
+            _ => MASK.to_string(),
+        }
+    }
+
+    /// Puts the field back to what it shows, undoing any typing.
+    fn show_nsec(&mut self, window: &mut Window, cx: &mut App) {
+        let text = self.nsec_text(cx);
+        if self.nsec.read(cx).value() != text.as_str() {
+            self.nsec
+                .update(cx, |state, cx| state.set_value(text, window, cx));
+        }
+    }
+
+    pub(super) fn hide_nsec(&mut self, window: &mut Window, cx: &mut App) {
+        self.nsec_revealed = false;
+        self.nsec_message = None;
+        self.show_nsec(window, cx);
     }
 
     fn values(&self, cx: &App) -> ProfileEdit {
@@ -96,9 +225,10 @@ impl ProfileForm {
         if !switched && (self.saving || self.dirty(cx)) {
             return;
         }
-        let saved = community
-            .map(|community| saved_profile(community, cx))
-            .unwrap_or_default();
+        let saved = match community {
+            Some(community) => saved_profile(community, cx),
+            None => default_profile(cx),
+        };
         if !switched && saved == self.baseline {
             return;
         }
@@ -149,18 +279,26 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn save_profile(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn save_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edit = self.profile.values(cx);
+        let saved = match buzz_relay_client::account::validate(&edit) {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.profile.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
         let Some(community) = AppState::current(cx) else {
+            // The default profile is local; nothing is published.
+            remember_profile(saved.clone(), None, cx);
+            self.profile.set(saved, window, cx);
+            self.show_toast("Profile updated", cx);
             return;
         };
-        let edit = self.profile.values(cx);
-        if let Err(error) = buzz_relay_client::account::validate(&edit) {
-            self.profile.error = Some(error.to_string().into());
-            cx.notify();
-            return;
-        }
         self.profile.saving = true;
         self.profile.error = None;
+        let origin = community.read(cx).origin.clone();
         let session = community.read(cx).session.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = session.publish_profile(edit.clone()).await;
@@ -169,6 +307,7 @@ impl SettingsPage {
                 match result {
                     Ok(()) => {
                         let saved = buzz_relay_client::account::validate(&edit).unwrap_or(edit);
+                        remember_profile(saved.clone(), Some(&origin), cx);
                         this.profile.set(saved, window, cx);
                         this.show_toast("Profile updated", cx);
                     }
@@ -244,11 +383,13 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let c = *cx.colors();
+        // The key field follows a hide that happened elsewhere.
+        self.profile.show_nsec(window, cx);
         let community = AppState::current(cx);
         let subtitle = if community.is_some() {
             "Update this community’s profile. Other community profiles stay unchanged."
         } else {
-            "Profiles belong to communities. Add a community to set up yours."
+            "Used for new communities. Existing community profiles stay unchanged."
         };
         let mut parts = vec![header("Profile", Some(subtitle.into()), cx).into_any_element()];
         let identity = match &cx.global::<AppState>().identity {
@@ -259,9 +400,10 @@ impl SettingsPage {
             parts.push(note("Your identity is unavailable.", cx).into_any_element());
             return section(parts);
         };
-        if let Some(community) = &community {
-            parts.push(self.profile_form(community, window, cx).into_any_element());
-        }
+        parts.push(
+            self.profile_form(community.as_ref(), window, cx)
+                .into_any_element(),
+        );
 
         // Identity details.
         let hex = identity.pubkey_hex();
@@ -311,7 +453,87 @@ impl SettingsPage {
                 cx,
             ),
         ];
+        // The private key widget (`PrivateKey.tsx`).
         let secret = identity.clone();
+        let revealed = self.profile.nsec_revealed;
+        let message = self.profile.nsec_message.clone().map(|(text, failed)| {
+            div()
+                .mt(rems(0.75))
+                .text_body_sm()
+                .text_color(if failed { c.text_danger } else { c.text_subtle })
+                .child(text)
+        });
+        let private_key =
+            form_group(
+                vec![
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .mb(rems(0.5))
+                                .text_label_sm()
+                                .child("Private key (nsec)"),
+                        )
+                        .child(
+                            div()
+                                .text_body_sm()
+                                .text_color(c.text_subtle)
+                                .child("Anyone with this key can act as you. Never share it."),
+                        )
+                        .child(
+                            div().mt(rems(0.75)).child(
+                                TextField::new(&self.profile.nsec).surface(Surface::Floating),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .mt(rems(0.75))
+                                .flex()
+                                .flex_wrap()
+                                .gap(rems(0.75))
+                                .child(
+                                    button(
+                                        "reveal-nsec",
+                                        if revealed {
+                                            "Hide private key"
+                                        } else {
+                                            "Reveal private key"
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            if this.profile.nsec_revealed {
+                                                this.profile.hide_nsec(window, cx);
+                                            } else {
+                                                this.profile.nsec_revealed = true;
+                                                this.profile.nsec_message = None;
+                                                this.profile.show_nsec(window, cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .child(button("copy-nsec", "Copy private key").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            secret.nsec().to_string(),
+                                        ));
+                                        this.profile.nsec_message = Some((
+                                            "Private key copied. Keep it somewhere safe; your \
+                                         clipboard now contains it."
+                                                .into(),
+                                            false,
+                                        ));
+                                        cx.notify();
+                                    }),
+                                )),
+                        )
+                        .children(message)
+                        .into_any_element(),
+                ],
+                cx,
+            );
         parts.push(
             div()
                 .flex()
@@ -326,30 +548,10 @@ impl SettingsPage {
                     cx,
                 ))
                 .child(rows_group(rows, cx))
+                .child(div().mt(rems(1.5)).child(private_key))
                 .child(
                     div().mt(rems(1.5)).child(rows_group(
                         vec![
-                            preference_row(
-                                None,
-                                "Private key",
-                                Some(
-                                    "Your nsec signs you in on another device. Anyone who has it \
-                                     can act as you, so keep it secret."
-                                        .into_any_element(),
-                                ),
-                                vec![
-                                    button("copy-nsec", "Copy private key")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                secret.nsec().to_string(),
-                                            ));
-                                            this.show_toast("Copied private key", cx);
-                                        }))
-                                        .into_any_element(),
-                                ],
-                                cx,
-                            )
-                            .into_any_element(),
                             preference_row(
                                 None,
                                 "Sign out of Buzz",
@@ -380,7 +582,7 @@ impl SettingsPage {
 
     fn profile_form(
         &mut self,
-        community: &Entity<Community>,
+        community: Option<&Entity<Community>>,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -389,7 +591,7 @@ impl SettingsPage {
         let values = form.values(cx);
         let dirty = form.dirty(cx);
         let busy = form.saving || form.uploading;
-        let media = community.read(cx).session.media().clone();
+        let media = community.map(|community| community.read(cx).session.media().clone());
         let name = values.name.trim().to_string();
         let about_len = values.about.encode_utf16().count();
         let about_error = (about_len > ABOUT_LIMIT).then(|| {
@@ -406,34 +608,40 @@ impl SettingsPage {
             .size(AvatarSize::Px(80.));
         let picture = values.picture.trim();
         if picture.starts_with("https://") && picture_error.is_none() {
-            avatar = avatar.image(media::avatar(picture, &media));
+            avatar = avatar.image(match &media {
+                Some(media) => media::avatar(picture, media),
+                None => ImageSource::from(SharedString::from(picture.to_string())),
+            });
         }
         let editor = div()
             .relative()
             .flex_none()
             .size(rems(5.))
             .child(avatar)
-            .child(
-                div()
-                    .absolute()
-                    .right(rems(-0.25))
-                    .bottom(rems(-0.25))
-                    .child(
-                        IconButton::new("avatar-upload", IconName::Plus)
-                            .size(IconButtonSize::Sm)
-                            .variant(ButtonVariant::Prominent)
-                            .shape(buzz_ui::IconButtonShape::Round)
-                            .disabled(busy)
-                            .tooltip(if form.uploading {
-                                "Uploading…"
-                            } else {
-                                "Upload an image"
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.upload_avatar(window, cx)),
-                            ),
-                    ),
-            );
+            // Uploads go to a community's media server.
+            .when(media.is_some(), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right(rems(-0.25))
+                        .bottom(rems(-0.25))
+                        .child(
+                            IconButton::new("avatar-upload", IconName::Plus)
+                                .size(IconButtonSize::Sm)
+                                .variant(ButtonVariant::Prominent)
+                                .shape(buzz_ui::IconButtonShape::Round)
+                                .disabled(busy)
+                                .tooltip(if form.uploading {
+                                    "Uploading…"
+                                } else {
+                                    "Upload an image"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.upload_avatar(window, cx)
+                                })),
+                        ),
+                )
+            });
         let preview = div()
             .flex()
             .items_center()
@@ -512,6 +720,8 @@ impl SettingsPage {
                         .disabled(busy),
                     Some(if form.uploading {
                         "Uploading your image…".into()
+                    } else if media.is_none() {
+                        "An HTTPS image URL.".into()
                     } else {
                         "An HTTPS image URL, or upload one with the + button.".into()
                     }),
@@ -585,4 +795,46 @@ pub fn sign_out_dialog(
                 .on_click(on_confirm),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn community_media_stays_out_of_the_default() {
+        let community = RelayOrigin::parse("wss://relay.example.com").unwrap();
+        let previous = ProfileEdit {
+            picture: "https://cdn.example.org/me.png".into(),
+            ..Default::default()
+        };
+        let edit = |picture: &str| ProfileEdit {
+            name: "Alice".into(),
+            picture: picture.into(),
+            about: String::new(),
+        };
+        let local = without_community_media(
+            edit("https://relay.example.com/media/abc.png"),
+            &previous,
+            Some(&community),
+        );
+        assert_eq!(local.picture, previous.picture);
+        assert_eq!(local.name, "Alice");
+        for kept in [
+            "https://elsewhere.example.com/media/abc.png",
+            "https://relay.example.com/avatars/abc.png",
+            "",
+        ] {
+            assert_eq!(
+                without_community_media(edit(kept), &previous, Some(&community)).picture,
+                kept
+            );
+        }
+        let picture = "https://relay.example.com/media/abc.png";
+        assert_eq!(
+            without_community_media(edit(picture), &previous, None).picture,
+            picture
+        );
+    }
 }
