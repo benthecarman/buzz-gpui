@@ -200,9 +200,16 @@ impl Session {
         not_before: u64,
         note: Option<String>,
     ) -> Result<(), String> {
-        let _guard = self.reminders.writes.lock().await;
-        let intent = create_intent(&random_d(), now(), &target, not_before, note.as_deref());
-        self.write_reminder(intent).await
+        let writer = self.reminder_writer();
+        self.runtime
+            .spawn(async move {
+                let _guard = writer.shared.writes.lock().await;
+                let intent =
+                    create_intent(&random_d(), now(), &target, not_before, note.as_deref());
+                writer.write(intent).await
+            })
+            .await
+            .map_err(|_| CLOSED.to_owned())?
     }
 
     /// Moves a pending reminder to `not_before`.
@@ -220,16 +227,43 @@ impl Session {
     }
 
     async fn edit_reminder(&self, id: &str, edit: ReminderEdit) -> Result<(), String> {
-        let _guard = self.reminders.writes.lock().await;
-        let current = self.reminder_head(id).await?;
-        let days = 30 + u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 60;
-        self.write_reminder(edit_intent(&current, edit, now(), days))
+        let writer = self.reminder_writer();
+        let id = id.to_owned();
+        self.runtime
+            .spawn(async move {
+                let _guard = writer.shared.writes.lock().await;
+                let current = writer.head(id).await?;
+                let days = 30 + u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 60;
+                writer.write(edit_intent(&current, edit, now(), days)).await
+            })
             .await
+            .map_err(|_| CLOSED.to_owned())?
     }
 
-    async fn reminder_head(&self, id: &str) -> Result<Reminder, String> {
+    fn reminder_writer(&self) -> Writer {
+        Writer {
+            commands: self.commands.clone(),
+            http: self.direct.http.clone(),
+            identity: self.direct.identity.clone(),
+            viewer: self.viewer.clone(),
+            shared: self.reminders.clone(),
+        }
+    }
+}
+
+/// What a reminder write needs, owned, so it runs on the session's
+/// runtime whatever calls it.
+struct Writer {
+    commands: tokio::sync::mpsc::UnboundedSender<Message>,
+    http: crate::http::RelayHttp,
+    identity: Arc<Identity>,
+    viewer: String,
+    shared: Arc<Shared>,
+}
+
+impl Writer {
+    async fn head(&self, id: String) -> Result<Reminder, String> {
         let (reply, answer) = oneshot::channel();
-        let id = id.to_owned();
         self.commands
             .send(Message::With(Box::new(move |actor| {
                 let _ = reply.send(actor.reminders.store.get(&id).cloned());
@@ -242,17 +276,17 @@ impl Session {
     }
 
     /// Seals, publishes and shows one reminder record.
-    async fn write_reminder(&self, intent: buzz_identity::ReminderIntent) -> Result<(), String> {
-        let identity = self.direct.identity.clone();
-        let event = identity
+    async fn write(&self, intent: buzz_identity::ReminderIntent) -> Result<(), String> {
+        let event = self
+            .identity
             .seal_reminder(intent, now())
             .map_err(|error| error.to_string())?;
         let body = serde_json::to_string(&event).expect("events serialize");
-        accept_publish(self.direct.http.post("/events", body).await, &event.id).map_err(
-            |error| match error {
+        accept_publish(self.http.post("/events", body).await, &event.id).map_err(|error| {
+            match error {
                 PublishError::Rejected(message) | PublishError::Uncertain(message) => message,
-            },
-        )?;
+            }
+        })?;
         let viewer = self.viewer.clone();
         let (reply, answer) = oneshot::channel();
         self.commands

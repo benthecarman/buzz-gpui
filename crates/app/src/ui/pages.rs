@@ -110,6 +110,7 @@ pub fn init(cx: &mut App) {
         cx,
     );
     super::me::register(cx);
+    super::reminders::register(cx);
     register(
         PageSpec {
             // Agents shares the channel sidebar and its collapse toggle.

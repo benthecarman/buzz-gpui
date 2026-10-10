@@ -100,7 +100,7 @@ impl SettingsPage {
             .into_any_element()
         };
         // Category switches stay live with Desktop alerts off.
-        let categories = CATEGORY_ROWS
+        let mut categories: Vec<AnyElement> = CATEGORY_ROWS
             .into_iter()
             .map(|(category, label)| {
                 switch_row(
@@ -113,6 +113,19 @@ impl SettingsPage {
                 )
             })
             .collect();
+        // Plugin categories follow, such as Reminders.
+        for spec in crate::notifications::categories::all(cx) {
+            categories.push(switch_row(
+                format!("notify-{}", spec.key).into(),
+                spec.label,
+                None,
+                preferences.categories.get(spec.key) != Some(&false),
+                Box::new(move |p, v| {
+                    p.categories.insert(spec.key.to_owned(), v);
+                }),
+                cx,
+            ));
+        }
         let enabled = preferences.enabled;
         let mut delivery = vec![switch_row(
             "notify-desktop".into(),

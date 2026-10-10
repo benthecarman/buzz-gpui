@@ -63,7 +63,6 @@ impl SettingsPage {
                                         SharedString::from(format!("plugin-{}", plugin.id)),
                                         enabled,
                                     )
-                                    .label(format!("Enable {}", plugin.name))
                                     .disabled(busy)
                                     .on_change(move |on, _, cx| Plugins::change(&id, on, cx))
                                     .into_any_element(),

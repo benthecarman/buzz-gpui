@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod banners;
+pub mod categories;
 
 /// Viewer preference key for the notification choices
 /// (`buzz-notification-preferences.v1:<viewer>`).
@@ -57,6 +58,9 @@ pub struct Preferences {
     /// "Sound": alerts play their category's sound.
     pub sound: bool,
     pub sounds: CategorySounds,
+    /// Plugin categories by key (`buzz.reminders/reminders`); a missing
+    /// key is on.
+    pub categories: std::collections::BTreeMap<String, bool>,
 }
 
 impl Default for Preferences {
@@ -69,6 +73,7 @@ impl Default for Preferences {
             notify_while_viewing: false,
             sound: true,
             sounds: CategorySounds::default(),
+            categories: Default::default(),
         }
     }
 }
@@ -240,7 +245,7 @@ impl Notifications {
             .unwrap_or_default()
     }
 
-    fn report(error: String, cx: &mut App) {
+    pub(crate) fn report(error: String, cx: &mut App) {
         if cx.has_global::<Self>() {
             cx.global_mut::<Self>().error = Some(error);
         }
@@ -400,7 +405,7 @@ fn text(
 
 /// One line without control characters, at most `limit` code points with
 /// an ellipsis.
-fn short_text(value: &str, limit: usize) -> String {
+pub(crate) fn short_text(value: &str, limit: usize) -> String {
     let cleaned: String = value
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -422,7 +427,7 @@ fn short_text(value: &str, limit: usize) -> String {
 
 /// CommonMark flattened to prose: HTML and definitions dropped, images
 /// labelled, at most [`BODY_CHARS`] code points.
-fn plain_text(content: &str) -> String {
+pub(crate) fn plain_text(content: &str) -> String {
     let source: String = content.chars().take(SOURCE_CHARS).collect();
     let Ok(tree) = markdown::to_mdast(&source, &markdown::ParseOptions::default()) else {
         return short_text(&source, BODY_CHARS);
@@ -470,7 +475,7 @@ fn prose(node: &markdown::mdast::Node) -> String {
 type Delivery = futures::channel::oneshot::Receiver<Result<(), String>>;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
+pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
     struct Service(banners::Banners);
     impl Global for Service {}
 
@@ -492,7 +497,7 @@ fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn show(title: String, _body: String, _target: Target, _cx: &mut App) -> Delivery {
+pub(crate) fn show(title: String, _body: String, _target: Target, _cx: &mut App) -> Delivery {
     tracing::debug!(%title, "desktop notifications are not supported on this platform");
     let (done, shown) = futures::channel::oneshot::channel();
     let _ = done.send(Err("This build can’t show system notifications.".into()));

@@ -67,6 +67,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Opens a plugin's dialog over the workspace, such as Remind me.
+    pub(crate) fn show_dialog<V: Render + EventEmitter<Dismissed>>(
+        &mut self,
+        view: Entity<V>,
+        cx: &mut Context<Self>,
+    ) {
+        self.show(view, false, cx);
+    }
+
     /// Search Buzz. Without a ready community it offers pages only.
     /// Mod+K, unless a dialog is open.
     pub fn search_buzz(&mut self, window: &mut Window, cx: &mut Context<Self>) {

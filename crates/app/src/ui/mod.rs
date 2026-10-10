@@ -49,6 +49,7 @@ pub mod pages;
 mod panels;
 mod profile_card;
 mod reading;
+mod reminders;
 mod renderers;
 mod report;
 mod resize_handle;

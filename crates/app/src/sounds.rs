@@ -123,6 +123,15 @@ pub fn play(category: Category, preferences: &Preferences) {
     }
 }
 
+/// Plays a plugin category's alert: the default sound, as buzz-app's
+/// `resolveCategorySound` gives categories without a choice.
+pub fn play_default(preferences: &Preferences) {
+    if preferences.enabled && preferences.sound {
+        let sound = Sound::default();
+        Player::global().start(Slot::Alert(sound), sound);
+    }
+}
+
 /// Plays `sound` as the Settings preview, stopping an earlier preview.
 pub fn preview(sound: Sound) {
     let player = Player::global();
