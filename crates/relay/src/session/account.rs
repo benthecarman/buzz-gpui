@@ -131,6 +131,33 @@ impl Session {
         .await
     }
 
+    /// Reads the viewer's own profile again, fresh and in the background,
+    /// so an avatar hydrated from disk or cut short by roster setup is
+    /// current (`ProfileButton.tsx`). Failures are ignored.
+    pub fn refresh_own_profile(&self) {
+        let reader = self.direct.reader.clone();
+        let commands = self.commands.clone();
+        let viewer = self.viewer.clone();
+        self.runtime.spawn(async move {
+            let read = reader
+                .read(
+                    vec![account::own_profile_filter(&viewer)],
+                    ReadOptions {
+                        fresh: true,
+                        ..ReadOptions::background()
+                    },
+                )
+                .await;
+            if let Ok(events) = read {
+                let _ = commands.send(Message::With(Box::new(move |actor| {
+                    if actor.profiles.accept(&events) {
+                        actor.publish();
+                    }
+                })));
+            }
+        });
+    }
+
     /// The viewer's current status, read fresh. `None` when unset, cleared
     /// or expired.
     pub async fn own_status(&self) -> Result<Option<UserStatus>, String> {

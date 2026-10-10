@@ -1,16 +1,17 @@
 //! The header's profile button and account menu (ui.md §2.5): who you
-//! are, your availability and status, Settings and sign-out.
+//! are, your availability and status, and Settings. Signing out is in
+//! Settings → Profile, as in buzz-app.
 
 use super::media;
 use super::overlay::{self, Align, Dismiss};
-use super::settings::{OpenSettings, sign_out_dialog};
+use super::settings::OpenSettings;
 use super::status::{Closed, StatusEditor};
 use crate::community::{AppState, IdentityState};
 use buzz_relay_client::{PresenceMode, PresenceState, UserStatus};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, ButtonVariant, Icon, IconButton, IconButtonShape,
-    IconButtonSize, IconName, Kbd, MaterialStyled, Menu, MenuItem, MenuSeparator, Presence,
-    Spinner, TypeStyled, tokens::radius,
+    IconButtonSize, IconName, MaterialStyled, Menu, MenuItem, MenuSeparator, Presence, Spinner,
+    TypeStyled, tokens::radius,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -30,9 +31,6 @@ enum Modal {
         editor: Entity<StatusEditor>,
         _subscription: Subscription,
     },
-    SignOut {
-        error: Option<SharedString>,
-    },
 }
 
 pub struct Account {
@@ -50,6 +48,8 @@ pub struct Account {
     /// An availability choice waiting to be observed on the relay.
     availability: Option<Change>,
     changes: usize,
+    /// Communities whose own profile was read again once live.
+    refreshed: Vec<EntityId>,
 }
 
 /// Confirmation feedback for an availability choice: one 15 s deadline
@@ -75,7 +75,27 @@ impl Account {
             status_error: None,
             availability: None,
             changes: 0,
+            refreshed: Vec::new(),
         }
+    }
+
+    /// Once the roster is verified and live, reads the viewer's profile
+    /// again, so the avatar is not a stale copy (`ProfileButton.tsx`).
+    fn refresh_profile(&mut self, cx: &App) {
+        let Some(community) = AppState::current(cx) else {
+            return;
+        };
+        let id = community.entity_id();
+        let community = community.read(cx);
+        let snapshot = &community.snapshot;
+        if self.refreshed.contains(&id)
+            || snapshot.roster != buzz_relay_client::RosterStatus::Ready
+            || !snapshot.live
+        {
+            return;
+        }
+        self.refreshed.push(id);
+        community.session.refresh_own_profile();
     }
 
     fn confirm_availability(&mut self, mode: PresenceMode, cx: &mut Context<Self>) {
@@ -385,11 +405,7 @@ impl Account {
                 .color(c.text_subtle)
                 .into_any_element()
         });
-        let shortcut = if cfg!(target_os = "macos") {
-            "⌘,"
-        } else {
-            "Ctrl+,"
-        };
+        let presence_error = cx.global::<AppState>().presence_error.clone();
         div()
             .mt(px(4.))
             .w(rems(18.))
@@ -402,6 +418,7 @@ impl Account {
                 self.availability.is_some_and(|change| change.failed),
                 |this| this.child(error("Could not confirm your status. Try again.".into())),
             )
+            .children(presence_error.map(|text| error(text.into())))
             .children(self.status_error.clone().map(error))
             .children(status_row)
             .child(MenuSeparator::new())
@@ -410,15 +427,7 @@ impl Account {
                     "account-settings",
                     IconName::Gear,
                     "Settings",
-                    Some(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(rems(0.5))
-                            .child(Kbd::new(shortcut))
-                            .children(settings_check)
-                            .into_any_element(),
-                    ),
+                    settings_check,
                     cx,
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -426,51 +435,14 @@ impl Account {
                     window.dispatch_action(Box::new(OpenSettings), cx);
                 })),
             )
-            .when(profile.signed_in, |this| {
-                this.child(
-                    Self::row("account-sign-out", IconName::SignOut, "Sign out", None, cx)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open = None;
-                            this.modal = Some(Modal::SignOut { error: None });
-                            cx.notify();
-                        })),
-                )
-            })
             .into_any_element()
     }
 
-    fn modal(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn modal(&self, window: &Window) -> Option<AnyElement> {
         let content = match self.modal.as_ref()? {
             Modal::Status { editor, .. } => editor.clone().into_any_element(),
-            Modal::SignOut { error } => sign_out_dialog(
-                error.clone(),
-                cx.listener(|this, _, _, cx| {
-                    this.modal = None;
-                    cx.notify();
-                }),
-                cx.listener(|this, _, _, cx| {
-                    this.modal = match AppState::sign_out(cx) {
-                        Ok(()) => None,
-                        Err(error) => Some(Modal::SignOut {
-                            error: Some(error.into()),
-                        }),
-                    };
-                    cx.notify();
-                }),
-                cx,
-            ),
         };
-        let dismiss: Option<Dismiss> =
-            matches!(self.modal, Some(Modal::SignOut { .. })).then(|| {
-                let account = cx.entity().downgrade();
-                Rc::new(move |_: &mut Window, cx: &mut App| {
-                    let _ = account.update(cx, |this, cx| {
-                        this.modal = None;
-                        cx.notify();
-                    });
-                }) as Dismiss
-            });
-        Some(overlay::modal(window, content, dismiss).into_any_element())
+        Some(overlay::modal(window, content, None).into_any_element())
     }
 }
 
@@ -484,7 +456,6 @@ struct Profile {
     presence: Option<PresenceState>,
     /// A community is selected, so status and availability apply.
     community: bool,
-    signed_in: bool,
 }
 
 impl Profile {
@@ -542,7 +513,6 @@ impl Profile {
             picture,
             presence,
             community: community.is_some() && viewer.is_some(),
-            signed_in: viewer.is_some(),
         }
     }
 
@@ -572,6 +542,7 @@ fn short_key(key: &str) -> String {
 
 impl Render for Account {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_profile(cx);
         let profile = Profile::read(cx);
         // Confirmed: the relay shows what the user chose.
         if self
@@ -587,7 +558,7 @@ impl Render for Account {
         });
         let menu_open = self.open.is_some();
         let menu = menu_open.then(|| self.menu(&profile, window, cx));
-        let modal = self.modal(window, cx);
+        let modal = self.modal(window);
         div()
             .relative()
             .child(
