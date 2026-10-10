@@ -7,6 +7,7 @@ pub mod dm;
 pub mod emoji;
 pub mod event;
 pub mod fold;
+pub mod gifs;
 pub mod http;
 pub mod lifecycle;
 pub mod links;

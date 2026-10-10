@@ -7,6 +7,7 @@ mod channel;
 mod channel_menu;
 mod composer;
 mod emoji_picker;
+mod gif_picker;
 mod markdown;
 mod media;
 mod members;

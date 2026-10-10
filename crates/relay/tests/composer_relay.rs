@@ -229,3 +229,19 @@ async fn adds_custom_emoji_to_the_viewer_set() {
         .await
         .unwrap();
 }
+
+/// The test relays do not advertise `buzz-gif`, and the plain one is not
+/// HTTPS, so GIF search stays off without a request to the provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn offers_gifs_only_when_the_relay_advertises_them() {
+    let Some(fixture) = fixture() else {
+        eprintln!("BUZZ_TEST_RELAY not set; skipping");
+        return;
+    };
+    let alice = fixture.session("alice").await;
+    assert!(!alice.gif_search_available().await);
+    assert_eq!(
+        alice.search_gifs("cats", "test", "en-US").await,
+        Err(gifs::UNAVAILABLE.to_owned())
+    );
+}

@@ -7,11 +7,15 @@
 //! (`emoji-search.ts`), and the reaction usage counts behind "Frequently
 //! used" and the hover bar's quick reactions (`quick-reactions.ts`).
 
+use super::gif_picker::{self, GifPanel, PickedGif};
 use super::media;
 use crate::community::{AppState, Community};
 use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::{CustomEmoji, EmojiSnapshot, Partition};
-use buzz_ui::{ActiveTheme, Icon, IconName, MaterialStyled, SearchField, Tooltip, TypeStyled};
+use buzz_ui::{
+    ActiveTheme, Icon, IconName, MaterialStyled, SearchField, Tab, TabVariant, Tabs, Tooltip,
+    TypeStyled,
+};
 use emojis::{Emoji, Group, SkinTone, UnicodeVersion};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -481,10 +485,22 @@ pub struct EmojiPicker {
     tones_open: bool,
     /// The palette the rows were built from.
     built_for: Option<Arc<[CustomEmoji]>>,
+    /// The composer's picker also offers GIFs, when the relay does.
+    gifs: Option<GifTab>,
     _subscriptions: Vec<Subscription>,
 }
 
+struct GifTab {
+    panel: Entity<GifPanel>,
+    /// `None` until the relay's NIP-11 answers.
+    available: Option<bool>,
+    showing: bool,
+    _check: Option<Task<()>>,
+    _subscription: Subscription,
+}
+
 impl EventEmitter<Picked> for EmojiPicker {}
+impl EventEmitter<PickedGif> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
 
 impl EmojiPicker {
@@ -536,6 +552,7 @@ impl EmojiPicker {
             tone: 0,
             tones_open: false,
             built_for: None,
+            gifs: None,
             _subscriptions: subscriptions,
         };
         picker.rebuild(cx);
@@ -547,7 +564,67 @@ impl EmojiPicker {
         self.search
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.tones_open = false;
+        if let Some(gifs) = &mut self.gifs {
+            gifs.showing = false;
+        }
+        self.check_gifs(cx);
         self.rebuild(cx);
+    }
+
+    /// Adds the GIF tab, shown once the relay says it offers GIF search.
+    pub fn enable_gifs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = cx.new(|cx| GifPanel::new(self.community.clone(), window, cx));
+        let subscription = cx.subscribe(&panel, |_, _, PickedGif(markdown), cx| {
+            cx.emit(PickedGif(markdown.clone()))
+        });
+        self.gifs = Some(GifTab {
+            panel,
+            available: None,
+            showing: false,
+            _check: None,
+            _subscription: subscription,
+        });
+        self.check_gifs(cx);
+    }
+
+    /// Asks the relay again unless it already said yes; a "no" or a
+    /// failure is not remembered, as a relay can turn GIFs on.
+    fn check_gifs(&mut self, cx: &mut Context<Self>) {
+        let Some(gifs) = &mut self.gifs else {
+            return;
+        };
+        if gifs.available == Some(true) || gifs._check.is_some() {
+            return;
+        }
+        let community = self.community.clone();
+        gifs._check = Some(cx.spawn(async move |this, cx| {
+            let available = gif_picker::available(&community, cx).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(gifs) = &mut this.gifs {
+                    gifs.available = Some(available);
+                    gifs._check = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn show_gifs(&mut self, showing: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).value().to_string();
+        let Some(gifs) = &mut self.gifs else {
+            return;
+        };
+        if gifs.showing == showing {
+            return;
+        }
+        gifs.showing = showing;
+        if showing {
+            gifs.panel
+                .update(cx, |panel, cx| panel.open(&query, window, cx));
+        } else {
+            self.focus(window, cx);
+        }
+        cx.notify();
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -763,6 +840,11 @@ impl Render for EmojiPicker {
             .child(div().flex_1())
             .child(self.tone_control(cx));
 
+        let tabs = self
+            .gifs
+            .as_ref()
+            .filter(|gifs| gifs.available == Some(true))
+            .map(|gifs| (gifs.showing, gifs.panel.clone()));
         div()
             .id("emoji-picker")
             .capture_action(cx.listener(|_, _: &Escape, _, cx| {
@@ -776,15 +858,37 @@ impl Render for EmojiPicker {
             .overflow_hidden()
             .occlude()
             .text_color(c.text_standard)
-            .child(
-                div()
-                    .px(px(12.))
-                    .pt(px(12.))
-                    .pb(px(4.))
-                    .child(SearchField::new(&self.search).capsule()),
-            )
-            .child(grid)
-            .child(nav)
+            .when_some(tabs.clone(), |d, (showing, _)| {
+                // `Tabs variant="panel" label="Media type"`.
+                d.child(
+                    div().mx(px(12.)).mt(px(12.)).child(
+                        Tabs::new(TabVariant::Panel)
+                            .tab(
+                                Tab::new("picker-emoji", "Emoji")
+                                    .selected(!showing)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.show_gifs(false, window, cx)
+                                    })),
+                            )
+                            .tab(Tab::new("picker-gif", "GIF").selected(showing).on_click(
+                                cx.listener(|this, _, window, cx| this.show_gifs(true, window, cx)),
+                            )),
+                    ),
+                )
+            })
+            .map(|d| match tabs {
+                Some((true, panel)) => d.child(div().pt(px(12.)).child(panel)),
+                _ => d
+                    .child(
+                        div()
+                            .px(px(12.))
+                            .pt(px(12.))
+                            .pb(px(4.))
+                            .child(SearchField::new(&self.search).capsule()),
+                    )
+                    .child(grid)
+                    .child(nav),
+            })
     }
 }
 

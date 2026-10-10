@@ -8,6 +8,7 @@
 //! [`Composer::failed`].
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
+use super::gif_picker::PickedGif;
 use super::media;
 use super::media::recorder::{self, Recorder};
 use super::message::{self, channel_icon};
@@ -211,7 +212,11 @@ impl Composer {
                 .submit_on_enter(true)
                 .auto_grow(1, 9)
         });
-        let picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx));
+        let picker = cx.new(|cx| {
+            let mut picker = EmojiPicker::new(community.clone(), window, cx);
+            picker.enable_gifs(window, cx);
+            picker
+        });
         let subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -225,6 +230,14 @@ impl Composer {
                     this.picker_open = false;
                     this.insert_text(&pick.text(), window, cx);
                 }),
+                cx.subscribe_in(
+                    &picker,
+                    window,
+                    |this, _, PickedGif(markdown), window, cx| {
+                        this.picker_open = false;
+                        this.insert_text(markdown, window, cx);
+                    },
+                ),
                 cx.subscribe_in(&picker, window, |this, _, _: &Dismissed, window, cx| {
                     this.picker_open = false;
                     this.focus(window, cx);
