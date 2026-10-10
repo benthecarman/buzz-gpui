@@ -196,13 +196,13 @@ impl AppState {
     /// community is dropped from this device and, unless the relay says
     /// access was revoked, its local data is purged. Any failure keeps the
     /// membership so the user can retry.
-    pub fn leave(community: Entity<Community>, cx: &mut App) -> Task<Result<(), String>> {
+    pub fn leave(community: Entity<Community>, cx: &mut App) -> Task<Result<LeaveOutcome, String>> {
         let session = community.read(cx).session.clone();
         cx.spawn(async move |cx| {
             let outcome = session.leave().await?;
             let purge = outcome != LeaveOutcome::Revoked;
             cx.update(|cx| Self::remove(&community, purge, cx));
-            Ok(())
+            Ok(outcome)
         })
     }
 

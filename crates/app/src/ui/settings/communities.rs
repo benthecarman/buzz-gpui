@@ -3,7 +3,10 @@
 
 use super::{Modal, SettingsPage, button, header, note, preference_row, rows_group, section};
 use crate::community::{AppState, Community};
-use buzz_ui::{ActiveTheme, AlertDialog, Avatar, AvatarSize, Badge, Button, Surface, TypeStyled};
+use buzz_relay_client::LeaveOutcome;
+use buzz_ui::{
+    ActiveTheme, AlertDialog, Avatar, AvatarSize, Badge, Button, Surface, ToastTone, TypeStyled,
+};
 use gpui_kit::*;
 
 impl SettingsPage {
@@ -79,12 +82,17 @@ impl SettingsPage {
             return;
         };
         *busy = true;
+        let name = community.read(cx).name();
         let task = AppState::leave(community.clone(), cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.modal = None,
+                    Ok(outcome) => {
+                        this.modal = None;
+                        let (text, tone) = left_text(&name, outcome);
+                        this.show_toast_tone(text, tone, cx);
+                    }
                     Err(message) => {
                         if let Some(Modal::Leave { busy, error, .. }) = &mut this.modal {
                             *busy = false;
@@ -110,9 +118,9 @@ impl SettingsPage {
         let name = community.read(cx).name();
         AlertDialog::new(format!("Leave {name}?"))
             .description(format!(
-                "You’ll stop being a member of {name} and lose access to its channels. Its \
-                 messages and settings on this device are removed. To come back, someone has \
-                 to add you again."
+                "This sends a leave request to the community’s relay, then removes {name} \
+                 from this device along with its saved drafts and reading positions. \
+                 Rejoining may need a new invite."
             ))
             .children(
                 error.map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
@@ -130,5 +138,43 @@ impl SettingsPage {
                     .on_click(cx.listener(|this, _, _, cx| this.leave(cx))),
             )
             .into_any_element()
+    }
+}
+
+/// buzz-app's `leftText`: what the leave did.
+fn left_text(name: &str, outcome: LeaveOutcome) -> (String, ToastTone) {
+    match outcome {
+        LeaveOutcome::Left => (format!("Left {name}."), ToastTone::Success),
+        LeaveOutcome::AlreadyAbsent => (
+            format!("You were no longer a member of {name}, so it was removed from this device."),
+            ToastTone::Info,
+        ),
+        LeaveOutcome::Revoked => (
+            format!(
+                "You’re currently banned from {name}, so the leave was refused. It was removed \
+                 from this device and can be added again by its URL if access is restored."
+            ),
+            ToastTone::Info,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn leave_toasts_follow_the_reference() {
+        assert_eq!(
+            left_text("Buzz", LeaveOutcome::Left),
+            ("Left Buzz.".into(), ToastTone::Success)
+        );
+        assert!(
+            left_text("Buzz", LeaveOutcome::AlreadyAbsent)
+                .0
+                .starts_with("You were no longer a member of Buzz")
+        );
+        assert_eq!(left_text("Buzz", LeaveOutcome::Revoked).1, ToastTone::Info);
     }
 }
