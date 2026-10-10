@@ -15,6 +15,7 @@
 
 mod account;
 mod actions;
+mod feedback;
 mod gifs;
 mod incoming;
 mod messaging;
@@ -26,6 +27,7 @@ mod timeline;
 mod unread;
 
 pub use actions::{MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
+pub use feedback::{FeedbackState, PendingFeedback};
 pub use incoming::IncomingMessage;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};

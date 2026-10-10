@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod dm;
 pub mod emoji;
 pub mod event;
+pub mod feedback;
 pub mod fold;
 pub mod gifs;
 pub mod http;
@@ -63,10 +64,10 @@ pub use read_state::{
 };
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
-    ChannelUnread, ChannelView, IncomingMessage, MessageSearch, PeoplePage, PublicChannels,
-    READING_DWELL_MS, RelayInfo, RosterStatus, SearchOutcome, Session, SessionSnapshot,
-    SessionStatus, ThreadUnread, TimelineSnapshot, TimelineStatus, UnreadCounts, UnreadDetail,
-    UnreadWatch,
+    ChannelUnread, ChannelView, FeedbackState, IncomingMessage, MessageSearch, PendingFeedback,
+    PeoplePage, PublicChannels, READING_DWELL_MS, RelayInfo, RosterStatus, SearchOutcome, Session,
+    SessionSnapshot, SessionStatus, ThreadUnread, TimelineSnapshot, TimelineStatus, UnreadCounts,
+    UnreadDetail, UnreadWatch,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,
