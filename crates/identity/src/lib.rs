@@ -326,6 +326,22 @@ impl Identity {
         )
         .map_err(|_| IdentityError::Decrypt)
     }
+
+    /// Decrypts an agent's activity frame or turn metrics (kinds 24200 and
+    /// 44200), which agents encrypt to their owner. Nothing else is opened
+    /// here; the event must be verified by the caller.
+    pub fn decrypt_agent_frame(&self, event: &Event) -> Result<String, IdentityError> {
+        let ours = self.keys.public_key().to_hex();
+        let addressed = event.tags.iter().any(|tag| {
+            let tag = tag.as_slice();
+            tag.first().map(String::as_str) == Some("p") && tag.get(1) == Some(&ours)
+        });
+        if !matches!(event.kind.as_u16(), 24200 | 44200) || !addressed {
+            return Err(IdentityError::NotAllowed);
+        }
+        nip44::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
+            .map_err(|_| IdentityError::Decrypt)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

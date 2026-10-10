@@ -1,6 +1,7 @@
 //! Client for Buzz relays.
 
 pub mod account;
+pub mod archive;
 pub mod community;
 pub mod discovery;
 pub mod dm;

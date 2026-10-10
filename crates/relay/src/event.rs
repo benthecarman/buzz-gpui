@@ -26,6 +26,8 @@ pub mod kinds {
     pub const COMMUNITY_ROSTER: u16 = 13534;
     pub const IDENTITY_ARCHIVE: u16 = 13535;
     pub const PRESENCE: u16 = 20001;
+    /// Encrypted agent activity frames (observer telemetry).
+    pub const AGENT_ACTIVITY: u16 = 24200;
     pub const TYPING: u16 = 20002;
     pub const LEAVE_COMMUNITY: u16 = 28936;
     pub const CUSTOM_EMOJI: u16 = 30030;
@@ -49,6 +51,8 @@ pub mod kinds {
     pub const HIDE_DM: u16 = 41012;
     pub const MEMBER_ADDED: u16 = 44100;
     pub const MEMBER_REMOVED: u16 = 44101;
+    /// Encrypted agent turn metrics.
+    pub const AGENT_METRICS: u16 = 44200;
     pub const FORUM_POST: u16 = 45001;
     pub const FORUM_COMMENT: u16 = 45003;
 

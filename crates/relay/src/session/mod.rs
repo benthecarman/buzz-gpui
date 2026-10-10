@@ -17,6 +17,7 @@ mod account;
 mod actions;
 mod gifs;
 mod incoming;
+mod observer;
 mod presence;
 mod threads;
 mod timeline;
@@ -221,6 +222,7 @@ impl Session {
             commands: commands.clone(),
             snapshot,
             live: None,
+            observer: None,
             relay: None,
             discovery: None,
             scan: None,
@@ -589,6 +591,8 @@ struct Actor {
     commands: mpsc::UnboundedSender<Message>,
     snapshot: watch::Sender<Arc<SessionSnapshot>>,
     live: Option<Live>,
+    /// The agent activity capture, if the archive wants one.
+    observer: Option<observer::Observer>,
     relay: Option<RelayInfo>,
     discovery: Option<DiscoveryState>,
     scan: Option<RosterScan>,
@@ -871,6 +875,7 @@ impl Actor {
             self.verifier.clone(),
             LiveOptions::default(),
         ));
+        self.observe_live();
         let journal = SqliteJournal::new(
             self.store.clone(),
             Partition::new(&self.origin, &self.identity.pubkey_hex()),
@@ -1080,6 +1085,7 @@ impl Actor {
                 self.admit_incoming(candidates);
             }
             LiveUpdate::Presence(events) => self.presence_live(&events),
+            LiveUpdate::Observer(events) => self.observed(events),
             LiveUpdate::Status => {}
             LiveUpdate::Established { route, channels } => {
                 if matches!(route, crate::RouteKey::Profiles) {

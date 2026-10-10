@@ -58,6 +58,9 @@ pub enum RouteKey {
     Profiles,
     Membership,
     Presence,
+    /// Agent activity and turn metrics addressed to the viewer, while the
+    /// archive captures them.
+    Observer,
     Channel(String),
     Batch(u64),
 }
@@ -88,6 +91,8 @@ pub enum LiveUpdate {
         scope: Arc<[String]>,
     },
     Presence(Vec<Verified>),
+    /// Agent activity (24200) or turn metrics (44200) for the viewer.
+    Observer(Vec<Verified>),
     /// A route reached EOSE. For channel routes the session catches up
     /// those channels over HTTP; for globals it refreshes global state.
     Established {
@@ -148,6 +153,7 @@ pub struct Live {
     joined: BTreeSet<String>,
     prioritized: Vec<String>,
     presence_authors: Vec<String>,
+    observer_kinds: Vec<u16>,
     cooldown: Option<Instant>,
     recovery: Instant,
     outbox: VecDeque<LiveUpdate>,
@@ -188,6 +194,7 @@ impl Live {
             joined: BTreeSet::new(),
             prioritized: Vec::new(),
             presence_authors: Vec::new(),
+            observer_kinds: Vec::new(),
             cooldown: None,
             outbox: VecDeque::new(),
         }
@@ -239,6 +246,26 @@ impl Live {
             if !self.presence_authors.is_empty() {
                 self.add_route(RouteKey::Presence, Vec::new());
             }
+            self.pump();
+        }
+    }
+
+    /// Agent kinds to receive live while they are archived; empty stops
+    /// the route (`observer`, relay.md §3.3). Only kinds 24200 and 44200.
+    pub fn watch_observer(&mut self, mut kinds: Vec<u16>) {
+        kinds.retain(|kind| matches!(*kind, kinds::AGENT_ACTIVITY | kinds::AGENT_METRICS));
+        kinds.sort_unstable();
+        kinds.dedup();
+        if kinds == self.observer_kinds {
+            return;
+        }
+        self.observer_kinds = kinds;
+        if self.connected {
+            self.remove_route(&RouteKey::Observer);
+            if !self.observer_kinds.is_empty() {
+                self.add_route(RouteKey::Observer, Vec::new());
+            }
+            self.sync();
             self.pump();
         }
     }
@@ -309,6 +336,9 @@ impl Live {
             if !self.presence_authors.is_empty() {
                 self.add_route(RouteKey::Presence, Vec::new());
             }
+            if !self.observer_kinds.is_empty() {
+                self.add_route(RouteKey::Observer, Vec::new());
+            }
             self.sync();
             self.outbox.push_back(LiveUpdate::Connected);
         } else {
@@ -319,8 +349,9 @@ impl Live {
     /// Reconciles channel routes with the inputs without rebalancing
     /// healthy batches.
     fn sync(&mut self) {
-        let capacity =
-            self.options.channel_capacity - usize::from(!self.presence_authors.is_empty());
+        let capacity = self.options.channel_capacity
+            - usize::from(!self.presence_authors.is_empty())
+            - usize::from(!self.observer_kinds.is_empty());
         let wanted: Vec<String> = self
             .prioritized
             .iter()
@@ -502,6 +533,13 @@ impl Live {
                 "since": route.since,
                 "limit": 0,
             }))],
+            // From the moment of dispatch and without a limit: the archive
+            // only takes fresh envelopes.
+            RouteKey::Observer => vec![object(json!({
+                "kinds": self.observer_kinds,
+                "#p": [self.viewer],
+                "since": now_secs(),
+            }))],
             RouteKey::Channel(_) => vec![channel(route.channels.iter().collect())],
             // One filter per channel on first open; replacements use one
             // filter naming all survivors.
@@ -518,7 +556,7 @@ impl Live {
         }
         let rank = |key: &RouteKey, prioritized: &[String]| match key {
             RouteKey::Profiles | RouteKey::Membership => 0,
-            RouteKey::Presence => 1,
+            RouteKey::Presence | RouteKey::Observer => 1,
             RouteKey::Channel(id) => match prioritized.iter().position(|p| p == id) {
                 Some(index) => 2 + index,
                 None => 100,
@@ -601,7 +639,7 @@ impl Live {
                 if let Some(previous) = route.previous.take() {
                     self.close_wire(previous);
                 }
-                if !matches!(key, RouteKey::Presence) {
+                if !matches!(key, RouteKey::Presence | RouteKey::Observer) {
                     self.outbox.push_back(LiveUpdate::Established {
                         route: key,
                         channels,
@@ -631,6 +669,15 @@ impl Live {
                     && self.presence_authors.contains(&event.pubkey_hex())
                 {
                     self.outbox.push_back(LiveUpdate::Presence(vec![event]));
+                }
+            }
+            RouteKey::Observer => {
+                if self.observer_kinds.contains(&event.kind_u16())
+                    && event
+                        .tags_named("p")
+                        .any(|tag| tag.get(1) == Some(&self.viewer))
+                {
+                    self.outbox.push_back(LiveUpdate::Observer(vec![event]));
                 }
             }
             RouteKey::Profiles | RouteKey::Membership => {
