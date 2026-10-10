@@ -516,7 +516,7 @@ pub fn added_by(label: SharedString, c: &buzz_ui::Colors) -> Div {
     div()
         .text_body_sm()
         .text_color(c.text_subtle)
-        .child("Added by ")
+        .child("Added by")
         .child(div().text_color(c.text_standard).child(label))
         .flex()
         .gap(rems(0.25))

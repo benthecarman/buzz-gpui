@@ -575,6 +575,7 @@ impl TeamsSection {
                                 .selected(open)
                                 .disabled(disabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
                                     this.menu = Some(id.clone());
                                     cx.notify();
                                 })),
