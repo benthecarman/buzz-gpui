@@ -40,3 +40,10 @@ pub enum RpcError {
     #[error("{0}")]
     Failed(String),
 }
+
+impl RpcError {
+    /// The other side could not read the request: it predates it.
+    pub fn is_unsupported(&self) -> bool {
+        *self == frame::unsupported()
+    }
+}
