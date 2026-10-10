@@ -497,11 +497,11 @@ The Claude Code harness preset (claude-agent-acp) exists in the port (host/harne
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Agents2 type "Claude Code" (one continuing session per thread; summary = model) | CC/index.ts:39-52 | MISSING | Agents2 first | L |
-| Claude tab: status ("Checking Claude Code…", "not installed", "needs you to sign in", "is ready (account)"), "Install Claude Code", "Sign in", "Cancel", "Check again", setup output, sign-in code + "Send" | CC/tabs.ts:100-225; CC/setup.ts | MISSING | — | M |
-| "Running sessions" list (Working/Idle; empty copy) | CC/tabs.ts:228-270 | MISSING | — | S |
-| Settings tab: Model (default/Opus/Sonnet/Haiku), Workspace, Sessions (per thread/channel), Answers (Only you/Anyone) + warning | CC/tabs.ts:20-31, 300-350 | MISSING | — | S |
-| Runtime: warmed spare session, live-session cap, memory read, base prompt, saved sessions | CC/runtime.ts; CC/sessions.ts; CC/prompt.ts; CC/base_prompt.md; CC/client.ts | MISSING | — | L |
+| Agents2 type "Claude Code" (one continuing session per thread; summary = model) | CC/index.ts:39-52 | DONE (app/agent_plugins/claude_code/mod.rs) | — | L |
+| Claude tab: status ("Checking Claude Code…", "not installed", "needs you to sign in", "is ready (account)"), "Install Claude Code", "Sign in", "Cancel", "Check again", setup output, sign-in code + "Send" | CC/tabs.ts:100-225; CC/setup.ts | DONE (app/agent_plugins/claude_code/tabs.rs, setup.rs; host/processes.rs) | — | M |
+| "Running sessions" list (Working/Idle; empty copy) | CC/tabs.ts:228-270 | DONE (app/agent_plugins/claude_code/tabs.rs) | — | S |
+| Settings tab: Model (default/Opus/Sonnet/Haiku), Workspace, Sessions (per thread/channel), Answers (Only you/Anyone) + warning | CC/tabs.ts:20-31, 300-350 | DONE (app/agent_plugins/claude_code/tabs.rs) | — | S |
+| Runtime: warmed spare session, live-session cap, memory read, base prompt, saved sessions | CC/runtime.ts; CC/sessions.ts; CC/prompt.ts; CC/base_prompt.md; CC/client.ts | DONE (app/agent_plugins/claude_code/{runtime,sessions,claude,prompt,client}.rs; app/buzz_mcp) | — | L |
 
 ## 26. Plugin system (`src/plugins/*`, `src/features/host/service.ts`; native `ST/host_process.rs`, `host_command.rs`, `host_request.rs`)
 
