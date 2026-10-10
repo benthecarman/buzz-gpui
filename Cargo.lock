@@ -1197,6 +1197,7 @@ dependencies = [
  "base64 0.22.1",
  "buzz-desktop",
  "buzz-identity",
+ "chrono",
  "crc32fast",
  "futures",
  "image",

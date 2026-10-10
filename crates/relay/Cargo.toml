@@ -10,6 +10,7 @@ publish.workspace = true
 base64 = "0.22"
 buzz-desktop.workspace = true
 buzz-identity = { path = "../identity" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 moxcms = "0.8"
