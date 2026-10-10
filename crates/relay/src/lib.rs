@@ -62,9 +62,9 @@ pub use read_state::{
 };
 pub use reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 pub use session::{
-    ChannelUnread, ChannelView, IncomingMessage, MessageSearch, PeoplePage, READING_DWELL_MS,
-    RelayInfo, RosterStatus, SearchOutcome, Session, SessionSnapshot, SessionStatus,
-    TimelineSnapshot, TimelineStatus, UnreadCounts,
+    ChannelUnread, ChannelView, IncomingMessage, MessageSearch, PeoplePage, PublicChannels,
+    READING_DWELL_MS, RelayInfo, RosterStatus, SearchOutcome, Session, SessionSnapshot,
+    SessionStatus, TimelineSnapshot, TimelineStatus, UnreadCounts,
 };
 pub use sidebar::{
     ChannelActivity, Coordinate, SidebarError, SidebarPreferences, SidebarSection, SidebarWrite,

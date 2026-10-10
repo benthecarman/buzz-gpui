@@ -39,6 +39,7 @@ mod renderers;
 mod report;
 mod resize_handle;
 mod search;
+pub mod search_kit;
 pub mod settings;
 mod sidebar;
 mod status;

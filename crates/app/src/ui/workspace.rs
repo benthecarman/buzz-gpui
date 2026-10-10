@@ -495,6 +495,12 @@ impl Render for Workspace {
                         if keys.key == "k" && keys.modifiers.secondary() && this.dialog.is_none() {
                             cx.stop_propagation();
                             this.open_search(window, cx);
+                        } else if keys.key == "f"
+                            && keys.modifiers.secondary()
+                            && this.dialog.is_none()
+                        {
+                            cx.stop_propagation();
+                            this.open_conversation_search(window, cx);
                         }
                     }))
                     .child(header)

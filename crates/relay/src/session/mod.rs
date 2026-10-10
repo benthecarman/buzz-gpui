@@ -24,7 +24,7 @@ mod threads;
 mod timeline;
 mod unread;
 
-pub use actions::{MessageSearch, PeoplePage, SearchOutcome};
+pub use actions::{MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
 pub use incoming::IncomingMessage;
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};

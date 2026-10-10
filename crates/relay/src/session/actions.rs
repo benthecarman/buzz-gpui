@@ -47,6 +47,19 @@ pub struct MessageSearch {
     pub channel: Option<String>,
     pub since: Option<u64>,
     pub until: Option<u64>,
+    /// The viewer's selectable agents, `(pubkey, agent name)`. A `from:`
+    /// name also matches an agent by its own name, as the author picker
+    /// does.
+    pub agents: Vec<(String, String)>,
+}
+
+/// Public channels found by name, as read-only previews.
+#[derive(Clone, Debug, Default)]
+pub struct PublicChannels {
+    pub channels: Vec<ChannelSummary>,
+    /// The relay returned a full page of channel metadata, so matches past
+    /// it are missing.
+    pub partial: bool,
 }
 
 /// Hits in relay relevance order, every one in a channel the viewer can
@@ -248,6 +261,19 @@ impl Session {
         query: &str,
         exact: bool,
     ) -> Result<Vec<ChannelSummary>, String> {
+        Ok(self
+            .search_public_channel_page(query, exact)
+            .await?
+            .channels)
+    }
+
+    /// [`Session::search_public_channels`], saying whether the relay's
+    /// page of channels was full (`searchPublic`'s `partial`).
+    pub async fn search_public_channel_page(
+        &self,
+        query: &str,
+        exact: bool,
+    ) -> Result<PublicChannels, String> {
         let (ops, query) = (self.ops(), query.to_owned());
         self.run(async move { ops.public_channels(&query, exact).await })
             .await
@@ -728,14 +754,10 @@ impl Ops {
         .await
     }
 
-    async fn public_channels(
-        &self,
-        query: &str,
-        exact: bool,
-    ) -> Result<Vec<ChannelSummary>, String> {
+    async fn public_channels(&self, query: &str, exact: bool) -> Result<PublicChannels, String> {
         let needle = query.trim().trim_start_matches('#').to_lowercase();
         if needle.is_empty() {
-            return Ok(Vec::new());
+            return Ok(PublicChannels::default());
         }
         let ctx = self.context().await?;
         let page = Filter::from_iter([
@@ -744,6 +766,7 @@ impl Ops {
             ("limit".to_owned(), json!(PUBLIC_CHANNEL_PAGE)),
         ]);
         let events = read(&ctx, vec![page]).await?;
+        let partial = events.len() >= PUBLIC_CHANNEL_PAGE;
         let joined: HashSet<String> = self
             .with(|actor| {
                 actor
@@ -782,20 +805,23 @@ impl Ops {
                     lower.contains(&needle)
                 };
                 matches.then(|| {
-                    let rank = members::match_tier(&name, &needle).unwrap_or(4);
+                    let rank = search::match_rank(&name, &needle).unwrap_or(3);
                     (rank, name, id.to_owned())
                 })
             })
             .collect();
         candidates.sort();
         candidates.truncate(PUBLIC_CHANNEL_MATCHES);
-        let ids = candidates.into_iter().map(|(_, _, id)| id).collect();
-        Ok(self
-            .resolve(&ctx, ids)
+        let ids: Vec<String> = candidates.into_iter().map(|(_, _, id)| id).collect();
+        let mut channels: Vec<ChannelSummary> = self
+            .resolve(&ctx, ids.clone())
             .await?
             .into_iter()
             .filter(|c| c.read_only && !c.archived && !c.cached)
-            .collect())
+            .collect();
+        // Best match first, as ranked above.
+        channels.sort_by_key(|c| ids.iter().position(|id| *id == c.id));
+        Ok(PublicChannels { channels, partial })
     }
 
     async fn search(&self, search: MessageSearch) -> Result<SearchOutcome, String> {
@@ -806,7 +832,10 @@ impl Ops {
             Some(key) if search::is_hex_key(key) => Some(key.to_ascii_lowercase()),
             Some(name) => {
                 let handle = name.strip_prefix('@').unwrap_or(name).to_owned();
-                match self.author(&ctx, &handle, search.channel.clone()).await? {
+                match self
+                    .author(&ctx, &handle, search.channel.clone(), search.agents.clone())
+                    .await?
+                {
                     Author::Found(key) => Some(key),
                     Author::Missing => return Ok(outcome),
                     Author::Ambiguous => {
@@ -832,7 +861,7 @@ impl Ops {
             return Ok(outcome);
         }
         let events = read(&ctx, vec![request.filter()]).await?;
-        let hits = search::hits(&events, search.channel.as_deref());
+        let hits = search::hits(&events, search.channel.as_deref(), Some(&ctx.relay));
         let mut ids: Vec<String> = hits.iter().map(|hit| hit.channel.clone()).collect();
         ids.sort();
         ids.dedup();
@@ -843,22 +872,28 @@ impl Ops {
             .into_iter()
             .filter(|hit| readable.contains(hit.channel.as_str()))
             .collect();
-        let authors = outcome.hits.iter().map(|hit| hit.author.clone()).collect();
+        let authors = outcome
+            .hits
+            .iter()
+            .flat_map(|hit| std::iter::once(hit.author.clone()).chain(hit.workflow_owner.clone()))
+            .collect();
         self.with(move |actor| actor.ensure_profiles(authors))
             .await?;
         Ok(outcome)
     }
 
     /// Resolves a `from:` name: the scoped channel's members first, then a
-    /// relay profile lookup.
+    /// relay profile lookup. Selectable agents are candidates either way,
+    /// by profile name or by their own name.
     async fn author(
         &self,
         ctx: &Context,
         handle: &str,
         channel: Option<String>,
+        agents: Vec<(String, String)>,
     ) -> Result<Author, String> {
         let wanted = handle.to_owned();
-        let local = self
+        let (scoped, agents) = self
             .with(move |actor| {
                 let members = channel
                     .and_then(|id| actor.discovery.as_ref()?.get(&id))
@@ -872,21 +907,42 @@ impl Ops {
                         Some((key, name))
                     })
                     .collect();
-                search::resolve_author(&wanted, named.iter().map(|(k, n)| (k.as_str(), n.as_str())))
+                let mut aliases = Vec::new();
+                for (key, name) in agents {
+                    if let Some(profile) = profiles.get(&key) {
+                        aliases.push((key.clone(), profile.name.clone()));
+                    }
+                    aliases.push((key, name));
+                }
+                let scoped = match search::resolve_author(
+                    &wanted,
+                    named.iter().map(|(k, n)| (k.as_str(), n.as_str())),
+                ) {
+                    Author::Missing => None,
+                    _ => Some(named),
+                };
+                (scoped, aliases)
             })
             .await?;
-        if local != Author::Missing {
-            return Ok(local);
+        let pairs = |people: &[(String, String)]| {
+            search::resolve_author(
+                handle,
+                people
+                    .iter()
+                    .chain(&agents)
+                    .map(|(k, n)| (k.as_str(), n.as_str())),
+            )
+        };
+        if let Some(scoped) = scoped {
+            return Ok(pairs(&scoped));
         }
         let events = read(ctx, vec![search::author_lookup_filter(handle)]).await?;
         self.adopt_profiles(&events).await?;
-        let people = members::rank_people(&events, handle, None);
-        Ok(search::resolve_author(
-            handle,
-            people
-                .iter()
-                .map(|p| (p.pubkey.as_str(), p.profile.name.as_str())),
-        ))
+        let people: Vec<(String, String)> = members::rank_people(&events, handle, None)
+            .into_iter()
+            .map(|p| (p.pubkey, p.profile.name))
+            .collect();
+        Ok(pairs(&people))
     }
 }
 

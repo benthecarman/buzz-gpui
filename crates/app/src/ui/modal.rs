@@ -31,6 +31,19 @@ pub fn row(
     highlighted: bool,
     cx: &App,
 ) -> Stateful<Div> {
+    labeled_row(id, leading, label.into(), detail, highlighted, cx)
+}
+
+/// A [`row`] whose label is an element, such as a label with its matched
+/// letters underlined (`search_kit::matched_label`).
+pub fn labeled_row(
+    id: impl Into<ElementId>,
+    leading: Leading,
+    label: impl IntoElement,
+    detail: Option<SharedString>,
+    highlighted: bool,
+    cx: &App,
+) -> Stateful<Div> {
     let c = cx.colors();
     let ix = c.interaction(Surface::Floating);
     div()
@@ -64,7 +77,7 @@ pub fn row(
                         .text_body_sm()
                         .text_color(c.text_standard)
                         .truncate()
-                        .child(label.into()),
+                        .child(label),
                 )
                 .children(detail.map(|detail| {
                     div()

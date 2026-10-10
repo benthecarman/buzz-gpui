@@ -6,6 +6,7 @@ use crate::ui::add_community::AddCommunity;
 use crate::ui::modal::{Dismissed, OpenChannel, OpenConversation};
 use crate::ui::new_channel::NewChannelDialog;
 use crate::ui::new_message::NewMessageDialog;
+use crate::ui::onboarding::Step;
 use crate::ui::overlay::{self, Dismiss};
 use crate::ui::pages::Page;
 use crate::ui::search::{OpenPage, SearchDialog};
@@ -66,14 +67,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Search Buzz. Without a ready community it offers pages only.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(community) = self.community.clone() else {
+        self.search(false, window, cx);
+    }
+
+    /// Search this conversation (Mod+F), when a conversation is open.
+    pub(super) fn open_conversation_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::MESSAGES && self.channel.is_some() {
+            self.search(true, window, cx);
+        }
+    }
+
+    fn search(&mut self, scoped: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Without an identity there is nothing to search.
+        if matches!(self.onboarding, Some((Step::Identity, _))) {
             return;
-        };
+        }
+        let community = self.community.clone();
         let current = self
             .channel
             .as_ref()
+            .filter(|_| self.page == Page::MESSAGES)
             .map(|page| page.read(cx).channel().clone());
+        let scope = current.clone().filter(|_| scoped);
         let on_open = Self::opener(cx);
         let weak = cx.entity().downgrade();
         let on_page: OpenPage = Rc::new(move |page, window, cx| {
@@ -84,7 +101,7 @@ impl Workspace {
             });
         });
         let dialog =
-            cx.new(|cx| SearchDialog::new(community, current, on_open, on_page, window, cx));
+            cx.new(|cx| SearchDialog::new(community, current, scope, on_open, on_page, window, cx));
         self.show(dialog, true, cx);
     }
 

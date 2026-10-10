@@ -119,64 +119,114 @@ impl ParsedSearch {
     }
 }
 
-/// How well a page or conversation name matches typed text (`matchName`),
-/// lower is better: 0 exact, 1 prefix, 2 at a word start, 3 any
-/// substring, 4 letters in order where each run starts at a word start
-/// ("bgp" in "buzz-github-prs"), 5 letters in order. `needle` is already
-/// lowercased. Case is folded, accents are not, as in buzz-app.
-pub fn match_name(label: &str, needle: &str) -> Option<u8> {
+/// How well a label matched typed text, and where.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameMatch {
+    /// Lower is better: 0 exact, 1 prefix, 2 at a word start, 3 any
+    /// substring, 4 letters in order where each run starts at a word start
+    /// ("bgp" in "buzz-github-prs"), 5 letters in order.
+    pub rank: u8,
+    /// The matched code points of the label, for underlining. Empty when
+    /// lowercasing changed the label's length (İ → i̇), so no letter is
+    /// underlined wrongly.
+    pub positions: Vec<usize>,
+}
+
+/// How well a page or conversation name matches typed text (`matchName`).
+/// `needle` is already lowercased. Case is folded, accents are not, as in
+/// buzz-app. Ranks are whole numbers, so callers can add fractional
+/// tie-breaks.
+pub fn match_name(label: &str, needle: &str) -> Option<NameMatch> {
     let text = label.to_lowercase();
+    let chars: Vec<char> = text.chars().collect();
+    let aligned = chars.len() == label.chars().count();
+    let found = |rank: u8, positions: Vec<usize>| {
+        Some(NameMatch {
+            rank,
+            positions: if aligned { positions } else { Vec::new() },
+        })
+    };
+    // The needle's code points, starting at byte `at` of `text`.
+    let run = |at: usize| {
+        let from = text[..at].chars().count();
+        (from..from + needle.chars().count()).collect::<Vec<_>>()
+    };
     if text == needle {
-        return Some(0);
+        return found(0, run(0));
     }
     let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
-    let mut substring = false;
+    let mut substring = None;
     if !needle.is_empty() {
         let mut from = 0;
-        while let Some(found) = text[from..].find(needle) {
-            let at = from + found;
+        while let Some(offset) = text[from..].find(needle) {
+            let at = from + offset;
             if at == 0 {
-                return Some(1);
+                return found(1, run(0));
             }
             if !word(text[..at].chars().next_back()) {
-                return Some(2);
+                return found(2, run(at));
             }
-            substring = true;
+            substring.get_or_insert(at);
             from = at + text[at..].chars().next().map_or(1, char::len_utf8);
         }
     }
-    if substring {
-        return Some(3);
+    if let Some(at) = substring {
+        return found(3, run(at));
     }
     // Spaces in typed text only separate words; they need not match.
     let letters: Vec<char> = needle.chars().filter(|c| !c.is_whitespace()).collect();
     if letters.is_empty() {
         return None;
     }
-    let chars: Vec<char> = text.chars().collect();
     // runs[i][j][in_run]: letters[i..] match chars[j..] with every run of
-    // consecutive matches starting at a word start.
+    // consecutive matches starting at a word start. `in_run` means the
+    // previous letter matched chars[j - 1].
     let mut runs = vec![vec![[false; 2]; chars.len() + 1]; letters.len() + 1];
     runs[letters.len()].fill([true; 2]);
+    let takes = |runs: &[Vec<[bool; 2]>], i: usize, j: usize, in_run: bool| {
+        let starts = in_run || j == 0 || !word(Some(chars[j - 1]));
+        chars[j] == letters[i] && starts && runs[i + 1][j + 1][1]
+    };
     for i in (0..letters.len()).rev() {
         for j in (0..chars.len()).rev() {
             for in_run in [false, true] {
-                let starts = in_run || j == 0 || !word(Some(chars[j - 1]));
-                let take = chars[j] == letters[i] && starts && runs[i + 1][j + 1][1];
-                runs[i][j][usize::from(in_run)] = take || runs[i][j + 1][0];
+                runs[i][j][usize::from(in_run)] = takes(&runs, i, j, in_run) || runs[i][j + 1][0];
             }
         }
     }
     if runs[0][0][0] {
-        return Some(4);
+        // Replay the same choices: take a letter when it leads to a full
+        // match, otherwise skip the character.
+        let mut positions = Vec::with_capacity(letters.len());
+        let (mut i, mut in_run) = (0, false);
+        for j in 0..chars.len() {
+            if i == letters.len() {
+                break;
+            }
+            in_run = takes(&runs, i, j, in_run);
+            if in_run {
+                positions.push(j);
+                i += 1;
+            }
+        }
+        return found(4, positions);
     }
-    let mut wanted = letters.iter().peekable();
-    for c in &chars {
-        if wanted.peek() == Some(&c) {
-            wanted.next();
+    let mut positions = Vec::with_capacity(letters.len());
+    for (j, c) in chars.iter().enumerate() {
+        if letters.get(positions.len()) == Some(c) {
+            positions.push(j);
         }
     }
-    wanted.peek().is_none().then_some(5)
+    if positions.len() == letters.len() {
+        found(5, positions)
+    } else {
+        None
+    }
+}
+
+/// [`match_name`]'s rank alone (`matchRank`).
+pub fn match_rank(label: &str, needle: &str) -> Option<u8> {
+    match_name(label, needle).map(|found| found.rank)
 }
 
 /// Drops trailing punctuation, so `in:general,` still names `general`.
@@ -330,11 +380,15 @@ pub struct SearchHit {
     pub created_at: u64,
     /// Whitespace-collapsed text, at most 240 characters.
     pub preview: String,
+    /// The owner of trusted workflow output, which shows as "Workflow ·
+    /// owned by …" rather than as the relay.
+    pub workflow_owner: Option<String>,
 }
 
 /// Search returns original indexed events. Hits need one `h`, a message
-/// kind, and (when scoped) the scoped channel.
-pub fn hits(events: &[Verified], scoped: Option<&str>) -> Vec<SearchHit> {
+/// kind, and (when scoped) the scoped channel. `authority` is the relay's
+/// own key, which signs workflow output.
+pub fn hits(events: &[Verified], scoped: Option<&str>, authority: Option<&str>) -> Vec<SearchHit> {
     events
         .iter()
         .filter_map(|event| {
@@ -378,6 +432,7 @@ pub fn hits(events: &[Verified], scoped: Option<&str>) -> Vec<SearchHit> {
                 } else {
                     preview
                 },
+                workflow_owner: crate::unread::workflow_owner(event, authority),
             })
         })
         .collect()
@@ -390,20 +445,43 @@ mod tests {
 
     #[test]
     fn ranks_names_like_buzz_app() {
-        assert_eq!(match_name("General", "general"), Some(0));
-        assert_eq!(match_name("general-chat", "gen"), Some(1));
-        assert_eq!(match_name("team-general", "gen"), Some(2));
-        assert_eq!(match_name("regenerate", "gen"), Some(3));
-        assert_eq!(match_name("buzz-github-prs", "bgp"), Some(4));
-        assert_eq!(match_name("buzz github", "b g"), Some(4));
-        assert_eq!(match_name("Settings", "stg"), Some(5));
-        assert_eq!(match_name("Agents", "xyz"), None);
-        assert_eq!(match_name("Agents", " "), None);
+        assert_eq!(match_rank("General", "general"), Some(0));
+        assert_eq!(match_rank("general-chat", "gen"), Some(1));
+        assert_eq!(match_rank("team-general", "gen"), Some(2));
+        assert_eq!(match_rank("regenerate", "gen"), Some(3));
+        assert_eq!(match_rank("buzz-github-prs", "bgp"), Some(4));
+        assert_eq!(match_rank("buzz github", "b g"), Some(4));
+        assert_eq!(match_rank("Settings", "stg"), Some(5));
+        assert_eq!(match_rank("Agents", "xyz"), None);
+        assert_eq!(match_rank("Agents", " "), None);
         // Overlapping hits: a later word start still wins over a substring.
-        assert_eq!(match_name("aab ab", "ab"), Some(2));
+        assert_eq!(match_rank("aab ab", "ab"), Some(2));
         // Case only; accents are not folded for names.
-        assert_eq!(match_name("Café", "cafe"), None);
-        assert_eq!(match_name("ÉQUIPE", "équipe"), Some(0));
+        assert_eq!(match_rank("Café", "cafe"), None);
+        assert_eq!(match_rank("ÉQUIPE", "équipe"), Some(0));
+    }
+
+    fn positions(label: &str, needle: &str) -> Vec<usize> {
+        match_name(label, needle).expect("matches").positions
+    }
+
+    #[test]
+    fn reports_matched_code_points() {
+        assert_eq!(positions("General", "general"), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(positions("team-general", "gen"), [5, 6, 7]);
+        assert_eq!(positions("regenerate", "gen"), [2, 3, 4]);
+        // Code points, not bytes.
+        assert_eq!(positions("ÉÉ général", "gén"), [3, 4, 5]);
+        // Each run starts at a word start, as the rank-4 search chose.
+        assert_eq!(positions("buzz-github-prs", "bgp"), [0, 5, 12]);
+        assert_eq!(positions("buzz-github-prs", "bugi"), [0, 1, 5, 6]);
+        assert_eq!(positions("buzz github", "b g"), [0, 5]);
+        // Any letters in order.
+        assert_eq!(positions("Settings", "stg"), [0, 2, 6]);
+        // Lowercasing that changes the length underlines nothing.
+        let dotted = match_name("İstanbul", "stan").expect("matches");
+        assert_eq!(dotted.rank, 2);
+        assert!(dotted.positions.is_empty());
     }
 
     fn day(year: i32, month: u32, day: u32) -> Day {
@@ -510,12 +588,36 @@ mod tests {
         let profile = signer.sign(&signer.viewer, 0, T0, "{}", &[]);
         let empty = signer.sign(&signer.viewer, 9, T0, " ", &[&["h", CHANNEL]]);
         let all = [chat, agent, two, profile, empty];
-        let found = hits(&all, None);
+        let found = hits(&all, None, None);
         assert_eq!(found.len(), 3);
         assert_eq!(found[0].preview, "hello world");
         assert_eq!(found[1].preview, "from an agent");
         assert_eq!(found[1].channel, other);
         assert_eq!(found[2].preview, "Attachment");
-        assert_eq!(hits(&all, Some(other)).len(), 1);
+        assert!(found.iter().all(|hit| hit.workflow_owner.is_none()));
+        assert_eq!(hits(&all, Some(other), None).len(), 1);
+    }
+
+    #[test]
+    fn attributes_workflow_output_to_its_owner() {
+        let signer = Signer::new();
+        let owner = signer.viewer_hex();
+        let workflow = signer.sign(
+            &signer.relay,
+            9,
+            T0,
+            "deployed",
+            &[
+                &["h", CHANNEL],
+                &["buzz:workflow", "true"],
+                &["buzz:workflow-owner", &owner],
+            ],
+        );
+        let relay = signer.relay_hex();
+        let found = hits(std::slice::from_ref(&workflow), None, Some(&relay));
+        assert_eq!(found[0].workflow_owner.as_deref(), Some(owner.as_str()));
+        // Only the relay's own key can attribute workflow output.
+        let found = hits(&[workflow], None, Some(&owner));
+        assert_eq!(found[0].workflow_owner, None);
     }
 }
