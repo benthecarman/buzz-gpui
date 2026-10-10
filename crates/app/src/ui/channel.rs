@@ -565,17 +565,19 @@ impl ChannelPage {
             let result = match &submission.editing {
                 Some(row) => session.edit(&channel, row.id, &submission.content).await,
                 None => {
+                    // Files upload in the background first; a failed upload
+                    // is handed back to the composer's draft.
+                    let Some(attachments) = submission.attachments().await else {
+                        return;
+                    };
                     session
-                        .send(
-                            &channel,
-                            &submission.content,
-                            mentions,
-                            submission.attachments.clone(),
-                            None,
-                        )
+                        .send(&channel, &submission.content, mentions, attachments, None)
                         .await
                 }
             };
+            let handed_back = cx
+                .update(|_, cx| submission.settle(&result, cx))
+                .unwrap_or(false);
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(()) => {
@@ -589,6 +591,7 @@ impl ChannelPage {
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
                     }
+                    Err(_) if handed_back => {}
                     Err(error) => {
                         this.error = Some(error.into());
                         this.composer.update(cx, |composer, cx| composer.failed(cx));

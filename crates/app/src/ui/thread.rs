@@ -558,15 +558,23 @@ impl ThreadPanel {
             None => self.list.set_follow_mode(FollowMode::Tail),
         }
         cx.spawn_in(window, async move |this, cx| {
+            // Files upload in the background first; a failed upload is
+            // handed back to the composer's draft.
+            let Some(attachments) = submission.attachments().await else {
+                return;
+            };
             let result = session
                 .send(
                     &channel,
                     &submission.content,
                     mentions,
-                    submission.attachments.clone(),
+                    attachments,
                     Some((root, parent.unwrap_or(root))),
                 )
                 .await;
+            let handed_back = cx
+                .update(|_, cx| submission.settle(&result, cx))
+                .unwrap_or(false);
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(()) => {
@@ -586,6 +594,7 @@ impl ThreadPanel {
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
                     }
+                    Err(_) if handed_back => {}
                     Err(error) => {
                         this.sent = None;
                         this.error = Some(error.into());

@@ -136,15 +136,23 @@ impl Comments {
             .map_or(self.root, |root| root.id);
         let channel = self.channel.clone();
         cx.spawn_in(window, async move |this, cx| {
+            // Files upload in the background first; a failed upload is
+            // handed back to the composer's draft.
+            let Some(attachments) = submission.attachments().await else {
+                return;
+            };
             let result = session
                 .send(
                     &channel,
                     &submission.content,
                     submission.mentions.clone(),
-                    submission.attachments.clone(),
+                    attachments,
                     Some((root, root)),
                 )
                 .await;
+            let handed_back = cx
+                .update(|_, cx| submission.settle(&result, cx))
+                .unwrap_or(false);
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(()) => {
@@ -153,6 +161,7 @@ impl Comments {
                             .update(cx, |composer, cx| composer.sent(window, cx));
                         this.list.scroll_to_bottom();
                     }
+                    Err(_) if handed_back => {}
                     Err(error) => {
                         this.error = Some(error.into());
                         this.composer.update(cx, |composer, cx| composer.failed(cx));

@@ -7,6 +7,7 @@
 //! reply or an edit) and reports back with [`Composer::sent`] or
 //! [`Composer::failed`].
 
+pub mod attachments;
 mod channels;
 mod live_markdown;
 
@@ -18,17 +19,18 @@ use super::message::{self, channel_icon};
 use super::message_edit;
 use super::overlay;
 use crate::community::{AppState, Community};
+use attachments::{AttachmentDraft, BackgroundSend, DraftFile, MAX_FILES, NewFile, Queue, Voice};
 use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::members::can_add_members;
-use buzz_relay_client::messages::media_byte_limit;
-use buzz_relay_client::upload::{self, MAX_UPLOAD, UploadError, UploadFile};
+use buzz_relay_client::upload::Source;
 use buzz_relay_client::{
     Attachment, ChannelSummary, ChannelType, EventId, Mentions, Partition, PublicChannels,
     RosterStatus,
 };
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, ButtonVariant, Dialog, Icon, IconButton,
-    IconButtonShape, IconButtonSize, IconName, Spinner, Surface, Tooltip, TypeStyled,
+    IconButtonShape, IconButtonSize, IconName, Spinner, Surface, Toast, ToastTone, Tooltip,
+    TypeStyled,
 };
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InlineToken, InlineTokenContext, InputContent, InputEvent,
@@ -44,8 +46,6 @@ use std::time::Duration;
 
 /// `maxLength` of the editor.
 const MAX_CHARS: usize = 16_000;
-/// At most this many files per message (`attachment-draft.ts`).
-const MAX_FILES: usize = 10;
 /// Drafts are saved this long after the last keystroke.
 const DRAFT_DELAY: Duration = Duration::from_millis(400);
 /// Completion lists.
@@ -69,9 +69,36 @@ pub struct Submission {
     /// Who the chosen mention chips notify (`p`) and who they only name
     /// (`mention`), first use first (§5d.3).
     pub mentions: Mentions,
-    pub attachments: Vec<Attachment>,
+    /// The files, which upload in the background after Send
+    /// (`sendInBackground`); the host publishes once they are up.
+    pub upload: Option<BackgroundSend>,
     /// The message being edited, if any.
     pub editing: Option<Arc<MessageRow>>,
+}
+
+impl Submission {
+    /// The files to publish: none, or those the background send uploaded.
+    /// `None` when that send failed or was cancelled; its text and files
+    /// are back in the draft then, so publish nothing.
+    pub async fn attachments(&self) -> Option<Vec<Attachment>> {
+        match &self.upload {
+            Some(upload) => upload.uploaded().await,
+            None => Some(Vec::new()),
+        }
+    }
+
+    /// Reports how publishing went. A failed background send hands its
+    /// text and files back with a notice; returns whether it did, in which
+    /// case the host shows nothing more.
+    pub fn settle(&self, result: &Result<(), String>, cx: &mut App) -> bool {
+        match &self.upload {
+            Some(upload) => {
+                upload.settle(result, cx);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// The thread panel's reply target, shown between the text and the tools.
@@ -120,8 +147,16 @@ pub struct Composer {
     picker: Entity<EmojiPicker>,
     picker_open: bool,
     picker_closed: Option<std::time::Instant>,
-    attachments: Vec<Pending>,
-    next_attachment: u64,
+    /// The draft's files, which outlive this composer.
+    files: Entity<AttachmentDraft>,
+    /// The community's background sends.
+    queue: Entity<Queue>,
+    /// "Could not attach file", as a toast.
+    attach_error: Option<SharedString>,
+    /// The draft file whose preview dialog is open.
+    previewing: Option<String>,
+    /// Why the last send failed (`error`), under the tools.
+    error: Option<SharedString>,
     drag_over: bool,
     notice: Option<SharedString>,
     save_draft: Option<Task<()>>,
@@ -142,14 +177,6 @@ enum Capture {
     Recording(Recorder),
     Preparing,
     Failed(SharedString),
-}
-
-/// A recorded note attached to the draft: it plays from memory under
-/// `key` until it is sent.
-struct VoiceDraft {
-    key: String,
-    duration: f64,
-    waveform: Vec<u8>,
 }
 
 /// `formatVoiceNoteDuration`: whole seconds as `m:ss`.
@@ -270,8 +297,26 @@ impl Composer {
                 }),
                 cx.observe(&community, |_, _, cx| cx.notify()),
             ];
-        cx.on_release(|this: &mut Self, cx| this.write_draft(cx))
-            .detach();
+        let key = draft_key(&channel, thread_root);
+        let files = attachments::draft(&community, &key, cx);
+        attachments::view(&files, cx);
+        let queue = attachments::queue(&community, cx);
+        let host = cx.entity_id();
+        queue.update(cx, |queue, cx| queue.add_host(host, cx));
+        let mut subscriptions = subscriptions;
+        subscriptions.push(cx.observe_in(&files, window, |this, _, window, cx| {
+            this.take_recovered(window, cx);
+            cx.notify();
+        }));
+        subscriptions.push(cx.observe(&queue, |_, _, cx| cx.notify()));
+        cx.on_release(move |this: &mut Self, cx| {
+            this.write_draft(cx);
+            let key = this.draft_key();
+            attachments::leave(&this.community, &key, &this.files, cx);
+            this.queue
+                .update(cx, |queue, cx| queue.remove_host(host, cx));
+        })
+        .detach();
         let markdown = LiveMarkdown::new(&input, cx);
         let mut composer = Self {
             community,
@@ -298,8 +343,11 @@ impl Composer {
             picker,
             picker_open: false,
             picker_closed: None,
-            attachments: Vec::new(),
-            next_attachment: 0,
+            files,
+            queue,
+            attach_error: None,
+            previewing: None,
+            error: None,
             drag_over: false,
             notice: None,
             save_draft: None,
@@ -445,19 +493,24 @@ impl Composer {
         cx.notify();
     }
 
-    /// The host delivered the submission: clear it.
+    /// The host delivered the submission: clear it. A background send
+    /// cleared the composer at Send, so this does nothing then.
     pub fn sent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sending {
+            return;
+        }
         self.sending = false;
         self.notice = None;
         if self.editing.is_some() {
             self.cancel_edit(window, cx);
             return;
         }
-        for item in self.attachments.drain(..) {
-            if let Some(voice) = &item.voice {
-                media::forget_local(&voice.key, cx);
-            }
-        }
+        self.clear_after_send(window, cx);
+    }
+
+    /// Empties the composer after a send, leaving the follow-up draft of
+    /// remembered agents.
+    fn clear_after_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completion = None;
         let followup = std::mem::take(&mut self.followup);
         let next = if crate::ui::settings::remember_mentioned_agents(cx) {
@@ -494,20 +547,51 @@ impl Composer {
         !self.input.read(cx).value().trim().is_empty()
     }
 
-    fn uploads_ready(&self) -> bool {
-        self.attachments
-            .iter()
-            .all(|item| matches!(item.status, Status::Ready(_)))
+    fn has_files(&self, cx: &App) -> bool {
+        !self.files.read(cx).items.is_empty()
+    }
+
+    /// A send of this conversation is still uploading.
+    fn send_pending(&self, cx: &App) -> bool {
+        self.queue.read(cx).pending(&self.draft_key())
     }
 
     fn can_submit(&self, cx: &App) -> bool {
+        let files = self.files.read(cx);
         !self.sending
             && self.can_send
-            && self.uploads_ready()
+            && (self.editing.is_some() || (!files.blocked() && !self.send_pending(cx)))
             && self.input.read(cx).value().chars().count() <= MAX_CHARS
             && !self.edit_status.locked
             // An empty edit asks to delete the message instead.
-            && (self.has_text(cx) || self.editing.is_some() || !self.attachments.is_empty())
+            && (self.has_text(cx) || self.editing.is_some() || !files.items.is_empty())
+    }
+
+    /// Hands a submission to the host. With files, Send clears the composer
+    /// at once and they upload in the background before the host publishes.
+    fn dispatch(
+        &mut self,
+        mut submission: Submission,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = None;
+        let files = self.files.read(cx).items.clone();
+        if submission.editing.is_none() && !files.is_empty() {
+            let draft = self.draft_json(cx);
+            self.files.update(cx, |draft, cx| draft.clear(cx));
+            self.clear_after_send(window, cx);
+            let followup = self.draft_json(cx);
+            let owner = self.draft_key();
+            submission.upload = self.queue.update(cx, |queue, cx| {
+                queue.start(owner, files, draft, followup, cx)
+            });
+            self.sending = false;
+        } else {
+            self.sending = true;
+        }
+        cx.emit(ComposerEvent::Submit(submission));
+        cx.notify();
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -526,17 +610,6 @@ impl Composer {
             .filter(|(key, _)| profiles.get(key).is_some_and(|profile| profile.is_agent))
             .map(|(key, name)| (key, format!("@{name}")))
             .collect();
-        let attachments = if self.editing.is_some() {
-            Vec::new()
-        } else {
-            self.attachments
-                .iter()
-                .filter_map(|item| match &item.status {
-                    Status::Ready(attachment) => Some(attachment.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
         self.sending = true;
         self.completion = None;
         let mut submission = Submission {
@@ -545,7 +618,7 @@ impl Composer {
                 recipients: mentioned,
                 references: Vec::new(),
             },
-            attachments,
+            upload: None,
             editing: self.editing.clone(),
         };
         if self.editing.is_none() && !submission.mentions.recipients.is_empty() {
@@ -574,8 +647,7 @@ impl Composer {
                 }
             }
         }
-        cx.emit(ComposerEvent::Submit(submission));
-        cx.notify();
+        self.dispatch(submission, window, cx);
     }
 
     /// Pubkeys and names of the mention chips, first use first: the
@@ -638,7 +710,7 @@ impl Composer {
 
     /// "Do nothing" / "Send anyway": outsiders become display-only
     /// references and are not added.
-    fn send_without_outsiders(&mut self, cx: &mut Context<Self>) {
+    fn send_without_outsiders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.outsiders.as_ref().is_none_or(|prompt| prompt.busy) {
             return;
         }
@@ -651,8 +723,7 @@ impl Composer {
             .recipients
             .retain(|key| !prompt.missing.contains(key));
         submission.mentions.references = prompt.missing;
-        cx.emit(ComposerEvent::Submit(submission));
-        cx.notify();
+        self.dispatch(submission, window, cx);
     }
 
     /// "Invite": adds each outsider (kind 9000) and waits for the roster,
@@ -685,7 +756,7 @@ impl Composer {
                     break;
                 }
             }
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 match failure {
                     Some(error) => {
                         if let Some(prompt) = &mut this.outsiders {
@@ -701,7 +772,7 @@ impl Composer {
                     }
                     None => {
                         if let Some(prompt) = this.outsiders.take() {
-                            cx.emit(ComposerEvent::Submit(prompt.submission));
+                            this.dispatch(prompt.submission, window, cx);
                         }
                     }
                 }
@@ -745,10 +816,36 @@ impl Composer {
     // ----- drafts -----
 
     fn draft_key(&self) -> String {
-        match self.thread_root {
-            Some(root) => format!("draft:{}:thread:{}", self.channel, root.to_hex()),
-            None => format!("draft:{}", self.channel),
+        draft_key(&self.channel, self.thread_root)
+    }
+
+    /// The draft as saved, `{text, tokens}` JSON.
+    fn draft_json(&self, cx: &App) -> String {
+        let content = self.input.read(cx).content();
+        serde_json::to_string(&Draft::from(&content)).expect("drafts serialize")
+    }
+
+    /// A failed send handed its text back: show it, unless the composer
+    /// holds something else by now (its saved draft was checked already).
+    fn take_recovered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(recovered) = self.files.update(cx, |files, _| files.recovered.take()) else {
+            return;
+        };
+        self.error = recovered.error.clone();
+        if self.editing.is_some() {
+            self.stash = serde_json::from_str::<Draft>(&recovered.draft)
+                .ok()
+                .map(|draft| draft.content());
+        } else if let Ok(draft) = serde_json::from_str::<Draft>(&recovered.draft) {
+            let content = draft.content();
+            let end = content.text().len();
+            self.input.update(cx, |state, cx| {
+                state.set_value(content, window, cx);
+                state.set_selected_range(end..end, cx);
+            });
+            self.restyle(cx);
         }
+        cx.notify();
     }
 
     fn partition(&self, cx: &App) -> Partition {
@@ -1250,135 +1347,51 @@ impl Composer {
         .detach();
     }
 
+    /// Files chosen, dropped or pasted (`attachFiles`). Refusals show the
+    /// "Could not attach file" toast.
     fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let read = cx.background_executor().spawn(async move {
-            paths
-                .into_iter()
-                .filter(|path| path.is_file())
-                .map(|path| {
-                    let name = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "File".into());
-                    let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_UPLOAD);
-                    let bytes = if too_big {
-                        Err(UploadError::Size)
-                    } else {
-                        std::fs::read(&path).map_err(|_| UploadError::Failed)
-                    };
-                    (name, bytes)
-                })
-                .collect::<Vec<_>>()
-        });
+        let read = cx
+            .background_executor()
+            .spawn(async move { attachments::files_from_paths(paths) });
         cx.spawn(async move |this, cx| {
             let files = read.await;
             let _ = this.update(cx, |this, cx| {
-                for (name, bytes) in files {
-                    this.add_file(name, bytes, cx);
+                let mut ok = Vec::new();
+                for file in files {
+                    match file {
+                        Ok(file) => ok.push(file),
+                        Err((_, error)) => {
+                            this.attach_error = Some(error.into());
+                            cx.notify();
+                            return;
+                        }
+                    }
                 }
+                this.add_files(ok, cx);
             });
         })
         .detach();
     }
 
-    fn add_file(
-        &mut self,
-        name: String,
-        bytes: Result<Vec<u8>, UploadError>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editing.is_some() {
+    /// Dropping files works outside edits and voice capture (`useFileDrop`).
+    fn accepts_drop(&self) -> bool {
+        self.editing.is_none() && self.capture.is_none() && !self.sending
+    }
+
+    fn add_files(&mut self, files: Vec<NewFile>, cx: &mut Context<Self>) {
+        if files.is_empty() || self.capture.is_some() || self.sending {
             return;
         }
-        if self.attachments.len() >= MAX_FILES {
-            self.notice = Some(format!("Attach at most {MAX_FILES} files per message.").into());
+        if self.editing.is_some() {
+            self.attach_error = Some("Finish editing before attaching new files.".into());
             cx.notify();
             return;
         }
-        self.next_attachment += 1;
-        let (mime, size, thumbnail, status, bytes) = match bytes {
-            Ok(bytes) => {
-                let mime = upload::mime_type(&name, &bytes);
-                let size = bytes.len() as u64;
-                let status = if size == 0 || size > MAX_UPLOAD || size > media_byte_limit(&mime) {
-                    Status::Failed(UploadError::Size.to_string().into())
-                } else {
-                    Status::Queued
-                };
-                (
-                    mime.clone(),
-                    size,
-                    thumbnail(&mime, &bytes),
-                    status,
-                    Some(bytes),
-                )
-            }
-            Err(error) => (
-                "application/octet-stream".into(),
-                0,
-                None,
-                Status::Failed(error.to_string().into()),
-                None,
-            ),
-        };
-        self.attachments.push(Pending {
-            id: self.next_attachment,
-            name,
-            mime,
-            size,
-            thumbnail,
-            bytes,
-            status,
-            voice: None,
-        });
-        self.pump(cx);
-        cx.notify();
-    }
-
-    /// Uploads run one at a time, in order (`prepareForSend`).
-    fn pump(&mut self, cx: &mut Context<Self>) {
-        if self
-            .attachments
-            .iter()
-            .any(|item| matches!(item.status, Status::Uploading))
-        {
-            return;
+        match attachments::add(&self.community, &self.files, files, cx) {
+            Ok(()) => self.attach_error = None,
+            Err(error) => self.attach_error = Some(error.into()),
         }
-        let Some(item) = self
-            .attachments
-            .iter_mut()
-            .find(|item| matches!(item.status, Status::Queued))
-        else {
-            return;
-        };
-        item.status = Status::Uploading;
-        let (id, file) = (
-            item.id,
-            UploadFile {
-                name: item.name.clone(),
-                mime: item.mime.clone(),
-                bytes: item.bytes.clone().unwrap_or_default(),
-            },
-        );
-        let media = self.community.read(cx).session.media().clone();
-        cx.spawn(async move |this, cx| {
-            let result = upload::upload(&media, file).await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some(item) = this.attachments.iter_mut().find(|item| item.id == id) {
-                    match result {
-                        Ok(mut attachment) => {
-                            item.bytes = None;
-                            attachment.voice_duration = item.voice.as_ref().map(|v| v.duration);
-                            item.status = Status::Ready(attachment);
-                        }
-                        Err(error) => item.status = Status::Failed(error.to_string().into()),
-                    }
-                }
-                this.pump(cx);
-                cx.notify();
-            });
-        })
-        .detach();
+        cx.notify();
     }
 
     // ----- voice notes -----
@@ -1387,14 +1400,17 @@ impl Composer {
     /// (`useVoiceCapture`), unless a note is already attached or the
     /// message is full.
     fn start_capture(&mut self, cx: &mut Context<Self>) {
+        let files = self.files.read(cx);
         if self.editing.is_some()
+            || self.sending
             || self.capture.is_some()
-            || self.attachments.iter().any(|item| item.voice.is_some())
+            || files.items.iter().any(|item| item.voice.is_some())
         {
             return;
         }
-        if self.attachments.len() >= MAX_FILES {
-            self.notice = Some(format!("Attach at most {MAX_FILES} files per message.").into());
+        if files.items.len() >= MAX_FILES {
+            self.attach_error =
+                Some(format!("Attach at most {MAX_FILES} files per message.").into());
             cx.notify();
             return;
         }
@@ -1485,60 +1501,53 @@ impl Composer {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis());
-        self.next_attachment += 1;
-        let id = self.next_attachment;
-        let key = format!("voice-draft:{}:{id}", cx.entity_id());
-        let bytes: Arc<[u8]> = mp4.clone().into();
-        media::set_local(&key, bytes, cx);
-        self.attachments.push(Pending {
-            id,
+        let key = format!("voice-draft:{}", uuid::Uuid::new_v4());
+        let bytes: Arc<[u8]> = mp4.into();
+        media::set_local(&key, bytes.clone(), cx);
+        let file = NewFile {
             name: format!("voice-note-{millis}.mp4"),
             mime: "video/mp4".into(),
-            size: mp4.len() as u64,
-            thumbnail: None,
-            bytes: Some(mp4),
-            status: Status::Queued,
-            voice: Some(VoiceDraft {
+            size: bytes.len() as u64,
+            source: Source::Bytes(bytes),
+            voice: Some(Voice {
                 key,
                 duration,
                 waveform,
             }),
-        });
-        self.pump(cx);
-    }
-
-    fn remove_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(voice) = self
-            .attachments
-            .iter()
-            .find(|item| item.id == id)
-            .and_then(|item| item.voice.as_ref())
-        {
-            media::forget_local(&voice.key, cx);
+        };
+        if let Err(error) = attachments::add(&self.community, &self.files, vec![file], cx) {
+            self.attach_error = Some(error.into());
         }
-        self.attachments.retain(|item| item.id != id);
-        self.notice = None;
-        self.pump(cx);
         cx.notify();
     }
 
-    fn retry_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(item) = self.attachments.iter_mut().find(|item| item.id == id)
-            && item.bytes.is_some()
-        {
-            item.status = Status::Queued;
+    fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
+        let voice = self
+            .files
+            .read(cx)
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.voice.clone());
+        if let Some(voice) = voice {
+            media::forget_local(&voice.key, cx);
         }
-        self.pump(cx);
+        self.files.update(cx, |files, cx| files.remove(id, cx));
+        cx.notify();
+    }
+
+    fn retry_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.files.update(cx, |files, cx| files.retry(id, cx));
         cx.notify();
     }
 
     /// Images and files from the clipboard. Text pastes as usual.
     fn paste(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
-        let mut consumed = false;
+        let mut images = Vec::new();
+        let mut paths = Vec::new();
         for entry in item.entries() {
             match entry {
                 ClipboardEntry::Image(image) => {
-                    consumed = true;
                     let extension = match image.format {
                         ImageFormat::Png => "png",
                         ImageFormat::Jpeg => "jpg",
@@ -1546,21 +1555,39 @@ impl Composer {
                         ImageFormat::Webp => "webp",
                         _ => "img",
                     };
-                    self.add_file(
-                        format!("pasted-image.{extension}"),
-                        Ok(image.bytes.clone()),
-                        cx,
-                    );
+                    images.push(attachments::file_from_bytes(
+                        format!("image.{extension}"),
+                        image.bytes.clone(),
+                    ));
                 }
-                ClipboardEntry::ExternalPaths(paths) => {
-                    consumed = true;
-                    self.add_paths(paths.paths().to_vec(), cx);
+                ClipboardEntry::ExternalPaths(external) => {
+                    paths.extend(external.paths().iter().cloned());
                 }
                 ClipboardEntry::String(_) => {}
             }
         }
+        let consumed = !images.is_empty() || !paths.is_empty();
+        if !images.is_empty() {
+            self.add_files(images, cx);
+        }
+        if !paths.is_empty() {
+            self.add_paths(paths, cx);
+        }
         consumed
     }
+}
+
+/// `draft:<channel>`, or `draft:<channel>:thread:<root>` for a thread.
+fn draft_key(channel: &str, thread_root: Option<EventId>) -> String {
+    match thread_root {
+        Some(root) => format!("draft:{channel}:thread:{}", root.to_hex()),
+        None => format!("draft:{channel}"),
+    }
+}
+
+/// Whether a saved draft holds no text or chips.
+pub(crate) fn draft_is_empty(json: &str) -> bool {
+    serde_json::from_str::<Draft>(json).is_ok_and(|draft| draft.text.trim().is_empty())
 }
 
 /// The text to edit, with its identity links and channel references back
@@ -1653,35 +1680,36 @@ fn channel_reference(id: &str, name: &str) -> String {
     format!("[{label}](buzz://channel/{id})")
 }
 
-fn thumbnail(mime: &str, bytes: &[u8]) -> Option<Arc<Image>> {
-    let format = match mime {
-        "image/png" => ImageFormat::Png,
-        "image/jpeg" => ImageFormat::Jpeg,
-        "image/gif" => ImageFormat::Gif,
-        "image/webp" => ImageFormat::Webp,
-        _ => return None,
-    };
-    Some(Arc::new(Image::from_bytes(format, bytes.to_vec())))
-}
-
-/// `formatFileSize` with one decimal under 10 (§4.8: "12 KB", "1.2 MB").
-fn file_size(size: u64) -> String {
-    const K: f64 = 1024.;
-    let size = size as f64;
-    let (value, unit) = if size < K {
-        return format!("{size} B");
-    } else if size < K * K {
-        (size / K, "KB")
-    } else if size < K * K * K {
-        (size / K / K, "MB")
-    } else {
-        (size / K / K / K, "GB")
-    };
-    if value < 10. {
-        format!("{value:.1} {unit}")
-    } else {
-        format!("{value:.0} {unit}")
+/// The picture a draft file shows: an image's own pixels. Other files
+/// show the file icon.
+fn preview_source(item: &DraftFile) -> Option<Img> {
+    let kind = item
+        .uploaded
+        .as_ref()
+        .map_or(item.mime.as_str(), |a| a.mime.as_str());
+    let lower = item.name.to_ascii_lowercase();
+    let image = matches!(
+        kind,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    ) || (item.uploaded.is_none()
+        && [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+            .iter()
+            .any(|ext| lower.ends_with(ext)));
+    if !image {
+        return None;
     }
+    Some(match &item.source {
+        Source::Path(path) => img(path.clone()).object_fit(ObjectFit::Cover),
+        Source::Bytes(bytes) => {
+            let format = match buzz_relay_client::upload::sniff_image(bytes)? {
+                "image/png" => ImageFormat::Png,
+                "image/jpeg" => ImageFormat::Jpeg,
+                "image/gif" => ImageFormat::Gif,
+                _ => ImageFormat::Webp,
+            };
+            img(Arc::new(Image::from_bytes(format, bytes.to_vec()))).object_fit(ObjectFit::Cover)
+        }
+    })
 }
 
 /// Name match tiers: exact, prefix, word prefix, substring.
@@ -1810,36 +1838,6 @@ enum Suggestion {
         detail: Option<SharedString>,
     },
     Emoji(Candidate),
-}
-
-struct Pending {
-    id: u64,
-    name: String,
-    mime: String,
-    size: u64,
-    thumbnail: Option<Arc<Image>>,
-    /// Kept until the upload succeeds, for retries.
-    bytes: Option<Vec<u8>>,
-    status: Status,
-    voice: Option<VoiceDraft>,
-}
-
-enum Status {
-    Queued,
-    Uploading,
-    Ready(Attachment),
-    Failed(SharedString),
-}
-
-impl Status {
-    fn label(&self) -> &str {
-        match self {
-            Status::Queued => "Queued",
-            Status::Uploading => "Uploading…",
-            Status::Ready(_) => "Ready",
-            Status::Failed(_) => "Upload failed",
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2004,163 +2002,406 @@ impl Composer {
         })
     }
 
+    /// The draft's files (`ComposerAttachments.tsx`): one row that scrolls
+    /// sideways. Images show as 46px previews with their actions on the
+    /// corner; other files, and failed ones, as 18rem chips.
     fn attachment_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.attachments.is_empty() || self.editing.is_some() {
+        let items = self.files.read(cx).items.clone();
+        if items.is_empty() || self.editing.is_some() {
             return None;
         }
-        let c = *cx.colors();
-        let items = self.attachments.iter().map(|item| {
-            let id = item.id;
-            let busy = matches!(item.status, Status::Uploading);
-            let failed = match &item.status {
-                Status::Failed(error) => Some(error.clone()),
-                _ => None,
-            };
-            let remove = div()
-                .id(("remove-attachment", id))
-                .size(px(20.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(c.affordance_prominent)
-                .text_color(c.text_inverse)
-                .cursor_pointer()
-                .tooltip(Tooltip::text(format!("Remove {}", item.name)))
-                .map(|d| {
-                    if busy {
-                        d.child(Spinner::new().size(12.))
-                    } else {
-                        d.child(Icon::new(IconName::X).size(12.))
-                    }
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(id, cx)));
-            let retry = (failed.is_some() && item.bytes.is_some()).then(|| {
-                IconButton::new(("retry-attachment", id), IconName::ArrowsClockwise)
-                    .size(IconButtonSize::Xs)
-                    .tooltip("Retry upload")
-                    .on_click(cx.listener(move |this, _, _, cx| this.retry_attachment(id, cx)))
-            });
-            let issue = failed.clone().map(|error| {
-                div()
-                    .id(("attachment-issue", id))
-                    .text_color(c.text_danger)
-                    .tooltip(Tooltip::text(error))
-                    .child(Icon::new(IconName::WarningCircle).size(14.))
-            });
-            let actions = div()
-                .absolute()
-                .top(px(2.))
-                .right(px(2.))
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .p(px(2.))
-                .rounded_full()
-                .when(item.thumbnail.is_some(), |d| d.bg(c.surface_panel))
-                .children(issue)
-                .children(retry)
-                .child(remove);
-            if let Some(voice) = &item.voice {
-                return self.voice_item(item, voice, failed, cx);
-            }
-            match &item.thumbnail {
-                Some(image) => div()
-                    .id(("attachment", id))
-                    .relative()
-                    .flex_none()
-                    .size(px(46.))
-                    .rounded(px(12.))
-                    .overflow_hidden()
-                    .bg(c.surface_inset)
-                    .tooltip(Tooltip::text(format!(
-                        "{} · {} · {}",
-                        item.name,
-                        file_size(item.size),
-                        item.status.label()
-                    )))
-                    .child(
-                        img(image.clone())
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .when(busy, |i| i.opacity(0.6)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(px(12.))
-                            .border_1()
-                            .border_color(c.border_image),
-                    )
-                    .child(
-                        actions
-                            .top(px(-2.))
-                            .right(px(-2.))
-                            .bg(gpui_kit::transparent_black()),
-                    )
-                    .into_any_element(),
-                None => div()
-                    .id(("attachment", id))
-                    .relative()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(8.))
-                    .w(px(288.))
-                    .h(px(46.))
-                    .p(px(2.))
-                    .pr(px(48.))
-                    .border_1()
-                    .border_color(if failed.is_some() {
-                        c.border_danger
-                    } else {
-                        c.border_standard
-                    })
-                    .rounded(px(12.))
-                    .child(
-                        div()
-                            .size(px(40.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(9.))
-                            .bg(c.affordance_subtle)
-                            .child(Icon::new(IconName::FileText).size(24.)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(div().text_label_sm().truncate().child(item.name.clone()))
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(c.text_subtle)
-                                    .truncate()
-                                    .child(format!(
-                                        "{} · {}",
-                                        file_size(item.size),
-                                        item.status.label()
-                                    )),
-                            ),
-                    )
-                    .child(actions)
-                    .into_any_element(),
-            }
-        });
+        let disabled = self.sending;
+        let children: Vec<AnyElement> = items
+            .iter()
+            .map(|item| match &item.voice {
+                Some(voice) => self.voice_item(item, voice, disabled, cx),
+                None => self.file_item(item, disabled, cx),
+            })
+            .collect();
         Some(
             div()
                 .id("composer-attachments")
                 .flex()
+                .flex_none()
                 .gap(px(8.))
-                .px(px(4.))
+                .min_w_0()
                 .overflow_x_scroll()
-                .children(items)
+                .children(children)
                 .into_any_element(),
         )
+    }
+
+    fn file_item(&self, item: &DraftFile, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
+        let id = SharedString::from(item.id.clone());
+        let size = attachments::file_size(item.uploaded.as_ref().map_or(item.size, |a| a.size));
+        let status = item.status.label();
+        let kind = item
+            .uploaded
+            .as_ref()
+            .map_or(item.mime.as_str(), |a| a.mime.as_str())
+            .to_string();
+        let preview = preview_source(item);
+        // A failed file shows its whole chip, preview and all.
+        let media = preview.is_some() && item.status != attachments::Status::Error;
+        let busy = item.status.busy();
+        let group = SharedString::from(format!("remove-{}", item.id));
+        let remove_id = id.clone();
+        let remove = div()
+            .id(SharedString::from(format!("remove-attachment-{id}")))
+            .group(group.clone())
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(20.))
+            .rounded(px(10.))
+            .bg(if disabled {
+                c.affordance_disabled
+            } else {
+                c.affordance_prominent
+            })
+            .text_color(if disabled {
+                c.text_unavailable
+            } else {
+                c.text_inverse
+            })
+            .when(!disabled, |d| d.cursor_pointer())
+            .tooltip(Tooltip::text("Remove attachment"))
+            .child(
+                div()
+                    .when(busy, |d| {
+                        d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
+                    })
+                    .child(Icon::new(IconName::X).size(12.)),
+            )
+            .when(busy, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .group_hover(group, |s| s.opacity(0.))
+                        .child(Spinner::new().size(12.).color(c.text_inverse)),
+                )
+            })
+            .when(!disabled, |d| {
+                d.on_click(
+                    cx.listener(move |this, _, _, cx| this.remove_attachment(&remove_id, cx)),
+                )
+            });
+        let issue = item.error.clone().map(|error| {
+            div()
+                .id(SharedString::from(format!("attachment-issue-{id}")))
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(c.text_danger)
+                .tooltip(Tooltip::text(error))
+                .child(Icon::new(IconName::WarningCircle).size(12.))
+        });
+        let retry_id = id.clone();
+        let retry = (item.status == attachments::Status::Error).then(|| {
+            IconButton::new(
+                SharedString::from(format!("retry-attachment-{id}")),
+                IconName::ArrowsClockwise,
+            )
+            .size(IconButtonSize::Xs)
+            .disabled(disabled)
+            .tooltip("Retry upload")
+            .on_click(cx.listener(move |this, _, _, cx| this.retry_attachment(&retry_id, cx)))
+        });
+        let actions = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .self_start()
+            .children(issue)
+            .children(retry)
+            .child(remove);
+        let thumb = preview.map(|source| {
+            let open_id = id.clone();
+            div()
+                .id(SharedString::from(format!("attachment-preview-{id}")))
+                .relative()
+                .flex_none()
+                .size(px(if media { 46. } else { 40. }))
+                .rounded(px(12.))
+                .overflow_hidden()
+                .bg(c.surface_panel)
+                .cursor_pointer()
+                .tooltip(Tooltip::text(format!("{} · {size} · {status}", item.name)))
+                .child(source.size_full())
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(12.))
+                        .border(px(0.5))
+                        .border_color(c.border_standard),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.previewing = Some(open_id.to_string());
+                    cx.notify();
+                }))
+        });
+        if media {
+            return div()
+                .id(SharedString::from(format!("attachment-{id}")))
+                .relative()
+                .flex()
+                .flex_none()
+                .size(px(46.))
+                .children(thumb)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .rounded_full()
+                        .bg(c.surface_panel)
+                        .child(actions),
+                )
+                .into_any_element();
+        }
+        let file_icon = div()
+            .size(px(40.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(9.))
+            .bg(c.affordance_subtle)
+            .text_color(c.text_subtle)
+            .child(Icon::new(IconName::FileText).size(24.));
+        div()
+            .id(SharedString::from(format!("attachment-{id}")))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .w(px(288.))
+            .max_w_full()
+            .h(px(46.))
+            .p(px(2.))
+            .min_w_0()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(c.border_standard)
+            .map(|d| match thumb {
+                Some(thumb) => d.child(thumb),
+                None => d.child(file_icon),
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("attachment-name-{id}")))
+                            .text_label_sm()
+                            .text_color(c.text_standard)
+                            .truncate()
+                            .tooltip(Tooltip::text(format!(
+                                "{} · {size} · {}",
+                                item.name,
+                                if kind.is_empty() { "File" } else { &kind }
+                            )))
+                            .child(item.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(c.text_subtle)
+                            .truncate()
+                            .child(format!("{size} · {status}")),
+                    ),
+            )
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// The community's background sends (`BackgroundUploadStatus.tsx`):
+    /// the phase, a 64px bar of the bytes sent (an indeterminate sweep
+    /// before there are byte counts) and Cancel, which stops the newest
+    /// send and hands it back.
+    fn background_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let queue = self.queue.read(cx);
+        if !queue.uploading() {
+            return None;
+        }
+        let progress = queue.progress(cx);
+        let c = *cx.colors();
+        let reduce = cx.reduce_motion();
+        let bar = div()
+            .relative()
+            .flex_none()
+            .w(px(64.))
+            .h(px(4.))
+            .rounded_full()
+            .overflow_hidden()
+            .bg(c.surface_inset)
+            .child(match progress.fraction {
+                Some(fraction) => div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(64. * fraction.clamp(0., 1.) as f32))
+                    .rounded_full()
+                    .bg(c.affordance_prominent)
+                    .into_any_element(),
+                None if reduce => div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .bg(c.affordance_prominent)
+                    .opacity(0.4)
+                    .into_any_element(),
+                None => div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(64. / 3.))
+                    .rounded_full()
+                    .bg(c.affordance_prominent)
+                    .with_animation(
+                        "background-upload-sweep",
+                        Animation::new(Duration::from_millis(1200))
+                            .repeat()
+                            .with_easing(ease_in_out),
+                        |sweep, delta| {
+                            // translateX(-100%) to translateX(300%).
+                            sweep.left(px(64. / 3. * (4. * delta - 1.)))
+                        },
+                    )
+                    .into_any_element(),
+            });
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_caption()
+                .text_color(c.text_subtle)
+                .child(progress.phase)
+                .child(bar)
+                .child(
+                    Button::new("cancel-background-upload", "Cancel")
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Sm)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.queue.update(cx, |queue, cx| queue.cancel_newest(cx));
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// "Could not attach file", and the queue's notices when this composer
+    /// hosts them: toasts at the window's top right.
+    fn toasts(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let host = cx.entity_id();
+        let queue = self.queue.read(cx);
+        let notices = if queue.hosts_notices(host) {
+            queue.notices.clone()
+        } else {
+            Vec::new()
+        };
+        if notices.is_empty() && self.attach_error.is_none() {
+            return None;
+        }
+        let mut cards: Vec<AnyElement> = Vec::new();
+        if let Some(error) = &self.attach_error {
+            cards.push(
+                Toast::new("attach-error", "Could not attach file")
+                    .tone(ToastTone::Error)
+                    .description(error.clone())
+                    .on_dismiss(cx.listener(|this, _, _, cx| {
+                        this.attach_error = None;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        for notice in notices {
+            let id = notice.id.clone();
+            let toast = Toast::new(
+                SharedString::from(format!("upload-notice-{}", notice.id)),
+                notice.message.clone(),
+            )
+            .tone(ToastTone::Error);
+            let toast = match notice.recovery {
+                Some(job) => toast.action(
+                    Button::new(
+                        SharedString::from(format!("retry-recovery-{job}")),
+                        "Retry failed send recovery",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.queue
+                            .update(cx, |queue, cx| queue.retry_recovery(&job, cx));
+                    })),
+                ),
+                None => toast.on_dismiss(cx.listener(move |this, _, _, cx| {
+                    this.queue.update(cx, |queue, cx| queue.dismiss(&id, cx));
+                })),
+            };
+            cards.push(toast.into_any_element());
+        }
+        let right = window.viewport_size().width - px(16.) - px(384.);
+        Some(
+            deferred(
+                anchored()
+                    .position_mode(AnchoredPositionMode::Window)
+                    .position(point(right, px(128.)))
+                    .child(div().flex().flex_col().gap(px(12.)).children(cards)),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
+    }
+
+    /// "Preview <name>": the image in a dialog titled with its name.
+    fn preview_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.previewing.as_ref()?;
+        let item = self
+            .files
+            .read(cx)
+            .items
+            .iter()
+            .find(|item| &item.id == id)?
+            .clone();
+        let source = preview_source(&item)?;
+        let dialog = Dialog::new("attachment-preview", item.name.clone())
+            .on_close(cx.listener(|this, _, _, cx| {
+                this.previewing = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .h(window.viewport_size().height * 0.65)
+                    .child(source.size_full().object_fit(ObjectFit::Contain)),
+            );
+        let content = div()
+            .key_context("AttachmentPreview")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.previewing = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(dialog);
+        Some(overlay::modal(window, content, None).into_any_element())
     }
 
     fn tools(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2221,14 +2462,14 @@ impl Composer {
             .gap(px(4.))
             .min_h(px(36.))
             .child(self.leading_tools(cx))
-            .when(!editing, |d| {
-                d.child(
-                    IconButton::new("attach", IconName::Paperclip)
-                        .size(IconButtonSize::Sm)
-                        .tooltip("Attach files")
-                        .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
-                )
-            })
+            // Disabled, not hidden, while editing (`renderLeadingTools`).
+            .child(
+                IconButton::new("attach", IconName::Paperclip)
+                    .size(IconButtonSize::Sm)
+                    .tooltip("Attach files")
+                    .disabled(editing || self.sending)
+                    .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
+            )
             .child(
                 div().relative().child(
                     IconButton::new("emoji", IconName::Smiley)
@@ -2257,24 +2498,27 @@ impl Composer {
                         })),
                 ),
             )
-            .when(!editing, |d| {
-                // A plain 32px button: no hover fill, an 18px glyph.
-                d.child(
-                    div()
-                        .id("record-voice-note")
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .size(px(32.))
-                        .rounded(px(10.))
-                        .text_color(c.text_subtle)
-                        .cursor_pointer()
-                        .tooltip(Tooltip::text("Record voice note"))
-                        .child(Icon::new(IconName::Microphone).size(18.))
-                        .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx))),
-                )
-            })
+            // A plain 32px button: no hover fill, an 18px glyph. While
+            // editing it stays but records nothing (`useVoiceCapture`).
+            .child(
+                div()
+                    .id("record-voice-note")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(32.))
+                    .rounded(px(10.))
+                    .text_color(if self.sending {
+                        c.text_unavailable
+                    } else {
+                        c.text_subtle
+                    })
+                    .when(!self.sending, |d| d.cursor_pointer())
+                    .tooltip(Tooltip::text("Record voice note"))
+                    .child(Icon::new(IconName::Microphone).size(18.))
+                    .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx))),
+            )
             .child(
                 IconButton::new("format", IconName::TextAa)
                     .size(IconButtonSize::Sm)
@@ -2409,13 +2653,13 @@ impl Composer {
     /// its remove button on the corner (`ComposerAttachments.tsx:128-170`).
     fn voice_item(
         &self,
-        item: &Pending,
-        voice: &VoiceDraft,
-        failed: Option<SharedString>,
+        item: &DraftFile,
+        voice: &Voice,
+        disabled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let c = *cx.colors();
-        let id = item.id;
+        let id = SharedString::from(item.id.clone());
         let media = self.community.read(cx).session.media().clone();
         let attachment = buzz_relay_client::fold::Attachment {
             url: voice.key.clone(),
@@ -2431,45 +2675,48 @@ impl Composer {
             preview_url: None,
             insecure: false,
         };
-        let busy = matches!(item.status, Status::Uploading);
+        let busy = item.status.busy();
+        let (remove_id, retry_id) = (id.clone(), id.clone());
         div()
-            .id(("voice-draft", id))
+            .id(SharedString::from(format!("voice-draft-{id}")))
             .relative()
             .flex_none()
             .flex()
             .flex_col()
             .w(px(336.))
             .max_w_full()
+            .min_w_0()
             .child(media::voice_draft(
-                ("voice-draft-card", id),
+                SharedString::from(format!("voice-draft-card-{id}")),
                 &attachment,
                 &media,
                 cx,
             ))
-            .when_some(failed, |d, error| {
+            .when_some(item.error.clone(), |d, error| {
                 d.child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(4.))
                         .text_caption()
                         .text_color(c.text_danger)
-                        .child(format!("Upload failed · {error}"))
+                        .child(error)
                         .child(
-                            IconButton::new(("retry-voice", id), IconName::ArrowsClockwise)
-                                .size(IconButtonSize::Xs)
-                                .tooltip("Retry upload")
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.retry_attachment(id, cx)
-                                    }),
-                                ),
+                            Button::new(
+                                SharedString::from(format!("retry-voice-{id}")),
+                                "Retry voice note upload",
+                            )
+                            .disabled(disabled)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.retry_attachment(&retry_id, cx),
+                            )),
                         ),
                 )
             })
             .child(
                 div()
-                    .id(("remove-voice", id))
+                    .id(SharedString::from(format!("remove-voice-{id}")))
                     .absolute()
                     .top(px(-1.))
                     .right(px(-5.))
@@ -2482,7 +2729,7 @@ impl Composer {
                     .border_color(c.border_standard)
                     .bg(c.surface_popover)
                     .text_color(c.text_standard)
-                    .cursor_pointer()
+                    .when(!disabled, |d| d.cursor_pointer())
                     .tooltip(Tooltip::text("Remove voice note"))
                     .map(|d| {
                         if busy {
@@ -2491,7 +2738,13 @@ impl Composer {
                             d.child(Icon::new(IconName::X).size(16.))
                         }
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(id, cx))),
+                    .when(!disabled, |d| {
+                        d.on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.remove_attachment(&remove_id, cx)
+                            }),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -2639,7 +2892,9 @@ impl Composer {
                 )
                 .surface(Surface::Floating)
                 .disabled(busy)
-                .on_click(cx.listener(|this, _, _, cx| this.send_without_outsiders(cx))),
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.send_without_outsiders(window, cx)),
+                ),
             )
             .when(prompt.can_add, |d| {
                 d.footer(
@@ -2659,7 +2914,7 @@ impl Composer {
                 match event.keystroke.key.as_str() {
                     "escape" => this.close_outsiders(window, cx),
                     // The default button, "Do nothing", has the focus.
-                    "enter" => this.send_without_outsiders(cx),
+                    "enter" => this.send_without_outsiders(window, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -2904,7 +3159,7 @@ impl Render for Composer {
         }
         let can_submit = self.can_submit(cx);
         let editing = self.editing.is_some();
-        let has_attachments = !self.attachments.is_empty() && !editing;
+        let has_attachments = self.has_files(cx) && !editing;
         let weak = cx.entity().downgrade();
         let token_colors = c;
         let textarea = Textarea::new(&self.input)
@@ -2960,7 +3215,8 @@ impl Render for Composer {
                     this.move_selection(-1, cx);
                     cx.stop_propagation();
                 } else if this.editing.is_none()
-                    && this.attachments.is_empty()
+                    && !this.has_files(cx)
+                    && this.recipients(cx).is_empty()
                     && this.input.read(cx).value().is_empty()
                     && this.input.read(cx).focus_handle(cx).is_focused(window)
                 {
@@ -3016,7 +3272,7 @@ impl Render for Composer {
             }))
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let over = event.bounds.contains(&event.event.position);
+                    let over = this.accepts_drop() && event.bounds.contains(&event.event.position);
                     if this.drag_over != over {
                         this.drag_over = over;
                         cx.notify();
@@ -3025,12 +3281,13 @@ impl Render for Composer {
             )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.drag_over = false;
-                this.add_paths(paths.paths().to_vec(), cx);
+                if this.accepts_drop() {
+                    this.add_paths(paths.paths().to_vec(), cx);
+                }
             }))
             .when(editing, |d| d.child(self.edit_header(cx)))
             .children(self.edit_retry(cx))
-            .children(self.attachment_row(cx))
-            .child(div().pl(px(4.)).pt(px(4.)).child(textarea))
+            .children(self.background_status(cx))
             .when(self.drag_over, |d| {
                 d.child(
                     div()
@@ -3040,6 +3297,17 @@ impl Render for Composer {
                         .child("Drop files to attach"),
                 )
             })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .min_w_0()
+                    .pl(px(4.))
+                    .pt(px(4.))
+                    .children(self.attachment_row(cx))
+                    .child(textarea),
+            )
             .children(self.notice.clone().map(|notice| {
                 div()
                     .px(px(8.))
@@ -3072,7 +3340,14 @@ impl Render for Composer {
                                 ),
                         ),
                 )
-            });
+            })
+            .children(self.error.clone().map(|error| {
+                div()
+                    .px(px(8.))
+                    .text_body()
+                    .text_color(c.text_standard)
+                    .child(error)
+            }));
 
         let picker = self.picker_open.then(|| {
             let dismiss = cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -3096,7 +3371,9 @@ impl Render for Composer {
             .children(self.completion_popup(cx))
             .children(picker)
             .child(shell)
+            .children(self.toasts(window, cx))
             .children(self.outsiders_dialog(window, cx))
+            .children(self.preview_dialog(window, cx))
     }
 }
 
@@ -3511,8 +3788,6 @@ mod tests {
             channel_reference("0e9d-1", "general_chat"),
             "[\\#general\\_chat](buzz://channel/0e9d-1)"
         );
-        assert_eq!(file_size(12 * 1024), "12 KB");
-        assert_eq!(file_size(1_258_291), "1.2 MB");
     }
 
     #[test]
