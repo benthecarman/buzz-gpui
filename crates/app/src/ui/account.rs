@@ -152,9 +152,8 @@ impl Account {
             return;
         };
         let id = community.entity_id();
-        let session = community.read(cx).session.clone();
         let current = self.current_status(cx);
-        let editor = cx.new(|cx| StatusEditor::new(session, current, window, cx));
+        let editor = cx.new(|cx| StatusEditor::new(community, current, window, cx));
         let _subscription = cx.subscribe(&editor, move |this, _, closed: &Closed, cx| {
             if let Closed(Some(saved)) = closed {
                 this.status = Some((id, saved.clone()));

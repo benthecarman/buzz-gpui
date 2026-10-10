@@ -1,11 +1,13 @@
 //! The "Set a status" dialog (`StatusEditor.tsx`, relay.md §5j): text, an
 //! emoji, and how long the status lasts.
 
+use crate::community::Community;
+use crate::ui::emoji_picker::{self, EmojiPicker, Picked};
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::{Session, StatusInput, UserStatus};
 use buzz_ui::{
-    ActiveTheme, Button, Dialog, IconButton, IconButtonSize, IconName, MaterialStyled, Menu,
-    MenuItem, Select, Surface, TextField, TypeStyled, tokens::radius,
+    ActiveTheme, Button, Dialog, IconButton, IconButtonSize, IconName, Menu, MenuItem, Select,
+    Surface, TextField, TypeStyled, tokens::radius,
 };
 use chrono::{DateTime, Datelike, Duration as Days, Local, NaiveTime, TimeZone, Timelike};
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -102,12 +104,6 @@ const QUICK: [(&str, &str); 5] = [
     ("🏠", "Working remotely"),
 ];
 
-/// A small set of status emoji; there is no full picker yet.
-const EMOJI: [&str; 24] = [
-    "💬", "📅", "🗣️", "🎧", "🍽️", "☕", "🚌", "✈️", "🏠", "🏖️", "🤒", "🌴", "🎉", "💻", "📝", "🔕",
-    "🌙", "☀️", "🏃", "🧪", "🚀", "👀", "✅", "❤️",
-];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Picker {
     Emoji,
@@ -122,6 +118,8 @@ pub struct Closed(pub Option<Option<UserStatus>>);
 
 pub struct StatusEditor {
     session: Arc<Session>,
+    /// The composer's emoji picker, custom emoji included.
+    emoji_picker: Entity<EmojiPicker>,
     current: Option<UserStatus>,
     text: Entity<InputState>,
     emoji: String,
@@ -131,14 +129,14 @@ pub struct StatusEditor {
     picker: Option<Picker>,
     busy: bool,
     error: Option<SharedString>,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<Closed> for StatusEditor {}
 
 impl StatusEditor {
     pub fn new(
-        session: Arc<Session>,
+        community: Entity<Community>,
         current: Option<UserStatus>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -151,14 +149,25 @@ impl StatusEditor {
             state
         });
         text.update(cx, |state, cx| state.focus(window, cx));
-        let _subscription = cx.subscribe(&text, |this, _, event: &InputEvent, cx| match event {
-            InputEvent::Change => {
-                this.error = None;
-                cx.notify();
-            }
-            InputEvent::PressEnter { .. } => this.submit(false, cx),
-            _ => {}
-        });
+        let session = community.read(cx).session.clone();
+        let emoji_picker = cx.new(|cx| EmojiPicker::new(community, window, cx));
+        let _subscriptions = vec![
+            cx.subscribe(&text, |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.submit(false, cx),
+                _ => {}
+            }),
+            cx.subscribe(&emoji_picker, |this, _, Picked(pick), cx| {
+                this.emoji = pick.text();
+                this.set_picker(None, cx);
+            }),
+            cx.subscribe(&emoji_picker, |this, _, _: &emoji_picker::Dismissed, cx| {
+                this.set_picker(None, cx)
+            }),
+        ];
         let now = Local::now();
         let duration = current.as_ref().map_or(Duration::Today, |status| {
             infer(status.expires_at, status.updated_at)
@@ -173,6 +182,7 @@ impl StatusEditor {
             .unwrap_or(now);
         Self {
             session,
+            emoji_picker,
             emoji: current
                 .as_ref()
                 .map(|status| status.emoji.clone())
@@ -185,7 +195,7 @@ impl StatusEditor {
             picker: None,
             busy: false,
             error: None,
-            _subscription,
+            _subscriptions,
         }
     }
 
@@ -413,35 +423,6 @@ impl StatusEditor {
             )
             .into_any_element()
     }
-
-    fn emoji_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        let c = *cx.colors();
-        div()
-            .floating_surface(&c)
-            .p(rems(0.5))
-            .grid()
-            .grid_cols(8)
-            .gap(rems(0.125))
-            .children(EMOJI.into_iter().map(|emoji| {
-                div()
-                    .id(SharedString::from(format!("emoji-{emoji}")))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(rems(2.))
-                    .rounded(radius::ROW)
-                    .text_size(rems(1.25))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(c.affordance_subtle_hover))
-                    .child(emoji)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.emoji = emoji.to_string();
-                        this.picker = None;
-                        cx.notify();
-                    }))
-            }))
-            .into_any_element()
-    }
 }
 
 fn time_label(hour: u32, minute: u32) -> String {
@@ -471,7 +452,13 @@ impl Render for StatusEditor {
                     .when(!effective.is_empty(), |this| {
                         this.child(div().text_size(rems(1.25)).child(effective.clone()))
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !emoji_open {
+                            this.emoji_picker.update(cx, |picker, cx| {
+                                picker.reset(window, cx);
+                                picker.focus(window, cx);
+                            });
+                        }
                         this.set_picker((!emoji_open).then_some(Picker::Emoji), cx)
                     })),
             )
@@ -479,7 +466,10 @@ impl Render for StatusEditor {
                 this.child(overlay::dropdown(
                     window,
                     Align::Start,
-                    self.emoji_grid(cx),
+                    emoji_picker::emoji_picker(&self.emoji_picker, {
+                        let dismiss = Self::dismiss(cx);
+                        move |_, window, cx| dismiss(window, cx)
+                    }),
                     Self::dismiss(cx),
                 ))
             });
