@@ -55,7 +55,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Presence dot driven by relay presence (online, away, offline, unknown), re-read every 5s up to six times after start or stop | BA/AgentCard.tsx:113-141, 186 | PARTIAL: relay presence drives the dot (ui/agents/card.rs, ui/agents.rs). The 5s re-read after start or stop is not done | Re-read cadence | M |
-| Thinking badge on the squircle avatar | BA/AgentCard.tsx:176-184 | MISSING | See §17-H | M |
+| Thinking badge on the squircle avatar | BA/AgentCard.tsx:176-184 | DONE (ui/agents/card.rs) | See §17-H | M |
 | Model line: `launchModel`; "Custom model" when set through the environment; `harness.model`; "Default model". The harness is not shown | BA/AgentCard.tsx:153-160, 200-212 | DONE (ui/agents.rs) | — | S |
 | Tile has no process status or buttons; process control lives in Manage | BA/AgentCard.tsx:386-420 | DONE (ui/agents/card.rs) | — | S |
 | "Review agent status" button when just imported, failed, profile pending, or there is a notice | BA/AgentCard.tsx:409-418; BA/AgentsPage.tsx:500-506 | DONE (ui/agents/card.rs) | — | S |
@@ -339,30 +339,30 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Observer telemetry (owner-encrypted kind 24200, decrypted, leased) | FA/activity.ts:80-139, 451-533; FA/observer.ts:1-58 | MISSING (no 24200 in the port) | Prerequisite for everything below | L |
-| "Agent Activity" panel and `buzz:agent-activity?…` targets; plugin lease | src/bundled/agent-activity/index.tsx:1-33; FA/activity-target.ts:1-53 | MISSING | — | M |
-| Panel states: connect, host cannot decode, "Retry live feed", empty "No captured activity yet…" | src/bundled/agent-activity/ActivityPanel.tsx:37-42, 389-410 | MISSING | — | S |
-| Agent select and conversation select (channel, thread with first prompt line) | ActivityPanel.tsx:64-177, 413-464 | MISSING | — | M |
-| Status line ("N observed working turn(s)." etc.), Transcript/Raw tabs, notices, diagnostics | ActivityPanel.tsx:187-285, 465-483 | MISSING | — | S |
-| Saved-history paging ("Show latest saved activity", "Load older activity") | ActivityPanel.tsx:204-221, 277-283, 355-369; FA/activity.ts:393-450 | MISSING | Archive host | M |
-| Raw view accordion with event JSON and limits | ActivityPanel.tsx:286-341; FA/activity-records.ts:16-51 | MISSING | — | M |
-| Transcript: turn header (config, status, facts), "The start of this turn isn't loaded.", error and "Working…" rows | src/bundled/agent-activity/ActivityTranscript.tsx:56-169; FA/activity-transcript.ts:180-195 | MISSING | — | M |
-| Transcript items: system prompt sections, prompts (steer), thoughts, Markdown agent reply, tool calls (kind icon, permission badge, diffs, output, elision), plan checklist, status items, chunk merging | ActivityTranscript.tsx:174-379; FA/activity-transcript.ts:92-514 | MISSING (markdown renderer reusable: app/src/ui/markdown.rs) | — | M |
-| Turn state machine (working ≤30s, ended, unknown); bounded live window; access filtering; working-channel set | FA/activity.ts:15-321, 380-389, 503-604 | MISSING | — | M |
-| Typing as working evidence (kind 9/20002 from agents, 8s) | FA/activity.ts:619-698 | PARTIAL: relay/src/typing.rs tracks 20002 pulses but does not link them to agents | Join with known agents | S |
+| Observer telemetry (owner-encrypted kind 24200, decrypted, leased) | FA/activity.ts:80-139, 451-533; FA/observer.ts:1-58 | DONE (relay/src/session/observer.rs, app/src/agent_activity/observer.rs) | Prerequisite for everything below | L |
+| "Agent Activity" panel and `buzz:agent-activity?…` targets; plugin lease | src/bundled/agent-activity/index.tsx:1-33; FA/activity-target.ts:1-53 | DONE (app/src/ui/agent_activity/mod.rs, app/src/agent_activity/mod.rs) | The plugin is compiled in, so its lease is held for the session | M |
+| Panel states: connect, host cannot decode, "Retry live feed", empty "No captured activity yet…" | src/bundled/agent-activity/ActivityPanel.tsx:37-42, 389-410 | DONE (app/src/ui/agent_activity/panel.rs) | — | S |
+| Agent select and conversation select (channel, thread with first prompt line) | ActivityPanel.tsx:64-177, 413-464 | DONE (app/src/ui/agent_activity/panel.rs) | — | M |
+| Status line ("N observed working turn(s)." etc.), Transcript/Raw tabs, notices, diagnostics | ActivityPanel.tsx:187-285, 465-483 | DONE (app/src/ui/agent_activity/panel.rs) | — | S |
+| Saved-history paging ("Show latest saved activity", "Load older activity") | ActivityPanel.tsx:204-221, 277-283, 355-369; FA/activity.ts:393-450 | DONE (app/src/agent_activity/observer.rs, through buzz-desktop's archive) | Archive host | M |
+| Raw view accordion with event JSON and limits | ActivityPanel.tsx:286-341; FA/activity-records.ts:16-51 | DONE (app/src/ui/agent_activity/panel.rs, app/src/agent_activity/mod.rs) | — | M |
+| Transcript: turn header (config, status, facts), "The start of this turn isn't loaded.", error and "Working…" rows | src/bundled/agent-activity/ActivityTranscript.tsx:56-169; FA/activity-transcript.ts:180-195 | DONE (app/src/ui/agent_activity/transcript.rs) | — | M |
+| Transcript items: system prompt sections, prompts (steer), thoughts, Markdown agent reply, tool calls (kind icon, permission badge, diffs, output, elision), plan checklist, status items, chunk merging | ActivityTranscript.tsx:174-379; FA/activity-transcript.ts:92-514 | DONE (app/src/agent_activity/transcript_model.rs, app/src/ui/agent_activity/transcript.rs) | — | M |
+| Turn state machine (working ≤30s, ended, unknown); bounded live window; access filtering; working-channel set | FA/activity.ts:15-321, 380-389, 503-604 | DONE (app/src/agent_activity/turns.rs, app/src/agent_activity/mod.rs) | — | M |
+| Typing as working evidence (kind 9/20002 from agents, 8s) | FA/activity.ts:619-698 | DONE (app/src/agent_activity/turns.rs): from the session's typing state (20002 pulses a message ends), only for agents that send telemetry | Join with known agents | S |
 
 ### 17-G/H. Current-activity indicators and thinking badge
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Live activity labels ("Working", "Waiting for permission", "Reading {file}", "Running N tools"…) | FA/current-activity.ts:6-139 | MISSING | — | S |
-| Shared `AgentActivityRow` (avatar, name, duration, scope, "View activity") | FA/AgentActivityRow.tsx:9-83 | MISSING | — | S |
-| Composer indicator separating "X is working" from "X is typing", with avatar stack | src/features/messages/TypingIndicator.tsx:30-228 | PARTIAL: everyone is "is typing", channels only (app/src/ui/typing.rs:59) | — | M |
-| Working-agents hover popover from the composer indicator (scopes, open thread, View activity, keyboard) | TypingIndicator.tsx:110-165, 230-340 | MISSING | — | M |
-| Sidebar channel "working" badge | src/bundled/channels/ChannelSidebarItem.tsx:83-119, 240-252 | MISSING | — | M |
-| Channel activity popover "Working now" | src/bundled/channels/ChannelActivityPopover.tsx:40-46, 197-330 | MISSING | — | M |
-| Profile "Latest activity" preview | src/bundled/profiles/ProfileActivity.tsx:11-92 | MISSING | — | S |
-| Thinking badge on squircle agent avatars (message rows, profile, Agents card), morph animation, a11y ", thinking" / ", available" | FA/AgentAvatar.tsx:20-101; src/shared/design-system/ui/agent-thinking/ThinkingBadge.tsx:7-157 | MISSING (presence dot only: ui/src/components/avatar.rs:46, 101) | — | M |
+| Live activity labels ("Working", "Waiting for permission", "Reading {file}", "Running N tools"…) | FA/current-activity.ts:6-139 | DONE (app/src/agent_activity/current.rs) | — | S |
+| Shared `AgentActivityRow` (avatar, name, duration, scope, "View activity") | FA/AgentActivityRow.tsx:9-83 | DONE (app/src/ui/agent_activity/row.rs) | — | S |
+| Composer indicator separating "X is working" from "X is typing", with avatar stack | src/features/messages/TypingIndicator.tsx:30-228 | DONE (app/src/ui/typing.rs): channel and thread composers; observed turns and typing both count | — | M |
+| Working-agents hover popover from the composer indicator (scopes, open thread, View activity, keyboard) | TypingIndicator.tsx:110-165, 230-340 | DONE (app/src/ui/typing.rs, app/src/ui/agent_activity/row.rs): rows with live labels, scope, open conversation and View activity; Escape closes; Down Arrow preview and single-agent click-to-open apply where clicks open panels (`AgentChooser::click_opens_panel`, buzz-app's personal workspace, which the port has no page for yet) | — | M |
+| Sidebar channel "working" badge | src/bundled/channels/ChannelSidebarItem.tsx:83-119, 240-252 | DONE (app/src/ui/sidebar/rows.rs, app/src/ui/agent_activity/mod.rs) | — | M |
+| Channel activity popover "Working now" | src/bundled/channels/ChannelActivityPopover.tsx:40-46, 197-330 | DONE (app/src/ui/channel_activity.rs): "Working now" rows with ticking durations, the triggering thread and View activity | — | M |
+| Profile "Latest activity" preview | src/bundled/profiles/ProfileActivity.tsx:11-92 | DONE (app/src/ui/agent_activity/profile.rs): on the profile card | — | S |
+| Thinking badge on squircle agent avatars (message rows, profile, Agents card), morph animation, a11y ", thinking" / ", available" | FA/AgentAvatar.tsx:20-101; src/shared/design-system/ui/agent-thinking/ThinkingBadge.tsx:7-157 | DONE (ui/src/components/thinking.rs, avatar.rs): message rows and the Agents card | The profile card's avatar is drawn by the profile slice | M |
 
 ## 18. Sessions / Me (`src/features/sessions/*` = FS, `src/bundled/sessions/*` = BS)
 
