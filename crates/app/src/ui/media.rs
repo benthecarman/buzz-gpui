@@ -12,6 +12,7 @@ mod audio;
 mod comments;
 mod controls;
 mod engine;
+mod preview;
 pub mod recorder;
 mod review;
 mod seek;
@@ -24,8 +25,11 @@ pub use audio::{audio_attachment, forget_local, pause_audio, set_local, voice_dr
 pub use engine::probe_file;
 pub use review::{dismiss_review, review_overlay};
 // The composer opens its draft attachments here.
+pub use preview::{ImageStatus, Open, image_preview, image_status};
 pub use review::open_local_preview;
+pub use review::{open_media, open_media_at};
 pub use timecode::body as text;
+pub use video::{OpenReview, video_preview};
 
 use buzz_relay_client::Media;
 use buzz_ui::TypeStyled;

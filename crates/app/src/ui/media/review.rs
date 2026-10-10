@@ -265,6 +265,35 @@ pub fn open_local_preview(path: &Path, mime: &str, name: &str, window: &mut Wind
     });
 }
 
+/// Opens one attachment from outside the timeline (a GitHub body) in the
+/// viewer, without a gallery or comments (`MediaViewer`).
+pub fn open_media(attachment: Attachment, media: &Media, window: &mut Window, cx: &mut App) {
+    open_media_at(attachment, media, 0., None, window, cx);
+}
+
+/// [`open_media`] for a video, from `seconds` and taking over the inline
+/// player.
+pub fn open_media_at(
+    attachment: Attachment,
+    media: &Media,
+    seconds: f64,
+    inline: Option<WeakEntity<VideoPlayer>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let restore = window.focused(cx);
+    let media = media.clone();
+    let review =
+        cx.new(|cx| Review::new(attachment, media, seconds, inline, None, None, window, cx));
+    let focus = review.read(cx).focus.clone();
+    focus.focus(window, cx);
+    host(cx).update(cx, |host, cx| {
+        host.review = Some(review);
+        host.restore = restore;
+        cx.notify();
+    });
+}
+
 /// The open viewer or draft preview, for the workspace to draw over the
 /// window.
 pub fn review_overlay(cx: &mut App) -> Option<impl IntoElement + use<>> {
