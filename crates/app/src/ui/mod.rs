@@ -81,4 +81,5 @@ pub mod todos;
 mod typing;
 mod unread_badge;
 mod window_controls;
+mod workflows;
 pub mod workspace;
