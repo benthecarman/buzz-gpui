@@ -24,8 +24,8 @@ mod teams;
 pub mod terminal;
 
 use api::{
-    AgentAction, AgentDefaults, AgentsSnapshot, HostAnswer, HostAsk, HostEvent, HostProtocol,
-    ImportCandidate, ImportPreview, Request, Response,
+    AgentAction, AgentDefaults, AgentsSnapshot, AppAgentRequest, HostAnswer, HostAsk, HostEvent,
+    HostProtocol, ImportCandidate, ImportPreview, Request, Response,
 };
 pub use buzz_agent_controller::Credentials;
 use buzz_agent_controller::{Action, Controller, Imports, NewAgent, RuntimeBundle, Store};
@@ -1168,6 +1168,18 @@ impl HostHandler<HostProtocol> for RpcHandler {
         Box::pin(async move {
             if processes::is_process_request(&request) {
                 return host.processes.serve(peer, request).await;
+            }
+            // Agents2 claims answer for this connection.
+            if let Request::AppAgent(
+                request @ (AppAgentRequest::Claim { .. } | AppAgentRequest::Release { .. }),
+            ) = request
+            {
+                return host
+                    .app_agents
+                    .hold(peer, request)
+                    .await
+                    .map(Response::AppAgent)
+                    .map_err(RpcError::Failed);
             }
             host.request_with(request, Some(Arc::new(peer))).await
         })

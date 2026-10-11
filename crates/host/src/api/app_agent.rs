@@ -81,6 +81,20 @@ pub enum AppAgentRequest {
         body: String,
         after: u64,
     },
+    /// Whether the asking GUI runs the agent now. Every GUI connected to
+    /// this host, and every copy of the app sharing its state directory,
+    /// hears the same events; one runs each agent. Asked before each run,
+    /// so another takes over within a tick of the holder letting go or
+    /// disconnecting. Answers [`AppAgentResponse::Claimed`]. Hosts from
+    /// before this answer an error, and the GUI runs the agent anyway.
+    Claim {
+        pubkey: String,
+    },
+    /// Lets another GUI or copy of the app run the agent, as when this GUI
+    /// cannot.
+    Release {
+        pubkey: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,6 +111,8 @@ pub enum AppAgentResponse {
     Events(String),
     /// The community's description of an uploaded blob, as JSON.
     Uploaded(String),
+    /// Whether the asking GUI runs the agent: see [`AppAgentRequest::Claim`].
+    Claimed(bool),
 }
 
 /// An Agents2 agent's identity; never its key.

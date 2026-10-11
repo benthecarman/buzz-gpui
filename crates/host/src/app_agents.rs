@@ -7,12 +7,16 @@
 //! keys in the host's credential store, so Agents2 never waits on the
 //! harness agent controller.
 
-use crate::api::{AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary};
+mod hosting;
+
+use crate::api::{AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol};
 use crate::profile::authorization;
 use base64::Engine;
 use buzz_agent_controller::{
     AppAgent, AppAgents, CREDENTIALS_BUSY, Credentials, NewAppAgent, Published, Secret,
 };
+use buzz_host_rpc::Peer;
+use hosting::{Holder, Hosting};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -71,6 +75,16 @@ pub(crate) struct AppAgentHost {
     profiles: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     creating: Arc<Mutex<VecDeque<Creating>>>,
     staged: Arc<Mutex<Vec<Staged>>>,
+    /// Which connection runs each agent, and the connections watched for
+    /// closing.
+    hosting: Arc<Hosting<Peer<HostProtocol>>>,
+    watched: Arc<Mutex<Vec<Peer<HostProtocol>>>>,
+}
+
+impl Holder for Peer<HostProtocol> {
+    fn same(&self, other: &Self) -> bool {
+        self.same_connection(other)
+    }
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -100,6 +114,7 @@ fn summary(agent: AppAgent) -> AppAgentSummary {
 impl AppAgentHost {
     /// `path` is the identity file, e.g. `<state>/agents2/identities.json`.
     pub(crate) fn new(path: PathBuf, credentials: Arc<dyn Credentials>) -> Self {
+        let hosts = path.with_file_name("hosts");
         Self {
             agents: AppAgents::open(path),
             credentials,
@@ -107,7 +122,48 @@ impl AppAgentHost {
             profiles: Arc::default(),
             creating: Arc::default(),
             staged: Arc::default(),
+            // Dev builds step aside for a packaged app.
+            hosting: Arc::new(Hosting::new(hosts, !cfg!(debug_assertions))),
+            watched: Arc::default(),
         }
+    }
+
+    /// [`AppAgentRequest::Claim`] and [`AppAgentRequest::Release`], which
+    /// answer for the asking connection.
+    pub(crate) async fn hold(
+        &self,
+        peer: Peer<HostProtocol>,
+        request: AppAgentRequest,
+    ) -> Result<AppAgentResponse> {
+        match request {
+            AppAgentRequest::Claim { pubkey } => {
+                self.watch(&peer);
+                let hosting = self.hosting.clone();
+                blocking(move || hosting.claim(&pubkey, &peer))
+                    .await
+                    .map(AppAgentResponse::Claimed)
+            }
+            AppAgentRequest::Release { pubkey } => {
+                self.hosting.release(&pubkey, &peer);
+                Ok(AppAgentResponse::Done)
+            }
+            request => self.serve(request).await,
+        }
+    }
+
+    /// Lets go of what a connection holds once it closes.
+    fn watch(&self, peer: &Peer<HostProtocol>) {
+        let mut watched = locked(&self.watched);
+        if watched.iter().any(|known| known.same_connection(peer)) {
+            return;
+        }
+        watched.push(peer.clone());
+        let (peer, host) = (peer.clone(), self.clone());
+        tokio::spawn(async move {
+            peer.closed().await;
+            host.hosting.release_all(&peer);
+            locked(&host.watched).retain(|known| !known.same_connection(&peer));
+        });
     }
 
     pub(crate) async fn serve(&self, request: AppAgentRequest) -> Result<AppAgentResponse> {
@@ -164,6 +220,9 @@ impl AppAgentHost {
                 body,
                 after,
             } => self.remember(pubkey, slug, body, after).await.map(A::Event),
+            R::Claim { .. } | R::Release { .. } => {
+                Err("Agents2 claims need a GUI connection".into())
+            }
         }
     }
 
@@ -300,6 +359,7 @@ impl AppAgentHost {
             // Held across the deletion, so no publication re-reads the key meanwhile.
             let mut keys = locked(&host.keys);
             keys.remove(&pubkey);
+            host.hosting.forget(&pubkey);
             host.agents.remove(&pubkey, host.credentials.as_ref())
         })
         .await

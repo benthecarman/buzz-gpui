@@ -6,7 +6,9 @@
 //! The visible agents are those the signed-in owner made for the selected
 //! community. Each saved agent has one runner for as long as its identity
 //! exists: matching live events and due timers queue there and run one at
-//! a time through its type's `run`.
+//! a time through its type's `run`. Every GUI on the agent's host, and
+//! every copy of the app sharing it, hears the same events; only the one
+//! the host lets hold the agent runs them.
 
 use super::attention::{
     self, AttentionObject, AttentionValue, CHAT_KINDS, EventData, Predicate, TimerState,
@@ -14,7 +16,7 @@ use super::attention::{
 };
 use super::registry::{self, RegisteredType};
 use super::runtime::{
-    AgentHandle, Bounded, CancelSource, Cancellation, Delivery, HostLink, Trigger,
+    AgentHandle, Bounded, CancelSource, Cancellation, Delivery, HostLink, Trigger, UNSUPPORTED,
 };
 use super::store::{
     self, AgentRecord, FileStorage, Storage, read_records, set_attention, write_records,
@@ -130,6 +132,66 @@ struct Runner {
     compiled: Option<Compiled>,
     /// Tells a replaced runner's drain loop to stop.
     serial: u64,
+    /// Whether the host may hold the agent for this GUI; true at first, so
+    /// an agent that starts out of view is let go of once.
+    may_hold: bool,
+}
+
+/// The agent and runnable type a drain step saw, to tell whether either
+/// changed while it waited on the host.
+#[derive(Clone)]
+struct Seen {
+    agent: Option<Agent>,
+    kind: Option<RegisteredType>,
+}
+
+impl PartialEq for Seen {
+    fn eq(&self, other: &Self) -> bool {
+        self.agent == other.agent
+            && match (&self.kind, &other.kind) {
+                (Some(a), Some(b)) => Arc::ptr_eq(&a.kind, &b.kind),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// What a runner does next.
+enum Step {
+    Idle,
+    /// It cannot run here: let another GUI or copy of the app have it.
+    Release(HostLink, Seen),
+    /// Ask the host to hold it before its next job.
+    Claim(HostLink, Seen),
+}
+
+/// A job started, or why none did.
+enum Start {
+    Idle,
+    /// The agent or its type changed while the claim was out.
+    Changed,
+    Run(
+        Task<Result<(), String>>,
+        Duration,
+        Cancellation,
+        CancelSource,
+    ),
+}
+
+/// Whether the host's answer to a claim lets this GUI run the agent. A
+/// claim that fails, as on a host from before claims, runs it anyway:
+/// answering twice beats not answering at all.
+fn claimed(pubkey: &str, answer: Result<AppAgentResponse, String>) -> bool {
+    match answer {
+        Ok(AppAgentResponse::Claimed(claimed)) => claimed,
+        Ok(_) => true,
+        Err(error) => {
+            if error != UNSUPPORTED {
+                tracing::warn!(agent = %pubkey, %error, "agent was not claimed");
+            }
+            true
+        }
+    }
 }
 
 /// The per-minute admission window.
@@ -805,6 +867,7 @@ impl Agents2 {
     /// reconnects; one is retired only when its agent is deleted, and its
     /// run is cancelled when the agent's type is replaced.
     fn update(&mut self, cx: &mut Context<Self>) {
+        let was_shown: Vec<String> = self.agents.iter().map(|a| a.pubkey.clone()).collect();
         let live: Vec<AppAgentSummary> = self
             .saved()
             .filter(|saved| !saved.summary.deleted)
@@ -843,6 +906,7 @@ impl Agents2 {
                             wrote: Arc::default(),
                             compiled: None,
                             serial: self.serial,
+                            may_hold: true,
                         },
                     );
                 }
@@ -868,9 +932,12 @@ impl Agents2 {
             cx.notify();
         }
         // Resume runners whose queue paused while their agent was out of
-        // view.
+        // view, and claim or release each agent as it comes into or leaves
+        // view, so another GUI takes over without waiting for an event or
+        // tick.
         for (pubkey, runner) in &self.runners {
-            if !runner.queue.is_empty() {
+            let shown = self.agents.iter().any(|agent| &agent.pubkey == pubkey);
+            if !runner.queue.is_empty() || shown != was_shown.contains(pubkey) {
                 drains.push(pubkey.clone());
             }
         }
@@ -980,8 +1047,11 @@ impl Agents2 {
 
     /// One run at a time per agent: events in arrival order, then a due
     /// timer. While the agent is out of view the queue pauses; a type that
-    /// cannot run drops what is queued. A run that ignores its deadline
-    /// stops holding the queue when the deadline passes.
+    /// cannot run drops what is queued. Either way the host lets another
+    /// GUI have the agent. Before each run, on every wake, the host is
+    /// asked whether this GUI holds the agent; one that does not drops
+    /// what is queued. A run that ignores its deadline stops holding the
+    /// queue when the deadline passes.
     fn drain(&mut self, pubkey: &str, cx: &mut Context<Self>) {
         let Some(runner) = self.runners.get_mut(pubkey) else {
             return;
@@ -994,9 +1064,44 @@ impl Agents2 {
         let pubkey = pubkey.to_owned();
         cx.spawn(async move |this, cx| {
             loop {
-                let next = this.update(cx, |this, cx| this.start(&pubkey, serial, cx));
-                let Ok(Some((run, timeout, lifetime, source))) = next else {
-                    break;
+                let (link, seen, claim) =
+                    match this.update(cx, |this, cx| this.step(&pubkey, serial, cx)) {
+                        Ok(Step::Claim(link, seen)) => (link, seen, true),
+                        Ok(Step::Release(link, seen)) => (link, seen, false),
+                        Ok(Step::Idle) | Err(_) => break,
+                    };
+                let request = match claim {
+                    true => AppAgentRequest::Claim {
+                        pubkey: pubkey.clone(),
+                    },
+                    false => AppAgentRequest::Release {
+                        pubkey: pubkey.clone(),
+                    },
+                };
+                let answer = link.app_agent(request).await;
+                if !claim {
+                    if let Err(error) = answer
+                        && error != UNSUPPORTED
+                    {
+                        tracing::warn!(agent = %pubkey, %error, "agent was not released");
+                    }
+                    // It may have come back into view, or gained its type,
+                    // meanwhile.
+                    match this.update(cx, |this, _| this.seen(&pubkey) != seen) {
+                        Ok(true) => continue,
+                        _ => break,
+                    }
+                }
+                let claimed = claimed(&pubkey, answer);
+                let next = this.update(cx, |this, cx| {
+                    this.start(&pubkey, serial, claimed, &seen, cx)
+                });
+                let (run, timeout, lifetime, source) = match next {
+                    Ok(Start::Run(run, timeout, lifetime, source)) => {
+                        (run, timeout, lifetime, source)
+                    }
+                    Ok(Start::Changed) => continue,
+                    Ok(Start::Idle) | Err(_) => break,
                 };
                 let deadline = cx.background_executor().timer(timeout);
                 let ended = futures::future::select(
@@ -1028,43 +1133,85 @@ impl Agents2 {
         .detach();
     }
 
-    /// Starts the runner's next job, if it has one it may run now.
-    #[allow(clippy::type_complexity)]
+    /// The agent in view and its runnable type.
+    fn seen(&self, pubkey: &str) -> Seen {
+        Seen {
+            agent: self.find(pubkey).cloned(),
+            kind: self
+                .runners
+                .get(pubkey)
+                .and_then(|runner| runner.kind.clone())
+                .filter(|kind| kind.kind.runs()),
+        }
+    }
+
+    /// Whether the runner asks the host to hold its agent or lets it go.
+    /// An agent out of view, or of a type that cannot run here, is left to
+    /// another GUI; what it queued in view is dropped.
+    fn step(&mut self, pubkey: &str, serial: u64, cx: &mut Context<Self>) -> Step {
+        let seen = self.seen(pubkey);
+        let host = self.host_of(pubkey);
+        let Some(runner) = self.runners.get_mut(pubkey).filter(|r| r.serial == serial) else {
+            return Step::Idle;
+        };
+        if seen.agent.is_none() || seen.kind.is_none() {
+            if seen.agent.is_some() {
+                runner.queue.clear();
+            }
+            if !std::mem::replace(&mut runner.may_hold, false) {
+                return Step::Idle;
+            }
+            return match host {
+                Some(host) => Step::Release(link(&host, cx), seen),
+                None => Step::Idle,
+            };
+        }
+        match host {
+            Some(host) => Step::Claim(link(&host, cx), seen),
+            None => Step::Idle,
+        }
+    }
+
+    /// Starts the runner's next job, if this GUI holds the agent and it has
+    /// one to run now.
     fn start(
         &mut self,
         pubkey: &str,
         serial: u64,
+        claimed: bool,
+        seen: &Seen,
         cx: &mut Context<Self>,
-    ) -> Option<(
-        Task<Result<(), String>>,
-        Duration,
-        Cancellation,
-        CancelSource,
-    )> {
-        let runner = self.runners.get(pubkey).filter(|r| r.serial == serial)?;
-        let lifetime = runner.lifetime_signal.clone();
-        let agent = self.find(pubkey).cloned();
-        let Some(agent) = agent else {
-            self.runners.get_mut(pubkey)?.running = false;
-            return None;
+    ) -> Start {
+        let current = self.seen(pubkey);
+        let Some(runner) = self.runners.get_mut(pubkey).filter(|r| r.serial == serial) else {
+            return Start::Idle;
         };
-        let runnable = runner.kind.clone().filter(|kind| kind.kind.runs());
-        let Some(kind) = runnable else {
-            let runner = self.runners.get_mut(pubkey)?;
+        runner.may_hold = claimed;
+        // Another GUI or copy of the app holds it and runs these.
+        if !claimed {
             runner.queue.clear();
-            runner.running = false;
-            return None;
+            return Start::Idle;
+        }
+        if current != *seen {
+            return Start::Changed;
+        }
+        let (Some(agent), Some(kind)) = (current.agent, current.kind) else {
+            return Start::Idle;
         };
-        let job = match self.runners.get_mut(pubkey)?.queue.pop_front() {
+        let lifetime = runner.lifetime_signal.clone();
+        let job = match runner.queue.pop_front() {
             Some(job) => Some(job),
             None => self.due(&agent),
         };
         let Some(job) = job else {
-            self.runners.get_mut(pubkey)?.running = false;
-            return None;
+            return Start::Idle;
         };
-        let host = self.host_of(pubkey)?;
-        let runner = self.runners.get(pubkey)?;
+        let Some(host) = self.host_of(pubkey) else {
+            return Start::Idle;
+        };
+        let Some(runner) = self.runners.get(pubkey) else {
+            return Start::Idle;
+        };
         let (source, cancel) = CancelSource::new();
         let handle = AgentHandle {
             pubkey: agent.pubkey.clone(),
@@ -1081,7 +1228,7 @@ impl Agents2 {
             cancel,
         };
         let run = kind.kind.run(delivery, cx);
-        Some((run, kind.kind.timeout(), lifetime, source))
+        Start::Run(run, kind.kind.timeout(), lifetime, source)
     }
 
     // ----- changes -----

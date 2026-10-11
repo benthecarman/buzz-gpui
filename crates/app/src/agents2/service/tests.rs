@@ -272,3 +272,78 @@ fn type_defaults_become_the_first_record() {
     assert!(registry::validate("p", &Kind).is_ok());
     assert!(registry::validate("P!", &Kind).is_err());
 }
+
+#[test]
+fn only_the_holder_runs_an_agent_and_a_failed_claim_still_answers() {
+    let bot = bot();
+    assert!(claimed(&bot, Ok(AppAgentResponse::Claimed(true))));
+    assert!(!claimed(&bot, Ok(AppAgentResponse::Claimed(false))));
+    // A host from before claims, or one that cannot read its locks.
+    assert!(claimed(&bot, Err(UNSUPPORTED.into())));
+    assert!(claimed(&bot, Err("Could not read agent hosting".into())));
+}
+
+#[test]
+fn a_claim_notices_a_changed_agent_or_type() {
+    struct Kind;
+    impl registry::AgentType for Kind {
+        fn id(&self) -> &'static str {
+            "kind"
+        }
+        fn title(&self) -> gpui_kit::SharedString {
+            "Kind".into()
+        }
+        fn defaults(&self) -> registry::TypeDefaults {
+            registry::TypeDefaults::default()
+        }
+    }
+    let kind = || RegisteredType {
+        key: "p/kind".into(),
+        kind: Arc::new(Kind),
+    };
+    let agent = Agent {
+        pubkey: bot(),
+        name: "Echo".into(),
+        agent_type: "p/kind".into(),
+        owner: "a".repeat(64),
+        relay: "wss://relay.example.com".into(),
+        attention: Arc::default(),
+        skipped: Arc::default(),
+        timers: Arc::default(),
+        config: Value::Null,
+    };
+    let first = kind();
+    let seen = Seen {
+        agent: Some(agent.clone()),
+        kind: Some(first.clone()),
+    };
+    assert!(
+        seen == Seen {
+            agent: Some(agent.clone()),
+            kind: Some(first),
+        }
+    );
+    // The same type registered again is a new type.
+    assert!(
+        seen != Seen {
+            agent: Some(agent.clone()),
+            kind: Some(kind()),
+        }
+    );
+    let renamed = Agent {
+        name: "Echo 2".into(),
+        ..agent
+    };
+    assert!(
+        seen != Seen {
+            agent: Some(renamed),
+            kind: seen.kind.clone(),
+        }
+    );
+    assert!(
+        seen != Seen {
+            agent: None,
+            kind: None
+        }
+    );
+}
