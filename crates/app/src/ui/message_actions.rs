@@ -265,10 +265,13 @@ impl MessageActions {
 
     /// Saves the composer's edit (`useMessageEdit`'s `save`): checks it,
     /// sends it through the outbox, and keeps the composer locked until it
-    /// lands; an empty edit asks to delete the message.
+    /// lands; an empty edit asks to delete the message. `current` is the
+    /// target row as the page has it now: the page is mid-update when its
+    /// composer sends, so the `find` hook can't read it here.
     pub fn save_edit(
         &mut self,
         submission: Submission,
+        current: Option<Arc<MessageRow>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -283,7 +286,6 @@ impl MessageActions {
             .edit_initial()
             .map(str::to_string)
             .unwrap_or_default();
-        let current = (self.hooks.find)(target.id, cx);
         let editable = current.as_ref().is_some_and(|row| {
             super::message::editable(row) && !self.ops.deleting(row.id) && self.writable(cx)
         });

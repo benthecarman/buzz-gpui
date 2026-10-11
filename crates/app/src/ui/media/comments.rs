@@ -270,9 +270,11 @@ impl Comments {
     }
 
     fn send(&mut self, mut submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
-        if submission.editing.is_some() {
-            self.actions
-                .update(cx, |actions, cx| actions.save_edit(submission, window, cx));
+        if let Some(target) = &submission.editing {
+            let current = self.row(target.id);
+            self.actions.update(cx, |actions, cx| {
+                actions.save_edit(submission, current, window, cx)
+            });
             return;
         }
         if self.at_frame

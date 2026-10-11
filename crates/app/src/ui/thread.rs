@@ -729,9 +729,17 @@ impl ThreadPanel {
     }
 
     fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
-        if submission.editing.is_some() {
-            self.message_actions
-                .update(cx, |actions, cx| actions.save_edit(submission, window, cx));
+        if let Some(target) = &submission.editing {
+            let current = self
+                .snapshot
+                .root
+                .iter()
+                .chain(self.snapshot.replies.iter())
+                .find(|row| row.id == target.id)
+                .cloned();
+            self.message_actions.update(cx, |actions, cx| {
+                actions.save_edit(submission, current, window, cx)
+            });
             return;
         }
         let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) else {

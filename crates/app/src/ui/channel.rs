@@ -585,9 +585,15 @@ impl ChannelPage {
 
     fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
         crate::perf::begin(crate::perf::SEND);
-        if submission.editing.is_some() {
-            self.message_actions
-                .update(cx, |actions, cx| actions.save_edit(submission, window, cx));
+        if let Some(target) = &submission.editing {
+            let current = self
+                .items
+                .iter()
+                .find(|item| item.row.id == target.id)
+                .map(|item| item.row.clone());
+            self.message_actions.update(cx, |actions, cx| {
+                actions.save_edit(submission, current, window, cx)
+            });
             return;
         }
         let session = self.session(cx);
