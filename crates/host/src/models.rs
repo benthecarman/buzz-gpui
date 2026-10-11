@@ -129,6 +129,34 @@ impl AgentContexts for Contexts {
             .await
         }
     }
+
+    fn codex_model_context(
+        &self,
+        id: Option<&str>,
+        revision: Option<u64>,
+        edit: AgentEdit,
+    ) -> impl Future<Output = Result<buzz_agent_controller::codex::CodexContext, String>> + Send
+    {
+        let host = self.0.clone();
+        let id = id.map(str::to_owned);
+        async move {
+            let _ = AgentHost::tools_path().await;
+            host.run_text(move |owner| {
+                let edit = owner.default_workspace(edit);
+                match (id.as_deref(), revision) {
+                    (Some(id), Some(revision)) => {
+                        owner.controller.codex_model_context(id, revision, edit)
+                    }
+                    (None, None) => {
+                        let edit = owner.controller.effective_draft(edit)?;
+                        owner.controller.draft_codex_model_context(edit)
+                    }
+                    _ => Err("Invalid agent model context".into()),
+                }
+            })
+            .await
+        }
+    }
 }
 
 impl crate::Owner {

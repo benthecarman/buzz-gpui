@@ -43,7 +43,7 @@
         # for Cargo.lock, so each repository is cloned once.
         buzzApp = builtins.fetchGit {
           url = "https://github.com/benthecarman/buzz-app";
-          rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a";
+          rev = "ec7d795f2da780c93f927e7f8ae18eda921155cf";
           allRefs = true;
           submodules = true;
         };

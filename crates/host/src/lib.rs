@@ -491,6 +491,7 @@ impl AgentHost {
             request @ (Request::TeamCapture { .. }
             | Request::TeamPreview { .. }
             | Request::TeamInstructions { .. }
+            | Request::TeamSync { .. }
             | Request::TeamMemberPrepare { .. }
             | Request::TeamMemberCommit { .. }) => self.team_request(request).await,
             Request::RestoreMemory { id, owner, entries } => {

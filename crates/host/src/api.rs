@@ -218,7 +218,8 @@ pub enum Request {
     },
     /// Applies a saved team's instructions to one member before a deploy,
     /// after reconciling the host's team bindings with `teams`, the
-    /// owner's current team heads in `community`.
+    /// owner's current team heads in `community`. Sent by GUIs from before
+    /// team text records; newer ones send [`Request::TeamSync`].
     TeamInstructions {
         id: String,
         revision: u64,
@@ -227,6 +228,19 @@ pub enum Request {
         community: String,
         owner: String,
         teams: BTreeMap<String, TeamCatalogEntry>,
+    },
+    /// buzz-app's `agent_control_team_sync`, after a team save or delete
+    /// and once teams load: copies each team's shared instructions
+    /// (`texts`, by team ID) to its members in `teams`, the owner's current
+    /// team heads in `community`, and clears them from agents no team with
+    /// text lists any longer. A team missing from `texts` could not be read
+    /// and keeps its members' text. Never restarts an agent. Answered with
+    /// [`Response::Agents`].
+    TeamSync {
+        community: String,
+        owner: String,
+        teams: BTreeMap<String, TeamCatalogEntry>,
+        texts: BTreeMap<String, String>,
     },
     /// [`Request::CreatePrepare`] for one member of a team import. A
     /// request ID that already created an agent answers that agent with
