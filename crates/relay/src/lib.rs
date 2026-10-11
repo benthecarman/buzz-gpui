@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod links;
 pub mod live;
 pub mod media;
+mod media_disk;
 pub mod members;
 pub mod messages;
 pub mod moderation;
@@ -63,6 +64,7 @@ pub use live::{
     Replay, RouteKey, RouteStatus,
 };
 pub use media::{Media, MediaError};
+pub use media_disk::set_disk_cache;
 pub use messages::{Attachment, CustomEmoji, Draft, EventTemplate, Mentions, MessageError};
 pub use nostr::prelude::{EventId, PublicKey};
 pub use origin::RelayOrigin;

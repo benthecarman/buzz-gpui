@@ -44,6 +44,10 @@ fn main() {
         .init();
     // A pending sign-out finishes before anything else reads or writes storage.
     sign_out::boot();
+    // Media fetched in earlier runs, kept where signing out erases it.
+    if let Some(cache) = dirs::cache_dir() {
+        buzz_relay_client::set_disk_cache(cache.join("buzz-gpui").join("media"));
+    }
     // A `buzz://` link the OS launched us with (`Exec=buzz-gpui %U`).
     let link = deep_links::from_args(std::env::args().skip(1));
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

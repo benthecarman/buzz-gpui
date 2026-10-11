@@ -7,8 +7,9 @@
 //! elsewhere) load unauthenticated, as the reference webview loads them.
 //!
 //! Fetches run on the session's tokio runtime and resolve to the whole
-//! body. Recent bodies stay in a small in-memory cache, standing in for the
-//! webview cache the reference relies on (`max-age=3600`).
+//! body. Recent bodies stay in a small in-memory cache, and bodies of any
+//! age on disk ([`crate::media_disk`]), standing in for the webview cache
+//! the reference relies on (`max-age=3600`).
 //!
 //! Players, downloads and the clipboard use buzz-desktop's media services
 //! instead, the code buzz-app's Tauri host runs: players stream from its
@@ -269,7 +270,7 @@ impl Media {
         let bytes = self
             .0
             .runtime
-            .spawn(async move { inner.download(target).await })
+            .spawn(async move { inner.load(target).await })
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))??;
         self.0
@@ -278,6 +279,16 @@ impl Media {
             .expect("media cache")
             .insert(key, bytes.clone());
         Ok(bytes)
+    }
+}
+
+/// Writes a body to disk behind the caller, if it is small enough to keep.
+fn keep(key: String, bytes: Arc<[u8]>) {
+    if bytes.len() > CACHE_ENTRY_LIMIT {
+        return;
+    }
+    if let Some(disk) = crate::media_disk::disk() {
+        tokio::task::spawn_blocking(move || disk.write(&key, &bytes));
     }
 }
 
@@ -295,6 +306,33 @@ impl Target {
 }
 
 impl Inner {
+    /// The body from disk if it was kept, else downloaded and kept. Other
+    /// hosts' images older than an hour show as kept and refresh behind.
+    async fn load(self: Arc<Self>, target: Target) -> Result<Arc<[u8]>, MediaError> {
+        let key = target.url().to_string();
+        let Some(disk) = crate::media_disk::disk() else {
+            return self.download(target).await;
+        };
+        let read = key.clone();
+        let kept = tokio::task::spawn_blocking(move || disk.read(&read))
+            .await
+            .ok()
+            .flatten();
+        if let Some(kept) = kept {
+            if matches!(target, Target::Public(_)) && kept.age > crate::media_disk::PUBLIC_FRESH {
+                tokio::spawn(async move {
+                    if let Ok(bytes) = self.download(target).await {
+                        keep(key, bytes);
+                    }
+                });
+            }
+            return Ok(kept.bytes.into());
+        }
+        let bytes = self.download(target).await?;
+        keep(key, bytes.clone());
+        Ok(bytes)
+    }
+
     async fn download(&self, target: Target) -> Result<Arc<[u8]>, MediaError> {
         let _slot = self.slots.acquire().await.expect("media slots stay open");
         let (request, limit) = match &target {
