@@ -704,6 +704,8 @@ impl CodexRuntime {
     ) {
         let id = self.inner.next_job.fetch_add(1, Ordering::Relaxed);
         let pubkey = request.agent.pubkey();
+        // Before the turn is spawned, which may report Working first.
+        self.status(&pubkey, &key, "Starting", "");
         let job = {
             let mut tail = locked(&lane.tail);
             let previous = tail.1.clone();
@@ -725,7 +727,6 @@ impl CodexRuntime {
             *tail = (id, job.clone());
             job
         };
-        self.status(&pubkey, &key, "Starting", "");
         // Agents2 can deliver follow-ups and other conversations at once.
         tokio::spawn(async move {
             job.await;
@@ -1196,6 +1197,10 @@ impl CodexRuntime {
             .await?;
             let context = self.history(&request, &signal).await?;
             signal.check()?;
+            // Before the request: Codex reports the turn's commands as soon
+            // as it starts, sometimes before this task resumes with the
+            // answer, and they must not be overwritten.
+            self.status(&pubkey, &key, "Working", "");
             let turn = rpc
                 .request(
                     "turn/start",
@@ -1233,7 +1238,6 @@ impl CodexRuntime {
             if let Some(ready) = locked(&ready_sender).take() {
                 let _ = ready.send(Ok(()));
             }
-            self.status(&pubkey, &key, "Working", "");
             let status = completed
                 .wait_for(Option::is_some)
                 .await
