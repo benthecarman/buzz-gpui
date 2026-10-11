@@ -48,6 +48,9 @@ pub struct Workspace {
     toggle_focus: FocusHandle,
     /// The page region, focused after a page change.
     main_focus: FocusHandle,
+    /// A topbar tab is opening its page, whose content keeps from taking
+    /// the focus.
+    preserve_focus: bool,
     /// Each channel's tab pane, per community, kept across visits.
     tab_states: HashMap<(EntityId, String), TabState>,
     /// The open channel's tab views, made on this visit.
@@ -133,6 +136,7 @@ impl Workspace {
             overflow_open: false,
             toggle_focus: cx.focus_handle(),
             main_focus: cx.focus_handle(),
+            preserve_focus: false,
             tab_states: HashMap::new(),
             tab_views: HashMap::new(),
             tab_strip: ScrollHandle::new(),
@@ -399,8 +403,10 @@ impl Workspace {
             page.live_status = true;
             page
         });
-        let composer = page.read(cx).composer();
-        composer.update(cx, |state, cx| state.focus(window, cx));
+        if !self.preserve_focus {
+            let composer = page.read(cx).composer();
+            composer.update(cx, |state, cx| state.focus(window, cx));
+        }
         self._page_events = Some(cx.subscribe_in(
             &page,
             window,
@@ -535,8 +541,9 @@ impl Workspace {
             community.read(cx).session.select(None);
         }
         // Focus moves to the page, as buzz-app's `#main-content` does; the
-        // channel page focuses its composer instead.
-        if page != Page::MESSAGES || self.channel.is_none() {
+        // channel page focuses its composer instead, unless a topbar tab
+        // opened it.
+        if page != Page::MESSAGES || self.channel.is_none() || self.preserve_focus {
             window.focus(&self.main_focus, cx);
         }
         cx.notify();

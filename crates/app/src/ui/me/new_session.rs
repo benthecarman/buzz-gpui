@@ -46,10 +46,12 @@ pub struct NewSession {
 }
 
 impl NewSession {
+    /// `focus`: the composer takes the focus.
     pub fn new(
         community: Entity<Community>,
         key: String,
         section: Option<String>,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -66,7 +68,9 @@ impl NewSession {
         });
         composer.update(cx, |composer, cx| {
             composer.without_attachments();
-            composer.focus(window, cx)
+            if focus {
+                composer.focus(window, cx)
+            }
         });
         let pending = pending::read(&community, &key, cx);
         let subscriptions = vec![

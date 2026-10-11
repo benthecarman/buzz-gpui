@@ -58,9 +58,11 @@ pub struct SessionWork {
 }
 
 impl SessionWork {
+    /// `focus`: the composer takes the focus.
     pub fn new(
         community: Entity<Community>,
         channel: ChannelSummary,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -123,10 +125,12 @@ impl SessionWork {
         if let Some(thread) = this.tabs(cx).thread {
             this.make_thread(thread, window, cx);
         }
-        this.page.update(cx, |page, cx| {
-            let composer = page.composer();
-            composer.update(cx, |state, cx| state.focus(window, cx));
-        });
+        if focus {
+            this.page.update(cx, |page, cx| {
+                let composer = page.composer();
+                composer.update(cx, |state, cx| state.focus(window, cx));
+            });
+        }
         this
     }
 

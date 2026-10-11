@@ -110,10 +110,20 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.overflow_open = false;
+        // The topbar tabs leave the focus off the destination's own
+        // autofocus (`focus: "preserve"`); More pages, a list of
+        // buttons, focuses it.
+        let tab = !(self.compact_pages || layout::narrow(Self::viewport_width(window)));
+        self.preserve_focus = tab;
+        if tab && page == Page::ME {
+            let model = crate::ui::me::MeModel::global(cx);
+            model.update(cx, |model, _| model.autofocus = false);
+        }
         match page {
             Page::MESSAGES => self.go_home(window, cx),
             page => self.select_page(page, window, cx),
         }
+        self.preserve_focus = false;
     }
 
     pub(super) fn header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
