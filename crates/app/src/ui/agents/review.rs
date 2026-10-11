@@ -12,6 +12,7 @@ use super::editor::Dismissed;
 use crate::community::{AppState, Community};
 use crate::hosts::{HostConnection, Hosts};
 use buzz_host::api::{Agent, HarnessOption};
+use buzz_host::harness::CODEX;
 use buzz_ui::{Button, ButtonSize, Toast, ToastTone};
 use gpui_kit::*;
 use serde_json::Value;
@@ -156,21 +157,39 @@ pub fn requested_draft(
                     || draft::kind(&option.command).as_deref() == Some(runtime.as_str()))
         })
     });
+    // As the Harness picker does, entering or leaving Codex resets what it
+    // owns.
+    let codex = option.is_some_and(|option| option.id.as_deref() == Some(CODEX));
+    let base = match option {
+        Some(_) if codex != current.is_codex() => {
+            let mut base = Draft {
+                model: String::new(),
+                configuration: None,
+                integration: None,
+                ..current
+            };
+            if codex {
+                base.integration = Some(CODEX.into());
+                base.provider.clear();
+                base.set_codex_configuration(draft::Configuration::Default);
+            }
+            base
+        }
+        _ => current,
+    };
     Draft {
-        name: display_name.clone().unwrap_or(current.name.clone()),
-        system_prompt: system_prompt
-            .clone()
-            .unwrap_or(current.system_prompt.clone()),
+        name: display_name.clone().unwrap_or(base.name.clone()),
+        system_prompt: system_prompt.clone().unwrap_or(base.system_prompt.clone()),
         command: option
             .map(|option| option.command.clone())
             .or(runtime.clone())
-            .unwrap_or(current.command.clone()),
+            .unwrap_or(base.command.clone()),
         args: option
             .map(|option| serde_json::to_string(&option.default_args).unwrap_or_default())
-            .unwrap_or(current.args.clone()),
-        provider: provider.clone().unwrap_or(current.provider.clone()),
-        model: model.clone().unwrap_or(current.model.clone()),
-        ..current
+            .unwrap_or(base.args.clone()),
+        provider: provider.clone().unwrap_or(base.provider.clone()),
+        model: model.clone().unwrap_or(base.model.clone()),
+        ..base
     }
 }
 
@@ -529,5 +548,79 @@ mod tests {
         assert_eq!(draft.name, "Scout 2");
         assert_eq!(draft.command, "/opt/hermes-acp");
         assert_eq!(draft.args, r#"["--acp"]"#);
+    }
+
+    #[test]
+    fn requested_runtimes_move_codexs_own_settings() {
+        use crate::ui::agents::draft::{Configuration, Effort};
+        let options = vec![
+            HarnessOption {
+                id: Some("goose".into()),
+                command: "/opt/homebrew/bin/goose".into(),
+                available: true,
+                ..Default::default()
+            },
+            HarnessOption {
+                id: Some("codex".into()),
+                command: "/tools/codex-acp".into(),
+                available: true,
+                ..Default::default()
+            },
+        ];
+        let request = |runtime: &str| ManagementRequest::Update {
+            request_id: "r".into(),
+            channel_id: "c".into(),
+            agent_name: "Scout".into(),
+            display_name: None,
+            system_prompt: None,
+            runtime: Some(runtime.into()),
+            provider: None,
+            model: None,
+        };
+        let goose = Agent {
+            name: "Scout".into(),
+            harness: buzz_host::api::HarnessSettings {
+                command: "goose".into(),
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let codex = Agent {
+            harness: buzz_host::api::HarnessSettings {
+                integration: Some("codex".into()),
+                command: "/tools/codex-acp".into(),
+                model: "gpt-5.5".into(),
+                configuration: Some(serde_json::json!({
+                    "mode": "advanced",
+                    "effort": { "kind": "value", "value": "high" },
+                })),
+                ..Default::default()
+            },
+            ..goose.clone()
+        };
+
+        let to_goose = requested_draft(&codex, &request("goose"), &options);
+        assert_eq!(to_goose.command, "/opt/homebrew/bin/goose");
+        assert_eq!(to_goose.model, "");
+        assert_eq!((to_goose.integration, to_goose.configuration), (None, None));
+
+        let to_codex = requested_draft(&goose, &request("codex-acp"), &options);
+        assert_eq!(to_codex.command, "/tools/codex-acp");
+        assert_eq!(to_codex.args, "[]");
+        assert!(to_codex.is_codex());
+        assert_eq!(to_codex.codex_configuration(), Some(Configuration::Default));
+        assert_eq!(
+            (to_codex.provider.as_str(), to_codex.model.as_str()),
+            ("", "")
+        );
+
+        let stays = requested_draft(&codex, &request("codex-acp"), &options);
+        assert_eq!(
+            stays.codex_configuration(),
+            Some(Configuration::Advanced(Effort::Value("high".into())))
+        );
+        assert_eq!(stays.model, "gpt-5.5");
     }
 }

@@ -7,6 +7,7 @@ use buzz_host::api::{
     Agent, AgentEdit, AgentsSnapshot, AiConfiguration, ConfigurationPolicy, DatabricksSettings,
     HarnessEdit, HarnessOption, SessionPolicy,
 };
+use buzz_host::harness::CODEX;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -52,6 +53,70 @@ pub fn from_agent(agent: &Agent) -> Draft {
     }
 }
 
+impl Draft {
+    /// A native Codex agent. Only the saved integration says so, never the
+    /// executable's name.
+    pub fn is_codex(&self) -> bool {
+        self.integration.as_deref() == Some(CODEX)
+    }
+
+    pub fn codex_configuration(&self) -> Option<Configuration> {
+        self.configuration.as_ref().and_then(Configuration::parse)
+    }
+
+    pub fn set_codex_configuration(&mut self, configuration: Configuration) {
+        self.configuration = Some(configuration.to_value());
+    }
+}
+
+/// Codex's saved choice: the controller's `AiConfiguration`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Configuration {
+    /// Codex chooses the model and effort each start.
+    Default,
+    Advanced(Effort),
+}
+
+/// An Advanced effort: one of the model's levels (empty until chosen), or
+/// the model reports none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Effort {
+    Value(String),
+    Unsupported,
+}
+
+impl Configuration {
+    /// `None` for a shape this build does not know.
+    pub fn parse(value: &AiConfiguration) -> Option<Self> {
+        match value.get("mode")?.as_str()? {
+            "default" => Some(Self::Default),
+            "advanced" => {
+                let effort = value.get("effort")?;
+                Some(Self::Advanced(match effort.get("kind")?.as_str()? {
+                    "value" => Effort::Value(effort.get("value")?.as_str()?.to_string()),
+                    "unsupported" => Effort::Unsupported,
+                    _ => return None,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn to_value(&self) -> AiConfiguration {
+        match self {
+            Self::Default => serde_json::json!({ "mode": "default" }),
+            Self::Advanced(Effort::Value(value)) => serde_json::json!({
+                "mode": "advanced",
+                "effort": { "kind": "value", "value": value },
+            }),
+            Self::Advanced(Effort::Unsupported) => serde_json::json!({
+                "mode": "advanced",
+                "effort": { "kind": "unsupported" },
+            }),
+        }
+    }
+}
+
 fn executable(command: &str) -> &str {
     command.rsplit(['/', '\\']).next().unwrap_or(command)
 }
@@ -80,11 +145,20 @@ pub fn kind(command: &str) -> Option<String> {
     buzz_host::harness::preset(command).map(|preset| preset.id)
 }
 
-/// `harnessOption`: the exact command, else the Goose or Pi option.
-pub fn option<'a>(options: &'a [HarnessOption], command: &str) -> Option<&'a HarnessOption> {
-    options
-        .iter()
-        .find(|option| option.command == command)
+/// `harnessOption`: the integration's option, else the exact command, else
+/// the Goose or Pi option.
+pub fn option<'a>(
+    options: &'a [HarnessOption],
+    command: &str,
+    integration: Option<&str>,
+) -> Option<&'a HarnessOption> {
+    integration
+        .and_then(|id| {
+            options
+                .iter()
+                .find(|option| option.id.as_deref() == Some(id))
+        })
+        .or_else(|| options.iter().find(|option| option.command == command))
         .or_else(|| {
             let wanted = kind(command).filter(|kind| kind == "goose" || kind == "pi")?;
             options
@@ -93,8 +167,20 @@ pub fn option<'a>(options: &'a [HarnessOption], command: &str) -> Option<&'a Har
         })
 }
 
-/// `harnessPolicy`: the host's integration policy for a command.
-pub fn policy<'a>(options: &'a [HarnessOption], command: &str) -> Option<&'a ConfigurationPolicy> {
+/// `harnessPolicy`: the host's policy for the integration, else for the
+/// command.
+pub fn policy<'a>(
+    options: &'a [HarnessOption],
+    command: &str,
+    integration: Option<&str>,
+) -> Option<&'a ConfigurationPolicy> {
+    if let Some(owned) = integration.and_then(|id| {
+        options
+            .iter()
+            .find(|option| option.id.as_deref() == Some(id))
+    }) {
+        return owned.configuration_policy.as_ref();
+    }
     if let Some(exact) = options.iter().find(|option| option.command == command) {
         return exact.configuration_policy.as_ref();
     }
@@ -210,7 +296,9 @@ pub fn provider_api_key(
     data: &AgentsSnapshot,
 ) -> Option<ApiKey> {
     let options = data.harness_options.as_deref().unwrap_or_default();
-    if policy(options, &draft.command).is_some_and(|policy| policy.authentication == "external") {
+    if policy(options, &draft.command, draft.integration.as_deref())
+        .is_some_and(|policy| policy.authentication == "external")
+    {
         return None;
     }
     if is_pi(&draft.command) {
@@ -254,6 +342,33 @@ pub fn edit(draft: &Draft, model_discovery: bool) -> Result<AgentEdit, String> {
     if args.iter().any(|arg| arg.is_empty() || arg.contains(',')) {
         return Err("ACP arguments must be nonempty and cannot contain commas.".into());
     }
+    if draft.is_codex() {
+        let Some(configuration) = &draft.configuration else {
+            return Err("Choose Default or Advanced Codex configuration.".into());
+        };
+        if !draft.provider.is_empty() {
+            return Err("Codex uses the provider configured by its CLI.".into());
+        }
+        if !args.is_empty() {
+            return Err("Codex does not accept custom adapter arguments.".into());
+        }
+        match Configuration::parse(configuration) {
+            Some(Configuration::Default) if !draft.model.is_empty() => {
+                return Err("Default Codex configuration cannot select a model.".into());
+            }
+            Some(Configuration::Advanced(_))
+                if !model_discovery && draft.model.trim().is_empty() =>
+            {
+                return Err("Choose a model for Advanced Codex configuration.".into());
+            }
+            Some(Configuration::Advanced(Effort::Value(value)))
+                if !model_discovery && value.trim().is_empty() =>
+            {
+                return Err("Choose an effort level for Advanced Codex configuration.".into());
+            }
+            _ => {}
+        }
+    }
     Ok(AgentEdit {
         name: draft.name.clone(),
         picture: draft.picture.clone(),
@@ -267,7 +382,9 @@ pub fn edit(draft: &Draft, model_discovery: bool) -> Result<AgentEdit, String> {
             model: draft.model.clone(),
             configuration: draft.configuration.clone(),
             provider: draft.provider.clone(),
-            databricks: draft.databricks.clone(),
+            // Codex has no Databricks settings; a hidden stale pair would
+            // only fail validation.
+            databricks: draft.databricks.clone().filter(|_| !draft.is_codex()),
         },
         environment: draft.environment.clone(),
         effort: None,
@@ -402,8 +519,154 @@ mod tests {
         assert_eq!(kind("/x/custom"), None);
         let options = options();
         assert_eq!(
-            option(&options, "buzz-pi-acp").map(|o| o.command.as_str()),
+            option(&options, "buzz-pi-acp", None).map(|o| o.command.as_str()),
             Some("/opt/bin/buzz-pi-acp")
+        );
+    }
+
+    fn codex_options() -> Vec<HarnessOption> {
+        let mut options = options();
+        options.push(HarnessOption {
+            id: Some("codex".into()),
+            command: "/tools/codex-acp".into(),
+            available: true,
+            configuration_policy: Some(ConfigurationPolicy {
+                authentication: "external".into(),
+                provider: "external".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        options
+    }
+
+    #[test]
+    fn codex_is_found_by_its_integration_not_its_command() {
+        let options = codex_options();
+        assert_eq!(
+            option(&options, "/saved/codex-acp", Some("codex")).map(|o| o.command.as_str()),
+            Some("/tools/codex-acp")
+        );
+        assert_eq!(option(&options, "/saved/codex-acp", None), None);
+        assert_eq!(
+            policy(&options, "/saved/codex-acp", Some("codex")).map(|p| p.provider.as_str()),
+            Some("external")
+        );
+        assert_eq!(policy(&options, "/saved/codex-acp", None), None);
+    }
+
+    fn codex_draft() -> Draft {
+        Draft {
+            name: "Coder".into(),
+            workspace: "/w".into(),
+            integration: Some("codex".into()),
+            command: "/tools/codex-acp".into(),
+            args: "[]".into(),
+            databricks: Some(DatabricksSettings {
+                host: "not-an-origin".into(),
+                filter: "stale".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn codex_needs_a_complete_mode_without_default_overrides() {
+        let mut draft = codex_draft();
+        let error = |draft: &Draft| edit(draft, false).unwrap_err();
+        assert_eq!(
+            error(&draft),
+            "Choose Default or Advanced Codex configuration."
+        );
+        draft.set_codex_configuration(Configuration::Default);
+        let saved = edit(&draft, false).unwrap().harness;
+        assert_eq!(saved.integration.as_deref(), Some("codex"));
+        assert_eq!(
+            saved.configuration,
+            Some(serde_json::json!({ "mode": "default" }))
+        );
+        // Hidden Databricks settings are not sent, but stay in the draft.
+        assert_eq!(saved.databricks, None);
+        assert!(draft.databricks.is_some());
+
+        draft.model = "gpt-5.5".into();
+        assert_eq!(
+            error(&draft),
+            "Default Codex configuration cannot select a model."
+        );
+        draft.model.clear();
+        draft.provider = "openai".into();
+        assert_eq!(
+            error(&draft),
+            "Codex uses the provider configured by its CLI."
+        );
+        draft.provider.clear();
+        draft.args = r#"["--flag"]"#.into();
+        assert_eq!(
+            error(&draft),
+            "Codex does not accept custom adapter arguments."
+        );
+        draft.args = "[]".into();
+
+        draft.set_codex_configuration(Configuration::Advanced(Effort::Value(String::new())));
+        assert_eq!(
+            error(&draft),
+            "Choose a model for Advanced Codex configuration."
+        );
+        // A model lookup needs neither yet.
+        assert!(edit(&draft, true).is_ok());
+        draft.model = "gpt-5.5".into();
+        assert_eq!(
+            error(&draft),
+            "Choose an effort level for Advanced Codex configuration."
+        );
+        draft.set_codex_configuration(Configuration::Advanced(Effort::Unsupported));
+        assert_eq!(
+            edit(&draft, false).unwrap().harness.configuration,
+            Some(serde_json::json!({
+                "mode": "advanced",
+                "effort": { "kind": "unsupported" },
+            }))
+        );
+    }
+
+    #[test]
+    fn codex_settings_round_trip_through_the_draft() {
+        let configuration = serde_json::json!({
+            "mode": "advanced",
+            "effort": { "kind": "value", "value": "high" },
+        });
+        let agent = Agent {
+            name: "Coder".into(),
+            workspace: "/w".into(),
+            harness: buzz_host::api::HarnessSettings {
+                integration: Some("codex".into()),
+                command: "/tools/codex-acp".into(),
+                model: "gpt-5.5".into(),
+                configuration: Some(configuration.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let draft = from_agent(&agent);
+        assert!(draft.is_codex());
+        assert_eq!(
+            draft.codex_configuration(),
+            Some(Configuration::Advanced(Effort::Value("high".into())))
+        );
+        let saved = edit(&draft, false).unwrap().harness;
+        assert_eq!(saved.integration.as_deref(), Some("codex"));
+        assert_eq!(saved.configuration, Some(configuration));
+        // A mode this build does not know is sent back as it came.
+        let unknown = serde_json::json!({ "mode": "later" });
+        let draft = Draft {
+            configuration: Some(unknown.clone()),
+            ..draft
+        };
+        assert_eq!(draft.codex_configuration(), None);
+        assert_eq!(
+            edit(&draft, false).unwrap().harness.configuration,
+            Some(unknown)
         );
     }
 
