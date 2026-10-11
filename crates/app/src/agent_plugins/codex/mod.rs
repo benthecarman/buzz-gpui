@@ -1,0 +1,293 @@
+//! Codex agents, buzz-app's bundled `buzz.codex` plugin: an Agents2 type
+//! whose agents run Codex on the host that holds them, so they run on
+//! remote buzzd hosts as well as this computer. Each agent has one
+//! `codex app-server`; each conversation is one Codex thread, which keeps
+//! Codex's own coding prompt and tools. Codex acts in Buzz with the shared
+//! Buzz tools as dynamic tools. Compiled in: there is no plugin loading.
+
+pub mod config;
+pub mod history;
+#[cfg(test)]
+mod live;
+pub mod prompt;
+pub mod rpc;
+pub mod runtime;
+pub mod tabs;
+
+use crate::agent_plugins::owner_relay;
+use crate::agents2::{
+    Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
+};
+use crate::buzz_mcp::BuzzEvent;
+use crate::community::AppState;
+use crate::hosts::HostConnection;
+use crate::runtime::Runtime;
+use config::Config;
+use gpui_kit::*;
+use runtime::{CodexRuntime, Run, Wake};
+use std::sync::Arc;
+use std::time::Duration;
+use tabs::Host;
+
+/// Registered as `buzz.codex/codex`, buzz-app's key.
+pub const PLUGIN: &str = "buzz.codex";
+pub const TYPE_ID: &str = "codex";
+/// The agent type whose declared processes hosts run.
+pub const PROCESS_OWNER: &str = "codex";
+/// A run returns once Codex has the work, so this bounds only the
+/// hand-over.
+const HANDOVER: Duration = Duration::from_secs(2 * 60);
+
+/// The runtime, kept for the app's lifetime.
+pub struct Codex {
+    runtime: CodexRuntime,
+    /// The selected community's scope; empty without one.
+    scope: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct CodexGlobal(Entity<Codex>);
+
+impl Global for CodexGlobal {}
+
+/// Registers the type and starts its runtime. Call after `agents2::init`.
+pub fn init(cx: &mut App) {
+    // As in buzz-app: only macOS and Linux, since file uploads run
+    // `base64`, which stock Windows lacks; no unusable type elsewhere.
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    if let Err(error) = register_type(PLUGIN, Arc::new(CodexType), cx) {
+        tracing::error!(%error, "could not register the Codex agent type");
+        return;
+    }
+    let state = cx.new(|cx| {
+        let mut subscriptions =
+            vec![cx.observe_global::<AppState>(|this: &mut Codex, cx| this.bind(cx))];
+        if let Some(agents) = Agents2::global(cx) {
+            subscriptions.push(cx.observe(&agents, |this, _, cx| this.sync(cx)));
+        }
+        subscriptions.push(
+            cx.observe_global::<crate::plugins::Plugins>(|this: &mut Codex, cx| this.sync(cx)),
+        );
+        // Quitting ends every agent's server.
+        subscriptions.push(cx.on_app_quit(|this: &mut Codex, cx| {
+            let _runtime = Runtime::handle(cx).enter();
+            this.runtime.dispose();
+            async {}
+        }));
+        let mut this = Codex {
+            runtime: CodexRuntime::new(None),
+            scope: String::new(),
+            _subscriptions: subscriptions,
+        };
+        this.bind(cx);
+        this
+    });
+    cx.set_global(CodexGlobal(state));
+}
+
+fn key() -> String {
+    format!("{PLUGIN}/{TYPE_ID}")
+}
+
+impl Codex {
+    fn global(cx: &App) -> Option<Entity<Codex>> {
+        cx.try_global::<CodexGlobal>()
+            .map(|global| global.0.clone())
+    }
+
+    /// Reads the selected community as its owner.
+    fn bind(&mut self, cx: &mut Context<Self>) {
+        let current = owner_relay::current(cx);
+        self.scope = current
+            .as_ref()
+            .map(|(scope, _)| scope.clone())
+            .unwrap_or_default();
+        self.runtime.set_relay(current);
+        self.sync(cx);
+    }
+
+    /// Agents of this type in the selected community keep their servers;
+    /// another community, or none, ends them all.
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let _runtime = Runtime::handle(cx).enter();
+        // Turning the plugin off ends every server, as unloading it does in
+        // buzz-app.
+        if !crate::plugins::enabled(PLUGIN) {
+            self.runtime.dispose();
+            return;
+        }
+        if self.scope.is_empty() {
+            self.runtime.sync(&[], "");
+            return;
+        }
+        let Some(agents) = Agents2::global(cx) else {
+            return;
+        };
+        let agents = agents.read(cx);
+        if *agents.status() != Status::Ready {
+            return;
+        }
+        let key = key();
+        let pubkeys: Vec<String> = agents
+            .agents()
+            .iter()
+            .filter(|agent| agent.agent_type == key)
+            .map(|agent| agent.pubkey.clone())
+            .collect();
+        self.runtime.sync(&pubkeys, &self.scope);
+    }
+}
+
+/// The agent's host, for its tabs.
+fn host_of(pubkey: &str, cx: &App) -> Host {
+    let host: Option<Entity<HostConnection>> =
+        Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(pubkey));
+    match host {
+        Some(host) => {
+            let host = host.read(cx);
+            Host {
+                spawn: Some(host.spawner(PROCESS_OWNER)),
+                label: host.label.clone(),
+                remote: host.remote.is_some(),
+            }
+        }
+        None => Host {
+            spawn: None,
+            label: SharedString::default(),
+            remote: false,
+        },
+    }
+}
+
+struct CodexType;
+
+/// The Codex tab before the runtime started, which `init` makes first.
+struct Unavailable;
+
+impl Render for Unavailable {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child("Codex agents run only in the desktop app")
+    }
+}
+
+impl AgentType for CodexType {
+    fn id(&self) -> &'static str {
+        TYPE_ID
+    }
+
+    fn title(&self) -> SharedString {
+        "Codex".into()
+    }
+
+    fn description(&self) -> Option<SharedString> {
+        Some("Codex on this computer, using its native coding tools and your account.".into())
+    }
+
+    fn defaults(&self) -> TypeDefaults {
+        TypeDefaults {
+            config: Config::default().value(),
+            attention: Default::default(),
+        }
+    }
+
+    fn summary(&self, agent: &Agent) -> Option<String> {
+        let model = Config::read(&agent.config).model;
+        Some(if model.is_empty() {
+            "Codex".into()
+        } else {
+            model
+        })
+    }
+
+    fn tabs(&self) -> Vec<AgentTab> {
+        vec![
+            AgentTab {
+                id: "codex".into(),
+                title: "Codex".into(),
+                build: Arc::new(|view, _, cx| {
+                    let Some(state) = Codex::global(cx) else {
+                        return cx.new(|_| Unavailable).into();
+                    };
+                    let pubkey = view.agent.pubkey.clone();
+                    let host = host_of(&pubkey, cx);
+                    let runtime = state.read(cx).runtime.clone();
+                    cx.new(|cx| tabs::CodexTab::new(pubkey, host, runtime, cx))
+                        .into()
+                }),
+            },
+            AgentTab {
+                id: "settings".into(),
+                title: "Settings".into(),
+                build: Arc::new(|view, window, cx| {
+                    let host = host_of(&view.agent.pubkey, cx);
+                    cx.new(|cx| tabs::SettingsTab::new(view, host, window, cx))
+                        .into()
+                }),
+            },
+        ]
+    }
+
+    fn runs(&self) -> bool {
+        true
+    }
+
+    fn run(&self, delivery: Delivery, cx: &mut App) -> Task<Result<(), String>> {
+        tracing::debug!(agent = %delivery.agent.pubkey, "Codex delivery");
+        if delivery.cancel.is_cancelled() {
+            return Task::ready(Err("The run was cancelled".into()));
+        }
+        let Some(state) = Codex::global(cx) else {
+            return Task::ready(Err("Codex agents run only in the desktop app".into()));
+        };
+        let host =
+            Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(&delivery.agent.pubkey));
+        let Some(host) = host else {
+            return Task::ready(Err("The agent's host is not connected".into()));
+        };
+        let spawn = host.read(cx).spawner(PROCESS_OWNER);
+        let wake = match delivery.trigger {
+            Trigger::Mention { event } => Wake::Mention {
+                event: event_of(&event),
+            },
+            Trigger::Watch {
+                event, interest, ..
+            } => Wake::Watch {
+                event: event_of(&event),
+                interest: interest.map(|interest| interest.instructions),
+            },
+            Trigger::Timer { .. } => Wake::Timer,
+        };
+        let run = Run {
+            wake,
+            channel: delivery.channel,
+            agent: Arc::new(delivery.agent),
+            config: delivery.config,
+            spawn,
+        };
+        let runtime = state.read(cx).runtime.clone();
+        let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });
+        cx.background_spawn(async move {
+            handed
+                .await
+                .unwrap_or_else(|_| Err("Codex stopped".to_string()))
+        })
+    }
+
+    fn timeout(&self) -> Duration {
+        HANDOVER
+    }
+}
+
+fn event_of(event: &crate::agents2::attention::EventData) -> BuzzEvent {
+    BuzzEvent {
+        id: event.id.clone(),
+        pubkey: event.pubkey.clone(),
+        created_at: event.created_at,
+        kind: u32::from(event.kind),
+        tags: event.tags.clone(),
+        content: event.content.clone(),
+        sig: String::new(),
+    }
+}

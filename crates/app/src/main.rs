@@ -111,6 +111,7 @@ fn main() {
         agents2::init(cx);
         ui::agents::init(cx);
         agent_plugins::claude_code::init(cx);
+        agent_plugins::codex::init(cx);
         mission_control::init(cx);
         ui::pages::init(cx);
         ui::agent_activity::init(cx);
