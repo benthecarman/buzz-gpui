@@ -2019,7 +2019,16 @@ impl<J: ReadStateJournal> ReadStateSync<J> {
             Ok(next)
         });
         if let Err(error) = result {
-            self.fail(&error);
+            // A rejected update changed nothing: only a failed save puts
+            // sync in error (which holds notifications back).
+            if !matches!(
+                error,
+                ReadStateError::Expired
+                    | ReadStateError::SyncUnsupported
+                    | ReadStateError::InvalidFrontier
+            ) {
+                self.fail(&error);
+            }
             return Err(error);
         }
         let journal = self.journal.as_ref().expect("saved");
@@ -3317,6 +3326,8 @@ mod tests {
         let update = ReadUpdate::observe("activity:room", 9).fenced("room", lease_revision);
         assert_eq!(sync.apply(update, None, T), Err(ReadStateError::Expired));
         assert_eq!(sync.state().frontier("activity:room"), None);
+        // An expected rejection is not a sync failure.
+        assert_ne!(sync.snapshot().status, ReadSyncStatus::Error);
     }
 
     #[test]
