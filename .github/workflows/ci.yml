@@ -35,6 +35,10 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # Backtraces keep file and line numbers, but the test build skips
+      # the full debug info that much of its compile and link time goes to.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
