@@ -1,10 +1,13 @@
 //! PanelHeader and PanelHeaderLabel (6.12).
 
-use crate::{ActiveTheme, Icon, IconName, TypeStyled};
+use super::ClickHandler;
+use crate::{ActiveTheme, Icon, IconName, Tooltip, TypeStyled};
 use gpui_kit::{
-    AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+    AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px, rems,
 };
+use std::rc::Rc;
 
 /// A 40px pane header with a title or label and trailing actions, over a
 /// hairline inset 4px from each side (flush inside joined panels).
@@ -12,6 +15,8 @@ use gpui_kit::{
 pub struct PanelHeader {
     title: Option<SharedString>,
     label: Option<(Option<IconName>, SharedString)>,
+    /// The label's text opens something: its id, tooltip and handler.
+    label_link: Option<(ElementId, SharedString, ClickHandler)>,
     leading: Vec<AnyElement>,
     actions: Vec<AnyElement>,
     joined: bool,
@@ -23,6 +28,7 @@ impl PanelHeader {
         Self {
             title: None,
             label: None,
+            label_link: None,
             leading: Vec::new(),
             actions: Vec::new(),
             joined: false,
@@ -39,6 +45,18 @@ impl PanelHeader {
     /// A PanelHeaderLabel: body-sm with a 16px icon slot, padding-inline 8.
     pub fn label(mut self, icon: Option<IconName>, text: impl Into<SharedString>) -> Self {
         self.label = Some((icon, text.into()));
+        self
+    }
+
+    /// Makes the label's text a link-styled button with a `title`
+    /// tooltip, underlined on hover and truncated to fit.
+    pub fn label_link(
+        mut self,
+        id: impl Into<ElementId>,
+        tooltip: impl Into<SharedString>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.label_link = Some((id.into(), tooltip.into(), Rc::new(on_click)));
         self
     }
 
@@ -92,9 +110,25 @@ impl RenderOnce for PanelHeader {
                         this.child(div().px(rems(0.5)).text_label().child(title))
                     })
                     .when_some(self.label, |this, (icon, text)| {
+                        let text = match self.label_link {
+                            Some((id, tooltip, on_click)) => div()
+                                .id(id)
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .cursor_pointer()
+                                .hover(|style| style.underline())
+                                .tooltip(Tooltip::text(tooltip))
+                                .on_click(move |event, window, cx| on_click(event, window, cx))
+                                .child(text)
+                                .into_any_element(),
+                            None => text.into_any_element(),
+                        };
                         this.child(
                             div()
                                 .flex()
+                                .min_w_0()
                                 .items_center()
                                 .gap(rems(0.5))
                                 .px(rems(0.5))

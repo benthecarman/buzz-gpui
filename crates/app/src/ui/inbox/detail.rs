@@ -266,6 +266,17 @@ impl Render for InboxDetail {
                         }),
                         title,
                     )
+                    .label_link(
+                        "inbox-detail-heading",
+                        if dm {
+                            "Open conversation"
+                        } else if self.item.root_id.is_some() {
+                            "Open full thread"
+                        } else {
+                            "Open in channel"
+                        },
+                        cx.listener(|this, _, _, cx| this.open(cx)),
+                    )
                     .action(
                         IconButton::new("inbox-open", IconName::ArrowSquareOut)
                             .size(IconButtonSize::Sm)
