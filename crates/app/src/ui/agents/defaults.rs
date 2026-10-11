@@ -654,6 +654,8 @@ impl DefaultsCard {
             },
             action: ModelAction::Connect,
             inherit_workspace: environment_host || environment_filter,
+            integration: buzz_host::harness::defaults_name(draft.harness).map(str::to_string),
+            selected_model: Some(draft.model.clone()).filter(|model| !model.is_empty()),
             ..Default::default()
         };
         self.lookup.generation += 1;
@@ -1018,6 +1020,11 @@ impl DefaultsCard {
                 window,
                 cx,
             ),
+            &c,
+        ));
+        fields = fields.child(Self::secondary(
+            "Codex is selected per agent. Its Default mode uses the model and effort from the \
+             Codex CLI, so these device-wide defaults do not configure Codex.",
             &c,
         ));
 
