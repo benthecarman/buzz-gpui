@@ -88,9 +88,9 @@ impl SettingsPage {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(outcome) => {
+                    Ok((outcome, residue)) => {
                         this.modal = None;
-                        let (text, tone) = left_text(&name, outcome);
+                        let (text, tone) = left_text(&name, outcome, residue);
                         this.show_toast_tone(text, tone, cx);
                     }
                     Err(message) => {
@@ -142,8 +142,8 @@ impl SettingsPage {
 }
 
 /// buzz-app's `leftText`: what the leave did.
-pub(crate) fn left_text(name: &str, outcome: LeaveOutcome) -> (String, ToastTone) {
-    match outcome {
+pub(crate) fn left_text(name: &str, outcome: LeaveOutcome, residue: bool) -> (String, ToastTone) {
+    let (text, tone) = match outcome {
         LeaveOutcome::Left => (format!("Left {name}."), ToastTone::Success),
         LeaveOutcome::AlreadyAbsent => (
             format!("You were no longer a member of {name}, so it was removed from this device."),
@@ -156,6 +156,10 @@ pub(crate) fn left_text(name: &str, outcome: LeaveOutcome) -> (String, ToastTone
             ),
             ToastTone::Info,
         ),
+    };
+    match residue {
+        true => (format!("{text} Some saved data couldn’t be cleared."), tone),
+        false => (text, tone),
     }
 }
 
@@ -167,14 +171,21 @@ mod tests {
     #[test]
     fn leave_toasts_follow_the_reference() {
         assert_eq!(
-            left_text("Buzz", LeaveOutcome::Left),
+            left_text("Buzz", LeaveOutcome::Left, false),
             ("Left Buzz.".into(), ToastTone::Success)
         );
+        assert_eq!(
+            left_text("Buzz", LeaveOutcome::Left, true).0,
+            "Left Buzz. Some saved data couldn’t be cleared."
+        );
         assert!(
-            left_text("Buzz", LeaveOutcome::AlreadyAbsent)
+            left_text("Buzz", LeaveOutcome::AlreadyAbsent, false)
                 .0
                 .starts_with("You were no longer a member of Buzz")
         );
-        assert_eq!(left_text("Buzz", LeaveOutcome::Revoked).1, ToastTone::Info);
+        assert_eq!(
+            left_text("Buzz", LeaveOutcome::Revoked, false).1,
+            ToastTone::Info
+        );
     }
 }

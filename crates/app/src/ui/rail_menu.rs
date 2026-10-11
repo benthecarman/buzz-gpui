@@ -273,8 +273,8 @@ impl LeaveCommunity {
             let result = task.await;
             let _ = this.update(cx, |_, cx| {
                 match result {
-                    Ok(outcome) => {
-                        let (text, tone) = super::settings::left_text(&name, outcome);
+                    Ok((outcome, residue)) => {
+                        let (text, tone) = super::settings::left_text(&name, outcome, residue);
                         let timeout = (tone == ToastTone::Success)
                             .then_some(std::time::Duration::from_secs(4));
                         notice::show(text, tone, timeout, cx);

@@ -232,19 +232,29 @@ impl AppState {
     /// community is dropped from this device and, unless the relay says
     /// access was revoked, its local data is purged. Any failure keeps the
     /// membership so the user can retry.
-    pub fn leave(community: Entity<Community>, cx: &mut App) -> Task<Result<LeaveOutcome, String>> {
+    /// Also whether any saved data outlived the purge (`residue`).
+    pub fn leave(
+        community: Entity<Community>,
+        cx: &mut App,
+    ) -> Task<Result<(LeaveOutcome, bool), String>> {
         let session = community.read(cx).session.clone();
         cx.spawn(async move |cx| {
             let outcome = session.leave().await?;
             let purge = outcome != LeaveOutcome::Revoked;
-            cx.update(|cx| Self::remove(&community, purge, cx));
-            Ok(outcome)
+            let purged = cx.update(|cx| Self::remove(&community, purge, cx));
+            let residue = !matches!(purged.await, Ok(Ok(())));
+            Ok((outcome, residue))
         })
     }
 
     /// Drops a community from this device: another community becomes
     /// selected, the session stops, then its local data is purged.
-    fn remove(community: &Entity<Community>, purge: bool, cx: &mut App) {
+    /// Resolves once the purge has run: `Err` when saved data remains.
+    fn remove(
+        community: &Entity<Community>,
+        purge: bool,
+        cx: &mut App,
+    ) -> tokio::task::JoinHandle<Result<(), ()>> {
         let id = community.entity_id();
         let state = cx.global_mut::<Self>();
         let Some(index) = state
@@ -252,7 +262,7 @@ impl AppState {
             .iter()
             .position(|other| other.entity_id() == id)
         else {
-            return;
+            return Runtime::handle(cx).spawn(async { Ok(()) });
         };
         state.communities.remove(index);
         let remaining = state.communities.len();
@@ -276,8 +286,10 @@ impl AppState {
             session.dispose().await;
             if purge && let Err(error) = store.purge(&partition) {
                 tracing::error!(%error, "could not purge the community's local data");
+                return Err(());
             }
-        });
+            Ok(())
+        })
     }
 
     /// Sign out's commit point (`IdentityHost::close`): every session
