@@ -9,6 +9,7 @@
 //! is not enough.
 
 use super::actions::{Context, Ops, read};
+use super::delivery::{Wait, delivered as waiting};
 use super::{Session, SessionSnapshot};
 use crate::discovery::{ChannelSummary, ChannelType, SESSION_CHANNEL_DESCRIPTION, ScanOptions};
 use crate::event::{Verified, kinds};
@@ -232,35 +233,21 @@ pub(super) async fn delivered(
             .retry(&id, None)
             .map_err(|error| error.to_string())?;
     }
-    let wait = async {
-        let mut changes = ctx.outbox.changes();
-        loop {
-            match ctx.outbox.get(&id) {
-                Some(op) => match op.delivery {
-                    Delivery::Accepted | Delivery::Seen => return Ok(()),
-                    Delivery::Failed | Delivery::Unknown => {
-                        return Err(op.error.clone().unwrap_or_else(|| {
-                            if addition {
-                                "Agent addition could not be confirmed. Check membership before retrying.".into()
-                            } else {
-                                "The operation could not be confirmed.".into()
-                            }
-                        }));
-                    }
-                    Delivery::Sending => {}
-                },
-                None => return Err("The operation could not be confirmed.".into()),
-            }
-            if changes.changed().await.is_err() {
-                return Err(if addition {
-                    "The community connection changed. Check channel membership before adding again.".into()
-                } else {
-                    "The community connection changed. Your draft is kept.".into()
-                });
-            }
-        }
+    let wait = Wait {
+        missing: Some("The operation could not be confirmed."),
+        failed: if addition {
+            "Agent addition could not be confirmed. Check membership before retrying."
+        } else {
+            "The operation could not be confirmed."
+        },
+        unknown_fails: true,
+        closed: if addition {
+            "The community connection changed. Check channel membership before adding again."
+        } else {
+            "The community connection changed. Your draft is kept."
+        },
     };
-    tokio::time::timeout(CONFIRM_TIMEOUT, wait)
+    tokio::time::timeout(CONFIRM_TIMEOUT, waiting(&ctx.outbox, id, &wait))
         .await
         .unwrap_or_else(|_| {
             Err(if addition {

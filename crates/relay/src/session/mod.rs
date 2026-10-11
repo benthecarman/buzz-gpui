@@ -19,6 +19,7 @@ mod activity;
 mod canvas;
 mod catalog;
 mod channels;
+mod delivery;
 mod feedback;
 mod gifs;
 mod inbox;

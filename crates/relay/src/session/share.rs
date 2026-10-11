@@ -9,6 +9,7 @@
 //! retry continues them and never repeats one that may have taken effect.
 
 use super::Session;
+use super::delivery::{Wait, delivered};
 use crate::discovery::{ChannelSummary, ChannelType};
 use crate::event::kinds;
 use crate::lifecycle::{AttemptStatus, ChannelDetails, DetailsDraft, NewChannel};
@@ -812,25 +813,13 @@ impl Session {
 /// Waits until the outbox shows the link accepted or seen. Its recovery
 /// keeps it listed after an echo.
 async fn link_receipt(outbox: &Outbox, id: EventId) -> Result<(), String> {
-    let mut changes = outbox.changes();
-    loop {
-        changes.borrow_and_update();
-        let Some(op) = outbox.get(&id) else {
-            return Err("Link delivery is unconfirmed. Check the channel before retrying.".into());
-        };
-        match op.delivery {
-            Delivery::Accepted | Delivery::Seen => return Ok(()),
-            Delivery::Failed | Delivery::Unknown => {
-                return Err(op.error.clone().unwrap_or_else(|| {
-                    "Link delivery is unconfirmed. Retry the saved message.".into()
-                }));
-            }
-            Delivery::Sending => {}
-        }
-        if changes.changed().await.is_err() {
-            return Err(LINK_UNCONFIRMED.into());
-        }
-    }
+    let wait = Wait {
+        missing: Some("Link delivery is unconfirmed. Check the channel before retrying."),
+        failed: "Link delivery is unconfirmed. Retry the saved message.",
+        unknown_fails: true,
+        closed: LINK_UNCONFIRMED,
+    };
+    delivered(outbox, id, &wait).await
 }
 
 #[cfg(test)]

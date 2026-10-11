@@ -7,6 +7,7 @@
 //! settles it.
 
 use super::actions::Ops;
+use super::delivery::Wait;
 use super::{Actor, Session};
 use crate::lifecycle::{self, CONFIRM_DELAYS, ChannelState, RUN_TIMEOUT};
 use crate::members::{self, MemberChange};
@@ -569,22 +570,13 @@ impl Ops {
 /// `waitForAddition`: delivered, or its failure. Delivery is not
 /// membership; the roster is read next.
 async fn delivered(outbox: &Outbox, id: EventId) -> Result<(), String> {
-    let mut changes = outbox.changes();
-    loop {
-        match outbox.get(&id) {
-            None => return Ok(()),
-            Some(op) => match op.delivery {
-                Delivery::Accepted | Delivery::Seen => return Ok(()),
-                Delivery::Sending => {}
-                Delivery::Failed | Delivery::Unknown => {
-                    return Err(op.error.clone().unwrap_or_else(|| {
-                        "Addition is not confirmed. Retry to check again.".into()
-                    }));
-                }
-            },
-        }
-        changes.changed().await.map_err(|_| CLOSED.to_owned())?;
-    }
+    let wait = Wait {
+        missing: None,
+        failed: "Addition is not confirmed. Retry to check again.",
+        unknown_fails: true,
+        closed: CLOSED,
+    };
+    super::delivery::delivered(outbox, id, &wait).await
 }
 
 fn now() -> u64 {

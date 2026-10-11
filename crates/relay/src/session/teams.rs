@@ -4,6 +4,7 @@
 //! instructions in their own text record, and the team heads the agent
 //! host reconciles its bindings against.
 
+use super::delivery::{Wait, delivered};
 use super::{Message, Session};
 use crate::event::Verified;
 use crate::kit::payload::{self, TeamPayload};
@@ -357,24 +358,16 @@ impl Inner {
         {
             return Err("This operation could not be confirmed and is too old to replay. Keep your draft and inspect the current result before making a new save.".into());
         }
-        let mut changes = outbox.changes();
-        let delivered = tokio::time::timeout(DELIVERY_WAIT, async {
-            loop {
-                match outbox.get(&id).map(|op| (op.delivery, op.error.clone())) {
-                    Some((Delivery::Accepted | Delivery::Seen, _)) => return Ok(()),
-                    Some((Delivery::Failed, error)) => {
-                        return Err(error.unwrap_or_else(|| "The relay refused this save.".into()));
-                    }
-                    None => return Err("The save was dismissed.".to_string()),
-                    _ => {}
-                }
-                if changes.changed().await.is_err() {
-                    return Err(CLOSED.to_string());
-                }
-            }
-        })
-        .await
-        .unwrap_or(Ok(()));
+        // An uncertain save may still land: the exact read below decides.
+        let wait = Wait {
+            missing: Some("The save was dismissed."),
+            failed: "The relay refused this save.",
+            unknown_fails: false,
+            closed: CLOSED,
+        };
+        let delivered = tokio::time::timeout(DELIVERY_WAIT, delivered(outbox, id, &wait))
+            .await
+            .unwrap_or(Ok(()));
         delivered?;
         if self.fresh(exact).await?.iter().any(|e| e.id == id) {
             Ok(())
