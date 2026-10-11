@@ -1333,7 +1333,23 @@ impl Composer {
                     return;
                 };
                 space = found.space;
-                (found.items, found.status, found.retry)
+                // Rows already shown for this query stay, disabled with a
+                // reason when they can no longer be picked (`use-mention-choices`).
+                let items = match self.completion.as_ref().filter(|old| {
+                    old.query.trigger == Trigger::Mention
+                        && old.query.start == query.start
+                        && old.query.text == query.text
+                }) {
+                    Some(old) => keep_shown(&old.items, found.items, |key| {
+                        if super::archives::hides(&self.community, key, cx) {
+                            "Archived"
+                        } else {
+                            "No longer available. Change your search to refresh choices."
+                        }
+                    }),
+                    None => found.items,
+                };
+                (items, found.status, found.retry)
             }
             Trigger::Emoji => {
                 // Unicode results still show while the community catalog
@@ -1480,6 +1496,7 @@ impl Composer {
                 agent: person.agent,
                 member: person.member,
                 dm,
+                disabled: None,
             })
             .collect();
         let teams_shown = rows.len();
@@ -1965,6 +1982,12 @@ impl Composer {
             id, name, member, ..
         }) = completion.items.get(index)
             && !self.can_select(id, name, *member, cx)
+        {
+            return;
+        }
+        if let Some(Suggestion::Person {
+            disabled: Some(_), ..
+        }) = completion.items.get(index)
         {
             return;
         }
@@ -3158,6 +3181,8 @@ pub(super) enum Suggestion {
         agent: bool,
         member: bool,
         dm: bool,
+        /// Why a row shown earlier can no longer be picked.
+        disabled: Option<SharedString>,
     },
     Channel {
         id: String,
@@ -3176,6 +3201,75 @@ pub(super) enum Suggestion {
         detail: SharedString,
         disabled: bool,
     },
+}
+
+/// `old`'s people in their shown order, refreshed from `new`; one that is
+/// gone stays, disabled with `reason`, and one that left the conversation
+/// asks to reopen. New people and the other rows follow.
+fn keep_shown(
+    old: &[Suggestion],
+    new: Vec<Suggestion>,
+    reason: impl Fn(&str) -> &'static str,
+) -> Vec<Suggestion> {
+    let (mut people, others): (Vec<Suggestion>, Vec<Suggestion>) = new
+        .into_iter()
+        .partition(|item| matches!(item, Suggestion::Person { .. }));
+    let mut out = Vec::new();
+    for item in old {
+        let Suggestion::Person {
+            pubkey,
+            name,
+            label,
+            picture,
+            agent,
+            member,
+            dm,
+            disabled,
+        } = item
+        else {
+            continue;
+        };
+        let found = people
+            .iter()
+            .position(|now| matches!(now, Suggestion::Person { pubkey: key, .. } if key == pubkey));
+        match found.map(|at| people.remove(at)) {
+            Some(Suggestion::Person {
+                member: false,
+                pubkey,
+                name,
+                label,
+                picture,
+                agent,
+                dm,
+                ..
+            }) if *member => out.push(Suggestion::Person {
+                pubkey,
+                name,
+                label,
+                picture,
+                agent,
+                member: false,
+                dm,
+                disabled: Some(
+                    "Channel membership changed. Reopen to review adding this recipient.".into(),
+                ),
+            }),
+            Some(now) => out.push(now),
+            None => out.push(Suggestion::Person {
+                pubkey: pubkey.clone(),
+                name: name.clone(),
+                label: label.clone(),
+                picture: picture.clone(),
+                agent: *agent,
+                member: *member,
+                dm: *dm,
+                disabled: disabled.clone().or_else(|| Some(reason(pubkey).into())),
+            }),
+        }
+    }
+    out.extend(people);
+    out.extend(others);
+    out
 }
 
 /// The saved teams' state line (`useTeamMentions` status).
@@ -4575,6 +4669,7 @@ impl Composer {
                     agent,
                     member,
                     dm,
+                    disabled,
                     ..
                 } => {
                     let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Default);
@@ -4584,7 +4679,9 @@ impl Composer {
                     if let Some(picture) = picture {
                         avatar = avatar.image(media::avatar(picture, &media));
                     }
-                    let detail = if *member {
+                    let detail = if let Some(reason) = disabled {
+                        div().text_color(c.text_subtle).child(reason.clone())
+                    } else if *member {
                         div()
                             .font_family(buzz_ui::tokens::font::MONO)
                             .text_color(c.text_metadata)
@@ -4600,6 +4697,9 @@ impl Composer {
                     };
                     row.h(px(48.))
                         .p(px(8.))
+                        .when(disabled.is_some(), |d| {
+                            d.cursor_default().text_color(c.text_subtle)
+                        })
                         .child(avatar)
                         .child(div().flex_1().min_w_0().truncate().child(name.clone()))
                         .child(
@@ -5196,6 +5296,51 @@ mod tests {
 
     fn keys(keys: &[&str]) -> Vec<String> {
         keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    fn person(key: &str, member: bool) -> Suggestion {
+        Suggestion::Person {
+            pubkey: key.into(),
+            name: key.to_uppercase().into(),
+            label: key.to_uppercase().into(),
+            picture: None,
+            agent: false,
+            member,
+            dm: false,
+            disabled: None,
+        }
+    }
+
+    #[test]
+    fn shown_people_stay_and_say_why_they_cannot_be_picked() {
+        let old = vec![person("a", true), person("b", false), person("c", true)];
+        let new = vec![person("d", true), person("c", false), person("a", true)];
+        let kept = keep_shown(
+            &old,
+            new,
+            |key| if key == "b" { "Archived" } else { "gone" },
+        );
+        let rows: Vec<(&str, Option<&str>)> = kept
+            .iter()
+            .map(|item| match item {
+                Suggestion::Person {
+                    pubkey, disabled, ..
+                } => (pubkey.as_str(), disabled.as_ref().map(|d| d.as_ref())),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("a", None),
+                ("b", Some("Archived")),
+                (
+                    "c",
+                    Some("Channel membership changed. Reopen to review adding this recipient.")
+                ),
+                ("d", None),
+            ]
+        );
     }
 
     #[test]
