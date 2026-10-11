@@ -139,6 +139,9 @@ impl ShareIntent {
 struct Progress {
     /// A created channel stays the destination on every retry.
     created: Option<String>,
+    /// The id chosen for the channel before its creation was sent, so a
+    /// retry after an uncertain creation never makes a second channel.
+    creating: Option<String>,
     details_applied: bool,
     message_id: Option<EventId>,
     /// People whose session access is confirmed.
@@ -168,6 +171,14 @@ impl ShareAttempt {
     /// The channel this attempt created, if any.
     pub fn created(&self) -> Option<String> {
         self.progress().created.clone()
+    }
+
+    /// The id this attempt creates its channel with, chosen once.
+    fn creating(&self) -> String {
+        self.progress()
+            .creating
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone()
     }
 
     /// The channel a retry continues in.
@@ -446,12 +457,16 @@ impl Session {
                     let created = match attempt.created() {
                         Some(id) => id,
                         None => {
-                            self.create_channel(NewChannel {
-                                name: name.clone(),
-                                description: String::new(),
-                                private,
-                                ttl: None,
-                            })
+                            let id = attempt.creating();
+                            self.create_channel_as(
+                                NewChannel {
+                                    name: name.clone(),
+                                    description: String::new(),
+                                    private,
+                                    ttl: None,
+                                },
+                                id,
+                            )
                             .await?
                         }
                     };
@@ -935,6 +950,12 @@ mod tests {
             ]
         );
         // A retry keeps the frozen roster: no second read.
+        // It also creates the channel under the id chosen first.
+        let attempt = ShareAttempt {
+            intent: new.clone(),
+            progress: Mutex::default(),
+        };
+        assert_eq!(attempt.creating(), attempt.creating());
         assert!(!steps(&new, SOURCE, true).contains(&Step::CheckMembers));
         let selected = intent(Destination::Channel(DEST.into()), Audience::Selected);
         assert_eq!(

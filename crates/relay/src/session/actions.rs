@@ -453,7 +453,21 @@ impl Session {
     /// viewer is confirmed as its owner.
     pub async fn create_channel(&self, channel: NewChannel) -> Result<String, String> {
         let ops = self.ops();
-        self.run(async move { ops.create(channel).await }).await
+        self.run(async move { ops.create(channel, None).await })
+            .await
+    }
+
+    /// [`Self::create_channel`] with an id the caller chose and kept, so a
+    /// retry after an uncertain creation adopts that channel instead of
+    /// making a second one.
+    pub async fn create_channel_as(
+        &self,
+        channel: NewChannel,
+        id: String,
+    ) -> Result<String, String> {
+        let ops = self.ops();
+        self.run(async move { ops.create(channel, Some(id)).await })
+            .await
     }
 
     /// One page of people to add to a channel (§5g.6).
@@ -957,9 +971,18 @@ impl Ops {
         self.adopt(ctx.epoch, vec![state.metadata]).await
     }
 
-    async fn create(&self, channel: NewChannel) -> Result<String, String> {
+    async fn create(&self, channel: NewChannel, id: Option<String>) -> Result<String, String> {
         let ctx = self.context().await?;
-        let id = uuid::Uuid::new_v4().to_string();
+        let filters = |id: &str| lifecycle::created_filters(&ctx.relay, &ctx.viewer, id);
+        if let Some(id) = &id {
+            // A chosen id may already be a channel an earlier try created.
+            let events = read(&ctx, filters(id)).await?;
+            if lifecycle::confirmed(Action::Join, &events, &ctx.relay, &ctx.viewer, id) {
+                self.adopt(ctx.epoch, events).await?;
+                return Ok(id.clone());
+            }
+        }
+        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let draft = lifecycle::create(&channel, &id).map_err(|error| error.to_string())?;
         let op = ctx
             .outbox
@@ -968,7 +991,7 @@ impl Ops {
         // Gives up after 15 seconds; an uncertain delivery may still have
         // created the channel, which its exact receipt confirms.
         super::work_sessions::delivered(&ctx, op, false, true).await?;
-        let filters = lifecycle::created_filters(&ctx.relay, &ctx.viewer, &id);
+        let filters = filters(&id);
         let events = confirm!({
             let events = read(&ctx, filters.clone()).await?;
             lifecycle::confirmed(Action::Join, &events, &ctx.relay, &ctx.viewer, &id)
