@@ -57,20 +57,25 @@ impl Default for Preferences {
     }
 }
 
-#[cfg(target_os = "macos")]
 actions!(
     buzz_app,
     [
-        /// ⌘Q and Quit Buzz in the app menu.
+        /// ⌘Q or Ctrl+Q, and Quit Buzz in the macOS app menu.
         Quit
     ]
 );
 
+/// Quits from the keyboard anywhere in the app: ⌘Q on macOS, Ctrl+Q
+/// elsewhere. Quitting stops this computer's agents first, as the tray's
+/// Quit does.
+fn quit_shortcut(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| quit(cx));
+    cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+}
+
 /// macOS apps quit from their menu, which the menu bar always shows.
 #[cfg(target_os = "macos")]
 fn app_menu(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| quit(cx));
-    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
     cx.set_menus([Menu::new("Buzz").items([MenuItem::action("Quit Buzz", Quit)])]);
 }
 
@@ -121,6 +126,7 @@ impl Global for MainWindow {}
 /// [`open`].
 pub fn init(cx: &mut App) {
     cx.set_quit_mode(QuitMode::Explicit);
+    quit_shortcut(cx);
     #[cfg(target_os = "macos")]
     app_menu(cx);
     let store = cx.global::<AppState>().store.clone();
