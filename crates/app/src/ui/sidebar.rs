@@ -133,8 +133,52 @@ pub fn render(
     cx: &mut App,
 ) -> AnyElement {
     let sidebar = ChannelSidebar::for_community(community, window, cx);
-    sidebar.update(cx, |sidebar, _| sidebar.props = Some(props));
-    sidebar.into_any_element()
+    let key = PropsKey::of(&props, cx);
+    let (changed, overlay) = sidebar.update(cx, |sidebar, _| {
+        let changed = sidebar.props_key.as_ref() != Some(&key);
+        sidebar.props_key = Some(key);
+        sidebar.props = Some(props);
+        (changed, sidebar.overlay_open())
+    });
+    // Hundreds of rows are costly to lay out, so the sidebar draws from
+    // its last frame unless something it shows changed: its own state and
+    // the entities it read notify, and new props draw it afresh here. An
+    // open menu or dialog draws every frame, as overlays expect.
+    if changed || overlay {
+        sidebar.into_any_element()
+    } else {
+        AnyView::from(sidebar)
+            .cached(StyleRefinement::default().size_full())
+            .into_any_element()
+    }
+}
+
+/// What the sidebar shows from outside its own state and the entities it
+/// reads; a change redraws it.
+#[derive(PartialEq)]
+struct PropsKey {
+    page: Page,
+    selected: Option<String>,
+    can_create: bool,
+    pages: Vec<(Page, &'static str)>,
+    hosts: usize,
+}
+
+impl PropsKey {
+    fn of(props: &SidebarProps, cx: &App) -> Self {
+        Self {
+            page: props.page,
+            selected: props.selected.clone(),
+            can_create: props.on_create_channel.is_some(),
+            pages: pages::placed(Placement::Sidebar, cx)
+                .into_iter()
+                .map(|spec| (spec.page, spec.label))
+                .collect(),
+            hosts: cx
+                .try_global::<crate::hosts::Hosts>()
+                .map_or(0, |hosts| hosts.hosts.len()),
+        }
+    }
 }
 
 /// One sidebar per community, kept while the community is.
@@ -261,6 +305,7 @@ pub(super) struct DraggedChannel {
 pub struct ChannelSidebar {
     community: Entity<Community>,
     props: Option<SidebarProps>,
+    props_key: Option<PropsKey>,
     collapsed: Vec<String>,
     scroll: ScrollHandle,
     /// The scroll offset this sidebar last set or saw.
@@ -341,6 +386,7 @@ impl ChannelSidebar {
         Self {
             community,
             props: None,
+            props_key: None,
             collapsed: view.collapsed,
             scroll: ScrollHandle::new(),
             scroll_seen: None,
@@ -866,6 +912,16 @@ impl ChannelSidebar {
         self.close_menus(cx);
         self.dialog = Some(dialogs::Dialog::lifecycle(channel, action, window, cx));
         cx.notify();
+    }
+}
+
+impl ChannelSidebar {
+    /// A menu, dialog or toast is up.
+    fn overlay_open(&self) -> bool {
+        self.row_menu.is_some()
+            || self.section_menu.is_some()
+            || self.dialog.is_some()
+            || self.toast.is_some()
     }
 }
 
