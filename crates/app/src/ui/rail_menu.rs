@@ -14,7 +14,7 @@ use super::settings::Section;
 use super::workspace::Workspace;
 use super::{moderation, notice};
 use crate::community::{AppState, Community};
-use buzz_relay_client::SessionStatus;
+use buzz_relay_client::{SessionSnapshot, SessionStatus};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, IconButton, IconName, Menu, MenuItem,
     MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
@@ -187,7 +187,7 @@ impl RailMarks {
     }
 
     fn mark(&mut self, community: &Entity<Community>, cx: &mut Context<Self>) {
-        let marks = unread_marks(community.read(cx));
+        let marks = unread_marks(&community.read(cx).snapshot);
         if self.marks.insert(community.entity_id(), marks) != Some(marks) {
             cx.notify();
         }
@@ -203,19 +203,20 @@ impl RailMarks {
 
 /// Whether a community has unread messages outside muted channels, and
 /// whether any unread needs attention (a mention, direct message, followed
-/// thread or broadcast), which shows even from a muted channel.
-fn unread_marks(community: &Community) -> (bool, bool) {
-    let snapshot = &community.snapshot;
+/// thread or broadcast), which shows even from a muted channel. Only rows
+/// the sidebar lists count.
+fn unread_marks(snapshot: &SessionSnapshot) -> (bool, bool) {
     let muted: &[String] = snapshot
         .sidebar
         .data
         .as_ref()
         .map_or(&[], |data| data.muted.as_slice());
-    let channels = snapshot.unread.channels.iter();
     let mut marks = (false, false);
-    for (id, unread) in channels.filter(|(_, unread)| unread.unread) {
-        marks.0 |= !muted.contains(id);
-        marks.1 |= unread.priority;
+    for (channel, unread) in super::sidebar::listed_unread(snapshot) {
+        if unread.unread {
+            marks.0 |= !muted.contains(&channel.id);
+            marks.1 |= unread.priority;
+        }
     }
     marks
 }
@@ -512,6 +513,98 @@ impl Render for LeaveCommunity {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn rail_marks_count_listed_rows_and_mute_spares_attention() {
+        use super::super::sidebar::unread_snapshot;
+        use buzz_relay_client::sidebar::SidebarPreferences;
+        use buzz_relay_client::sidebar_store::SidebarState;
+        use buzz_relay_client::{ChannelSummary, ChannelType, ChannelUnread};
+        let channel = |id: &str, kind: ChannelType| ChannelSummary {
+            id: id.into(),
+            channel_type: Some(kind),
+            ..Default::default()
+        };
+        let ordinary = ChannelUnread {
+            unread: true,
+            bold: true,
+            count: 1,
+            ..Default::default()
+        };
+        let attention = ChannelUnread {
+            unread: true,
+            priority: true,
+            count: 1,
+            attention: 1,
+            ..Default::default()
+        };
+        let muted = |ids: &[&str]| SidebarState {
+            data: Some(SidebarPreferences {
+                muted: ids.iter().map(|id| id.to_string()).collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let general = channel("general", ChannelType::Stream);
+        let dm = channel("dm", ChannelType::Dm);
+        let marks = |channels: Vec<ChannelSummary>, rows: &[(&str, ChannelUnread)], sidebar| {
+            unread_marks(&unread_snapshot(channels, rows, sidebar))
+        };
+        assert_eq!(
+            marks(vec![general.clone()], &[], muted(&[])),
+            (false, false)
+        );
+        assert_eq!(
+            marks(vec![general.clone()], &[("general", ordinary)], muted(&[])),
+            (true, false)
+        );
+        // Muting quiets the pill but not a mention.
+        assert_eq!(
+            marks(
+                vec![general.clone()],
+                &[("general", ordinary)],
+                muted(&["general"])
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            marks(
+                vec![general.clone()],
+                &[("general", attention)],
+                muted(&["general"])
+            ),
+            (false, true)
+        );
+        // Rows the sidebar does not list mark nothing: archived and hidden
+        // channels, DMs hidden here or by the relay, and channels no
+        // longer in the roster.
+        let archived = ChannelSummary {
+            archived: true,
+            ..channel("archived", ChannelType::Stream)
+        };
+        let secret = ChannelSummary {
+            hidden: true,
+            ..channel("secret", ChannelType::Stream)
+        };
+        let rows = [
+            ("archived", attention),
+            ("secret", attention),
+            ("dm", attention),
+            ("gone", attention),
+        ];
+        let local = SidebarState {
+            hidden_dms: vec!["dm".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            marks(vec![archived, secret, dm.clone()], &rows, local),
+            (false, false)
+        );
+        let mut snapshot = unread_snapshot(vec![dm.clone()], &rows, SidebarState::default());
+        assert_eq!(unread_marks(&snapshot), (true, true));
+        snapshot.hidden_dms = vec!["dm".to_string()].into();
+        assert_eq!(unread_marks(&snapshot), (false, false));
+    }
 
     #[test]
     fn leave_failures_follow_the_reference() {

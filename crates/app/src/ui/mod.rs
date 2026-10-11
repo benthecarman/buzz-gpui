@@ -70,7 +70,7 @@ mod scroll;
 mod search;
 pub mod search_kit;
 pub mod settings;
-mod sidebar;
+pub(crate) mod sidebar;
 mod sidebar_unread;
 mod status;
 pub mod templates;

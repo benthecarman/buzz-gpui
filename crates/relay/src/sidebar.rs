@@ -68,6 +68,12 @@ fn active(channel: &ChannelSummary) -> bool {
     !channel.archived && (!channel.hidden || channel.channel_type == Some(ChannelType::Dm))
 }
 
+/// Whether [`sidebar_sections`] lists `channel`: active, and not a DM the
+/// viewer hid.
+pub fn listed(channel: &ChannelSummary, hidden_dms: &HashSet<String>) -> bool {
+    active(channel) && !hidden_dms.contains(&channel.id)
+}
+
 /// JavaScript `<` on lowercased strings compares UTF-16 code units.
 fn compare_name(a: &ChannelSummary, b: &ChannelSummary) -> Ordering {
     let (x, y) = (a.name.to_lowercase(), b.name.to_lowercase());

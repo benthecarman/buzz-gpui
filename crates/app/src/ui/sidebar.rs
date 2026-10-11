@@ -18,11 +18,11 @@ use super::message::display_name;
 use super::pages::{self, Page, Placement};
 use crate::community::{AppState, Community};
 use buzz_relay_client::lifecycle::{Action, LifecyclePermissions};
-use buzz_relay_client::sidebar::{SidebarSection, sidebar_sections};
+use buzz_relay_client::sidebar::{SidebarSection, listed, sidebar_sections};
 use buzz_relay_client::sidebar_store::{Destination, PreferencesStatus, SidebarState};
 use buzz_relay_client::{
-    ChannelSummary, ChannelType, Profiles, RosterStatus, SessionSnapshot, SessionStatus,
-    StatusWatch,
+    ChannelSummary, ChannelType, ChannelUnread, Profiles, RosterStatus, SessionSnapshot,
+    SessionStatus, StatusWatch,
 };
 use buzz_ui::{ActiveTheme, Button, ButtonSize, NavigationItem, Toast, ToastTone, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
@@ -125,6 +125,20 @@ pub fn first_row(snapshot: &SessionSnapshot, except: &str) -> Option<ChannelSumm
         .find(|channel| channel.id != except)
         .map(|channel| channel.id.clone())?;
     snapshot.channels.iter().find(|c| c.id == id).cloned()
+}
+
+/// The unread state of the channels the sidebar lists (here or in Me),
+/// which is all the rail and the tray count: archived and hidden channels
+/// and hidden DMs keep their read state but show nowhere.
+pub fn listed_unread(
+    snapshot: &SessionSnapshot,
+) -> impl Iterator<Item = (&ChannelSummary, ChannelUnread)> {
+    let hidden = hidden_dms(snapshot);
+    snapshot
+        .channels
+        .iter()
+        .filter(move |channel| listed(channel, &hidden))
+        .filter_map(|channel| Some((channel, *snapshot.unread.channels.get(&channel.id)?)))
 }
 
 /// Draws the community's sidebar, making its state on first use.
@@ -1402,6 +1416,42 @@ fn probe_snapshot(snapshot: &SessionSnapshot) {
             shown(STARTUP, step);
             shown(SWITCH, step);
         }
+    }
+}
+
+/// A snapshot of `channels` with `unread` rows, for tests of what the
+/// rail and the tray count.
+#[cfg(test)]
+pub(crate) fn unread_snapshot(
+    channels: Vec<ChannelSummary>,
+    unread: &[(&str, ChannelUnread)],
+    sidebar: SidebarState,
+) -> SessionSnapshot {
+    SessionSnapshot {
+        status: SessionStatus::Ready,
+        live: true,
+        cached: false,
+        live_status: Default::default(),
+        relay: None,
+        roster: RosterStatus::Ready,
+        channels: channels.into(),
+        profiles: Default::default(),
+        unread: std::sync::Arc::new(buzz_relay_client::UnreadCounts {
+            channels: unread
+                .iter()
+                .map(|(id, row)| (id.to_string(), *row))
+                .collect(),
+            ..Default::default()
+        }),
+        presence: Default::default(),
+        typing: Default::default(),
+        thread_typing: Default::default(),
+        typing_anywhere: Default::default(),
+        sidebar: std::sync::Arc::new(sidebar),
+        hidden_dms: std::sync::Arc::new([]),
+        dm_visibility: Default::default(),
+        emoji: Default::default(),
+        statuses: Default::default(),
     }
 }
 

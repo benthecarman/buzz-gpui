@@ -15,6 +15,7 @@ use crate::runtime::Runtime;
 use crate::ui::launch::Launch;
 use crate::ui::navigation;
 use crate::ui::workspace::Workspace;
+use buzz_relay_client::{ChannelType, SessionSnapshot};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
@@ -700,9 +701,17 @@ fn watch_communities(cx: &mut App) {
 fn attention(communities: &[Entity<Community>], cx: &App) -> u32 {
     communities
         .iter()
-        .map(|community| {
-            let unread = &community.read(cx).snapshot.unread;
-            unread.mentions + unread.direct
+        .map(|community| snapshot_attention(&community.read(cx).snapshot))
+        .sum()
+}
+
+/// Unread mentions and direct messages in the rows the sidebar lists.
+fn snapshot_attention(snapshot: &SessionSnapshot) -> u32 {
+    crate::ui::sidebar::listed_unread(snapshot)
+        .filter(|(_, unread)| unread.unread)
+        .map(|(channel, unread)| match channel.channel_type {
+            Some(ChannelType::Dm) => unread.count,
+            _ => unread.mentions,
         })
         .sum()
 }
@@ -739,6 +748,39 @@ fn update_attention(cx: &mut App) {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn the_tray_counts_mentions_and_direct_messages_in_listed_rows() {
+        use buzz_relay_client::sidebar_store::SidebarState;
+        use buzz_relay_client::{ChannelSummary, ChannelUnread};
+        let channel = |id: &str, kind: ChannelType| ChannelSummary {
+            id: id.into(),
+            channel_type: Some(kind),
+            ..Default::default()
+        };
+        let row = |count, mentions| ChannelUnread {
+            unread: true,
+            count,
+            mentions,
+            ..Default::default()
+        };
+        let channels = vec![
+            channel("general", ChannelType::Stream),
+            channel("dm", ChannelType::Dm),
+            channel("hidden-dm", ChannelType::Dm),
+        ];
+        let rows = [
+            ("general", row(5, 1)),
+            ("dm", row(2, 0)),
+            ("hidden-dm", row(3, 0)),
+        ];
+        let sidebar = SidebarState {
+            hidden_dms: vec!["hidden-dm".into()],
+            ..Default::default()
+        };
+        let snapshot = crate::ui::sidebar::unread_snapshot(channels, &rows, sidebar);
+        assert_eq!(snapshot_attention(&snapshot), 3);
+    }
 
     #[test]
     fn geometry_is_saved_as_window_state_writes_it() {
