@@ -19,6 +19,8 @@ macro_rules! tabler_icons {
             NotificationFilled,
             /// Block Goose harness mark (monochrome).
             GooseLogo,
+            /// OpenAI's Blossom mark for Codex (monochrome).
+            CodexLogo,
             /// buzz-app's outline Microsoft OneDrive mark, for links.
             OneDriveLogo,
             /// buzz-app's GitHub open-issue mark.
@@ -34,6 +36,7 @@ macro_rules! tabler_icons {
                 IconName::HashArrowIn,
                 IconName::NotificationFilled,
                 IconName::GooseLogo,
+                IconName::CodexLogo,
                 IconName::OneDriveLogo,
                 IconName::GitHubIssue,
                 IconName::Bestie,
@@ -46,6 +49,7 @@ macro_rules! tabler_icons {
                     IconName::HashArrowIn => "icons/custom/hash-arrow-in.svg",
                     IconName::NotificationFilled => "icons/custom/notification-filled.svg",
                     IconName::GooseLogo => "icons/brand/goose.svg",
+                    IconName::CodexLogo => "icons/brand/codex.svg",
                     IconName::OneDriveLogo => "icons/custom/onedrive-logo.svg",
                     IconName::GitHubIssue => "icons/custom/github-issue.svg",
                     IconName::Bestie => "icons/custom/bestie.png",
@@ -59,6 +63,7 @@ macro_rules! tabler_icons {
                     IconName::HashArrowIn => "HashArrowIn",
                     IconName::NotificationFilled => "NotificationFilled",
                     IconName::GooseLogo => "GooseLogo",
+                    IconName::CodexLogo => "CodexLogo",
                     IconName::OneDriveLogo => "OneDriveLogo",
                     IconName::GitHubIssue => "GitHubIssue",
                     IconName::Bestie => "Bestie",
@@ -366,10 +371,18 @@ pub enum BrandMark {
     Claude,
     /// Hermes Agent.
     Hermes,
+    /// Codex, monochrome; drawn in the current text color.
+    Codex,
 }
 
 impl BrandMark {
-    pub const ALL: &[BrandMark] = &[Self::Goose, Self::Pi, Self::Claude, Self::Hermes];
+    pub const ALL: &[BrandMark] = &[
+        Self::Goose,
+        Self::Pi,
+        Self::Claude,
+        Self::Hermes,
+        Self::Codex,
+    ];
 
     fn path(self) -> &'static str {
         match self {
@@ -377,6 +390,7 @@ impl BrandMark {
             Self::Pi => "icons/brand/pi.svg",
             Self::Claude => "icons/brand/claude.png",
             Self::Hermes => "icons/brand/hermes.png",
+            Self::Codex => "icons/brand/codex.svg",
         }
     }
 }
@@ -403,7 +417,8 @@ impl Brand {
         self
     }
 
-    /// Color for the monochrome Goose mark; ignored by the others.
+    /// Color for the monochrome Goose and Codex marks; ignored by the
+    /// others.
     pub fn color(mut self, color: impl Into<Hsla>) -> Self {
         self.color = Some(color.into());
         self
@@ -413,10 +428,13 @@ impl Brand {
 impl RenderOnce for Brand {
     fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
         match self.mark {
-            BrandMark::Goose => Icon::new(IconName::GooseLogo)
-                .size_rems(self.size)
-                .color(self.color.unwrap_or_else(|| window.text_style().color))
-                .into_any_element(),
+            mark @ (BrandMark::Goose | BrandMark::Codex) => Icon::new(match mark {
+                BrandMark::Goose => IconName::GooseLogo,
+                _ => IconName::CodexLogo,
+            })
+            .size_rems(self.size)
+            .color(self.color.unwrap_or_else(|| window.text_style().color))
+            .into_any_element(),
             mark => div()
                 .flex_none()
                 .size(self.size)
