@@ -192,6 +192,28 @@ pub fn placed(placement: Placement, cx: &App) -> Vec<PageSpec> {
         .collect()
 }
 
+/// The header pill `page` selects (`headerPageSelection`). Pages beside
+/// the channel sidebar sit inside Messages, so its pill stays selected on
+/// Inbox or Agents while their sidebar row and route stay exact. Me,
+/// Settings, header pages and unregistered pages select only themselves.
+pub fn header_selection(page: Page, cx: &App) -> Page {
+    area(page, &all(cx))
+}
+
+fn area(page: Page, pages: &[PageSpec]) -> Page {
+    let beside_channels = pages
+        .iter()
+        .any(|spec| spec.page == page && spec.placement != Placement::Topbar);
+    let messages = pages
+        .iter()
+        .any(|spec| spec.page == Page::MESSAGES && spec.placement == Placement::Topbar);
+    if page != Page::ME && beside_channels && messages {
+        Page::MESSAGES
+    } else {
+        page
+    }
+}
+
 /// Bundled pages keep fixed slots; the rest follow by label, then by key,
 /// so the order never depends on registration timing (`orderPages`).
 const BUNDLED_ORDER: [Page; 6] = [
@@ -249,6 +271,81 @@ mod tests {
                 "Workflows"
             ]
         );
+    }
+
+    fn placed(page: &'static str, placement: Placement) -> PageSpec {
+        PageSpec {
+            page: Page::new(page),
+            label: page,
+            icon: IconName::Browser,
+            placement,
+            navigation: Navigation::Channels,
+            collapsible: false,
+            badge: None,
+            build: None,
+        }
+    }
+
+    fn registered() -> Vec<PageSpec> {
+        vec![
+            placed("buzz.me/me", Placement::Topbar),
+            placed("buzz.channels/channels", Placement::Topbar),
+            placed("buzz.inbox/inbox", Placement::Sidebar),
+            placed("buzz.reminders/reminders", Placement::Sidebar),
+            placed("buzz.agents/agents", Placement::Sidebar),
+            placed("buzz.workflows/workflows", Placement::Sidebar),
+            placed("buzz.sessions/sessions", Placement::Hidden),
+            placed("example.sidebar/me", Placement::Sidebar),
+            placed("example.header/main", Placement::Topbar),
+        ]
+    }
+
+    #[test]
+    fn pages_beside_the_channel_sidebar_keep_messages_selected() {
+        let pages = registered();
+        for (selected, expected) in [
+            ("buzz.channels/channels", "buzz.channels/channels"),
+            ("buzz.inbox/inbox", "buzz.channels/channels"),
+            ("buzz.reminders/reminders", "buzz.channels/channels"),
+            ("buzz.agents/agents", "buzz.channels/channels"),
+            ("buzz.workflows/workflows", "buzz.channels/channels"),
+            ("buzz.sessions/sessions", "buzz.channels/channels"),
+            ("example.sidebar/me", "buzz.channels/channels"),
+            ("buzz.me/me", "buzz.me/me"),
+            ("settings", "settings"),
+            ("example.header/main", "example.header/main"),
+            ("missing/page", "missing/page"),
+        ] {
+            assert_eq!(
+                area(Page::new(selected), &pages).key(),
+                expected,
+                "{selected}"
+            );
+        }
+    }
+
+    #[test]
+    fn messages_is_never_borrowed_unless_it_is_a_header_page() {
+        let inbox = Page::new("buzz.inbox/inbox");
+        let others: Vec<PageSpec> = registered()
+            .into_iter()
+            .filter(|spec| spec.page != Page::MESSAGES)
+            .collect();
+        for messages in [None, Some(Placement::Sidebar), Some(Placement::Hidden)] {
+            let mut pages = others.clone();
+            pages.extend(messages.map(|placement| placed("buzz.channels/channels", placement)));
+            assert_eq!(area(inbox, &pages), inbox);
+        }
+    }
+
+    #[test]
+    fn me_stays_separate_whatever_its_placement() {
+        let mut pages: Vec<PageSpec> = registered()
+            .into_iter()
+            .filter(|spec| spec.page != Page::ME)
+            .collect();
+        pages.push(placed("buzz.me/me", Placement::Sidebar));
+        assert_eq!(area(Page::ME, &pages), Page::ME);
     }
 
     #[test]

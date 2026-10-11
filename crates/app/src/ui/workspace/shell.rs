@@ -153,7 +153,8 @@ impl Workspace {
         });
         let header_pages = pages::placed(Placement::Topbar, cx);
         let compact = self.compact_pages || narrow;
-        let selected = self.page;
+        // Messages stays selected while a page beside its sidebar shows.
+        let selected = pages::header_selection(self.page, cx);
 
         // Page pills, measured even while folded so they can come back.
         let pills = header_pages
