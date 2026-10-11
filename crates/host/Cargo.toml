@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 buzz-agent-controller.workspace = true
-buzz-credential-store.workspace = true
+buzz-keychain = { path = "../keychain" }
 buzz-desktop.workspace = true
 buzz-host-rpc = { path = "../host-rpc" }
 base64 = "0.22"

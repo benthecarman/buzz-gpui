@@ -7,7 +7,7 @@
 //! tokens or forge kinds the app never writes.
 
 use base64::Engine;
-use buzz_credential_store::Error as StoreError;
+use buzz_keychain::Error as StoreError;
 use nostr::nips::nip19::ToBech32;
 use nostr::nips::nip44;
 use nostr::prelude::{
@@ -94,7 +94,7 @@ impl fmt::Debug for Identity {
 /// Reads the saved identity. `Ok(None)` means none is saved; errors never
 /// lead to generating a key.
 pub fn load() -> Result<Option<Identity>, IdentityError> {
-    match buzz_credential_store::read(SERVICE, ACCOUNT) {
+    match buzz_keychain::read(SERVICE, ACCOUNT) {
         Ok(bytes) => {
             let text = std::str::from_utf8(&bytes).map_err(|_| IdentityError::Malformed)?;
             Identity::from_nsec(text)
@@ -132,11 +132,11 @@ fn ensure_absent() -> Result<(), IdentityError> {
 /// Deletes the saved identity (sign out), then confirms a fresh read finds
 /// nothing. buzz-app shares this entry, so it is signed out too.
 pub fn forget() -> Result<(), IdentityError> {
-    match buzz_credential_store::delete(SERVICE, ACCOUNT) {
+    match buzz_keychain::delete(SERVICE, ACCOUNT) {
         Ok(()) | Err(StoreError::Absent) => {}
         Err(error) => return Err(store_error(error)),
     }
-    match buzz_credential_store::read(SERVICE, ACCOUNT) {
+    match buzz_keychain::read(SERVICE, ACCOUNT) {
         Err(StoreError::Absent) => Ok(()),
         Ok(_) => Err(IdentityError::StillSaved),
         Err(error) => Err(store_error(error)),
@@ -145,7 +145,7 @@ pub fn forget() -> Result<(), IdentityError> {
 
 fn save(identity: Identity) -> Result<Identity, IdentityError> {
     let nsec = identity.nsec();
-    buzz_credential_store::add(SERVICE, ACCOUNT, nsec.as_bytes()).map_err(store_error)?;
+    buzz_keychain::add(SERVICE, ACCOUNT, nsec.as_bytes()).map_err(store_error)?;
     // Commit in memory only once storage confirms.
     Ok(identity)
 }

@@ -17,7 +17,7 @@ base64 = "0.22"
 alacritty_terminal = { version = "0.26", default-features = false }
 blurhash = "0.2"
 buzz-agent-controller.workspace = true
-buzz-credential-store.workspace = true
+buzz-keychain = { path = "../keychain" }
 buzz-desktop.workspace = true
 buzz-host = { path = "../host" }
 buzz-host-rpc = { path = "../host-rpc" }
