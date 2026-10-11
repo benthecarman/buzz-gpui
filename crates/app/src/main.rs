@@ -15,6 +15,7 @@ mod idle;
 mod image_clipboard;
 mod main_window;
 mod mirror;
+mod mission_control;
 mod network;
 mod notifications;
 mod oauth;
@@ -110,6 +111,7 @@ fn main() {
         agents2::init(cx);
         ui::agents::init(cx);
         agent_plugins::claude_code::init(cx);
+        mission_control::init(cx);
         ui::pages::init(cx);
         ui::agent_activity::init(cx);
         ui::profile_panel::init(cx);

@@ -44,6 +44,7 @@ mod message;
 mod message_actions;
 mod message_copy;
 mod message_edit;
+pub mod mission_control;
 mod modal;
 pub mod moderation;
 pub mod navigation;

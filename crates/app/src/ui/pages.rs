@@ -152,6 +152,7 @@ pub fn init(cx: &mut App) {
         cx,
     );
     super::agents2::register(cx);
+    super::mission_control::register(cx);
 }
 
 /// Adds a page, replacing any earlier one with the same key.

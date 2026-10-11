@@ -71,6 +71,19 @@ pub fn attach(community: &Entity<Community>, identity: Arc<Identity>, cx: &mut A
     .detach();
 }
 
+/// Every attached community with its activity entity (Mission control
+/// reads them all).
+pub fn all(cx: &App) -> Vec<(Entity<Community>, Entity<AgentActivity>)> {
+    let Some(registry) = cx.try_global::<Registry>() else {
+        return Vec::new();
+    };
+    registry
+        .0
+        .values()
+        .filter_map(|activity| Some((activity.read(cx).community.upgrade()?, activity.clone())))
+        .collect()
+}
+
 /// The feed state, who works where, and the working channels.
 type WorkingKey = (FeedStatus, Vec<(String, Option<String>)>, Vec<String>);
 

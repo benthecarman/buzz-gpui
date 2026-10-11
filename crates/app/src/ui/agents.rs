@@ -790,6 +790,17 @@ impl AgentsPage {
             .joined(true)
             .title("Agents")
             .action(
+                Button::new("mission-control", "Mission control")
+                    .size(ButtonSize::Sm)
+                    .icon(IconName::SquaresFour)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(
+                            Box::new(crate::ui::mission_control::OpenMissionControl),
+                            cx,
+                        )
+                    }),
+            )
+            .action(
                 Button::new("add-host", "Add host")
                     .size(ButtonSize::Sm)
                     .icon(IconName::Plug)
