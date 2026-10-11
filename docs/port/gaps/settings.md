@@ -90,6 +90,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 | Permission/status line ("This build can’t show system notifications.", "Notifications are off…", "Waiting for system permission…") | `src/app/NotificationSettings.tsx:149-160,199-216` | DONE (ui/settings/notifications.rs) | Report when the notification daemon is unavailable or refuses. | S |
 | "Notification choices weren’t saved" toast with "Retry saving choices" / "Reload saved choices" | `src/app/NotificationSettings.tsx:291-311` | DONE (ui/settings/notifications.rs) | Error toast with retry and reload. | S |
 | "Buzz couldn’t send the notification" error toast | `src/app/NotificationSettings.tsx:312-317` | DONE (ui/settings/notifications.rs) | Surface banner delivery errors. | S |
+| No alert for the conversation in front of the user | `src/features/notifications/messages.ts:145-164`; `presentation.ts`; `src/features/messages/use-reading.ts:67-104` | DONE, deliberate difference (notifications.rs `in_front`, ui/workspace.rs `on_screen`) | buzz-app waits two frames and stays quiet only if the new row is in a reading lease's visible rows. The port stays quiet when the focused window shows the message's conversation: its channel for a top-level message, its open thread tab for a reply, even if the row is scrolled out of view. A reported visible row still counts. A reply whose thread is not open still notifies, as in buzz-app. An unfocused window always notifies; "Notify while viewing" notifies anyway. | S |
 
 ## 7. Shortcuts (ShortcutSettings.tsx, features/shortcuts)
 
@@ -233,7 +234,7 @@ localhost dev-server build.
 | MISSING | 0 |
 | PARTIAL | 0 |
 | DIFFERENT | 0 |
-| DONE | 97 |
+| DONE | 98 |
 | SKIPPED (decided) | 6 |
 
 Counts are of the rows in the tables. Nothing is open.
