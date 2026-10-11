@@ -468,6 +468,8 @@ impl Scanner {
         let mut paragraph: Option<Range<usize>> = None;
         // The open fence: its character, length and the quotes it is in.
         let mut fence: Option<(u8, usize, usize)> = None;
+        // Where the open fence's marker is in `spans`.
+        let mut opener = None;
         let mut last_quotes = 0;
         let mut start = 0;
         loop {
@@ -490,6 +492,7 @@ impl Scanner {
                 if run >= len && spaces(bytes, first + run, end) == end {
                     self.push(first..end, MARKER);
                     fence = None;
+                    opener = None;
                 } else {
                     self.push(at..end, CODE);
                 }
@@ -533,11 +536,11 @@ impl Scanner {
                     self.flush(text, &mut paragraph);
                 } else if ticks >= 3 && !bytes[first + ticks..end].contains(&b'`') {
                     self.flush(text, &mut paragraph);
-                    self.push(first..end, MARKER);
+                    opener = Some(self.fence_opener(first, ticks, end));
                     fence = Some((b'`', ticks, quotes));
                 } else if tildes >= 3 {
                     self.flush(text, &mut paragraph);
-                    self.push(first..end, MARKER);
+                    opener = Some(self.fence_opener(first, tildes, end));
                     fence = Some((b'~', tildes, quotes));
                 } else {
                     if quotes > 0 {
@@ -559,7 +562,22 @@ impl Scanner {
             }
             start = end + 1;
         }
+        // A fence still open shows its marker, so the block being typed is
+        // plain to see.
+        if let Some(at) = opener {
+            self.spans[at].1 = CODE;
+        }
         self.flush(text, &mut paragraph);
+    }
+
+    /// An opening fence of `len` characters at `first`: the fence hides
+    /// once closed, the info string after it shows as code. Returns where
+    /// the fence's span is.
+    fn fence_opener(&mut self, first: usize, len: usize, end: usize) -> usize {
+        let at = self.spans.len();
+        self.push(first..first + len, MARKER);
+        self.push(first + len..end, CODE);
+        at
     }
 
     fn flush(&mut self, text: &str, paragraph: &mut Option<Range<usize>>) {
@@ -1131,7 +1149,6 @@ mod tests {
             "2 * 3 * 4",
             "a ** b",
             "**unclosed",
-            "~~~three~~~",
             "~~a~",
             "* not emphasis*",
             "\\*escaped*",
@@ -1244,7 +1261,8 @@ mod tests {
         assert_eq!(
             runs("```rust\nlet *a* = 1;\n```\n*b*"),
             vec![
-                ("```rust", MARKER),
+                ("```", MARKER),
+                ("rust", CODE),
                 ("let *a* = 1;", CODE),
                 ("```", MARKER),
                 ("*", MARKER),
@@ -1266,11 +1284,15 @@ mod tests {
                 ("*", MARKER),
             ]
         );
-        // An unclosed fence runs to the end, as it renders.
+        // An unclosed fence runs to the end, as it renders, and shows its
+        // fence and what follows it while it is typed.
         assert_eq!(
             runs("```\na\n\nb"),
-            vec![("```", MARKER), ("a", CODE), ("b", CODE)]
+            vec![("```", CODE), ("a", CODE), ("b", CODE)]
         );
+        assert_eq!(runs("```hello"), vec![("```hello", CODE)]);
+        // Not strikethrough: an unclosed fence, shown as the code it sends as.
+        assert_eq!(runs("~~~three~~~"), vec![("~~~three~~~", CODE)]);
         // Three backticks with more on the line are a code span.
         assert_eq!(runs("```a```")[1], ("a", CODE));
     }
