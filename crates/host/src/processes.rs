@@ -40,7 +40,8 @@ type Declared = (
     &'static [&'static str],
 );
 
-/// The Claude Code type's processes, as its manifest declares them.
+/// The Claude Code and Codex types' processes, as their manifests declare
+/// them.
 const DECLARED: &[Declared] = &[
     ("claude-code", "claude", "claude", &[]),
     (
@@ -50,6 +51,10 @@ const DECLARED: &[Declared] = &[
         &["-c", "curl -fsSL https://claude.ai/install.sh | bash"],
     ),
     ("claude-code", "read", "base64", &["-i"]),
+    // Prints the default workspace once the host has expanded and made it.
+    ("codex", "workspace", "pwd", &[]),
+    ("codex", "app-server", "codex", &["app-server"]),
+    ("codex", "read", "base64", &["-i"]),
 ];
 
 pub(crate) fn is_process_request(request: &Request) -> bool {

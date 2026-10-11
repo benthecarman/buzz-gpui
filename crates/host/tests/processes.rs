@@ -1,4 +1,4 @@
-//! The process bridge Claude Code agents run through: declared processes
+//! The process bridge Claude Code and Codex agents run through: declared processes
 //! only, output in order to the connection that spawned them, and killed
 //! with that connection.
 
@@ -239,6 +239,61 @@ async fn declared_processes_run_and_report_in_order() {
         "{stdout}"
     );
     assert_eq!(code, Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_declares_its_workspace_reader_and_server() {
+    let setup = start_host();
+    let (client, outputs) = connect(&setup.connector).await;
+    let codex = |handle, process: &str, args: &[&str], cwd: Option<String>| Request::ProcessSpawn {
+        handle,
+        owner: "codex".into(),
+        process: process.into(),
+        args: args.iter().map(|arg| arg.to_string()).collect(),
+        cwd,
+        env: BTreeMap::new(),
+    };
+    // `workspace` prints the directory the host made for it.
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("made/.buzz");
+    let mut pwd = outputs.watch(1);
+    client
+        .request(codex(
+            1,
+            "workspace",
+            &[],
+            Some(workspace.to_string_lossy().into_owned()),
+        ))
+        .await
+        .unwrap();
+    let (stdout, _, code) = finish(&mut pwd).await;
+    assert_eq!(
+        (std::path::PathBuf::from(stdout.trim()), code),
+        (workspace.canonicalize().unwrap(), Some(0))
+    );
+    let file = workspace.join("answer.txt");
+    std::fs::write(&file, "hi").unwrap();
+    let mut read = outputs.watch(2);
+    client
+        .request(codex(
+            2,
+            "read",
+            &["answer.txt"],
+            Some(workspace.to_string_lossy().into_owned()),
+        ))
+        .await
+        .unwrap();
+    let (stdout, _, code) = finish(&mut read).await;
+    assert_eq!((stdout.trim(), code), ("aGk=", Some(0)));
+    // Codex's own processes are not Claude Code's.
+    assert_eq!(
+        client
+            .request(codex(3, "claude", &[], None))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "Process is not declared"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
