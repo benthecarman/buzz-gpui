@@ -1,6 +1,7 @@
 //! The settings the Add and Edit dialogs share: buzz-app's
 //! `AgentSettingsFields`, `AgentHarnessEditor`, `AgentModelPicker`,
-//! `ProviderApiKeyField` and `AgentEnvironmentEditor`.
+//! `ProviderApiKeyField`, `AgentEnvironmentEditor` and, in [`codex`],
+//! `CodexConfigurationFields`.
 //!
 //! The [`Draft`] is the source of truth; text inputs copy into it as they
 //! change. Environment values and API keys are write-only: the host lists
@@ -26,6 +27,8 @@ use gpui_kit::*;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+mod codex;
+
 /// Goose catalogs are capped in the list; typing searches the rest.
 const VISIBLE_MODEL_LIMIT: usize = 10;
 
@@ -43,6 +46,9 @@ pub enum Open {
     Provider,
     Session,
     Model,
+    CodexMode,
+    CodexModel,
+    CodexEffort,
 }
 
 /// Which text input changed.
@@ -117,6 +123,7 @@ pub struct Fields {
     pi_loaded: Option<String>,
     /// The placeholder each input was last given.
     placeholders: BTreeMap<String, String>,
+    codex: codex::State,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -265,6 +272,7 @@ impl Fields {
             pi_providers: Some(Vec::new()),
             pi_loaded: None,
             placeholders: BTreeMap::new(),
+            codex: Default::default(),
             _subscriptions: subscriptions,
         };
         let options = fields.options(&data);
@@ -294,7 +302,15 @@ impl Fields {
             Input::Instructions => {
                 self.draft.system_prompt = self.instructions.read(cx).value().to_string()
             }
-            Input::Executable => self.draft.command = text(&self.executable, cx),
+            Input::Executable => {
+                self.draft.command = text(&self.executable, cx);
+                // A typed path rebinds Codex, keeping its settings; any other
+                // executable has no native integration.
+                if !self.draft.is_codex() {
+                    self.draft.integration = None;
+                    self.draft.configuration = None;
+                }
+            }
             Input::CustomProvider => self.draft.provider = text(&self.custom_provider, cx),
             Input::ApiKey => {
                 let value = text(&self.api_key, cx);
@@ -482,6 +498,7 @@ impl Fields {
     /// each render.
     pub fn sync<T: Owner>(&mut self, window: &mut Window, cx: &mut Context<T>) {
         self.sync_env_inputs(window, cx);
+        codex::sync(self, cx);
         let key = self.context_key();
         if key != self.key {
             self.key = key;
@@ -603,7 +620,22 @@ impl Fields {
     }
 
     fn policy(&self, data: &AgentsSnapshot) -> Option<ConfigurationPolicy> {
-        draft::policy(&self.options(data), &self.draft.command).cloned()
+        draft::policy(
+            &self.options(data),
+            &self.draft.command,
+            self.draft.integration.as_deref(),
+        )
+        .cloned()
+    }
+
+    /// The integration a model request names: the saved one, else the
+    /// option's. Codex's comes only from the saved one.
+    fn integration(&self, data: &AgentsSnapshot) -> Option<String> {
+        self.draft.integration.clone().or_else(|| {
+            draft::option(&self.options(data), &self.draft.command, None)
+                .and_then(|option| option.id.clone())
+                .filter(|id| id != buzz_host::harness::CODEX)
+        })
     }
 
     fn is_pi(&self, cx: &App) -> bool {
@@ -818,22 +850,26 @@ impl Fields {
             return choices;
         }
         let options = self.options(data);
-        draft::option(&options, &self.draft.command)
-            .or_else(|| {
-                buzz_host::harness::preset(&self.draft.command).and_then(|_| {
-                    options.iter().find(|option| {
-                        draft::kind(&option.command) == draft::kind(&self.draft.command)
-                    })
-                })
-            })
-            .map(|option| {
-                option
-                    .providers
+        draft::option(
+            &options,
+            &self.draft.command,
+            self.draft.integration.as_deref(),
+        )
+        .or_else(|| {
+            buzz_host::harness::preset(&self.draft.command).and_then(|_| {
+                options
                     .iter()
-                    .map(|provider| (provider.value.clone(), provider.label.clone()))
-                    .collect()
+                    .find(|option| draft::kind(&option.command) == draft::kind(&self.draft.command))
             })
-            .unwrap_or_default()
+        })
+        .map(|option| {
+            option
+                .providers
+                .iter()
+                .map(|provider| (provider.value.clone(), provider.label.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn entries(&self) -> Vec<ModelOption> {
@@ -975,7 +1011,8 @@ fn run<T: Owner>(fields: &mut Fields, action: ModelAction, cx: &mut Context<T>) 
         action,
         inherit_workspace: !external
             && ((inherit_host && host.is_empty()) || (inherit_filter && filter.is_empty())),
-        ..Default::default()
+        integration: fields.integration(&data),
+        selected_model: Some(fields.draft.model.clone()).filter(|model| !model.is_empty()),
     };
     let key = fields.key.clone();
     let goose = draft::is_goose(&fields.draft.command);
@@ -1071,6 +1108,7 @@ fn test<T: Owner>(fields: &mut Fields, cx: &mut Context<T>) {
         expected_revision: fields.saved.as_ref().map(|_| fields.draft.revision),
         edit: Some(edit),
         action: ModelAction::Test,
+        integration: fields.integration(&fields.data(cx)),
         ..Default::default()
     };
     let (task, lookup) = fields.host.update(cx, |host, cx| host.models(request, cx));
@@ -1366,6 +1404,8 @@ impl Fields {
                     );
             }
             ai = ai.child(block);
+        } else if self.draft.is_codex() {
+            ai = ai.child(self.codex_fields(disabled, window, cx));
         } else {
             ai = ai.child(self.model_picker(disabled, &data, window, cx));
         }
@@ -1433,32 +1473,45 @@ impl Fields {
         let c = *cx.colors();
         let options = self.options(data);
         let preset = buzz_host::harness::preset(&self.draft.command);
-        let harness = draft::option(&options, &self.draft.command)
-            .cloned()
-            .or_else(|| {
-                preset.as_ref().and_then(|_| {
-                    options
-                        .iter()
-                        .find(|o| draft::kind(&o.command) == draft::kind(&self.draft.command))
-                        .cloned()
-                })
-            });
+        let harness = draft::option(
+            &options,
+            &self.draft.command,
+            self.draft.integration.as_deref(),
+        )
+        .cloned()
+        .or_else(|| {
+            preset.as_ref().and_then(|_| {
+                options
+                    .iter()
+                    .find(|o| draft::kind(&o.command) == draft::kind(&self.draft.command))
+                    .cloned()
+            })
+        });
         let external = self.external(data);
         let discovered = self.discovered(data);
         let pi_loading = discovered && self.pi_providers.is_none();
         let missing_pi = options
             .iter()
             .any(|o| draft::kind(&o.command).as_deref() == Some("pi") && !o.available);
+        let missing_codex = options.iter().any(|o| {
+            o.id.as_deref() == Some(buzz_host::harness::CODEX)
+                && !o.available
+                && o.status != "not-enabled"
+        });
         let missing_preset = preset.is_some() && harness.as_ref().is_none_or(|h| !h.available);
         let mut items: Vec<(String, bool, bool, Pick<T>)> = Vec::new();
         let custom = self.harness_custom;
         let exact = options.iter().any(|o| o.command == self.draft.command);
+        let was_codex = self.draft.is_codex();
         for option in &options {
             let label = if option.available {
                 option.label.clone()
+            } else if option.status == "not-enabled" {
+                format!("{} (coming in a later update)", option.label)
             } else {
                 format!("{} (install first)", option.label)
             };
+            let codex = option.id.as_deref() == Some(buzz_host::harness::CODEX);
             let command = option.command.clone();
             let default_args = option.default_args.clone();
             let first_provider = option
@@ -1492,10 +1545,26 @@ impl Fields {
                     fields.patch(
                         |draft| {
                             draft.command = command;
+                            // Rebinding Codex keeps its Default or Advanced
+                            // settings.
+                            if was_codex && codex {
+                                return;
+                            }
+                            draft.integration = codex.then(|| buzz_host::harness::CODEX.into());
                             if reset {
-                                draft.args = args;
+                                draft.args = args.clone();
                                 draft.provider = provider;
                                 draft.model.clear();
+                            }
+                            if codex {
+                                draft.args = "[]".into();
+                                draft.provider.clear();
+                                draft.model.clear();
+                                draft.set_codex_configuration(draft::Configuration::Default);
+                            } else if was_codex {
+                                draft.args = args;
+                                draft.model.clear();
+                                draft.configuration = None;
                             }
                         },
                         window,
@@ -1582,6 +1651,13 @@ impl Fields {
                 &c,
             ));
         }
+        if missing_codex {
+            editor = editor.child(note(
+                "Codex needs its CLI and ACP adapter before you can select it. Set it up under \
+                 Settings → Agents → Harnesses.",
+                &c,
+            ));
+        }
         if let (true, Some(preset)) = (missing_preset, &preset) {
             editor = editor.child(note(
                 format!(
@@ -1591,7 +1667,7 @@ impl Fields {
                 &c,
             ));
         }
-        if missing_pi || missing_preset {
+        if missing_pi || missing_preset || missing_codex {
             editor = editor.child(
                 div()
                     .flex()
@@ -1611,7 +1687,11 @@ impl Fields {
                     }),
             );
         }
-        if preset.is_none() {
+        // Codex and other external integrations configure their own provider.
+        let own_provider = self
+            .policy(data)
+            .is_some_and(|policy| policy.provider == "external");
+        if preset.is_none() && !own_provider {
             let default_provider = self.default_provider(data);
             let mut provider_items: Vec<(String, bool, bool, Pick<T>)> = Vec::new();
             let pcustom = self.provider_custom;
@@ -2425,16 +2505,19 @@ impl Fields {
                         .disabled(disabled),
                     &c,
                 ))
-                .child(field(
-                    "Arguments (JSON array)",
-                    None,
-                    TextArea::new(&self.args)
-                        .rows(3)
-                        .code()
-                        .surface(Surface::Floating)
-                        .disabled(disabled),
-                    &c,
-                ))
+                // Codex takes no adapter arguments.
+                .when(!self.draft.is_codex(), |this| {
+                    this.child(field(
+                        "Arguments (JSON array)",
+                        None,
+                        TextArea::new(&self.args)
+                            .rows(3)
+                            .code()
+                            .surface(Surface::Floating)
+                            .disabled(disabled),
+                        &c,
+                    ))
+                })
                 .child(
                     div()
                         .flex()
