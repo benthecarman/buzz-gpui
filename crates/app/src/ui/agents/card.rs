@@ -18,9 +18,10 @@ use buzz_host::api::{Agent, AgentAction, ImportSource, ProcessStatus};
 use buzz_relay_client::PresenceState;
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, Dialog, Icon, IconButton, IconButtonSize,
-    IconName, Menu, MenuItem, MenuSeparator, MenuSize, Presence, Select, TypeStyled,
+    IconName, Menu, MenuItem, MenuSeparator, MenuSize, Popover, Presence, Select, TypeStyled,
     tokens::radius,
 };
+use gpui_kit::base::SelectableText;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -443,6 +444,32 @@ impl AgentsPage {
                     .is_ok_and(|origin| origin.http() == community)
             })
         });
+        // With nothing to act on, the button shows the identity's npub
+        // instead (buzz-app's "{name} identity details" popover).
+        if setups.is_empty() && !archivable && !view_profile && !tile {
+            let c = *cx.colors();
+            let popover = open.then(|| {
+                let details = Popover::new()
+                    .title(format!("{name} identity details"))
+                    .child(
+                        div()
+                            .mt(rems(0.75))
+                            .text_mono()
+                            .text_color(c.text_subtle)
+                            .child(SelectableText::new(
+                                SharedString::from(format!("identity-npub-{pubkey}")),
+                                SharedString::from(inventory::npub(&pubkey)),
+                            )),
+                    );
+                overlay::dropdown(window, Align::End, details, Self::dismiss(cx))
+            });
+            return div()
+                .relative()
+                .occlude()
+                .child(trigger)
+                .children(popover)
+                .into_any_element();
+        }
         let menu = open.then(|| {
             let item = |id: SharedString, label: SharedString| {
                 MenuItem::new(id, label).size(MenuSize::Default)
