@@ -284,6 +284,7 @@ fn legacy_command(kind: buzz_host::api::HarnessKind) -> &'static str {
         HarnessKind::Pi => "buzz-pi-acp",
         HarnessKind::Claude => "claude-agent-acp",
         HarnessKind::Hermes => "hermes-acp",
+        HarnessKind::Codex => "codex-acp",
     }
 }
 
@@ -557,6 +558,7 @@ impl HostConnection {
                         this.harnesses = Some(buzz_host::harness::legacy(
                             options,
                             this.agents.claude_setup.as_ref(),
+                            this.agents.codex_setup.as_ref(),
                         ));
                     }
                     this.harnesses_failed = !read;

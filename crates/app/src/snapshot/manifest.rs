@@ -899,6 +899,7 @@ pub fn snapshot_import_edit(
             model,
             provider,
             databricks: None,
+            ..Default::default()
         },
         environment,
         effort: snapshot

@@ -4,8 +4,8 @@
 //! `AgentSettingsFields.tsx`.
 
 use buzz_host::api::{
-    Agent, AgentEdit, AgentsSnapshot, ConfigurationPolicy, DatabricksSettings, HarnessEdit,
-    HarnessOption, SessionPolicy,
+    Agent, AgentEdit, AgentsSnapshot, AiConfiguration, ConfigurationPolicy, DatabricksSettings,
+    HarnessEdit, HarnessOption, SessionPolicy,
 };
 use std::collections::BTreeMap;
 
@@ -18,11 +18,15 @@ pub struct Draft {
     pub system_prompt: String,
     pub session_policy: Option<SessionPolicy>,
     pub workspace: String,
+    /// The harness's native integration (`codex`); `None` for others.
+    pub integration: Option<String>,
     pub command: String,
     /// A JSON array of strings, as typed.
     pub args: String,
     pub model: String,
     pub provider: String,
+    /// Codex's Default or Advanced choice, as the host sent it.
+    pub configuration: Option<AiConfiguration>,
     /// `None` removes a saved variable; values are write-only.
     pub environment: BTreeMap<String, Option<String>>,
     pub databricks: Option<DatabricksSettings>,
@@ -37,10 +41,12 @@ pub fn from_agent(agent: &Agent) -> Draft {
         system_prompt: agent.system_prompt.clone(),
         session_policy: agent.session_policy,
         workspace: agent.workspace.clone(),
+        integration: agent.harness.integration.clone(),
         command: agent.harness.command.clone(),
         args: serde_json::to_string_pretty(&agent.harness.args).unwrap_or_else(|_| "[]".into()),
         model: agent.harness.model.clone(),
         provider: agent.harness.provider.clone(),
+        configuration: agent.harness.configuration.clone(),
         environment: BTreeMap::new(),
         databricks: agent.harness.databricks.clone(),
     }
@@ -255,9 +261,11 @@ pub fn edit(draft: &Draft, model_discovery: bool) -> Result<AgentEdit, String> {
         session_policy: Some(draft.session_policy),
         workspace: draft.workspace.clone(),
         harness: HarnessEdit {
+            integration: draft.integration.clone(),
             command: draft.command.clone(),
             args,
             model: draft.model.clone(),
+            configuration: draft.configuration.clone(),
             provider: draft.provider.clone(),
             databricks: draft.databricks.clone(),
         },
