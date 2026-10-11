@@ -22,6 +22,7 @@ use super::sidebar::SidebarView;
 use super::thread::{self, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
+use crate::notifications::Conversation;
 use buzz_relay_client::{ChannelSummary, RosterStatus};
 use buzz_ui::{ActiveTheme, ShellBackground, TypeStyled};
 use gpui_kit::component::window_border;
@@ -114,6 +115,8 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe_global_in::<AppState>(window, |this, window, cx| this.sync(window, cx))
             .detach();
+        // Notifications follow the conversation in front of the user.
+        cx.observe_self(|this, cx| this.report_open(cx)).detach();
         // A page whose plugin was turned off leaves for Messages.
         cx.observe_global_in::<crate::plugins::Plugins>(window, |this, window, cx| {
             if this.page != Page::SETTINGS
@@ -739,6 +742,41 @@ impl Workspace {
             },
         };
         Some(Target { community, place })
+    }
+
+    /// The conversation on screen: the open channel, and its thread while
+    /// the tab pane shows it.
+    fn on_screen(&self, cx: &App) -> Option<Conversation> {
+        if self.onboarding.is_some() || self.page != Page::MESSAGES {
+            return None;
+        }
+        let community = self.community.as_ref()?.read(cx).origin.to_string();
+        let channel = self.channel.as_ref()?.read(cx).channel_id().to_string();
+        let tabs = self.tabs(cx);
+        let thread_shown =
+            tabs.showing() && tabs.selected_tab().as_deref() == Some(super::channel_tabs::THREAD);
+        let thread = self
+            .thread
+            .as_ref()
+            .filter(|_| thread_shown)
+            .and_then(|thread| {
+                let thread = thread.read(cx);
+                // An exact panel's root is known once it loads.
+                thread
+                    .loaded_root()
+                    .or((!self.thread_exact).then(|| thread.root_id()))
+            });
+        Some(Conversation {
+            community,
+            channel,
+            thread,
+        })
+    }
+
+    /// Tells notifications what is on screen.
+    fn report_open(&self, cx: &mut App) {
+        let open = self.on_screen(cx);
+        crate::notifications::showing(open, cx);
     }
 
     /// A registered page's view. Every bundled page uses buzz-app's

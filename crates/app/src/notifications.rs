@@ -2,15 +2,15 @@
 //!
 //! The session decides what deserves attention ([`Session::incoming`]),
 //! including channel mute; this module applies the user's side: only the
-//! selected community, the viewer's preferences, the message being in
-//! view, a two-minute dedupe, and the reference text format. Banners go to
-//! the freedesktop notification service ([`banners`]) from the tokio
-//! runtime on Linux, and to the system's notification center through GPUI
-//! on macOS and Windows (`system`). They are silent and never awaited by
-//! the UI; the chosen sound plays
-//! once the service took the banner. A failure is kept for Settings →
-//! Notifications to show. Clicking a banner brings the window forward on
-//! the message it is about.
+//! selected community, the viewer's preferences, the message's
+//! conversation being open in the focused window, a two-minute dedupe, and
+//! the reference text format. Banners go to the freedesktop notification
+//! service ([`banners`]) from the tokio runtime on Linux, and to the
+//! system's notification center through GPUI on macOS and Windows
+//! (`system`). They are silent and never awaited by the UI; the chosen
+//! sound plays once the service took the banner. A failure is kept for
+//! Settings → Notifications to show. Clicking a banner brings the window
+//! forward on the message it is about.
 //!
 //! [`Session::incoming`]: buzz_relay_client::Session::incoming
 
@@ -18,7 +18,9 @@ use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use crate::sounds::Sound;
 use crate::ui::navigation::{self, Place, Target};
-use buzz_relay_client::{Category, ChannelSummary, ChannelType, IncomingMessage, Profiles, Store};
+use buzz_relay_client::{
+    Category, ChannelSummary, ChannelType, EventId, IncomingMessage, Profiles, Store,
+};
 use futures::StreamExt;
 use gpui_kit::{App, Entity, Global, Task};
 use serde::{Deserialize, Serialize};
@@ -285,6 +287,58 @@ impl Shown {
     }
 }
 
+/// The conversation a window shows: a channel, and the thread open beside
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conversation {
+    /// The community's relay origin.
+    pub community: String,
+    pub channel: String,
+    pub thread: Option<EventId>,
+}
+
+impl Conversation {
+    /// Whether the banner's message shows here: a top-level message in
+    /// its channel, a reply in its open thread.
+    fn shows(&self, key: &Key) -> bool {
+        key.in_channel(&self.community, &self.channel)
+            && key.thread.is_none_or(|root| self.thread == Some(root))
+    }
+}
+
+/// One message banner: the message, where it is, and its thread's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Key {
+    pub origin: String,
+    pub channel: String,
+    pub message: EventId,
+    pub thread: Option<EventId>,
+}
+
+impl Key {
+    fn in_channel(&self, origin: &str, channel: &str) -> bool {
+        self.origin == origin && self.channel == channel
+    }
+}
+
+/// The main window's conversation, whether or not it is focused.
+#[derive(Default)]
+struct OnScreen(Option<Conversation>);
+
+impl Global for OnScreen {}
+
+/// The main window shows `conversation`.
+pub fn showing(conversation: Option<Conversation>, cx: &mut App) {
+    cx.set_global(OnScreen(conversation));
+}
+
+/// Whether the message is already in front of the user: the focused
+/// window shows its conversation, or the message's row was reported in
+/// view. An unfocused window still notifies.
+fn in_front(key: &Key, viewing: bool, open: Option<&Conversation>, focused: bool) -> bool {
+    focused && (viewing || open.is_some_and(|open| open.shows(key)))
+}
+
 /// Forwards `community`'s incoming messages to [`deliver`] until either
 /// goes away.
 pub fn listen(community: &Entity<Community>, cx: &mut App) -> Task<()> {
@@ -321,9 +375,19 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
     }
     let this = community.read(cx);
     let preferences = Notifications::preferences(cx);
-    // In front of the user: the message is in view in a focused window.
-    let viewing = item.viewing && cx.active_window().is_some();
-    if !preferences.allows(item.category) || (viewing && !preferences.notify_while_viewing) {
+    let thread = item
+        .thread_root
+        .as_deref()
+        .and_then(|root| EventId::from_hex(root).ok());
+    let banner = Key {
+        origin: this.origin.to_string(),
+        channel: item.channel_id.clone(),
+        message: item.message_id,
+        thread,
+    };
+    let open = cx.try_global::<OnScreen>().and_then(|open| open.0.as_ref());
+    let in_front = in_front(&banner, item.viewing, open, cx.active_window().is_some());
+    if !preferences.allows(item.category) || (in_front && !preferences.notify_while_viewing) {
         return;
     }
     let key = (this.origin.to_string(), item.message_id.to_hex());
@@ -341,10 +405,7 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
         place: Place::Conversation {
             channel: item.channel_id.clone(),
             message: Some(item.message_id),
-            thread: item
-                .thread_root
-                .as_deref()
-                .and_then(|root| buzz_relay_client::EventId::from_hex(root).ok()),
+            thread,
             members: false,
         },
     };
@@ -646,6 +707,59 @@ mod tests {
             text(&item(Category::Direct, ""), None, &Profiles::default()).1,
             "New message"
         );
+    }
+
+    #[test]
+    fn the_open_conversation_does_not_notify_while_focused() {
+        let root = EventId::from_byte_array([9; 32]);
+        let top = Key {
+            origin: "ws://relay".into(),
+            channel: "general".into(),
+            message: EventId::from_byte_array([1; 32]),
+            thread: None,
+        };
+        let reply = Key {
+            message: EventId::from_byte_array([2; 32]),
+            thread: Some(root),
+            ..top.clone()
+        };
+        let channel = Conversation {
+            community: "ws://relay".into(),
+            channel: "general".into(),
+            thread: None,
+        };
+        let thread = Conversation {
+            thread: Some(root),
+            ..channel.clone()
+        };
+        // The channel is open: its messages are in front, not its threads.
+        assert!(in_front(&top, false, Some(&channel), true));
+        assert!(!in_front(&reply, false, Some(&channel), true));
+        // The thread is open beside it: both are.
+        assert!(in_front(&top, false, Some(&thread), true));
+        assert!(in_front(&reply, false, Some(&thread), true));
+        // Another thread, channel or community is not.
+        let other_thread = Conversation {
+            thread: Some(EventId::from_byte_array([8; 32])),
+            ..channel.clone()
+        };
+        assert!(!in_front(&reply, false, Some(&other_thread), true));
+        let other_channel = Conversation {
+            channel: "random".into(),
+            ..channel.clone()
+        };
+        assert!(!in_front(&top, false, Some(&other_channel), true));
+        let other_community = Conversation {
+            community: "ws://other".into(),
+            ..channel.clone()
+        };
+        assert!(!in_front(&top, false, Some(&other_community), true));
+        assert!(!in_front(&top, false, None, true));
+        // A row reported in view is in front wherever it is.
+        assert!(in_front(&reply, true, None, true));
+        // An unfocused window still notifies.
+        assert!(!in_front(&top, false, Some(&channel), false));
+        assert!(!in_front(&top, true, Some(&channel), false));
     }
 
     #[test]

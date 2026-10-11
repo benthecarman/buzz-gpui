@@ -373,6 +373,9 @@ impl Workspace {
         if let Some(old) = &self.thread {
             super::super::media::pause_audio(Some(old.entity_id()), cx);
         }
+        // An exact thread's root is known once it loads.
+        cx.observe(&panel, |this, _, cx| this.report_open(cx))
+            .detach();
         self.thread = Some(panel.clone());
         self.thread_exact = target.exact;
         Some(panel)

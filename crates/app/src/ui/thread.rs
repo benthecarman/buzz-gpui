@@ -277,6 +277,12 @@ impl ThreadPanel {
         self.root_id
     }
 
+    /// The thread's root once it has loaded; in exact mode [`Self::root_id`]
+    /// may be a reply.
+    pub fn loaded_root(&self) -> Option<EventId> {
+        self.snapshot.root.as_ref().map(|root| root.id)
+    }
+
     /// The composer itself, for hosts that follow its sends (Inbox drafts).
     pub fn composer_entity(&self) -> Entity<super::composer::Composer> {
         self.composer.clone()
