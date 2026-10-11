@@ -102,7 +102,7 @@ impl RenderOnce for Tab {
                 .h(rems(2.))
                 .px(rems(1.))
                 .rounded_full()
-                .text_label()
+                .text_body()
                 .text_color(if selected {
                     c.text_standard
                 } else {

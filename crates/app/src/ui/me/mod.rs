@@ -108,6 +108,10 @@ pub struct MeModel {
     /// Bumped by every navigation inside Me, so a view started for an
     /// earlier visit can tell (`navigation.signal`).
     pub visit: u64,
+    /// Whether the view the visit opens takes the focus. Opening Me from
+    /// its topbar tab leaves the focus where it is (`focus: "preserve"`);
+    /// every navigation inside Me focuses its content again.
+    pub autofocus: bool,
     pub kit: Arc<MeKitSnapshot>,
     pub me: Arc<SidebarState>,
     /// Each Me conversation's tabs, by community and channel, apart from
@@ -134,6 +138,7 @@ impl MeModel {
                 community: None,
                 selections: HashMap::new(),
                 visit: 0,
+                autofocus: true,
                 kit: Arc::default(),
                 me: Arc::default(),
                 tabs: HashMap::new(),
@@ -208,6 +213,7 @@ impl MeModel {
             self.selections.insert(scope, selection);
         }
         self.visit += 1;
+        self.autofocus = true;
         cx.notify();
     }
 
@@ -431,6 +437,7 @@ impl Render for MePage {
             let community = community.expect("ready implies a community");
             let selection = model.selection(cx);
             let visit = model.visit;
+            let focus = model.autofocus;
             let pending = selection
                 .session()
                 .and_then(|id| pending::draft_key_for(&community, id, cx));
@@ -453,7 +460,13 @@ impl Render for MePage {
                                 .map(|(_, _, view)| view.clone());
                             let view = current.unwrap_or_else(|| {
                                 let view = cx.new(|cx| {
-                                    SessionWork::new(community.clone(), channel.clone(), window, cx)
+                                    SessionWork::new(
+                                        community.clone(),
+                                        channel.clone(),
+                                        focus,
+                                        window,
+                                        cx,
+                                    )
                                 });
                                 self.work = Some((channel.id.clone(), visit, view.clone()));
                                 view
@@ -478,7 +491,14 @@ impl Render for MePage {
                     let view = current.unwrap_or_else(|| {
                         let section = pending::section_of(&key);
                         let view = cx.new(|cx| {
-                            NewSession::new(community.clone(), key.clone(), section, window, cx)
+                            NewSession::new(
+                                community.clone(),
+                                key.clone(),
+                                section,
+                                focus,
+                                window,
+                                cx,
+                            )
                         });
                         self.new = Some((key, view.clone()));
                         view
