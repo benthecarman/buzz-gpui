@@ -62,6 +62,19 @@ const DEFAULT_SIZE: Size<Pixels> = Size {
     width: px(1200.),
     height: px(800.),
 };
+/// The smallest the window may be. Geometry below it is never saved or
+/// restored: a compositor can report a 1x1 window while it maps or hides
+/// it, and restoring that leaves a window no one can see.
+const MIN_SIZE: Size<Pixels> = Size {
+    width: px(480.),
+    height: px(400.),
+};
+
+/// Whether `bounds` is a size the window can usefully have.
+fn usable(bounds: &WindowBounds) -> bool {
+    let size = bounds.get_bounds().size;
+    size.width >= MIN_SIZE.width && size.height >= MIN_SIZE.height
+}
 
 struct MainWindow {
     handle: Option<AnyWindowHandle>,
@@ -140,7 +153,7 @@ pub fn open(cx: &mut App) {
     let opened = gpui_kit::open_window(
         WindowOptions {
             window_bounds: Some(bounds),
-            window_min_size: Some(size(px(480.), px(400.))),
+            window_min_size: Some(MIN_SIZE),
             app_id: Some("buzz-gpui".into()),
             // For the taskbar, Alt+Tab and the window list; the header
             // draws no title.
@@ -239,7 +252,9 @@ fn hide(window: &mut Window, cx: &mut App) {
 }
 
 fn remember_bounds(bounds: WindowBounds, cx: &mut App) {
-    cx.global_mut::<MainWindow>().bounds = Some(bounds);
+    if usable(&bounds) {
+        cx.global_mut::<MainWindow>().bounds = Some(bounds);
+    }
 }
 
 /// Saves where the window is for the next launch.
@@ -462,6 +477,7 @@ fn restore_geometry(bytes: &[u8], cx: &App) -> Option<WindowBounds> {
     } else {
         WindowBounds::Windowed(bounds)
     })
+    .filter(usable)
 }
 
 pub fn preferences(cx: &App) -> Preferences {
@@ -634,6 +650,16 @@ mod tests {
         let file: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(file[LABEL]["maximized"], true);
         assert_eq!(file[LABEL]["fullscreen"], false);
+    }
+
+    #[test]
+    fn a_window_too_small_to_see_is_not_kept() {
+        let at = |w: f32, h: f32| Bounds::new(point(px(0.), px(0.)), size(px(w), px(h)));
+        // What a hidden window once left behind: restored, no one saw it.
+        assert!(!usable(&WindowBounds::Windowed(at(1., 1.))));
+        assert!(!usable(&WindowBounds::Maximized(at(479., 800.))));
+        assert!(usable(&WindowBounds::Windowed(at(480., 400.))));
+        assert!(usable(&WindowBounds::Fullscreen(at(1920., 1080.))));
     }
 
     #[test]
