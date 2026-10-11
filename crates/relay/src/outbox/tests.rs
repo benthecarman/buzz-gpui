@@ -1460,6 +1460,28 @@ async fn acknowledgement_failure_keeps_recovery_and_latest_evidence() {
     assert!(h.outbox.send(chat("again"), with_recovery()).is_ok());
 }
 
+/// The app calls in from GPUI threads, which have no Tokio context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recover_and_acknowledge_work_off_the_runtime() {
+    let h = Harness::new(Mode::Accept);
+    h.outbox.ready().await.unwrap();
+    let id = h.send("First message");
+    while h.delivery(&id) != Delivery::Accepted {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let outbox = h.outbox.clone();
+    std::thread::spawn(move || {
+        futures::executor::block_on(async {
+            outbox.recover(&id, recovery()).await.unwrap();
+            outbox.acknowledge(&id).await.unwrap();
+        })
+    })
+    .join()
+    .unwrap();
+    let saved = &h.journal.records()[0];
+    assert!(saved.recovery.is_none() && saved.acknowledged);
+}
+
 #[tokio::test(start_paused = true)]
 async fn recover_adopts_a_confirmed_echo_durably() {
     let h = Harness::new(Mode::Accept);

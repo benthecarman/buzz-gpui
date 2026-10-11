@@ -527,6 +527,9 @@ struct Inner {
     hydration: watch::Sender<bool>,
     changes: watch::Sender<u64>,
     observers: Mutex<Vec<(u64, SendObserver)>>,
+    /// The runtime `new` ran on. Callers may reach the outbox from threads
+    /// with no Tokio context (GPUI), so background work spawns through it.
+    runtime: tokio::runtime::Handle,
 }
 
 /// Stops a send observer when dropped.
@@ -723,8 +726,9 @@ impl Outbox {
             hydration: watch::Sender::new(false),
             changes: watch::Sender::new(0),
             observers: Mutex::new(Vec::new()),
+            runtime: tokio::runtime::Handle::current(),
         });
-        tokio::spawn(inner.clone().hydrate());
+        inner.runtime.spawn(inner.clone().hydrate());
         Self { inner }
     }
 
@@ -1035,7 +1039,7 @@ impl Outbox {
         .boxed()
         .shared();
         state.dismissing.insert(id, work.clone());
-        tokio::spawn(work.clone());
+        inner.runtime.spawn(work.clone());
         work
     }
 
@@ -1173,7 +1177,7 @@ impl Inner {
     /// so it can never write back an older view (§9.2 #3). It completes
     /// even if the caller stops waiting.
     fn persist(self: &Arc<Self>, action: Action) -> BoxFuture<'static, Result<(), OutboxError>> {
-        let task = tokio::spawn(self.clone().commit(action));
+        let task = self.runtime.spawn(self.clone().commit(action));
         Box::pin(async move { task.await.unwrap_or(Err(OutboxError::Closed)) })
     }
 
@@ -1264,7 +1268,7 @@ impl Inner {
 
     /// A commit nobody waits for.
     fn persist_detached(self: &Arc<Self>) {
-        tokio::spawn(self.clone().commit(Action::Save));
+        self.runtime.spawn(self.clone().commit(Action::Save));
     }
 
     /// A status change: shown now, committed in the background. A failed
@@ -1379,7 +1383,9 @@ impl Inner {
         let (start, started) = oneshot::channel();
         // The deadline starts now and covers queue wait (§9.2 #2).
         let expires_at = Instant::now() + self.options.delivery_timeout;
-        let task = tokio::spawn(self.clone().attempt(id, serial, expires_at, started));
+        let task = self
+            .runtime
+            .spawn(self.clone().attempt(id, serial, expires_at, started));
         state.attempts.insert(
             id,
             Attempt {
@@ -1679,7 +1685,7 @@ impl Inner {
         if state.closed || state.confirming.contains_key(&event.id) {
             return;
         }
-        let task = tokio::spawn(self.clone().poll_echo(event.id));
+        let task = self.runtime.spawn(self.clone().poll_echo(event.id));
         state.confirming.insert(event.id, task.abort_handle());
     }
 
