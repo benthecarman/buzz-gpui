@@ -58,8 +58,8 @@ section lists what a person still has to try on real machines.
 | Remote hosts over `tcp://` | yes | DONE | DONE |
 | Remote hosts and `buzzd` over `unix://` | Unix sockets | DONE | DIFFERENT: tokio has no Unix sockets on Windows; use `tcp://` |
 | Owner-only files (config, `buzzd` token, agent key files) | modes 0600 and 0700 | DONE | DIFFERENT: no Unix modes; the files are in the user's profile, whose ACL already admits only the user, SYSTEM and Administrators |
-| `buzzd` stops cleanly when the service manager stops it | SIGTERM | DONE | PLANNED: console close, logoff and shutdown events |
-| `buzzd` host name | `/etc/hostname` | PLANNED: macOS has no `/etc/hostname`; ask the system | PLANNED: `COMPUTERNAME` |
+| `buzzd` stops cleanly when the service manager stops it | SIGTERM | DONE | DONE: Ctrl+Break, console close, logoff and shutdown events |
+| `buzzd` host name | `/etc/hostname` | DONE: the system's host name, without `.local` (macOS has no `/etc/hostname`) | DONE: the system's host name |
 
 ## Packaging
 
