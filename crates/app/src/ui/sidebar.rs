@@ -12,6 +12,8 @@ mod dialogs;
 pub(super) mod menus;
 mod rows;
 
+pub(crate) use rows::{own_agents, working_agents, working_badge};
+
 use super::message::display_name;
 use super::pages::{self, Page, Placement};
 use crate::community::{AppState, Community};

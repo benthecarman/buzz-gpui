@@ -46,6 +46,22 @@ fn sender(item: &ThreadActivityItem, profiles: &Profiles) -> SharedString {
     }
 }
 
+/// Opens something for `(channel, thread root or agent)`.
+pub type OpenFor = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
+/// Opens a working agent: `(channel, agent, its captured message)`.
+pub type OpenAgent = Rc<dyn Fn(&str, &str, Option<&str>, &mut Window, &mut App)>;
+
+/// Where the popover's entries open, for a sidebar that does not open them
+/// in Messages (Me's rows).
+#[derive(Clone)]
+pub struct Opens {
+    /// An unread thread: `(channel, root)`.
+    pub thread: OpenFor,
+    pub agent: OpenAgent,
+    /// An agent's activity: `(channel, agent)`.
+    pub activity: OpenFor,
+}
+
 /// A sidebar row with its activity popover.
 #[derive(IntoElement)]
 pub struct ActivityRow {
@@ -58,6 +74,7 @@ pub struct ActivityRow {
     media: Option<Media>,
     community: Option<Entity<Community>>,
     owned: Arc<HashSet<String>>,
+    opens: Option<Opens>,
 }
 
 impl ActivityRow {
@@ -71,7 +88,14 @@ impl ActivityRow {
             media: None,
             community: None,
             owned: Arc::default(),
+            opens: None,
         }
+    }
+
+    /// Opens the popover's entries here instead of in Messages.
+    pub fn opens(mut self, opens: Opens) -> Self {
+        self.opens = Some(opens);
+        self
     }
 
     pub fn activity(
@@ -269,7 +293,11 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
             .as_ref()
             .is_some_and(|activity| activity.freshness == Freshness::Stale);
     let channel = row.channel.clone();
+    let opens = row.opens.clone();
     let open = move |root: Option<String>, window: &mut Window, cx: &mut App| {
+        if let (Some(opens), Some(root)) = (&opens, &root) {
+            return (opens.thread)(&channel, root, window, cx);
+        }
         let url = match root.and_then(|root| EventId::from_hex(&root).ok()) {
             Some(root) => format!("{}&thread={}", message_link(&channel, &root), root.to_hex()),
             None => format!("buzz://channel/{channel}"),
@@ -323,6 +351,9 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
             let (open, open_state, view_state) = (open.clone(), state.clone(), state.clone());
             let (agent_key, channel) = (agent.clone(), row.channel.clone());
             let opened = message.clone();
+            let (opens, open_agent, open_channel) =
+                (row.opens.clone(), agent.clone(), row.channel.clone());
+            let activity_opens = row.opens.clone();
             list = list.child(AgentActivityRow {
                 id: SharedString::from(format!("working-{agent}")),
                 name: name.clone(),
@@ -350,11 +381,19 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
                 .into(),
                 on_open: Some(Rc::new(move |window, cx| {
                     open_state.update(cx, |state, cx| state.close(cx));
-                    open(opened.clone(), window, cx);
+                    match &opens {
+                        Some(opens) => {
+                            (opens.agent)(&open_channel, &open_agent, opened.as_deref(), window, cx)
+                        }
+                        None => open(opened.clone(), window, cx),
+                    }
                 })),
                 // Activity opens beside the channel it is about.
                 on_open_activity: Some(Rc::new(move |window, cx| {
                     view_state.update(cx, |state, cx| state.close(cx));
+                    if let Some(opens) = &activity_opens {
+                        return (opens.activity)(&channel, &agent_key, window, cx);
+                    }
                     navigation::open_url(&format!("buzz://channel/{channel}"), window, cx);
                     super::agent_activity::open(&agent_key, Some(&channel), None, window, cx);
                 })),
