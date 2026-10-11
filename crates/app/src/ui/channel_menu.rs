@@ -68,9 +68,12 @@ pub struct ChannelActions {
     community: Entity<Community>,
     channel: ChannelSummary,
     menu_open: bool,
-    /// Lifecycle permissions, read when the menu opens.
+    /// Lifecycle permissions: read when the channel first shows, so the
+    /// menu opens complete, and again on each open, showing the last
+    /// answer meanwhile.
     permissions: Option<Result<LifecyclePermissions, String>>,
     permissions_generation: u64,
+    prefetched: bool,
     modal: Option<Modal>,
     on_removed: OnRemoved,
     /// Registered channel panels' entries, set by the page each frame.
@@ -95,6 +98,7 @@ impl ChannelActions {
             menu_open: false,
             permissions: None,
             permissions_generation: 0,
+            prefetched: false,
             modal: None,
             on_removed,
             menu_panels: Vec::new(),
@@ -234,7 +238,10 @@ impl ChannelActions {
     }
 
     fn load_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.permissions = None;
+        // A failed read is retried from nothing; a good one stays shown.
+        if matches!(self.permissions, Some(Err(_))) {
+            self.permissions = None;
+        }
         self.permissions_generation += 1;
         let generation = self.permissions_generation;
         let session = self.community.read(cx).session.clone();
@@ -242,10 +249,14 @@ impl ChannelActions {
         cx.spawn_in(window, async move |this, cx| {
             let permissions = session.channel_permissions(&channel).await;
             let _ = this.update(cx, |this, cx| {
-                if this.permissions_generation == generation {
-                    this.permissions = Some(permissions);
-                    cx.notify();
+                if this.permissions_generation != generation {
+                    return;
                 }
+                // A refresh that fails keeps the last good answer.
+                if permissions.is_ok() || !matches!(this.permissions, Some(Ok(_))) {
+                    this.permissions = Some(permissions);
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -500,6 +511,10 @@ impl Render for ChannelActions {
             .find(|c| c.id == self.channel.id)
         {
             self.channel = current.clone();
+        }
+        if !self.prefetched && self.lifecycle_shown() {
+            self.prefetched = true;
+            self.load_permissions(window, cx);
         }
         if self.menu_open {
             crate::perf::shown(crate::perf::MENU, "painted");
