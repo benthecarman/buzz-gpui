@@ -81,6 +81,8 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 # Machine-wide idle time, as buzz-app reads it there.
 user-idle = { version = "0.6", default-features = false }
+# "Copy image", as on Linux.
+arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 # The user's `buzz://` registration; GPUI already uses it.
