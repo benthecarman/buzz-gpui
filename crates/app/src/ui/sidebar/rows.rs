@@ -16,7 +16,7 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -144,11 +144,13 @@ impl Render for DragPreview {
 impl ChannelSidebar {
     /// One section: header with its actions, then its rows unless
     /// collapsed. Saved groups, Starred and Channels take dropped rows.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn section(
         &mut self,
         index: usize,
         section: &SidebarSection<'_>,
         snapshot: &SessionSnapshot,
+        channels: &HashMap<&str, &ChannelSummary>,
         props: &SidebarProps,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -318,7 +320,14 @@ impl ChannelSidebar {
             section
                 .rows
                 .iter()
-                .map(|channel| self.channel_row(channel, &key, snapshot, props, &own, cx))
+                .map(
+                    |channel| match self.row_shown(&channel.id, props, window, cx) {
+                        true => {
+                            self.channel_row(channel, &key, snapshot, channels, props, &own, cx)
+                        }
+                        false => self.row_placeholder(&channel.id, cx),
+                    },
+                )
                 .collect()
         } else {
             Vec::new()
@@ -361,12 +370,81 @@ impl ChannelSidebar {
             .into_any_element()
     }
 
+    /// Whether a row is drawn in full. Hundreds of rows cost milliseconds
+    /// to build, lay out and paint, so rows more than a list height away
+    /// from the visible part stand in as [`Self::row_placeholder`]s of the
+    /// same height. The selected, focused and dragged rows, and rows not
+    /// painted yet, are always drawn.
+    pub(super) fn row_shown(
+        &self,
+        id: &str,
+        props: &SidebarProps,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let (Some(row), Some((viewport, painted_at))) = (self.painted.get(id), self.viewport.get())
+        else {
+            return true;
+        };
+        if props.selected.as_deref() == Some(id)
+            || self.dragging.as_deref() == Some(id)
+            || self
+                .row_menu
+                .as_ref()
+                .is_some_and(|menu| menu.channel.id == id)
+            || self
+                .focus
+                .get(id)
+                .is_some_and(|focus| focus.contains_focused(window, cx))
+        {
+            return true;
+        }
+        // Where the row is now: scrolling since the paint moved it.
+        let top = row.top() + (self.scroll.offset().y - painted_at);
+        let margin = viewport.size.height;
+        top + row.size.height >= viewport.top() - margin && top <= viewport.bottom() + margin
+    }
+
+    /// A row far outside the view: its height, focus and bounds, without
+    /// its content. One that comes into view (a jump the scroll offset did
+    /// not foresee) asks for the next frame, which draws it in full.
+    pub(super) fn row_placeholder(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let focus = self
+            .focus
+            .entry(id.to_owned())
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
+        let (bounds, bounds_id) = (self.bounds.clone(), id.to_owned());
+        div()
+            .id(SharedString::from(format!("ch-{id}")))
+            .track_focus(&focus)
+            .relative()
+            .flex_none()
+            .h(rems(1.75))
+            .child(
+                canvas(
+                    move |row, window, _| {
+                        if row.intersects(&window.content_mask().bounds) {
+                            window.request_animation_frame();
+                        }
+                        bounds.borrow_mut().insert(bounds_id, row);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
     /// A channel or DM row (§3.3, §3.4).
+    #[allow(clippy::too_many_arguments)]
     fn channel_row(
         &mut self,
         channel: &ChannelSummary,
         section: &str,
         snapshot: &SessionSnapshot,
+        channels: &HashMap<&str, &ChannelSummary>,
         props: &SidebarProps,
         own_agents: &HashSet<String>,
         cx: &mut Context<Self>,
@@ -558,12 +636,9 @@ impl ChannelSidebar {
             .or_insert_with(|| cx.focus_handle())
             .clone();
         let select = props.on_select_channel.clone();
-        let target = snapshot
-            .channels
-            .iter()
-            .find(|c| c.id == id)
-            .cloned()
-            .unwrap_or_else(|| channel.clone());
+        let target = channels
+            .get(id.as_str())
+            .map_or_else(|| channel.clone(), |found| (*found).clone());
         let bounds = self.bounds.clone();
         let bounds_id = id.clone();
         let (menu_channel, key_channel) = (target.clone(), target.clone());

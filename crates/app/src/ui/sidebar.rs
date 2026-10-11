@@ -181,6 +181,10 @@ impl PropsKey {
     }
 }
 
+/// Where the list showed at the last paint: its visible bounds and its
+/// scroll offset.
+type Painted = (Bounds<Pixels>, Pixels);
+
 /// One sidebar per community, kept while the community is.
 #[derive(Default)]
 struct Sidebars(HashMap<EntityId, Entity<ChannelSidebar>>);
@@ -322,6 +326,11 @@ pub struct ChannelSidebar {
     location: Option<String>,
     /// Row bounds from the last paint, for reveals and keyboard menus.
     bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// Row bounds from the last paint, taken at the start of a render to
+    /// pick the rows drawn in full ([`Self::row_shown`]).
+    painted: HashMap<String, Bounds<Pixels>>,
+    /// The list's visible bounds and scroll offset at the last paint.
+    viewport: Rc<std::cell::Cell<Option<Painted>>>,
     focus: HashMap<String, FocusHandle>,
     /// The first reveal happened (`useSidebarStartup`).
     revealed: bool,
@@ -396,6 +405,8 @@ impl ChannelSidebar {
             saving_scroll: false,
             location: view.location.clone(),
             bounds: Rc::default(),
+            painted: HashMap::new(),
+            viewport: Rc::default(),
             focus: HashMap::new(),
             revealed: false,
             roster_since: None,
@@ -916,6 +927,20 @@ impl ChannelSidebar {
 }
 
 impl ChannelSidebar {
+    /// Records the list's visible bounds and scroll offset as painted, for
+    /// [`Self::row_shown`].
+    fn viewport_probe(&self) -> impl IntoElement {
+        let (viewport, scroll) = (self.viewport.clone(), self.scroll.clone());
+        canvas(
+            move |bounds, _, _| viewport.set(Some((bounds, scroll.offset().y))),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+}
+
+impl ChannelSidebar {
     /// A menu, dialog or toast is up.
     fn overlay_open(&self) -> bool {
         self.row_menu.is_some()
@@ -1041,7 +1066,12 @@ impl ChannelSidebar {
         };
         self.manage_scroll(ready && snapshot.roster == RosterStatus::Ready, window, cx);
         let edges = self.unread_edges(&sections, &snapshot);
-        self.bounds.borrow_mut().clear();
+        self.painted = std::mem::take(&mut *self.bounds.borrow_mut());
+        let index: HashMap<&str, &ChannelSummary> = snapshot
+            .channels
+            .iter()
+            .map(|channel| (channel.id.as_str(), channel))
+            .collect();
 
         if ready && !sections.is_empty() {
             crate::perf::shown(crate::perf::STARTUP, "sidebar");
@@ -1055,8 +1085,8 @@ impl ChannelSidebar {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .children(navigation);
-        for (index, section) in sections.iter().enumerate() {
-            list = list.child(self.section(index, section, &snapshot, props, window, cx));
+        for (at, section) in sections.iter().enumerate() {
+            list = list.child(self.section(at, section, &snapshot, &index, props, window, cx));
         }
         if !ready {
             list = list.child(empty("Loading your sidebar…".into(), &c));
@@ -1097,14 +1127,20 @@ impl ChannelSidebar {
                     this.close_menus(cx);
                 }
             }))
-            .child(div().relative().flex_1().min_h_0().child(list).children(
-                super::sidebar_unread::pills(
-                    &edges,
-                    &self.community.read(cx).session.media().clone(),
-                    self.reveal_unread(cx),
-                    cx,
-                ),
-            ))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(list)
+                    .children(super::sidebar_unread::pills(
+                        &edges,
+                        &self.community.read(cx).session.media().clone(),
+                        self.reveal_unread(cx),
+                        cx,
+                    ))
+                    .child(self.viewport_probe()),
+            )
             .children(notices)
             .children(menu)
             .children(dialog)
