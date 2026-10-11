@@ -12,7 +12,6 @@ Status:
 - **DONE**: the feature works natively on that platform.
 - **DIFFERENT**: it works differently or not at all, for the reason
   given. Nothing is faked.
-- **PLANNED**: not done yet.
 
 macOS and Windows were checked by CI builds and lints only. The last
 section lists what a person still has to try on real machines.
@@ -21,7 +20,7 @@ section lists what a person still has to try on real machines.
 
 | Feature | Linux | macOS | Windows |
 |---|---|---|---|
-| Credentials (human key, agent keys, host tokens) | Secret Service through buzz-credential-store | DONE: login keychain, generic passwords (`crates/keychain`) | DONE: Credential Manager through buzz-credential-store's `keyring` backend, as buzz-app does |
+| Credentials (human key, agent keys, host tokens) | Secret Service through buzz-credential-store | DONE: login keychain, generic passwords (`crates/keychain`) | DONE: Credential Manager through buzz-credential-store's `keyring` backend (`windows-native`), as buzz-app does; create-only writes lock under `%USERPROFILE%\.buzz-foundation` |
 | One running app; a second launch hands its link over and exits | Unix socket in `$XDG_RUNTIME_DIR` (`single_instance.rs`) | DONE: Launch Services keeps one app and sends links as open-URL events; the Unix socket (in `$TMPDIR`) covers launches outside Launch Services | DONE: a named pipe per user and profile |
 | `buzz://` links from the OS | `Exec=buzz-gpui %U`, read from argv | DONE: links arrive as open-URL events (`App::on_open_urls`), also on a cold start | DONE: argv, as on Linux |
 | `buzz://` scheme registration | `.desktop` file; portable release builds write a user handler (`deep_links::register_scheme`) | DONE: `CFBundleURLTypes` in Info.plist; Launch Services registers the app when it is copied to Applications | DONE: release builds write `HKCU\Software\Classes\buzz` at launch, since the zip has no installer |
@@ -71,4 +70,26 @@ section lists what a person still has to try on real machines.
 
 ## Smoke tests on real machines
 
-Nothing in this file was run on a Mac or a Windows PC.
+Nothing in this file was run on a Mac or a Windows PC. CI builds, lints
+and packages both. Someone with the hardware should check:
+
+- **Both:** sign in with a key already in the keychain or Credential
+  Manager; a second launch and a `buzz://` link from a browser reach the
+  running app and bring its window forward; a mention shows a banner and
+  clicking it opens the message; the tray icon opens and quits Buzz, gets
+  its dot for unread mentions, and close and minimize to tray hide the
+  window; Copy image in the image viewer; away after ten minutes idle
+  while typing elsewhere keeps you online; pulling the network cable and
+  plugging it back reconnects at once; starting an agent.
+- **macOS:** the window buttons sit inside the header, centred on it,
+  clear of the back and forward buttons; the header drags the window and
+  double-clicking it zooms; ⌘Q quits; a Dock click reopens a window
+  hidden to the menu bar; the first banner asks for permission.
+- **Windows:** the taskbar, window and Explorer show the Buzz icon; the
+  header drags the window, double-click maximizes, dragging to the screen
+  edge snaps, and the buttons in it still click; toasts show "Buzz";
+  stopping a Claude Code process ends what it started; `buzzd` stops its
+  agents when its console closes; no console windows flash. Version
+  probes run through buzz-desktop's `process::run_output` start without
+  `CREATE_NO_WINDOW`; if a console flashes when Settings lists
+  harnesses, the fix belongs in buzz-desktop.
