@@ -338,15 +338,26 @@ pub struct PluginShortcut {
 }
 
 /// The bundled plugins' shortcuts.
-pub const PLUGINS: &[PluginShortcut] = &[PluginShortcut {
-    key: "buzz.terminal/toggle",
-    plugin: "Terminal",
-    title: "Toggle channel terminal",
-    order: 10,
-    defaults: &[Binding::primary("j")],
-    action: || Box::new(crate::ui::terminal::ToggleTerminal),
-    panel: Some(crate::ui::terminal::PANEL),
-}];
+pub const PLUGINS: &[PluginShortcut] = &[
+    PluginShortcut {
+        key: "buzz.terminal/toggle",
+        plugin: "Terminal",
+        title: "Toggle channel terminal",
+        order: 10,
+        defaults: &[Binding::primary("j")],
+        action: || Box::new(crate::ui::terminal::ToggleTerminal),
+        panel: Some(crate::ui::terminal::PANEL),
+    },
+    PluginShortcut {
+        key: "buzz.mission-control/open",
+        plugin: "Mission control",
+        title: "Open Mission control",
+        order: 10,
+        defaults: &[Binding::new("m", true, true, false)],
+        action: || Box::new(crate::ui::mission_control::OpenMissionControl),
+        panel: None,
+    },
+];
 
 /// Copy, paste, cut and select all: a shortcut there would take them
 /// from every field.
@@ -777,6 +788,7 @@ mod tests {
                 "Search this conversation",
                 "Open Settings",
                 "Close tab or window",
+                "Open Mission control",
                 "Toggle channel terminal",
             ]
         );
@@ -1039,9 +1051,13 @@ mod tests {
             action(&defaults, "ctrl-j"),
             Some("buzz_terminal::ToggleTerminal")
         );
+        assert_eq!(
+            action(&defaults, "ctrl-shift-m"),
+            Some("buzz_mission_control::OpenMissionControl")
+        );
         // The stale app-wide binding goes; the others stay, beside 13 host
-        // chords and the terminal's.
-        assert_eq!(defaults.bindings().count(), 2 + 13 + 1);
+        // chords, the terminal's and Mission control's.
+        assert_eq!(defaults.bindings().count(), 2 + 13 + 2);
         let mut overrides = Overrides::new();
         overrides.insert("settings".into(), Binding::primary(";"));
         let rebound = Keymap::new(keymap_bindings(defaults.bindings(), &overrides));
