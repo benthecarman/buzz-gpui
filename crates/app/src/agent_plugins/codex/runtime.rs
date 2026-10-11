@@ -638,13 +638,18 @@ impl CodexRuntime {
             NextTurn,
         }
         let steered = async {
-            active.ready.clone().await?;
+            let ready = active.ready.clone().await;
             if entry.abort.aborted() {
                 return Ok(Steered::Done);
             }
+            // A turn that failed to start is over too: its failure is
+            // already posted, and the follow-up, often a retry sent after
+            // reading it, starts afresh. The failed turn stays on the
+            // lane until it has left its thread.
             if active.finished() {
                 return Ok(Steered::NextTurn);
             }
+            ready?;
             let context = self.history(&request, &entry.abort).await?;
             if entry.abort.aborted() {
                 return Ok(Steered::Done);
