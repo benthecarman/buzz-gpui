@@ -333,13 +333,9 @@ impl Render for Root {
             crate::perf::shown(crate::perf::STARTUP, "launch_surface_gone");
         }
         // The surface animates every frame, and nothing under it shows
-        // while it is opaque: the workspace draws from its last frame
-        // there unless it changed.
-        let covered = self
-            .launch
-            .as_ref()
-            .and_then(|launch| launch.opacity(Instant::now()))
-            == Some(1.);
+        // while it does: the workspace draws from its last frame there
+        // unless it changed.
+        let covered = self.launch.as_ref().is_some_and(Launch::showing);
         let workspace = match covered {
             true => AnyView::from(self.workspace.clone())
                 .cached(StyleRefinement::default().size_full())
