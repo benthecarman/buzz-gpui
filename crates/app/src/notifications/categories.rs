@@ -88,7 +88,7 @@ pub fn submit(key: &str, submission: Submission, cx: &mut App) -> bool {
         return false;
     }
     let (title, body) = text(&submission, spec.label);
-    let shown = show(title, body, submission.target, cx);
+    let shown = show(title, body, submission.target, None, cx);
     cx.spawn(async move |cx| {
         let result = shown.await.unwrap_or(Ok(()));
         cx.update(|cx| match result {
