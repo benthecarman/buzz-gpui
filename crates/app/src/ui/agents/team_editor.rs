@@ -543,7 +543,7 @@ impl TeamEditor {
             let key = pubkey.clone();
             let mut avatar = Avatar::new(name.clone()).squircle().size(AvatarSize::Small);
             if let Some(url) = picture.clone().filter(|p| !p.is_empty()) {
-                avatar = avatar.image(SharedString::from(url));
+                avatar = avatar.image(crate::ui::media::any_avatar(&url));
             }
             let this = cx.entity().downgrade();
             list = list.child(

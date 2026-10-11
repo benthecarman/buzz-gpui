@@ -568,7 +568,7 @@ pub fn instructions(id: impl Into<ElementId>, text: &str, c: &buzz_ui::Colors) -
 fn avatar(name: &str, picture: Option<&String>, size: AvatarSize) -> Avatar {
     let mut avatar = Avatar::new(name.to_string()).size(size);
     if let Some(url) = picture {
-        avatar = avatar.image(SharedString::from(url.clone()));
+        avatar = avatar.image(crate::ui::media::any_avatar(url));
     }
     avatar
 }

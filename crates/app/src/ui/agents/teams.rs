@@ -437,7 +437,7 @@ impl TeamsSection {
                 .squircle()
                 .size(AvatarSize::Px(44.));
             if let Some(url) = picture.clone().filter(|p| !p.is_empty()) {
-                avatar = avatar.image(SharedString::from(url));
+                avatar = avatar.image(crate::ui::media::any_avatar(&url));
             }
             // The reference fans the avatars out; GPUI cannot rotate, so
             // they overlap and step instead.

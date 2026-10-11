@@ -304,7 +304,10 @@ impl Agents2Page {
                     .child(
                         Avatar::new(agent.name.clone())
                             .size(AvatarSize::Px(72.))
-                            .squircle(),
+                            .squircle()
+                            .when_some(agent_picture(agent, cx), |avatar, picture| {
+                                avatar.image(picture)
+                            }),
                     ),
             )
             .child(
@@ -365,7 +368,10 @@ impl Agents2Page {
                         div().flex_none().size(rems(4.)).child(
                             Avatar::new(agent.name.clone())
                                 .size(AvatarSize::Px(64.))
-                                .squircle(),
+                                .squircle()
+                                .when_some(agent_picture(agent, cx), |avatar, picture| {
+                                    avatar.image(picture)
+                                }),
                         ),
                     )
                     .child(
@@ -413,6 +419,24 @@ impl Agents2Page {
                 &c,
             ))
     }
+}
+
+/// The agent's profile picture, as its community's profiles have it.
+fn agent_picture(agent: &Agent, cx: &App) -> Option<ImageSource> {
+    let relay = crate::ui::agents::inventory::origin(&agent.relay);
+    let community = cx
+        .global::<crate::community::AppState>()
+        .communities
+        .iter()
+        .find(|community| community.read(cx).origin.http() == relay)?
+        .read(cx);
+    let picture = community
+        .snapshot
+        .profiles
+        .get(&agent.pubkey)?
+        .picture
+        .clone()?;
+    (!picture.is_empty()).then(|| crate::ui::media::avatar(&picture, community.session.media()))
 }
 
 fn side_body() -> Div {
@@ -1175,7 +1199,10 @@ impl Render for Build {
                 div().flex_none().size(rems(6.)).child(
                     Avatar::new(agent.name.clone())
                         .size(AvatarSize::Px(96.))
-                        .squircle(),
+                        .squircle()
+                        .when_some(agent_picture(&agent, cx), |avatar, picture| {
+                            avatar.image(picture)
+                        }),
                 ),
             )
             .child(name_field)

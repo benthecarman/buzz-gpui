@@ -452,7 +452,7 @@ impl EditDialog {
                     AvatarSize::Large
                 });
         if let Some(picture) = picture.clone() {
-            avatar = avatar.image(SharedString::from(picture));
+            avatar = avatar.image(crate::ui::media::any_avatar(&picture));
         }
         let identity = div()
             .flex()

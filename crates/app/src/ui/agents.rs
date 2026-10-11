@@ -21,7 +21,7 @@ mod form;
 pub(crate) mod harness;
 mod host_dialog;
 mod import;
-mod inventory;
+pub(crate) mod inventory;
 pub(crate) mod relay;
 pub(crate) mod review;
 mod share;

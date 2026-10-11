@@ -99,14 +99,51 @@ pub fn image(url: &str, media: &Media) -> ImageSource {
 /// A profile picture: the relay's small thumbnail when it is relay media
 /// (`mediaUrl(url, "small")`), falling back to the original.
 pub fn avatar(url: &str, media: &Media) -> ImageSource {
+    source(avatar_remote(url, media))
+}
+
+fn avatar_remote(url: &str, media: &Media) -> Remote {
     match media.thumbnail(url) {
-        Some(thumbnail) => source(Remote {
+        Some(thumbnail) => Remote {
             url: thumbnail.into(),
             fallback: Some(url.to_string().into()),
             media: media.clone(),
-        }),
-        None => image(url, media),
+        },
+        None => Remote {
+            url: url.to_string().into(),
+            fallback: None,
+            media: media.clone(),
+        },
     }
+}
+
+/// A profile picture from whichever community it belongs to: fetched
+/// through the community whose media it is, which signs for it, else the
+/// current one's (other hosts' images need no signature).
+pub fn any_avatar(url: &str) -> ImageSource {
+    let url = url.to_string();
+    ImageSource::Custom(Arc::new(move |window, cx| {
+        let Some(media) = media_for(&url, cx) else {
+            return Some(Err(ImageCacheError::Asset("No community".into())));
+        };
+        decoded(&avatar_remote(&url, &media), window, cx)
+            .map(|result| result.map_err(ImageCacheError::Asset))
+    }))
+}
+
+/// The media client for `url`: its own community's, else the current one.
+fn media_for(url: &str, cx: &App) -> Option<Media> {
+    let state = cx.try_global::<crate::community::AppState>()?;
+    state
+        .communities
+        .iter()
+        .map(|community| community.read(cx).session.media())
+        .find(|media| media.is_relay_media(url))
+        .cloned()
+        .or_else(|| {
+            crate::community::AppState::current(cx)
+                .map(|community| community.read(cx).session.media().clone())
+        })
 }
 
 fn source(remote: Remote) -> ImageSource {
