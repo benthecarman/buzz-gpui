@@ -177,8 +177,6 @@ impl History {
 /// notification click. Each brings the window to the front.
 #[derive(Debug)]
 pub enum Request {
-    /// Only the Linux tray and second launches ask for this.
-    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     Focus,
     Url(String),
     Open(Target),
@@ -205,7 +203,6 @@ impl From<Request> for Arrival {
 
 /// Reaches the one main window from anywhere in the app.
 struct Navigator {
-    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     sender: UnboundedSender<Arrival>,
     window: Option<(AnyWindowHandle, WeakEntity<Workspace>)>,
 }
@@ -239,6 +236,9 @@ pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
                     if let Some(token) = arrival.activation_token {
                         gpui_linux::set_activation_token(token);
                     }
+                    // A window comes forward on macOS only with its app.
+                    #[cfg(target_os = "macos")]
+                    cx.activate(true);
                     window.activate_window();
                     workspace.handle(arrival.request, window, cx);
                 })
@@ -255,7 +255,6 @@ pub fn install(window: AnyWindowHandle, workspace: &Entity<Workspace>, cx: &mut 
 }
 
 /// Where to send [`Request`]s from other threads.
-#[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
 pub fn sender(cx: &App) -> Option<UnboundedSender<Arrival>> {
     cx.try_global::<Navigator>()
         .map(|navigator| navigator.sender.clone())

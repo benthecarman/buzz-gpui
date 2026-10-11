@@ -5,7 +5,9 @@
 //! selected community, the viewer's preferences, the message being in
 //! view, a two-minute dedupe, and the reference text format. Banners go to
 //! the freedesktop notification service ([`banners`]) from the tokio
-//! runtime, silent and never awaited by the UI; the chosen sound plays
+//! runtime on Linux, and to the system's notification center through GPUI
+//! on macOS and Windows (`system`). They are silent and never awaited by
+//! the UI; the chosen sound plays
 //! once the service took the banner. A failure is kept for Settings →
 //! Notifications to show. Clicking a banner brings the window forward on
 //! the message it is about.
@@ -15,9 +17,7 @@
 use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use crate::sounds::Sound;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use crate::ui::navigation;
-use crate::ui::navigation::{Place, Target};
+use crate::ui::navigation::{self, Place, Target};
 use buzz_relay_client::{Category, ChannelSummary, ChannelType, IncomingMessage, Profiles, Store};
 use futures::StreamExt;
 use gpui_kit::{App, Entity, Global, Task};
@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod banners;
 pub mod categories;
+#[cfg(any(target_os = "macos", windows))]
+mod system;
 
 /// Viewer preference key for the notification choices
 /// (`buzz-notification-preferences.v1:<viewer>`).
@@ -168,7 +170,6 @@ impl Preferences {
 pub enum ServiceStatus {
     #[default]
     Unknown,
-    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     Available,
     /// No service on the session bus.
     Unavailable,
@@ -500,11 +501,20 @@ pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) ->
     shown
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub(crate) fn show(title: String, _body: String, _target: Target, _cx: &mut App) -> Delivery {
-    tracing::debug!(%title, "desktop notifications are not supported on this platform");
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
+    struct Started;
+    impl Global for Started {}
+
     let (done, shown) = futures::channel::oneshot::channel();
-    let _ = done.send(Err("This build can’t show system notifications.".into()));
+    if cx.try_global::<Started>().is_none() {
+        let Some(navigation) = navigation::sender(cx) else {
+            return shown;
+        };
+        system::start(navigation, cx);
+        cx.set_global(Started);
+    }
+    let _ = done.send(system::show(title, body, target, cx));
     shown
 }
 
@@ -523,9 +533,13 @@ fn probe(cx: &mut App) {
     .detach();
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(any(target_os = "macos", windows))]
 fn probe(cx: &mut App) {
-    Notifications::service(ServiceStatus::Unavailable, cx);
+    let status = match system::available() {
+        true => ServiceStatus::Available,
+        false => ServiceStatus::Unavailable,
+    };
+    Notifications::service(status, cx);
 }
 
 #[cfg(test)]
