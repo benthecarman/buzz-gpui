@@ -91,12 +91,22 @@ fn join(href: &str) -> Option<Link> {
 
 /// Registers this binary for `buzz://` links in the user's applications,
 /// as buzz-app's deep-link plugin repairs portable and unpackaged
-/// installs at launch. Packaged installs register through their desktop
-/// file, and development builds leave any installed handler alone.
+/// installs at launch. Development builds leave any installed handler
+/// alone. On macOS the bundle's Info.plist registers it.
 pub fn register_scheme() {
-    if cfg!(debug_assertions) || cfg!(not(any(target_os = "linux", target_os = "freebsd"))) {
-        return;
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if !cfg!(debug_assertions) {
+        register_desktop_file();
     }
+    #[cfg(windows)]
+    if !cfg!(debug_assertions) {
+        register_url_protocol();
+    }
+}
+
+/// Packaged installs register through their desktop file.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn register_desktop_file() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
@@ -135,8 +145,10 @@ pub fn register_scheme() {
 }
 
 /// The user desktop file that hands `buzz://` links to this binary.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 const HANDLER: &str = "buzz-gpui-handler.desktop";
 
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 fn handler_entry(exe: &str) -> String {
     // Exec quoting (Desktop Entry spec): quote the path, escape `"`, `` ` ``,
     // `$` and `\`, and double `%`.
@@ -156,6 +168,49 @@ fn handler_entry(exe: &str) -> String {
         "[Desktop Entry]\nType=Application\nName=Buzz\nExec={quoted} %u\nTerminal=false\n\
          MimeType=x-scheme-handler/buzz\nNoDisplay=true\n"
     )
+}
+
+/// The zip has no installer, so the user's URL protocol entry is written,
+/// or repaired after the folder moved, at every launch.
+#[cfg(windows)]
+fn register_url_protocol() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("buzz-scheme".into())
+        .spawn(move || {
+            let exe = exe.to_string_lossy();
+            let command = protocol_command(&exe);
+            let classes = windows_registry::CURRENT_USER;
+            let written = classes.create(r"Software\Classes\buzz").and_then(|key| {
+                if key
+                    .open(r"shell\open\command")
+                    .and_then(|open| open.get_string(""))
+                    .is_ok_and(|current| current == command)
+                {
+                    return Ok(());
+                }
+                key.set_string("", "URL:Buzz")?;
+                key.set_string("URL Protocol", "")?;
+                key.create("DefaultIcon")?
+                    .set_string("", format!("\"{exe}\",0"))?;
+                key.create(r"shell\open\command")?.set_string("", &command)
+            });
+            if let Err(error) = written {
+                tracing::warn!(%error, "could not register buzz:// for this binary");
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not register buzz://");
+    }
+}
+
+/// The command Windows runs for a `buzz://` link. Windows paths cannot
+/// hold `"`, so quoting is enough.
+#[cfg(any(windows, test))]
+fn protocol_command(exe: &str) -> String {
+    format!("\"{exe}\" \"%1\"")
 }
 
 /// The `buzz:` URL on a command line, if any. The newest intent wins, so
@@ -195,6 +250,14 @@ mod tests {
         assert!(entry.contains("Exec=\"/home/me/My Apps/buzz-gpui\" %u\n"));
         assert!(entry.contains("MimeType=x-scheme-handler/buzz\n"));
         assert!(handler_entry("/a/100%$x").contains("Exec=\"/a/100%%\\$x\" %u"));
+    }
+
+    #[test]
+    fn the_windows_protocol_runs_this_binary() {
+        assert_eq!(
+            protocol_command(r"C:\Users\Me\Buzz\bin\buzz-gpui.exe"),
+            r#""C:\Users\Me\Buzz\bin\buzz-gpui.exe" "%1""#
+        );
     }
 
     #[test]
