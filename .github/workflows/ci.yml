@@ -57,7 +57,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
+      # The dependency build's store path changes only with its inputs
+      # (Cargo.lock, the manifests, the toolchain), so keep it between
+      # runs under that path and rebuild only this workspace's crates.
+      - name: Find the dependency build
+        id: deps
+        run: |
+          path=$(nix eval --raw .#buzzd.cargoArtifacts.outPath)
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "key=buzzd-deps-$(basename "$path")" >> "$GITHUB_OUTPUT"
+      - name: Restore the dependency build
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/buzzd-deps.nar
+          key: ${{ steps.deps.outputs.key }}
+      - name: Import the dependency build
+        if: steps.restore.outputs.cache-hit == 'true'
+        run: sudo "$(command -v nix-store)" --import < /tmp/buzzd-deps.nar
       - run: nix build .#buzzd --print-build-logs
+      - name: Export the dependency build
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/master'
+        run: nix-store --export "${{ steps.deps.outputs.path }}" > /tmp/buzzd-deps.nar
+      - name: Save the dependency build
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/buzzd-deps.nar
+          key: ${{ steps.deps.outputs.key }}
 
   check-other:
     name: Check (${{ matrix.os }})

@@ -4,9 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, flake-utils, ... }:
+  outputs = { self, nixpkgs, flake-utils, crane, ... }:
     {
       nixosModules.default = import ./nix/module.nix self;
     }
@@ -35,9 +36,26 @@
           gst-plugins-good
           gst-libav
         ];
-      in
-      {
-        packages.buzzd = pkgs.rustPlatform.buildRustPackage {
+        craneLib = crane.mkLib pkgs;
+        # buzz-agent-controller reads two files from outside its crate
+        # directory, which cargo vendoring leaves behind; take them from the
+        # same pinned fork commit. Both fetches match the ones crane makes
+        # for Cargo.lock, so each repository is cloned once.
+        buzzApp = builtins.fetchGit {
+          url = "https://github.com/benthecarman/buzz-app";
+          rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a";
+          allRefs = true;
+          submodules = true;
+        };
+        # buzz-agent likewise reads its model manifest from the buzz
+        # workspace's scripts directory.
+        buzz = builtins.fetchGit {
+          url = "https://github.com/block/buzz.git";
+          rev = "4f51b9e1010e086a16c099cd8d8218ca974a5e18";
+          allRefs = true;
+          submodules = true;
+        };
+        buzzdArgs = {
           pname = "buzzd";
           version = "0.1.0";
           src = pkgs.lib.cleanSourceWith {
@@ -46,42 +64,47 @@
               let base = baseNameOf path; in
               !(builtins.elem base [ "target" "target-deb" "dist" ".test-relay" ".claude" "docs" ]);
           };
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            allowBuiltinFetchGit = true;
-          };
-          cargoBuildFlags = [ "-p" "buzzd" ];
-          # buzz-agent-controller reads two files from outside its crate
-          # directory, which cargo vendoring leaves behind. Put them where the
-          # vendored crate looks, from the same pinned fork commit.
-          preBuild =
-            let
-              buzzApp = builtins.fetchGit {
-                url = "https://github.com/benthecarman/buzz-app";
-                rev = "b3f1f709256d21ae2abb84fa5c84bf59144b930a";
-                allRefs = true;
-              };
-              # buzz-agent likewise reads its model manifest from the buzz
-              # workspace's scripts directory.
-              buzz = builtins.fetchGit {
-                url = "https://github.com/block/buzz";
-                rev = "4f51b9e1010e086a16c099cd8d8218ca974a5e18";
-                allRefs = true;
-              };
-            in
-            ''
-              cp ${buzzApp}/crates/build_env.rs "$NIX_BUILD_TOP/cargo-vendor-dir/build_env.rs"
-              mkdir -p "$NIX_BUILD_TOP/runtime" "$NIX_BUILD_TOP/scripts"
-              cp ${buzzApp}/runtime/agent-runtime.json "$NIX_BUILD_TOP/runtime/"
-              cp ${buzz}/scripts/model-capabilities.json "$NIX_BUILD_TOP/scripts/"
-            '';
+          cargoExtraArgs = "--locked -p buzzd";
           # Tests need a display, a keyring or a relay; they run in CI-like
           # environments, not in the package build.
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config cmake perl ];
           buildInputs = with pkgs; [ dbus openssl ];
-          meta.mainProgram = "buzzd";
+          # The vendored crates sit in the read-only store. Copy the git
+          # sources of those two crates into the build directory and put the
+          # files where they look. Store timestamps keep the dependency build
+          # fresh when the package build reuses it.
+          postConfigure = ''
+            vendor="$NIX_BUILD_TOP/vendor"
+            mkdir -p "$vendor/runtime" "$vendor/scripts"
+            for dir in $(sed -n 's/^directory = "\(.*\)"$/\1/p' "$CARGO_HOME/config.toml"); do
+              if ls -d "$dir"/buzz-agent-* >/dev/null 2>&1; then
+                copy="$vendor/$(basename "$dir")"
+                cp -rL --preserve=timestamps "$dir" "$copy"
+                chmod -R u+w "$copy"
+                cp --preserve=timestamps ${buzzApp}/crates/build_env.rs "$copy/"
+                substituteInPlace "$CARGO_HOME/config.toml" --replace-fail "\"$dir\"" "\"$copy\""
+              fi
+            done
+            cp --preserve=timestamps ${buzzApp}/runtime/agent-runtime.json "$vendor/runtime/"
+            cp --preserve=timestamps ${buzz}/scripts/model-capabilities.json "$vendor/scripts/"
+            # buzz-agent-controller's build script watches an optional
+            # .env.local, and a missing file reruns it on every build. An
+            # empty one sets nothing, the same as none.
+            touch -d @1 "$vendor/.env.local"
+          '';
         };
+      in
+      {
+        # The dependencies build in their own derivation, so CI can keep
+        # them and rebuild only this workspace's crates.
+        packages.buzzd = craneLib.buildPackage (buzzdArgs // {
+          cargoArtifacts = craneLib.buildDepsOnly (buzzdArgs // {
+            # Only the release build is reused; skip crane's extra check.
+            buildPhaseCargoCommand = "cargoWithProfile build --locked -p buzzd";
+          });
+          meta.mainProgram = "buzzd";
+        });
         packages.default = self.packages.${system}.buzzd;
 
         devShells.default = pkgs.mkShell {
