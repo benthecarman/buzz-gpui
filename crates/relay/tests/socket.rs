@@ -157,6 +157,18 @@ impl FakeRelay {
     async fn quiet(&mut self, wait: Duration) -> bool {
         tokio::time::timeout(wait, self.seen.recv()).await.is_err()
     }
+
+    /// How many events arrive before it has been quiet for `wait`.
+    async fn events_until_quiet(&mut self, wait: Duration) -> usize {
+        let mut events = 0;
+        while let Ok(seen) = tokio::time::timeout(wait, self.seen.recv()).await {
+            match seen.unwrap() {
+                Seen::Event(_) => events += 1,
+                _ => panic!("expected only events"),
+            }
+        }
+        events
+    }
 }
 
 fn options() -> SocketOptions {
@@ -534,18 +546,31 @@ async fn publication_limits_and_timeouts() {
         })
     );
     let mut not_sent = 0;
+    let mut unconfirmed = 0;
     for publication in rest {
         match publication.await.unwrap() {
             Err(PublishError::NotSent(message)) => {
                 assert_eq!(message, "Publication timed out");
                 not_sent += 1;
             }
-            Err(PublishError::Unconfirmed { .. }) => {}
+            Err(PublishError::Unconfirmed { message, refusal }) => {
+                assert_eq!((message.as_str(), refusal), ("Publication timed out", None));
+                unconfirmed += 1;
+            }
             other => panic!("{other:?}"),
         }
     }
-    // A slot freed by the first timeout may send one more just in time.
-    assert!((28..=29).contains(&not_sent), "{not_sent}");
+    // Each timeout frees a slot, and the next queued one may go out before
+    // its own deadline; how many do depends on how far apart they were
+    // queued. Whatever the count, exactly the ones reported sent reached
+    // the relay, and the rest never left.
+    assert!(not_sent > 0, "every queued publication was sent");
+    assert!(unconfirmed >= 2, "{unconfirmed}");
+    assert_eq!(
+        relay.events_until_quiet(Duration::from_millis(300)).await,
+        unconfirmed - 2,
+        "{not_sent} not sent, {unconfirmed} unconfirmed"
+    );
 }
 
 #[tokio::test]
