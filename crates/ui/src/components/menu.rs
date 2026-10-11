@@ -242,9 +242,9 @@ impl RenderOnce for MenuItem {
                     Icon::new(icon).size(self.icon_size).into_any_element(),
                 ))
             })
-            .children(self.leading.map(&quiet_slot))
+            .children(self.leading.map(quiet_slot))
             .child(div().flex_1().min_w_0().truncate().child(self.label))
-            .children(self.trailing.map(&quiet_slot))
+            .children(self.trailing.map(quiet_slot))
             .when_some(self.checked, |this, checked| {
                 this.child(div().flex_none().size(rems(1.)).when(checked, |this| {
                     this.child(Icon::new(IconName::Check).size(16.))
