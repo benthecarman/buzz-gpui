@@ -581,6 +581,7 @@ impl ChannelSidebar {
         let weak = cx.entity().downgrade();
         Rc::new(move |channel, window, cx| {
             let channel = channel.to_string();
+            let next = weak.clone();
             let _ = weak.update(cx, |this, cx| {
                 let snapshot = this.community.read(cx).snapshot.clone();
                 let channels = labelled(&snapshot);
@@ -594,8 +595,13 @@ impl ChannelSidebar {
                     this.toggle(&key, true, cx);
                 }
                 this.reveal = Some(channel);
-                window.request_animation_frame();
                 cx.notify();
+                // A section opened here lays out its rows in this frame:
+                // look again in the next. (`request_animation_frame` is for
+                // drawing, not for a click.)
+                window.on_next_frame(move |_, cx| {
+                    let _ = next.update(cx, |_, cx| cx.notify());
+                });
             });
         })
     }
