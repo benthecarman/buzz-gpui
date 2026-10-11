@@ -55,51 +55,90 @@ fn recapture(community: &Entity<Community>, cx: &mut App) {
     }
 }
 
+/// The newest [`capture`] of each community, so a slower earlier one
+/// never replaces its settings.
+#[derive(Default)]
+struct Captures(std::collections::HashMap<EntityId, u64>);
+
+impl Global for Captures {}
+
 /// Starts, restarts or stops capturing agent activity for `community`
 /// under its current settings. Envelopes are checked (fresh, addressed to
-/// the viewer, decrypting) before they are archived.
+/// the viewer, decrypting) before they are archived. The archive is opened
+/// and its settings read off the UI thread: both write to disk, and every
+/// community does this at startup.
 pub fn capture(community: &Entity<Community>, identity: Arc<Identity>, cx: &mut App) {
     let session = community.read(cx).session.clone();
     let (viewer, key) = partition(community, cx);
-    let settings = match open(cx).and_then(|archive| {
-        archive
-            .settings(&viewer, &key)
-            .map(|settings| (archive, settings))
-    }) {
-        Ok(found) => found,
-        Err(error) => {
-            tracing::warn!(%error, "agent activity is not archived");
-            session.observe(Vec::new());
-            return;
-        }
+    let id = community.entity_id();
+    let generation = {
+        let captures = &mut cx.default_global::<Captures>().0;
+        let generation = captures.get(&id).map_or(0, |g| g + 1);
+        captures.insert(id, generation);
+        generation
     };
-    let (archive, settings) = settings;
-    let mut frames = session.observe(settings.kinds());
-    if settings.kinds().is_empty() {
-        return;
-    }
-    Runtime::handle(cx).spawn(async move {
-        while let Some(event) = frames.recv().await {
-            let (archive, identity, viewer, key) = (
-                archive.clone(),
-                identity.clone(),
-                viewer.clone(),
-                key.clone(),
-            );
-            let revision = settings.revision;
-            let stored = tokio::task::spawn_blocking(move || {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |since| since.as_secs());
-                archive::check_envelope(&identity, &event, now)?;
-                archive.ingest(&viewer, &key, &event, revision)
-            })
-            .await;
-            if let Ok(Err(error)) = stored {
-                tracing::debug!(%error, "an agent activity envelope was not archived");
-            }
-        }
+    let existing = opened(cx);
+    let read = cx.background_spawn(async move {
+        let archive = match existing {
+            Some(archive) => archive,
+            None => Arc::new(Archive::open(
+                data_dir().join("archive").join("events.sqlite3"),
+            )?),
+        };
+        let settings = archive.settings(&viewer, &key)?;
+        Ok::<_, String>((archive, settings, viewer, key))
     });
+    cx.spawn(async move |cx| {
+        let read = read.await;
+        cx.update(|cx| {
+            if cx.global::<Captures>().0.get(&id) != Some(&generation) {
+                return;
+            }
+            let (archive, settings, viewer, key) = match read {
+                Ok(found) => found,
+                Err(error) => {
+                    tracing::warn!(%error, "agent activity is not archived");
+                    session.observe(Vec::new());
+                    return;
+                }
+            };
+            // Another open (Settings) may have won; one archive is kept.
+            let archive = match opened(cx) {
+                Some(kept) => kept,
+                None => {
+                    cx.default_global::<ArchiveHost>().0 = Some(archive.clone());
+                    archive
+                }
+            };
+            let mut frames = session.observe(settings.kinds());
+            if settings.kinds().is_empty() {
+                return;
+            }
+            Runtime::handle(cx).spawn(async move {
+                while let Some(event) = frames.recv().await {
+                    let (archive, identity, viewer, key) = (
+                        archive.clone(),
+                        identity.clone(),
+                        viewer.clone(),
+                        key.clone(),
+                    );
+                    let revision = settings.revision;
+                    let stored = tokio::task::spawn_blocking(move || {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |since| since.as_secs());
+                        archive::check_envelope(&identity, &event, now)?;
+                        archive.ingest(&viewer, &key, &event, revision)
+                    })
+                    .await;
+                    if let Ok(Err(error)) = stored {
+                        tracing::debug!(%error, "an agent activity envelope was not archived");
+                    }
+                }
+            });
+        });
+    })
+    .detach();
 }
 
 /// What the archive confirmation dialog is about.
