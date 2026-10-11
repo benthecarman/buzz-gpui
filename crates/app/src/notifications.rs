@@ -375,10 +375,10 @@ pub fn listen(community: &Entity<Community>, cx: &mut App) -> Task<()> {
 }
 
 fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) {
-    // Like the reference, only the selected community notifies.
-    if AppState::current(cx).is_none_or(|current| current != *community) {
-        return;
-    }
+    // Every community notifies, not only the selected one as in buzz-app,
+    // whose other communities are not connected: here they all are, and
+    // the rail marks them. A banner from one not in view names it.
+    let elsewhere = AppState::current(cx).is_none_or(|current| current != *community);
     let this = community.read(cx);
     let preferences = Notifications::preferences(cx);
     let thread = item
@@ -403,7 +403,10 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
         .iter()
         .find(|channel| channel.id == item.channel_id)
         .cloned();
-    let (title, body) = text(item, channel.as_ref(), &this.snapshot.profiles);
+    let (mut title, body) = text(item, channel.as_ref(), &this.snapshot.profiles);
+    if elsewhere {
+        title = format!("{title} · {}", this.name());
+    }
     // A reply's thread root is only a hint; the click reveals the message
     // wherever it is.
     let target = Target {
