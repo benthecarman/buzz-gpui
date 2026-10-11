@@ -443,30 +443,55 @@ impl Identity {
     }
 
     /// The owner's signed intent to set up `agent_pubkey` in the community
-    /// whose relay is `relay_url` (`wss://host`): a schnorr signature over
-    /// `sha256("nostr:agent-community:<agent>:<relay>")`, as buzz-app's Use
-    /// here sends it to the agent host.
+    /// whose relay is `relay_url` (`wss://host`), as buzz-app's Use here
+    /// sends it to the agent host (`relay_agent_resolve`).
     pub fn resolve_agent_community(
         &self,
         agent_pubkey: &str,
         relay_url: &str,
     ) -> Result<String, IdentityError> {
-        let hex = |value: &str| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        };
-        if !hex(agent_pubkey)
-            || agent_pubkey == self.pubkey_hex()
-            || !relay_url.starts_with("wss://")
-            || relay_url.ends_with('/')
-        {
+        if !relay_url.starts_with("wss://") || relay_url.ends_with('/') {
             return Err(IdentityError::NotAllowed);
         }
-        let digest: [u8; 32] =
-            Sha256::digest(format!("nostr:agent-community:{agent_pubkey}:{relay_url}")).into();
-        Ok(self.keys.sign_schnorr(digest).to_string())
+        let viewer = self.pubkey_hex();
+        let target = buzz_desktop::relay::agent::AgentTarget {
+            pubkey: agent_pubkey.to_owned(),
+            owner: viewer.clone(),
+            confirmed: Some(true),
+        };
+        let proof = buzz_desktop::relay::agent::resolve(
+            &self.secret_bytes(),
+            &viewer,
+            relay_url.to_owned(),
+            target,
+        )
+        .map_err(|_| IdentityError::NotAllowed)?;
+        proof["signature"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or(IdentityError::NotAllowed)
+    }
+
+    /// The owner's signature authorizing one read of an agent's harness log
+    /// (`relay_agent_log_proof`): `id` is the agent's log session, `nonce`
+    /// the host's challenge, and `relay_url` must be the community's relay.
+    pub fn harness_log_proof(
+        &self,
+        community: &str,
+        id: &str,
+        agent_pubkey: &str,
+        relay_url: &str,
+        nonce: &str,
+    ) -> Result<String, String> {
+        use buzz_desktop::relay::agent::{LogTarget, log_proof, log_relays};
+        let target = LogTarget {
+            id: id.to_owned(),
+            pubkey: agent_pubkey.to_owned(),
+            relay_url: relay_url.to_owned(),
+            nonce: nonce.to_owned(),
+        };
+        let relays = log_relays(community, &target)?;
+        log_proof(&self.secret_bytes(), &self.pubkey_hex(), relays, target)
     }
 
     /// NIP-44 v2 encryption to our own key, for app data only.
@@ -805,6 +830,57 @@ mod tests {
             .verify_schnorr(&signature, &digest, &owner)
             .unwrap();
         assert!(identity.attest_agent(&identity.pubkey_hex()).is_err());
+    }
+
+    fn verify(owner: &str, text: &str, signature: &str) {
+        let digest: [u8; 32] = Sha256::digest(text).into();
+        let signature: secp256k1::schnorr::Signature = signature.parse().unwrap();
+        let owner: secp256k1::XOnlyPublicKey = owner.parse().unwrap();
+        secp256k1::Secp256k1::verification_only()
+            .verify_schnorr(&signature, &digest, &owner)
+            .unwrap();
+    }
+
+    #[test]
+    fn owner_proofs_sign_buzz_app_texts() {
+        let identity = Identity::ephemeral();
+        let owner = identity.pubkey_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let relay = "wss://relay.example";
+        let resolved = identity.resolve_agent_community(&agent, relay).unwrap();
+        verify(
+            &owner,
+            &format!("nostr:agent-community:{agent}:{relay}"),
+            &resolved,
+        );
+        assert!(identity.resolve_agent_community(&owner, relay).is_err());
+        assert!(
+            identity
+                .resolve_agent_community(&agent, "wss://relay.example/")
+                .is_err()
+        );
+
+        let id = format!("{agent}-{:x}", Sha256::digest(relay.as_bytes()));
+        let nonce = "0e9d217a-2d7e-4d5e-bbbd-eec9257acfba";
+        let proof = identity
+            .harness_log_proof("https://relay.example", &id, &agent, relay, nonce)
+            .unwrap();
+        verify(
+            &owner,
+            &format!("buzz-app:harness-log:v1:{id}:{agent}:{relay}:{nonce}"),
+            &proof,
+        );
+        let elsewhere = "wss://other.example";
+        assert!(
+            identity
+                .harness_log_proof("https://relay.example", &id, &agent, elsewhere, nonce)
+                .is_err()
+        );
+        assert!(
+            identity
+                .harness_log_proof("https://relay.example", &id, &agent, relay, "NONCE")
+                .is_err()
+        );
     }
 
     #[test]
