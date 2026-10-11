@@ -82,6 +82,8 @@ pub struct AgentHost {
     /// Loopback ports of sign-ins this host started, which a GUI may
     /// forward a browser callback to.
     sign_ins: std::sync::Mutex<BTreeMap<u16, std::time::Instant>>,
+    /// One profile publication per agent at a time, by agent id.
+    profile_turns: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     app_agents: app_agents::AppAgentHost,
     processes: processes::Processes,
     terminals: terminal::Terminals,
@@ -109,8 +111,6 @@ struct Owner {
     /// Agents with an explicit Start or Stop since the host opened; a
     /// queued restore skips them.
     acted: BTreeSet<String>,
-    /// Profile publications in flight, one per agent.
-    publishing: BTreeSet<String>,
     log_challenges: BTreeMap<String, start::LogChallenge>,
     /// Refuses a start while old Buzz runs; replaced in tests.
     legacy_check: fn() -> Result<(), String>,
@@ -194,7 +194,6 @@ impl AgentHost {
             queued,
             next_start: 0,
             acted: BTreeSet::new(),
-            publishing: BTreeSet::new(),
             log_challenges: BTreeMap::new(),
             legacy_check: start::refuse_legacy,
             last: None,
@@ -237,6 +236,7 @@ impl AgentHost {
             state_dir: config.state_dir,
             legacy_dir: config.legacy_dir,
             sign_ins: Default::default(),
+            profile_turns: Default::default(),
             app_agents,
             processes: processes::Processes::default(),
             terminals: Default::default(),
@@ -662,33 +662,40 @@ impl AgentHost {
     }
 }
 
+/// What buzz-agent-controller's `creation_profile` answers when the
+/// profile is already published.
+const NOTHING_PENDING: &str = "No pending profile update";
+
 impl AgentHost {
     /// Publishes the agent's pending profile and records it, unless the
     /// agent's settings changed meanwhile. One publication per agent runs
-    /// at a time.
+    /// at a time: a request made while one runs, as a GUI's after a create
+    /// does while the host publishes on its own, waits for it, and is done
+    /// if that one left nothing pending.
     async fn publish_profile(&self, id: &str) -> Result<(), String> {
+        let turn = self
+            .profile_turns
+            .lock()
+            .expect("profile turns")
+            .entry(id.to_string())
+            .or_default()
+            .clone();
+        let _turn = turn.lock().await;
         let target = id.to_string();
-        let (profile, credentials) = self
+        let pending = self
             .run_text(move |owner| {
-                let profile = owner.controller.creation_profile(&target)?;
-                if !owner.publishing.insert(target) {
-                    return Err(
-                        "Profile publication is already in progress; refresh status before retrying"
-                            .into(),
-                    );
+                match owner.controller.creation_profile(&target) {
+                    Ok(profile) => Ok(Some((profile, owner.credentials.clone()))),
+                    // buzz-agent-controller's answer once it is published.
+                    Err(error) if error == NOTHING_PENDING => Ok(None),
+                    Err(error) => Err(error),
                 }
-                Ok((profile, owner.credentials.clone()))
             })
             .await?;
-        let result = self.publish_acquired(id, profile, credentials).await;
-        let target = id.to_string();
-        let _ = self
-            .run(move |owner| {
-                owner.publishing.remove(&target);
-                Ok(())
-            })
-            .await;
-        result
+        match pending {
+            Some((profile, credentials)) => self.publish_acquired(id, profile, credentials).await,
+            None => Ok(()),
+        }
     }
 
     async fn publish_acquired(
