@@ -15,7 +15,7 @@ mod library;
 mod owner;
 mod save_as;
 
-pub use editor::{Changed, TemplateEditor, setup_summary};
+pub use editor::{Changed, GroupDefault, TemplateEditor, setup_summary};
 pub use save_as::SaveAsTemplate;
 
 use crate::community::{AppState, Community};

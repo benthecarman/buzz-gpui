@@ -113,8 +113,20 @@ impl NewChannelDialog {
                 }
             }),
         ];
+        let group = cx
+            .try_global::<CreateIn>()
+            .and_then(|create| create.0.clone());
+        // A personal group's default template applies to its new channels.
+        let group_default = group.as_ref().and_then(|group| {
+            let personal = community.read(cx).session.me_kit().snapshot().personal()?;
+            let found = personal.groups.into_iter().find(|g| g.id == *group)?;
+            Some(templates::GroupDefault {
+                name: found.name,
+                template_id: found.default_template_id,
+            })
+        });
         let template = templates::provider(cx)
-            .map(|_| cx.new(|cx| TemplateEditor::new(community.clone(), cx)));
+            .map(|_| cx.new(|cx| TemplateEditor::in_group(community.clone(), group_default, cx)));
         let mut subscriptions = subscriptions;
         subscriptions.extend(template.as_ref().map(|editor| {
             cx.subscribe(editor, |this, _, _: &templates::Changed, cx| {
@@ -130,9 +142,6 @@ impl NewChannelDialog {
             let _ = this.update_in(cx, |this, window, cx| this.restore(pending, window, cx));
         })
         .detach();
-        let group = cx
-            .try_global::<CreateIn>()
-            .and_then(|create| create.0.clone());
         cx.set_global(CreateIn(None));
         Self {
             group,

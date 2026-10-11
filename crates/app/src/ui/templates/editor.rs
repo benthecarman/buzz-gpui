@@ -16,6 +16,14 @@ use gpui_kit::*;
 use std::rc::Rc;
 
 const UNAVAILABLE: &str = "Template unavailable. Choose another or None.";
+const AWAITING: &str = "Group default is awaiting selection.";
+
+/// The personal group a channel is created in, and its default template.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupDefault {
+    pub name: String,
+    pub template_id: String,
+}
 
 /// The setup a template put in the draft (`TemplateDraft`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -37,6 +45,9 @@ pub struct TemplateEditor {
     select_open: bool,
     /// A template waiting for "Replace setup".
     replacement: Option<String>,
+    group: Option<GroupDefault>,
+    /// The group default still to apply once the catalog can resolve it.
+    automatic: String,
     _kit: Task<()>,
     _community: Subscription,
 }
@@ -44,15 +55,61 @@ pub struct TemplateEditor {
 impl EventEmitter<Changed> for TemplateEditor {}
 
 impl TemplateEditor {
-    pub fn new(community: Entity<Community>, cx: &mut Context<Self>) -> Self {
+    /// For a channel created in a personal group: its default template is
+    /// applied once the catalog can resolve it (`initialDefault`).
+    pub fn in_group(
+        community: Entity<Community>,
+        group: Option<GroupDefault>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let automatic = group
+            .as_ref()
+            .map(|group| group.template_id.clone())
+            .unwrap_or_default();
+        let draft = (!automatic.is_empty()).then(|| TemplateDraft {
+            template_id: automatic.clone(),
+            problem: Some(AWAITING.into()),
+            ..TemplateDraft::default()
+        });
         Self {
             _kit: watch_kit(&community, cx),
-            _community: cx.observe(&community, |_, _, cx| cx.notify()),
+            _community: cx.observe(&community, |this: &mut Self, _, cx| {
+                this.apply_automatic(cx);
+                cx.notify()
+            }),
             community,
-            draft: None,
+            draft,
             select_open: false,
             replacement: None,
+            group,
+            automatic,
         }
+    }
+
+    /// Applies the group default once the catalog is ready and, for a
+    /// lineup, the agents too.
+    fn apply_automatic(&mut self, cx: &mut Context<Self>) {
+        if self.automatic.is_empty()
+            || self.draft.as_ref().and_then(|d| d.problem.as_deref()) != Some(AWAITING)
+        {
+            return;
+        }
+        let catalog = Catalog::read(&self.community, cx);
+        if !catalog.ready() {
+            return;
+        }
+        let template = kit::templates(&catalog.kit.entries)
+            .into_iter()
+            .find(|t| t.id == self.automatic)
+            .cloned();
+        let empty = template
+            .as_ref()
+            .is_some_and(|t| t.agents.is_empty() && t.team_ids.is_empty());
+        if !catalog.agents_ready && !empty {
+            return;
+        }
+        let id = std::mem::take(&mut self.automatic);
+        self.apply(id, cx);
     }
 
     pub fn draft(&self) -> Option<&TemplateDraft> {
@@ -119,6 +176,7 @@ impl TemplateEditor {
 
     /// `apply`: copies a template's lineup, or clears it for None.
     fn apply(&mut self, id: String, cx: &mut Context<Self>) {
+        self.automatic.clear();
         if id.is_empty() {
             self.set(Some(TemplateDraft::default()), cx);
             return;
@@ -275,6 +333,38 @@ impl Render for TemplateEditor {
                 self.select(&catalog, window, cx),
                 cx,
             ))
+            .when_some(
+                self.group
+                    .clone()
+                    .filter(|group| !group.template_id.is_empty()),
+                |this, group| {
+                    let current = self.draft.as_ref().map(|d| d.template_id.as_str());
+                    if current == Some(group.template_id.as_str()) {
+                        this.child(
+                            div()
+                                .text_body_sm()
+                                .text_color(c.text_subtle)
+                                .child(format!("Default for {}", group.name)),
+                        )
+                    } else {
+                        this.child(
+                            div().child(
+                                Button::new(
+                                    "group-default",
+                                    "Use this group’s default (replace setup)",
+                                )
+                                .ghost()
+                                .surface(Surface::Floating)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.choose(group.template_id.clone(), cx)
+                                    },
+                                )),
+                            ),
+                        )
+                    }
+                },
+            )
             .when_some(status, |this, status| {
                 this.child(
                     div()
@@ -301,7 +391,8 @@ impl Render for TemplateEditor {
                         Button::new("recheck-setup", label)
                             .surface(Surface::Floating)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if draft.problem.as_deref() == Some(UNAVAILABLE) {
+                                if matches!(draft.problem.as_deref(), Some(UNAVAILABLE | AWAITING))
+                                {
                                     this.apply(draft.template_id.clone(), cx);
                                 } else {
                                     this.publish(
