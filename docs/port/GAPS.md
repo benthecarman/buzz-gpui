@@ -31,7 +31,9 @@ in the composer, with its markers visible rather than hidden.
     ported natively instead.
   - Block-hosted services: Hosted communities, Builderlab and the enterprise
     login gate.
-- **Later:** updates, from GitHub releases eventually.
+- **Updates** come from GitHub releases. Copies installed from the .deb
+  update themselves; macOS, Windows and development builds only say a
+  release is out (`crates/app/src/updates/`).
 - **Reuse buzz-app's Rust where it exists:**
   - The chat data layer is TypeScript in buzz-app, so `crates/relay` stays
     our Rust port of it.
@@ -73,8 +75,6 @@ in the composer, with its markers visible rather than hidden.
   - pairing and remote agent setup;
   - the Pi installer;
   - Databricks browser sign-in.
-- **Updates:** checking for, downloading and installing updates, and an
-  Updates section in Settings.
 - **Native extras:** a terminal (PTY) panel per channel, and the in-app
   browser.
 

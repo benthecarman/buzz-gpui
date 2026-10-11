@@ -188,7 +188,7 @@ impl Workspace {
                 });
             });
         };
-        let (open_host, close) = (run.clone(), run.clone());
+        let (open_host, open_updates, close) = (run.clone(), run.clone(), run.clone());
         let app: &mut App = cx;
         app.on_action(move |_: &OpenSettings, cx| {
             run(cx, |this, window, cx| this.open_settings(None, window, cx))
@@ -196,6 +196,11 @@ impl Workspace {
         app.on_action(move |_: &OpenHostSettings, cx| {
             open_host(cx, |this, window, cx| {
                 this.open_settings(Some(Section::Agents), window, cx)
+            })
+        });
+        app.on_action(move |_: &crate::updates::OpenUpdateSettings, cx| {
+            open_updates(cx, |this, window, cx| {
+                this.open_settings(Some(Section::Updates), window, cx)
             })
         });
         // Settings' Back row opens the last place outside Settings as a

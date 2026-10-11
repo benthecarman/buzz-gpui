@@ -175,8 +175,6 @@ pub struct SettingsPage {
     archive_error: Option<SharedString>,
     /// Made on first visit; keeps the row being rebound and its notice.
     shortcuts: Option<Entity<shortcuts::ShortcutSettings>>,
-    /// Settings → Updates.
-    update_state: updates::UpdateState,
     /// The open plugin card's view and the community it was made for.
     card: Option<(&'static str, Option<EntityId>, AnyView)>,
     /// Card visibility checks run while the page shows; a changed answer
@@ -203,7 +201,6 @@ impl SettingsPage {
             retention_menu: false,
             archive_error: None,
             shortcuts: None,
-            update_state: updates::UpdateState::default(),
             card: None,
             _card_checks: (
                 cards::retain_visibility(cx),

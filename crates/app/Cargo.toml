@@ -56,6 +56,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # The launch mark's SMIL tracks.
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
+# Release tags against the running version, for updates.
+semver = "1"
 sha2 = "0.10"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }

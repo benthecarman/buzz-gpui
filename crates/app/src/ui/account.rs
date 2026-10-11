@@ -216,6 +216,37 @@ impl Account {
         cx.notify();
     }
 
+    /// "Check for updates", or "Update available" with the new version
+    /// once one is on offer; both open Settings → Updates.
+    fn update_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let c = cx.colors();
+        let offered = crate::updates::Updater::get(cx).version();
+        let check = offered.is_none();
+        let label = match offered {
+            Some(_) => "Update available",
+            None => "Check for updates",
+        };
+        let badge = offered.map(|version| {
+            div()
+                .px(rems(0.375))
+                .rounded(radius::FLOATING_INNER)
+                .bg(c.affordance_subtle)
+                .text_caption()
+                .text_color(c.text_subtle)
+                .child(version.to_string())
+                .into_any_element()
+        });
+        Self::row("account-updates", IconName::Download, label, badge, cx).on_click(cx.listener(
+            move |this, _, window, cx| {
+                this.set_open(None, cx);
+                if check {
+                    crate::updates::check(true, cx);
+                }
+                window.dispatch_action(Box::new(crate::updates::OpenUpdateSettings), cx);
+            },
+        ))
+    }
+
     /// A direct menu row: 28px high, 12px gap, `text-body`.
     fn row(
         id: &'static str,
@@ -448,6 +479,7 @@ impl Account {
                     .on_click(cx.listener(|this, _, window, cx| this.send_feedback(window, cx))),
                 )
             })
+            .child(self.update_row(cx))
             .child(
                 Self::row(
                     "account-settings",

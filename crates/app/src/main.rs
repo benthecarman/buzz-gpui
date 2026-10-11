@@ -28,6 +28,7 @@ mod snapshot;
 mod sounds;
 mod tray;
 mod ui;
+mod updates;
 
 use hosts::Hosts;
 use ui::navigation::{self, Request};
@@ -151,6 +152,7 @@ fn main() {
         }
         shortcuts::init(cx);
         main_window::init(cx);
+        updates::init(cx);
         main_window::open(cx);
     });
 }

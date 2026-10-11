@@ -40,8 +40,8 @@ case ${1:-} in
     nix develop "$ROOT" --command bash -c '
       env=(-E WAYLAND_DISPLAY=gui-testing)
       for var in DBUS_SESSION_BUS_ADDRESS LD_LIBRARY_PATH XDG_DATA_DIRS \
-        BUZZ_DEV_NSEC_FILE RUST_LOG HOME XDG_CONFIG_HOME XDG_DATA_HOME \
-        XDG_STATE_HOME XDG_CACHE_HOME; do
+        BUZZ_DEV_NSEC_FILE BUZZ_UPDATE_URL BUZZ_UPDATE_KIND BUZZ_UPDATE_INSTALLER \
+        RUST_LOG HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME; do
         [[ -v $var ]] && env+=(-E "$var")
       done
       exec systemd-run --user --unit="$DESKTOP_UNIT" --collect --same-dir "${env[@]}" \

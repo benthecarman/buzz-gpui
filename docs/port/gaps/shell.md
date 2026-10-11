@@ -90,10 +90,10 @@ listed under "Webview / plugin-runtime only" at the end, not as gaps.
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Background update check at launch and every 6 h; 30 s check and 30 min download timeouts; auto-download when found | `src/features/updates/updates.ts:29-33, 125-170`; `src-tauri/src/lib.rs:716-722` | SKIPPED (decided) | - | L |
-| "Ready to update!" toast with **Update now** / Retry, dismiss persists until resolved, recovery toast after a failed install ("Software Updates" / "Update failed") | `src/features/updates/UpdateNotice.tsx:1-79` | SKIPPED (decided) | - | M |
-| Settings → Updates: "Version x.y.z", status line (checking / up to date / unavailable on this build / downloading / ready: "Buzz will restart" / failed), button Check for updates / Check again / Retry / Update now | `src/features/updates/UpdateSettings.tsx:1-97`; `src/app/settings-sections.ts:48` | SKIPPED (decided) | - | S |
-| Restart after install only after confirmed local-agent shutdown (`update_restart`) | `src-tauri/src/lib.rs:419-436` | SKIPPED (decided) | - | S |
+| Background update check at launch and every 6 h; 30 s check and 30 min download timeouts; auto-download when found | `src/features/updates/updates.ts:29-33, 125-170`; `src-tauri/src/lib.rs:716-722` | DONE (crates/app/src/updates/): GitHub releases instead of the Tauri updater, with ETag and rate-limit handling and a switch for automatic checks. A .deb install downloads, verifies against `SHA256SUMS` and installs with `pkexec apt-get`; macOS and Windows open the download in the browser; development builds only report a release | - | L |
+| "Ready to update!" toast with **Update now** / Retry, dismiss persists until resolved, recovery toast after a failed install ("Software Updates" / "Update failed") | `src/features/updates/UpdateNotice.tsx:1-79` | DONE (crates/app/src/updates/mod.rs): raised once per version; "Update failed" with Retry; "Update installed" with Restart Buzz | - | M |
+| Settings → Updates: "Version x.y.z", status line (checking / up to date / unavailable on this build / downloading / ready: "Buzz will restart" / failed), button Check for updates / Check again / Retry / Update now | `src/features/updates/UpdateSettings.tsx:1-97`; `src/app/settings-sections.ts:48` | DONE (crates/app/src/ui/settings/updates.rs), with the release notes and the automatic-check switch | - | S |
+| Restart after install only after confirmed local-agent shutdown (`update_restart`) | `src-tauri/src/lib.rs:419-436` | DONE (crates/app/src/main_window.rs, `restart`): the new binary starts once this process has exited | - | S |
 
 ## 8. Presence and idle (`src/features/presence/*`, `src-tauri/src/os_idle.rs`)
 
@@ -158,7 +158,7 @@ listed under "Webview / plugin-runtime only" at the end, not as gaps.
 
 ## Counts
 
-Rows in the tables: DONE 66, SKIPPED (decided) 5 (updates and the developer
-client metrics panel). Nothing is open.
+Rows in the tables: DONE 70, SKIPPED (decided) 1 (the developer client
+metrics panel). Nothing is open.
 
 The first pass also counted these as done without listing them: header geometry and joined panel; window controls with Hyprland/Omarchy policy and compositor-supported filtering; drag, double-click and right-click title bar; default and minimum window size; client decorations; Back/Forward with disabled state and tooltips; 100-entry history with push/dedupe semantics; mouse back/forward buttons; Mod+[ / Mod+] / Mod+Shift+A / Mod+, / interface-size keys / Mod+K; search button and tooltip; palette layout and placeholder; page, channel and DM name matching; from:/in:/after:/before: operators; author chip; scope chip and "Search in …" row; message results and detail line; date presets; people and agents groups; result empty-state copy; avatar button with presence dot and fallback glyph; menu header with availability chip; availability radio persisted per viewer and applied to all communities; 15 s confirm with spinner and failure line; set-a-status row with loading; Settings row with check; `buzz://channel` and `buzz://message` parsing; `buzz://join` to Add community; launch URL from argv; single-instance handoff with activation token; notification click focuses and reveals the message; notification title and body format; 2-minute dedupe and selected-community-only; per-category and master toggles; freedesktop backend with suppressed sound; pending link waits for the channel list; message reveal and thread hint; restore last channel per community; close button quits by default.

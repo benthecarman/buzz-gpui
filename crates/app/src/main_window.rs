@@ -265,6 +265,27 @@ pub fn quit(cx: &mut App) {
     }
 }
 
+/// Quits as [`quit`] does, then starts `program`: the update just
+/// installed. The new copy waits for this process to exit, so it does
+/// not hand its launch to this one over the single-instance socket.
+pub fn restart(program: String, cx: &mut App) {
+    save_geometry(cx);
+    let result = crate::hosts::Hosts::shutdown_local(cx)
+        .map_err(|error| format!("{error}. Your agents may still be running; try again."))
+        .and_then(|()| crate::updates::install::relaunch_after_exit(&program));
+    match result {
+        Ok(()) => cx.quit(),
+        Err(error) => {
+            tracing::error!(%error, "restart for the update was refused");
+            crate::ui::toasts::show(
+                crate::ui::toasts::Notice::error("quit", "Buzz couldn’t restart")
+                    .description(error),
+                cx,
+            );
+        }
+    }
+}
+
 /// Closes the window and keeps running; the tray, a notification or
 /// another launch opens it again.
 fn hide(window: &mut Window, cx: &mut App) {
