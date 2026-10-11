@@ -1102,21 +1102,15 @@ impl ChannelSidebar {
         let menu = self.row_menu_overlay(&snapshot, props, window, cx);
         let dialog = self.dialog_overlay(&snapshot, props, window, cx);
         let toast = self.toast.as_ref().map(|(text, tone, generation)| {
-            let right = window.viewport_size().width - px(16.) - px(384.);
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(point(right, px(128.)))
-                    .child(
-                        Toast::new(("sidebar-toast", *generation), text.clone())
-                            .tone(*tone)
-                            .on_dismiss(cx.listener(|this, _, _, cx| {
-                                this.toast = None;
-                                cx.notify();
-                            })),
-                    ),
+            super::toasts::place(
+                window,
+                Toast::new(("sidebar-toast", *generation), text.clone())
+                    .tone(*tone)
+                    .on_dismiss(cx.listener(|this, _, _, cx| {
+                        this.toast = None;
+                        cx.notify();
+                    })),
             )
-            .with_priority(3)
         });
         frame()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {

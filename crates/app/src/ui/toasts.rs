@@ -1,8 +1,7 @@
-//! The window's toast region (`ToastProvider` in buzz-app's `App.tsx`): a
-//! column of toast cards 384px wide, 12px apart, 128px from the top right
-//! (ui.md §6.9). Anything in the app can raise one through [`show`]; a
-//! keyed toast replaces the one with the same key, as a `ToastNotice`
-//! updates in place.
+//! The window's toast region (`ToastProvider` in buzz-app's `Toast.tsx`):
+//! a column of toast cards at the bottom right, newest first. Anything in
+//! the app can raise one through [`show`]; a keyed toast replaces the one
+//! with the same key in place, as a `ToastNotice` updates.
 
 use buzz_ui::{Button, ButtonSize, Surface, Toast, ToastTone};
 use gpui_kit::*;
@@ -155,31 +154,40 @@ pub fn card(notice: &Notice, generation: usize) -> Toast {
     toast
 }
 
-/// Where the toast column starts: 16px from the right edge, 128px down.
-/// Cards are 24rem wide, so the interface size moves it.
-pub fn origin(window: &Window) -> Point<Pixels> {
-    let width = window.rem_size() * 24.;
-    point(window.viewport_size().width - px(16.) - width, px(128.))
-}
+/// The region's inset from the window's right and bottom edges
+/// (`--space-4`, and Sonner's `offset` of `--space-6`).
+const RIGHT: Pixels = px(16.);
+const BOTTOM: Pixels = px(24.);
 
-/// Lays `cards` out in the toast region, above dialogs.
-pub fn stack(window: &Window, cards: Vec<AnyElement>) -> Option<AnyElement> {
+/// Lays `cards`, oldest first, out in the toast region above dialogs:
+/// newest on top, 24rem wide at most, and scrolling past 40% of the
+/// window. The region's 12px padding leaves room for the cards' shadow.
+pub fn stack(window: &Window, mut cards: Vec<AnyElement>) -> Option<AnyElement> {
     if cards.is_empty() {
         return None;
     }
+    cards.reverse();
+    let size = window.viewport_size();
+    let width = (window.rem_size() * 24.).min(size.width - RIGHT * 2.);
+    let height = (size.height * 0.4).min(size.height - BOTTOM * 2.);
     Some(
         deferred(
             anchored()
                 .position_mode(AnchoredPositionMode::Window)
-                .position(origin(window))
+                .anchor(Anchor::BottomRight)
+                .position(point(size.width - RIGHT, size.height - BOTTOM))
                 .child(
                     div()
                         .id("toasts")
-                        .occlude()
                         .flex()
                         .flex_col()
                         .gap(rems(0.75))
-                        .children(cards),
+                        .w(width)
+                        .max_h(height)
+                        .p(rems(0.75))
+                        .overflow_y_scroll()
+                        // Only the cards take clicks, not the gaps.
+                        .children(cards.into_iter().map(|card| div().occlude().child(card))),
                 ),
         )
         .with_priority(3)
@@ -187,7 +195,12 @@ pub fn stack(window: &Window, cards: Vec<AnyElement>) -> Option<AnyElement> {
     )
 }
 
-/// The window's toasts, newest last.
+/// One card in the toast region.
+pub fn place(window: &Window, card: impl IntoElement) -> AnyElement {
+    stack(window, vec![card.into_any_element()]).expect("one card")
+}
+
+/// The window's toasts.
 pub fn render(window: &Window, cx: &App) -> Option<AnyElement> {
     let toasts = cx.try_global::<Toasts>()?;
     let cards = toasts

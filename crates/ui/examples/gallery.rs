@@ -586,6 +586,7 @@ fn overlays(cx: &App) -> Div {
                     div()
                         .flex()
                         .flex_col()
+                        .w(rems(22.5))
                         .gap(rems(0.75))
                         .child(
                             Toast::new("t1", "Message copied")

@@ -105,6 +105,9 @@ pub struct ChannelPage {
     pub pane: Option<(bool, PaneToggle)>,
     /// Shown inside another channel's tab pane, so without its header.
     pub secondary: bool,
+    /// The Messages page's conversation, which shows live-update
+    /// recovery above its composer (`LiveStatus`).
+    pub live_status: bool,
     /// Channel panel launchers for the header, set by the workspace.
     pub launchers: Vec<Launcher>,
     /// Channel panels the header menu opens as tabs, set by the workspace.
@@ -268,6 +271,7 @@ impl ChannelPage {
             on_open_thread,
             pane: None,
             secondary: false,
+            live_status: false,
             launchers: Vec::new(),
             menu_panels: Vec::new(),
             personal: false,
@@ -831,20 +835,42 @@ impl ChannelPage {
         }
     }
 
-    /// The composer, with the read-only preview's Join above it
-    /// (`ChannelJoinNotice`).
-    fn composer_shell(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The composer, with the read-only preview's Join and live-update
+    /// recovery above it (`ChannelJoinNotice`, `LiveStatus`), and who is
+    /// typing over its top edge.
+    fn composer_shell(&self, typing: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let read_only = self.channel.read_only;
         self.composer
             .update(cx, |composer, cx| composer.set_can_send(!read_only, cx));
         // A channel known only from the cache shows its disabled composer
         // with the draft, without the join notice.
         let join = read_only && !self.channel.cached;
+        let composer = self.composer.downgrade();
+        let live = self
+            .live_status
+            .then(|| {
+                super::live_status::recovery(
+                    &self.community,
+                    Some(&self.channel.id),
+                    // Retry removes the focused button: focus moves on.
+                    move |window, cx| {
+                        let _ = composer.update(cx, |composer, cx| composer.focus(window, cx));
+                    },
+                    cx,
+                )
+            })
+            .flatten();
         div()
             .flex()
             .flex_col()
             .when(join, |d| d.child(self.join.clone()))
-            .child(self.composer.clone())
+            .children(live)
+            .child(
+                div()
+                    .relative()
+                    .children(typing)
+                    .child(self.composer.clone()),
+            )
             .into_any_element()
     }
 }
@@ -1111,7 +1137,6 @@ impl Render for ChannelPage {
                 .into_any_element()
         };
 
-        let composer = self.composer_shell(cx);
         // A saved conversation shows no one typing (`MessageComposer`).
         let typing = (!self.channel.cached)
             .then(|| {
@@ -1124,6 +1149,7 @@ impl Render for ChannelPage {
                 )
             })
             .flatten();
+        let composer = self.composer_shell(typing, cx);
 
         let overlays = self
             .message_actions
@@ -1159,7 +1185,7 @@ impl Render for ChannelPage {
                     .child(error)
             }))
             .children(status)
-            .child(div().relative().children(typing).child(composer))
+            .child(composer)
             .children(overlays)
     }
 }
