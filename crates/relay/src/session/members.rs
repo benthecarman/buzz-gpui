@@ -6,8 +6,8 @@
 //! that may have reached the relay is never sent again until a readback
 //! settles it.
 
-use super::{Actor, Message, Session};
-use crate::event::Verified;
+use super::actions::Ops;
+use super::{Actor, Session};
 use crate::lifecycle::{self, CONFIRM_DELAYS, ChannelState, RUN_TIMEOUT};
 use crate::members::{self, MemberChange};
 use crate::outbox::{Delivery, Operation, Outbox, PublishError, Recovery, SendOptions};
@@ -15,7 +15,7 @@ use nostr::prelude::EventId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 
 const CLOSED: &str = "The community connection closed.";
 const ACCESS: &str = "Channel access unavailable; refresh membership.";
@@ -103,17 +103,18 @@ impl Session {
     /// failed with their error.
     pub async fn member_additions(&self, channel: &str) -> Vec<MemberAddition> {
         let channel = channel.to_owned();
-        self.query(move |actor| {
-            actor
-                .members
-                .additions
-                .values()
-                .filter(|addition| addition.shown.channel == channel)
-                .map(|addition| addition.shown.clone())
-                .collect()
-        })
-        .await
-        .unwrap_or_default()
+        self.ops()
+            .with(move |actor| {
+                actor
+                    .members
+                    .additions
+                    .values()
+                    .filter(|addition| addition.shown.channel == channel)
+                    .map(|addition| addition.shown.clone())
+                    .collect()
+            })
+            .await
+            .unwrap_or_default()
     }
 
     async fn addition(
@@ -126,7 +127,9 @@ impl Session {
         let key = (channel.to_owned(), pubkey.to_owned());
         let started = {
             let key = key.clone();
-            self.query(move |actor| actor.begin_addition(key)).await?
+            self.ops()
+                .with(move |actor| actor.begin_addition(key))
+                .await?
         };
         let intent = match started {
             Err(mut waiting) => {
@@ -145,8 +148,9 @@ impl Session {
             .runtime
             .spawn(async move {
                 let mut intent = intent;
-                let ops = AddOps { commands };
-                let work = ops.add(&channel, &pubkey, participant, allow_agents, &mut intent);
+                let ops = Ops { commands };
+                let work =
+                    ops.add_member(&channel, &pubkey, participant, allow_agents, &mut intent);
                 let result = tokio::time::timeout(ADDITION_TIMEOUT, work)
                     .await
                     .unwrap_or_else(|_| {
@@ -164,7 +168,8 @@ impl Session {
         };
         let reported = result.clone();
         let _ = self
-            .query(move |actor| actor.finish_addition(key, intent, reported))
+            .ops()
+            .with(move |actor| actor.finish_addition(key, intent, reported))
             .await;
         result
     }
@@ -175,7 +180,8 @@ impl Session {
     pub async fn change_member(&self, channel: &str, change: MemberChange) -> Result<(), String> {
         let id = channel.to_owned();
         let begin = change.clone();
-        self.query(move |actor| actor.begin_member_operation(&id, begin))
+        self.ops()
+            .with(move |actor| actor.begin_member_operation(&id, begin))
             .await??;
         let (commands, id) = (self.commands.clone(), channel.to_owned());
         let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -184,7 +190,7 @@ impl Session {
         let result = self
             .runtime
             .spawn(async move {
-                let ops = AddOps { commands };
+                let ops = Ops { commands };
                 let work = ops.administer(&id, &work_change, &flag);
                 tokio::time::timeout(RUN_TIMEOUT, work)
                     .await
@@ -202,7 +208,8 @@ impl Session {
         };
         let (id, reported) = (channel.to_owned(), result.clone());
         let _ = self
-            .query(move |actor| actor.finish_member_operation(&id, change, reported, uncertain))
+            .ops()
+            .with(move |actor| actor.finish_member_operation(&id, change, reported, uncertain))
             .await;
         result
     }
@@ -210,7 +217,8 @@ impl Session {
     /// The latest role change or removal in `channel`, if any.
     pub async fn member_operation(&self, channel: &str) -> Option<MemberOperation> {
         let channel = channel.to_owned();
-        self.query(move |actor| actor.members.operations.get(&channel).cloned())
+        self.ops()
+            .with(move |actor| actor.members.operations.get(&channel).cloned())
             .await
             .ok()
             .flatten()
@@ -222,7 +230,8 @@ impl Session {
         let (commands, id) = (self.commands.clone(), channel.to_owned());
         let busy = {
             let id = id.clone();
-            self.query(move |actor| actor.members.active.contains(&id))
+            self.ops()
+                .with(move |actor| actor.members.active.contains(&id))
                 .await?
         };
         if busy {
@@ -230,10 +239,10 @@ impl Session {
         }
         self.runtime
             .spawn(async move {
-                let ops = AddOps { commands };
-                ops.assert_access(&id).await?;
+                let ops = Ops { commands };
+                ops.assert_access(&id, ACCESS).await?;
                 let (ctx, state) = ops.membership(&id).await?;
-                ops.assert_access(&id).await?;
+                ops.assert_access(&id, ACCESS).await?;
                 let resolved = {
                     let state = state.clone();
                     let id = id.clone();
@@ -257,60 +266,16 @@ impl Session {
             .await
             .unwrap_or_else(|_| Err(CLOSED.to_owned()))
     }
-
-    /// Runs `f` on the actor and returns its result.
-    async fn query<R: Send + 'static>(
-        &self,
-        f: impl FnOnce(&mut Actor) -> R + Send + 'static,
-    ) -> Result<R, String> {
-        AddOps {
-            commands: self.commands.clone(),
-        }
-        .with(f)
-        .await
-    }
 }
 
 /// Marks a relay refusal inside the administration task: final, never
 /// uncertain.
 const REFUSED: &str = "\u{1}";
 
-/// The cloneable half of the session an addition runs against.
-#[derive(Clone)]
-struct AddOps {
-    commands: tokio::sync::mpsc::UnboundedSender<Message>,
-}
-
 /// The epoch reads started in, to fence adoption.
 type Epoch = u64;
 
-impl AddOps {
-    async fn with<R: Send + 'static>(
-        &self,
-        f: impl FnOnce(&mut Actor) -> R + Send + 'static,
-    ) -> Result<R, String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(f(actor));
-            })))
-            .map_err(|_| CLOSED.to_owned())?;
-        answer.await.map_err(|_| CLOSED.to_owned())
-    }
-
-    async fn assert_access(&self, channel: &str) -> Result<(), String> {
-        let id = channel.to_owned();
-        let readable = self
-            .with(move |actor| {
-                actor
-                    .discovery
-                    .as_ref()
-                    .is_some_and(|discovery| discovery.can_access(&id))
-            })
-            .await?;
-        if readable { Ok(()) } else { Err(ACCESS.into()) }
-    }
-
+impl Ops {
     /// A fresh strong read of the channel's signed state.
     async fn membership(&self, channel: &str) -> Result<(Epoch, ChannelState), String> {
         let (reader, relay, epoch) = self
@@ -337,17 +302,8 @@ impl AddOps {
         Ok((epoch, state))
     }
 
-    async fn adopt(&self, epoch: Epoch, events: Vec<Verified>) -> Result<(), String> {
-        self.with(move |actor| {
-            if actor.epoch == epoch {
-                actor.accept(&events);
-            }
-        })
-        .await
-    }
-
     /// The addition preconditions (`check` in `addChannelMember`).
-    async fn check(
+    async fn check_addition(
         &self,
         channel: &str,
         pubkey: &str,
@@ -385,7 +341,7 @@ impl AddOps {
     }
 
     /// `addChannelMember`.
-    async fn add(
+    async fn add_member(
         &self,
         channel: &str,
         pubkey: &str,
@@ -396,19 +352,19 @@ impl AddOps {
         if !members::is_key(pubkey) {
             return Err("Choose a valid person or agent.".into());
         }
-        self.check(channel, pubkey, participant, allow_agents)
+        self.check_addition(channel, pubkey, participant, allow_agents)
             .await?;
         let outbox: Outbox = self
             .with(|actor| actor.outbox.clone())
             .await?
             .ok_or("Member additions are unavailable.")?;
         outbox.ready().await.map_err(|error| error.to_string())?;
-        self.check(channel, pubkey, participant, allow_agents)
+        self.check_addition(channel, pubkey, participant, allow_agents)
             .await?;
         let (epoch, state) = self.membership(channel).await?;
         self.adopt(epoch, vec![state.metadata.clone(), state.roster.clone()])
             .await?;
-        self.check(channel, pubkey, participant, allow_agents)
+        self.check_addition(channel, pubkey, participant, allow_agents)
             .await?;
         let member = state.role(pubkey).is_some();
         // Only a roster-confirmed earlier addition may be superseded.
@@ -441,7 +397,7 @@ impl AddOps {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        self.check(channel, pubkey, participant, allow_agents)
+        self.check_addition(channel, pubkey, participant, allow_agents)
             .await?;
         if member {
             if let Some(op) = &pending {
@@ -505,7 +461,7 @@ impl AddOps {
         intent.dismissed = false;
         intent.confirmed = false;
         delivered(&outbox, id).await?;
-        self.check(channel, pubkey, participant, allow_agents)
+        self.check_addition(channel, pubkey, participant, allow_agents)
             .await?;
         // Delivery alone is not membership: the signed roster must list them.
         let mut confirmed = None;
@@ -524,7 +480,7 @@ impl AddOps {
         };
         self.adopt(epoch, vec![state.metadata, state.roster])
             .await?;
-        self.check(channel, pubkey, participant, allow_agents)
+        self.check_addition(channel, pubkey, participant, allow_agents)
             .await?;
         outbox
             .acknowledge(&id)
@@ -560,9 +516,9 @@ impl AddOps {
         let viewer = identity.pubkey_hex();
         let mut owner: Option<Option<String>> = None;
         let authorize = async |owner: &mut Option<Option<String>>| -> Result<(), String> {
-            self.assert_access(channel).await?;
+            self.assert_access(channel, ACCESS).await?;
             let (_, state) = self.membership(channel).await?;
-            self.assert_access(channel).await?;
+            self.assert_access(channel, ACCESS).await?;
             // Removing someone's own agent needs its attestation, read
             // fresh once per attempt.
             if owner.is_none()
@@ -580,7 +536,7 @@ impl AddOps {
                     )
                     .await
                     .map_err(|error| error.message)?;
-                self.assert_access(channel).await?;
+                self.assert_access(channel, ACCESS).await?;
                 *owner = Some(
                     crate::account::newest_profile(&events, &change.pubkey)
                         .and_then(crate::profiles::attested_owner),

@@ -736,7 +736,11 @@ impl Ops {
     }
 
     /// `assertAccess`: the channel is still readable to the viewer.
-    async fn assert_access(&self, channel: &str, message: &'static str) -> Result<(), String> {
+    pub(super) async fn assert_access(
+        &self,
+        channel: &str,
+        message: &'static str,
+    ) -> Result<(), String> {
         let id = channel.to_owned();
         let accessible = self
             .with(move |actor| {
