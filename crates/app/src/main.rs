@@ -91,6 +91,10 @@ fn main() {
         requests
     };
     app.run(move |cx| {
+        // Windows shows toasts and groups taskbar buttons under this
+        // AppUserModelID; it is the macOS bundle identifier too.
+        #[cfg(windows)]
+        cx.set_app_identity("com.benthecarman.buzz-gpui", "Buzz");
         gpui_kit::init(cx);
         buzz_ui::init(cx);
         runtime::Runtime::init(cx);
