@@ -48,8 +48,10 @@ jobs:
         run: git config --system core.longpaths true
       - uses: actions/checkout@v4
       - uses: ./.github/actions/gstreamer
-      - uses: dtolnay/rust-toolchain@stable
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.98.1
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --locked -- -D warnings

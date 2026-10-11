@@ -45,7 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/gstreamer
-      - uses: dtolnay/rust-toolchain@stable
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: scripts/package-macos.sh
       - uses: actions/upload-artifact@v4
@@ -62,7 +65,10 @@ jobs:
       - run: git config --system core.longpaths true
       - uses: actions/checkout@v4
       - uses: ./.github/actions/gstreamer
-      - uses: dtolnay/rust-toolchain@stable
+      # The Rust that the Nix dev shell gets from the locked nixpkgs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release -p buzz-gpui -p buzzd
       - run: |
