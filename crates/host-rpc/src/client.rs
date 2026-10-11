@@ -1,13 +1,13 @@
-use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION, Unknown};
+use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION};
+use crate::link::{self, Pending};
 use crate::transport::Connector;
 use crate::{Protocol, RpcError};
+use futures::StreamExt;
 use futures::future::BoxFuture;
-use futures::{SinkExt, StreamExt};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 
 /// Answers requests the host sends to the GUI.
 pub trait ClientHandler<P: Protocol>: Send + Sync + 'static {
@@ -77,8 +77,6 @@ impl Default for HostClientOptions {
     }
 }
 
-pub(crate) type Pending<R> = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<R, RpcError>>>>>;
-
 struct Link<P: Protocol> {
     outgoing: mpsc::Sender<Frame<P>>,
     pending: Pending<P::ClientResponse>,
@@ -145,30 +143,15 @@ impl<P: Protocol> HostClient<P> {
         timeout: std::time::Duration,
     ) -> Result<P::ClientResponse, RpcError> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        let pending = {
+        // Not held while sending: a full queue would block every other
+        // request, and the session ending, behind this one.
+        let (outgoing, pending) = {
             let link = self.shared.link.lock().await;
             let link = link.as_ref().ok_or(RpcError::NotConnected)?;
-            link.pending.lock().await.insert(id, sender);
-            if link
-                .outgoing
-                .send(Frame::ClientRequest { id, body })
-                .await
-                .is_err()
-            {
-                link.pending.lock().await.remove(&id);
-                return Err(RpcError::Disconnected);
-            }
-            link.pending.clone()
+            (link.outgoing.clone(), link.pending.clone())
         };
-        match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(RpcError::Disconnected),
-            Err(_) => {
-                pending.lock().await.remove(&id);
-                Err(RpcError::TimedOut)
-            }
-        }
+        let frame = Frame::ClientRequest { id, body };
+        link::request(&outgoing, &pending, id, frame, timeout).await
     }
 }
 
@@ -269,8 +252,8 @@ async fn session<P: Protocol>(
         ));
     }
 
-    let (mut sink, mut stream) = wire.split();
-    let (outgoing, mut queue) = mpsc::channel::<Frame<P>>(256);
+    let (sink, mut stream) = wire.split();
+    let (outgoing, queue) = mpsc::channel::<Frame<P>>(256);
     let pending: Pending<P::ClientResponse> = Arc::default();
     *shared.link.lock().await = Some(Link {
         outgoing: outgoing.clone(),
@@ -282,12 +265,7 @@ async fn session<P: Protocol>(
     });
     let _ = shared.events.send(ClientEvent::Connected(welcome.host));
 
-    let mut writer = AbortOnDrop(tokio::spawn(async move {
-        while let Some(frame) = queue.recv().await {
-            sink.send(frame::encode(&frame)?).await?;
-        }
-        Ok::<_, std::io::Error>(())
-    }));
+    let mut writer = AbortOnDrop(tokio::spawn(link::write(sink, queue)));
     let mut ping = tokio::time::interval(options.ping_interval);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut nonce = 0u64;
@@ -305,19 +283,14 @@ async fn session<P: Protocol>(
                     None => return SessionEnd::Lost("host closed the connection".into()),
                 };
                 dead.as_mut().reset(tokio::time::Instant::now() + options.dead_after);
-                let frame = match frame::decode::<Frame<P>>(&bytes) {
-                    Ok(frame) => frame,
-                    Err(error) => match frame::peek(&bytes) {
-                        Some(Unknown::Request(id)) => {
-                            let body = Err(frame::unsupported());
-                            if outgoing.send(Frame::HostResponse { id, body }).await.is_err() {
-                                return SessionEnd::Lost("the connection closed".into());
-                            }
-                            continue;
-                        }
-                        Some(Unknown::Event) => continue,
-                        None => return SessionEnd::Lost(error.to_string()),
-                    },
+                let unsupported = |id| Frame::HostResponse {
+                    id,
+                    body: Err(frame::unsupported()),
+                };
+                let frame = match link::read(&bytes, &outgoing, unsupported).await {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => continue,
+                    Err(error) => return SessionEnd::Lost(error.to_string()),
                 };
                 match frame {
                     Frame::ClientResponse { id, body } => {

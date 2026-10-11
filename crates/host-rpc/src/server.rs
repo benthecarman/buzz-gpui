@@ -1,13 +1,14 @@
-use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION, Unknown, Welcome, Wire};
+use crate::frame::{self, Frame, Hello, HostInfo, PROTOCOL_VERSION, Welcome, Wire};
+use crate::link;
 use crate::transport::{BoxConnection, Listener};
 use crate::{Protocol, RpcError};
+use futures::StreamExt;
 use futures::future::BoxFuture;
-use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 
 /// Events the host broadcasts, tagged with a sequence number that increases
 /// for the lifetime of the host process.
@@ -49,7 +50,7 @@ impl Default for ServerOptions {
 pub struct Peer<P: Protocol> {
     address: Arc<str>,
     outgoing: mpsc::Sender<Frame<P>>,
-    pending: crate::client::Pending<P::HostResponse>,
+    pending: link::Pending<P::HostResponse>,
     next_id: Arc<AtomicU64>,
     timeout: Duration,
 }
@@ -84,25 +85,8 @@ impl<P: Protocol> Peer<P> {
 
     pub async fn request(&self, body: P::HostRequest) -> Result<P::HostResponse, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
-        if self
-            .outgoing
-            .send(Frame::HostRequest { id, body })
-            .await
-            .is_err()
-        {
-            self.pending.lock().await.remove(&id);
-            return Err(RpcError::Disconnected);
-        }
-        match tokio::time::timeout(self.timeout, receiver).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(RpcError::Disconnected),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(RpcError::TimedOut)
-            }
-        }
+        let frame = Frame::HostRequest { id, body };
+        link::request(&self.outgoing, &self.pending, id, frame, self.timeout).await
     }
 }
 
@@ -164,8 +148,8 @@ async fn run_connection<P: Protocol>(
     .await?;
     tracing::info!(%address, client = %hello.client, "host client connected");
 
-    let (mut sink, mut stream) = wire.split();
-    let (outgoing, mut queue) = mpsc::channel::<Frame<P>>(256);
+    let (sink, mut stream) = wire.split();
+    let (outgoing, queue) = mpsc::channel::<Frame<P>>(256);
     let peer = Peer {
         address: address.into(),
         outgoing: outgoing.clone(),
@@ -176,12 +160,7 @@ async fn run_connection<P: Protocol>(
 
     // Everything spawned for this connection stops with it.
     let mut writer = tokio::task::JoinSet::new();
-    writer.spawn(async move {
-        while let Some(frame) = queue.recv().await {
-            sink.send(frame::encode(&frame)?).await?;
-        }
-        Ok::<_, std::io::Error>(())
-    });
+    writer.spawn(link::write(sink, queue));
     let mut tasks = tokio::task::JoinSet::new();
     let idle = tokio::time::sleep(options.idle_timeout);
     tokio::pin!(idle);
@@ -195,23 +174,15 @@ async fn run_connection<P: Protocol>(
                     None => return Ok(()),
                 };
                 idle.as_mut().reset(tokio::time::Instant::now() + options.idle_timeout);
-                let frame = match frame::decode::<Frame<P>>(&bytes) {
-                    Ok(frame) => frame,
-                    Err(error) => match frame::peek(&bytes) {
-                        Some(Unknown::Request(id)) => Frame::ClientResponse {
-                            id,
-                            body: Err(frame::unsupported()),
-                        },
-                        _ => return Err(error),
-                    },
+                let Some(frame) = link::read(&bytes, &outgoing, |id| Frame::ClientResponse {
+                    id,
+                    body: Err(frame::unsupported()),
+                })
+                .await?
+                else {
+                    continue;
                 };
                 match frame {
-                    // Only made above, for a request this host cannot read.
-                    Frame::ClientResponse { id, body } => {
-                        if outgoing.send(Frame::ClientResponse { id, body }).await.is_err() {
-                            return Ok(());
-                        }
-                    }
                     Frame::ClientRequest { id, body } => {
                         let response = handler.handle(peer.clone(), body);
                         let outgoing = outgoing.clone();

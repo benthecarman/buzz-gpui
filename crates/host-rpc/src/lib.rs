@@ -6,6 +6,7 @@
 
 mod client;
 mod frame;
+mod link;
 mod server;
 pub mod transport;
 
