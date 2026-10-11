@@ -6,9 +6,10 @@
 //! keys, the wheel, and the window coming to the front, captured before any
 //! control handles them ([`Idle::input`]). Where the desktop reports
 //! machine-wide idle time (GNOME's Mutter idle monitor over D-Bus, under
-//! Wayland and X11) it is sampled every 30 s and counts too, so typing in
-//! another app keeps the user online; elsewhere only input in Buzz does,
-//! as in buzz-app on Linux.
+//! Wayland and X11; the system's own count on macOS and Windows, which
+//! buzz-app reads there too) it is sampled every 30 s and counts too, so
+//! typing in another app keeps the user online; elsewhere only input in
+//! Buzz does, as in buzz-app on Linux.
 //!
 //! The window being shown is tracked here as well: while it is hidden in
 //! the tray, sessions stop observing other people's presence.
@@ -173,17 +174,19 @@ impl Monitor {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(any(target_os = "macos", windows))]
 struct Monitor;
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(any(target_os = "macos", windows))]
 impl Monitor {
     fn connect() -> Option<Self> {
-        None
+        Self.idle_time().map(|_| Self)
     }
 
     fn idle_time(&self) -> Option<Duration> {
-        None
+        user_idle::UserIdle::get_time()
+            .ok()
+            .map(|idle| idle.duration())
     }
 }
 

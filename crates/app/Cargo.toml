@@ -78,6 +78,10 @@ zbus = "5"
 # "Copy image": GPUI's clipboard offers only text on Wayland.
 arboard = { version = "3", features = ["wayland-data-control"] }
 
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Machine-wide idle time, as buzz-app reads it there.
+user-idle = { version = "0.6", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 # The user's `buzz://` registration; GPUI already uses it.
 windows-registry = "0.6"
