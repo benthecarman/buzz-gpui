@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-pub use kit::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG};
+pub use kit::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG, TEXT_TAG};
 
 pub const TEAM_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub const TEAM_CHUNK_BYTES: usize = 16 * 1024;
@@ -105,6 +105,8 @@ pub fn team_record(team: &Team, community: &str, deleted: bool) -> Value {
 pub fn record_tag(raw: &Value) -> &'static str {
     if raw["value"]["type"] == "team-payload" {
         PAYLOAD_TAG
+    } else if raw["value"]["type"] == "team-text" {
+        TEXT_TAG
     } else if raw["version"] == 2 {
         MANIFEST_TAG
     } else if (raw["value"]["type"] == "groups" && raw["value"]["id"] == "me")
@@ -152,7 +154,8 @@ pub fn parse_team(raw: &Value) -> Option<(Team, bool)> {
 
 /// Decrypts and admits one of the viewer's own records
 /// (`validate_ciphertext`): the record must name this community, match
-/// the event's tags, and a portable one must be the viewer's.
+/// the event's tags, and a portable one or a team text head must be the
+/// viewer's.
 pub fn decode_record(
     identity: &Identity,
     event: &Verified,
@@ -176,7 +179,11 @@ pub fn decode_record(
         .map(|tag| tag.as_slice().to_vec())
         .collect();
     kit::admission(&json!({ "tags": tags }), &raw, community)?;
-    if raw["value"]["type"] == "team-payload" || raw["version"] == 2 {
+    if matches!(
+        raw["value"]["type"].as_str(),
+        Some("team-payload" | "team-text")
+    ) || raw["version"] == 2
+    {
         let owner = if raw["version"] == 2 {
             &raw["value"]["portable"]["owner"]
         } else {
