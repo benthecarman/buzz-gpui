@@ -15,7 +15,9 @@
 use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use crate::sounds::Sound;
-use crate::ui::navigation::{self, Place, Target};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::ui::navigation;
+use crate::ui::navigation::{Place, Target};
 use buzz_relay_client::{Category, ChannelSummary, ChannelType, IncomingMessage, Profiles, Store};
 use futures::StreamExt;
 use gpui_kit::{App, Entity, Global, Task};
@@ -166,6 +168,7 @@ impl Preferences {
 pub enum ServiceStatus {
     #[default]
     Unknown,
+    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     Available,
     /// No service on the session bus.
     Unavailable,

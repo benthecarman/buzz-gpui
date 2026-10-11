@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 pub(crate) const START_CANCELLED: &str = "Start cancelled by a newer action";
 const NO_SAVE_RESTART: &str = "Agent no longer needs a save restart";
+// Pi is installed only on macOS and Linux.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub(crate) const NOT_WAITING_FOR_PI: &str = "Agent no longer waiting for Pi";
 const REPLAY_NOT_ATTACHED: &str = "Saved settings changed; mention replay was not attached";
 
@@ -63,6 +65,7 @@ fn needs_save_restart(agent: &AgentView) -> bool {
     is_running(agent) && !agent.restart_diff.is_empty()
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn waiting_for_pi(agent: &AgentView) -> bool {
     buzz_desktop::harness_setup::waiting_for_pi(agent)
 }
@@ -520,6 +523,7 @@ impl AgentHost {
 
     /// Restarts an agent that waited for Pi, after a Pi install: whether it
     /// runs now, or `None` when it no longer waited.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) async fn restart_waiting_for_pi(&self, id: String) -> Option<bool> {
         let result = self
             .start_agent(
@@ -543,6 +547,7 @@ impl AgentHost {
     }
 
     /// Agents a Pi install should restart.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) async fn waiting_for_pi(&self) -> Result<Vec<String>, String> {
         self.run_text(|owner| {
             Ok(owner
