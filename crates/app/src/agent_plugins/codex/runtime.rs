@@ -593,10 +593,15 @@ impl CodexRuntime {
         let key = json!([channel_id, root.as_deref().unwrap_or("channel")]).to_string();
         let text = text_of(&request.event, &request.agent.name());
         let entry = self.entry(&request, &spawn);
-        let lane = locked(&entry.lanes)
+        // Held until the request is queued: a lane whose last turn just
+        // ended is being removed, and a turn queued on it would run where
+        // no tool call or later follow-up finds it.
+        let mut lanes = locked(&entry.lanes);
+        let lane = lanes
             .entry(key.clone())
             .or_insert_with(|| Arc::new(Lane::new()))
             .clone();
+        let entry = entry.clone();
         match lane.active() {
             Some(active) => {
                 // Startup and history reads stay ordered without holding the
@@ -606,7 +611,7 @@ impl CodexRuntime {
                 let (this, accepted) = (self.clone(), active.clone());
                 let task = tokio::spawn(async move {
                     previous.await;
-                    this.steer(request, text, key, lane, entry, accepted).await;
+                    this.steer(request, text, key, entry, accepted).await;
                 });
                 *steering = async move {
                     if task.await.is_err() {
@@ -628,7 +633,6 @@ impl CodexRuntime {
         request: Request,
         text: String,
         key: String,
-        lane: Arc<Lane>,
         entry: Arc<Entry>,
         active: Arc<Active>,
     ) {
@@ -675,12 +679,12 @@ impl CodexRuntime {
         .await;
         match steered {
             Ok(Steered::Done) => {}
-            Ok(Steered::NextTurn) => self.start(request, text, key, lane, entry),
+            Ok(Steered::NextTurn) => self.start_next(request, text, key, &entry),
             Err(_) if entry.abort.aborted() => {}
             // A completion racing the request means this is the next
             // ordinary turn.
             Err(error) if error == "no active turn to steer" => {
-                self.start(request, text, key, lane, entry)
+                self.start_next(request, text, key, &entry)
             }
             Err(error) => {
                 let notice = format!(
@@ -693,7 +697,20 @@ impl CodexRuntime {
         }
     }
 
-    /// Queues a turn behind the conversation's last one.
+    /// Starts a follow-up that came too late to steer. The turn it meant
+    /// to steer has ended, so its lane may be gone or going: queue on the
+    /// conversation's current lane, under the lock its removal takes.
+    fn start_next(&self, request: Request, text: String, key: String, entry: &Arc<Entry>) {
+        let mut lanes = locked(&entry.lanes);
+        let lane = lanes
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Lane::new()))
+            .clone();
+        self.start(request, text, key, lane, entry.clone());
+    }
+
+    /// Queues a turn behind the conversation's last one. Callers hold the
+    /// lane map's lock, so the lane can't be removed meanwhile.
     fn start(
         &self,
         request: Request,
@@ -730,8 +747,9 @@ impl CodexRuntime {
         // Agents2 can deliver follow-ups and other conversations at once.
         tokio::spawn(async move {
             job.await;
-            let idle = locked(&lane.tail).0 == id && lane.active().is_none();
+            // Checked under the map's lock, which queuing holds too.
             let mut lanes = locked(&entry.lanes);
+            let idle = locked(&lane.tail).0 == id && lane.active().is_none();
             if idle
                 && lanes
                     .get(&key)
