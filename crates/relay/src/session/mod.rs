@@ -431,7 +431,12 @@ impl Session {
             ReaderOptions::default(),
         );
         let viewer = identity.pubkey_hex();
-        let kit = me_kit::MeKit::new(commands.clone(), runtime.clone(), origin.http());
+        let kit = me_kit::MeKit::new(
+            commands.clone(),
+            runtime.clone(),
+            origin.http(),
+            canvas::Canvas::new(commands.clone(), reader.clone(), identity.clone()),
+        );
         let workflows = crate::workflows::Workflows::new(
             runtime.clone(),
             viewer.clone(),

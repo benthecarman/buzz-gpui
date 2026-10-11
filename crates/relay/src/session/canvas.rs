@@ -12,7 +12,7 @@ use crate::canvas::{
     self, ACCESS_CHANGED, AWAITING, CanvasError, HistoryCursor, HistoryPage, OTHER_SELECTED,
     Revision, TOO_LARGE, TOO_OLD, TOO_SOON, UNAVAILABLE, UNRESOLVED, WRITE_UNAVAILABLE,
 };
-use crate::event::kinds;
+use crate::event::{Verified, kinds};
 use crate::outbox::{Delivery, Outbox, SendOptions};
 use crate::reader::{ReadOptions, Reader};
 use crate::socket::Filter;
@@ -46,9 +46,10 @@ struct Access {
     writable: bool,
 }
 
-/// The network side of Canvas calls, cloned off the session.
+/// The network side of Canvas calls, cloned off the session. The Me
+/// settings and channel setup save through it too.
 #[derive(Clone)]
-struct Canvas {
+pub(super) struct Canvas {
     commands: tokio::sync::mpsc::UnboundedSender<Message>,
     reader: Reader,
     identity: Arc<Identity>,
@@ -68,6 +69,18 @@ fn supported(identity: &Identity) -> bool {
 }
 
 impl Canvas {
+    pub(super) fn new(
+        commands: tokio::sync::mpsc::UnboundedSender<Message>,
+        reader: Reader,
+        identity: Arc<Identity>,
+    ) -> Self {
+        Self {
+            commands,
+            reader,
+            identity,
+        }
+    }
+
     /// `canWrite`: the session is open and the viewer may post in the
     /// channel, as the actor knows it now.
     async fn access(&self, channel: &str) -> Result<Access, CanvasError> {
@@ -102,12 +115,36 @@ impl Canvas {
             .map_err(|error| CanvasError::Failed(error.message))
     }
 
-    async fn read(&self, channel: &str, strong: bool) -> Result<Option<Revision>, CanvasError> {
+    /// The selected head event, without an access check.
+    pub(super) async fn head(
+        &self,
+        channel: &str,
+        strong: bool,
+    ) -> Result<Option<Verified>, CanvasError> {
+        let events = self.fresh(canvas::head_filter(channel, strong)).await?;
+        let Some(head) = canvas::selected_head(channel, &events) else {
+            return Ok(None);
+        };
+        Ok(events.iter().find(|event| event.id == head.id).cloned())
+    }
+
+    /// The selected head event, if the viewer may still write here.
+    pub(super) async fn read_event(
+        &self,
+        channel: &str,
+        strong: bool,
+    ) -> Result<Option<Verified>, CanvasError> {
         if !self.writable(channel).await? {
             return Err(UNAVAILABLE.into());
         }
-        let events = self.fresh(canvas::head_filter(channel, strong)).await?;
-        Ok(canvas::selected_head(channel, &events))
+        self.head(channel, strong).await
+    }
+
+    async fn read(&self, channel: &str, strong: bool) -> Result<Option<Revision>, CanvasError> {
+        Ok(self
+            .read_event(channel, strong)
+            .await?
+            .map(|event| Revision::from_event(event.event())))
     }
 
     async fn history(
@@ -141,6 +178,17 @@ impl Canvas {
         content: &str,
         expected: Option<EventId>,
     ) -> Result<Revision, CanvasError> {
+        let saved = self.save_event(channel, content, expected).await?;
+        Ok(Revision::from_event(saved.event()))
+    }
+
+    /// Saves and returns the confirmed head event.
+    pub(super) async fn save_event(
+        &self,
+        channel: &str,
+        content: &str,
+        expected: Option<EventId>,
+    ) -> Result<Verified, CanvasError> {
         let access = self.access(channel).await?;
         let outbox = match access.outbox {
             Some(outbox) if access.writable && supported(&self.identity) => outbox,
@@ -154,7 +202,7 @@ impl Canvas {
             .ready()
             .await
             .map_err(|error| CanvasError::Failed(error.to_string()))?;
-        let head = self.read(channel, true).await?;
+        let head = self.read_event(channel, true).await?;
         if head.as_ref().map(|head| head.id) != expected {
             return Err(CanvasError::Conflict);
         }
@@ -165,7 +213,7 @@ impl Canvas {
         {
             return Err(UNRESOLVED.into());
         }
-        if head.is_some_and(|head| head.created_at >= now()) {
+        if head.is_some_and(|head| head.created_at.as_secs() >= now()) {
             return Err(TOO_SOON.into());
         }
         if !self.writable(channel).await? {
@@ -175,7 +223,7 @@ impl Canvas {
             .send(draft, SendOptions::default())
             .map_err(|error| CanvasError::Failed(error.to_string()))?;
         self.confirm(&outbox, id).await?;
-        match self.read(channel, true).await? {
+        match self.read_event(channel, true).await? {
             Some(selected) if selected.id == id => Ok(selected),
             _ => Err(OTHER_SELECTED.into()),
         }
@@ -183,7 +231,7 @@ impl Canvas {
 
     /// `confirm`: the exact save is on the relay. A proven refusal of its
     /// precondition is dismissed so a reviewed save can follow.
-    async fn confirm(&self, outbox: &Outbox, id: EventId) -> Result<(), CanvasError> {
+    pub(super) async fn confirm(&self, outbox: &Outbox, id: EventId) -> Result<(), CanvasError> {
         let result = self.confirm_inner(outbox, id).await;
         if result.is_err()
             && outbox
@@ -259,12 +307,12 @@ impl Canvas {
 }
 
 impl Session {
-    fn canvas(&self) -> Canvas {
-        Canvas {
-            commands: self.commands.clone(),
-            reader: self.direct.reader.clone(),
-            identity: self.direct.identity.clone(),
-        }
+    pub(super) fn canvas(&self) -> Canvas {
+        Canvas::new(
+            self.commands.clone(),
+            self.direct.reader.clone(),
+            self.direct.identity.clone(),
+        )
     }
 
     async fn on_io<R: Send + 'static>(

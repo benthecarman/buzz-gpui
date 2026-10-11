@@ -14,9 +14,11 @@
 //! replace the legacy sidebar sections once that record exists.
 
 use super::actions::{Context, Ops};
+use super::canvas::Canvas;
 use super::kit::{KitSnapshot, KitStatus};
 use super::work_sessions::delivered;
 use super::{Message, Session};
+use crate::canvas::{AWAITING, TOO_OLD};
 use crate::event::Verified;
 use crate::kit::me::{self as kit, KitEntry};
 use crate::kit::{self as recipes, GroupsId};
@@ -42,8 +44,6 @@ const SAVE_UNAVAILABLE: &str = "Recipe saving is unavailable or already in progr
 const UNRESOLVED: &str =
     "A save for this recipe is unresolved. Inspect Outbox and refresh before replacing it.";
 const TOO_SOON: &str = "Please wait a second before saving this recipe again";
-/// `CanvasConflictError`.
-pub const CANVAS_CONFLICT: &str = "Canvas changed since you opened it. Your draft is kept; load the current document before replacing it.";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum MeKitStatus {
@@ -112,6 +112,8 @@ struct Inner {
     commands: mpsc::UnboundedSender<Message>,
     runtime: tokio::runtime::Handle,
     community: String,
+    /// Canvas reads and saves for the session settings.
+    canvas: Canvas,
     snapshot: watch::Sender<Arc<MeKitSnapshot>>,
     /// The same catalog as typed templates and teams ([`Session::kit`]).
     typed: watch::Sender<Arc<KitSnapshot>>,
@@ -144,12 +146,14 @@ impl MeKit {
         commands: mpsc::UnboundedSender<Message>,
         runtime: tokio::runtime::Handle,
         community: String,
+        canvas: Canvas,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 commands,
                 runtime,
                 community,
+                canvas,
                 snapshot: watch::Sender::new(Arc::default()),
                 typed: watch::Sender::new(Arc::default()),
                 refreshing: Mutex::new(None),
@@ -354,58 +358,27 @@ impl MeKit {
             .as_ref()
             .is_none_or(|op| now().saturating_sub(op.created_at()) >= REPLAY_WINDOW_SECS)
         {
-            return Err("This operation could not be confirmed and is too old to replay. Keep your draft and inspect the current result before making a new save.".into());
+            return Err(TOO_OLD.into());
         }
         delivered(ctx, id, false, true).await?;
         if !found(&fresh(ctx, vec![ids_filter(&hex)]).await?) {
-            return Err("Save is awaiting exact relay confirmation; your draft is kept".into());
+            return Err(AWAITING.into());
         }
         Ok(())
     }
 
     // ----- Canvas (`capability.ts` `canvas`) -----
 
-    /// Whether the viewer can still write in `channel` (`canWrite`).
-    async fn can_write(&self, channel: &str) -> Result<bool, String> {
-        let id = channel.to_owned();
-        self.ops()
-            .with(move |actor| {
-                actor
-                    .discovery
-                    .as_ref()
-                    .and_then(|discovery| discovery.get(&id))
-                    .is_some_and(|summary| {
-                        !summary.read_only && !summary.archived && !summary.cached
-                    })
-            })
-            .await
-    }
-
     /// The channel's current Canvas (kind 40100), read strongly.
     pub async fn canvas_read(&self, channel: &str) -> Result<Option<Verified>, String> {
-        let kit = self.clone();
+        let canvas = self.inner.canvas.clone();
         let channel = channel.to_owned();
         self.inner
             .runtime
-            .spawn(async move {
-                if !kit.can_write(&channel).await? {
-                    return Err("Canvas is unavailable after channel access changed".into());
-                }
-                let ctx = kit.context().await?;
-                kit.canvas_head(&ctx, &channel).await
-            })
+            .spawn(async move { canvas.read_event(&channel, true).await })
             .await
             .unwrap_or_else(|_| Err("The session has closed".into()))
-    }
-
-    async fn canvas_head(&self, ctx: &Context, channel: &str) -> Result<Option<Verified>, String> {
-        let mut filter = Filter::new();
-        filter.insert("kinds".into(), json!([crate::kinds::CANVAS]));
-        filter.insert("#h".into(), json!([channel]));
-        filter.insert("limit".into(), json!(1));
-        filter.insert("consistency".into(), json!("strong"));
-        let events = fresh(ctx, vec![filter]).await?;
-        Ok(recipes::selected_head(&events).cloned())
+            .map_err(|error| error.to_string())
     }
 
     /// Saves Canvas if its head is still `expected` (`canvas.save`), and
@@ -416,75 +389,18 @@ impl MeKit {
         content: &str,
         expected: Option<String>,
     ) -> Result<Verified, String> {
-        let kit = self.clone();
+        let canvas = self.inner.canvas.clone();
         let (channel, content) = (channel.to_owned(), content.to_owned());
+        let expected = expected
+            .map(|id| EventId::from_hex(&id))
+            .transpose()
+            .map_err(|error| error.to_string())?;
         self.inner
             .runtime
-            .spawn(async move { kit.canvas_save_now(&channel, &content, expected).await })
+            .spawn(async move { canvas.save_event(&channel, &content, expected).await })
             .await
             .unwrap_or_else(|_| Err("The session has closed".into()))
-    }
-
-    async fn canvas_save_now(
-        &self,
-        channel: &str,
-        content: &str,
-        expected: Option<String>,
-    ) -> Result<Verified, String> {
-        if !self.can_write(channel).await? {
-            return Err("Canvas writing is unavailable in this channel".into());
-        }
-        if content.len() > kit::CANVAS_BYTES {
-            return Err("Keep Canvas below 24 KiB".into());
-        }
-        let ctx = self.context().await?;
-        ctx.outbox
-            .ready()
-            .await
-            .map_err(|error| error.to_string())?;
-        let head = self.canvas_head(&ctx, channel).await?;
-        if head.as_ref().map(Verified::id_hex) != expected {
-            return Err(CANVAS_CONFLICT.into());
-        }
-        let unresolved = ctx.outbox.visible().iter().any(|op| {
-            op.kind() == crate::kinds::CANVAS
-                && op.has_tag("h", channel)
-                && !matches!(op.delivery, Delivery::Accepted | Delivery::Seen)
-        });
-        if unresolved {
-            return Err("This channel has an unresolved Canvas save. Inspect Outbox before making another save.".into());
-        }
-        if head
-            .as_ref()
-            .is_some_and(|head| head.created_at_secs() >= now())
-        {
-            return Err("Please wait a second before saving Canvas again".into());
-        }
-        if !self.can_write(channel).await? {
-            return Err("Channel access changed".into());
-        }
-        let id = ctx
-            .outbox
-            .send(
-                crate::messages::Draft {
-                    kind: crate::kinds::CANVAS,
-                    content: content.to_owned(),
-                    tags: vec![
-                        vec!["h".into(), channel.to_owned()],
-                        vec![
-                            "expected-revision".into(),
-                            expected.unwrap_or_else(|| "none".into()),
-                        ],
-                    ],
-                },
-                SendOptions::default(),
-            )
-            .map_err(|error| error.to_string())?;
-        self.confirm(&ctx, id).await?;
-        match self.canvas_head(&ctx, channel).await? {
-            Some(head) if head.id_hex() == id.to_hex() => Ok(head),
-            _ => Err("Your save was received, but a different Canvas is selected. Your draft is kept; load the current document.".into()),
-        }
+            .map_err(|error| error.to_string())
     }
 
     // ----- Me groups and placement (`me-preferences.ts`) -----

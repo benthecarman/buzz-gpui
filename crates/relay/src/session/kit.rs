@@ -11,6 +11,7 @@
 //! (completion), leaving a notice when setup could not finish.
 
 use super::{Actor, Message, Session};
+use crate::canvas::{AWAITING, TOO_OLD};
 use crate::event::{Verified, kinds};
 use crate::kit::setup::{
     ChannelCreationInput, PendingCreation, Progress, Receipts, SETUP_NOT_CONTINUED, SetupNotice,
@@ -24,7 +25,7 @@ use crate::socket::Filter;
 use crate::store::{Partition, Store};
 use buzz_identity::Identity;
 use nostr::prelude::EventId;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
@@ -198,13 +199,11 @@ impl Kit {
         }
         delivered(&self.outbox, id).await?;
         if !self.exists(&id).await? {
-            return Err("Save is awaiting exact relay confirmation; your draft is kept".into());
+            return Err(AWAITING.into());
         }
         Ok(())
     }
 }
-
-const TOO_OLD: &str = "This operation could not be confirmed and is too old to replay. Keep your draft and inspect the current result before making a new save.";
 
 /// Waits until the outbox delivered `id`: accepted or seen.
 async fn delivered(outbox: &Outbox, id: EventId) -> Result<(), String> {
@@ -366,11 +365,14 @@ impl Session {
     /// strongly consistent): "Save as template" copies it.
     pub async fn kit_canvas(&self, channel: &str) -> Result<Option<String>, String> {
         let (commands, channel) = (self.commands.clone(), channel.to_owned());
+        let canvas = self.canvas();
         self.runtime
             .spawn(async move {
-                let ctx = with(&commands, |actor| actor.kit_context()).await??;
-                Ok(canvas_head(&ctx, &channel, false)
-                    .await?
+                with(&commands, |actor| actor.kit_context()).await??;
+                Ok(canvas
+                    .head(&channel, false)
+                    .await
+                    .map_err(|e| e.to_string())?
                     .map(|event| event.content.clone()))
             })
             .await
@@ -530,19 +532,6 @@ async fn load_team(ctx: &Kit, team: &Team) -> Result<Value, String> {
         payloads.push(chunk);
     }
     payload::decode_team_payload(manifest, &payloads, &ctx.community, &ctx.viewer, &team.id)
-}
-
-/// The selected Canvas head of a channel.
-async fn canvas_head(ctx: &Kit, channel: &str, strong: bool) -> Result<Option<Verified>, String> {
-    let mut filter = Filter::new();
-    filter.insert("kinds".into(), json!([kinds::CANVAS]));
-    filter.insert("#h".into(), json!([channel]));
-    filter.insert("limit".into(), json!(1));
-    if strong {
-        filter.insert("consistency".into(), json!("strong"));
-    }
-    let events = ctx.read(vec![filter]).await?;
-    Ok(kit::selected_head(&events).cloned())
 }
 
 /// Seeds a new channel's starting Canvas through the outbox with
@@ -719,10 +708,11 @@ async fn complete(session: &Arc<Session>, ctx: &Kit, mut p: Progress) -> Result<
         p.group_done = true;
         persist(&p)?;
     }
+    let canvas_api = session.canvas();
     let rest = async {
         if !setup.canvas.is_empty() && !p.canvas_done {
             let seeded = p.operations.get("canvas").cloned();
-            let head = canvas_head(ctx, &p.id, true).await?.map(|e| e.id.to_hex());
+            let head = canvas_api.head(&p.id, true).await.map_err(|e| e.to_string())?.map(|e| e.id.to_hex());
             if head.is_some() && head != seeded {
                 return Err("Canvas has a different saved document; no agents were added by this attempt.".to_owned());
             }
@@ -735,19 +725,16 @@ async fn complete(session: &Arc<Session>, ctx: &Kit, mut p: Progress) -> Result<
                     id
                 }
             };
-            if let Err(error) = ctx.confirm(canvas).await {
-                let refused = ctx
-                    .outbox
-                    .get(&canvas)
-                    .is_some_and(|op| crate::canvas::is_definitive_conflict(&op));
-                if refused {
-                    // A refused seed must not fence a later manual Canvas save.
-                    let _ = ctx.outbox.dismiss(&canvas).await;
+            // A refused seed is dismissed, so it cannot fence a later
+            // manual Canvas save.
+            match canvas_api.confirm(&ctx.outbox, canvas).await {
+                Ok(()) => {}
+                Err(error) if error.is_conflict() => {
                     return Err("Canvas changed before the seed was saved; no agents were added by this attempt.".into());
                 }
-                return Err(error);
+                Err(error) => return Err(error.to_string()),
             }
-            if canvas_head(ctx, &p.id, true).await?.map(|e| e.id) != Some(canvas) {
+            if canvas_api.head(&p.id, true).await.map_err(|e| e.to_string())?.map(|e| e.id) != Some(canvas) {
                 return Err("The seed Canvas is not the selected document; no agents were added by this attempt.".into());
             }
             p.canvas_done = true;
