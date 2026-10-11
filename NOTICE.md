@@ -19,7 +19,8 @@ its license is in `third_party/gpui-base/`.
 The app icons in `assets/icons/` are copied from buzz-app's
 `src-tauri/icons`, which copied them from Block Buzz's
 `desktop/src-tauri/icons` ([block/buzz](https://github.com/block/buzz),
-Apache-2.0).
+Apache-2.0). The background is recoloured navy so this app is told apart
+from buzz-app.
 
 ## Fonts
 
