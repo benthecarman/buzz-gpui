@@ -213,9 +213,20 @@ impl Processes {
         {
             return Err("That process handle is in use".into());
         }
+        #[cfg(not(windows))]
         let mut child = command
             .spawn()
             .map_err(|error| format!("Could not start {program}: {error}"))?;
+        // Windows has no process groups: a job holds the process and all
+        // it starts, and ends them when it closes. No console window opens
+        // beside the app.
+        #[cfg(windows)]
+        let job = buzz_desktop::process::windows_job::WindowsJob::new()
+            .ok_or_else(|| format!("Could not start {program}"))?;
+        #[cfg(windows)]
+        let mut child = job
+            .spawn_hidden(&mut command)
+            .ok_or_else(|| format!("Could not start {program}"))?;
         let id = registry.next;
         registry.next += 1;
         let (stop, stopped) = oneshot::channel();
@@ -273,9 +284,9 @@ impl Processes {
                         // SAFETY: signals a process group this module started.
                         unsafe { libc::kill(-group, libc::SIGTERM) };
                     }
-                    // No polite stop on Windows: end it now.
-                    #[cfg(not(unix))]
-                    let _ = child.start_kill();
+                    // No polite stop on Windows: end it and what it started.
+                    #[cfg(windows)]
+                    job.terminate(STOP_GRACE).await;
                     match tokio::time::timeout(STOP_GRACE, child.wait()).await {
                         Ok(status) => status.ok(),
                         Err(_) => {
@@ -291,6 +302,8 @@ impl Processes {
                 // SAFETY: as above.
                 unsafe { libc::kill(-group, libc::SIGKILL) };
             }
+            #[cfg(windows)]
+            job.terminate(STOP_GRACE).await;
             for reader in readers.into_iter().flatten() {
                 let _ = reader.await;
             }

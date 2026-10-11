@@ -41,7 +41,7 @@ section lists what a person still has to try on real machines.
 | Copy image | `arboard` (GPUI's clipboard has text only on Wayland) | DONE: `arboard` | DONE: `arboard` |
 | Paste and drop files | vendored GPUI patch for `text/uri-list` | DONE: GPUI reads file names from the pasteboard | DONE: GPUI reads `CF_HDROP` |
 | Time zone abbreviation in times | `localtime_r` | DONE | DIFFERENT: Windows names zones in full ("Pacific Standard Time"), so times show a GMT offset |
-| HEIC avatars through ffmpeg | `ffmpeg` from the package's dependencies | DIFFERENT: needs `brew install ffmpeg` | PLANNED: run it without a console window. DIFFERENT: ffmpeg must be on `PATH`; the zip does not carry it |
+| HEIC avatars through ffmpeg | `ffmpeg` from the package's dependencies | DIFFERENT: needs `brew install ffmpeg` | DIFFERENT: ffmpeg must be on `PATH`; the zip does not carry it. It runs without a console window |
 | Media playback and sounds | GStreamer from the distribution | DONE: GStreamer from Homebrew | DONE: GStreamer bundled in the zip |
 | Data and config locations | XDG directories | DONE: `~/Library/Application Support` | DONE: `%APPDATA%` |
 
@@ -52,7 +52,7 @@ section lists what a person still has to try on real machines.
 | Embedded agent host | in-process host (`crates/host`) | DONE | DONE |
 | Agent processes and their descendants | buzz-agent-controller, process groups | DONE | DONE: buzz-agent-controller uses job objects |
 | Refuse to start agents while old Buzz runs | `ps -axo pid=,comm=` | DONE | DONE: `tasklist`; before, `ps` did not exist there, so every agent start was refused |
-| Agent-type processes (`crates/host/src/processes.rs`) | own process group; SIGTERM, then SIGKILL to the group | DONE | PLANNED: a job object ends descendants too; no console window |
+| Agent-type processes (`crates/host/src/processes.rs`) | own process group; SIGTERM, then SIGKILL to the group | DONE | DONE: a job object (buzz-desktop's) ends descendants too; no console window |
 | Channel terminals | login shell in a PTY (`buzz_desktop::terminal`) | DONE | DIFFERENT: buzz-desktop's terminal is Unix-only ("Local terminals require macOS or Linux"); buzz-app has none on Windows either. A ConPTY backend belongs in buzz-desktop |
 | Installing Pi and Claude Code into Buzz's tools | `buzz_desktop::harness_setup` | DONE | DIFFERENT: buzz-desktop supports macOS and Linux only, as buzz-app; install them yourself and Buzz finds them on `PATH` |
 | Remote hosts over `tcp://` | yes | DONE | DONE |
