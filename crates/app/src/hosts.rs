@@ -14,7 +14,9 @@ use buzz_host::api::{
 };
 use buzz_host::credentials::{FileCredentials, KeyringCredentials};
 use buzz_host::{AgentHost, HostConfig, RpcHandler};
-use buzz_host_rpc::transport::{self, Connector, TcpConnector, UnixConnector};
+#[cfg(unix)]
+use buzz_host_rpc::transport::UnixConnector;
+use buzz_host_rpc::transport::{self, Connector, TcpConnector};
 use buzz_host_rpc::{
     ClientEvent, ClientHandler, ConnectionState, HostClient, HostClientOptions, HostInfo, RpcError,
     ServerOptions,
@@ -295,7 +297,12 @@ fn remote_connector(host: &RemoteHost) -> Result<Arc<dyn Connector>, String> {
     } else if let Some(path) = host.address.strip_prefix("unix://")
         && !path.is_empty()
     {
-        Ok(Arc::new(UnixConnector { path: path.into() }))
+        #[cfg(unix)]
+        return Ok(Arc::new(UnixConnector { path: path.into() }));
+        #[cfg(not(unix))]
+        return Err(format!(
+            "unix://{path}: Unix sockets need macOS or Linux; use tcp://."
+        ));
     } else {
         Err("Enter an address that starts with tcp:// or unix://.".into())
     }

@@ -188,6 +188,7 @@ pub enum Request {
 #[derive(Debug)]
 pub struct Arrival {
     pub request: Request,
+    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     pub activation_token: Option<String>,
 }
 

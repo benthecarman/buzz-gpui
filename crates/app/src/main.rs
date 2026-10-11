@@ -1,3 +1,6 @@
+// Release builds open no console window beside the app on Windows.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod agent_activity;
 mod agent_plugins;
 mod agents2;
@@ -19,7 +22,7 @@ mod plugins;
 mod runtime;
 mod shortcuts;
 mod sign_out;
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod single_instance;
 mod snapshot;
 mod sounds;
@@ -41,7 +44,7 @@ fn main() {
     sign_out::boot();
     // A `buzz://` link the OS launched us with (`Exec=buzz-gpui %U`).
     let link = deep_links::from_args(std::env::args().skip(1));
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let instance = {
         let path = single_instance::socket_path(&community::data_dir());
         let handoff = single_instance::Handoff {
@@ -99,7 +102,7 @@ fn main() {
         if let Some(link) = link {
             let _ = requests.unbounded_send(Request::Url(link).into());
         }
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if let Some(listener) = instance {
             single_instance::serve(listener, move |handoff| {
                 let request = match handoff.link.is_empty() {

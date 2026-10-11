@@ -125,6 +125,7 @@ fn gmt_offset(offset_seconds: i32) -> String {
 }
 
 /// The C library's abbreviation for the local zone at that instant.
+#[cfg(unix)]
 fn local_abbreviation(seconds: u64) -> Option<String> {
     let time = seconds as libc::time_t;
     // SAFETY: `localtime_r` fills the zeroed `tm` we own; `tm_zone` then
@@ -139,6 +140,13 @@ fn local_abbreviation(seconds: u64) -> Option<String> {
             .ok()
             .map(str::to_string)
     }
+}
+
+/// Windows' C library names zones in full ("Pacific Standard Time"), so
+/// the caller falls back to a GMT offset there.
+#[cfg(not(unix))]
+fn local_abbreviation(_seconds: u64) -> Option<String> {
+    None
 }
 
 /// The longest wait between checks of the local day. Timers run late

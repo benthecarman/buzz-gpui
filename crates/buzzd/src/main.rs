@@ -128,19 +128,24 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
             tracing::info!(address = %listener.local_addr()?, "listening");
             servers.spawn(serve(listener, handler.clone(), options.clone()));
         } else if let Some(path) = address.strip_prefix("unix://") {
-            let listener = buzz_host_rpc::transport::UnixListener::bind(path.into())
-                .with_context(|| format!("could not listen on unix://{path}"))?;
-            tracing::info!(%path, "listening");
-            servers.spawn(serve(listener, handler.clone(), options.clone()));
+            #[cfg(unix)]
+            {
+                let listener = buzz_host_rpc::transport::UnixListener::bind(path.into())
+                    .with_context(|| format!("could not listen on unix://{path}"))?;
+                tracing::info!(%path, "listening");
+                servers.spawn(serve(listener, handler.clone(), options.clone()));
+            }
+            #[cfg(not(unix))]
+            bail!("unix://{path}: Unix sockets are not supported on this platform");
         } else {
             bail!("listen address {address:?} must start with tcp:// or unix://");
         }
     }
 
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let terminated = terminated()?;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
-        _ = terminate.recv() => {}
+        _ = terminated => {}
         Some(result) = servers.join_next() => {
             result?.context("listener failed")?;
         }
@@ -191,14 +196,28 @@ fn host_id(state_dir: &Path) -> Result<String> {
     }
 }
 
+/// Resolves on SIGTERM, which service managers send to stop the daemon.
+/// Windows has no such signal; there Ctrl+C alone stops it.
+fn terminated() -> Result<impl std::future::Future<Output = ()>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            terminate.recv().await;
+        })
+    }
+    #[cfg(not(unix))]
+    Ok(std::future::pending())
+}
+
 fn write_private(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
         .open(path)
         .with_context(|| format!("could not write {}", path.display()))?;
     file.write_all(contents.as_bytes())?;
@@ -207,10 +226,13 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
 }
 
 fn private_dir(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path)
         .with_context(|| format!("could not create {}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 
