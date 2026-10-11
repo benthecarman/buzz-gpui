@@ -26,7 +26,6 @@ mod sign_out;
 mod single_instance;
 mod snapshot;
 mod sounds;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod tray;
 mod ui;
 

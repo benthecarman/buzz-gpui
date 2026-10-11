@@ -29,7 +29,7 @@ section lists what a person still has to try on real machines.
 | Clicking a notification opens its message | `ActionInvoked` plus an xdg-activation token | DONE: GPUI notification response, by the banner's tag | DONE: the same, while Buzz runs. DIFFERENT: a toast clicked in the Action Center after Buzz quit does not start it; that needs a COM activator an installer registers |
 | Notification service status in Settings | probes the D-Bus service | DONE: available inside `Buzz.app` | DONE: always available |
 | Bringing the window forward (hand-off, tray, notification) | xdg-activation token (`gpui_linux::set_activation_token`) | DONE: the app is activated with the window | DONE: GPUI's activation takes the foreground |
-| Tray icon: open, quit, unread attention, minimize or close to tray | StatusNotifierItem over D-Bus (`tray.rs`) | PLANNED: menu-bar status item (`tray-icon`) | PLANNED: notification-area icon (`tray-icon`) |
+| Tray icon: open, quit, unread attention, minimize or close to tray | StatusNotifierItem over D-Bus (`tray/linux.rs`) | DONE: menu-bar item through `tray-icon` (`tray/native.rs`); a click opens its menu, as on every menu-bar item | DONE: notification-area icon through `tray-icon`; a click opens Buzz, a right-click the menu |
 | Dock icon click reopens a hidden window | n/a | DONE: `App::on_reopen` | n/a |
 | Quit shortcut | none (Ctrl+Q is reserved) | PLANNED: app menu with Quit Buzz (⌘Q) | n/a |
 | Window chrome | client-side: the header is the title bar, with Buzz's own minimize, maximize and close | PLANNED: transparent title bar with the system traffic lights, header inset for them | PLANNED: no system caption; the header drags the window through the OS hit test |

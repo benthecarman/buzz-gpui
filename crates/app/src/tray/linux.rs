@@ -9,6 +9,7 @@
 //! window. The icon asks for attention while mentions or direct messages
 //! are unread.
 
+use super::{TrayEvent, icon, tool_tip};
 use crate::ui::navigation::{Arrival, Request};
 use futures::channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
@@ -20,14 +21,6 @@ const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
-
-/// What the tray asks of the app.
-#[derive(Debug, PartialEq, Eq)]
-pub enum TrayEvent {
-    /// Whether a panel is showing the icon.
-    Shown(bool),
-    Quit,
-}
 
 /// The icon's menu: (id, label). Id 0 is the root.
 const OPEN: i32 = 1;
@@ -266,14 +259,6 @@ impl Item {
     async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
-fn tool_tip(attention: u32) -> String {
-    match attention {
-        0 => String::new(),
-        1 => "1 unread mention or direct message".into(),
-        n => format!("{n} unread mentions and direct messages"),
-    }
-}
-
 struct Menu {
     open: Arc<dyn Fn() + Send + Sync>,
     events: UnboundedSender<TrayEvent>,
@@ -409,10 +394,6 @@ mod icons {
     use super::Pixmap;
     use std::sync::LazyLock;
 
-    const SOURCES: [&[u8]; 2] = [
-        include_bytes!("../../../assets/icons/buzz-128.png"),
-        include_bytes!("../../../assets/icons/buzz-256.png"),
-    ];
     /// Panels pick the closest size and scale it.
     const SIZES: [u32; 3] = [22, 32, 64];
 
@@ -428,20 +409,10 @@ mod icons {
     }
 
     fn render(dot: bool) -> Vec<Pixmap> {
-        let Ok(source) =
-            image::load_from_memory(SOURCES[1]).or_else(|_| image::load_from_memory(SOURCES[0]))
-        else {
-            return Vec::new();
-        };
         SIZES
             .iter()
-            .map(|&size| {
-                let mut icon = source
-                    .resize_exact(size, size, image::imageops::FilterType::Triangle)
-                    .to_rgba8();
-                if dot {
-                    draw_dot(&mut icon);
-                }
+            .filter_map(|&size| {
+                let icon = super::icon(size, dot)?;
                 let argb = icon
                     .pixels()
                     .flat_map(|pixel| {
@@ -449,25 +420,9 @@ mod icons {
                         [a, r, g, b]
                     })
                     .collect();
-                (size as i32, size as i32, argb)
+                Some((size as i32, size as i32, argb))
             })
             .collect()
-    }
-
-    /// A red dot with a white ring in the top-right corner.
-    pub(super) fn draw_dot(icon: &mut image::RgbaImage) {
-        let size = icon.width() as f32;
-        let radius = size * 0.22;
-        let ring = (size * 0.06).max(1.);
-        let (cx, cy) = (size - radius - 0.5, radius + 0.5);
-        for (x, y, pixel) in icon.enumerate_pixels_mut() {
-            let distance = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-            if distance <= radius - ring {
-                pixel.0 = [0xe5, 0x48, 0x4d, 0xff];
-            } else if distance <= radius {
-                pixel.0 = [0xff, 0xff, 0xff, 0xff];
-            }
-        }
     }
 }
 
@@ -504,11 +459,5 @@ mod tests {
             assert_eq!(bytes.len(), (*w * *h * 4) as usize);
             assert_ne!(bytes, marked);
         }
-    }
-
-    #[test]
-    fn tool_tips_count_what_is_unread() {
-        assert_eq!(tool_tip(0), "");
-        assert_eq!(tool_tip(2), "2 unread mentions and direct messages");
     }
 }

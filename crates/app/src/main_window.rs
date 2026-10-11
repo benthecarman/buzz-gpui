@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::tray::{Tray, TrayEvent};
 
 /// View-state key for the tray choices (a device preference).
@@ -90,6 +89,9 @@ struct MainWindow {
     shown: bool,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     tray: Option<Arc<Tray>>,
+    /// On the main thread, where macOS and Windows keep it.
+    #[cfg(any(target_os = "macos", windows))]
+    tray: Option<Tray>,
     /// Mentions and direct messages unread, last told to the tray.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     attention: u32,
@@ -121,7 +123,6 @@ pub fn init(cx: &mut App) {
         moves: 0,
         preferences,
         shown: false,
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         tray: None,
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         attention: 0,
@@ -533,7 +534,6 @@ pub fn set_preferences(preferences: Preferences, cx: &mut App) {
 }
 
 /// Puts the icon up or takes it down to match the choices.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn apply_preferences(cx: &mut App) {
     let main = cx.global::<MainWindow>();
     match (main.preferences.show_icon, main.tray.is_some()) {
@@ -547,9 +547,6 @@ fn apply_preferences(cx: &mut App) {
         _ => {}
     }
 }
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn apply_preferences(_cx: &mut App) {}
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn start_tray(cx: &mut App) {
@@ -609,6 +606,37 @@ fn start_tray(cx: &mut App) {
     .detach();
 }
 
+#[cfg(any(target_os = "macos", windows))]
+fn start_tray(cx: &mut App) {
+    use futures::StreamExt;
+    let Some(navigation) = navigation::sender(cx) else {
+        return;
+    };
+    let (events, mut received) = futures::channel::mpsc::unbounded();
+    let tray = match Tray::start(navigation, events) {
+        Ok(tray) => tray,
+        Err(error) => {
+            tracing::warn!(%error, "could not put up the tray icon");
+            return;
+        }
+    };
+    cx.global_mut::<MainWindow>().tray = Some(tray);
+    update_attention(cx);
+    // Ends when the icon is taken down, which drops its senders.
+    cx.spawn(async move |cx| {
+        while let Some(event) = received.next().await {
+            cx.update(|cx| match event {
+                TrayEvent::Shown(shown) => {
+                    cx.global_mut::<MainWindow>().shown = shown;
+                    cx.refresh_windows();
+                }
+                TrayEvent::Quit => quit(cx),
+            });
+        }
+    })
+    .detach();
+}
+
 /// Follows every community's unread counts for the tray icon.
 fn watch_communities(cx: &mut App) {
     let communities = cx.global::<AppState>().communities.clone();
@@ -620,7 +648,6 @@ fn watch_communities(cx: &mut App) {
     update_attention(cx);
 }
 
-#[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
 fn attention(communities: &[Entity<Community>], cx: &App) -> u32 {
     communities
         .iter()
@@ -649,8 +676,15 @@ fn update_attention(cx: &mut App) {
     });
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn update_attention(_cx: &mut App) {}
+#[cfg(any(target_os = "macos", windows))]
+fn update_attention(cx: &mut App) {
+    let count = attention(&cx.global::<AppState>().communities.clone(), cx);
+    if let Some(tray) = cx.global_mut::<MainWindow>().tray.as_mut()
+        && let Err(error) = tray.set_attention(count)
+    {
+        tracing::debug!(%error, "could not update the tray icon");
+    }
+}
 
 #[cfg(test)]
 mod tests {
