@@ -91,6 +91,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 | "Notification choices weren’t saved" toast with "Retry saving choices" / "Reload saved choices" | `src/app/NotificationSettings.tsx:291-311` | DONE (ui/settings/notifications.rs) | Error toast with retry and reload. | S |
 | "Buzz couldn’t send the notification" error toast | `src/app/NotificationSettings.tsx:312-317` | DONE (ui/settings/notifications.rs) | Surface banner delivery errors. | S |
 | No alert for the conversation in front of the user | `src/features/notifications/messages.ts:145-164`; `presentation.ts`; `src/features/messages/use-reading.ts:67-104` | DONE, deliberate difference (notifications.rs `in_front`, ui/workspace.rs `on_screen`) | buzz-app waits two frames and stays quiet only if the new row is in a reading lease's visible rows. The port stays quiet when the focused window shows the message's conversation: its channel for a top-level message, its open thread tab for a reply, even if the row is scrolled out of view. A reported visible row still counts. A reply whose thread is not open still notifies, as in buzz-app. An unfocused window always notifies; "Notify while viewing" notifies anyway. | S |
+| Banners withdrawn once the message is read | None (banners stay in the notification center) | DONE (port addition, kept) (notifications/withdraw.rs, banners.rs, system.rs) | A message banner is closed when the focused window opens its conversation, or when an unread watch sees the message read (in view, marked read, or on another device). Linux uses `CloseNotification` with the id the service returned. macOS and Windows use GPUI's `dismiss_system_notification` by tag. The 64 most recent banners are remembered. A click or dismissal forgets the banner. Plugin notifications are not withdrawn. | S |
 
 ## 7. Shortcuts (ShortcutSettings.tsx, features/shortcuts)
 
@@ -234,7 +235,7 @@ localhost dev-server build.
 | MISSING | 0 |
 | PARTIAL | 0 |
 | DIFFERENT | 0 |
-| DONE | 98 |
+| DONE | 99 |
 | SKIPPED (decided) | 6 |
 
 Counts are of the rows in the tables. Nothing is open.

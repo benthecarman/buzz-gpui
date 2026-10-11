@@ -5,7 +5,12 @@
 //! token is what lets the window come to the front on Wayland: GNOME only
 //! raises a window for an app that isn't focused when the app presents a
 //! token it was handed, so both reach navigation together.
+//!
+//! A message's banner is closed with `CloseNotification` once the message
+//! is read; the id the service gave it is remembered until then, or until
+//! the banner is clicked or dismissed.
 
+use super::Key;
 use crate::ui::navigation::{Arrival, Request, Target};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
@@ -24,6 +29,8 @@ pub struct Banner {
     pub title: String,
     pub body: String,
     pub target: Target,
+    /// The message it is about, for closing it once read.
+    pub key: Option<Key>,
     /// Told whether the service took the banner, with its refusal.
     pub done: Option<futures::channel::oneshot::Sender<Result<(), String>>>,
 }
@@ -47,10 +54,15 @@ pub async fn available() -> bool {
     }
 }
 
+enum Command {
+    Show(Banner),
+    Close(Key),
+}
+
 /// Hands banners to the task that owns the bus connection, starting it on
 /// first use.
 pub struct Banners {
-    sender: mpsc::UnboundedSender<Banner>,
+    sender: mpsc::UnboundedSender<Command>,
 }
 
 impl Banners {
@@ -62,29 +74,54 @@ impl Banners {
 
     /// Never waits on the service.
     pub fn show(&self, banner: Banner) {
-        let _ = self.sender.send(banner);
+        let _ = self.sender.send(Command::Show(banner));
+    }
+
+    /// Closes the banners shown for `key`. Ordered after every earlier
+    /// banner, so one still being shown is closed too.
+    pub fn close(&self, key: Key) {
+        let _ = self.sender.send(Command::Close(key));
     }
 }
 
-/// Banners shown and not yet closed, and the activation tokens of the ones
-/// being clicked.
+/// Banners shown and not yet closed, the messages they are about, and the
+/// activation tokens of the ones being clicked.
 #[derive(Default)]
 struct Shown {
     targets: HashMap<u32, Target>,
     order: VecDeque<u32>,
     tokens: HashMap<u32, String>,
+    keys: HashMap<u32, Key>,
 }
 
 impl Shown {
-    fn insert(&mut self, id: u32, target: Target) {
+    fn insert(&mut self, id: u32, target: Target, key: Option<Key>) {
         if self.order.len() >= REMEMBERED
             && let Some(oldest) = self.order.pop_front()
         {
             self.targets.remove(&oldest);
             self.tokens.remove(&oldest);
+            self.keys.remove(&oldest);
         }
         self.order.push_back(id);
         self.targets.insert(id, target);
+        if let Some(key) = key {
+            self.keys.insert(id, key);
+        }
+    }
+
+    /// The ids of the banners about `key`'s message, forgotten for closing.
+    fn withdraw(&mut self, key: &Key) -> Vec<u32> {
+        let ids: Vec<u32> = self
+            .keys
+            .iter()
+            .filter(|(_, shown)| *shown == key)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ids {
+            self.keys.remove(id);
+        }
+        ids
     }
 
     fn token(&mut self, id: u32, token: String) {
@@ -93,9 +130,12 @@ impl Shown {
         }
     }
 
-    /// The clicked banner's place and token.
+    /// The clicked banner's place and token. The click opens the message,
+    /// so reading it no longer closes the banner; a service that keeps the
+    /// banner still routes a second click.
     fn invoked(&mut self, id: u32, action: &str) -> Option<Arrival> {
         let token = self.tokens.remove(&id);
+        self.keys.remove(&id);
         if action != "default" {
             return None;
         }
@@ -109,19 +149,22 @@ impl Shown {
     fn closed(&mut self, id: u32) {
         self.targets.remove(&id);
         self.tokens.remove(&id);
+        self.keys.remove(&id);
         self.order.retain(|shown| *shown != id);
     }
 }
 
-async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: UnboundedSender<Arrival>) {
+async fn run(mut commands: mpsc::UnboundedReceiver<Command>, navigation: UnboundedSender<Arrival>) {
     let proxy = match connect().await {
         Ok(proxy) => proxy,
         Err(error) => {
             tracing::warn!(%error, "desktop notifications are unavailable");
             // Each banner reports the refusal.
             let error = error.to_string();
-            while let Some(mut banner) = banners.recv().await {
-                banner.finish(Err(error.clone()));
+            while let Some(command) = commands.recv().await {
+                if let Command::Show(mut banner) = command {
+                    banner.finish(Err(error.clone()));
+                }
             }
             return;
         }
@@ -149,10 +192,12 @@ async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: Unbounded
         Ok(signals) => signals,
         Err(error) => {
             tracing::warn!(%error, "notification clicks are unavailable");
-            while let Some(mut banner) = banners.recv().await {
-                banner.finish(Err(
-                    "The desktop notification service does not support clicks".into(),
-                ));
+            while let Some(command) = commands.recv().await {
+                if let Command::Show(mut banner) = command {
+                    banner.finish(Err(
+                        "The desktop notification service does not support clicks".into(),
+                    ));
+                }
             }
             return;
         }
@@ -160,19 +205,28 @@ async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: Unbounded
     let mut shown = Shown::default();
     loop {
         tokio::select! {
-            banner = banners.recv() => {
-                let Some(mut banner) = banner else { return };
-                match notify(&proxy, &banner, markup).await {
+            command = commands.recv() => match command {
+                None => return,
+                Some(Command::Show(mut banner)) => match notify(&proxy, &banner, markup).await {
                     Ok(id) => {
                         banner.finish(Ok(()));
-                        shown.insert(id, banner.target);
+                        shown.insert(id, banner.target, banner.key);
                     }
                     Err(error) => {
                         tracing::warn!(%error, "could not show a notification");
                         banner.finish(Err(error.to_string()));
                     }
+                },
+                Some(Command::Close(key)) => {
+                    for id in shown.withdraw(&key) {
+                        // Already gone is fine; its NotificationClosed
+                        // forgets the rest.
+                        if let Err(error) = proxy.call::<_, _, ()>("CloseNotification", &(id,)).await {
+                            tracing::debug!(%error, id, "could not close a notification");
+                        }
+                    }
                 }
-            }
+            },
             signal = signals.next() => {
                 let Some(signal) = signal else {
                     tracing::warn!("the notification service went away");
@@ -288,7 +342,7 @@ mod tests {
     #[test]
     fn a_click_carries_its_token() {
         let mut shown = Shown::default();
-        shown.insert(7, target("general"));
+        shown.insert(7, target("general"), None);
         shown.token(7, "token".into());
         let arrival = shown.invoked(7, "default").unwrap();
         assert_eq!(arrival.activation_token.as_deref(), Some("token"));
@@ -303,18 +357,43 @@ mod tests {
         let mut shown = Shown::default();
         shown.token(1, "stray".into());
         assert!(shown.invoked(1, "default").is_none());
-        shown.insert(2, target("general"));
+        shown.insert(2, target("general"), None);
         shown.closed(2);
         assert!(shown.invoked(2, "default").is_none());
-        shown.insert(3, target("general"));
+        shown.insert(3, target("general"), None);
         assert!(shown.invoked(3, "other").is_none());
+    }
+
+    fn key(message: u8) -> Key {
+        Key {
+            origin: "ws://relay".into(),
+            channel: "general".into(),
+            message: buzz_relay_client::EventId::from_byte_array([message; 32]),
+            thread: None,
+        }
+    }
+
+    #[test]
+    fn a_read_message_closes_its_banner_once() {
+        let mut shown = Shown::default();
+        shown.insert(4, target("general"), Some(key(1)));
+        shown.insert(5, target("general"), Some(key(2)));
+        shown.insert(6, target("general"), None);
+        assert_eq!(shown.withdraw(&key(1)), [4]);
+        assert!(shown.withdraw(&key(1)).is_empty());
+        // Clicked or dismissed banners are not closed again.
+        shown.insert(8, target("general"), Some(key(3)));
+        assert!(shown.invoked(5, "default").is_some());
+        shown.closed(8);
+        assert!(shown.withdraw(&key(2)).is_empty());
+        assert!(shown.withdraw(&key(3)).is_empty());
     }
 
     #[test]
     fn forgets_the_oldest_banners() {
         let mut shown = Shown::default();
         for id in 0..(REMEMBERED as u32 + 1) {
-            shown.insert(id, target("general"));
+            shown.insert(id, target("general"), None);
         }
         assert!(shown.invoked(0, "default").is_none());
         assert!(shown.invoked(REMEMBERED as u32, "default").is_some());

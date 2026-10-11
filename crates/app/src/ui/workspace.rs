@@ -116,7 +116,12 @@ impl Workspace {
         cx.observe_global_in::<AppState>(window, |this, window, cx| this.sync(window, cx))
             .detach();
         // Notifications follow the conversation in front of the user.
-        cx.observe_self(|this, cx| this.report_open(cx)).detach();
+        cx.observe_self(|this, cx| this.report_open(cx.active_window().is_some(), cx))
+            .detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            this.report_open(window.is_window_active(), cx)
+        })
+        .detach();
         // A page whose plugin was turned off leaves for Messages.
         cx.observe_global_in::<crate::plugins::Plugins>(window, |this, window, cx| {
             if this.page != Page::SETTINGS
@@ -773,10 +778,11 @@ impl Workspace {
         })
     }
 
-    /// Tells notifications what is on screen.
-    fn report_open(&self, cx: &mut App) {
+    /// Tells notifications what is on screen, which reads its banners
+    /// while the window is `active`.
+    fn report_open(&self, active: bool, cx: &mut App) {
         let open = self.on_screen(cx);
-        crate::notifications::showing(open, cx);
+        crate::notifications::showing(open, active, cx);
     }
 
     /// A registered page's view. Every bundled page uses buzz-app's

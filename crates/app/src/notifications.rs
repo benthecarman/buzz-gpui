@@ -10,7 +10,8 @@
 //! (`system`). They are silent and never awaited by the UI; the chosen
 //! sound plays once the service took the banner. A failure is kept for
 //! Settings → Notifications to show. Clicking a banner brings the window
-//! forward on the message it is about.
+//! forward on the message it is about, and reading the message takes the
+//! banner back (`withdraw`).
 //!
 //! [`Session::incoming`]: buzz_relay_client::Session::incoming
 
@@ -32,6 +33,7 @@ mod banners;
 pub mod categories;
 #[cfg(any(target_os = "macos", windows))]
 mod system;
+mod withdraw;
 
 /// Viewer preference key for the notification choices
 /// (`buzz-notification-preferences.v1:<viewer>`).
@@ -327,8 +329,12 @@ struct OnScreen(Option<Conversation>);
 
 impl Global for OnScreen {}
 
-/// The main window shows `conversation`.
-pub fn showing(conversation: Option<Conversation>, cx: &mut App) {
+/// The main window shows `conversation`; while it is `active`, the
+/// conversation's banners are read.
+pub fn showing(conversation: Option<Conversation>, active: bool, cx: &mut App) {
+    if active && let Some(conversation) = &conversation {
+        withdraw::opened(conversation, cx);
+    }
     cx.set_global(OnScreen(conversation));
 }
 
@@ -413,7 +419,13 @@ fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) 
         return;
     }
     let category = item.category;
-    let shown = show(title, body, target, cx);
+    // One shown in front of the user ("Notify while viewing") is read as
+    // it shows, so it is not taken back.
+    let withdrawable = (!in_front).then_some(banner.clone());
+    let shown = show(title, body, target, withdrawable, cx);
+    if !in_front {
+        withdraw::posted(banner, community, cx);
+    }
     // The sound follows the service taking the banner, if alerts for the
     // category are still on by then.
     cx.spawn(async move |cx| {
@@ -537,16 +549,27 @@ fn prose(node: &markdown::mdast::Node) -> String {
     }
 }
 
-/// Shows a banner without waiting on the notification service; its click
-/// comes back through navigation.
 /// What became of one banner: `Err` carries the service's refusal.
 type Delivery = futures::channel::oneshot::Receiver<Result<(), String>>;
 
+/// The bus connection's owner, started with the first banner.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
-    struct Service(banners::Banners);
-    impl Global for Service {}
+struct Service(banners::Banners);
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl Global for Service {}
+
+/// Shows a banner without waiting on the notification service; its click
+/// comes back through navigation. A banner with a `key` can be taken back
+/// once its message is read.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub(crate) fn show(
+    title: String,
+    body: String,
+    target: Target,
+    key: Option<Key>,
+    cx: &mut App,
+) -> Delivery {
     let (done, shown) = futures::channel::oneshot::channel();
     if cx.try_global::<Service>().is_none() {
         let Some(navigation) = navigation::sender(cx) else {
@@ -559,16 +582,34 @@ pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) ->
         title,
         body,
         target,
+        key,
         done: Some(done),
     });
     shown
 }
 
-#[cfg(any(target_os = "macos", windows))]
-pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) -> Delivery {
-    struct Started;
-    impl Global for Started {}
+/// Closes the banners shown for `key`, if any are still up.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn withdraw(key: &Key, cx: &mut App) {
+    if let Some(service) = cx.try_global::<Service>() {
+        service.0.close(key.clone());
+    }
+}
 
+#[cfg(any(target_os = "macos", windows))]
+struct Started;
+
+#[cfg(any(target_os = "macos", windows))]
+impl Global for Started {}
+
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn show(
+    title: String,
+    body: String,
+    target: Target,
+    key: Option<Key>,
+    cx: &mut App,
+) -> Delivery {
     let (done, shown) = futures::channel::oneshot::channel();
     if cx.try_global::<Started>().is_none() {
         let Some(navigation) = navigation::sender(cx) else {
@@ -577,8 +618,15 @@ pub(crate) fn show(title: String, body: String, target: Target, cx: &mut App) ->
         system::start(navigation, cx);
         cx.set_global(Started);
     }
-    let _ = done.send(system::show(title, body, target, cx));
+    let _ = done.send(system::show(title, body, target, key, cx));
     shown
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn withdraw(key: &Key, cx: &mut App) {
+    if cx.has_global::<Started>() {
+        system::withdraw(key, cx);
+    }
 }
 
 /// Learns whether the notification service is there, for the status line
