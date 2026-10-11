@@ -93,7 +93,34 @@ struct State {
     /// In the order they started, for the status view.
     live: Vec<(String, Arc<Live>)>,
     opening: BTreeMap<String, (u64, Starting)>,
+    /// Per conversation, the latest message's place: it resolves once
+    /// that message has been handed to the process, or given up.
+    queue: BTreeMap<String, (u64, Shared<BoxFuture<'static, ()>>)>,
     disposed: bool,
+}
+
+/// A message's place in its conversation's queue. Dropping it, once the
+/// message is handed over or on any way out, lets the next one go.
+struct Place {
+    sessions: Weak<Inner>,
+    key: String,
+    id: u64,
+    _done: tokio::sync::oneshot::Sender<()>,
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        if let Some(sessions) = upgrade(&self.sessions) {
+            let mut state = sessions.state();
+            if state
+                .queue
+                .get(&self.key)
+                .is_some_and(|(id, _)| *id == self.id)
+            {
+                state.queue.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl State {
@@ -211,6 +238,12 @@ impl AgentSessions {
         if self.state().disposed {
             return Settled::failed("Claude Code was stopped");
         }
+        // Messages reach the process in the order they arrived, even when
+        // they all wait for it to start and wake together.
+        let (place, previous) = self.queue(&key);
+        if let Some(previous) = previous {
+            previous.await;
+        }
         // A message that arrives while its conversation's process starts
         // uses it.
         let opening = self.state().opening.get(&key).map(|(_, open)| open.clone());
@@ -232,7 +265,7 @@ impl AgentSessions {
                 (true, Some(steer)) => steer,
                 _ => text,
             };
-            return self.answer(&key, &live, &text).await;
+            return self.answer(&key, &live, &text, place).await;
         }
         let saved = self.options().store.get(&key);
         let id = self.next_id();
@@ -279,7 +312,7 @@ impl AgentSessions {
             live.process.kill().await;
             return Settled::failed("Claude Code was stopped");
         }
-        let delivered = self.answer(&key, &live, &text).await;
+        let delivered = self.answer(&key, &live, &text, place).await;
         // A saved session that no longer loads starts over rather than
         // failing every message in the conversation, shown the
         // conversation so far.
@@ -387,8 +420,36 @@ impl AgentSessions {
         });
     }
 
-    async fn answer(&self, key: &str, live: &Arc<Live>, text: &str) -> Settled {
-        let settled = live.process.send(text).await;
+    /// Takes the next place in `key`'s queue, and the place before it, if
+    /// one is still waiting to be handed its message.
+    fn queue(&self, key: &str) -> (Place, Option<Shared<BoxFuture<'static, ()>>>) {
+        let (done, handed) = tokio::sync::oneshot::channel::<()>();
+        let id = self.next_id();
+        let handed = async move {
+            let _ = handed.await;
+        }
+        .boxed()
+        .shared();
+        let previous = self
+            .state()
+            .queue
+            .insert(key.to_string(), (id, handed))
+            .map(|(_, previous)| previous);
+        let place = Place {
+            sessions: Arc::downgrade(&self.inner),
+            key: key.to_string(),
+            id,
+            _done: done,
+        };
+        (place, previous)
+    }
+
+    /// Hands the process `text`, then lets the next message in `key`'s
+    /// queue go, and waits for the answer.
+    async fn answer(&self, key: &str, live: &Arc<Live>, text: &str, place: Place) -> Settled {
+        let settled = live.process.send(text);
+        drop(place);
+        let settled = settled.await;
         if self.state().holds(key, live) {
             self.touch(key, live, None);
             if live.fingerprint != self.fingerprint() && !live.process.busy() {
