@@ -99,10 +99,19 @@ its defaults are complete. The status is a quick check of the port only.
 | Terminal (`buzz.terminal`) | Channel-header terminal launcher, bottom drawer, "Toggle channel terminal" shortcut | Yes (index.ts:112) | `src/bundled/terminal/` | DONE (crates/app/src/ui/terminal/) | agents/sessions/terminal |
 | Agents (`buzz.agents`) | Agents page | Yes (index.ts:172) | `src/bundled/agents/` | DONE (crates/app/src/ui/agents.rs, crates/app/src/ui/agents/; detail in agents.md) | agents |
 | Agents2 (`buzz.agents2`) | "Agents2" primary sidebar page (agent types, tabs) | Yes (index.ts:177) | `src/bundled/agents2/`; `src/features/agents2/service.ts` | DONE (crates/app/src/agents2/, crates/app/src/ui/agents2/) | agents |
-| Claude Code agent plugin | Agent-type plugin under `src/agent-plugins/claude-code` | n/a | `src/agent-plugins/claude-code/` | DONE (crates/app/src/agent_plugins/claude_code/) | agents/sessions |
+| Claude Code (`buzz.claude-code`) | Agents2 type "Claude Code"; bundled since #818 | Yes (index.ts) | `src/bundled/claude-code/` | DONE (crates/app/src/agent_plugins/claude_code/; the switch gates the type) | agents/sessions |
+| Codex (`buzz.codex`) | Agents2 type "Codex"; bundled since #830, macOS and Linux | Yes (index.ts) | `src/bundled/codex/` | DONE (crates/app/src/agent_plugins/codex/; detail in agents.md §30) | agents |
 | Composer lab | Composer state gallery fixtures | Not shipped | `src/bundled/composer/lab/` | SKIPPED (decided) | messages/composer |
+
+## buzz-app main of 2026-10-10
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Inbox detail heading names its conversation as a link, with an "Open conversation" / "Open full thread" / "Open in channel" tooltip (#819) | src/bundled/inbox/InboxDetail.tsx | DONE (ui/src/components/panel_header.rs `label_link`, app/src/ui/inbox/detail.rs) | No keyboard focus ring: the port has no focus model there | S |
+| Me sidebar rows show the working-agents badge (hidden on hover) and the Messages activity popover; threads open in the channel reader (#817) | src/bundled/me/MeSidebar.tsx; src/bundled/channels/WorkingAgentsBadge.tsx; useWorkingAgents.ts | DONE (ui/sidebar/rows.rs, ui/sidebar.rs, ui/channel_activity.rs, ui/me/sections.rs) | — | M |
 
 ## Counts
 
 - Main table, 35 rows: DONE 26, SKIPPED (decided) 8, DIFFERENT 1 (`managed_npm.rs`: the port uses harnesses installed on PATH, by design).
-- Other slices' plugins, 12 rows: DONE 11, SKIPPED (decided) 1 (Composer lab).
+- Other slices' plugins, 13 rows: DONE 12, SKIPPED (decided) 1 (Composer lab).
+- buzz-app main of 2026-10-10, 2 rows: DONE 2.

@@ -139,7 +139,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Live updates need attention" toast with reason and "Retry live updates"; quiet during quota recovery; diagnostics and "Last rejection" | src/bundled/channels/LiveStatus.tsx:22-98 | DONE (session/mod.rs `LiveView`; app ui/live_status.rs; the diagnostics text is the channel settings Diagnostics row) | - | - |
+| "Live updates need attention" notice (inline above the Messages composer since #813) with reason and "Retry live updates"; quiet during quota recovery; diagnostics and "Last rejection" | src/bundled/channels/LiveStatus.tsx | DONE (session/mod.rs `LiveView`; app ui/live_status.rs; the diagnostics text is the channel settings Diagnostics row) | - | - |
 | Relay connection error with Try again | service.ts:187-197, 290-295 | DONE (session/mod.rs; app ui/live_status.rs) | - | - |
 
 ### Native relay host

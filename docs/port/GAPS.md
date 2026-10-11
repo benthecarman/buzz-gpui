@@ -24,6 +24,41 @@ status calendar, the default profile, saved agent activity, leaving a
 community) were done after the audits ran, as was live Markdown styling
 in the composer, with its markers visible rather than hidden.
 
+## buzz-app main since the last pin
+
+On 2026-10-11 the buzz-app fork was rebased onto buzz-app main at #833
+(`d55d70a0`), and the port pins the result (fork rev `ec7d795f`). Each
+upstream change since the previous base is listed below, with the area file
+that holds its rows.
+
+| Upstream change | Area | Status |
+|---|---|---|
+| #609 `08b3cbe8` share compact clock formatting | [messages](gaps/messages.md) | DONE |
+| #818 `8820e5a5` bundle the Claude Code agent type by default | [plugins](gaps/plugins.md), [agents](gaps/agents.md) §30 | DONE |
+| #788 `635b699c` placeholder Builderlab agent type in Agents2 | [agents](gaps/agents.md) §30 | SKIPPED (decided: Builderlab) |
+| #751 `89ee72a9` native Codex agents with CLI defaults | [agents](gaps/agents.md) §30 | DONE |
+| #769 `bd7797f7` bounded stdin for fixed plugin host commands | [agents](gaps/agents.md) §30 | N/A (external plugins only) |
+| #813 `5608988d` Sonner for bottom-right app toasts | [shell](gaps/shell.md) §11 | DONE |
+| #775 `8cef21d0` shared team instructions in their own record | [agents](gaps/agents.md) §30 | DONE |
+| #824 `54bd0634` complete the Builderlab mock in a test | — | N/A (test only) |
+| `b23fb875` Codex agents in Agents2 | [agents](gaps/agents.md) §30 | DONE |
+| #790 `5fe10620` run each Agents2 agent in one copy of the app | [agents](gaps/agents.md) §30 | DONE |
+| #819 `0217167f` inbox detail heading opens its context | [plugins](gaps/plugins.md) | DONE |
+| #797 `2b079c66` test-audit agent skill | — | N/A (contributor docs) |
+| #823 `63d2f5ee` rebuild Vite's dependency cache on dev start | — | N/A (web dev tooling) |
+| #830 `fcb3c655` bundle the Codex agent type by default | [plugins](gaps/plugins.md), [agents](gaps/agents.md) §30 | DONE |
+| #829 `829b1ecc` split an invitation paging test | — | N/A (test only) |
+| #832 `f927c881` run bundled Codex with danger-full-access | [agents](gaps/agents.md) §30 | DONE |
+| #826 `293c5191` view Codex and Claude sessions started in Buzz | [agents](gaps/agents.md) §30 | DONE (runtime naming); scripts N/A |
+| #831 `f8705a95` default Codex workspace to `~/.buzz` | [agents](gaps/agents.md) §30 | DONE |
+| #803 `f138a467` show typed angle-bracket text | [messages](gaps/messages.md) | DONE |
+| #817 `82d165d5` Me sidebar working indicators and activity | [plugins](gaps/plugins.md) | DONE |
+| #843 `35972bde` cancel toast exit-removal timers on unmount | [shell](gaps/shell.md) §11 | N/A (Sonner library fix) |
+| #825 `a2b7db9a` nonmember mention prompt defaults to Invite | [messages](gaps/messages.md) | DONE |
+| #798 `37dcd836` design-system chrome tabs for Me and Messages | [shell](gaps/shell.md) §11 | DONE |
+| #851 `6460c4ee` Codex replies in the thread, not under the mention | [agents](gaps/agents.md) §30 | DONE |
+| #833 `d55d70a0` commit attribution as Agents2 does it | [agents](gaps/agents.md) §30 | DONE |
+
 ## Decided
 
 - **Skipped:**
