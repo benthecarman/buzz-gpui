@@ -19,7 +19,6 @@ use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, IconButton, IconName, Menu, MenuItem,
     MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
 };
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::sync::Arc;
 
@@ -81,8 +80,10 @@ pub fn rail(
             image,
         };
         // Unread, as on a channel row: a pill half out of the rail's left
-        // edge, level with the item.
-        let pill = unread.then(|| {
+        // edge, level with the item. One mark for both: unread outside
+        // muted channels, or anything needing attention, even from a
+        // muted one.
+        let pill = (unread || attention).then(|| {
             div()
                 .absolute()
                 .left(px(-4.))
@@ -96,19 +97,6 @@ pub fn rail(
             .id(SharedString::from(format!("rail-item-{index}")))
             .relative()
             .rounded(rems(0.5))
-            // A mention, direct message or other attention: the accent
-            // dot channel rows use, on the icon's corner.
-            .when(attention, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(-1.))
-                        .right(px(-1.))
-                        .size(px(9.))
-                        .rounded_full()
-                        .bg(c.affordance_prominent),
-                )
-            })
             .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
             .drag_over::<DraggedCommunity>(|style, _, _, cx| {
                 style.bg(cx.colors().affordance_accent)
