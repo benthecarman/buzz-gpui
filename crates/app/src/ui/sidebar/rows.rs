@@ -703,6 +703,19 @@ impl ChannelSidebar {
             .when(self.dragging.as_deref() == Some(id.as_str()), |this| {
                 this.opacity(0.3)
             })
+            // Unread, as Discord marks it: a pill half out of the panel's
+            // left edge, 12px left of the row (frame and list insets).
+            .when(unread.bold && !selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(-16.))
+                        .top(px(10.))
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(c.text_standard),
+                )
+            })
             .child(
                 div()
                     .flex()

@@ -1079,11 +1079,16 @@ impl ChannelSidebar {
             crate::perf::shown(crate::perf::STARTUP, "sidebar");
             crate::perf::shown(crate::perf::SWITCH, "sidebar");
         }
+        // The list reaches into the frame's side padding, keeping the
+        // padding inside it, so the unread pill at the panel's edge is
+        // not clipped.
         let mut list = div()
             .id("sidebar")
             .flex()
             .flex_col()
-            .size_full()
+            .h_full()
+            .mx(rems(-0.5))
+            .px(rems(0.5))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .children(navigation);

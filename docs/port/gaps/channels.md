@@ -506,7 +506,7 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Bold label for ordinary backlog | src/bundled/channels/UnreadBadge.tsx:50-56 | DONE (unread.rs:555-563; crates/app/src/ui/sidebar.rs:159-163) | - | - |
+| Bold label for ordinary backlog | src/bundled/channels/UnreadBadge.tsx:50-56 | DIFFERENT (unread.rs:555-563; crates/app/src/ui/sidebar/rows.rs: the label is bold and, as Discord marks unread, a pill shows half out of the panel's left edge; the user asked for it) | - | - |
 | Priority accent dot, no numerals | UnreadBadge.tsx:57-60, 80-87; docs/port/ui.md:967-969 | DONE (crates/app/src/ui/unread_badge.rs) | Numeric mention pill instead (crates/app/src/ui/sidebar.rs:168-184), which ui.md:969 rules out; replace with 6 px dot | S |
 | Thread-activity dot "N unread threads" | UnreadBadge.tsx:57, 63-64, 88-95 | DONE (crates/app/src/ui/unread_badge.rs, crates/relay/src/session/unread.rs) | Needs activity exposure | S |
 | Accessible/tooltip labels ("…Not an exact total", "Marked unread on this device only", "; may be out of date") | UnreadBadge.tsx:61-64 | DONE (crates/app/src/ui/unread_badge.rs) | Labels | S |
