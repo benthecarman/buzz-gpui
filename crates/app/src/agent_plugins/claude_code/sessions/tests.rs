@@ -1,7 +1,7 @@
 //! buzz-app's `sessions.test.ts`.
 
 use super::*;
-use crate::agent_plugins::claude_code::claude::testing::{FakeClaude, FakeSpawn, flush};
+use crate::agent_plugins::claude_code::claude::testing::{FakeClaude, FakeSpawn, flush, until};
 use crate::agent_plugins::process::{Spawn, SpawnOptions, Spawned};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -410,9 +410,9 @@ async fn resumes_a_saved_conversation_after_its_process_stops() {
     });
     pool.deliver("c/root", "first", 1).await;
     let first = pool.claudes()[0].clone();
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    assert!(first.killed());
-    assert_eq!(pool.pool.snapshot(), vec![]);
+    // The idle timer runs on the real clock; a busy machine may fire it
+    // well after its 50ms.
+    until(|| first.killed() && pool.pool.snapshot().is_empty()).await;
     pool.deliver("c/root", "later", 5).await;
     let resumed = pool.claudes().last().unwrap().clone();
     assert!(resumed.args().contains(&"--resume".into()));
