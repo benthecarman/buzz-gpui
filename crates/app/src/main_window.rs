@@ -317,6 +317,20 @@ impl Render for Root {
             // The launch surface is gone: the app shows.
             crate::perf::shown(crate::perf::STARTUP, "launch_surface_gone");
         }
+        // The surface animates every frame, and nothing under it shows
+        // while it is opaque: the workspace draws from its last frame
+        // there unless it changed.
+        let covered = self
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.opacity(Instant::now()))
+            == Some(1.);
+        let workspace = match covered {
+            true => AnyView::from(self.workspace.clone())
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            false => self.workspace.clone().into_any_element(),
+        };
         div()
             .relative()
             .size_full()
@@ -325,7 +339,7 @@ impl Render for Root {
             .on_mouse_move(|_, _, cx| Idle::input(cx))
             .on_scroll_wheel(|_, _, cx| Idle::input(cx))
             .on_key_down(tab_through)
-            .child(self.workspace.clone())
+            .child(workspace)
             .children(launch)
             .when(crate::perf::on(), |root| {
                 // Painted last: the end of the frame's CPU work.
