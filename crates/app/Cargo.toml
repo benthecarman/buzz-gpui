@@ -83,6 +83,8 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 user-idle = { version = "0.6", default-features = false }
 # "Copy image", as on Linux.
 arboard = "3"
+# The menu-bar or notification-area icon; Tauri's tray.
+tray-icon = { version = "0.26", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # The user's `buzz://` registration; GPUI already uses it.
