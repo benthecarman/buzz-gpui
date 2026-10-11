@@ -32,6 +32,15 @@ pub enum AppAgentRequest {
         pubkey: String,
         name: String,
     },
+    /// Sets the picture its profile shows, an `https` URL (an upload to its
+    /// community); empty removes it. [`Self::PublishProfile`] then
+    /// publishes it. Hosts from before pictures answer that they do not
+    /// support this request, so a GUI never believes a picture was saved
+    /// that was not.
+    SetPicture {
+        pubkey: String,
+        picture: String,
+    },
     /// Deletes the key and marks the identity deleted. The row stays until
     /// [`Self::Forget`], once its community is cleaned up.
     Delete {
@@ -47,8 +56,8 @@ pub enum AppAgentRequest {
         pubkey: String,
         event: AppAgentEvent,
     },
-    /// Publishes the agent's name as its profile unless its community
-    /// already has it.
+    /// Publishes the agent's name and picture as its profile unless its
+    /// community already has them.
     PublishProfile {
         pubkey: String,
     },
@@ -126,6 +135,9 @@ pub struct AppAgentSummary {
     /// The agent type's key, fixed at create.
     pub agent_type: String,
     pub name: String,
+    /// The picture its profile shows; empty for none. `None` from hosts
+    /// from before pictures, which cannot set one.
+    pub picture: Option<String>,
     /// Its key is gone. Its community still has to drop it from its
     /// channels and archive it, after which it is forgotten.
     pub deleted: bool,
@@ -138,4 +150,101 @@ pub struct AppAgentEvent {
     pub kind: u16,
     pub content: String,
     pub tags: Vec<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire<T: Serialize>(value: &T) -> Vec<u8> {
+        rmp_serde::to_vec_named(value).unwrap()
+    }
+
+    /// The summary and requests as hosts and GUIs from before pictures
+    /// have them.
+    mod old {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub enum AppAgentRequest {
+            List,
+            Rename { pubkey: String, name: String },
+            PublishProfile { pubkey: String },
+        }
+
+        #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase", default)]
+        pub struct AppAgentSummary {
+            pub pubkey: String,
+            pub relay: String,
+            pub owner: String,
+            pub agent_type: String,
+            pub name: String,
+            pub deleted: bool,
+        }
+    }
+
+    #[test]
+    fn summaries_carry_the_picture_both_ways() {
+        let summary = AppAgentSummary {
+            pubkey: "a".repeat(64),
+            name: "Ada".into(),
+            picture: Some("https://relay.example/media/a.png".into()),
+            ..Default::default()
+        };
+        let read: AppAgentSummary = rmp_serde::from_slice(&wire(&summary)).unwrap();
+        assert_eq!(read, summary);
+        let none = AppAgentSummary {
+            picture: Some(String::new()),
+            ..summary.clone()
+        };
+        let read: AppAgentSummary = rmp_serde::from_slice(&wire(&none)).unwrap();
+        assert_eq!(read.picture.as_deref(), Some(""), "none is not unknown");
+
+        let old: old::AppAgentSummary = rmp_serde::from_slice(&wire(&summary)).unwrap();
+        assert_eq!(old.name, "Ada", "an older GUI ignores the picture");
+        let from_old: AppAgentSummary = rmp_serde::from_slice(&wire(&old::AppAgentSummary {
+            pubkey: "a".repeat(64),
+            name: "Ada".into(),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(from_old.picture, None, "an older host cannot set pictures");
+    }
+
+    #[test]
+    fn older_hosts_refuse_set_picture_and_newer_ones_take_old_requests() {
+        let set = AppAgentRequest::SetPicture {
+            pubkey: "a".repeat(64),
+            picture: "https://relay.example/media/a.png".into(),
+        };
+        // An older host cannot decode it, so it answers that it does not
+        // support the request rather than dropping the picture.
+        assert!(rmp_serde::from_slice::<old::AppAgentRequest>(&wire(&set)).is_err());
+        match rmp_serde::from_slice(&wire(&set)).unwrap() {
+            AppAgentRequest::SetPicture { picture, .. } => {
+                assert_eq!(picture, "https://relay.example/media/a.png")
+            }
+            other => panic!("expected SetPicture, got {other:?}"),
+        }
+        let rename = old::AppAgentRequest::Rename {
+            pubkey: "a".repeat(64),
+            name: "Ada".into(),
+        };
+        assert!(matches!(
+            rmp_serde::from_slice(&wire(&rename)).unwrap(),
+            AppAgentRequest::Rename { name, .. } if name == "Ada"
+        ));
+        let publish = old::AppAgentRequest::PublishProfile {
+            pubkey: "a".repeat(64),
+        };
+        assert!(matches!(
+            rmp_serde::from_slice(&wire(&publish)).unwrap(),
+            AppAgentRequest::PublishProfile { .. }
+        ));
+        assert!(matches!(
+            rmp_serde::from_slice(&wire(&old::AppAgentRequest::List)).unwrap(),
+            AppAgentRequest::List
+        ));
+    }
 }

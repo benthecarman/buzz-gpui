@@ -161,6 +161,7 @@ async fn custody_over_rpc() {
             owner: owner.pubkey_hex(),
             agent_type: "test/echo".into(),
             name: "Ada".into(),
+            picture: Some(String::new()),
             deleted: false,
         }
     );
@@ -180,6 +181,44 @@ async fn custody_over_rpc() {
     .await
     .unwrap();
     assert_eq!(list(&client).await[0].name, "Ada Lovelace");
+
+    let picture = "https://relay.example.com/media/ada.png";
+    ask(
+        &client,
+        AppAgentRequest::SetPicture {
+            pubkey: pubkey.clone(),
+            picture: picture.into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(list(&client).await[0].picture.as_deref(), Some(picture));
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::SetPicture {
+                    pubkey: pubkey.clone(),
+                    picture: "http://relay.example.com/media/ada.png".into(),
+                },
+            )
+            .await
+        ),
+        "Choose a picture uploaded to the agent's community"
+    );
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::SetPicture {
+                    pubkey: "d".repeat(64),
+                    picture: picture.into(),
+                },
+            )
+            .await
+        ),
+        "No such agent on this device"
+    );
 
     // Bounds checked before anything is sent.
     assert_eq!(
@@ -372,6 +411,12 @@ async fn old_hosts_answer_app_agent_requests_as_unsupported() {
         pubkey: "a".repeat(64),
     };
     let message = failed(ask(&client, claim).await);
+    assert!(message.contains("does not support"), "{message}");
+    let picture = AppAgentRequest::SetPicture {
+        pubkey: "a".repeat(64),
+        picture: "https://relay.example.com/media/ada.png".into(),
+    };
+    let message = failed(ask(&client, picture).await);
     assert!(message.contains("does not support"), "{message}");
     // The connection survives, and the requests the old host knows work.
     assert!(matches!(

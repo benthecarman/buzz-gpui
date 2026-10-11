@@ -8,6 +8,7 @@
 //! harness agent controller.
 
 mod hosting;
+mod pictures;
 
 use crate::api::{AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol};
 use crate::profile::authorization;
@@ -17,8 +18,9 @@ use buzz_agent_controller::{
 };
 use buzz_host_rpc::Peer;
 use hosting::{Holder, Hosting};
+use pictures::{Picture, Pictures};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -66,6 +68,7 @@ struct Staged {
 #[derive(Clone)]
 pub(crate) struct AppAgentHost {
     agents: AppAgents,
+    pictures: Pictures,
     credentials: Arc<dyn Credentials>,
     /// Each key after its first read, so only create and first use reach the
     /// credential store, whose lock refuses rather than waits.
@@ -100,13 +103,14 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| "Native credential operation failed".to_owned())?
 }
 
-fn summary(agent: AppAgent) -> AppAgentSummary {
+fn summary(agent: AppAgent, picture: Picture) -> AppAgentSummary {
     AppAgentSummary {
         pubkey: agent.pubkey,
         relay: agent.relay,
         owner: agent.owner,
         agent_type: agent.agent_type,
         name: agent.name,
+        picture: Some(picture.picture),
         deleted: agent.deleted,
     }
 }
@@ -116,6 +120,7 @@ impl AppAgentHost {
     pub(crate) fn new(path: PathBuf, credentials: Arc<dyn Credentials>) -> Self {
         let hosts = path.with_file_name("hosts");
         Self {
+            pictures: Pictures::open(path.with_file_name("pictures.json")),
             agents: AppAgents::open(path),
             credentials,
             keys: Arc::default(),
@@ -171,10 +176,20 @@ impl AppAgentHost {
         use AppAgentResponse as A;
         match request {
             R::List => {
-                let agents = self.agents.clone();
-                blocking(move || Ok(agents.list()?.into_iter().map(summary).collect()))
-                    .await
-                    .map(A::Agents)
+                let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
+                blocking(move || {
+                    let mut pictures: BTreeMap<String, Picture> = pictures.all()?;
+                    Ok(agents
+                        .list()?
+                        .into_iter()
+                        .map(|agent| {
+                            let picture = pictures.remove(&agent.pubkey).unwrap_or_default();
+                            summary(agent, picture)
+                        })
+                        .collect())
+                })
+                .await
+                .map(A::Agents)
             }
             R::CreatePrepare {
                 request_id,
@@ -194,12 +209,24 @@ impl AppAgentHost {
                     .await
                     .map(|()| A::Done)
             }
+            R::SetPicture { pubkey, picture } => {
+                let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
+                blocking(move || {
+                    agents.get(&pubkey)?;
+                    pictures.set(&pubkey, &picture)
+                })
+                .await
+                .map(|()| A::Done)
+            }
             R::Delete { pubkey } => self.delete(pubkey).await.map(|()| A::Done),
             R::Forget { pubkey } => {
-                let agents = self.agents.clone();
-                blocking(move || agents.forget(&pubkey))
-                    .await
-                    .map(|()| A::Done)
+                let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
+                blocking(move || {
+                    agents.forget(&pubkey)?;
+                    pictures.forget(&pubkey)
+                })
+                .await
+                .map(|()| A::Done)
             }
             R::Publish { pubkey, event } => self.publish(pubkey, event).await.map(A::Event),
             R::PublishProfile { pubkey } => self.publish_profile(pubkey).await.map(|()| A::Done),
@@ -342,7 +369,7 @@ impl AppAgentHost {
                 host.agents
                     .commit(pending.prepared, &tag, host.credentials.as_ref())?;
             keys.insert(agent.pubkey.clone(), Arc::new(key));
-            Ok(summary(agent))
+            Ok(summary(agent, Picture::default()))
         })
         .await
     }
@@ -373,23 +400,27 @@ impl AppAgentHost {
         serde_json::to_string(&signed).map_err(|_| "Invalid agent event".into())
     }
 
-    /// Publishes the agent's profile if its name differs from the last one
-    /// its community accepted. Safe to call any time; one runs per agent at
-    /// a time.
+    /// Publishes the agent's profile if its name or picture differs from
+    /// the last one its community accepted. Safe to call any time; one runs
+    /// per agent at a time.
     async fn publish_profile(&self, pubkey: String) -> Result<()> {
         let turn = self.profile_turn(&pubkey);
         let _turn = turn.lock().await;
         let agent = self.agent(pubkey).await?;
-        if agent.profile.as_ref().map(|last| &last.name) == Some(&agent.name) {
+        let pictures = self.pictures.clone();
+        let saved = agent.pubkey.clone();
+        let picture = blocking(move || pictures.get(&saved)).await?;
+        if picture.current(&agent) {
             return Ok(());
         }
         let (agent, key) = self.key(agent).await?;
-        let signed = post(&agent, &key, agent.profile_event(&key)?).await?;
+        let event = pictures::profile_event(&agent, &key, &picture.picture)?;
+        let signed = post(&agent, &key, event).await?;
         let created_at = signed
             .get("created_at")
             .and_then(Value::as_u64)
             .ok_or("Invalid agent event")?;
-        let agents = self.agents.clone();
+        let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
         blocking(move || {
             agents.published(
                 &agent.pubkey,
@@ -397,7 +428,8 @@ impl AppAgentHost {
                     name: agent.name,
                     created_at,
                 },
-            )
+            )?;
+            pictures.published(&agent.pubkey, picture.picture, created_at)
         })
         .await
     }
