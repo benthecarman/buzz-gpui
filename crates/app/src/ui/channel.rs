@@ -574,6 +574,7 @@ impl ChannelPage {
     }
 
     fn send(&mut self, submission: Submission, window: &mut Window, cx: &mut Context<Self>) {
+        crate::perf::begin(crate::perf::SEND);
         if submission.editing.is_some() {
             self.message_actions
                 .update(cx, |actions, cx| actions.save_edit(submission, window, cx));
@@ -864,6 +865,14 @@ impl Render for ChannelPage {
             window.focus(&self.focus, cx);
         }
         let snapshot = self.model.read(cx).snapshot.clone();
+        if crate::perf::on() && !self.items.is_empty() {
+            use crate::perf::{STARTUP, SWITCH, shown};
+            shown(SWITCH, "timeline");
+            match snapshot.restored {
+                true => shown(STARTUP, "timeline.cached"),
+                false => shown(STARTUP, "timeline.live"),
+            }
+        }
         let narrow = window.viewport_size().width <= typing::NARROW;
         let inset = if narrow { px(12.) } else { px(24.) };
         let owned = typing::owned_agents(cx);
@@ -871,6 +880,9 @@ impl Render for ChannelPage {
         let directory = Directory::of(community, Some(&self.channel.members), cx);
         let names = directory.names.clone();
         let viewer = community.session.viewer().to_string();
+        if crate::perf::on() {
+            probe_send(&self.items, &viewer);
+        }
 
         // Who is typing, and which of the viewer's agents work here.
         let roots: HashSet<String> = self.items.iter().map(|item| item.row.id.to_hex()).collect();
@@ -1134,6 +1146,28 @@ impl Render for ChannelPage {
             .children(status)
             .child(div().relative().children(typing).child(composer))
             .children(overlays)
+    }
+}
+
+/// Times a send from Enter to its optimistic row and the relay's answer.
+fn probe_send(items: &[message::Item], viewer: &str) {
+    use crate::perf::{SEND, logged, shown};
+    let Some(own) = items
+        .iter()
+        .rev()
+        .find(|item| item.row.author.to_hex() == viewer)
+    else {
+        return;
+    };
+    let sending = own
+        .row
+        .delivery
+        .as_ref()
+        .is_some_and(|d| d.status == buzz_relay_client::fold::Delivery::Sending);
+    if sending {
+        shown(SEND, "optimistic");
+    } else if logged(SEND, "optimistic") {
+        shown(SEND, "confirmed");
     }
 }
 

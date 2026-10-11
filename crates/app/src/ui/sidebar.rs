@@ -889,6 +889,9 @@ impl ChannelSidebar {
     ) -> AnyElement {
         let c = *cx.colors();
         let snapshot = self.community.read(cx).snapshot.clone();
+        if crate::perf::on() {
+            probe_snapshot(&snapshot);
+        }
         if self.dragging.is_some() && !cx.has_active_drag() {
             self.dragging = None;
         }
@@ -984,6 +987,10 @@ impl ChannelSidebar {
         let edges = self.unread_edges(&sections, &snapshot);
         self.bounds.borrow_mut().clear();
 
+        if ready && !sections.is_empty() {
+            crate::perf::shown(crate::perf::STARTUP, "sidebar");
+            crate::perf::shown(crate::perf::SWITCH, "sidebar");
+        }
         let mut list = div()
             .id("sidebar")
             .flex()
@@ -1281,6 +1288,28 @@ fn empty(message: SharedString, c: &buzz_ui::Colors) -> Div {
         .text_body_sm()
         .text_color(c.text_subtle)
         .child(message)
+}
+
+/// Times what the shown community's sidebar waits for at startup.
+fn probe_snapshot(snapshot: &SessionSnapshot) {
+    use crate::perf::{STARTUP, SWITCH, shown};
+    let reached = [
+        (snapshot.cached, "snapshot.cached"),
+        (
+            snapshot.channels.iter().any(|c| c.cached),
+            "snapshot.cached_channels",
+        ),
+        (snapshot.live, "snapshot.live"),
+        (snapshot.roster == RosterStatus::Ready, "snapshot.roster"),
+        (snapshot.sidebar.data.is_some(), "snapshot.preferences"),
+        (snapshot.unread.observed, "snapshot.unread"),
+    ];
+    for (reached, step) in reached {
+        if reached {
+            shown(STARTUP, step);
+            shown(SWITCH, step);
+        }
+    }
 }
 
 #[cfg(test)]

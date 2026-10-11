@@ -424,6 +424,7 @@ impl Workspace {
 
     /// Opens a thread beside the channel and records the visit.
     pub fn open_thread(&mut self, root: EventId, window: &mut Window, cx: &mut Context<Self>) {
+        crate::perf::begin(crate::perf::THREAD);
         self.show_thread(root, false, window, cx);
         self.record(cx);
     }
