@@ -3,7 +3,8 @@
 //!
 //! `BUZZ_PERF=1` logs each flow's steps to stderr, prefixed `[buzz::perf]`,
 //! as milliseconds since the flow began; `BUZZ_PERF=frames` also logs the
-//! CPU time of every frame (render, layout and paint, before the GPU).
+//! CPU time of every frame (render, layout and paint, before the GPU) and
+//! when it ended, after the newest flow began.
 //! Off, every probe is one relaxed atomic load.
 
 use std::cell::RefCell;
@@ -101,7 +102,11 @@ pub fn frame_end() {
             && FRAMES.load(Ordering::Relaxed)
         {
             let ms = now.duration_since(started).as_secs_f64() * 1000.;
-            eprintln!("[buzz::perf] frame {ms:.2} ms");
+            // The newest flow is the input the frame answers.
+            let since = state.flows.last().map_or(0., |flow| {
+                now.duration_since(flow.started).as_secs_f64() * 1000.
+            });
+            eprintln!("[buzz::perf] frame {ms:.2} ms (+{since:.1} ms)");
         }
     });
 }

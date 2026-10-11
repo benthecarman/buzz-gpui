@@ -313,8 +313,9 @@ impl Render for Root {
             launch.update(self.workspace.read(cx).launch_content(cx), Instant::now());
             launch.render(window, cx)
         });
-        if launch.is_none() {
-            self.launch = None;
+        if launch.is_none() && self.launch.take().is_some() {
+            // The launch surface is gone: the app shows.
+            crate::perf::shown(crate::perf::STARTUP, "launch_surface_gone");
         }
         div()
             .relative()
