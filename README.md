@@ -29,6 +29,53 @@ tray icons through the AppIndicator extension, which Ubuntu turns on.
 Agents on the laptop run inside the app. Their keys are kept in the system
 keyring, and they stop when the app quits.
 
+## Laptop: install the app (macOS)
+
+The macOS build is not signed or notarized. It needs GStreamer from
+Homebrew to play audio and video:
+
+```sh
+brew install gstreamer
+```
+
+1. Open `Buzz-<version>-macos-arm64.dmg` (Apple silicon) or
+   `Buzz-<version>-macos-x86_64.dmg` (Intel).
+2. Drag Buzz to Applications.
+3. The first time, right-click Buzz in Applications and choose Open. If
+   macOS still refuses, run `xattr -dr com.apple.quarantine /Applications/Buzz.app`.
+
+Build the image on a Mac with `scripts/package-macos.sh`. It writes
+`dist/Buzz-<version>-macos-<arch>.dmg` for the Mac's own architecture.
+
+## Laptop: install the app (Windows)
+
+The Windows build is not signed. It carries the GStreamer libraries and
+plugins it needs, so nothing else has to be installed.
+
+1. Extract `Buzz-<version>-windows-x86_64.zip`.
+2. Run `Buzz\bin\buzz-gpui.exe`. If SmartScreen stops it, choose More info,
+   then Run anyway.
+
+Keep the `bin` and `lib` folders together: GStreamer finds its plugins in
+`lib` next to `bin`. The zip also holds `buzzd.exe`.
+
+Build it on Windows with GStreamer's MSVC runtime and development
+installers, `cargo build --release -p buzz-gpui -p buzzd`, then
+`python scripts/package-windows.py <GStreamer root>` (needs `pip install
+pefile`). It writes `dist/Buzz-<version>-windows-x86_64.zip`.
+
+### What macOS and Windows do not have yet
+
+The system tray, desktop notifications, the hand-off to a running app on a
+second launch, and `buzz://` links work on Linux only. On Windows, hosts and
+`buzzd` listen and connect over `tcp://` only, not `unix://`.
+
+### Builds
+
+The Build workflow makes all of these packages. It runs by hand, for pull
+requests that change it, and for `v*` tags, which also attach the packages
+to a GitHub release.
+
 ## Dev server: run `buzzd` (NixOS)
 
 Add the flake as an input and enable the module:
