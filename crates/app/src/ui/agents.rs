@@ -36,7 +36,7 @@ mod teams;
 pub(crate) mod wake;
 
 pub(crate) use create::OpenHarnesses;
-pub(crate) use edit::EditDialog;
+pub(crate) use edit::{EditDialog, read_picture};
 pub(crate) use editor::Dismissed as EditorDismissed;
 
 /// Hooks agent snapshots, teams and the catalog into chat at startup, so

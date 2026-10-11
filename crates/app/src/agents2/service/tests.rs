@@ -307,6 +307,7 @@ fn a_claim_notices_a_changed_agent_or_type() {
         agent_type: "p/kind".into(),
         owner: "a".repeat(64),
         relay: "wss://relay.example.com".into(),
+        picture: None,
         attention: Arc::default(),
         skipped: Arc::default(),
         timers: Arc::default(),

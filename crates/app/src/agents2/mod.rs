@@ -34,7 +34,7 @@ pub use registry::{
 };
 #[allow(unused_imports)]
 pub use runtime::{AgentHandle, Cancellation, Delivery, Trigger};
-pub use service::{Agents2, Status};
+pub use service::{Agents2, PICTURES_UNSUPPORTED, Status};
 
 /// One agent in the selected community.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +46,10 @@ pub struct Agent {
     pub owner: String,
     /// The canonical `wss://` community origin it was created for.
     pub relay: String,
+    /// The picture its host saved for its profile; empty for none. `None`
+    /// when its host is from before pictures, so only its community's
+    /// profile knows it.
+    pub picture: Option<String>,
     pub attention: Arc<BTreeMap<String, AttentionObject>>,
     /// Stored attention objects that are invalid or over a limit, by slug.
     pub skipped: Arc<BTreeMap<String, SkippedObject>>,
@@ -59,6 +63,8 @@ pub struct Agent {
 #[derive(Clone, Debug, Default)]
 pub struct AgentChange {
     pub name: Option<String>,
+    /// An uploaded picture's URL; empty removes it.
+    pub picture: Option<String>,
     pub config: Option<Value>,
     pub attention: Vec<(String, Option<Value>)>,
 }

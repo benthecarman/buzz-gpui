@@ -421,21 +421,31 @@ impl Agents2Page {
     }
 }
 
-/// The agent's profile picture, as its community's profiles have it.
-fn agent_picture(agent: &Agent, cx: &App) -> Option<ImageSource> {
+/// The community the agent was created for, if it is added.
+fn agent_community(agent: &Agent, cx: &App) -> Option<Entity<crate::community::Community>> {
     let relay = crate::ui::agents::inventory::origin(&agent.relay);
-    let community = cx
-        .global::<crate::community::AppState>()
+    cx.global::<crate::community::AppState>()
         .communities
         .iter()
-        .find(|community| community.read(cx).origin.http() == relay)?
-        .read(cx);
-    let picture = community
-        .snapshot
-        .profiles
-        .get(&agent.pubkey)?
-        .picture
-        .clone()?;
+        .find(|community| community.read(cx).origin.http() == relay)
+        .cloned()
+}
+
+/// The agent's profile picture: the one its host saved, so a change shows
+/// before its community has the new profile, else (a host from before
+/// pictures) the one its community's profiles have.
+fn agent_picture(agent: &Agent, cx: &App) -> Option<ImageSource> {
+    let community = agent_community(agent, cx)?;
+    let community = community.read(cx);
+    let picture = match &agent.picture {
+        Some(picture) => picture.clone(),
+        None => community
+            .snapshot
+            .profiles
+            .get(&agent.pubkey)?
+            .picture
+            .clone()?,
+    };
     (!picture.is_empty()).then(|| crate::ui::media::avatar(&picture, community.session.media()))
 }
 
@@ -962,6 +972,9 @@ pub struct Build {
     /// Escape blurs too, and blur saves; this skips that one save.
     cancelled: bool,
     name_error: Option<SharedString>,
+    /// A picture is uploading or saving.
+    picture_busy: bool,
+    picture_error: Option<SharedString>,
     copied: usize,
     copied_shown: bool,
     tabs: Entity<AgentTabs>,
@@ -1011,6 +1024,8 @@ impl Build {
             shown: current,
             cancelled: false,
             name_error: None,
+            picture_busy: false,
+            picture_error: None,
             copied: 0,
             copied_shown: false,
             tabs,
@@ -1079,6 +1094,121 @@ impl Build {
             }
         })
         .detach();
+    }
+
+    /// Picks an image, uploads it to the agent's community and saves it as
+    /// the agent's picture, which its host then publishes in its profile.
+    fn upload_picture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self.current(cx) else {
+            return;
+        };
+        if agent.picture.is_none() {
+            self.picture_error = Some(crate::agents2::PICTURES_UNSUPPORTED.into());
+            return cx.notify();
+        }
+        let Some(community) = agent_community(&agent, cx) else {
+            self.picture_error =
+                Some("Connect to the agent’s community to change its picture.".into());
+            return cx.notify();
+        };
+        let session = community.read(cx).session.clone();
+        // Development only: a headless session has no file dialog.
+        let dev_file = std::env::var_os("BUZZ_DEV_PICK_FILE").map(std::path::PathBuf::from);
+        let paths = dev_file.is_none().then(|| {
+            cx.prompt_for_paths(PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Choose a picture".into()),
+            })
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = match (dev_file, paths) {
+                (Some(path), _) => vec![path],
+                (None, Some(paths)) => match paths.await {
+                    Ok(Ok(Some(paths))) => paths,
+                    _ => return,
+                },
+                (None, None) => return,
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.picture_busy = true;
+                this.picture_error = None;
+                cx.notify();
+            });
+            let file = cx
+                .background_executor()
+                .spawn(async move { crate::ui::agents::read_picture(&path) })
+                .await;
+            let uploaded = match file {
+                Ok(file) => buzz_relay_client::upload::upload(session.media(), file)
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|blob| {
+                        if !blob.mime.starts_with("image/") {
+                            Err("The server did not return an image.".to_string())
+                        } else if buzz_relay_client::account::picture_error(&blob.url).is_some() {
+                            Err("The server returned a picture link that can’t be used.".into())
+                        } else {
+                            Ok(blob.url)
+                        }
+                    }),
+                Err(error) => Err(error),
+            };
+            let saved = match uploaded {
+                Ok(url) => match this.update(cx, |this, cx| this.save_picture(url, cx)) {
+                    Ok(task) => task.await,
+                    Err(_) => return,
+                },
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.picture_busy = false;
+                this.picture_error = saved.err().map(Into::into);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_picture(
+        &mut self,
+        picture: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let Some(service) = Agents2::global(cx) else {
+            return Task::ready(Err("Agents2 is not running".into()));
+        };
+        let pubkey = self.pubkey.clone();
+        service.update(cx, |service, cx| {
+            service.save(
+                &pubkey,
+                AgentChange {
+                    picture: Some(picture),
+                    ..Default::default()
+                },
+                cx,
+            )
+        })
+    }
+
+    fn remove_picture(&mut self, cx: &mut Context<Self>) {
+        self.picture_busy = true;
+        self.picture_error = None;
+        let task = self.save_picture(String::new(), cx);
+        cx.spawn(async move |this, cx| {
+            let saved = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.picture_busy = false;
+                this.picture_error = saved.err().map(Into::into);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1176,6 +1306,53 @@ impl Render for Build {
             }))
             .child(TextField::new(&self.name).invalid(self.name_error.is_some()))
             .children(problem(self.name_error.as_ref(), &c));
+        let shown = agent_picture(&agent, cx);
+        let has_picture = shown.is_some();
+        let picture = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(rems(0.5))
+            .child(
+                div().flex_none().size(rems(6.)).child(
+                    Avatar::new(agent.name.clone())
+                        .size(AvatarSize::Px(96.))
+                        .squircle()
+                        .when_some(shown, |avatar, picture| avatar.image(picture)),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(rems(0.5))
+                    .child(
+                        Button::new(
+                            "agent-picture",
+                            if has_picture {
+                                "Change picture"
+                            } else {
+                                "Upload picture"
+                            },
+                        )
+                        .size(ButtonSize::Sm)
+                        .loading(self.picture_busy)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if !this.picture_busy {
+                                this.upload_picture(window, cx)
+                            }
+                        })),
+                    )
+                    .when(has_picture, |this| {
+                        this.child(
+                            Button::new("agent-picture-remove", "Remove")
+                                .size(ButtonSize::Sm)
+                                .disabled(self.picture_busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.remove_picture(cx))),
+                        )
+                    }),
+            )
+            .children(problem(self.picture_error.as_ref(), &c));
         let rail = div()
             .id("agents2-rail")
             .flex()
@@ -1195,16 +1372,7 @@ impl Render for Build {
                         .border_r_1()
                 }
             })
-            .child(
-                div().flex_none().size(rems(6.)).child(
-                    Avatar::new(agent.name.clone())
-                        .size(AvatarSize::Px(96.))
-                        .squircle()
-                        .when_some(agent_picture(&agent, cx), |avatar, picture| {
-                            avatar.image(picture)
-                        }),
-                ),
-            )
+            .child(picture)
             .child(name_field)
             .child(facts)
             .child(

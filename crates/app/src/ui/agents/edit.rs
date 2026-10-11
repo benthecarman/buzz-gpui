@@ -55,7 +55,7 @@ impl Owner for EditDialog {
 }
 
 /// Reads a chosen picture, as Settings → Profile does.
-fn read_picture(path: &std::path::Path) -> Result<UploadFile, String> {
+pub(crate) fn read_picture(path: &std::path::Path) -> Result<UploadFile, String> {
     let size = std::fs::metadata(path)
         .map_err(|error| format!("Couldn’t read that file: {error}"))?
         .len();

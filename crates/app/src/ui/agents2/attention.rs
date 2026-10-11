@@ -1692,6 +1692,7 @@ mod tests {
             agent_type: "p/t".into(),
             owner: "b".repeat(64),
             relay: "wss://relay.example".into(),
+            picture: None,
             attention: Arc::new(attention),
             skipped: Arc::default(),
             timers: Arc::default(),

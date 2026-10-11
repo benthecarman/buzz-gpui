@@ -301,6 +301,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Peek: avatar, "type · summary", Close, "Open", type Peek slot, "Enable the plugin…" note, "Wakes on" summary | Agents2Page.tsx:318-370; src/features/agents2/AttentionPanel.tsx:73-101 | DONE (ui/agents2/page.rs) | — | M |
 | New agent form: Name, Type radio cards, "Create and set up", error copy | Agents2Page.tsx:372-458; src/features/agents2/service.ts:339-363 | DONE (ui/agents2/page.rs) | — | M |
 | Build view: identity rail (avatar, inline rename, Type, Key + copy "Copied"), "Delete agent", tab host (type tabs then "Attention") | Agents2Page.tsx:460-574; src/bundled/agents2/AgentTabs.tsx; src/features/agents2/tabs.tsx | DONE (ui/agents2/page.rs, ui/agents2/tabs.rs) | — | M |
+| Port-only: picture editing on the Build view ("Upload picture"/"Change picture", "Remove"), uploaded to the agent's community and published in its profile | n/a (buzz-app's Agents2 agents have no picture; profile content is `name` and `bot`) | DIFFERENT (kept): an addition of ours. The host saves the picture beside the identities and publishes it with the name (host/app_agents/pictures.rs, `AppAgentRequest::SetPicture`); hosts from before it answer "Update the agent's host to change its picture." (ui/agents2/page.rs) | Nothing | S |
 | Delete dialog "Delete {name}?" and background cleanup (leave channels, archive, forget; retried on reconnect) | src/features/agents2/AgentManage.tsx:13-75; service.ts:493-597 | DONE (ui/agents2/manage.rs, app/src/agents2/cleanup.rs) | Cleanup reads a relay with no NIP-IA snapshot yet as "not archived" (buzz-app waits for one). | M |
 | Agents2 tabs inside the profile panel and "Delete agent" there | src/bundled/profiles/ProfilePanel.tsx:181-190, 425-492 | DONE (ui/agents2/mod.rs `profile_sections`, hooked in ui/workspace/companion.rs) | Only the viewer's own profile opens in the companion panel today, so the hook shows once the profile panel (channels.md) opens other people's profiles there. | M |
 
@@ -651,7 +652,7 @@ These features match buzz-app closely enough and are not listed above.
 | Status | Rows |
 |---|---|
 | DONE | 378 |
-| DIFFERENT | 7 |
+| DIFFERENT | 8 |
 | MISSING | 0 |
 | SKIPPED | 8 |
 | N/A | 12 |

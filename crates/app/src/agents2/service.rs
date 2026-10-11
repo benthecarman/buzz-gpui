@@ -42,6 +42,8 @@ pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
 const TIMER_TICK: Duration = Duration::from_secs(5);
 /// Bounds one cleanup attempt.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// What setting a picture on a host from before pictures answers.
+pub const PICTURES_UNSUPPORTED: &str = "Update the agent's host to change its picture.";
 
 /// Whether the agent list could be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -862,6 +864,7 @@ impl Agents2 {
             agent_type: summary.agent_type.clone(),
             owner: summary.owner.clone(),
             relay: summary.relay.clone(),
+            picture: summary.picture.clone(),
             attention: record.attention.clone(),
             skipped: record.skipped.clone(),
             timers: record.timers.clone(),
@@ -1334,7 +1337,7 @@ impl Agents2 {
         })
     }
 
-    /// Changes an agent's name, config or attention.
+    /// Changes an agent's name, picture, config or attention.
     pub fn save(
         &mut self,
         pubkey: &str,
@@ -1382,15 +1385,34 @@ impl Agents2 {
         }
         self.update(cx);
         cx.notify();
-        let Some(name) = name.filter(|name| *name != identity.summary.name) else {
+        let name = name.filter(|name| *name != identity.summary.name);
+        let picture = change
+            .picture
+            .map(|picture| picture.trim().to_owned())
+            .filter(|picture| identity.summary.picture.as_ref() != Some(picture));
+        if name.is_none() && picture.is_none() {
             return Task::ready(Ok(()));
-        };
+        }
         let link = link(&identity.host, cx);
         let pubkey = pubkey.to_owned();
         cx.spawn(async move |this, cx| {
-            link.app_agent(AppAgentRequest::Rename { pubkey, name })
-                .await?;
-            // Shows the new name and publishes it as the agent's profile.
+            if let Some(picture) = picture {
+                let pubkey = pubkey.clone();
+                link.app_agent(AppAgentRequest::SetPicture { pubkey, picture })
+                    .await
+                    .map_err(|error| {
+                        if error == UNSUPPORTED {
+                            PICTURES_UNSUPPORTED.to_string()
+                        } else {
+                            error
+                        }
+                    })?;
+            }
+            if let Some(name) = name {
+                link.app_agent(AppAgentRequest::Rename { pubkey, name })
+                    .await?;
+            }
+            // Shows the change and publishes it as the agent's profile.
             if let Ok(refresh) = this.update(cx, |this, cx| this.refresh(cx)) {
                 refresh.await;
             }
