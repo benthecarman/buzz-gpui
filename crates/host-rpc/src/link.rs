@@ -16,7 +16,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 pub(crate) type Pending<R> = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<R, RpcError>>>>>;
 
 /// Queues `frame`, the request `id`, and waits up to `timeout` for its
-/// answer.
+/// answer. Fails as soon as the connection closes, since nothing can
+/// answer it then.
 pub(crate) async fn request<P: Protocol, R>(
     outgoing: &mpsc::Sender<Frame<P>>,
     pending: &Pending<R>,
@@ -30,14 +31,17 @@ pub(crate) async fn request<P: Protocol, R>(
         pending.lock().await.remove(&id);
         return Err(RpcError::Disconnected);
     }
-    match tokio::time::timeout(timeout, receiver).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err(RpcError::Disconnected),
-        Err(_) => {
-            pending.lock().await.remove(&id);
-            Err(RpcError::TimedOut)
-        }
-    }
+    let failure = tokio::select! {
+        biased;
+        answer = tokio::time::timeout(timeout, receiver) => match answer {
+            Ok(Ok(result)) => return result,
+            Ok(Err(_)) => RpcError::Disconnected,
+            Err(_) => RpcError::TimedOut,
+        },
+        () = outgoing.closed() => RpcError::Disconnected,
+    };
+    pending.lock().await.remove(&id);
+    Err(failure)
 }
 
 /// Writes queued frames until the queue closes or the connection fails.

@@ -356,6 +356,60 @@ async fn pending_request_fails_when_connection_drops() {
 }
 
 #[tokio::test]
+async fn host_request_fails_when_connection_closes() {
+    struct Silent;
+    impl ClientHandler<Test> for Silent {
+        fn handle(&self, _: String) -> BoxFuture<'static, Result<String, RpcError>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+    type Results = tokio::sync::mpsc::UnboundedSender<Result<String, RpcError>>;
+    struct Asks(Arc<Host>, Results);
+    impl HostHandler<Test> for Asks {
+        fn info(&self) -> HostInfo {
+            self.0.info()
+        }
+        fn events(&self) -> EventSource<Test> {
+            self.0.events()
+        }
+        fn handle(
+            &self,
+            peer: Peer<Test>,
+            _: Request,
+        ) -> BoxFuture<'static, Result<String, RpcError>> {
+            // Outlives the connection, as work a host starts for it can.
+            let results = self.1.clone();
+            tokio::spawn(async move {
+                let _ = results.send(peer.request("sign".into()).await);
+            });
+            Box::pin(async { Ok(String::new()) })
+        }
+    }
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        Arc::new(Asks(Host::new(1), results)),
+        ServerOptions::default(),
+    ));
+    let client = HostClient::spawn(
+        &tokio::runtime::Handle::current(),
+        Arc::new(connector),
+        Arc::new(Silent),
+        options(None),
+    );
+    let mut state = client.state();
+    wait_for(&mut state, connected).await;
+    client.request(Request::Echo("ask".into())).await.unwrap();
+    drop(client);
+    // Well before the host's 120 s request timeout.
+    let result = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .expect("the request outlived its connection");
+    assert_eq!(result, Some(Err(RpcError::Disconnected)));
+}
+
+#[tokio::test]
 async fn lagging_client_is_told_to_resync() {
     let host = Host::new(2);
     let (connector, listener) = transport::memory();
