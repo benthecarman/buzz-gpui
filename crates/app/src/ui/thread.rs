@@ -92,6 +92,9 @@ pub struct ThreadPanel {
     /// Draws its own "Thread" header. Off inside a tab pane, whose tab
     /// strip names and closes it.
     pub show_header: bool,
+    /// A saved draft opened this thread (`requireReadyRoot`): the composer
+    /// waits until the loaded root is the draft's own.
+    pub require_ready_root: bool,
     /// Exact mode: the message to reveal once its thread has loaded.
     revealing: Option<EventId>,
     /// The panel, focused when it opens; focus here (the history or the
@@ -238,6 +241,7 @@ impl ThreadPanel {
             error: None,
             on_close,
             show_header: false,
+            require_ready_root: false,
             revealing: exact.then_some(root_id),
             focus,
             reporter: Reporter::default(),
@@ -625,7 +629,16 @@ impl ThreadPanel {
     }
 
     fn can_send(&self) -> bool {
-        self.reply_parent.is_none() || self.selected_parent().is_some()
+        (self.reply_parent.is_none() || self.selected_parent().is_some())
+            && (!self.require_ready_root
+                || (self.snapshot.status == ThreadStatus::Ready && self.snapshot.error.is_none()))
+    }
+
+    /// The loaded root is the one the draft names, ready to reply to.
+    fn root_verified(&self) -> bool {
+        !self.require_ready_root
+            || (self.snapshot.root.as_ref().map(|root| root.id) == Some(self.root_id)
+                && self.snapshot.target_status == Some(TargetStatus::Ready))
     }
 
     /// An older page failed while the root is shown: retry that page.
@@ -958,6 +971,21 @@ impl Render for ThreadPanel {
         };
 
         let mut status: Vec<AnyElement> = Vec::new();
+        if self.require_ready_root
+            && snapshot
+                .root
+                .as_ref()
+                .is_some_and(|root| root.id != self.root_id)
+        {
+            status.push(
+                note(
+                    "This saved draft does not identify a thread root. Open its origin to check \
+                     the destination."
+                        .into(),
+                )
+                .into_any_element(),
+            );
+        }
         if snapshot.status == ThreadStatus::Loading && self.entries.is_empty() {
             status.push(note("Loading thread…".into()).into_any_element());
         }
@@ -1044,7 +1072,7 @@ impl Render for ThreadPanel {
                     .text_color(c.text_warning)
                     .child(error)
             }))
-            .when(snapshot.root.is_some(), |this| {
+            .when(snapshot.root.is_some() && self.root_verified(), |this| {
                 this.child(
                     div()
                         .relative()

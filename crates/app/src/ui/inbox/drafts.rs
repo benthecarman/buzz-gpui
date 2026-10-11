@@ -538,14 +538,16 @@ impl DraftDetail {
                         let _ = detail.update(cx, |_, cx| cx.emit(DraftEvent::Close));
                     });
                     let panel = cx.new(|cx| {
-                        ThreadPanel::new(
+                        let mut panel = ThreadPanel::new(
                             community.clone(),
                             channel.id.clone(),
                             root,
                             on_close,
                             window,
                             cx,
-                        )
+                        );
+                        panel.require_ready_root = true;
+                        panel
                     });
                     let composer = panel.read(cx).composer_entity();
                     subscriptions.push(cx.subscribe(
