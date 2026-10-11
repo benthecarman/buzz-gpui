@@ -64,11 +64,19 @@ installers, `cargo build --release -p buzz-gpui -p buzzd`, then
 `python scripts/package-windows.py <GStreamer root>` (needs `pip install
 pefile`). It writes `dist/Buzz-<version>-windows-x86_64.zip`.
 
-### What macOS and Windows do not have yet
+### What differs on macOS and Windows
 
-The system tray, desktop notifications, the hand-off to a running app on a
-second launch, and `buzz://` links work on Linux only. On Windows, hosts and
-`buzzd` listen and connect over `tcp://` only, not `unix://`.
+[docs/port/PLATFORMS.md](docs/port/PLATFORMS.md) lists every difference.
+The ones you may notice:
+
+- macOS shows notifications only for Buzz run from `Buzz.app`, and asks
+  for permission on the first one.
+- Windows has no channel terminals, and Buzz cannot install Pi or Claude
+  Code there; install them yourself and Buzz finds them on `PATH`.
+- On Windows, hosts and `buzzd` listen and connect over `tcp://` only, not
+  `unix://`.
+- HEIC avatars need `ffmpeg`: `brew install ffmpeg` on macOS, and on
+  Windows an `ffmpeg.exe` on `PATH`.
 
 ### Builds
 
