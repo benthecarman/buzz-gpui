@@ -88,6 +88,10 @@ arboard = "3"
 # The user's `buzz://` registration; GPUI already uses it.
 windows-registry = "0.6"
 
+[target.'cfg(windows)'.build-dependencies]
+# The executable's icon; GPUI already uses it for its manifest.
+embed-resource = "3"
+
 [package.metadata.deb]
 name = "buzz-gpui"
 maintainer = "Ben Carman <benthecarman@live.com>"

@@ -33,7 +33,7 @@ section lists what a person still has to try on real machines.
 | Dock icon click reopens a hidden window | n/a | DONE: `App::on_reopen` | n/a |
 | Quit shortcut | none (Ctrl+Q is reserved) | PLANNED: app menu with Quit Buzz (⌘Q) | n/a |
 | Window chrome | client-side: the header is the title bar, with Buzz's own minimize, maximize and close | PLANNED: transparent title bar with the system traffic lights, header inset for them | PLANNED: no system caption; the header drags the window through the OS hit test |
-| App icon | hicolor PNGs from the .deb | DONE: `.icns` in the bundle | PLANNED: icon resource in the .exe (window, taskbar, Explorer) |
+| App icon | hicolor PNGs from the .deb | DONE: `.icns` in the bundle | DONE: icon resource in the .exe (window, taskbar, Explorer) |
 | Launch at login | none | n/a: Linux has no such setting either | n/a |
 | Window position and size across launches | GPUI window bounds | DONE | DONE |
 | Machine idle for automatic away | GNOME Mutter idle monitor | DONE: `user-idle`, as buzz-app | DONE: `user-idle`, as buzz-app |
