@@ -426,24 +426,38 @@ fn saved_geometry(bounds: WindowBounds) -> serde_json::Value {
     }})
 }
 
-/// The window mode of a saved entry, which buzz-desktop leaves to the
-/// front end.
+/// The parts of a saved entry buzz-desktop leaves to the front end: the
+/// window mode, and the geometry as saved for when no screen is known.
 #[derive(Deserialize)]
 struct Mode {
     maximized: bool,
     fullscreen: bool,
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    prev_x: i32,
+    prev_y: i32,
 }
 
 /// The saved geometry, moved so the header and both control areas are on
 /// some screen; otherwise at the top of the primary work area
 /// (`window_state::restore_request`).
 fn restore_geometry(bytes: &[u8], cx: &App) -> Option<WindowBounds> {
-    use buzz_desktop::window_state::{self as state, Position, Rect, Size as Extent};
-    let saved = state::saved_geometry(bytes, LABEL)?;
-    let mode: Mode = serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|mut file| serde_json::from_value(file[LABEL].take()).ok())?;
-    let rect = |bounds: Bounds<Pixels>| Rect {
+    let areas: Vec<_> = cx
+        .displays()
+        .iter()
+        .map(|display| screen_rect(display.visible_bounds()))
+        .collect();
+    let primary = cx
+        .primary_display()
+        .map(|display| screen_rect(display.visible_bounds()));
+    restore_bounds(bytes, &areas, primary)
+}
+
+fn screen_rect(bounds: Bounds<Pixels>) -> buzz_desktop::window_state::Rect {
+    use buzz_desktop::window_state::{Position, Rect, Size as Extent};
+    Rect {
         position: Position::new(
             f32::from(bounds.origin.x).round() as i32,
             f32::from(bounds.origin.y).round() as i32,
@@ -452,20 +466,40 @@ fn restore_geometry(bytes: &[u8], cx: &App) -> Option<WindowBounds> {
             f32::from(bounds.size.width).max(0.).round() as u32,
             f32::from(bounds.size.height).max(0.).round() as u32,
         ),
+    }
+}
+
+/// [`restore_geometry`] for the given screens' work areas.
+fn restore_bounds(
+    bytes: &[u8],
+    areas: &[buzz_desktop::window_state::Rect],
+    primary: Option<buzz_desktop::window_state::Rect>,
+) -> Option<WindowBounds> {
+    use buzz_desktop::window_state::{self as state, Position, Rect, Size as Extent};
+    let saved = state::saved_geometry(bytes, LABEL)?;
+    let mode: Mode = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|mut file| serde_json::from_value(file[LABEL].take()).ok())?;
+    let real = |area: &Rect| area.size.width > 0 && area.size.height > 0;
+    let areas: Vec<Rect> = areas.iter().copied().filter(real).collect();
+    let fallback = primary.filter(real).or_else(|| areas.first().copied());
+    // Wayland reports no screens until the event loop has run, which is
+    // after this, and places windows itself. Fitting the window to no
+    // screen would shrink it to nothing, so it keeps its saved geometry.
+    let (origin, extent) = match fallback {
+        Some(fallback) => {
+            let header = f32::from(HEADER_HEIGHT) as u32;
+            state::restore_request(&saved, Position::default(), header, &areas, fallback)
+        }
+        None if mode.maximized => (
+            Position::new(mode.prev_x, mode.prev_y),
+            Extent::new(mode.width, mode.height),
+        ),
+        None => (
+            Position::new(mode.x, mode.y),
+            Extent::new(mode.width, mode.height),
+        ),
     };
-    let areas: Vec<Rect> = cx
-        .displays()
-        .iter()
-        .map(|display| rect(display.visible_bounds()))
-        .collect();
-    let fallback = cx
-        .primary_display()
-        .map(|display| rect(display.visible_bounds()))
-        .or_else(|| areas.first().copied())
-        .unwrap_or_default();
-    let header = f32::from(HEADER_HEIGHT) as u32;
-    let (origin, extent) =
-        state::restore_request(&saved, Position::default(), header, &areas, fallback);
     let bounds = Bounds::new(
         point(px(origin.x as f32), px(origin.y as f32)),
         size(px(extent.width as f32), px(extent.height as f32)),
@@ -650,6 +684,36 @@ mod tests {
         let file: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(file[LABEL]["maximized"], true);
         assert_eq!(file[LABEL]["fullscreen"], false);
+    }
+
+    #[test]
+    fn restores_the_saved_size_before_any_screen_is_known() {
+        use buzz_desktop::window_state::{Position, Rect, Size as Extent};
+        let inner = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(800.)));
+        let json = saved_geometry(WindowBounds::Windowed(inner)).to_string();
+        let size_of = |bounds: Option<WindowBounds>| {
+            let size = bounds.unwrap().get_bounds().size;
+            (f32::from(size.width), f32::from(size.height))
+        };
+        // Wayland at launch: no screens yet, or ones with no size.
+        assert_eq!(
+            size_of(restore_bounds(json.as_bytes(), &[], None)),
+            (1200., 800.)
+        );
+        let empty = Rect::default();
+        assert_eq!(
+            size_of(restore_bounds(json.as_bytes(), &[empty], Some(empty))),
+            (1200., 800.)
+        );
+        // A known screen too small for it still shrinks it to fit.
+        let small = Rect {
+            position: Position::new(0, 0),
+            size: Extent::new(1000, 700),
+        };
+        assert_eq!(
+            size_of(restore_bounds(json.as_bytes(), &[], Some(small))),
+            (1000., 700.)
+        );
     }
 
     #[test]
