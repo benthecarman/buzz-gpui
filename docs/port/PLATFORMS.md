@@ -31,8 +31,8 @@ section lists what a person still has to try on real machines.
 | Bringing the window forward (hand-off, tray, notification) | xdg-activation token (`gpui_linux::set_activation_token`) | DONE: the app is activated with the window | DONE: GPUI's activation takes the foreground |
 | Tray icon: open, quit, unread attention, minimize or close to tray | StatusNotifierItem over D-Bus (`tray/linux.rs`) | DONE: menu-bar item through `tray-icon` (`tray/native.rs`); a click opens its menu, as on every menu-bar item | DONE: notification-area icon through `tray-icon`; a click opens Buzz, a right-click the menu |
 | Dock icon click reopens a hidden window | n/a | DONE: `App::on_reopen` | n/a |
-| Quit shortcut | none (Ctrl+Q is reserved) | PLANNED: app menu with Quit Buzz (⌘Q) | n/a |
-| Window chrome | client-side: the header is the title bar, with Buzz's own minimize, maximize and close | DONE: transparent title bar with the system's window buttons at buzz-app's position, and the header inset 80 px for them | DONE: no system caption; Buzz's own buttons, and the header is the caption in the system's hit test (drag, double-click, Alt+Space menu, snapping). DIFFERENT: no Snap Layouts flyout on the maximize button, which would hand its clicks to the system |
+| Quit shortcut | none (Ctrl+Q is reserved) | DONE: app menu with Quit Buzz (⌘Q) | n/a |
+| Window chrome | client-side: the header is the title bar, with Buzz's own minimize, maximize and close | DONE: transparent title bar with the system's window buttons at buzz-app's position, and the header inset 80 px for them | DONE: no system caption; Buzz's own buttons, and the header is the caption in the system's hit test (drag, double-click, right-click menu, snapping). DIFFERENT: no Snap Layouts flyout on the maximize button, which would hand its clicks to the system |
 | App icon | hicolor PNGs from the .deb | DONE: `.icns` in the bundle | DONE: icon resource in the .exe (window, taskbar, Explorer) |
 | Launch at login | none | n/a: Linux has no such setting either | n/a |
 | Window position and size across launches | GPUI window bounds | DONE | DONE |

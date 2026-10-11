@@ -57,6 +57,23 @@ impl Default for Preferences {
     }
 }
 
+#[cfg(target_os = "macos")]
+actions!(
+    buzz_app,
+    [
+        /// ⌘Q and Quit Buzz in the app menu.
+        Quit
+    ]
+);
+
+/// macOS apps quit from their menu, which the menu bar always shows.
+#[cfg(target_os = "macos")]
+fn app_menu(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| quit(cx));
+    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    cx.set_menus([Menu::new("Buzz").items([MenuItem::action("Quit Buzz", Quit)])]);
+}
+
 const DEFAULT_SIZE: Size<Pixels> = Size {
     width: px(1200.),
     height: px(800.),
@@ -104,6 +121,8 @@ impl Global for MainWindow {}
 /// [`open`].
 pub fn init(cx: &mut App) {
     cx.set_quit_mode(QuitMode::Explicit);
+    #[cfg(target_os = "macos")]
+    app_menu(cx);
     let store = cx.global::<AppState>().store.clone();
     let preferences = store
         .device_pref(PREFERENCES)
