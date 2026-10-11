@@ -1,7 +1,7 @@
 //! Where a host keeps its agents' private keys.
 
 use buzz_agent_controller::{Credentials, LegacySource, Secret};
-use buzz_credential_store::Error as StoreError;
+use buzz_keychain::Error as StoreError;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -23,8 +23,8 @@ impl Credentials for KeyringCredentials {
     /// Old Buzz keeps every agent key in one JSON map, `{"agent:<pubkey>":
     /// nsec}`, under the account `secrets` of its own service.
     fn read_legacy(&self, source: LegacySource, pubkey: &str) -> Result<Secret, String> {
-        let bytes = buzz_credential_store::read(source.keyring_service(), "secrets")
-            .map_err(store_message)?;
+        let bytes =
+            buzz_keychain::read(source.keyring_service(), "secrets").map_err(store_message)?;
         let mut map: std::collections::BTreeMap<String, String> =
             serde_json::from_slice(&bytes).map_err(|_| "Saved agent key is corrupt")?;
         let key = map
@@ -39,7 +39,7 @@ impl Credentials for KeyringCredentials {
 
     fn read(&self, id: &str, pubkey: &str) -> Result<Option<Secret>, String> {
         let account = account(id, pubkey)?;
-        match buzz_credential_store::read(&self.service, &account) {
+        match buzz_keychain::read(&self.service, &account) {
             Ok(bytes) => parse(&bytes, pubkey).map(Some),
             Err(StoreError::Absent) => Ok(None),
             Err(error) => Err(store_message(error)),
@@ -48,13 +48,12 @@ impl Credentials for KeyringCredentials {
 
     fn add(&self, id: &str, key: &Secret) -> Result<(), String> {
         let account = account(id, key.pubkey())?;
-        buzz_credential_store::add(&self.service, &account, key.hex().as_bytes())
-            .map_err(store_message)
+        buzz_keychain::add(&self.service, &account, key.hex().as_bytes()).map_err(store_message)
     }
 
     fn delete(&self, id: &str, pubkey: &str) -> Result<(), String> {
         let account = account(id, pubkey)?;
-        match buzz_credential_store::delete(&self.service, &account) {
+        match buzz_keychain::delete(&self.service, &account) {
             Ok(()) | Err(StoreError::Absent) => Ok(()),
             Err(error) => Err(store_message(error)),
         }

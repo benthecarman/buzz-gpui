@@ -1121,11 +1121,11 @@ dependencies = [
  "bech32 0.11.1",
  "blurhash",
  "buzz-agent-controller",
- "buzz-credential-store",
  "buzz-desktop",
  "buzz-host",
  "buzz-host-rpc",
  "buzz-identity",
+ "buzz-keychain",
  "buzz-pair-mobile",
  "buzz-relay-client",
  "buzz-ui",
@@ -1173,10 +1173,10 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "buzz-agent-controller",
- "buzz-credential-store",
  "buzz-desktop",
  "buzz-host-rpc",
  "buzz-identity",
+ "buzz-keychain",
  "buzz-relay-client",
  "futures",
  "libc",
@@ -1216,8 +1216,8 @@ name = "buzz-identity"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "buzz-credential-store",
  "buzz-desktop",
+ "buzz-keychain",
  "nostr 0.45.5",
  "secp256k1 0.31.1",
  "serde_json",
@@ -1225,6 +1225,15 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-keychain"
+version = "0.1.0"
+dependencies = [
+ "buzz-credential-store",
+ "security-framework",
  "zeroize",
 ]
 

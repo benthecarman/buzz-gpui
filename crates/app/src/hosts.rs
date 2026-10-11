@@ -182,7 +182,7 @@ impl Hosts {
         remotes.push(remote.clone());
         if let Err(error) = crate::config::save_hosts(&remotes) {
             if keyring.is_ok() {
-                let _ = buzz_credential_store::delete(HOST_TOKEN_SERVICE, address);
+                let _ = buzz_keychain::delete(HOST_TOKEN_SERVICE, address);
             }
             return Err(error);
         }
@@ -210,8 +210,8 @@ impl Hosts {
             .filter(|other| other.address != remote.address)
             .collect();
         crate::config::save_hosts(&remotes)?;
-        match buzz_credential_store::delete(HOST_TOKEN_SERVICE, &remote.address) {
-            Ok(()) | Err(buzz_credential_store::Error::Absent) => {}
+        match buzz_keychain::delete(HOST_TOKEN_SERVICE, &remote.address) {
+            Ok(()) | Err(buzz_keychain::Error::Absent) => {}
             Err(error) => tracing::warn!(?error, "could not delete the host token"),
         }
         let id = host.entity_id();
@@ -223,12 +223,12 @@ impl Hosts {
 }
 
 /// Replaces any token saved for this address.
-fn store_token(address: &str, token: &str) -> Result<(), buzz_credential_store::Error> {
-    match buzz_credential_store::delete(HOST_TOKEN_SERVICE, address) {
-        Ok(()) | Err(buzz_credential_store::Error::Absent) => {}
+fn store_token(address: &str, token: &str) -> Result<(), buzz_keychain::Error> {
+    match buzz_keychain::delete(HOST_TOKEN_SERVICE, address) {
+        Ok(()) | Err(buzz_keychain::Error::Absent) => {}
         Err(error) => return Err(error),
     }
-    buzz_credential_store::add(HOST_TOKEN_SERVICE, address, token.as_bytes())
+    buzz_keychain::add(HOST_TOKEN_SERVICE, address, token.as_bytes())
 }
 
 fn start_embedded(
@@ -314,7 +314,7 @@ fn remote_token(host: &RemoteHost) -> Option<String> {
     if let Some(token) = &host.token {
         return Some(token.clone());
     }
-    buzz_credential_store::read(HOST_TOKEN_SERVICE, &host.address)
+    buzz_keychain::read(HOST_TOKEN_SERVICE, &host.address)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }
