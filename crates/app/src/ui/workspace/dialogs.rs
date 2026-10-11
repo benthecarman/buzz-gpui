@@ -176,6 +176,7 @@ impl Workspace {
                         channel,
                         message: Some(message),
                         thread: None,
+                        members: false,
                     },
                 };
                 this.navigate(target, window, cx);

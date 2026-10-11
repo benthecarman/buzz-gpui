@@ -302,6 +302,7 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::overlay::begin_frame();
         let launch = self.launch.as_mut().and_then(|launch| {
             launch.update(self.workspace.read(cx).launch_content(cx), Instant::now());
             launch.render(window, cx)
@@ -316,9 +317,46 @@ impl Render for Root {
             .capture_key_down(|_, _, cx| Idle::input(cx))
             .on_mouse_move(|_, _, cx| Idle::input(cx))
             .on_scroll_wheel(|_, _, cx| Idle::input(cx))
+            .on_key_down(tab_through)
             .child(self.workspace.clone())
             .children(launch)
     }
+}
+
+/// Tab and Shift+Tab move focus through the tab stops, as a browser's
+/// do, when nothing focused took the key. A modal keeps focus, and a
+/// focus trap (the media viewer) cycles inside itself.
+fn tab_through(event: &KeyDownEvent, window: &mut Window, cx: &mut App) {
+    let keys = &event.keystroke;
+    let modifiers = keys.modifiers;
+    if keys.key != "tab" || modifiers.control || modifiers.alt || modifiers.platform {
+        return;
+    }
+    cx.stop_propagation();
+    if crate::ui::overlay::modal_shown() {
+        return;
+    }
+    let step = |window: &mut Window, cx: &mut App| {
+        if modifiers.shift {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+    };
+    let trap = gpui_kit::base::active_focus_trap(window, cx);
+    let before = window.focused(cx);
+    step(window, cx);
+    let Some(trap) = trap else {
+        return;
+    };
+    // Past the trap's last stop: on round to its first.
+    for _ in 0..10_000 {
+        if trap.contains_focused(window, cx) || window.focused(cx) == before {
+            return;
+        }
+        step(window, cx);
+    }
+    trap.focus(window, cx);
 }
 
 /// Where the window was, as tauri-plugin-window-state 2.4.1 writes it:

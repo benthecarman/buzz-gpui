@@ -17,6 +17,7 @@ use buzz_ui::{
     ActiveTheme, Appearance, Button, ButtonSize, ButtonVariant, Dialog, IconButton, IconButtonSize,
     IconName, PanelHeader, Scrim, Spinner, ThemeScope, TypeStyled,
 };
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::{Cell, RefCell};
@@ -504,7 +505,7 @@ impl Review {
         });
         let reduce = cx.reduce_motion();
         let mut review = Self {
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             selected: attachment.url.clone(),
             active: attachment,
             media,
@@ -1902,7 +1903,6 @@ impl Render for Review {
         let closing = matches!(self.motion, Motion::Closing { .. });
         div()
             .id("media-review")
-            .track_focus(&self.focus)
             .key_context("MediaReview")
             .on_key_down(cx.listener(Self::key))
             .occlude()
@@ -1969,6 +1969,8 @@ impl Render for Review {
             .when(closing, |d| d.cursor_default())
             // The comments' delete and report dialogs.
             .children(overlays)
+            // Tab stays inside the viewer (`useModalBoundary`).
+            .focus_trap("media-review-trap", &self.focus)
     }
 }
 

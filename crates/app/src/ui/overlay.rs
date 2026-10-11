@@ -11,6 +11,28 @@ pub type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 const MODAL_LAYER: usize = 1;
 const MENU_LAYER: usize = 3;
 
+thread_local! {
+    /// A modal was drawn in the frame being built, and in the last one.
+    static MODALS: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
+}
+
+/// Starts a frame: what the last one drew is what the window shows.
+pub fn begin_frame() {
+    MODALS.with(|modals| {
+        let (building, _) = modals.get();
+        modals.set((false, building));
+    });
+}
+
+/// A modal dialog shows, so Tab stays where it is rather than reaching the
+/// page behind it.
+pub fn modal_shown() -> bool {
+    MODALS.with(|modals| {
+        let (building, shown) = modals.get();
+        building || shown
+    })
+}
+
 /// A full-window layer that swallows the pointer, calling `on_dismiss` on
 /// a press outside its content.
 fn layer(id: &'static str, window: &Window, on_dismiss: Option<Dismiss>) -> Stateful<Div> {
@@ -32,6 +54,7 @@ pub fn modal(
     content: impl IntoElement,
     on_dismiss: Option<Dismiss>,
 ) -> impl IntoElement {
+    MODALS.with(|modals| modals.set((true, modals.get().1)));
     deferred(
         anchored().position(point(px(0.), px(0.))).child(
             layer("modal", window, on_dismiss).child(
