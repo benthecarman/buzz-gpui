@@ -232,10 +232,28 @@ impl AgentsPage {
                     .into_any_element(),
             }
         });
+        // An agent set up in the shown community opens its profile
+        // (`onViewProfile`); otherwise the tile manages it.
+        let view_profile = AppState::current(cx).is_some_and(|community| {
+            let community = community.read(cx).origin.http();
+            setups.iter().any(|setup| {
+                buzz_relay_client::RelayOrigin::parse(&setup.agent.relay_url)
+                    .is_ok_and(|origin| origin.http() == community)
+            })
+        });
         let manage_key = pubkey.clone();
-        let manage = cx.listener(move |this, _, _, cx| {
+        let manage = cx.listener(move |this, event: &ClickEvent, window, cx| {
             this.menu = None;
-            this.modal = Some(Modal::Manage(manage_key.clone()));
+            if view_profile {
+                crate::ui::navigation::show_profile(
+                    manage_key.clone(),
+                    event.position(),
+                    window,
+                    cx,
+                );
+            } else {
+                this.modal = Some(Modal::Manage(manage_key.clone()));
+            }
             cx.notify();
         });
         if tile {
@@ -397,11 +415,33 @@ impl AgentsPage {
             let pubkey = pubkey.clone();
             move |this, _, _, cx| this.set_menu(Some(OpenMenu::Card(pubkey.clone())), cx)
         }));
+        let view_profile = AppState::current(cx).is_some_and(|community| {
+            let community = community.read(cx).origin.http();
+            setups.iter().any(|setup| {
+                buzz_relay_client::RelayOrigin::parse(&setup.agent.relay_url)
+                    .is_ok_and(|origin| origin.http() == community)
+            })
+        });
         let menu = open.then(|| {
             let item = |id: SharedString, label: SharedString| {
                 MenuItem::new(id, label).size(MenuSize::Default)
             };
             let mut menu = Menu::new().size(MenuSize::Wide);
+            if view_profile {
+                let key = pubkey.clone();
+                menu = menu.child(item("view-profile".into(), "View profile".into()).on_click(
+                    cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.menu = None;
+                        crate::ui::navigation::show_profile(
+                            key.clone(),
+                            event.position(),
+                            window,
+                            cx,
+                        );
+                        cx.notify();
+                    }),
+                ));
+            }
             if tile {
                 let key = pubkey.clone();
                 menu = menu.child(item("manage".into(), "Manage agent".into()).on_click(
@@ -450,7 +490,7 @@ impl AgentsPage {
                     })),
                 );
             }
-            if tile || archivable {
+            if tile || archivable || view_profile {
                 menu = menu.child(MenuSeparator::new());
             }
             if setups.is_empty() {
