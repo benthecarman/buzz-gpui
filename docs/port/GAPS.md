@@ -11,8 +11,8 @@ days, and L is a week or more.
 | App shell, navigation, windows, updates, notifications | [gaps/shell.md](gaps/shell.md) | 47 | 12 | 12 | 71 |
 | Settings, profile, identity | [gaps/settings.md](gaps/settings.md) | 50 | 14 | 28 | 92 |
 | Messages, composer, media, search | [gaps/messages.md](gaps/messages.md) | 90 | 42 | 28 | 160 |
-| Channels, communities, relay layer | [gaps/channels.md](gaps/channels.md) | 186 | 93 | 53 | 332 |
-| Agents, sessions, workflows, terminal | [gaps/agents.md](gaps/agents.md) | 289 | 35 | 39 | 363 |
+| Channels, communities, relay layer | [gaps/channels.md](gaps/channels.md) | 0 | 1 | 11 | 12 |
+| Agents, sessions, workflows, terminal | [gaps/agents.md](gaps/agents.md) | 2 | 0 | 7 | 9 |
 | Bundled plugins and the rest | [gaps/plugins.md](gaps/plugins.md) | 30 | 6 | 2 | 38 |
 
 Open rows by size: about 805 small, 355 medium, and 75 large. Some

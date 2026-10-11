@@ -9,16 +9,18 @@
 
 ## Summary
 
-| Area | DONE | PARTIAL | DIFFERENT | MISSING | Rows |
-|---|---|---|---|---|---|
-| Connection, transport, native host, enterprise | 24 | 14 | 16 | 12 | 66 |
-| Session, caching, windows, folding | 39 | 14 | 3 | 14 | 70 |
-| Outbox, publishing, attachments, media | 55 | 2 | 5 | 2 | 64 |
-| Read state and unread | 38 | 11 | 6 | 8 | 63 |
-| Sidebar, discovery, navigation, DMs; members, moderation, profiles; communities, hosted, inbox | 46 | 16 | 6 | 67 | 135 |
-| Other relay-layer features | 36 | 12 | 8 | 35 | 91 |
-| Channel page, settings, lifecycle, create, canvas, templates, usage | 13 | 16 | 7 | 37 | 73 |
-| **Total** | **251** | **85** | **51** | **175** | **562** |
+| Area | DONE | PARTIAL | DIFFERENT | MISSING | SKIPPED | Rows |
+|---|---|---|---|---|---|---|
+| Connection, transport, native host, enterprise | 61 | 1 | 2 | 0 | 2 | 66 |
+| Session, caching, windows, folding | 68 | 0 | 2 | 0 | 0 | 70 |
+| Outbox, publishing, attachments, media | 59 | 0 | 5 | 0 | 0 | 64 |
+| Read state and unread | 62 | 0 | 1 | 0 | 0 | 63 |
+| Sidebar, discovery, navigation, DMs; members, moderation, profiles; communities, hosted, inbox | 134 | 0 | 0 | 0 | 1 | 135 |
+| Other relay-layer features | 90 | 0 | 1 | 0 | 0 | 91 |
+| Channel page, settings, lifecycle, create, canvas, templates, usage | 73 | 0 | 0 | 0 | 0 | 73 |
+| **Total** | **547** | **1** | **11** | **0** | **3** | **562** |
+
+Statuses were reconciled with the code on 2026-10-10. The findings below are from the original audit and most are closed.
 
 ### Highest-impact findings
 
@@ -74,7 +76,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 |---|---|---|---|---|
 | Routes (profiles, membership, presence, singletons, batches of 10); capacity 1022; `limited` over capacity | live.ts:17-22, 369-454 | DONE (live.rs:40-54, 321-406) | - | - |
 | REQ filters per route (channel kinds `#h`; profiles; membership incl. read-state and 30300; presence `limit 0`) | live.ts:200-203, 572-635 | DONE (live.rs:462-511) | - | - |
-| Observer/telemetry route (24200/44200 `#p viewer`, archive capture, settings retry) | live.ts:302-320, 567-588, 852-866; native.ts:539-659 | PARTIAL | Route and capture done (live.rs `RouteKey::Observer`; `Session::observe`); decrypting, archiving and the settings retry come with the agent activity feature | M |
+| Observer/telemetry route (24200/44200 `#p viewer`, archive capture, settings retry) | live.ts:302-320, 567-588, 852-866; native.ts:539-659 | DONE (crates/relay/src/session/observer.rs; crates/app/src/agent_activity/observer.rs decrypts with buzz-desktop; crates/app/src/ui/settings/archive.rs) | - | M |
 | `prioritize` ≤64 ids; singletons; globals first; `SETUP_CONCURRENCY=4` | live.ts:22, 521-553, 1031-1035 | DONE (live.rs:214-226, 515-565) | - | - |
 | Setup deadline 10 s ("Live subscription setup timed out; retry available"); keep previous wire and re-pend | live.ts:455-473, 558-565 | DONE (live.rs) | - | - |
 | Replacement keeps previous wire until EOSE; previous-wire events filtered to narrowed scope | live.ts:323-344, 832-842 | DONE (live.rs) | - | - |
@@ -145,22 +147,22 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Webview hardening (path allowlist, sign-kind allowlist, `/events` kind gates, shape checks) | src-tauri/src/relay.rs:74-94, 225-323, 654-706 | DIFFERENT | No untrusted webview; signing scoped by `Purpose` (crates/identity/src/lib.rs:396) | - |
-| Workflow runs read `GET /workflows/{id}/runs?limit=20` | src-tauri/src/relay.rs:96-162; native.ts:401-426 | MISSING | With workflows feature | M |
+| Workflow runs read `GET /workflows/{id}/runs?limit=20` | src-tauri/src/relay.rs:96-162; native.ts:401-426 | DONE (crates/relay/src/workflows/protocol.rs `runs_path`, crates/relay/src/workflows/capability.rs) | - | M |
 | Git authorization (27235 token) and project git | src-tauri/src/relay.rs:164-223; native.ts:427-455, 702-710 | DONE (crates/identity/src/lib.rs `git_auth`; crates/relay/src/session/projects.rs) | - | M |
-| Catalog sign guard (30175/30178, `env_vars` refused) | src-tauri/src/relay/catalog.rs:1-87 | MISSING | With the agent catalog | M |
+| Catalog sign guard (30175/30178, `env_vars` refused) | src-tauri/src/relay/catalog.rs:1-87 | DONE (crates/identity/src/lib.rs `Purpose::Catalog`, `check_catalog` with buzz-desktop `relay::events::validate_event`) | - | M |
 
 ### Enterprise
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Build-time enterprise relays / adapter URL validation and canonicalization (`wss://host/`, IDNA, HTTPS or loopback adapter) | src-tauri/build.rs:170-190; src-tauri/src/enterprise_auth_build.rs:10-42; enterprise_relay_url.rs:1-75; enterprise_adapter_url.rs:3-26 | MISSING | Build script plus validators | S |
-| `enterprise_login_gate` (`GET /info` 128 KiB; Required only for federated client-attached offline-jwt; fails closed) | src-tauri/src/enterprise_login_gate.rs:35-121 | MISSING | buzz-app registers it but no TS calls it; docs/port/relay.md §1.11 marks optional | M |
+| Build-time enterprise relays / adapter URL validation and canonicalization (`wss://host/`, IDNA, HTTPS or loopback adapter) | src-tauri/build.rs:170-190; src-tauri/src/enterprise_auth_build.rs:10-42; enterprise_relay_url.rs:1-75; enterprise_adapter_url.rs:3-26 | SKIPPED (decided: enterprise login gate) | - | S |
+| `enterprise_login_gate` (`GET /info` 128 KiB; Required only for federated client-attached offline-jwt; fails closed) | src-tauri/src/enterprise_login_gate.rs:35-121 | SKIPPED (decided: enterprise login gate) | - | M |
 
 ### Profiling, debug, budget
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | PARTIAL | Every request is traced with timings and Server-Timing (http.rs `send`, target `buzz_relay::profile`); the 2048-sample ring and client metrics come with a diagnostics view | S |
+| Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | PARTIAL | Every request is traced with timings and Server-Timing (http.rs `send`, target `buzz_relay::profile`). The 2048-sample ring and client metrics show only in buzz-app's Developer settings (`ClientMetricsPanel`), which this port does not have | S |
 | Frame traffic log and `relayDebug` | live.ts:280-286, 689, 718; debug.ts:1-7 | DONE (socket.rs: `relay-ws` trace target for every frame) | - | - |
 | `yieldToHost` batches of 12 | yield.ts:1-12; transport.ts:234-241 | DONE (reader.rs:544-547, `spawn_blocking`) | - | - |
 | Budgets (32 KiB input, byteSize, ByteLru) | budget.ts:1-71 | DONE (outbox.rs:51, 749; unread.rs:319) | - | - |
@@ -287,7 +289,7 @@ Port fold engine (rows, ordering, incremental projection, attachments) matches b
 |---|---|---|---|---|
 | Incoming live messages for notifications (first sight, single `h`, 4096-char preview) | incoming.ts:1-19; session.ts:2324-2448 | DONE (session/incoming.rs:1-203) | - | - |
 | Delivery receipt read (16 KiB cap, strict UTF-8) | receipt.ts:1-21 | DONE (outbox.rs:53, 270-282) | - | - |
-| Generic filtered views for plugins (`projectEvents`, `observe`, `subscribeLive`) | projection.ts:1-104; session.ts:1616-1622, 1924+ | MISSING | Only if plugin-style views are ported | M |
+| Generic filtered views for plugins (`projectEvents`, `observe`, `subscribeLive`) | projection.ts:1-104; session.ts:1616-1622, 1924+ | DIFFERENT (kept): bundled plugins are compiled in and read the session through its own methods | - | M |
 | Preload avatar media for the channel about to open (last 12 authors) | store.ts:403-425 | DONE (media.rs `prefetch_avatars`; session/channels.rs) | - | - |
 
 ## Outbox, publishing, attachments and media
@@ -307,7 +309,7 @@ Key findings:
 | Event built at send time: `client-id` UUID, `ms` tag, local id | outbox.ts:679-744 | DONE (outbox.rs:775-827) | - | - |
 | Send checks and texts (kind allowed, kind 9 non-empty, 32 KiB, MAX_PENDING 256, unique recovery key) | outbox.ts:647-678 | DONE (outbox.rs:724-757, 809-826) | - | - |
 | Edit (40003) created_at +1 s per target, 60 s lead cap | outbox.ts:686-709 | DONE (outbox.rs:770-803) | - | - |
-| NIP-AP catalog kinds: `supersedes`, head+1, larger limits | outbox.ts:665-674, 710-727 | MISSING | `Draft` has no `supersedes` (messages.rs:31-35); add if catalog publishing is ported | S |
+| NIP-AP catalog kinds: `supersedes`, head+1, larger limits | outbox.ts:665-674, 710-727 | DONE (crates/relay/src/outbox.rs: `SendOptions::supersedes`, max(now, head + 1, retained + 1); crates/relay/src/session/catalog.rs) | - | S |
 | Unsigned intent saved before signing; signed bytes before publishing | outbox.ts:442-468 | DONE (outbox.rs:1358-1411) | - | - |
 | ≤3 concurrent deliveries; 10 s deadline from enqueue | outbox.ts:90, 407-428 | DONE (outbox.rs:54-55, 1262-1337) | - | - |
 | Failure classes, no downgrade, "Retry blocked/failed:" prefixes, timeout text | outbox.ts:381-406, 500-532 | DONE (outbox.rs:1472-1526) | - | - |
@@ -319,7 +321,7 @@ Key findings:
 | `observe()` marks seen on verified echo | outbox.ts:838-892 | DONE (outbox.rs:1609-1651; session/mod.rs:1186-1187) | - | - |
 | Retry reuses saved signature; refusal rules | outbox.ts:767-794 | DONE (outbox.rs:849-886) | - | - |
 | dismiss / recover / acknowledge rules and texts | outbox.ts:587-636, 795-815, 117-122 | DONE (outbox.rs:891-1000, 1339-1353) | - | - |
-| Workflow receipt callback | session.ts:293-294 | PARTIAL | Session passes `on_receipt: None`; comes with the workflows feature | S |
+| Workflow receipt callback | session.ts:293-294 | DONE (crates/relay/src/session/mod.rs `on_receipt: Some(self.workflows.receipt_listener())`) | - | S |
 | preparePublish: fresh mention roster check, canvas/workflow validation, re-check at publish start | session.ts:296-315 | DONE (session/publisher.rs; canvas and workflow checks come with those features) | - | - |
 | `observeSend` hook (mention-wake, unhide DM on outgoing send) | outbox.ts:48-50, 153-177 | DONE (outbox.rs `observe_send`; `Session::observe_send`; its consumers are agent mention-wake and local DM hides) | - | - |
 | Serialized journal commits; confirmed LRU 2048 / 8 MiB; "Outbox storage is full" over 2 MiB | outbox.ts:205-276, 127 | DONE (outbox.rs:45-49, 1065-1153; store.rs:136, 512-660) | - | - |
@@ -340,7 +342,7 @@ Key findings:
 | Message delivery notice: 10 s grace, "Couldn't send this message." / "Delivery not yet confirmed.", Retry | src/features/messages/delivery.ts:3-18 | DONE (crates/app/src/ui/message.rs:27, 1704-1722) | - | - |
 | Edit/delete/reaction failure UI ("Retry message update", "Discard failed update", "Couldn't update reaction.", "Retry reaction") | MessageManagement.tsx:484-551; ReactionTool.tsx:145-166 | DONE (crates/app/src/ui/message_actions.rs:981-1003; crates/app/src/ui/message.rs:1613-1620) | - | - |
 | No edit/delete of unconfirmed rows | useMessageEdit.ts:13-38 | DONE (crates/app/src/ui/message.rs:462) | - | - |
-| useComposerSent: reveal sent message; re-select exact-message session channel | src/bundled/channels/useComposerSent.ts:4-19; ChannelsPage.tsx:545-550 | PARTIAL | Sending returns the timeline to its tail, which shows the sent message (crates/app/src/ui/channel.rs:553-556). Re-selecting an exact-message session channel belongs to the Sessions work. | S |
+| useComposerSent: reveal sent message; re-select exact-message session channel | src/bundled/channels/useComposerSent.ts:4-19; ChannelsPage.tsx:545-550 | DONE (crates/app/src/ui/channel.rs: sending returns to the tail, which shows the sent message; an exact message opens in a thread panel here, see agents.md §18) | - | S |
 
 ### Channel writes (src-tauri/src/relay/channel_writes.rs)
 
@@ -394,7 +396,7 @@ Key findings:
 | Non-Range origins: video spooled to disk up to 500 MiB | media_spool.rs:1-47, 152-293 | DONE (crates/app/src/ui/media/engine.rs; crates/relay/src/media.rs stream_url) | - | - |
 | Loopback HTTP server for media elements | media_stream.rs:1-200 | DONE (crates/app/src/ui/media/engine.rs plays its URLs) | - | - |
 | Response type policy and cache headers | relay.rs:1729-1809 | DONE (players: buzz-desktop's listener; images: crates/app/src/ui/media.rs) | Images are sniffed and relay SVG is refused like the policy; their cache stays the in-memory LRU (64 MiB) standing in for `max-age=3600`. | - |
-| Avatar prefetch/warm | media.ts:37-143 | MISSING | Optional. Needs the channel prefetch path (session and sidebar, not the media module) to hand avatar URLs to a warming queue. | S |
+| Avatar prefetch/warm | media.ts:37-143 | DONE (crates/relay/src/session/channels.rs `preload_media`, crates/relay/src/media.rs `prefetch_avatars`) | - | S |
 | media_download to Downloads, errors returned | relay.rs:1579-1601 | DONE (crates/app/src/ui/media.rs save; attachments.rs; review.rs) | - | - |
 | Copy image to clipboard in viewer | relay.rs:1553-1575; ImageReviewStage.tsx:140-150, 392 | DONE (crates/app/src/ui/media/review.rs) | - | - |
 
@@ -510,7 +512,7 @@ The data layer is ported almost one to one. The gaps are in the session API and 
 | Accessible/tooltip labels ("…Not an exact total", "Marked unread on this device only", "; may be out of date") | UnreadBadge.tsx:61-64 | DONE (crates/app/src/ui/unread_badge.rs) | Labels | S |
 | Off-screen "N unread" edge pills with DM avatar stack; reveal expands section, centres and focuses row | src/bundled/channels/SidebarUnread.tsx:30-239 | DONE (crates/app/src/ui/sidebar_unread.rs): there are no collapsible sections to expand yet. | Implement | M |
 | "Mark as Read" / "Mark as Unread (this device)" in sidebar and header menus, pending/"Saving…"/error | src/bundled/channels/ChannelReadMenuItem.tsx:24-56; useChannelReadAction.ts:1-32 | DONE (crates/app/src/ui/sidebar/menus.rs, crates/app/src/ui/sidebar.rs) | Menu items + action state (needs `markUnreadLocal`) | M |
-| "Mark all as read" in community rail menu with disabled reasons and toasts | src/features/communities/CommunityRailItem.tsx:280-315 | MISSING. Not done here: it needs the rail item's context menu (Communities). The session API exists. | Rail context menu (API exists) | S |
+| "Mark all as read" in community rail menu with disabled reasons and toasts | src/features/communities/CommunityRailItem.tsx:280-315 | DONE (crates/app/src/ui/rail_menu.rs) | - | S |
 | Channel activity popover (hover 250/150 ms; "Working now" with timers; "Unread threads" rows with per-row "Mark as read"; stale note) | src/bundled/channels/ChannelActivityPopover.tsx:33-357 | DONE (crates/app/src/ui/channel_activity.rs): working rows show no timer, as the port captures no agent turns. | Needs `activity()` and `markThrough` in session | L |
 | `UnreadOptions` panel (mark unread on device, mark read through loaded, sync status, Refresh, Retry read sync) | UnreadBadge.tsx:100-177 | DONE (crates/app/src/ui/channel_diagnostics.rs, in channel settings → Diagnostics) | - | M |
 | `channel-activity.ts` values for Recent sort (kinds incl. 45001/45003, limit:1 per channel in batches of 128) | src/features/relay/channel-activity.ts:1-145 | DONE (crates/app/src/ui/sidebar.rs: the sidebar turns `Session::track_channel_activity` on while a section sorts by Recent and sorts by `ChannelSummary::last_activity_at`). Not done: the "Couldn’t refresh recent activity" notice and the startup wait for activity, as the session does not publish the activity read's status | - | M |
@@ -575,7 +577,7 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Group DM shows participant count badge ("N other participants") | src/bundled/channels/ChannelSidebarItem.tsx:202-212 | DONE (crates/app/src/ui/sidebar/rows.rs) | Count badge | S |
 | User status shown next to 1:1 DM name (compact) | src/bundled/channels/ChannelSidebarItem.tsx:219-228 | DONE (crates/app/src/ui/sidebar/rows.rs; read in batches every 2 minutes, not live) | Render user status accessory | S |
 | DM typing badge ("X is typing...", remote humans, incl. threads) | src/bundled/channels/DmTypingBadge.tsx:8-94 | DONE (crates/app/src/ui/sidebar/rows.rs) | Typing badge on the DM avatar | S |
-| Working-agents indicator (turns + channel-level typing, label "<agents> working in <channel>") | src/bundled/channels/working-agents.ts:7-99; src/bundled/channels/ChannelSidebarItem.tsx:238-250 | PARTIAL (crates/app/src/ui/sidebar/rows.rs): the viewer's own agents typing at the top level show; agent turns need the session to decrypt agent activity | Agent activity feed and three-dot indicator | M |
+| Working-agents indicator (turns + channel-level typing, label "<agents> working in <channel>") | src/bundled/channels/working-agents.ts:7-99; src/bundled/channels/ChannelSidebarItem.tsx:238-250 | DONE (crates/app/src/ui/sidebar/rows.rs with `agent_activity::with_observed`) | - | M |
 | Sessions nested under parent channel with collapse, "New session" draft row | src/bundled/channels/ChannelSidebarRow.tsx:96-190; src/features/channel-navigation/ChannelNavigationState.tsx:100-185 | DONE (crates/app/src/ui/sidebar.rs; buzz-app's sidebar also renders them flat) | Nest by `parent_channel_id`, collapse state, drafts persisted as `sessions:channel-drafts` | M |
 | DM "Remove from Messages" (X button and menu), local viewer-scoped hide with probes that restore on new messages | src/bundled/channels/useHiddenDms.ts:1-237; src/bundled/channels/ChannelSidebarRow.tsx:130-160 | DONE (crates/app/src/ui/sidebar/menus.rs, crates/relay/src/session/mod.rs) | Wire local hides, X button, focus move, probe loop | M |
 | Header menu shares row actions (mute/read/copy link) via navigation state | src/features/channel-navigation/ChannelNavigationState.tsx:20-60 | DONE (crates/app/src/ui/sidebar/menus.rs `header_actions`, crates/app/src/ui/channel_menu.rs) | Shared action provider for header menu | S |
@@ -596,14 +598,14 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | People search paging (15 first browse page, 30 otherwise, prefix search, exact key, viewer excluded, `hasMore`) | src/features/relay/direct-messages.ts:27-65 | DONE (crates/relay/src/dm.rs:56-100; crates/relay/src/session/actions.rs:213-224) | - | - |
 | Open DM (41010), strong 39000/39002 confirm, participants check, unhide | src/features/relay/direct-messages.ts:66-102 | DONE (crates/relay/src/session/actions.rs:676-702) | - | - |
 | `delivered(id, channelId)`: confirm an earlier first message from journal or relay read, retry failed/unknown, wait on outbox | src/features/relay/direct-messages.ts:103-184 | DONE (`Session::dm_delivered`; dm.rs `sent_filter`) | - | - |
-| New message as a full page (not a dialog) with composer (mentions, attachments) | src/features/direct-messages/NewMessage.tsx:363-440 | DIFFERENT: modal dialog with plain textarea (crates/app/src/ui/new_message.rs:303-380) | Page with full composer | M |
-| Persist recipients and draft per scope; restore after restart ("Could not restore the message.") | src/features/direct-messages/NewMessage.tsx:20-110, 160-205 | MISSING | View-state persistence | S |
-| Pending send recovery ("Retry the earlier message to confirm its delivery before editing.", retry button) | src/features/direct-messages/NewMessage.tsx:270-410 | PARTIAL (crates/app/src/ui/new_message.rs): the first message waits for `Session::dm_delivered` ("Sending message…"); an unconfirmed send stays pending with "Retry send", and editing waits for it. Not done: restoring the pending send after a restart, as `Session::send` takes no recovery record | A recovery record on the first send | M |
-| Selected agent no longer available guard | src/features/direct-messages/NewMessage.tsx:226-230 | MISSING | Check agent availability | S |
+| New message as a full page (not a dialog) with composer (mentions, attachments) | src/features/direct-messages/NewMessage.tsx:363-440 | DONE (crates/app/src/ui/new_message.rs, crates/app/src/ui/workspace/dialogs.rs) | - | M |
+| Persist recipients and draft per scope; restore after restart ("Could not restore the message.") | src/features/direct-messages/NewMessage.tsx:20-110, 160-205 | DONE (crates/app/src/ui/new_message.rs) | - | S |
+| Pending send recovery ("Retry the earlier message to confirm its delivery before editing.", retry button) | src/features/direct-messages/NewMessage.tsx:270-410 | DONE (crates/app/src/ui/new_message.rs: outbox recovery `direct-message:new`) | - | M |
+| Selected agent no longer available guard | src/features/direct-messages/NewMessage.tsx:226-230 | DONE (crates/app/src/ui/new_message.rs `validate_agents`) | - | S |
 | Recipient picker: chips, Backspace removes last, Escape, Enter/Tab, "Find a person…" / "Add another person…", "Agent" tag | src/features/direct-messages/RecipientPicker.tsx:290-500 | DONE (crates/app/src/ui/new_message.rs:120-150, 286, 330-336) | - | - |
-| Picker "Load more people" / "Retry loading people" paging | src/features/direct-messages/RecipientPicker.tsx:505-540 | MISSING (only page 1, crates/app/src/ui/new_message.rs:98) | Page 2+ and retry | S |
-| Picker name-continuation rule (waits while a longer name exists) | src/features/direct-messages/RecipientPicker.tsx:205-230 | MISSING | Match tiering on selection | S |
-| Chip removal focus handling | src/features/direct-messages/useChipRemoval.tsx | MISSING | Focus next chip after removal | S |
+| Picker "Load more people" / "Retry loading people" paging | src/features/direct-messages/RecipientPicker.tsx:505-540 | DONE (crates/app/src/ui/new_message.rs) | - | S |
+| Picker name-continuation rule (waits while a longer name exists) | src/features/direct-messages/RecipientPicker.tsx:205-230 | DONE (crates/app/src/ui/new_message.rs `exact_recipient`) | - | S |
+| Chip removal focus handling | src/features/direct-messages/useChipRemoval.tsx | DONE (crates/app/src/ui/new_message.rs: poof, plop and focus back to the To field) | - | S |
 
 ## Channel members, moderation and profiles
 
@@ -632,14 +634,14 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Roster grouped Owners/Admins/Members/Agents with presence | src/bundled/channels/ChannelMembersDialog.tsx:632-660 | DONE (crates/app/src/ui/members.rs:30-60) | - | - |
 | Role filter "All · N" select | src/bundled/channels/ChannelMembersDialog.tsx:1151-1170 | DONE (crates/app/src/ui/members.rs:591-640) | - | - |
 | Search box "Add people and agents" / "Search members"; "Not in this channel" results with Add / "Adding…" | src/bundled/channels/ChannelMembersDialog.tsx:1105-1260 | DONE (crates/app/src/ui/members.rs:160-165, 515-525, 750-775) | - | - |
-| Search results "Show more results" paging | src/bundled/channels/ChannelMembersDialog.tsx:1290-1302 | MISSING | Page 2+ | S |
+| Search results "Show more results" paging | src/bundled/channels/ChannelMembersDialog.tsx:1290-1302 | DONE (crates/app/src/ui/members.rs) | - | S |
 | Disabled-add reasons (DM, archived, unavailable, join first) | src/bundled/channels/ChannelMembersDialog.tsx:1186-1194 | DONE (crates/app/src/ui/members.rs): a saved conversation shown offline gives the connection reason | - | S |
 | Member row menu: View profile, View owner profile, Send message, Make admin/member, Remove | src/bundled/channels/MemberAdministration.tsx:230-300 | DONE (crates/app/src/ui/members.rs:340-400) | - | - |
 | Role change and removal confirmations with exact copy | src/bundled/channels/ChannelMembersDialog.tsx:995-1100 | DONE (crates/app/src/ui/members.rs:550-590) | - | - |
 | "managed by <owner> (you)" attribution | src/bundled/channels/ChannelMembersDialog.tsx:220-235; useMemberOwners.ts | DONE (crates/app/src/ui/members.rs:418-428) | - | - |
 | Archived identities labelled/hidden; "Archived identities could not be checked." | src/bundled/channels/ChannelMembersDialog.tsx:205, 1318-1322 | DONE (crates/app/src/ui/members.rs, crates/app/src/ui/archives.rs) | - | S |
-| "Role unverified" label | src/bundled/channels/ChannelMembersDialog.tsx:935 | MISSING | Label when role cannot be verified | S |
-| Roster load errors ("The member list could not be confirmed." / "could not load."), names-failed note, owners-failed note, "Some agents could not load." | src/bundled/channels/ChannelMembersDialog.tsx:520-565, 1307-1318 | PARTIAL: generic error only | Distinct notes | S |
+| "Role unverified" label | src/bundled/channels/ChannelMembersDialog.tsx:935 | DONE (crates/app/src/ui/members.rs: the row's accessible label, as in buzz-app) | - | S |
+| Roster load errors ("The member list could not be confirmed." / "could not load."), names-failed note, owners-failed note, "Some agents could not load." | src/bundled/channels/ChannelMembersDialog.tsx:520-565, 1307-1318 | DONE (crates/app/src/ui/members.rs; crates/relay/src/session/actions.rs `channel_state`, `load_profiles`) | - | S |
 | Per-person addition error with Retry / "Retrying…" | src/bundled/channels/ChannelMembersDialog.tsx:1324-1338 | DONE (crates/app/src/ui/members.rs, from `Session::member_additions`). A failed agent start is kept in the dialog, not the session, so it does not survive reopening | - | S |
 | "<name> is in the channel." live announcement; "Opening conversation…" status | src/bundled/channels/ChannelMembersDialog.tsx:798, 1340-1344 | DONE (crates/app/src/ui/members.rs) | - | S |
 | Refresh member data button | src/bundled/channels/ChannelMembersDialog.tsx:1074 | DONE (crates/app/src/ui/members.rs:789) | - | - |
@@ -666,11 +668,11 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Profile panel (side panel, tabs Info / Runtime / Channels / Memories) | src/bundled/profiles/ProfilePanel.tsx:370-620 | DONE (crates/app/src/ui/profile_panel.rs): a tab beside the conversation for profile links, or the companion dock elsewhere. The agent-only sections are the rows below | - | L |
 | Copy npub with status text | src/bundled/profiles/ProfilePanel.tsx:521-540 | DONE (crates/app/src/ui/profile_panel.rs) | - | S |
 | Presence label (Active / Away / Offline) in profile | src/bundled/profiles/ProfilePanel.tsx:410-415 | DONE (crates/app/src/ui/profile_panel.rs) | - | S |
-| Profile activity preview ("Latest activity", states) | src/bundled/profiles/ProfileActivity.tsx:44-70; activity-preview.ts | MISSING | Activity feed | M |
+| Profile activity preview ("Latest activity", states) | src/bundled/profiles/ProfileActivity.tsx:44-70; activity-preview.ts | DONE (crates/app/src/ui/agent_activity/profile.rs) | - | M |
 | Profile channels list ("No visible channels with verified membership…") | src/bundled/profiles/ProfileChannels.tsx:49-95 | DONE (crates/app/src/ui/profile_panel.rs). Not done: the partial-roster notes, as the session does not publish roster coverage | - | S |
 | Add agent to channel from profile | src/bundled/profiles/ProfileAddChannel.tsx:90-205 | DONE (crates/app/src/ui/profile_panel.rs, crates/app/src/ui/members.rs `start_added_agent`) | - | M |
-| Agent instances, runtime, actions, delete, archive, identity, harness log, memories, public metadata | src/bundled/profiles/ProfileInstances.tsx, ProfileRuntime.tsx, ProfileAgentActions.tsx, ProfileAgentDelete.tsx, ProfileAgentArchive.tsx, ProfileAgentIdentity.tsx, ProfileHarnessLog.tsx, ProfileMemories.tsx, ProfilePublicMetadata.tsx | PARTIAL (crates/app/src/ui/profile_panel.rs): the Runtime tab (restart notice, status, Start on launch, configuration, model, advanced) and the Memories tab are done. Not done: instances, agent actions, delete, archive, identity, harness log, public agent metadata and the model Edit buttons, which belong to the agents slice | Agent sections in the profile panel | L |
-| Instance profile panel (`parseInstanceTarget`) | src/bundled/profiles/InstanceProfilePanel.tsx | MISSING | Instance panel | M |
+| Agent instances, runtime, actions, delete, archive, identity, harness log, memories, public metadata | src/bundled/profiles/ProfileInstances.tsx, ProfileRuntime.tsx, ProfileAgentActions.tsx, ProfileAgentDelete.tsx, ProfileAgentArchive.tsx, ProfileAgentIdentity.tsx, ProfileHarnessLog.tsx, ProfileMemories.tsx, ProfilePublicMetadata.tsx | DONE (crates/app/src/ui/profile_panel/agent.rs, crates/app/src/ui/profile_panel.rs) | - | L |
+| Instance profile panel (`parseInstanceTarget`) | src/bundled/profiles/InstanceProfilePanel.tsx | DONE (crates/app/src/ui/profile_panel/agent.rs: `buzz:agent-instance:` links, and instances opening in place) | - | M |
 | "Message" from profile opens DM ("Could not open the conversation. Try again.") | src/bundled/profiles/ProfilePanel.tsx:330-350 | DONE (crates/app/src/ui/profile_card.rs:45-55; crates/app/src/ui/workspace.rs:737) | - | - |
 
 ## Communities, hosted communities and inbox
@@ -682,28 +684,28 @@ Port data layer for the sidebar (`crates/relay/src/sidebar.rs`) is a near-comple
 | Destination / relay origin normalization | src/features/communities/destination.ts:1-73 | DONE (crates/relay/src/origin.rs) | - | - |
 | Saved communities per viewer, selected community persisted | src/features/communities/service.ts | DONE (crates/app/src/community.rs:49-170) | - | - |
 | NIP-11 name ("Buzz Relay" ignored) | src/features/communities/service.ts; CommunityDialog.tsx:233 | DONE (crates/relay/src/community.rs:141-215) | - | - |
-| Community icon from NIP-11, cached, fallback to initials | src/features/communities/community-icon.ts:5-68; CommunityRail.tsx:99-128 | MISSING (rail shows initials only, crates/app/src/ui/workspace.rs:405-433) | Fetch icon, save, render | S |
+| Community icon from NIP-11, cached, fallback to initials | src/features/communities/community-icon.ts:5-68; CommunityRail.tsx:99-128 | DONE (crates/relay/src/community_icon.rs; crates/app/src/community.rs saves it; crates/app/src/ui/rail_menu.rs) | - | S |
 | Invite links: `buzz://join`, share link `https://host/invite/<code>` | src/features/communities/invite-link.ts:1-47 | DONE (crates/relay/src/community.rs:55-130; crates/app/src/deep_links.rs:44) | - | - |
 | OS invite intent (one pending request, cleared by request id) | src/features/communities/invite-intent.ts:4-33 | DONE (crates/app/src/deep_links.rs; crates/app/src/ui/add_community.rs) | - | - |
 | Join journal (public progress only), resume | src/features/communities/join-journal.ts:1-89 | DONE (crates/relay/src/community.rs:342-420; crates/app/src/ui/add_community.rs:90-145) | - | - |
 | Add community dialog: relay URL, invite code, policy (terms, age), profile step | src/features/communities/CommunityDialog.tsx:300-445 | DONE (crates/app/src/ui/add_community.rs:480-700) | - | - |
-| Invite error copy (expired / exhausted / invalid / policy changed) | src/features/communities/CommunityDialog.tsx:24-33 | DIFFERENT: port strings differ ("This invite has expired. Ask for a new one." vs "This invite code has expired — ask for a new one."; policy-required/changed cases missing) (crates/relay/src/community.rs:528-545) | Match copy, add policy cases | S |
+| Invite error copy (expired / exhausted / invalid / policy changed) | src/features/communities/CommunityDialog.tsx:24-33 | DONE (crates/relay/src/community.rs `claim_error`) | - | S |
 | Profile default per community, ProfileFields | src/features/communities/profile-default.ts; ProfileFields.tsx:52-70 | DONE (crates/app/src/ui/add_community.rs:640-690) | - | - |
-| Avatar URL field on join profile | (not in buzz-app ProfileFields) | DIFFERENT: port adds "Avatar URL (optional)" (crates/app/src/ui/add_community.rs:679) | Remove or keep deliberately | S |
+| Avatar URL field on join profile | (not in buzz-app ProfileFields) | DONE (crates/app/src/ui/add_community.rs: removed; a loaded picture is kept) | - | S |
 | Leave community (28936), refusals already-absent / revoked, purge device state unless revoked | src/features/communities/leave-protocol.ts:1-59; service.ts:321-375; device-state.ts:64-83 | DONE (crates/relay/src/account.rs:18-280; crates/app/src/community.rs:199-245) | - | - |
-| Purge failures reported by store name | src/features/communities/device-state.ts:41-83 | PARTIAL: one store purge, error only logged (crates/app/src/community.rs:237) | Report to user | S |
-| Community rail: Personal space button | src/features/communities/CommunityRail.tsx:193-200 | MISSING | Personal space entry | M |
-| Rail item context menu: Copy community URL, Invite to community, Community settings, Leave community ("Mark all as read" item: see read state) | src/features/communities/CommunityRailItem.tsx:120-310 | MISSING (leave only in Settings → Communities, crates/app/src/ui/settings/communities.rs:9-130) | Context menu | M |
-| Rail tooltip / label "Switch to <name>" | src/features/communities/CommunityRailItem.tsx:159 | MISSING | Tooltip | S |
-| `useCommunityRole` (owner/admin from 13534) gating admin menu items | src/features/communities/useCommunityRole.ts:23-69 | MISSING | Role lookup | S |
-| Admin protocol (invite request, member command kinds, reasons) | src/features/communities/admin-protocol.ts:11-108 | MISSING | Protocol helpers | M |
+| Purge failures reported by store name | src/features/communities/device-state.ts:41-83 | DONE (crates/app/src/community.rs `leave` residue; crates/app/src/ui/settings/communities.rs `left_text`) | - | S |
+| Community rail: Personal space button | src/features/communities/CommunityRail.tsx:193-200 | DONE (crates/app/src/ui/rail_menu.rs, crates/app/src/community.rs `select_personal`) | - | M |
+| Rail item context menu: Copy community URL, Invite to community, Community settings, Leave community ("Mark all as read" item: see read state) | src/features/communities/CommunityRailItem.tsx:120-310 | DONE (crates/app/src/ui/rail_menu.rs) | - | M |
+| Rail tooltip / label "Switch to <name>" | src/features/communities/CommunityRailItem.tsx:159 | DONE (crates/app/src/ui/rail_menu.rs: the name as tooltip) | - | S |
+| `useCommunityRole` (owner/admin from 13534) gating admin menu items | src/features/communities/useCommunityRole.ts:23-69 | DONE (crates/app/src/ui/moderation/mod.rs `manager`, `refresh_role`) | - | S |
+| Admin protocol (invite request, member command kinds, reasons) | src/features/communities/admin-protocol.ts:11-108 | DONE (crates/relay/src/moderation.rs) | - | M |
 | Connection status per community | src/features/communities/connection.ts:1-22 | DONE: not applicable. buzz-app's rail shows no connection state; `connection.ts` only registers and connects transports. Connection problems show in the live status toast (ui/live_status.rs) | - | S |
 
 ### Hosted communities
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Settings card "Hosted communities" (Builderlab sign-in, account, identity link/unpair, list, quota, create, delete with recovery) | src/bundled/hosted-communities/index.tsx:1-20; HostedCommunities.tsx:120-700; api.ts:1-110; native.ts:8-90 | MISSING | Whole feature | L |
+| Settings card "Hosted communities" (Builderlab sign-in, account, identity link/unpair, list, quota, create, delete with recovery) | src/bundled/hosted-communities/index.tsx:1-20; HostedCommunities.tsx:120-700; api.ts:1-110; native.ts:8-90 | SKIPPED (decided: Block-hosted services) | - | L |
 
 ### Inbox
 
@@ -747,7 +749,7 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 |---|---|---|---|---|
 | Capability gate (NIP-11 `buzz-gif`, `klipy`, `/gifs/search`) | gif-capability.ts:10-22; gifs.ts:162-192 | DONE (gifs.rs:19-25; session/gifs.rs:194-208) | - | - |
 | HTTPS-only communities | gifs.ts:51-62 | DONE (session/gifs.rs:195, 218) | - | - |
-| Per-community discovery cache, forgotten on failure | gifs.ts:156-177, 219-225 | DIFFERENT | NIP-11 read fresh per picker open | S |
+| Per-community discovery cache, forgotten on failure | gifs.ts:156-177, 219-225 | DONE (crates/relay/src/session/gifs.rs) | - | S |
 | Search body (customer_id, locale, trimmed query; fallback `buzz-desktop`) | gifs.ts:120-130, 206-216 | DONE (gifs.rs:28-35; crates/app/src/ui/gif_picker.rs:60-80) | - | - |
 | Result normalization | gifs.ts:64-118 | DONE (gifs.rs:56-106) | - | - |
 | Errors ("GIF request failed (status)", "GIF search failed") | gifs.ts:150-153, 217 | DONE (session/gifs.rs:224-236) | - | - |
@@ -789,7 +791,7 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 | Notification sender "Workflow · owned by X" | workflow-attribution.ts:29-31 | DONE (crates/app/src/notifications.rs:180-188) | - | - |
 | Workflow rows never group | src/features/messages/message-grouping.ts:12-13 | DONE (crates/app/src/ui/message.rs:54-55) | - | - |
 | Message row and thread byline (WorkflowByline) | MessageRow.tsx:231-250, 391, 585; ThreadPanel.tsx:338-343 | DONE (crates/app/src/ui/message.rs, crates/app/src/ui/thread.rs) | Render in message.rs / thread.rs | S |
-| Inbox, popover, search, preview labels | InboxPage.tsx:626-705; SearchResults.tsx:552-562 | PARTIAL: popover, search, notifications and previews done (crates/app/src/ui/workflows/, channel_activity.rs); the Inbox page does not exist yet | Inbox has `workflow_owner_id` (unread.rs:638), unused; search does not compute it | M |
+| Inbox, popover, search, preview labels | InboxPage.tsx:626-705; SearchResults.tsx:552-562 | DONE (crates/app/src/ui/inbox.rs, crates/app/src/ui/workflows/, crates/app/src/ui/channel_activity.rs) | - | M |
 
 ### Product feedback (kind 42000)
 
@@ -866,10 +868,10 @@ Emoji, GIFs, threads, thread windows and typing are close to one to one. Missing
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| `relay_agent_resolve` owner proof | src-tauri/src/relay/agent.rs:45-58 | MISSING | - | S |
-| `relay_agent_log_proof` | agent.rs:68-112 | MISSING | - | S |
-| Observer telemetry 24200 decrypt | agent.rs:124-232; native.ts:612-628 | MISSING | - | M |
-| Archive 44200 decode and archive settings | agent.rs:203-232; native.ts:596-640 | MISSING | - | M |
+| `relay_agent_resolve` owner proof | src-tauri/src/relay/agent.rs:45-58 | DONE (crates/identity/src/lib.rs `resolve_agent_community` with buzz-desktop `relay::agent::resolve`) | - | S |
+| `relay_agent_log_proof` | agent.rs:68-112 | DONE (crates/identity/src/lib.rs `harness_log_proof` with buzz-desktop `relay::agent::log_proof`) | - | S |
+| Observer telemetry 24200 decrypt | agent.rs:124-232; native.ts:612-628 | DONE (crates/app/src/agent_activity/observer.rs, crates/identity/src/lib.rs `decode_agent_frame`) | - | M |
+| Archive 44200 decode and archive settings | agent.rs:203-232; native.ts:596-640 | DONE (crates/identity/src/lib.rs `decode_agent_frame`, `decode_archive_page`; crates/app/src/ui/settings/archive.rs) | - | M |
 | Agent memories 30174 read (limits, HMAC d-tag, newest per slug, `MemoryDenied`) | agent.rs:317-497; native.ts:666-690 | DONE (crates/relay/src/session/memories.rs `Session::agent_memories`; crates/identity `decode_agent_memories` with buzz-desktop's decoder) | - | L |
 | `relay_agent_library` (legacy managed-agents.json listing) | agent.rs:499-636 | DIFFERENT | crates/host/src/import.rs:51-80 reads it for import only | M |
 
@@ -911,7 +913,7 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | "Channel settings" tab (identity, Escape closes, "Editing is unavailable on this connection.") | BC/ChannelSettingsPanel.tsx:31-224; BC/ChannelsPage.tsx:1561-1585 | DONE (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/workspace/board.rs; every port session can sign, so "Editing is unavailable on this connection." never applies) | Modal "Channel details" dialog (A/channel_menu.rs:379-581) | M |
 | Description and Visibility rows (hidden for DM/session), click to edit | BC/ChannelSettingsPanel.tsx:103-181 | DONE (crates/app/src/ui/channel_settings.rs) | Fields shown directly, disabled for non-editors; Description shown for DMs (A/channel_menu.rs:485-546) | S |
 | Members row with count; Channel ID row with copy ("Channel ID copied") | BC/ChannelSettingsPanel.tsx:182-192, 308-356 | DONE (crates/app/src/ui/channel_settings.rs) | Port has "Copy link" instead (A/channel_menu.rs:157-171) | S |
-| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | PARTIAL (crates/app/src/ui/channel_settings.rs, personal_group.rs): lifecycle buttons and the Personal group select done; Save as template belongs to the templates slice | - | M |
+| Setup tools (Save as template, "Personal group" select, lifecycle buttons) | BC/ChannelsPage.tsx:1092-1158 | DONE (crates/app/src/ui/channel_settings.rs, crates/app/src/ui/personal_group.rs, crates/app/src/ui/templates/save_as.rs) | - | M |
 | Personal groups settings card ("Manage personal groups", "Reload groups") | BC/ChannelSetupSettings.tsx:1-105 | DONE (crates/app/src/ui/settings/personal_groups.rs) | - | M |
 | Fresh load, reload keeping explicit choices, "Reload details" on error | BC/ChannelDetailsEditor.tsx:122-168, 292-301 | DONE (crates/app/src/ui/channel_settings.rs) | Loads once; error replaces body, no reload (A/channel_menu.rs:405-423, 484) | S |
 | Save gating (dirty and valid) and inline field errors | BC/ChannelDetailsEditor.tsx:173-197, 492-521; FR/channel-details-protocol.ts:45-76 | DONE (crates/app/src/ui/channel_settings.rs) | Save always enabled; errors only after submit (A/channel_menu.rs:436-449, 565-577; R/lifecycle.rs:613-633) | S |
@@ -1003,7 +1005,7 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | Plugin registration and gating (Templates card, providers) | BT/index.tsx:1-28; FT/provider.ts:1-88 | DONE (crates/app/src/ui/templates/mod.rs) | - | M |
 | Channel kit store (30078 NIP-44, 16 KiB, decode checks, model validation) | FT/capability.ts:50-425; FT/model.ts:13-291; FT/host.ts | DONE (crates/relay/src/kit/mod.rs, crates/relay/src/session/kit.rs; record rules from buzz-desktop `relay::kit`) | - | L |
 | Template library and dialog | BT/TemplateLibrary.tsx; BT/TemplateSettings.tsx; BT/ChannelTemplatesDialog.tsx | DONE (crates/app/src/ui/templates/library.rs, crates/app/src/ui/templates/dialog.rs) | - | L |
-| Template selection and fields (agent search, teams, Starting Canvas, group default) | BT/TemplateEditor.tsx:1-270; BT/TemplateFields.tsx:1-232 | PARTIAL (crates/app/src/ui/templates/fields.rs, crates/app/src/ui/templates/editor.rs): the group default waits for personal groups in the UI | - | M |
+| Template selection and fields (agent search, teams, Starting Canvas, group default) | BT/TemplateEditor.tsx:1-270; BT/TemplateFields.tsx:1-232 | DONE (crates/app/src/ui/templates/fields.rs, crates/app/src/ui/templates/editor.rs; group defaults in crates/app/src/ui/settings/personal_groups.rs) | - | M |
 | Portable team payload (16 KiB chunks, 8 MiB) | FT/team-payload.ts:1-180 | DONE (crates/relay/src/kit/payload.rs) | - | M |
 | Setup orchestration (`buzz-channel-setup.v2`) | FT/setup.ts:46-409 | DONE (crates/relay/src/kit/setup.rs, crates/relay/src/session/kit.rs; Canvas seed through crates/relay/src/canvas.rs) | - | L |
 | Save channel as template; catalog hook | BT/TemplateSettings.tsx:80+; BT/useTemplateCatalog.ts:1-38 | DONE (crates/app/src/ui/templates/save_as.rs) | - | M |
@@ -1017,6 +1019,6 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 ## DONE count
 
-**DONE: 223** of 562 rows.
+**DONE: 547** of 562 rows.
 
-Other statuses: PARTIAL 93, DIFFERENT 57, MISSING 189.
+Other statuses: PARTIAL 1, DIFFERENT 11, MISSING 0, SKIPPED 3.

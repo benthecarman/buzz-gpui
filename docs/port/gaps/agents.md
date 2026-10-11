@@ -33,9 +33,9 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 |---|---|---|---|---|
 | Body when no desktop control or runtime unavailable: "Open the desktop app to import and run agents…", plus the teams and old-library slots | BA/AgentsPage.tsx:358-365, 466-473 | DIFFERENT (kept): the port always has an embedded host. With it offline the page still lists relay-only agents, archives and profiles from the relays (ui/agents.rs) | Nothing while every GUI ships a host | S |
 | Legacy `ManagedAgents` body for older hosts (header "Individual agents" + Use-here explainer + "No agents yet. Create an agent or import one from old Buzz below.") | BA/AgentsPage.tsx:483-534 | DIFFERENT (kept): a host without the new snapshot fields still gets the full page; missing fields read as unavailable (host/api.rs) | Nothing | S |
-| Old-library slot: "Connect to a community to browse the old library." plus "Retry connection" | BA/AgentsPage.tsx:241-252 | Not done: buzz-app shows it only in the no-host body, which the port does not have (row above) | Only with a no-host body | S |
-| Profile companion: clicking a tile opens the agent's profile PanelCard ("View profile for {name}") | BA/AgentsPage.tsx:163-197, 253-267; BA/AgentCard.tsx:394-405 | Not done: needs the companion dock, which belongs to the workspace and dock work | Companion dock with the profile panel | M |
-| Routed edit target: a page route `{pubkey}` opens Edit for that agent, with opened, not-found and unavailable outcomes | BA/edit-route.ts:4-13; BA/index.tsx:23-27; BA/AgentControlPanel.tsx:146-178 | Not done: needs route parameters in the page registry (app/src/ui/pages.rs), which belongs to the workspace work | Route and deep link to Edit | M |
+| Old-library slot: "Connect to a community to browse the old library." plus "Retry connection" | BA/AgentsPage.tsx:241-252 | DIFFERENT (kept): buzz-app shows it only in the no-host body, which this port does not have (row above) | Only with a no-host body | S |
+| Profile companion: clicking a tile opens the agent's profile PanelCard ("View profile for {name}") | BA/AgentsPage.tsx:163-197, 253-267; BA/AgentCard.tsx:394-405 | DONE (ui/agents/card.rs: the tile and "View profile" open the profile in the companion) | — | M |
+| Routed edit target: a page route `{pubkey}` opens Edit for that agent, with opened, not-found and unavailable outcomes | BA/edit-route.ts:4-13; BA/index.tsx:23-27; BA/AgentControlPanel.tsx:146-178 | DONE (ui/agents.rs `edit_route`, `open_edit_route`): not-found and unavailable show a notice, as page routes here report no outcome to navigation | — | M |
 | Display names resolved through the relay identity-names service, with disambiguation | BA/AgentControlPanel.tsx:116-131 | DONE (ui/agents/inventory.rs, ui/agents/discovery.rs) | — | S |
 | "Waiting for the desktop app…" while a control operation is busy | BA/AgentControlPanel.tsx:323 | DONE (ui/agents.rs) | — | S |
 | Controller `state.error` shown as alert or status | BA/AgentControlPanel.tsx:310-314 | DONE (ui/agents.rs, app/src/hosts/control.rs) | — | S |
@@ -54,23 +54,23 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Presence dot driven by relay presence (online, away, offline, unknown), re-read every 5s up to six times after start or stop | BA/AgentCard.tsx:113-141, 186 | PARTIAL: relay presence drives the dot (ui/agents/card.rs, ui/agents.rs). The 5s re-read after start or stop is not done | Re-read cadence | M |
+| Presence dot driven by relay presence (online, away, offline, unknown), re-read every 5s up to six times after start or stop | BA/AgentCard.tsx:113-141, 186 | DONE (ui/agents.rs `recheck_presence`; relay `Session::refresh_presence`) | — | M |
 | Thinking badge on the squircle avatar | BA/AgentCard.tsx:176-184 | DONE (ui/agents/card.rs) | See §17-H | M |
 | Model line: `launchModel`; "Custom model" when set through the environment; `harness.model`; "Default model". The harness is not shown | BA/AgentCard.tsx:153-160, 200-212 | DONE (ui/agents.rs) | — | S |
 | Tile has no process status or buttons; process control lives in Manage | BA/AgentCard.tsx:386-420 | DONE (ui/agents/card.rs) | — | S |
 | "Review agent status" button when just imported, failed, profile pending, or there is a notice | BA/AgentCard.tsx:409-418; BA/AgentsPage.tsx:500-506 | DONE (ui/agents/card.rs) | — | S |
 | "Archived" pill | BA/AgentCard.tsx (archived label) | DONE (ui/agents/card.rs) | — | S |
-| Menu item "View profile" | BA/AgentCard.tsx:240-252 | Not done: needs the companion dock (§1) | Companion | S |
+| Menu item "View profile" | BA/AgentCard.tsx:240-252 | DONE (ui/agents/card.rs) | — | S |
 | Menu items "Archive agent" / "Unarchive agent" (icons; disabled while pending) | BA/AgentCard.tsx:270-287 | DONE (ui/agents/card.rs, ui/agents/dialogs.rs) | — | S |
 | Menu item "Duplicate", which opens Add agent as "Duplicate {name}" with name "{name} copy" | BA/AgentCard.tsx:322-340; BA/AgentControlPanel.tsx:105-110; BA/AgentCreateDialog.tsx:186-193, 338 | DONE (ui/agents/card.rs, ui/agents/create.rs) | — | S |
-| Menu item "Share" (direct share or export) | BA/AgentCard.tsx:342-350 | MISSING | See §10 | S |
+| Menu item "Share" (direct share or export) | BA/AgentCard.tsx:342-350 | DONE (ui/agents/card.rs, ui/agents/share.rs) | — | S |
 | Several local setups: "Edit/Duplicate/Delete {name}" choice rows with relay URL and npub | BA/AgentCard.tsx:296-365 | DONE (ui/agents/card.rs) | — | S |
 | Disabled Edit with a note: "Import this identity to edit in Foundation." / "No linked identity to edit." | BA/AgentCard.tsx:368-380 | DONE (ui/agents/card.rs) | — | S |
 | Identity popover "{name} identity details" with npubs | BA/AgentCard.tsx:448-474 | Not done: the npubs are in Manage → "Identity & sources" instead of a popover | Popover | S |
 | "No linked identity" | BA/AgentCard.tsx:476-480 | DONE (ui/agents/card.rs) | — | S |
 | Feedback slot: "Archiving…" / "Unarchiving…" / "{Archive\|Unarchive} failed: {error}" with Retry | BA/InventoryIdentityCard.tsx:200-235 | DONE (ui/agents/card.rs) | — | S |
 | Port-only menu items "Start on launch" (check) and "Retry profile publication" | n/a (buzz-app has no start-on-launch UI; profile retry is in Manage and Edit) | DIFFERENT (kept): "Start on launch" stays because the host restores those agents; "Retry profile publication" moved to Manage and Edit (ui/agents/card.rs) | Decide whether to keep Start on launch | S |
-| Picture shown through `useAvatarPreview` (relay-hosted media preview) | BA/AgentCard.tsx:142-152 | PARTIAL: the picture URL still goes straight to Avatar (ui/agents/card.rs); the authenticated media loader is not used | Use the authenticated media loader | S |
+| Picture shown through `useAvatarPreview` (relay-hosted media preview) | BA/AgentCard.tsx:142-152 | DONE (ui/agents/card.rs `picture` through `media::avatar`, the authenticated loader) | — | S |
 
 ## 3. Manage dialog and process control (`BA/ManagedAgentActions.tsx`, `BA/InventoryIdentityCard.tsx`, `FA/control.ts`)
 
@@ -93,9 +93,9 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Destination is the current community; there is no picker | BA/AgentCreateDialog.tsx:116-135; BA/AgentControlPanel.tsx:300-312 | DONE (ui/agents/create.rs; the Host select is the intended remote-host addition) | — | S |
-| Sidebar "Import" button opens "Import agent snapshot" | BA/AgentCreateDialog.tsx:368-379 | Not done: snapshot import is §10; the dialog has no sidebar, as buzz-app without an import entry | Snapshot import (§10) | M |
-| Catalog "AGENTS" list in the sidebar, preview pane, "Add agent" / "Added to My Agents", "Adding agent…", "Withdrawn agent" | BA/AgentCreateDialog.tsx:380-465 | MISSING: the "AGENTS" label is reused for import candidates (ui/agents/import.rs:206-245) | See §11 | M |
-| Seeded drafts from catalog and clone (runtime, model, provider, picture, session policy) and the clone notice | BA/AgentCreateDialog.tsx:67-104, 340-360 | PARTIAL: Clone seeds name and instructions with the clone notice (ui/agents/create.rs); catalog seeding waits for §11 | Catalog seeds (§11) | S |
+| Sidebar "Import" button opens "Import agent snapshot" | BA/AgentCreateDialog.tsx:368-379 | DONE (ui/agents/create.rs, ui/agents/snapshots.rs) | — | M |
+| Catalog "AGENTS" list in the sidebar, preview pane, "Add agent" / "Added to My Agents", "Adding agent…", "Withdrawn agent" | BA/AgentCreateDialog.tsx:380-465 | DONE (ui/agents/catalog.rs, ui/agents/create.rs) | — | M |
+| Seeded drafts from catalog and clone (runtime, model, provider, picture, session policy) and the clone notice | BA/AgentCreateDialog.tsx:67-104, 340-360 | DONE (ui/agents/create.rs `seeded`, `seeded_draft`) | — | S |
 | Default harness: the agent-defaults harness if available, else `buzz-agent` | BA/AgentCreateDialog.tsx:40-63 | DONE (ui/agents/draft.rs) | — | S |
 | Default provider for Buzz Agent: the first provider (`databricks_v2`) unless defaults supply one | BA/AgentCreateDialog.tsx:56-62 | DONE (ui/agents/draft.rs) | — | S |
 | Harness help: "Pi needs its CLI, Node.js and buzz-pi-acp…"; "{preset} needs its ACP launcher. Set it up under Settings → Agents → Harnesses."; link "Open Harnesses in Settings"; "Opening Settings discards unsaved edits." | BA/AgentHarnessEditor.tsx:103-131 | DONE (ui/agents/fields.rs) | — | S |
@@ -103,13 +103,13 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | A harness change resets args to the option's `defaultArgs`, the provider to its first provider, and the model to "" | BA/AgentHarnessEditor.tsx:78-101 | DONE (ui/agents/fields.rs) | — | S |
 | Preset alert: "This agent has model or provider settings that Buzz cannot apply to {label} yet…", "Current model/provider", "Use {label} defaults" button; validation "Use {preset} defaults before saving this agent." | BA/AgentSettingsFields.tsx:280-310; BA/agent-edit.ts:81-82 | DONE (ui/agents/fields.rs, ui/agents/draft.rs) | — | S |
 | `PresetSetupHint`: backticked commands as inline code; setup URL | FA/PresetSetupHint.tsx:1-8 | DONE (ui/agents/fields.rs) | — | S |
-| Windows notices: Git Bash needed; "Databricks sign-in is not supported on Windows yet." | BA/AgentSettingsFields.tsx:224-236 | Not done: Windows builds are not shipped | Only for a Windows build | S |
+| Windows notices: Git Bash needed; "Databricks sign-in is not supported on Windows yet." | BA/AgentSettingsFields.tsx:224-236 | N/A (Windows builds are not shipped) | — | S |
 | Hidden `GOOSE_PROVIDER` override notice | BA/AgentSettingsFields.tsx:237-243 | DONE (ui/agents/fields.rs) | — | S |
 | API key field: eye toggle ("Show API key" / "Hide API key"); "Will remove on save"; helper "…Keys exported in your shell profile are not used. Saved keys are stored in this device's local agent settings files." plus Goose and Pi variants | BA/ProviderApiKeyField.tsx:32-70; BA/AgentSettingsFields.tsx:245-275 | DONE (ui/agents/fields.rs) | — | S |
 | A typed key belongs to the provider it was typed for; changing the provider drops it | BA/AgentSettingsFields.tsx:171-187 | DONE (ui/agents/draft.rs) | — | S |
 | Per-agent "Effort" select | not in buzz-app's agent form (effort exists only in defaults and snapshots: src/app/AgentDefaultsCard.tsx:720) | DONE (ui/agents/fields.rs; the per-agent Effort select was removed, as in buzz-app) | — | S |
-| Clearing an agent's effort | — | IN PROGRESS (ui/agents/editor.rs:416-420 only sends a set value) | — | S |
-| Escape closes open selects and the model dropdown | Base UI Select / Combobox; BA/AgentModelPicker.tsx:388, 418 | IN PROGRESS | — | S |
+| Clearing an agent's effort | — | DONE (host/api.rs `AgentEdit::effort`: `Some(None)` clears it) | — | S |
+| Escape closes open selects and the model dropdown | Base UI Select / Combobox; BA/AgentModelPicker.tsx:388, 418 | DONE (ui/agents/create.rs, ui/agents/edit.rs, ui/agents/defaults.rs) | — | S |
 | Owner-only build note: "This build allows instructions only from the owner and verified same-owner agents." | ui.md §5a.7 (BA/AgentSettingsFields.tsx) | DONE (ui/agents/fields.rs) | — | S |
 | Footer helper variants for Pi and presets ("Configure {preset}'s model and sign-in in the harness itself…") | BA/AgentSettingsFields.tsx:404-412 | DONE (ui/agents/fields.rs) | — | S |
 | Create pipeline: create, start, then "Finishing…" profile publication. Failures go to "Checking…" (refresh and classify) with: "We couldn't confirm whether the agent was created…"; "…was saved, but couldn't start… select Start agent"; "…started, but profile setup didn't finish… Select Finish profile"; "Finish profile" button | BA/AgentCreateDialog.tsx:180-312, 474-583 | DONE (ui/agents/create.rs) | — | M |
@@ -251,15 +251,15 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| "Other agents (N)" disclosure, identity rows by name, "No visible identities in your Buzz library." | BA/AgentLibrary.tsx:41-123 | Not done: buzz-app shows this library only without desktop control; the port lists the same identities in the page groups (ui/agents/inventory.rs) | Only with a no-host body | M |
+| "Other agents (N)" disclosure, identity rows by name, "No visible identities in your Buzz library." | BA/AgentLibrary.tsx:41-123 | DIFFERENT (kept): buzz-app shows this library only without desktop control; the port lists the same identities in the page groups (ui/agents/inventory.rs) | Only with a no-host body | M |
 | "Profiles without identities" list | BA/AgentLibrary.tsx:124-144 | DONE (ui/agents.rs, ui/agents/discovery.rs) | — | S |
-| Library states ("Reading agent inventory…", cleared, connect, error) and footer disclaimers | BA/AgentLibrary.tsx:76-96, 145-155; FA/library.ts:76-84 | PARTIAL: "Checking community inventory…" and the library error show on the page (ui/agents.rs); the no-host body and its disclaimers are not built | Only with a no-host body | S |
+| Library states ("Reading agent inventory…", cleared, connect, error) and footer disclaimers | BA/AgentLibrary.tsx:76-96, 145-155; FA/library.ts:76-84 | DIFFERENT (kept): "Checking community inventory…" and the library error show on the page (ui/agents.rs); the no-host body and its disclaimers are not built | Only with a no-host body | S |
 | Relay inventory read (kinds 30175/30177, owner only, avatar inheritance) | FA/relay-library.ts:1-129; FA/library.ts:24-42 | DONE (ui/agents/relay.rs) | — | M |
 | Merge of local and relay sources with partial-failure messages | FA/inventory.ts:1-88 | DONE (ui/agents/relay.rs, ui/agents/discovery.rs) | — | S |
 | Per-community inventory request and profile lookup across memberships | BA/use-community-inventory.ts:1-151; BA/community-profiles.ts:1-44 | DONE (ui/agents/discovery.rs) | — | M |
-| Known-agent keys (profile flag plus library) | FA/known.ts:1-16; FA/use-known.ts | PARTIAL: the page knows library keys (ui/agents/discovery.rs); the app-wide known-agent set used by mentions and members still reads `is_agent` only | Share the library keys app-wide | S |
-| Agent choices (managed + legacy, archived excluded, templates) | FA/choices.ts:1-252; FA/use-choices.ts | Not done: its users (Agents2, teams, snapshots) are other slices | With those slices | M |
-| Public agent metadata (type and capabilities from 30177/10100) | FA/public-metadata.ts:1-95 | Not done: the page does not need it; its users are other slices | With those slices | S |
+| Known-agent keys (profile flag plus library) | FA/known.ts:1-16; FA/use-known.ts | DONE (ui/identity.rs `AgentLibrary`, used by mentions and ui/members.rs) | — | S |
+| Agent choices (managed + legacy, archived excluded, templates) | FA/choices.ts:1-252; FA/use-choices.ts | DONE (ui/templates/mod.rs `agent_choices`) | — | M |
+| Public agent metadata (type and capabilities from 30177/10100) | FA/public-metadata.ts:1-95 | DONE (ui/profile_panel/agent.rs `public_metadata`) | — | S |
 
 ## 14. Identity archive and relay-only removal (`FA/AgentArchiveDialog.tsx`, `BA/inventory-archive.ts`, `BA/RelayAgentRemove.tsx`, `FA/relay-removal.ts`)
 
@@ -274,7 +274,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Listen for `agent_management_request` (create/update), queue capped at 200 | FA/management-request.ts:1-105; BA/AgentUpdateReview.tsx:74-88, 323-332 | PARTIAL: parsed and queued (ui/agents/review.rs), but frames come from the saved-activity capture (app/src/ui/settings/archive.rs), so requests arrive only while "Save agent activity" is on. A separate subscription needs the activity observer (§17-D) | Own subscription with §17-D | M |
+| Listen for `agent_management_request` (create/update), queue capped at 200 | FA/management-request.ts:1-105; BA/AgentUpdateReview.tsx:74-88, 323-332 | DONE (ui/agents/review.rs `listen`; relay `Session::observe_management`) | — | M |
 | Membership check; toast "Could not verify request membership" + Retry | BA/AgentUpdateReview.tsx:89-137, 189-201, 334-344 | DONE (ui/agents/review.rs) | — | S |
 | Toasts "Agent creation needs attention… Create the agent yourself", "Could not load personal agents", "Agent update needs attention" | BA/AgentUpdateReview.tsx:203-253 | DONE (ui/agents/review.rs) | — | S |
 | Editor pre-filled with the requested changes: "Requested by an agent. Review every field before saving."; writes paused until membership is confirmed | BA/AgentUpdateReview.tsx:254-285, 346-376 | DONE (ui/agents/review.rs, ui/agents/edit.rs) | — | M |
@@ -476,13 +476,13 @@ The port renders workflow-authored messages only (app/src/notifications.rs:180-1
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Settings → Integrations → "Builderlab" card | BB/index.tsx:36-60 | MISSING | — | S |
-| Login: "Sign in with Builderlab", "Finish sign-in in your browser…", "Cancel sign-in", "Signed in as {email}.", "Sign out", unavailable reason | BB/login/Login.tsx:9-75 | MISSING | — | M |
-| OAuth PKCE through the loopback callback, code exchange, `/v1/auth/me` check | BB/oauth/browser.ts; BB/oauth/session.ts | MISSING | Needs §24 | M |
-| "Remote agents" list ("No remote agents yet.", Refresh / Retry) | BB/agents/RemoteAgents.tsx:278-465 | MISSING: buzzd hosts are self-hosted processes, not the Beekeeper service | — | M |
-| Create remote agent (name, optional instructions, community or Personal space), enrollment (attest, kind-30177 registration), "Finish setup", "Retry community setup" | BB/agents/RemoteAgents.tsx:285-330; BB/agents/enrollment.ts; BB/agents/registration.ts | MISSING | — | L |
-| Edit instructions on Active agents | BB/agents/RemoteAgents.tsx:382-430 | MISSING | — | S |
-| "Delete {name}?" (kind-5 deletion, Beekeeper delete, tombstones) | BB/agents/RemoteAgents.tsx:465-486; BB/agents/enrollment.ts | MISSING | — | M |
+| Settings → Integrations → "Builderlab" card | BB/index.tsx:36-60 | SKIPPED (decided: Builderlab) | — | S |
+| Login: "Sign in with Builderlab", "Finish sign-in in your browser…", "Cancel sign-in", "Signed in as {email}.", "Sign out", unavailable reason | BB/login/Login.tsx:9-75 | SKIPPED (decided: Builderlab) | — | M |
+| OAuth PKCE through the loopback callback, code exchange, `/v1/auth/me` check | BB/oauth/browser.ts; BB/oauth/session.ts | SKIPPED (decided: Builderlab) | — | M |
+| "Remote agents" list ("No remote agents yet.", Refresh / Retry) | BB/agents/RemoteAgents.tsx:278-465 | SKIPPED (decided: remote agents via Builderlab) | — | M |
+| Create remote agent (name, optional instructions, community or Personal space), enrollment (attest, kind-30177 registration), "Finish setup", "Retry community setup" | BB/agents/RemoteAgents.tsx:285-330; BB/agents/enrollment.ts; BB/agents/registration.ts | SKIPPED (decided: remote agents via Builderlab) | — | L |
+| Edit instructions on Active agents | BB/agents/RemoteAgents.tsx:382-430 | SKIPPED (decided: remote agents via Builderlab) | — | S |
+| "Delete {name}?" (kind-5 deletion, Beekeeper delete, tombstones) | BB/agents/RemoteAgents.tsx:465-486; BB/agents/enrollment.ts | SKIPPED (decided: remote agents via Builderlab) | — | M |
 
 ## 24. OAuth loopback callback (`ST/oauth_callback/*`)
 
@@ -546,12 +546,12 @@ The Claude Code harness preset (claude-agent-acp) exists in the port (host/harne
 | Databricks OAuth credential wait at start; Disconnect cancels waiting and queued starts ("Start cancelled by Disconnect; reconnect and retry Start") | ST/agents.rs:816-853 | DONE (host/start.rs, host/models.rs) | — | M |
 | Refuse start while old Buzz is running ("Stop old Buzz before starting agents here…") | ST/agents.rs:587-593, 1613-1648 | DONE (host/start.rs) | — | S |
 | Mention attach and replay floor (`agent_control_attach_mention`, `action` with `replay_floor`) | ST/agents.rs:559-586, 1103-1126 | DONE (host/start.rs) | — | M |
-| Harness log: `agent_control_log_challenge` + `agent_control_read_log` (owner-signed challenge) and the profile log viewer | ST/agents.rs:598-662, 937-961; src/bundled/profiles/ProfileHarnessLog.tsx | PARTIAL: the host answers LogChallenge and ReadLog (host/start.rs); the profile log viewer is not built because it lives in the profile companion (§1) | Viewer in the companion | M |
+| Harness log: `agent_control_log_challenge` + `agent_control_read_log` (owner-signed challenge) and the profile log viewer | ST/agents.rs:598-662, 937-961; src/bundled/profiles/ProfileHarnessLog.tsx | DONE (host/start.rs; ui/profile_panel/agent.rs `HarnessLog`) | — | M |
 | `agent_control_use_here` | ST/agents.rs:1354-1365 | DONE (host/lib.rs) | — | M |
 | `agent_control_local_clone_settings` / `agent_control_clone_settings` | ST/agents.rs:1366-1386 | DONE (host/lib.rs) | — | S |
-| `agent_control_snapshot_memory_write` (restore memories from a snapshot) | ST/agents.rs:1595-1612; ST/agents/snapshot_memory.rs | Not done: only snapshot import (§10) uses it | With §10 | M |
-| Agent-signed owner-addressed memory event publication | ST/agents/profile_http.rs:93-126 | Not done: only snapshot import (§10) uses it | With §10 | S |
-| Team instructions, capture, export, preview | ST/agents.rs:1676-1823 | MISSING | See §12 | M |
+| `agent_control_snapshot_memory_write` (restore memories from a snapshot) | ST/agents.rs:1595-1612; ST/agents/snapshot_memory.rs | DONE (host `Request::RestoreMemory`; ui/agents/snapshots.rs, ui/agents/team_ops.rs) | — | M |
+| Agent-signed owner-addressed memory event publication | ST/agents/profile_http.rs:93-126 | DONE (host `Request::RestoreMemory`) | — | S |
+| Team instructions, capture, export, preview | ST/agents.rs:1676-1823 | DONE (host `Request::TeamCapture`; ui/agents/team_ops.rs) | — | M |
 | Databricks catalog `agent_models_run` connect/refresh (PKCE through `buzz_agent`, cache dir, build-default host/filter) | ST/agent_models.rs:20-31, 245-630 | DONE (host/models.rs (buzz-desktop agent_models)) | — | L |
 | `agent_models_run` disconnect | ST/agent_models.rs:48-53; ST/agents.rs:816-853 | DONE (host/models.rs) | — | S |
 | `agent_models_run` test (one tiny completion; Goose and Pi inference checks) | ST/agent_models.rs:52-53; ST/goose_models.rs:25-60; ST/pi_models.rs:154-275 | DONE (host/models.rs) | — | M |
@@ -596,10 +596,13 @@ These features match buzz-app closely enough and are not listed above.
 
 | Status | Rows |
 |---|---|
-| MISSING | 288 |
-| PARTIAL | 33 |
-| DIFFERENT | 38 |
-| IN PROGRESS | 10 |
+| DONE | 345 |
+| DIFFERENT | 7 |
+| MISSING | 2 |
+| SKIPPED | 7 |
+| N/A | 10 |
 | DONE (counted only) | 88 |
 
-The 10 IN PROGRESS rows cover the six in-progress items: restart on save appears twice (UI and native); Databricks Disconnect appears three times (UI, model run, start cancellation); Test connection appears twice. Two Databricks rows (browser sign-in and catalog connect/refresh) stay MISSING: that work is not on the in-progress list.
+Statuses were reconciled with the code on 2026-10-10.
+
+The rows once marked IN PROGRESS are reconciled with the code: each is DONE now.
