@@ -109,6 +109,8 @@ pub fn offset(position: &Position, items: &[Item]) -> Option<ListOffset> {
 pub struct Cached {
     pub list: ListState,
     pub items: Vec<Item>,
+    /// What the timeline showed, to show again before the session answers.
+    pub snapshot: std::sync::Arc<buzz_relay_client::TimelineSnapshot>,
 }
 
 #[derive(Default)]

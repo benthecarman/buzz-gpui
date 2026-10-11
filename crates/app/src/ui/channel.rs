@@ -138,18 +138,20 @@ impl ChannelPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let model = community.update(cx, |community, cx| community.open_channel(&channel.id, cx));
         // A channel closed a moment ago keeps its measured rows and place;
         // otherwise the saved position is restored once its rows load.
-        let (list, items, restore) = match scroll::take(&community, &channel.id, cx) {
-            Some(cached) => (cached.list, cached.items, None),
+        let (list, items, restore, seed) = match scroll::take(&community, &channel.id, cx) {
+            Some(cached) => (cached.list, cached.items, None, Some(cached.snapshot)),
             None => {
                 let list = ListState::new(1, ListAlignment::Bottom, px(1000.));
                 list.set_follow_mode(FollowMode::Tail);
                 let restore = scroll::load(&community, &channel.id, cx);
-                (list, Vec::new(), restore)
+                (list, Vec::new(), restore, None)
             }
         };
+        let model = community.update(cx, |community, cx| {
+            community.open_channel(&channel.id, seed, cx)
+        });
         let unread_watch = community.read(cx).session.watch_unread(&channel.id);
         let placeholder = composer_placeholder(&channel, &community.read(cx).snapshot.profiles);
         let composer = cx.new(|cx| {
@@ -436,6 +438,7 @@ impl ChannelPage {
         let cached = scroll::Cached {
             list: self.list.clone(),
             items: std::mem::take(&mut self.items),
+            snapshot: self.model.read(cx).snapshot.clone(),
         };
         scroll::keep(&self.community, &self.channel.id, cached, cx);
     }
