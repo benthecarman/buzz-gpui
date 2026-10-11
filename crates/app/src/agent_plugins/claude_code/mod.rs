@@ -5,7 +5,6 @@
 //! with the in-process Buzz tools. Compiled in: there is no plugin loading.
 
 pub mod claude;
-pub mod client;
 #[cfg(debug_assertions)]
 mod dev;
 #[cfg(test)]
@@ -16,21 +15,17 @@ pub mod sessions;
 pub mod setup;
 pub mod tabs;
 
+use crate::agent_plugins::owner_relay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
 };
-use crate::buzz_mcp::{BuzzEvent, Memory};
-use crate::community::{AppState, IdentityState};
+use crate::buzz_mcp::BuzzEvent;
+use crate::community::AppState;
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
-use buzz_identity::Identity;
-use buzz_relay_client::session::SessionSnapshot;
-use buzz_relay_client::{ChannelType, RelayHttp};
-use futures::future::BoxFuture;
 use gpui_kit::*;
-use runtime::{ChannelInfo, ClaudeRuntime, Config, OwnerRelay, Run, Synced, Wake};
-use serde_json::Value;
+use runtime::{ClaudeRuntime, Config, Run, Synced, Wake};
 use setup::ClaudeSetup;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -101,18 +96,7 @@ impl ClaudeCode {
 
     /// Reads the selected community as its owner.
     fn bind(&mut self, cx: &mut Context<Self>) {
-        let relay = AppState::current(cx).and_then(|community| {
-            let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
-                return None;
-            };
-            let community = community.read(cx);
-            let _runtime = Runtime::handle(cx).enter();
-            Some(Arc::new(AppRelay {
-                http: RelayHttp::new(community.origin.clone(), identity.clone()),
-                identity: identity.clone(),
-                snapshot: Some(community.session.snapshot()),
-            }) as Arc<dyn OwnerRelay>)
-        });
+        let relay = owner_relay::current(cx).map(|(_, relay)| relay);
         self.runtime.set_relay(relay);
     }
 
@@ -293,142 +277,5 @@ fn event_of(event: &crate::agents2::attention::EventData) -> BuzzEvent {
         tags: event.tags.clone(),
         content: event.content.clone(),
         sig: String::new(),
-    }
-}
-
-/// The selected community, read with the owner's key: conversations for
-/// context, names, and the agent's memory, which is encrypted to the owner.
-struct AppRelay {
-    http: RelayHttp,
-    identity: Arc<Identity>,
-    /// The session's view: channels and profiles. `None` reads only
-    /// over HTTP.
-    snapshot: Option<tokio::sync::watch::Receiver<Arc<SessionSnapshot>>>,
-}
-
-fn filters(values: Vec<Value>) -> Vec<buzz_relay_client::socket::Filter> {
-    values
-        .into_iter()
-        .filter_map(|value| match value {
-            Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .collect()
-}
-
-fn profile_name(content: &str) -> Option<String> {
-    let profile: Value = serde_json::from_str(content).ok()?;
-    ["display_name", "name"]
-        .iter()
-        .filter_map(|key| profile.get(*key).and_then(Value::as_str))
-        .find(|name| !name.trim().is_empty())
-        .map(str::to_string)
-}
-
-impl OwnerRelay for AppRelay {
-    fn channel(&self, id: &str) -> Option<ChannelInfo> {
-        let snapshot = self.snapshot.as_ref()?.borrow().clone();
-        snapshot
-            .channels
-            .iter()
-            .find(|channel| channel.id == id)
-            .map(|channel| ChannelInfo {
-                name: Some(channel.name.clone()),
-                dm: channel.channel_type == Some(ChannelType::Dm),
-                members: channel.members.clone(),
-            })
-    }
-
-    fn read(&self, values: Vec<Value>) -> BoxFuture<'static, Result<Vec<BuzzEvent>, String>> {
-        let http = self.http.clone();
-        Box::pin(async move {
-            let events = http
-                .query(&filters(values))
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(events
-                .iter()
-                .filter_map(|event| {
-                    serde_json::to_value(event)
-                        .ok()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                })
-                .collect())
-        })
-    }
-
-    fn names(
-        &self,
-        pubkeys: Vec<String>,
-        _members: Vec<String>,
-    ) -> BoxFuture<'static, HashMap<String, String>> {
-        let profiles = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.borrow().profiles.clone())
-            .unwrap_or_default();
-        let mut names = HashMap::new();
-        let mut missing = Vec::new();
-        for pubkey in pubkeys {
-            match profiles.get(&pubkey) {
-                Some(profile) if !profile.name_is_fallback => {
-                    names.insert(pubkey, profile.name.clone());
-                }
-                _ => missing.push(pubkey),
-            }
-        }
-        let http = self.http.clone();
-        Box::pin(async move {
-            if missing.is_empty() {
-                return names;
-            }
-            let filter =
-                serde_json::json!({ "kinds": [0], "authors": missing, "limit": missing.len() });
-            if let Ok(events) = http.query(&filters(vec![filter])).await {
-                let mut newest: HashMap<String, (u64, String)> = HashMap::new();
-                for event in events {
-                    let Some(name) = profile_name(&event.content) else {
-                        continue;
-                    };
-                    let (pubkey, at) = (event.pubkey.to_hex(), event.created_at.as_secs());
-                    if newest.get(&pubkey).is_none_or(|(seen, _)| *seen < at) {
-                        newest.insert(pubkey, (at, name));
-                    }
-                }
-                names.extend(newest.into_iter().map(|(pubkey, (_, name))| (pubkey, name)));
-            }
-            names
-        })
-    }
-
-    fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>> {
-        let (http, identity, agent) = (self.http.clone(), self.identity.clone(), agent.to_string());
-        Box::pin(async move {
-            let query = buzz_desktop::relay::agent::memory_query(&identity.pubkey_hex(), &agent)?;
-            let values: Vec<Value> =
-                serde_json::from_str(&query).map_err(|_| "Invalid memory target")?;
-            let records = http
-                .query_raw(&filters(values))
-                .await
-                .map_err(|error| error.to_string())?;
-            let records: Vec<Option<Value>> = records.into_iter().map(Some).collect();
-            let listing = identity.decode_agent_memories(&agent, &records)?;
-            Ok(listing
-                .get("entries")
-                .and_then(Value::as_array)
-                .map(|entries| {
-                    entries
-                        .iter()
-                        .filter_map(|entry| {
-                            Some(Memory {
-                                slug: entry.get("slug")?.as_str()?.to_string(),
-                                body: entry.get("body")?.as_str()?.to_string(),
-                                created_at: entry.get("createdAt")?.as_u64()?,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default())
-        })
     }
 }
