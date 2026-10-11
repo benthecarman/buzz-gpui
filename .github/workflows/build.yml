@@ -92,10 +92,25 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The in-app updater installs a package only if its checksum is
+      # listed here.
+      - run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      # A new release stays a draft until every asset is up, so installed
+      # copies never see it half uploaded. A tag with a suffix (v1.2.0-rc.1)
+      # is a prerelease, which the updater skips.
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          created=false
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            prerelease=()
+            [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+              --generate-notes --draft "${prerelease[@]}"
+            created=true
+          fi
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          if $created; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
