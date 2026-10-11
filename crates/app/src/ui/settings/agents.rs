@@ -3,8 +3,9 @@
 //! "Remember mentioned agents" message preference.
 //!
 //! The Hosts block is this port's addition for remote hosts. Harnesses and
-//! the inline Agent defaults card are this computer's, as in buzz-app; a
-//! remote host's defaults open from its row.
+//! the inline Agent defaults card are this computer's, as in buzz-app,
+//! unless another host is picked in the Harnesses heading; a remote host's
+//! defaults also open from its row.
 
 mod harnesses;
 
@@ -147,8 +148,9 @@ impl SettingsPage {
             ))
             .child(rows_group(rows, cx));
 
-        // This computer's harnesses and defaults, as in buzz-app. Both
-        // live while the section is shown, so returning checks again.
+        // This computer's harnesses and defaults, as in buzz-app, or the
+        // host picked in the Harnesses heading. Both live while the section
+        // is shown, so returning checks again.
         let local = hosts
             .iter()
             .find(|host| host.read(cx).remote.is_none())
@@ -159,7 +161,13 @@ impl SettingsPage {
                 harnesses::Harnesses::new(host, cx)
             })
         };
-        let defaults = local.map(|host| {
+        // A picked host that was since removed falls back to this computer.
+        let picked = harnesses
+            .read(cx)
+            .host()
+            .filter(|host| hosts.contains(host))
+            .or(local);
+        let defaults = picked.map(|host| {
             let card = window.use_keyed_state(
                 (
                     "settings-agent-defaults",

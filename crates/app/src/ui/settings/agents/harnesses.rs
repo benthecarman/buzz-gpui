@@ -4,7 +4,7 @@
 //! "Add harness" catalog.
 
 use super::super::{button, form_group, inline_header, preference_row};
-use crate::hosts::{HostConnection, Install};
+use crate::hosts::{HostConnection, Hosts, Install};
 use crate::ui::agents::harness::{self, status_label};
 use crate::ui::overlay;
 use buzz_host::api::{Harness, HarnessKind, HarnessStatus, InstallReport};
@@ -12,8 +12,8 @@ use buzz_host::harness::{HarnessPreset, harness_presets};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, Brand, BrandMark, Button, ButtonSize, Colors, Dialog, DialogSize, Icon,
-    IconButton, IconButtonSize, IconName, NavigationItem, Spinner, Surface, TypeStyled,
-    tokens::radius,
+    IconButton, IconButtonSize, IconName, Menu, MenuItem, NavigationItem, Select, Spinner, Surface,
+    TypeStyled, tokens::radius,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -197,8 +197,10 @@ impl Default for SignIn {
 }
 
 pub struct Harnesses {
-    /// This computer's host; `None` when it could not start.
+    /// The host shown: this computer's unless another is picked; `None`
+    /// when this computer's could not start.
     host: Option<Entity<HostConnection>>,
+    host_open: bool,
     checking: bool,
     /// Check again presses, which also check sign-ins again.
     checks: u64,
@@ -221,6 +223,7 @@ impl Harnesses {
             .map(|host| cx.observe(host, |_, _, cx| cx.notify()));
         let this = Self {
             host,
+            host_open: false,
             checking: false,
             checks: 0,
             claude: SignIn::default(),
@@ -235,6 +238,73 @@ impl Harnesses {
             host.update(cx, |host, cx| host.refresh(cx).detach());
         }
         this
+    }
+
+    /// The host whose harnesses show, and whose defaults the page shows.
+    pub fn host(&self) -> Option<Entity<HostConnection>> {
+        self.host.clone()
+    }
+
+    /// Shows another host's harnesses, checked afresh.
+    fn pick(&mut self, host: Entity<HostConnection>, cx: &mut Context<Self>) {
+        self.host_open = false;
+        if self.host.as_ref() == Some(&host) {
+            return cx.notify();
+        }
+        *self = Self::new(Some(host), cx);
+        cx.notify();
+    }
+
+    /// The host picker, when there is more than one host.
+    fn host_picker(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let hosts = cx.global::<Hosts>().hosts.clone();
+        if hosts.len() < 2 {
+            return None;
+        }
+        let mut menu = Menu::new();
+        for (index, host) in hosts.iter().enumerate() {
+            let state = host.read(cx);
+            let online = matches!(state.state, ConnectionState::Connected { .. });
+            let pick = host.clone();
+            menu = menu.child(
+                MenuItem::new(("harness-host", index), state.label.clone())
+                    .checked(self.host.as_ref() == Some(host))
+                    .disabled(!online)
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick(pick.clone(), cx))),
+            );
+        }
+        let weak = cx.entity().downgrade();
+        let dismiss: overlay::Dismiss = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.host_open = false;
+                cx.notify();
+            });
+        });
+        Some(
+            div()
+                .relative()
+                .w(rems(12.))
+                .child(
+                    Select::new("harness-host")
+                        .when_some(self.host.as_ref(), |this, host| {
+                            this.value(host.read(cx).label.clone())
+                        })
+                        .open(self.host_open)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.host_open = !this.host_open;
+                            cx.notify();
+                        })),
+                )
+                .when(self.host_open, |this| {
+                    this.child(overlay::dropdown(
+                        window,
+                        overlay::Align::End,
+                        div().min_w(rems(12.)).child(menu),
+                        dismiss,
+                    ))
+                })
+                .into_any_element(),
+        )
     }
 
     fn check_again(&mut self, cx: &mut Context<Self>) {
@@ -371,7 +441,7 @@ impl Harnesses {
         cx.notify();
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> Div {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let state = self.host.as_ref().map(|host| host.read(cx));
         let disabled = state.is_none_or(|state| {
             !matches!(state.state, ConnectionState::Connected { .. }) || state.installing()
@@ -392,16 +462,20 @@ impl Harnesses {
                 .on_click(cx.listener(|this, _, _, cx| this.check_again(cx)))
                 .into_any_element()
         };
+        let picker = self.host_picker(window, cx);
         inline_header(
             "Harnesses",
             None,
-            vec![
-                IconButton::new("harnesses-about-acp", IconName::Question)
-                    .size(IconButtonSize::Sm)
-                    .tooltip(ACP_HINT)
-                    .into_any_element(),
-                check,
-            ],
+            picker
+                .into_iter()
+                .chain([
+                    IconButton::new("harnesses-about-acp", IconName::Question)
+                        .size(IconButtonSize::Sm)
+                        .tooltip(ACP_HINT)
+                        .into_any_element(),
+                    check,
+                ])
+                .collect(),
             cx,
         )
     }
@@ -1244,7 +1318,7 @@ impl Render for Harnesses {
             .catalog_open
             .then(|| overlay::modal(window, self.catalog_dialog(cx), Some(close)));
         div()
-            .child(self.header(cx))
+            .child(self.header(window, cx))
             .child(form_group(body, cx))
             .children(dialog)
     }
