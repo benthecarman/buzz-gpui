@@ -50,6 +50,10 @@ impl Process {
     pub async fn kill(&self) -> Result<(), String> {
         self.0.kill().await
     }
+    /// Closes stdin, which asks a server reading it to finish.
+    pub async fn end(&self) -> Result<(), String> {
+        self.0.write(String::new(), true).await
+    }
 }
 
 /// Starts an agent type's declared processes.
@@ -144,13 +148,27 @@ pub struct HostSpawner {
     pub owner: &'static str,
 }
 
-/// What a host older than the process bridge answers.
-pub const UPDATE_HOST: &str = "Update this host to run Claude Code agents";
+/// The agent types whose processes hosts run, by owner, as people know
+/// them.
+const OWNERS: &[(&str, &str)] = &[("claude-code", "Claude Code"), ("codex", "Codex")];
 
-fn failure(error: RpcError) -> String {
+/// What to tell someone whose host is too old for `owner`'s processes:
+/// older than the process bridge, or than the type's declarations.
+pub fn update_host(owner: &str) -> String {
+    let title = OWNERS
+        .iter()
+        .find(|(id, _)| *id == owner)
+        .map_or(owner, |(_, title)| title);
+    format!("Update this host to run {title} agents")
+}
+
+fn failure(owner: &str, error: RpcError) -> String {
     match error {
-        RpcError::Failed(message) if message.contains("does not support this request") => {
-            UPDATE_HOST.into()
+        RpcError::Failed(message)
+            if message.contains("does not support this request")
+                || message == "Process is not declared" =>
+        {
+            update_host(owner)
         }
         other => other.to_string(),
     }
@@ -174,13 +192,18 @@ impl Spawn for HostSpawner {
         };
         let (handle, output) = sinks.open();
         let request = request(handle);
+        let owner = self.owner;
         Box::pin(async move {
             if let Err(error) = client.request(request).await {
                 sinks.sinks().remove(&handle);
-                return Err(failure(error));
+                return Err(failure(owner, error));
             }
             Ok(Spawned {
-                process: Process(Arc::new(HostProcess { client, handle })),
+                process: Process(Arc::new(HostProcess {
+                    client,
+                    handle,
+                    owner,
+                })),
                 output,
             })
         })
@@ -190,12 +213,13 @@ impl Spawn for HostSpawner {
 struct HostProcess {
     client: Arc<HostClient<HostProtocol>>,
     handle: u64,
+    owner: &'static str,
 }
 
 impl ProcessControl for HostProcess {
     fn write(&self, data: String, close: bool) -> BoxFuture<'static, Result<(), String>> {
         let client = self.client.clone();
-        let handle = self.handle;
+        let (handle, owner) = (self.handle, self.owner);
         Box::pin(async move {
             client
                 .request(Request::ProcessWrite {
@@ -205,19 +229,19 @@ impl ProcessControl for HostProcess {
                 })
                 .await
                 .map(drop)
-                .map_err(failure)
+                .map_err(|error| failure(owner, error))
         })
     }
 
     fn kill(&self) -> BoxFuture<'static, Result<(), String>> {
         let client = self.client.clone();
-        let handle = self.handle;
+        let (handle, owner) = (self.handle, self.owner);
         Box::pin(async move {
             client
                 .request(Request::ProcessKill { handle })
                 .await
                 .map(drop)
-                .map_err(failure)
+                .map_err(|error| failure(owner, error))
         })
     }
 }
@@ -236,4 +260,27 @@ pub async fn collect(
         }
     }
     (None, stdout, stderr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_hosts_are_asked_to_update_for_the_type() {
+        let old = || RpcError::Failed("The other side does not support this request".into());
+        assert_eq!(
+            failure("claude-code", old()),
+            "Update this host to run Claude Code agents"
+        );
+        // A host from before Codex knows the bridge but not its processes.
+        assert_eq!(
+            failure("codex", RpcError::Failed("Process is not declared".into())),
+            "Update this host to run Codex agents"
+        );
+        assert_eq!(
+            failure("codex", RpcError::Failed("Could not start codex".into())),
+            "Could not start codex"
+        );
+    }
 }
