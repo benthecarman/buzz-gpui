@@ -9,6 +9,7 @@ mod buzz_mcp;
 mod community;
 mod config;
 mod deep_links;
+mod gst_bundle;
 mod hosts;
 mod http;
 mod idle;
@@ -35,6 +36,15 @@ use hosts::Hosts;
 use ui::navigation::{self, Request};
 
 fn main() {
+    gst_bundle::use_bundled();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--gst-check") {
+        std::process::exit(if gst_bundle::self_check(&args[1..]) {
+            0
+        } else {
+            1
+        });
+    }
     perf::init();
     buzz_host::dispatch_supervisor();
     tracing_subscriber::fmt()
