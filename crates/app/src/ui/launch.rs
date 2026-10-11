@@ -3,9 +3,11 @@
 //! with the window controls in a 48px draggable header
 //! (`LoadingWindowHeader`), shown until the first content is ready.
 //!
-//! It fades over 220ms on a loop boundary of the mark's 1.76s animation.
+//! Unlike buzz-app, it goes as soon as nothing holds it, with no fade and
+//! no full loop of the mark first: content is usually ready within a few
+//! hundred milliseconds, well inside the 1.76s loop buzz-app waits out.
 //! Content still settling (the sidebar and timeline) holds it for at most
-//! two cycles; content required to show anything (the open channel's first
+//! a second; content required to show anything (the open channel's first
 //! page) holds it until it loads or fails.
 //!
 //! The mark is buzz-app's `buzz-loading-mark.svg`, whose SMIL tracks are
@@ -23,10 +25,8 @@ use std::time::{Duration, Instant};
 
 /// One loop of the mark (`CYCLE_MS`).
 pub const CYCLE: Duration = Duration::from_millis(1760);
-/// The fade out (`FADE_MS`).
-pub const FADE: Duration = Duration::from_millis(220);
-/// How long settling content may hold the surface (`SETTLING_BUDGET_MS`).
-pub const SETTLING_BUDGET: Duration = Duration::from_millis(1760 * 2);
+/// How long settling content may hold the surface.
+pub const SETTLING_BUDGET: Duration = Duration::from_secs(1);
 /// The mark is drawn 72px square (`4.5rem`).
 const MARK_SIZE: f32 = 72.;
 
@@ -287,13 +287,12 @@ fn rounded_rect(
     path.close();
 }
 
-/// Whether the launch surface still shows, and when it fades.
+/// Whether the launch surface still shows.
 #[derive(Clone, Debug)]
 pub struct Launch {
     started: Instant,
-    /// When content was first ready; the fade starts on the next loop
-    /// boundary after it.
-    fading: Option<Instant>,
+    /// Nothing holds the surface any more.
+    done: bool,
 }
 
 /// What the app shows under the surface.
@@ -310,43 +309,24 @@ impl Launch {
     pub fn new(now: Instant) -> Self {
         Self {
             started: now,
-            fading: None,
+            done: false,
         }
     }
 
-    /// The first loop boundary at or after `now`, at least one cycle in.
-    fn boundary(&self, now: Instant) -> Instant {
-        let elapsed = now.saturating_duration_since(self.started).as_secs_f32();
-        let cycles = (elapsed / CYCLE.as_secs_f32()).ceil().max(1.);
-        self.started + CYCLE.mul_f32(cycles)
-    }
-
-    /// Takes the content state at `now`; starts the fade once nothing
-    /// holds the surface.
+    /// Takes the content state at `now`; the surface goes once nothing
+    /// holds it.
     pub fn update(&mut self, content: Content, now: Instant) {
-        if self.fading.is_some() {
-            return;
-        }
-        let pending = match content {
-            Content::Required => true,
-            Content::Settling => now < self.started + SETTLING_BUDGET,
-            Content::Ready => false,
-        };
-        if !pending {
-            self.fading = Some(self.boundary(now));
-        }
+        self.done = self.done
+            || match content {
+                Content::Required => false,
+                Content::Settling => now >= self.started + SETTLING_BUDGET,
+                Content::Ready => true,
+            };
     }
 
-    /// The surface's opacity at `now`; `None` once it is gone.
-    pub fn opacity(&self, now: Instant) -> Option<f32> {
-        let Some(fade) = self.fading else {
-            return Some(1.);
-        };
-        let into = now.checked_duration_since(fade).unwrap_or_default();
-        if now < fade {
-            return Some(1.);
-        }
-        (into < FADE).then(|| 1. - into.as_secs_f32() / FADE.as_secs_f32())
+    /// Whether the surface still shows.
+    pub fn showing(&self) -> bool {
+        !self.done
     }
 
     /// The mark's position in its loop, 0..1.
@@ -358,8 +338,10 @@ impl Launch {
     /// The surface: the mark centred, and the window controls in a 48px
     /// draggable header. Asks for the next frame while it shows.
     pub fn render(&self, window: &mut Window, cx: &App) -> Option<AnyElement> {
+        if !self.showing() {
+            return None;
+        }
         let now = Instant::now();
-        let opacity = self.opacity(now)?;
         window.request_animation_frame();
         let c = cx.colors();
         let background = c.surface_base;
@@ -380,7 +362,6 @@ impl Launch {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .opacity(opacity)
                 .bg(background)
                 .flex()
                 .items_center()
@@ -450,26 +431,24 @@ mod tests {
     }
 
     #[test]
-    fn fades_on_a_loop_boundary_with_a_settling_budget() {
+    fn goes_once_ready_with_a_settling_budget() {
         let start = Instant::now();
+        // Required content holds it however long it takes.
         let mut launch = Launch::new(start);
         launch.update(Content::Required, start + Duration::from_secs(30));
-        assert_eq!(launch.opacity(start + Duration::from_secs(30)), Some(1.));
-        // Ready early: the first full loop still plays.
+        assert!(launch.showing());
+        // Ready content ends it at once, mid-loop.
         let mut launch = Launch::new(start);
         launch.update(Content::Ready, start + Duration::from_millis(100));
-        assert_eq!(
-            launch.opacity(start + Duration::from_millis(1700)),
-            Some(1.)
-        );
-        let mid = launch.opacity(start + CYCLE + FADE / 2).unwrap();
-        assert!(mid > 0.4 && mid < 0.6);
-        assert_eq!(launch.opacity(start + CYCLE + FADE), None);
-        // Settling content holds it for two loops at most.
+        assert!(!launch.showing());
+        // Settling content holds it until the budget runs out.
         let mut launch = Launch::new(start);
-        launch.update(Content::Settling, start + Duration::from_millis(2000));
-        assert_eq!(launch.opacity(start + Duration::from_secs(10)), Some(1.));
+        launch.update(Content::Settling, start + Duration::from_millis(500));
+        assert!(launch.showing());
         launch.update(Content::Settling, start + SETTLING_BUDGET);
-        assert_eq!(launch.opacity(start + SETTLING_BUDGET + FADE), None);
+        assert!(!launch.showing());
+        // Once gone, it stays gone.
+        launch.update(Content::Required, start + SETTLING_BUDGET * 2);
+        assert!(!launch.showing());
     }
 }
