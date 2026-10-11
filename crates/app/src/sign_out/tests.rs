@@ -59,6 +59,13 @@ fn finish_pending(
     finish(paths, choices, remove_agent_keys, remove_key).map_err(|_| FAILED.to_owned())
 }
 
+/// Lets go of a lock another Buzz holds. Unlocked rather than closed: a
+/// process another test spawns meanwhile holds a copy of the descriptor
+/// until it execs, and the lock lasts until its last copy closes.
+fn release(file: File) {
+    file.unlock().unwrap();
+}
+
 fn no_agents(_: &Path) -> Result<(), String> {
     panic!("agent keys must not be touched")
 }
@@ -321,7 +328,7 @@ fn a_running_copy_with_the_same_key_refuses_a_plain_sign_out() {
         boot_with(&paths, no_agents, || panic!("the key stays")).err(),
         Some(BUSY.into())
     );
-    drop(other);
+    release(other);
     assert!(boot_with(&paths, no_agents, || Ok(())).is_ok());
     assert!(!paths.marker.exists());
 }
@@ -347,7 +354,7 @@ fn an_erase_is_refused_while_any_copy_runs() {
         boot_with(&paths, no_agents, || panic!("the key stays")).err(),
         Some(BUSY_ALL.into())
     );
-    drop(other);
+    release(other);
 }
 
 #[test]
@@ -468,7 +475,7 @@ fn a_pending_erase_waits_for_every_agent_supervisor_to_let_go() {
     );
     assert_eq!(refused.err(), Some(AGENT_STOPPING.to_owned()));
     assert_eq!(listing(dir.path()), before);
-    drop(held);
+    release(held);
     let removed = Cell::new(0);
     let finished = boot_with(
         &paths,

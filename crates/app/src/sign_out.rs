@@ -238,6 +238,17 @@ struct Locks {
     all: File,
 }
 
+/// Lets go explicitly rather than by closing: a process spawned from
+/// another thread holds a copy of each descriptor until it execs, and a
+/// lock lasts until its last copy closes, so closing alone can leave it
+/// held for a moment after this instance is gone.
+impl Drop for Locks {
+    fn drop(&mut self) {
+        let _ = self.all.unlock();
+        let _ = self.key.unlock();
+    }
+}
+
 impl Instance {
     /// Admits this instance's one sign-out, holding the locks it needs
     /// alone.
