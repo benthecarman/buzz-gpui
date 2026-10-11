@@ -9,6 +9,7 @@
 use crate::ui::navigation::{Arrival, Request, Target};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use zbus::zvariant::Value;
@@ -125,18 +126,20 @@ async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: Unbounded
             return;
         }
     };
-    // A click opens the message, so a service without actions is refused
-    // (`notifications/linux.rs`).
-    let clickable = match proxy
+    let capabilities = match proxy
         .call::<_, _, Vec<String>>("GetCapabilities", &())
         .await
     {
-        Ok(capabilities) => capabilities.iter().any(|c| c == "actions"),
+        Ok(capabilities) => capabilities,
         Err(error) => {
             tracing::warn!(%error, "could not read the notification service's capabilities");
-            false
+            Vec::new()
         }
     };
+    // A click opens the message, so a service without actions is refused
+    // (`notifications/linux.rs`).
+    let clickable = capabilities.iter().any(|c| c == "actions");
+    let markup = capabilities.iter().any(|c| c == "body-markup");
     // Subscribed before the first banner, so no click is missed.
     let signals = match clickable {
         true => proxy.receive_all_signals().await,
@@ -159,7 +162,7 @@ async fn run(mut banners: mpsc::UnboundedReceiver<Banner>, navigation: Unbounded
         tokio::select! {
             banner = banners.recv() => {
                 let Some(mut banner) = banner else { return };
-                match notify(&proxy, &banner).await {
+                match notify(&proxy, &banner, markup).await {
                     Ok(id) => {
                         banner.finish(Ok(()));
                         shown.insert(id, banner.target);
@@ -207,7 +210,7 @@ async fn connect() -> zbus::Result<zbus::Proxy<'static>> {
     zbus::Proxy::new_owned(connection, SERVICE, PATH, SERVICE).await
 }
 
-async fn notify(proxy: &zbus::Proxy<'_>, banner: &Banner) -> zbus::Result<u32> {
+async fn notify(proxy: &zbus::Proxy<'_>, banner: &Banner, markup: bool) -> zbus::Result<u32> {
     let actions = ["default", "Open"];
     let hints: HashMap<&str, Value<'_>> = HashMap::from([
         // Names the app, its icon and its notification settings.
@@ -224,7 +227,7 @@ async fn notify(proxy: &zbus::Proxy<'_>, banner: &Banner) -> zbus::Result<u32> {
                 0u32,
                 "buzz-gpui",
                 banner.title.as_str(),
-                banner.body.as_str(),
+                notification_body(&banner.body, markup).as_ref(),
                 &actions[..],
                 hints,
                 -1i32,
@@ -233,10 +236,42 @@ async fn notify(proxy: &zbus::Proxy<'_>, banner: &Banner) -> zbus::Result<u32> {
         .await
 }
 
+/// The body is plain text. A service that advertises `body-markup` parses
+/// it as markup, so escape it there; typed `<harness>` must stay literal.
+fn notification_body(body: &str, markup: bool) -> Cow<'_, str> {
+    if !markup || !body.contains(['&', '<', '>']) {
+        return Cow::Borrowed(body);
+    }
+    let mut escaped = String::with_capacity(body.len());
+    for character in body.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            other => escaped.push(other),
+        }
+    }
+    Cow::Owned(escaped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ui::navigation::Place;
+
+    #[test]
+    fn markup_services_receive_escaped_plain_text() {
+        let preview = "<harness> & a > b";
+        assert_eq!(notification_body(preview, false), preview);
+        assert_eq!(
+            notification_body(preview, true),
+            "&lt;harness&gt; &amp; a &gt; b"
+        );
+        assert!(matches!(
+            notification_body("plain", true),
+            Cow::Borrowed("plain")
+        ));
+    }
 
     fn target(channel: &str) -> Target {
         Target {

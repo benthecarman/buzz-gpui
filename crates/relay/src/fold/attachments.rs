@@ -311,6 +311,25 @@ fn validated_blurhash(value: &str) -> Option<String> {
     (bytes.len() == 4 + 2 * components).then(|| value.to_owned())
 }
 
+/// Raw HTML in chat is shown as the typed text, except complete HTML
+/// comments (`visibleHtmlSource`). Comments are hidden markup by Markdown
+/// convention, and clients put protocol markers in them (Buzz Desktop
+/// waves start with `<!-- buzz:wave:v1 -->`). An unclosed `<!--` stays
+/// visible.
+pub fn visible_html_source(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("<!--") {
+        let Some(end) = rest[start + 4..].find("-->") else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 4 + end + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Credential-free HTTP(S), WHATWG-serialized (`message-content.ts:6-18`).
 pub(super) fn safe_link_url(value: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
@@ -616,6 +635,17 @@ fn strip_ranges(content: &str, mut ranges: Vec<(usize, usize)>) -> (String, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shows_typed_html_but_hides_complete_comments() {
+        assert_eq!(visible_html_source("<harness>"), "<harness>");
+        assert_eq!(
+            visible_html_source("<!-- buzz:wave:v1 -->\n<b>hi</b><!--x-->!"),
+            "\n<b>hi</b>!"
+        );
+        assert_eq!(visible_html_source("<!-->"), "<!-->");
+        assert_eq!(visible_html_source("a <!-- open"), "a <!-- open");
+    }
 
     #[test]
     fn validates_blurhash_syntax() {

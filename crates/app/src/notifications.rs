@@ -430,8 +430,9 @@ pub(crate) fn short_text(value: &str, limit: usize) -> String {
     }
 }
 
-/// CommonMark flattened to prose: HTML and definitions dropped, images
-/// labelled, at most [`BODY_CHARS`] code points.
+/// CommonMark flattened to prose: raw HTML as typed but for complete
+/// comments, definitions dropped, images labelled, at most [`BODY_CHARS`]
+/// code points.
 pub(crate) fn plain_text(content: &str) -> String {
     let source: String = content.chars().take(SOURCE_CHARS).collect();
     let Ok(tree) = markdown::to_mdast(&source, &markdown::ParseOptions::default()) else {
@@ -443,7 +444,8 @@ pub(crate) fn plain_text(content: &str) -> String {
 fn prose(node: &markdown::mdast::Node) -> String {
     use markdown::mdast::Node;
     match node {
-        Node::Html(_) | Node::Definition(_) => String::new(),
+        Node::Definition(_) => String::new(),
+        Node::Html(html) => buzz_relay_client::fold::visible_html_source(&html.value),
         Node::Image(_) | Node::ImageReference(_) => "[Image]".into(),
         Node::Break(_) | Node::ThematicBreak(_) => " ".into(),
         Node::Text(text) => text.value.clone(),
@@ -622,7 +624,20 @@ mod tests {
             "Hello there second"
         );
         assert_eq!(plain_text("look ![cat](https://x/cat.png)"), "look [Image]");
-        assert_eq!(plain_text("<b>raw</b> text"), "raw text");
+        assert_eq!(plain_text("<b>raw</b> text"), "<b>raw</b> text");
+        assert_eq!(
+            plain_text("**hello**\n\n<div>shown</div>"),
+            "hello <div>shown</div>"
+        );
+        assert_eq!(
+            plain_text("<harness stuff goes here>"),
+            "<harness stuff goes here>"
+        );
+        assert_eq!(
+            plain_text("<!-- buzz:wave:v1 -->\nLogan waved at you."),
+            "Logan waved at you."
+        );
+        assert_eq!(plain_text("<!-- buzz:wave:v1 -->"), "");
         let long = "word ".repeat(100);
         let body = plain_text(&long);
         assert_eq!(body.chars().count(), BODY_CHARS);
