@@ -611,6 +611,17 @@ impl ChannelPage {
             self.community.read(cx).origin.clone(),
             super::agents::wake::floor(),
         );
+        // With no recipients to resolve and no files to upload, the intent
+        // is queued now, so the row shows on the next frame.
+        let queued = (session_send.is_none() && submission.upload.is_none()).then(|| {
+            session.send(
+                &channel,
+                &submission.content,
+                mentions.clone(),
+                Vec::new(),
+                None,
+            )
+        });
         cx.spawn_in(window, async move |this, cx| {
             if let Some((known, profiles, rules, starting)) = session_send
                 && submission.editing.is_none()
@@ -637,9 +648,10 @@ impl ChannelPage {
                     }
                 }
             }
-            let result = match &submission.editing {
-                Some(row) => session.edit(&channel, row.id, &submission.content).await,
-                None => {
+            let result = match (&submission.editing, queued) {
+                (Some(row), _) => session.edit(&channel, row.id, &submission.content).await,
+                (None, Some(queued)) => queued.await,
+                (None, None) => {
                     // Files upload in the background first; a failed upload
                     // is handed back to the composer's draft.
                     let Some(attachments) = submission.attachments().await else {
