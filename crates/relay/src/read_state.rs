@@ -1832,6 +1832,15 @@ impl<J: ReadStateJournal> ReadStateSync<J> {
         Ok(())
     }
 
+    /// Whether [`Self::accept`] would use anything in the batch: our own
+    /// read-state coordinates, while sync is supported.
+    pub fn relevant(&self, events: &[Verified]) -> bool {
+        self.capability != ReadCapability::Unsupported
+            && events
+                .iter()
+                .any(|event| event.pubkey_hex() == self.viewer && read_coordinate(event).is_some())
+    }
+
     /// Feeds any verified batch (live or read). Only our own read-state
     /// coordinates are used; returns whether there were any.
     pub fn accept(
@@ -1840,11 +1849,7 @@ impl<J: ReadStateJournal> ReadStateSync<J> {
         identity: &Identity,
         coverage: Option<&dyn MarkCoverage>,
     ) -> bool {
-        if self.capability == ReadCapability::Unsupported
-            || !events
-                .iter()
-                .any(|event| event.pubkey_hex() == self.viewer && read_coordinate(event).is_some())
-        {
+        if !self.relevant(events) {
             return false;
         }
         if let Err(error) = self.ingest(events, identity, coverage) {

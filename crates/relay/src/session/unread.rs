@@ -575,8 +575,11 @@ impl Actor {
             return false;
         };
         let before = (reads.unread.stamp(), reads.sync.changes());
-        let coverage = reads.unread.coverage();
-        reads.sync.accept(events, &self.identity, Some(&coverage));
+        // Coverage builds the evidence index: only when read state needs it.
+        if reads.sync.relevant(events) {
+            let coverage = reads.unread.coverage();
+            reads.sync.accept(events, &self.identity, Some(&coverage));
+        }
         reads.unread.accept(events);
         before != (reads.unread.stamp(), reads.sync.changes())
     }

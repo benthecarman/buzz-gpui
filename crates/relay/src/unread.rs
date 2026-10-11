@@ -2082,8 +2082,9 @@ impl<F: ThreadFollowStore> Unread<F> {
         for id in ids {
             self.retracted.insert(id.clone(), ());
             self.witnesses.remove(&id);
-            // A deleted message must be fetched again, not reused.
-            self.lookup_events.remove(&id);
+            // A deleted message must be fetched again, not reused. Roots
+            // may have walked through it.
+            changed |= self.lookup_events.remove(&id).is_some();
             let affected: Vec<(String, bool)> = self
                 .lookups
                 .iter()
@@ -2114,7 +2115,6 @@ impl<F: ThreadFollowStore> Unread<F> {
     /// when the bound overflowed, which clears all evidence.
     pub fn accept(&mut self, batch: &[Verified]) -> bool {
         self.retract(batch);
-        self.index = None;
         let incoming: HashMap<String, Verified> = batch
             .iter()
             .map(|event| (event.id_hex(), event.clone()))
@@ -2152,7 +2152,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         }
         if changed {
             self.freshness = Freshness::Observed;
-            self.changed();
+            self.reindex();
         }
         true
     }
@@ -4535,6 +4535,7 @@ mod tests {
         let first = h.room();
         assert!(Arc::ptr_eq(&first, &h.room()));
         h.emit(&[row]);
+        assert!(h.unread.index.is_some(), "a repeat keeps the index");
         let unrelated = h.alice("other", "elsewhere", 11, vec![]);
         h.emit(&[unrelated]);
         assert!(Arc::ptr_eq(&first, &h.room()));
