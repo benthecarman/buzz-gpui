@@ -6,6 +6,7 @@
 
 use futures::future::BoxFuture;
 use std::io;
+#[cfg(unix)]
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, mpsc};

@@ -179,6 +179,7 @@ impl Drop for PrivateDir {
 
 fn private_dir() -> std::io::Result<PrivateDir> {
     let path = std::env::temp_dir().join(format!("buzz-avatar-{}", uuid::Uuid::new_v4()));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);

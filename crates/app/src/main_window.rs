@@ -10,12 +10,14 @@
 
 use crate::community::{AppState, Community};
 use crate::idle::Idle;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::runtime::Runtime;
 use crate::ui::launch::Launch;
 use crate::ui::navigation;
 use crate::ui::workspace::Workspace;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -75,6 +77,7 @@ struct MainWindow {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     tray: Option<Arc<Tray>>,
     /// Mentions and direct messages unread, last told to the tray.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     attention: u32,
     _communities: Vec<Subscription>,
 }
@@ -106,6 +109,7 @@ pub fn init(cx: &mut App) {
         shown: false,
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         tray: None,
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         attention: 0,
         _communities: Vec::new(),
     });
