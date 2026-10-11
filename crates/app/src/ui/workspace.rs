@@ -78,6 +78,8 @@ pub struct Workspace {
     account: Entity<Account>,
     onboarding: Option<(Step, Entity<Onboarding>)>,
     _community_observer: Option<Subscription>,
+    /// Every community's unread marks, for the rail.
+    rail_marks: Entity<super::rail_menu::RailMarks>,
     /// Places visited, for Back and Forward.
     history: History,
     /// A place waiting for its community's channel list.
@@ -115,6 +117,8 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe_global_in::<AppState>(window, |this, window, cx| this.sync(window, cx))
             .detach();
+        let rail_marks = cx.new(super::rail_menu::RailMarks::new);
+        cx.observe(&rail_marks, |_, _, cx| cx.notify()).detach();
         // Notifications follow the conversation in front of the user.
         cx.observe_self(|this, cx| this.report_open(cx.active_window().is_some(), cx))
             .detach();
@@ -164,6 +168,7 @@ impl Workspace {
             account: cx.new(Account::new),
             onboarding: None,
             _community_observer: None,
+            rail_marks,
             history: History::default(),
             pending: None,
             pending_listing: false,
@@ -558,7 +563,7 @@ impl Workspace {
     }
 
     fn rail(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        super::rail_menu::rail(window, cx)
+        super::rail_menu::rail(self.rail_marks.clone(), window, cx)
     }
 }
 

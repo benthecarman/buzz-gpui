@@ -19,6 +19,7 @@ use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, IconButton, IconName, Menu, MenuItem,
     MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::sync::Arc;
 
@@ -30,7 +31,11 @@ pub fn state(window: &mut Window, cx: &mut App) -> MenuState {
 }
 
 /// The rail: Personal space, the communities, then "Add a community".
-pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement {
+pub fn rail(
+    marks: Entity<RailMarks>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
     let menu = state(window, cx);
     let state = cx.global::<AppState>();
     let selected = state.selected;
@@ -48,13 +53,20 @@ pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElemen
                 .selected(selected.is_none())
                 .on_click(cx.listener(|this, _, window, cx| this.select_personal(window, cx))),
         );
+    let c = *cx.colors();
     for (index, community) in communities.iter().enumerate() {
-        let (name, icon, media) = {
+        let (name, icon, media, (unread, attention)) = {
             let community = community.read(cx);
             (
                 community.name(),
                 community.icon().map(str::to_owned),
                 community.session.media().clone(),
+                // You are in the selected one; its sidebar shows the rest.
+                if selected == Some(index) {
+                    (false, false)
+                } else {
+                    marks.read(cx).of(&communities[index])
+                },
             )
         };
         let image = icon.and_then(|icon| icon_source(&icon, &media));
@@ -68,35 +80,68 @@ pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElemen
             name: name.clone().into(),
             image,
         };
+        // Unread, as on a channel row: a pill half out of the rail's left
+        // edge, level with the item.
+        let pill = unread.then(|| {
+            div()
+                .absolute()
+                .left(px(-4.))
+                .top_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .child(div().size(px(8.)).rounded_full().bg(c.text_standard))
+        });
+        let item = div()
+            .id(SharedString::from(format!("rail-item-{index}")))
+            .relative()
+            .rounded(rems(0.5))
+            // A mention, direct message or other attention: the accent
+            // dot channel rows use, on the icon's corner.
+            .when(attention, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(-1.))
+                        .right(px(-1.))
+                        .size(px(9.))
+                        .rounded_full()
+                        .bg(c.affordance_prominent),
+                )
+            })
+            .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            .drag_over::<DraggedCommunity>(|style, _, _, cx| {
+                style.bg(cx.colors().affordance_accent)
+            })
+            .on_drop(cx.listener(move |_, dragged: &DraggedCommunity, _, cx| {
+                AppState::move_community(dragged.index, index, cx);
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Right, move |event, _, cx| {
+                open(&menu, index, event.position, cx)
+            })
+            .child(
+                IconButton::new(
+                    SharedString::from(format!("community-{index}")),
+                    IconName::Globe,
+                )
+                .tooltip(name)
+                .selected(selected == Some(index))
+                .child(avatar)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    crate::perf::begin(crate::perf::SWITCH);
+                    this.select_community(index, window, cx);
+                    crate::perf::step(crate::perf::SWITCH, "handled");
+                })),
+            );
         rail = rail.child(
             div()
-                .id(SharedString::from(format!("rail-item-{index}")))
-                .rounded(rems(0.5))
-                .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
-                .drag_over::<DraggedCommunity>(|style, _, _, cx| {
-                    style.bg(cx.colors().affordance_accent)
-                })
-                .on_drop(cx.listener(move |_, dragged: &DraggedCommunity, _, cx| {
-                    AppState::move_community(dragged.index, index, cx);
-                    cx.notify();
-                }))
-                .on_mouse_down(MouseButton::Right, move |event, _, cx| {
-                    open(&menu, index, event.position, cx)
-                })
-                .child(
-                    IconButton::new(
-                        SharedString::from(format!("community-{index}")),
-                        IconName::Globe,
-                    )
-                    .tooltip(name)
-                    .selected(selected == Some(index))
-                    .child(avatar)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        crate::perf::begin(crate::perf::SWITCH);
-                        this.select_community(index, window, cx);
-                        crate::perf::step(crate::perf::SWITCH, "handled");
-                    })),
-                ),
+                .relative()
+                .w_full()
+                .flex()
+                .justify_center()
+                .children(pill)
+                .child(item),
         );
     }
     rail.children(render(&menu, cx)).child(
@@ -104,6 +149,75 @@ pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElemen
             .tooltip("Add a community")
             .on_click(cx.listener(|this, _, window, cx| this.open_add_community(window, cx))),
     )
+}
+
+/// Each community's unread marks, kept as their sessions change: every
+/// community, selected or not, so the rail shows where there is something
+/// new. It notifies only when a mark changes, so a busy background
+/// community does not redraw the window.
+pub struct RailMarks {
+    marks: std::collections::HashMap<EntityId, (bool, bool)>,
+    _observers: Vec<Subscription>,
+}
+
+impl RailMarks {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<AppState>(|this, cx| this.follow(cx))
+            .detach();
+        let mut this = Self {
+            marks: Default::default(),
+            _observers: Vec::new(),
+        };
+        this.follow(cx);
+        this
+    }
+
+    /// Watches the communities saved now.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        let communities = cx.global::<AppState>().communities.clone();
+        self._observers = communities
+            .iter()
+            .map(|community| cx.observe(community, |this, community, cx| this.mark(&community, cx)))
+            .collect();
+        self.marks
+            .retain(|id, _| communities.iter().any(|c| c.entity_id() == *id));
+        for community in &communities {
+            self.mark(community, cx);
+        }
+    }
+
+    fn mark(&mut self, community: &Entity<Community>, cx: &mut Context<Self>) {
+        let marks = unread_marks(community.read(cx));
+        if self.marks.insert(community.entity_id(), marks) != Some(marks) {
+            cx.notify();
+        }
+    }
+
+    fn of(&self, community: &Entity<Community>) -> (bool, bool) {
+        self.marks
+            .get(&community.entity_id())
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// Whether a community has unread messages outside muted channels, and
+/// whether any unread needs attention (a mention, direct message, followed
+/// thread or broadcast), which shows even from a muted channel.
+fn unread_marks(community: &Community) -> (bool, bool) {
+    let snapshot = &community.snapshot;
+    let muted: &[String] = snapshot
+        .sidebar
+        .data
+        .as_ref()
+        .map_or(&[], |data| data.muted.as_slice());
+    let channels = snapshot.unread.channels.iter();
+    let mut marks = (false, false);
+    for (id, unread) in channels.filter(|(_, unread)| unread.unread) {
+        marks.0 |= !muted.contains(id);
+        marks.1 |= unread.priority;
+    }
+    marks
 }
 
 /// A community being dragged on the rail, drawn as its icon under the
