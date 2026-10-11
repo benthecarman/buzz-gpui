@@ -294,6 +294,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_types_are_bundled_and_on_and_keep_an_installed_copys_switch() {
+        let home = tempfile_dir();
+        let manager = Manager::open(Some(home.clone()), "default", false).unwrap();
+        let catalog = rows(manager.catalog().unwrap());
+        let row = |rows: &[PluginRow], id: &str| rows.iter().find(|row| row.id == id).cloned();
+        assert_eq!(
+            row(&catalog, "buzz.claude-code").map(|row| (row.name, row.enabled)),
+            Some(("Claude Code".into(), true))
+        );
+        assert_eq!(
+            row(&catalog, "buzz.codex").map(|row| (row.name, row.enabled)),
+            Some(("Codex".into(), true))
+        );
+        let _ = std::fs::remove_dir_all(home);
+
+        // A profile that installed Codex from a folder and turned it off
+        // gets the bundled copy, still off.
+        let home = tempfile_dir();
+        let profile = home.join("profiles/default");
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry = serde_json::json!({
+            "version": 1,
+            "bundledEnabled": true,
+            "bundledOverrides": {},
+            "installed": {
+                "buzz.codex": {
+                    "manifest": { "id": "buzz.codex", "name": "Codex", "apiVersion": 1 },
+                    "current": "0".repeat(64),
+                    "previous": null,
+                    "enabled": false,
+                },
+            },
+        });
+        std::fs::write(profile.join("registry.json"), registry.to_string()).unwrap();
+        let manager = Manager::open(Some(home.clone()), "default", false).unwrap();
+        let catalog = rows(manager.catalog().unwrap());
+        assert_eq!(
+            row(&catalog, "buzz.codex").map(|row| row.enabled),
+            Some(false)
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn keys_name_their_plugin() {
         assert_eq!(plugin_of("buzz.inbox/inbox"), "buzz.inbox");
         assert_eq!(plugin_of("settings"), "settings");

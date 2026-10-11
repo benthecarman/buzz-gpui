@@ -423,6 +423,11 @@ impl Agents2 {
                 this.update(cx);
                 cx.notify();
             }),
+            // A plugin turned on or off brings or takes its types.
+            cx.observe_global::<crate::plugins::Plugins>(|this, cx| {
+                this.update(cx);
+                cx.notify();
+            }),
             cx.observe_global::<Hosts>(|this, cx| this.watch_hosts(cx)),
             cx.observe_global::<AppState>(|this, cx| this.bind(cx)),
         ];
