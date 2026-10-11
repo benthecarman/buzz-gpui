@@ -1,0 +1,74 @@
+# Platform parity
+
+Linux is the full-featured target. This file lists every place where the
+app behaves differently on macOS or Windows, what Linux does there, and
+what the other two do now. It was written from an audit of the code on
+2026-10-11: every `cfg(target_os = …)`, `cfg(unix)` and `cfg(not(…))`
+stub, every no-op fallback, the UI and docs that said "Linux only", and
+the notes of the change that first built the app on macOS and Windows.
+
+Status:
+
+- **DONE**: the feature works natively on that platform.
+- **DIFFERENT**: it works differently or not at all, for the reason
+  given. Nothing is faked.
+- **PLANNED**: not done yet.
+
+macOS and Windows were checked by CI builds and lints only. The last
+section lists what a person still has to try on real machines.
+
+## App shell
+
+| Feature | Linux | macOS | Windows |
+|---|---|---|---|
+| Credentials (human key, agent keys, host tokens) | Secret Service through buzz-credential-store | DONE: login keychain, generic passwords (`crates/keychain`) | DONE: Credential Manager through buzz-credential-store's `keyring` backend, as buzz-app does |
+| One running app; a second launch hands its link over and exits | Unix socket in `$XDG_RUNTIME_DIR` (`single_instance.rs`) | PLANNED: Launch Services already keeps one app and sends links as open-URL events; also claim the Unix socket (in `$TMPDIR`) for launches outside Launch Services | PLANNED: a named pipe per user and profile |
+| `buzz://` links from the OS | `Exec=buzz-gpui %U`, read from argv | PLANNED: `CFBundleURLTypes` in Info.plist; links arrive as open-URL events (`App::on_open_urls`), also on a cold start | PLANNED: argv, as on Linux |
+| `buzz://` scheme registration | `.desktop` file; portable release builds write a user handler (`deep_links::register_scheme`) | PLANNED: Info.plist; Launch Services registers the app when it is copied to Applications | PLANNED: release builds write `HKCU\Software\Classes\buzz` at launch, since the zip has no installer |
+| Desktop notifications | freedesktop notification service over D-Bus (`notifications/banners.rs`) | PLANNED: GPUI's `UNUserNotificationCenter` backend | PLANNED: GPUI's WinRT toast backend, with the app's AppUserModelID |
+| Clicking a notification opens its message | `ActionInvoked` plus an xdg-activation token | PLANNED: GPUI notification response | PLANNED: GPUI notification response |
+| Notification service status in Settings | probes the D-Bus service | PLANNED | PLANNED |
+| Bringing the window forward (hand-off, tray, notification) | xdg-activation token (`gpui_linux::set_activation_token`) | PLANNED: activate the app first | PLANNED: the second launch allows the running one to take the foreground |
+| Tray icon: open, quit, unread attention, minimize or close to tray | StatusNotifierItem over D-Bus (`tray.rs`) | PLANNED: menu-bar status item (`tray-icon`) | PLANNED: notification-area icon (`tray-icon`) |
+| Dock icon click reopens a hidden window | n/a | PLANNED: `App::on_reopen` | n/a |
+| Quit shortcut | none (Ctrl+Q is reserved) | PLANNED: app menu with Quit Buzz (⌘Q) | n/a |
+| Window chrome | client-side: the header is the title bar, with Buzz's own minimize, maximize and close | PLANNED: transparent title bar with the system traffic lights, header inset for them | PLANNED: no system caption; the header drags the window through the OS hit test |
+| App icon | hicolor PNGs from the .deb | DONE: `.icns` in the bundle | PLANNED: icon resource in the .exe (window, taskbar, Explorer) |
+| Launch at login | none | n/a: Linux has no such setting either | n/a |
+| Window position and size across launches | GPUI window bounds | DONE | DONE |
+| Machine idle for automatic away | GNOME Mutter idle monitor | PLANNED: `user-idle`, as buzz-app | PLANNED: `user-idle`, as buzz-app |
+| Network back online: reconnect communities | default route in `/proc/net/route` | PLANNED: probe for a default route with an unconnected UDP socket | PLANNED: same probe |
+| Copy image | `arboard` (GPUI's clipboard has text only on Wayland) | PLANNED: `arboard` | PLANNED: `arboard` |
+| Paste and drop files | vendored GPUI patch for `text/uri-list` | DONE: GPUI reads file names from the pasteboard | DONE: GPUI reads `CF_HDROP` |
+| Time zone abbreviation in times | `localtime_r` | DONE | DIFFERENT: Windows names zones in full ("Pacific Standard Time"), so times show a GMT offset |
+| HEIC avatars through ffmpeg | `ffmpeg` from the package's dependencies | DIFFERENT: needs `brew install ffmpeg` | PLANNED: run it without a console window. DIFFERENT: ffmpeg must be on `PATH`; the zip does not carry it |
+| Media playback and sounds | GStreamer from the distribution | DONE: GStreamer from Homebrew | DONE: GStreamer bundled in the zip |
+| Data and config locations | XDG directories | DONE: `~/Library/Application Support` | DONE: `%APPDATA%` |
+
+## Agents and hosts
+
+| Feature | Linux | macOS | Windows |
+|---|---|---|---|
+| Embedded agent host | in-process host (`crates/host`) | DONE | DONE |
+| Agent processes and their descendants | buzz-agent-controller, process groups | DONE | DONE: buzz-agent-controller uses job objects |
+| Refuse to start agents while old Buzz runs | `ps -axo pid=,comm=` | DONE | PLANNED: `ps` does not exist, so every agent start was refused; list processes with `tasklist` |
+| Agent-type processes (`crates/host/src/processes.rs`) | own process group; SIGTERM, then SIGKILL to the group | DONE | PLANNED: a job object ends descendants too; no console window |
+| Channel terminals | login shell in a PTY (`buzz_desktop::terminal`) | DONE | DIFFERENT: buzz-desktop's terminal is Unix-only ("Local terminals require macOS or Linux"); buzz-app has none on Windows either. A ConPTY backend belongs in buzz-desktop |
+| Installing Pi and Claude Code into Buzz's tools | `buzz_desktop::harness_setup` | DONE | DIFFERENT: buzz-desktop supports macOS and Linux only, as buzz-app; install them yourself and Buzz finds them on `PATH` |
+| Remote hosts over `tcp://` | yes | DONE | DONE |
+| Remote hosts and `buzzd` over `unix://` | Unix sockets | DONE | DIFFERENT: tokio has no Unix sockets on Windows; use `tcp://` |
+| Owner-only files (config, `buzzd` token, agent key files) | modes 0600 and 0700 | DONE | DIFFERENT: no Unix modes; the files are in the user's profile, whose ACL already admits only the user, SYSTEM and Administrators |
+| `buzzd` stops cleanly when the service manager stops it | SIGTERM | DONE | PLANNED: console close, logoff and shutdown events |
+| `buzzd` host name | `/etc/hostname` | PLANNED: macOS has no `/etc/hostname`; ask the system | PLANNED: `COMPUTERNAME` |
+
+## Packaging
+
+| Item | Linux | macOS | Windows |
+|---|---|---|---|
+| Package | `.deb` | `.dmg` with `Buzz.app` | `.zip` |
+| Signing | n/a | DIFFERENT: ad-hoc signature only; Developer ID signing and notarisation need Apple credentials the project does not have, so Gatekeeper warns on first open | DIFFERENT: unsigned; signing needs a code-signing certificate, so SmartScreen warns |
+| Installer, Start menu entry | n/a | n/a | DIFFERENT: the zip has no installer and adds no Start menu entry; registry entries for `buzz://` and notifications are written at launch instead |
+
+## Smoke tests on real machines
+
+Nothing in this file was run on a Mac or a Windows PC.
