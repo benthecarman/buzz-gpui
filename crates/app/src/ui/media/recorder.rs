@@ -514,7 +514,7 @@ mod tests {
             .unwrap(),
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async move {
+        let round_trip = async move {
             let wait = Duration::from_secs(20);
             let session = Session::open(
                 &tokio::runtime::Handle::current(),
@@ -581,6 +581,12 @@ mod tests {
             // The plain test relay serves media over HTTP, so the note shows
             // as an unavailable file here; over HTTPS it is a voice note.
             assert_eq!(row.attachments[0].name.as_deref(), Some(name.as_str()));
-        });
+        };
+        // Creating the channel, the upload and the send wait on the relay
+        // with no deadline of their own (an upload may take ten minutes),
+        // so a relay that stops answering fails here instead of stalling.
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(120), round_trip).await })
+            .expect("the voice note went through the relay within two minutes");
     }
 }
