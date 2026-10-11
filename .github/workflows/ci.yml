@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Format, lint and test
+  lint:
+    name: Format and lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,14 @@ jobs:
         run: nix develop --command cargo fmt --all --check
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: Swatinem/rust-cache@v2
       # Tests that need the local test relay skip themselves without it.
       - name: Test
         run: nix develop --command cargo test --workspace --locked
