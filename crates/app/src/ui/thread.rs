@@ -776,6 +776,15 @@ impl Render for ThreadPanel {
         self.sync_composer(window, cx);
         let c = *cx.colors();
         let snapshot = self.snapshot.clone();
+        if crate::perf::on() {
+            crate::perf::shown(crate::perf::THREAD, "panel");
+            if snapshot.root.is_some() {
+                crate::perf::shown(crate::perf::THREAD, "root");
+            }
+            if !snapshot.replies.is_empty() {
+                crate::perf::shown(crate::perf::THREAD, "replies");
+            }
+        }
         let owned = Rc::new(typing::owned_agents(cx));
         let narrow = window.viewport_size().width <= typing::NARROW;
         let community = self.community.read(cx);

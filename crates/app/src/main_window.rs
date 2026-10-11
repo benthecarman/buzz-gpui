@@ -15,6 +15,7 @@ use crate::runtime::Runtime;
 use crate::ui::launch::Launch;
 use crate::ui::navigation;
 use crate::ui::workspace::Workspace;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -307,6 +308,7 @@ impl Root {
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::overlay::begin_frame();
+        crate::perf::frame_start();
         let launch = self.launch.as_mut().and_then(|launch| {
             launch.update(self.workspace.read(cx).launch_content(cx), Instant::now());
             launch.render(window, cx)
@@ -324,6 +326,14 @@ impl Render for Root {
             .on_key_down(tab_through)
             .child(self.workspace.clone())
             .children(launch)
+            .when(crate::perf::on(), |root| {
+                // Painted last: the end of the frame's CPU work.
+                root.child(
+                    canvas(|_, _, _| {}, |_, _, _, _| crate::perf::frame_end())
+                        .absolute()
+                        .size_0(),
+                )
+            })
     }
 }
 

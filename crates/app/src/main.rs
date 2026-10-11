@@ -18,6 +18,7 @@ mod mirror;
 mod network;
 mod notifications;
 mod oauth;
+mod perf;
 mod plugins;
 mod runtime;
 mod shortcuts;
@@ -34,6 +35,7 @@ use hosts::Hosts;
 use ui::navigation::{self, Request};
 
 fn main() {
+    perf::init();
     buzz_host::dispatch_supervisor();
     tracing_subscriber::fmt()
         .with_env_filter(

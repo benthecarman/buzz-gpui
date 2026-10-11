@@ -107,6 +107,7 @@ impl AppState {
     /// Adopts a restored, created or imported identity and opens its saved
     /// communities.
     pub fn set_identity(identity: buzz_identity::Identity, cx: &mut App) {
+        crate::perf::step(crate::perf::STARTUP, "identity");
         let identity = Arc::new(identity);
         // Agents start only for this key.
         if let Some(host) = crate::hosts::Hosts::embedded(cx) {
@@ -130,6 +131,7 @@ impl AppState {
         state.identity = IdentityState::Ready(identity);
         state.presence_mode = mode;
         state.presence_error = presence_error;
+        crate::perf::step(crate::perf::STARTUP, "sessions");
     }
 
     fn saved(&self, viewer: &str) -> Saved {

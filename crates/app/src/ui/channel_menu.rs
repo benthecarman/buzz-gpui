@@ -220,6 +220,7 @@ impl ChannelActions {
     }
 
     fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::perf::begin(crate::perf::MENU);
         self.menu_open = true;
         if self.save_as.is_none() && super::templates::provider(cx).is_some() {
             let (community, channel) = (self.community.clone(), self.channel.id.clone());
@@ -499,6 +500,9 @@ impl Render for ChannelActions {
             .find(|c| c.id == self.channel.id)
         {
             self.channel = current.clone();
+        }
+        if self.menu_open {
+            crate::perf::shown(crate::perf::MENU, "painted");
         }
         let menu = self
             .menu_open
