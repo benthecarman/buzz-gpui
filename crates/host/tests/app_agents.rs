@@ -368,9 +368,82 @@ async fn old_hosts_answer_app_agent_requests_as_unsupported() {
     connected(&client).await;
     let message = failed(ask(&client, AppAgentRequest::List).await);
     assert!(message.contains("does not support"), "{message}");
+    let claim = AppAgentRequest::Claim {
+        pubkey: "a".repeat(64),
+    };
+    let message = failed(ask(&client, claim).await);
+    assert!(message.contains("does not support"), "{message}");
     // The connection survives, and the requests the old host knows work.
     assert!(matches!(
         client.request(Request::Agents).await,
         Ok(Response::Agents(_))
     ));
+}
+
+async fn claim(client: &HostClient<HostProtocol>, pubkey: &str) -> bool {
+    let request = AppAgentRequest::Claim {
+        pubkey: pubkey.into(),
+    };
+    match ask(client, request).await.unwrap() {
+        AppAgentResponse::Claimed(claimed) => claimed,
+        other => panic!("expected a claim, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_gui_runs_each_agent_until_it_lets_go_or_disconnects() {
+    let state = tempfile::tempdir().unwrap();
+    let host = AgentHost::start(HostConfig {
+        info: info(),
+        state_dir: state.path().join("state"),
+        workspace: state.path().join("workspace"),
+        credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
+        watch_interval: Duration::from_millis(100),
+        legacy_dir: None,
+    })
+    .unwrap();
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve(
+        listener,
+        Arc::new(RpcHandler(host)),
+        ServerOptions::default(),
+    ));
+    let connector = Arc::new(connector);
+    let gui = || {
+        HostClient::<HostProtocol>::spawn(
+            &tokio::runtime::Handle::current(),
+            connector.clone(),
+            Arc::new(NoAsks),
+            HostClientOptions::default(),
+        )
+    };
+    let (one, other) = (gui(), gui());
+    connected(&one).await;
+    connected(&other).await;
+    let agent = "a".repeat(64);
+    assert!(claim(&one, &agent).await);
+    assert!(claim(&one, &agent).await, "a holder keeps it");
+    assert!(!claim(&other, &agent).await);
+    assert!(claim(&other, &"b".repeat(64)).await);
+
+    let release = AppAgentRequest::Release {
+        pubkey: agent.clone(),
+    };
+    ask(&one, release).await.unwrap();
+    assert!(claim(&other, &agent).await);
+    assert!(!claim(&one, &agent).await);
+
+    // As when that GUI quits.
+    drop(other);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !claim(&one, &agent).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a closed connection lets go");
+    let invalid = AppAgentRequest::Claim {
+        pubkey: "../x".into(),
+    };
+    assert_eq!(failed(ask(&one, invalid).await), "Invalid agent");
 }
