@@ -91,6 +91,12 @@ origins in its `NOTICE.md`:
   [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent),
   as cropped and resized by Block Buzz. MIT License, Copyright (c) 2025 Nous
   Research.
+- `codex.svg`: the OpenAI Blossom mark, from buzz-app's `CodexLogoArtwork`,
+  which takes it from OpenAI's brand kit
+  (https://cdn.openai.com/brand/openai-logos.zip,
+  `SVGs/OAI_OpenAI-Blossom_Black.svg`) to identify OpenAI's Codex harness.
+  The fill is `currentColor` and the viewBox is cropped to the mark. OpenAI
+  and the Blossom logo are trademarks of OpenAI.
 
 The MIT License terms for Pi and Hermes:
 
