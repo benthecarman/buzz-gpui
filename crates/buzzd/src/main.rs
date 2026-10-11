@@ -197,7 +197,8 @@ fn host_id(state_dir: &Path) -> Result<String> {
 }
 
 /// Resolves on SIGTERM, which service managers send to stop the daemon.
-/// Windows has no such signal; there Ctrl+C alone stops it.
+/// Windows has no such signal; there it resolves on Ctrl+Break, on the
+/// console closing, and on logoff or shutdown.
 fn terminated() -> Result<impl std::future::Future<Output = ()>> {
     #[cfg(unix)]
     {
@@ -207,8 +208,20 @@ fn terminated() -> Result<impl std::future::Future<Output = ()>> {
             terminate.recv().await;
         })
     }
-    #[cfg(not(unix))]
-    Ok(std::future::pending())
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_logoff, ctrl_shutdown};
+        let (mut pressed, mut closed) = (ctrl_break()?, ctrl_close()?);
+        let (mut logoff, mut shutdown) = (ctrl_logoff()?, ctrl_shutdown()?);
+        Ok(async move {
+            tokio::select! {
+                _ = pressed.recv() => {}
+                _ = closed.recv() => {}
+                _ = logoff.recv() => {}
+                _ = shutdown.recv() => {}
+            }
+        })
+    }
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<()> {
@@ -236,10 +249,23 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|name| name.trim().to_string())
         .ok()
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Remote host".into())
+}
+
+/// macOS and Windows keep no `/etc/hostname`; the system knows the name.
+/// macOS adds `.local`, which says nothing here.
+#[cfg(not(target_os = "linux"))]
+fn hostname() -> String {
+    let name = gethostname::gethostname().to_string_lossy().into_owned();
+    let name = name.strip_suffix(".local").unwrap_or(&name).trim();
+    match name.is_empty() {
+        true => "Remote host".into(),
+        false => name.to_string(),
+    }
 }
