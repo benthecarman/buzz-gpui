@@ -276,11 +276,11 @@ pub fn open(state: &MenuState, index: usize, at: Point<Pixels>, cx: &mut App) {
 }
 
 /// Why "Mark all as read" is unavailable, if it is (`MarkAllReadItem`):
-/// read state belongs to the selected community's ready session.
-fn mark_all_reason(community: &Community, selected: bool) -> Option<String> {
-    if !selected {
-        Some("Only the selected community can be marked as read.".into())
-    } else if community.snapshot.status != SessionStatus::Ready {
+/// read state belongs to the community's ready session. Unlike buzz-app,
+/// whose only live session is the selected community's, every community
+/// here keeps its own, so any of them can be marked from the rail.
+fn mark_all_reason(community: &Community) -> Option<String> {
+    if community.snapshot.status != SessionStatus::Ready {
         Some(format!("Waiting for {} to connect.", community.name()))
     } else if community.snapshot.cached {
         Some("Read state can’t sync on this connection.".into())
@@ -306,7 +306,7 @@ pub fn render(state: &MenuState, cx: &mut Context<Workspace>) -> Option<AnyEleme
         community: Some(origin.to_string()),
         place: Place::Settings(section),
     };
-    let reason = mark_all_reason(community.read(cx), selected);
+    let reason = mark_all_reason(community.read(cx));
     let mut menu = Menu::new().size(MenuSize::Compact).child(
         MenuItem::new("rail-mark-read", "Mark all as read")
             .icon(IconName::Checks)
