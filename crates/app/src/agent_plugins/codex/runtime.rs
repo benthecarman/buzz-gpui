@@ -10,7 +10,7 @@ use super::config::{Config, absolute_workspace, valid_workspace};
 use super::history::conversation_history;
 use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
 use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
-use crate::agent_plugins::owner_relay::OwnerRelay;
+use crate::agent_plugins::owner_relay::{OwnerRelay, Scoped};
 use crate::agent_plugins::process::{SpawnOptions, Spawner, collect};
 use crate::buzz_mcp::app_client::{AgentActions, AppClient, Check, Memories, Signal};
 use crate::buzz_mcp::tools::{call_tool, tools};
@@ -136,6 +136,8 @@ impl Storage for FileStorage {
 /// One request, as its turn or steering needs it.
 #[derive(Clone)]
 struct Request {
+    /// The agent's community and owner, as `origin:viewer`.
+    scope: String,
     event: BuzzEvent,
     agent: Arc<dyn AgentActions>,
     settings: Config,
@@ -233,10 +235,8 @@ impl Entry {
 struct Inner {
     entries: Mutex<HashMap<String, Arc<Entry>>>,
     views: Mutex<HashMap<String, Vec<SessionView>>>,
-    /// The community the entries belong to.
-    scope: Mutex<String>,
-    /// The selected community, as its owner reads it, and its scope.
-    relay: Mutex<Option<(String, Arc<dyn OwnerRelay>)>>,
+    /// Each agent's own community, as its owner reads it, and its scope.
+    relays: Mutex<HashMap<String, Scoped>>,
     storage: Arc<dyn Storage>,
     changes: watch::Sender<u64>,
     next_job: AtomicU64,
@@ -307,8 +307,7 @@ impl CodexRuntime {
             inner: Arc::new(Inner {
                 entries: Mutex::default(),
                 views: Mutex::default(),
-                scope: Mutex::default(),
-                relay: Mutex::default(),
+                relays: Mutex::default(),
                 storage,
                 changes: watch::Sender::new(0),
                 next_job: AtomicU64::new(1),
@@ -316,16 +315,22 @@ impl CodexRuntime {
         }
     }
 
-    /// The selected community as its owner reads it, and its scope; `None`
-    /// while there is none.
-    pub fn set_relay(&self, relay: Option<(String, Arc<dyn OwnerRelay>)>) {
-        *locked(&self.inner.relay) = relay;
+    /// The owner's connection to each agent's own community, and its
+    /// scope, by agent pubkey.
+    pub fn set_relays(&self, relays: HashMap<String, Scoped>) {
+        *locked(&self.inner.relays) = relays;
     }
 
-    /// The relay, while it belongs to the entries' community.
-    fn relay(&self) -> Option<Arc<dyn OwnerRelay>> {
-        let relay = locked(&self.inner.relay).clone()?;
-        (relay.0 == *locked(&self.inner.scope)).then_some(relay.1)
+    /// The agent's community as its owner reads it, and its scope.
+    fn relay(&self, pubkey: &str) -> Option<Scoped> {
+        locked(&self.inner.relays).get(pubkey).cloned()
+    }
+
+    /// The request's community, while it is still the agent's.
+    fn relay_of(&self, request: &Request) -> Option<Arc<dyn OwnerRelay>> {
+        self.relay(&request.agent.pubkey())
+            .filter(|(scope, _)| *scope == request.scope)
+            .map(|(_, relay)| relay)
     }
 
     /// Bumps whenever a conversation's status changes.
@@ -360,14 +365,10 @@ impl CodexRuntime {
         self.notify();
     }
 
-    /// Keeps the servers of `pubkeys` in `scope`: another community ends
-    /// them all, and an agent no longer present ends its own. Must run
-    /// inside tokio.
-    pub fn sync(&self, pubkeys: &[String], scope: &str) {
-        if *locked(&self.inner.scope) != scope {
-            self.dispose();
-            *locked(&self.inner.scope) = scope.into();
-        }
+    /// Keeps the servers of `pubkeys`, the agents still running whichever
+    /// community is selected; an agent no longer present ends its own.
+    /// Must run inside tokio.
+    pub fn sync(&self, pubkeys: &[String]) {
         let gone: Vec<Arc<Entry>> = {
             let mut entries = locked(&self.inner.entries);
             let gone = entries
@@ -400,12 +401,13 @@ impl CodexRuntime {
         self.notify();
     }
 
-    fn storage_key(&self, pubkey: &str) -> String {
+    fn storage_key(request: &Request) -> String {
         // Resume restores the persisted tool schema; bindings from before
         // tools start fresh.
         format!(
-            "buzz.codex.sessions.v3:{}:{pubkey}",
-            locked(&self.inner.scope)
+            "buzz.codex.sessions.v3:{}:{}",
+            request.scope,
+            request.agent.pubkey()
         )
     }
 
@@ -415,7 +417,7 @@ impl CodexRuntime {
         if let Some(prior) = entries.get(&pubkey) {
             return prior.clone();
         }
-        let storage_key = self.storage_key(&pubkey);
+        let storage_key = Self::storage_key(request);
         // Malformed local data starts fresh.
         let saved: Vec<(String, Saved)> = match self.inner.storage.get(&storage_key) {
             Some(Value::Object(stored)) => stored
@@ -552,8 +554,7 @@ impl CodexRuntime {
         if event.pubkey != agent.owner() {
             return Ok(());
         }
-        let relay = locked(&self.inner.relay).clone();
-        let Some((_, relay)) = relay else {
+        let Some((scope, relay)) = self.relay(&agent.pubkey()) else {
             return Err("Connect to the agent's community first".into());
         };
         let channel_id = channel.ok_or("The event has no unambiguous channel")?;
@@ -567,6 +568,7 @@ impl CodexRuntime {
             tool_root.clone()
         };
         let request = Request {
+            scope,
             event,
             agent,
             settings,
@@ -737,7 +739,7 @@ impl CodexRuntime {
     /// The request's conversation before it, read as the owner.
     async fn history(&self, request: &Request, signal: &Signal) -> Result<String, String> {
         signal.check()?;
-        let relay = self.relay().ok_or("The community changed")?;
+        let relay = self.relay_of(request).ok_or("The community changed")?;
         let read = move |filters: Vec<Value>| relay.read(filters);
         tokio::select! {
             history = conversation_history(&request.event, &request.conversation, &read) => history,
@@ -806,19 +808,20 @@ impl CodexRuntime {
         let version = active.version.load(Ordering::SeqCst);
         let request = active.reply();
         let memories: Memories = {
-            let (this, agent, check, signal) = (
+            let (this, request, check, signal) = (
                 self.clone(),
-                request.agent.pubkey(),
+                request.clone(),
                 check.clone(),
                 active.signal.clone(),
             );
             Arc::new(move || {
-                let (this, agent, check, signal) =
-                    (this.clone(), agent.clone(), check.clone(), signal.clone());
+                let (this, request, check, signal) =
+                    (this.clone(), request.clone(), check.clone(), signal.clone());
                 async move {
                     let relay = this
-                        .relay()
+                        .relay_of(&request)
                         .ok_or("Buzz is not connected to this community")?;
+                    let agent = request.agent.pubkey();
                     let memories: Vec<Memory> = tokio::select! {
                         memories = relay.memories(&agent) => memories?,
                         reason = signal.wait() => return Err(reason),

@@ -348,3 +348,104 @@ fn a_claim_notices_a_changed_agent_or_type() {
         }
     );
 }
+
+const HERE: &str = "https://relay.example.test";
+const OTHER: &str = "https://other.example.test";
+
+fn viewer() -> String {
+    "a".repeat(64)
+}
+
+/// Both communities bound, `HERE` and `OTHER`, each ready for the viewer.
+fn both_ready() -> Sessions {
+    Sessions::from([
+        (HERE.to_owned(), Some(viewer())),
+        (OTHER.to_owned(), Some(viewer())),
+    ])
+}
+
+#[test]
+fn keeps_running_an_agent_while_another_community_is_selected_and_gives_it_only_its_communitys_events()
+ {
+    let (owner, relay) = (viewer(), "wss://relay.example.test");
+    let sessions = both_ready();
+    let viewer = Some(owner.as_str());
+    assert!(shown(&owner, relay, Some(HERE), &sessions));
+    // Another community selected: no longer shown, still running.
+    assert!(!shown(&owner, relay, Some(OTHER), &sessions));
+    assert!(!shown(&owner, relay, None, &sessions));
+    assert!(alive(&owner, relay, viewer, &sessions));
+    assert!(ready(&owner, relay, &sessions));
+    // It hears its own community, never the selected one's.
+    assert!(hears(&owner, relay, HERE, &sessions));
+    assert!(!hears(&owner, relay, OTHER, &sessions));
+}
+
+#[test]
+fn connects_an_agents_community_at_start_without_selecting_it() {
+    let viewer = viewer();
+    let stranger = "d".repeat(64);
+    let identities = [
+        (viewer.as_str(), "wss://other.example.test"),
+        (stranger.as_str(), "wss://third.example.test"),
+    ];
+    assert_eq!(
+        wanted(Some(&viewer), Some(HERE), identities),
+        BTreeSet::from([HERE.to_owned(), OTHER.to_owned()]),
+        "the selected community and the viewer's agent's, not another owner's"
+    );
+    assert_eq!(
+        wanted(Some(&viewer), None, identities),
+        BTreeSet::from([OTHER.to_owned()])
+    );
+    assert!(
+        wanted(None, Some(HERE), identities).is_empty(),
+        "signed out"
+    );
+}
+
+#[test]
+fn keeps_an_agent_running_while_its_community_reconnects_and_stops_it_on_leave() {
+    let (owner, relay) = (viewer(), "wss://relay.example.test");
+    let viewer = Some(owner.as_str());
+    let mut sessions = both_ready();
+    // Reconnecting: the session is not ready, so it is not shown and hears
+    // nothing, but keeps running.
+    sessions.insert(HERE.to_owned(), None);
+    assert!(alive(&owner, relay, viewer, &sessions));
+    assert!(!ready(&owner, relay, &sessions));
+    assert!(!shown(&owner, relay, Some(HERE), &sessions));
+    assert!(!hears(&owner, relay, HERE, &sessions));
+    sessions.insert(HERE.to_owned(), Some(owner.clone()));
+    assert!(ready(&owner, relay, &sessions));
+    // Signed out, or left: it stops.
+    assert!(!alive(&owner, relay, None, &sessions));
+    sessions.remove(HERE);
+    assert!(!alive(&owner, relay, viewer, &sessions));
+    // Another owner's agent never runs here.
+    let stranger = "d".repeat(64);
+    assert!(!alive(
+        &stranger,
+        "wss://other.example.test",
+        viewer,
+        &sessions
+    ));
+    assert!(!ready(&stranger, "wss://other.example.test", &sessions));
+}
+
+#[test]
+fn tries_a_failed_unselected_community_again_every_so_often_and_leaves_the_selected_ones_retry_to_the_viewer()
+ {
+    let start = Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+    // Failed while selected: the viewer has its Retry.
+    assert!(!retry_due(true, true, None, at(10)));
+    // Another community selected: tried at the next tick.
+    assert!(retry_due(false, true, None, at(15)));
+    let retried = Some(at(15));
+    assert!(!retry_due(false, true, retried, at(35)));
+    assert!(retry_due(false, true, retried, at(45)));
+    // A connected one is left alone.
+    assert!(!retry_due(false, false, None, at(15)));
+    assert_eq!(RETRY, Duration::from_secs(30));
+}

@@ -620,6 +620,7 @@ Upstream changes since the previous pin. `CX/` = `src/bundled/codex/`;
 | Claude Code agent type bundled and on by default; turning the plugin off hides its type (#818) | crates/plugin-manager; src/bundled/claude-code | DONE (buzzodz-plugins at the pin; agents2/registry.rs, agents2/service.rs) | — | S |
 | Base prompt commit-attribution line (#833) | src/bundled/claude-code/base_prompt.md | DONE (agent_plugins/claude_code/base_prompt.md) | — | S |
 | Each Agents2 agent runs in one copy of the app (#790) | ST/app_agents.rs; src/features/agents2/service.ts | DONE (host/app_agents.rs, host/app_agents/hosting.rs `Claim`/`Release`; agents2/service.rs) | — | M |
+| Agents keep running while another community is selected (#838, ported ahead of merge): every joined community with one of the viewer's agents is bound with the selected one; each community's live events reach only its own agents; deleted-agent cleanup runs in unselected communities; a failed unselected community is retried every 30 s; `running` beside `agents`; `relay(pubkey)`; Claude Code and Codex keep processes for `running` and read through each agent's own community; one shared Claude Code spare and no per-agent process cap | src/features/agents2/service.ts; src/features/communities/service.ts; src/bundled/claude-code/{claude,runtime,sessions}.ts; src/bundled/codex/{index,runtime}.ts | DONE (agents2/service.rs, agent_plugins/owner_relay.rs `running`, claude_code/{claude,runtime,sessions}.rs `Spare`, codex/{mod,runtime}.rs) | No `Communities.open`: the port opens every joined community's session at launch. Leaving is the only "disconnected" state. The spare is also keyed by the host that would run it | L |
 | Shared team instructions in their own `buzz-team-text-v1` record, chunked, owner-checked | src/features/agents/team-instructions.ts; src/features/channel-templates/*; ST/relay/kit.rs (#775) | DONE (relay/src/kit/mod.rs, relay/src/kit/payload.rs, relay/src/session/teams.rs) | — | L |
 | Team save writes the text, then syncs every member's copy; delete and app start sync too; conflicting teams refused (#775) | src/bundled/channel-templates/ChannelTemplatesDialog.tsx; TemplateLibrary.tsx; ST/agents.rs `agent_control_team_sync` | DONE (ui/agents/team_text.rs, team_editor.rs, teams.rs; host `Request::TeamSync`) | Syncs each connected host that runs agents in the community | M |
 | Deploy only adds and starts members; export, share, catalog and import carry the text (#775) | FA/team-deployment.ts; BA/TeamDeployDialog.tsx; BA/TeamExportDialog.tsx; FA/team-import.ts | DONE (ui/agents/team_ops.rs, team_dialogs.rs) | — | M |
@@ -651,7 +652,7 @@ These features match buzz-app closely enough and are not listed above.
 
 | Status | Rows |
 |---|---|
-| DONE | 378 |
+| DONE | 379 |
 | DIFFERENT | 8 |
 | MISSING | 0 |
 | SKIPPED | 8 |

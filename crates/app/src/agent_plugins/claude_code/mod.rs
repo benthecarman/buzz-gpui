@@ -15,12 +15,12 @@ pub mod sessions;
 pub mod setup;
 pub mod tabs;
 
+use crate::agent_plugins::owner_relay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
 };
 use crate::buzz_mcp::BuzzEvent;
-use crate::community::AppState;
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
 use gpui_kit::*;
@@ -58,10 +58,9 @@ pub fn init(cx: &mut App) {
         return;
     }
     let state = cx.new(|cx| {
-        let mut subscriptions =
-            vec![cx.observe_global::<AppState>(|this: &mut ClaudeCode, cx| this.bind(cx))];
+        let mut subscriptions = Vec::new();
         if let Some(agents) = Agents2::global(cx) {
-            subscriptions.push(cx.observe(&agents, |this, _, cx| this.sync(cx)));
+            subscriptions.push(cx.observe(&agents, |this: &mut ClaudeCode, _, cx| this.sync(cx)));
         }
         subscriptions.push(
             cx.observe_global::<crate::plugins::Plugins>(|this: &mut ClaudeCode, cx| this.sync(cx)),
@@ -77,7 +76,6 @@ pub fn init(cx: &mut App) {
             setups: HashMap::new(),
             _subscriptions: subscriptions,
         };
-        this.bind(cx);
         this.sync(cx);
         this
     });
@@ -96,14 +94,7 @@ impl ClaudeCode {
             .map(|global| global.0.clone())
     }
 
-    /// Reads each agent's own community as its owner.
-    fn bind(&mut self, _cx: &mut Context<Self>) {
-        // TODO(port): the owner's connection to each agent's own community.
-        self.runtime.set_relays(HashMap::new());
-    }
-
-    /// Agents come and go with the community; a spare session is warmed
-    /// for each.
+    /// One spare session waits for whichever running agent needs it next.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let Some(agents) = Agents2::global(cx) else {
             return;
@@ -116,14 +107,14 @@ impl ClaudeCode {
             return;
         }
         let agents = agents.read(cx);
-        // Agents leaving view, the app signing out included, stop their
-        // processes.
+        // Agents that stop running, the app signing out included, stop
+        // their processes; switching communities does not.
         if *agents.status() == Status::Loading {
             return;
         }
         let key = key();
         let synced: Vec<Synced> = agents
-            .agents()
+            .running()
             .iter()
             .filter(|agent| agent.agent_type == key)
             .filter_map(|agent| {
@@ -135,7 +126,12 @@ impl ClaudeCode {
                 })
             })
             .collect();
+        let relays = owner_relay::running(agents, cx)
+            .into_iter()
+            .map(|(pubkey, (_, relay))| (pubkey, relay))
+            .collect();
         let _runtime = Runtime::handle(cx).enter();
+        self.runtime.set_relays(relays);
         self.runtime.sync(synced);
     }
 

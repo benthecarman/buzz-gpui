@@ -1,15 +1,16 @@
-//! The selected community as its owner reads it, for agent types that
+//! An agent's own community as its owner reads it, for agent types that
 //! act in it: channels, conversations for context, names, and the agent's
 //! memory, which is encrypted to the owner.
 
+use crate::agents2::Agents2;
 use crate::buzz_mcp::{BuzzEvent, Memory};
-use crate::community::{AppState, IdentityState};
+use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use buzz_identity::Identity;
 use buzz_relay_client::session::SessionSnapshot;
 use buzz_relay_client::{ChannelType, RelayHttp};
 use futures::future::BoxFuture;
-use gpui_kit::App;
+use gpui_kit::{App, Entity, EntityId};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +23,8 @@ pub struct ChannelInfo {
     pub members: Vec<String>,
 }
 
-/// What an agent type's runtime reads as the owner: the selected
-/// community's session.
+/// What an agent type's runtime reads as the owner: the agent's own
+/// community's session, selected or not.
 pub trait OwnerRelay: Send + Sync {
     fn channel(&self, id: &str) -> Option<ChannelInfo>;
     /// Reads the community as the owner.
@@ -40,7 +41,7 @@ pub trait OwnerRelay: Send + Sync {
     fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>>;
 }
 
-/// The selected community, read with the owner's key: conversations for
+/// A community, read with the owner's key: conversations for
 /// context, names, and the agent's memory, which is encrypted to the owner.
 pub struct AppRelay {
     pub(crate) http: RelayHttp,
@@ -177,11 +178,13 @@ impl OwnerRelay for AppRelay {
     }
 }
 
-/// The selected community, read as its owner, and its relay partition
-/// (buzz-app's relay `scope`, `<origin>:<viewer>`). `None` until a
-/// community is selected and the owner is signed in.
-pub fn current(cx: &App) -> Option<(String, Arc<dyn OwnerRelay>)> {
-    let community = AppState::current(cx)?;
+/// A community as its owner reads it, and its scope, `<origin>:<viewer>`.
+pub type Scoped = (String, Arc<dyn OwnerRelay>);
+
+/// A community, read as its owner, and its relay partition (buzz-app's
+/// relay `scope`, `<origin>:<viewer>`). `None` until the owner is signed
+/// in.
+pub fn of(community: &Entity<Community>, cx: &App) -> Option<Scoped> {
     let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
         return None;
     };
@@ -194,4 +197,23 @@ pub fn current(cx: &App) -> Option<(String, Arc<dyn OwnerRelay>)> {
         snapshot: Some(community.session.snapshot()),
     });
     Some((format!("{}:{}", partition.origin, partition.viewer), relay))
+}
+
+/// The owner's connection to each running agent's own community, which
+/// need not be the selected one, by agent pubkey: buzz-app's
+/// `agents2.relay(pubkey)`. Agents of one community share it.
+pub fn running(agents: &Agents2, cx: &App) -> HashMap<String, Scoped> {
+    let mut communities: HashMap<EntityId, Option<Scoped>> = HashMap::new();
+    agents
+        .running()
+        .iter()
+        .filter_map(|agent| {
+            let community = agents.relay(&agent.pubkey)?;
+            let relay = communities
+                .entry(community.entity_id())
+                .or_insert_with(|| of(&community, cx))
+                .clone()?;
+            Some((agent.pubkey.clone(), relay))
+        })
+        .collect()
 }

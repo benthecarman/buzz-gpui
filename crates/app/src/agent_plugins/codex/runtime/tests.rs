@@ -215,8 +215,11 @@ fn fixture_with(storage: Arc<MemoryStorage>) -> Fixture {
         ..Default::default()
     });
     let runtime = CodexRuntime::with_storage(storage.clone());
-    runtime.set_relay(Some((SCOPE.into(), relay.clone() as Arc<dyn OwnerRelay>)));
-    runtime.sync(&[agent_key()], SCOPE);
+    runtime.set_relays(HashMap::from([(
+        agent_key(),
+        (SCOPE.into(), relay.clone() as Arc<dyn OwnerRelay>),
+    )]));
+    runtime.sync(&[agent_key()]);
     Fixture {
         fake: FakeCodex::default(),
         runtime,
@@ -618,7 +621,7 @@ async fn timers_and_unready_communities_are_refused() {
         f.runtime.run(run).await,
         Err("Codex timers are not supported yet; use mentions or event watches.".into())
     );
-    f.runtime.set_relay(None);
+    f.runtime.set_relays(HashMap::new());
     assert_eq!(
         f.runtime.run(f.delivery("work")).await,
         Err("Connect to the agent's community first".into())
@@ -646,11 +649,11 @@ async fn reports_an_exit_and_a_turn_without_a_final_reply() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn another_community_ends_the_server_and_drops_its_late_answer() {
+async fn ends_the_server_when_its_agent_stops_running_and_drops_its_late_answer() {
     let f = fixture();
     f.run(f.delivery("work")).await;
     f.starts_reach(1).await;
-    f.runtime.sync(&[], "other-community");
+    f.runtime.sync(&[]);
     f.end_turn(0, "completed");
     until(|| f.fake.state().ended == 1).await;
     flush().await;
@@ -658,11 +661,12 @@ async fn another_community_ends_the_server_and_drops_its_late_answer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_same_community_keeps_work_alive() {
+async fn work_stays_alive_while_its_agent_keeps_running() {
     let f = fixture();
     f.run(f.delivery("work")).await;
     f.starts_reach(1).await;
-    f.runtime.sync(&[agent_key()], SCOPE);
+    // Another community selected, or a reconnect: the agent still runs.
+    f.runtime.sync(&[agent_key()]);
     f.complete().await;
     f.published_reach(1).await;
     assert_eq!(f.fake.state().ended, 0);

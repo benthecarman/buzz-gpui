@@ -4,8 +4,8 @@
 //! it has its own key held by an agent host (`buzz_host::api::AppAgentRequest`),
 //! an `agent-attention/v1` configuration the app owns and edits, and a
 //! config value the type owns. The app delivers matching live events to
-//! `run` from the stream the owner already receives, so no type opens a
-//! socket of its own.
+//! `run` from the stream the owner already receives in the agent's
+//! community, selected or not, so no type opens a socket of its own.
 //!
 //! - [`registry`]: the [`AgentType`] trait and [`register_type`].
 //! - [`runtime`]: what a run receives ([`Delivery`], [`AgentHandle`]).
@@ -36,7 +36,7 @@ pub use registry::{
 pub use runtime::{AgentHandle, Cancellation, Delivery, Trigger};
 pub use service::{Agents2, PICTURES_UNSUPPORTED, Status};
 
-/// One agent in the selected community.
+/// One of the viewer's agents, in the community at `relay`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Agent {
     pub pubkey: String,

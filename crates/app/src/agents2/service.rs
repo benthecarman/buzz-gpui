@@ -3,12 +3,13 @@
 //! The agent list is the union of every connected host's saved Agents2
 //! identities; `records` only adds local settings to them. Every change is
 //! made on the host first and then read back, so the list has one source.
-//! The visible agents are those the signed-in owner made for the selected
-//! community. Each saved agent has one runner for as long as its identity
-//! exists: matching live events and due timers queue there and run one at
-//! a time through its type's `run`. Every GUI on the agent's host, and
-//! every copy of the app sharing it, hears the same events; only the one
-//! the host lets hold the agent runs them.
+//! The running agents are those the signed-in owner made for any joined
+//! community, selected or not; the visible ones are the selected
+//! community's. Each saved agent has one runner for as long as its identity
+//! exists: its own community's matching live events and due timers queue
+//! there and run one at a time through its type's `run`. Every GUI on the
+//! agent's host, and every copy of the app sharing it, hears the same
+//! events; only the one the host lets hold the agent runs them.
 
 use super::attention::{
     self, AttentionObject, AttentionValue, CHAT_KINDS, EventData, Predicate, TimerState,
@@ -31,7 +32,7 @@ use buzz_identity::Identity;
 use buzz_relay_client::{LiveBatch, RelayOrigin, Session, SessionStatus};
 use gpui_kit::{App, AppContext, Context, Entity, EntityId, Global, Subscription, Task};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,8 @@ pub(crate) const QUEUE_LIMIT: usize = 32;
 pub(crate) const RATE_LIMIT: u32 = 60;
 pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
 const TIMER_TICK: Duration = Duration::from_secs(5);
+/// How often a failed connection to an unselected community is tried again.
+pub(crate) const RETRY: Duration = Duration::from_secs(30);
 /// Bounds one cleanup attempt.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// What setting a picture on a host from before pictures answers.
@@ -81,11 +84,8 @@ struct HostList {
     _observe: Subscription,
 }
 
-/// The selected community while its session is ready.
+/// A community's session while it is ready.
 struct Binding {
-    community: Entity<Community>,
-    /// `https://host[:port]`, comparable with an identity's relay.
-    origin: String,
     /// The relay URL new agents are made for.
     destination: String,
     viewer: String,
@@ -95,6 +95,80 @@ struct Binding {
     /// Ends work started for this binding when it is replaced.
     generation: u64,
     _events: Task<()>,
+}
+
+/// A community the viewer has an agent in, or the selected one, and its
+/// binding while its session is ready.
+struct Bound {
+    community: Entity<Community>,
+    binding: Option<Binding>,
+    /// When its failed connection was last tried again.
+    retried: Option<Instant>,
+    _observe: Subscription,
+}
+
+/// Each bound community's `https://host[:port]` origin, and the viewer its
+/// session is ready for, if it is.
+pub(crate) type Sessions = HashMap<String, Option<String>>;
+
+/// The communities to connect: the selected one, where agents are made,
+/// and each one the viewer has an agent in, deleted ones included so their
+/// cleanup can finish. `identities` are each saved agent's owner and relay.
+pub(crate) fn wanted<'a>(
+    viewer: Option<&str>,
+    selected: Option<&str>,
+    identities: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> BTreeSet<String> {
+    let Some(viewer) = viewer else {
+        return BTreeSet::new();
+    };
+    selected
+        .map(str::to_owned)
+        .into_iter()
+        .chain(
+            identities
+                .into_iter()
+                .filter(|(owner, _)| *owner == viewer)
+                .filter_map(|(_, relay)| http_origin(relay)),
+        )
+        .collect()
+}
+
+/// Whether the agent stays running: it is the viewer's, and its community
+/// is joined and bound. A reconnect does not stop it.
+pub(crate) fn alive(owner: &str, relay: &str, viewer: Option<&str>, sessions: &Sessions) -> bool {
+    viewer == Some(owner) && http_origin(relay).is_some_and(|origin| sessions.contains_key(&origin))
+}
+
+/// Whether the agent's community session is ready to run it in.
+pub(crate) fn ready(owner: &str, relay: &str, sessions: &Sessions) -> bool {
+    http_origin(relay)
+        .and_then(|origin| sessions.get(&origin))
+        .is_some_and(|viewer| viewer.as_deref() == Some(owner))
+}
+
+/// Whether the Agents2 page shows a running agent: it is in the selected
+/// community, and that community's session is ready.
+pub(crate) fn shown(owner: &str, relay: &str, selected: Option<&str>, sessions: &Sessions) -> bool {
+    selected.is_some() && http_origin(relay).as_deref() == selected && ready(owner, relay, sessions)
+}
+
+/// Whether a running agent hears a live event from the community at
+/// `origin`: only its own community's, while it is ready.
+pub(crate) fn hears(owner: &str, relay: &str, origin: &str, sessions: &Sessions) -> bool {
+    http_origin(relay).as_deref() == Some(origin) && ready(owner, relay, sessions)
+}
+
+/// Whether a failed community connection is tried again now: only one
+/// that is not selected, since nobody is there to press its Retry, and at
+/// most every [`RETRY`].
+pub(crate) fn retry_due(
+    selected: bool,
+    failed: bool,
+    retried: Option<Instant>,
+    now: Instant,
+) -> bool {
+    !selected && failed && retried.is_none_or(|at| now.duration_since(at) >= RETRY)
 }
 
 struct Job {
@@ -405,10 +479,16 @@ pub struct Agents2 {
     records: BTreeMap<String, AgentRecord>,
     lists: Vec<(EntityId, HostList)>,
     status: Status,
+    /// The selected community's agents, while it is ready.
     agents: Vec<Agent>,
-    binding: Option<Binding>,
-    /// The selected community, observed.
-    watched: Option<(EntityId, Subscription)>,
+    /// Every agent kept running here, whichever community is selected:
+    /// the viewer's agents in each joined community.
+    running: Vec<Agent>,
+    /// By origin, so each agent listens in its own community, selected or
+    /// not.
+    bound: HashMap<String, Bound>,
+    /// Agents whose community was ready at the last update.
+    connected: HashSet<String>,
     generation: u64,
     runners: HashMap<String, Runner>,
     serial: u64,
@@ -433,7 +513,10 @@ impl Agents2 {
                 cx.notify();
             }),
             cx.observe_global::<Hosts>(|this, cx| this.watch_hosts(cx)),
-            cx.observe_global::<AppState>(|this, cx| this.bind(cx)),
+            cx.observe_global::<AppState>(|this, cx| {
+                this.watch(cx);
+                this.update(cx);
+            }),
         ];
         // Wakes each runner, which starts any timer that is due.
         let tick = cx.spawn(async move |this, cx| {
@@ -444,6 +527,7 @@ impl Agents2 {
                     for pubkey in pubkeys {
                         this.drain(&pubkey, cx);
                     }
+                    this.reconnect(cx);
                 });
                 if alive.is_err() {
                     return;
@@ -456,8 +540,9 @@ impl Agents2 {
             lists: Vec::new(),
             status: Status::Unavailable,
             agents: Vec::new(),
-            binding: None,
-            watched: None,
+            running: Vec::new(),
+            bound: HashMap::new(),
+            connected: HashSet::new(),
             generation: 0,
             runners: HashMap::new(),
             serial: 0,
@@ -466,7 +551,7 @@ impl Agents2 {
             _tick: tick,
         };
         this.watch_hosts(cx);
-        this.bind(cx);
+        this.watch(cx);
         this
     }
 
@@ -479,15 +564,65 @@ impl Agents2 {
         &self.status
     }
 
-    /// The selected community's agents.
+    /// The selected community's agents, while it is ready.
     pub fn agents(&self) -> &[Agent] {
         &self.agents
+    }
+
+    /// Every agent kept running here, whichever community is selected: the
+    /// viewer's agents in each joined community.
+    pub fn running(&self) -> &[Agent] {
+        &self.running
     }
 
     /// The agent of this pubkey in the selected community, if it is an
     /// Agents2 agent.
     pub fn find(&self, pubkey: &str) -> Option<&Agent> {
         self.agents.iter().find(|agent| agent.pubkey == pubkey)
+    }
+
+    /// The owner's connection to a running agent's community, which need
+    /// not be the selected one: read the agent's conversations through
+    /// this.
+    pub fn relay(&self, pubkey: &str) -> Option<Entity<Community>> {
+        let origin = http_origin(&self.agent(pubkey)?.relay)?;
+        self.bound.get(&origin).map(|bound| bound.community.clone())
+    }
+
+    /// A running agent, in any community.
+    fn agent(&self, pubkey: &str) -> Option<&Agent> {
+        self.running.iter().find(|agent| agent.pubkey == pubkey)
+    }
+
+    /// The agent, while its community's session is ready to run it in.
+    fn ready(&self, pubkey: &str) -> Option<&Agent> {
+        let sessions = self.sessions();
+        self.agent(pubkey)
+            .filter(|agent| ready(&agent.owner, &agent.relay, &sessions))
+    }
+
+    fn sessions(&self) -> Sessions {
+        self.bound
+            .iter()
+            .map(|(origin, bound)| {
+                let viewer = bound.binding.as_ref().map(|binding| binding.viewer.clone());
+                (origin.clone(), viewer)
+            })
+            .collect()
+    }
+
+    /// The live binding of the agent's community, if it has one now.
+    fn binding_of(&self, summary: &AppAgentSummary) -> Option<&Binding> {
+        self.bound
+            .get(&http_origin(&summary.relay)?)?
+            .binding
+            .as_ref()
+            .filter(|binding| binding.viewer == summary.owner)
+    }
+
+    /// The selected community, while it is bound.
+    fn selected(&self, cx: &App) -> Option<&Bound> {
+        self.bound.get(&selected_origin(cx)?)
     }
 
     /// The host holding the agent's key.
@@ -554,6 +689,7 @@ impl Agents2 {
             self.host_changed(host, cx);
         }
         if added || self.lists.len() != before {
+            self.watch(cx);
             self.update(cx);
             self.recompute_status();
             cx.notify();
@@ -628,6 +764,7 @@ impl Agents2 {
                 }
                 this.prune();
                 this.recompute_status();
+                this.watch(cx);
                 this.update(cx);
                 cx.notify();
                 this.sync(cx);
@@ -675,79 +812,142 @@ impl Agents2 {
         };
     }
 
-    // ----- the selected community -----
+    // ----- the communities -----
 
-    fn bind(&mut self, cx: &mut Context<Self>) {
-        // Follows the selected community, to bind once its session is ready.
-        let current = AppState::current(cx);
-        if self.watched.as_ref().map(|(id, _)| *id) != current.as_ref().map(Entity::entity_id) {
-            self.watched = current.map(|community| {
-                (
-                    community.entity_id(),
-                    cx.observe(&community, |this, _, cx| this.bind(cx)),
-                )
-            });
+    /// Connects the selected community, where agents are made, and each
+    /// one the viewer has an agent in, deleted ones included so their
+    /// cleanup can finish; lets go of the rest.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        let viewer = viewer(cx);
+        let selected = selected_origin(cx);
+        let saved: Vec<Saved> = self.saved().collect();
+        let origins = wanted(
+            viewer.as_deref(),
+            selected.as_deref(),
+            saved
+                .iter()
+                .map(|saved| (saved.summary.owner.as_str(), saved.summary.relay.as_str())),
+        );
+        // Left, or left and joined again with a new session.
+        let gone: Vec<String> = self
+            .bound
+            .iter()
+            .filter(|(origin, bound)| {
+                !origins.contains(*origin) || joined(origin, cx).as_ref() != Some(&bound.community)
+            })
+            .map(|(origin, _)| origin.clone())
+            .collect();
+        for origin in gone {
+            self.unbind(&origin, cx);
         }
-        let next = AppState::current(cx).and_then(|community| {
-            let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
-                return None;
+        for origin in origins {
+            if self.bound.contains_key(&origin) {
+                continue;
+            }
+            let Some(community) = joined(&origin, cx) else {
+                continue;
             };
-            let read = community.read(cx);
-            (read.snapshot.status == SessionStatus::Ready)
-                .then(|| (community.clone(), identity.clone(), read.snapshot.live))
-        });
-        let same = match (&self.binding, &next) {
-            (Some(binding), Some((community, ..))) => binding.community == *community,
-            (None, None) => true,
-            _ => false,
+            let observe = {
+                let origin = origin.clone();
+                cx.observe(&community, move |this, _, cx| this.bind(&origin, cx))
+            };
+            self.bound.insert(
+                origin.clone(),
+                Bound {
+                    community,
+                    binding: None,
+                    retried: None,
+                    _observe: observe,
+                },
+            );
+            self.bind(&origin, cx);
+        }
+    }
+
+    /// Tries each unselected community whose connection failed again,
+    /// since nobody is there to press its Retry; its agents wait on it.
+    fn reconnect(&mut self, cx: &mut Context<Self>) {
+        let selected = selected_origin(cx);
+        let now = Instant::now();
+        for (origin, bound) in &mut self.bound {
+            let community = bound.community.read(cx);
+            let failed = matches!(community.snapshot.status, SessionStatus::Failed(_));
+            if retry_due(
+                selected.as_ref() == Some(origin),
+                failed,
+                bound.retried,
+                now,
+            ) {
+                bound.retried = Some(now);
+                community.session.retry();
+            }
+        }
+    }
+
+    fn unbind(&mut self, origin: &str, cx: &mut Context<Self>) {
+        if self.bound.remove(origin).is_some() {
+            self.update(cx);
+            cx.notify();
+        }
+    }
+
+    /// Binds a community once its session is ready, and unbinds it while
+    /// it is not; its agents keep running either way.
+    fn bind(&mut self, origin: &str, cx: &mut Context<Self>) {
+        let identity = match &cx.global::<AppState>().identity {
+            IdentityState::Ready(identity) => Some(identity.clone()),
+            _ => None,
         };
-        if same {
+        let Some(bound) = self.bound.get_mut(origin) else {
+            return;
+        };
+        let read = bound.community.read(cx);
+        let next = identity
+            .filter(|_| read.snapshot.status == SessionStatus::Ready)
+            .map(|identity| (identity, read.snapshot.live));
+        match (&mut bound.binding, &next) {
             // Retries what failed whenever the connection recovers.
-            if let (Some(binding), Some((_, _, live))) = (&mut self.binding, &next) {
+            (Some(binding), Some((_, live))) => {
                 let recovered = *live && !binding.live;
                 binding.live = *live;
                 if recovered {
                     self.sync(cx);
                 }
+                return;
             }
-            return;
+            (None, None) => return,
+            _ => {}
         }
         self.generation += 1;
-        self.binding = next.map(|(community, identity, live)| {
-            let read = community.read(cx);
-            let session = read.session.clone();
-            let origin = read.origin.http();
-            let destination = read.origin.websocket().to_owned();
-            let events = listen(&session, cx);
+        let generation = self.generation;
+        let binding = next.map(|(identity, live)| {
+            let (session, destination) = {
+                let read = bound.community.read(cx);
+                (read.session.clone(), read.origin.websocket().to_owned())
+            };
             Binding {
-                origin,
                 destination,
                 viewer: session.viewer().to_owned(),
                 identity,
-                session,
                 live,
-                generation: self.generation,
-                community,
-                _events: events,
+                generation,
+                _events: listen(&session, origin, cx),
+                session,
             }
         });
+        let live = binding.is_some();
+        if let Some(bound) = self.bound.get_mut(origin) {
+            bound.binding = binding;
+        }
         self.update(cx);
         cx.notify();
-        if self.binding.is_some() {
+        if live {
             self.sync(cx);
         }
     }
 
-    fn in_scope(&self, summary: &AppAgentSummary) -> bool {
-        self.binding.as_ref().is_some_and(|binding| {
-            summary.owner == binding.viewer
-                && http_origin(&summary.relay).as_deref() == Some(binding.origin.as_str())
-        })
-    }
-
     /// Brings the relay in line with the saved identities: publishes each
-    /// name its community lacks, and finishes Delete for the open
-    /// community. Each step is safe to repeat; what fails is tried again on
+    /// name its community lacks, and finishes Delete where connected. Each step is safe to repeat; what fails is tried again on
     /// the next refresh or reconnect.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let saved: Vec<Saved> = self.saved().collect();
@@ -765,7 +965,7 @@ impl Agents2 {
                     }
                 })
                 .detach();
-            } else if self.in_scope(&identity.summary) {
+            } else if self.binding_of(&identity.summary).is_some() {
                 self.cleanup(identity, cx);
             }
         }
@@ -780,13 +980,13 @@ impl Agents2 {
             *again = true;
             return;
         }
-        let Some(binding) = &self.binding else {
+        let Some(binding) = self.binding_of(&identity.summary) else {
             return;
         };
-        self.cleaning.insert(pubkey.clone(), false);
         let generation = binding.generation;
         let session = binding.session.clone();
         let viewer = binding.identity.clone();
+        self.cleaning.insert(pubkey.clone(), false);
         let link = link(&identity.host, cx);
         let runtime = Runtime::handle(cx);
         cx.spawn(async move |this, cx| {
@@ -813,8 +1013,7 @@ impl Agents2 {
             let _ = this.update(cx, |this, cx| {
                 let again = this.cleaning.remove(&pubkey).unwrap_or(false);
                 let current = this
-                    .binding
-                    .as_ref()
+                    .binding_of(&identity.summary)
                     .is_some_and(|binding| binding.generation == generation);
                 match outcome {
                     Ok(()) => {
@@ -833,7 +1032,7 @@ impl Agents2 {
         .detach();
     }
 
-    // ----- the visible agents and their runners -----
+    // ----- the running and visible agents, and their runners -----
 
     /// Its saved settings or, without any, its type's defaults, kept in
     /// memory until a save stores them. Without its type there are no
@@ -872,25 +1071,32 @@ impl Agents2 {
         }
     }
 
-    /// Joins identities, records and the binding into the visible agents,
-    /// and keeps one runner per saved agent. Runners outlive edits and
-    /// reconnects; one is retired only when its agent is deleted, and its
-    /// run is cancelled when the agent's type is replaced.
+    /// Joins identities, records and the bindings into the running and
+    /// visible agents, and keeps one runner per saved agent. Runners
+    /// outlive edits and reconnects; one is retired only when its agent is
+    /// deleted, and its run is cancelled when the agent's type is replaced.
     fn update(&mut self, cx: &mut Context<Self>) {
-        let was_shown: Vec<String> = self.agents.iter().map(|a| a.pubkey.clone()).collect();
         let live: Vec<AppAgentSummary> = self
             .saved()
             .filter(|saved| !saved.summary.deleted)
             .map(|saved| saved.summary)
             .collect();
-        let mut agents = Vec::new();
+        let viewer = viewer(cx);
+        let sessions = self.sessions();
+        let mut running = Vec::new();
         for summary in &live {
-            if !self.in_scope(summary) {
+            if !alive(&summary.owner, &summary.relay, viewer.as_deref(), &sessions) {
                 continue;
             }
             let record = self.record_of(summary, cx);
-            agents.push(Self::view(summary, &record));
+            running.push(Self::view(summary, &record));
         }
+        let selected = selected_origin(cx);
+        let agents: Vec<Agent> = running
+            .iter()
+            .filter(|agent| shown(&agent.owner, &agent.relay, selected.as_deref(), &sessions))
+            .cloned()
+            .collect();
         self.runners
             .retain(|pubkey, _| live.iter().any(|summary| &summary.pubkey == pubkey));
         let mut drains = Vec::new();
@@ -937,26 +1143,36 @@ impl Agents2 {
                 }
             }
         }
-        if agents != self.agents {
+        if agents != self.agents || running != self.running {
             self.agents = agents;
+            self.running = running;
             cx.notify();
         }
-        // Resume runners whose queue paused while their agent was out of
-        // view, and claim or release each agent as it comes into or leaves
-        // view, so another GUI takes over without waiting for an event or
-        // tick.
+        // Resume runners whose queue paused while their community was not
+        // ready, and claim or release each agent as its community becomes
+        // ready or not, so another GUI takes over without waiting for an
+        // event or tick.
+        let connected: HashSet<String> = self
+            .running
+            .iter()
+            .filter(|agent| ready(&agent.owner, &agent.relay, &sessions))
+            .map(|agent| agent.pubkey.clone())
+            .collect();
         for (pubkey, runner) in &self.runners {
-            let shown = self.agents.iter().any(|agent| &agent.pubkey == pubkey);
-            if !runner.queue.is_empty() || shown != was_shown.contains(pubkey) {
+            if !runner.queue.is_empty()
+                || connected.contains(pubkey) != self.connected.contains(pubkey)
+            {
                 drains.push(pubkey.clone());
             }
         }
+        self.connected = connected;
         for pubkey in drains {
             self.drain(&pubkey, cx);
         }
     }
 
-    fn dispatch(&mut self, batch: LiveBatch, cx: &mut Context<Self>) {
+    /// Gives a community's live events to the agents in it.
+    fn dispatch(&mut self, batch: LiveBatch, origin: &str, cx: &mut Context<Self>) {
         let events: Vec<Arc<EventData>> = batch
             .events
             .iter()
@@ -968,7 +1184,11 @@ impl Agents2 {
             .collect();
         let mut drains = Vec::new();
         let now = Instant::now();
-        for agent in &self.agents {
+        let sessions = self.sessions();
+        for agent in &self.running {
+            if !hears(&agent.owner, &agent.relay, origin, &sessions) {
+                continue;
+            }
             let Some(runner) = self.runners.get_mut(&agent.pubkey) else {
                 continue;
             };
@@ -1023,7 +1243,7 @@ impl Agents2 {
         }
     }
 
-    /// The due timer of a visible agent, recording its run.
+    /// The due timer of a running agent, recording its run.
     fn due(&mut self, agent: &Agent) -> Option<Job> {
         let record = self
             .records
@@ -1056,7 +1276,7 @@ impl Agents2 {
     }
 
     /// One run at a time per agent: events in arrival order, then a due
-    /// timer. While the agent is out of view the queue pauses; a type that
+    /// timer. While its community's session is not ready the queue pauses; a type that
     /// cannot run drops what is queued. Either way the host lets another
     /// GUI have the agent. Before each run, on every wake, the host is
     /// asked whether this GUI holds the agent; one that does not drops
@@ -1095,8 +1315,8 @@ impl Agents2 {
                     {
                         tracing::warn!(agent = %pubkey, %error, "agent was not released");
                     }
-                    // It may have come back into view, or gained its type,
-                    // meanwhile.
+                    // Its community may have become ready again, or it may
+                    // have gained its type, meanwhile.
                     match this.update(cx, |this, _| this.seen(&pubkey) != seen) {
                         Ok(true) => continue,
                         _ => break,
@@ -1145,10 +1365,10 @@ impl Agents2 {
         .detach();
     }
 
-    /// The agent in view and its runnable type.
+    /// The agent while its community is ready, and its runnable type.
     fn seen(&self, pubkey: &str) -> Seen {
         Seen {
-            agent: self.find(pubkey).cloned(),
+            agent: self.ready(pubkey).cloned(),
             kind: self
                 .runners
                 .get(pubkey)
@@ -1158,8 +1378,8 @@ impl Agents2 {
     }
 
     /// Whether the runner asks the host to hold its agent or lets it go.
-    /// An agent out of view, or of a type that cannot run here, is left to
-    /// another GUI; what it queued in view is dropped.
+    /// An agent whose community is not ready, or of a type that cannot run
+    /// here, is left to another GUI; what it queued while ready is dropped.
     fn step(&mut self, pubkey: &str, serial: u64, cx: &mut Context<Self>) -> Step {
         let seen = self.seen(pubkey);
         let host = self.host_of(pubkey);
@@ -1262,7 +1482,7 @@ impl Agents2 {
         host: Option<Entity<HostConnection>>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Agent, String>> {
-        let Some(binding) = &self.binding else {
+        let Some(binding) = self.selected(cx).and_then(|bound| bound.binding.as_ref()) else {
             return Task::ready(Err("Connect to a community first".into()));
         };
         let Some(kind) = registry::type_of(type_key, cx) else {
@@ -1421,7 +1641,7 @@ impl Agents2 {
     }
 
     /// Deletes its key at once. Leaving its channels and archiving it
-    /// follow in the background whenever its community is open.
+    /// follow in the background whenever its community is connected.
     pub fn remove(&mut self, pubkey: &str, cx: &mut Context<Self>) -> Task<Result<(), String>> {
         let Some(identity) = self.live(pubkey) else {
             return Task::ready(Err("No such agent on this device".into()));
@@ -1431,7 +1651,7 @@ impl Agents2 {
         cx.spawn(async move |this, cx| {
             link.app_agent(AppAgentRequest::Delete { pubkey }).await?;
             // Drops its settings, and starts its cleanup if its community
-            // is open.
+            // is connected.
             if let Ok(refresh) = this.update(cx, |this, cx| this.refresh(cx)) {
                 refresh.await;
             }
@@ -1463,10 +1683,10 @@ impl Agents2 {
     /// Channels a watch can be scoped to, by name, from the viewer's joined
     /// roster.
     pub fn channel_choices(&self, cx: &App) -> Vec<attention::ChannelChoice> {
-        let Some(binding) = &self.binding else {
+        let Some(bound) = self.selected(cx).filter(|bound| bound.binding.is_some()) else {
             return Vec::new();
         };
-        let mut choices: Vec<_> = binding
+        let mut choices: Vec<_> = bound
             .community
             .read(cx)
             .snapshot
@@ -1490,13 +1710,37 @@ fn link(host: &Entity<HostConnection>, cx: &App) -> HostLink {
     }
 }
 
-/// Delivers the session's live events to the runners.
-fn listen(session: &Arc<Session>, cx: &mut Context<Agents2>) -> Task<()> {
+/// The signed-in viewer.
+fn viewer(cx: &App) -> Option<String> {
+    match &cx.global::<AppState>().identity {
+        IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+        _ => None,
+    }
+}
+
+/// The selected community's `https://host[:port]` origin.
+fn selected_origin(cx: &App) -> Option<String> {
+    AppState::current(cx).map(|community| community.read(cx).origin.http())
+}
+
+/// The joined community at `origin`, if any.
+fn joined(origin: &str, cx: &App) -> Option<Entity<Community>> {
+    cx.global::<AppState>()
+        .communities
+        .iter()
+        .find(|community| community.read(cx).origin.http() == origin)
+        .cloned()
+}
+
+/// Delivers the session's live events to the runners of its community's
+/// agents.
+fn listen(session: &Arc<Session>, origin: &str, cx: &mut Context<Agents2>) -> Task<()> {
     let mut events = session.live_events();
+    let origin = origin.to_owned();
     cx.spawn(async move |this, cx| {
         while let Some(batch) = events.recv().await {
             if this
-                .update(cx, |this, cx| this.dispatch(batch, cx))
+                .update(cx, |this, cx| this.dispatch(batch, &origin, cx))
                 .is_err()
             {
                 return;

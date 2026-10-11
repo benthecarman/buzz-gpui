@@ -19,7 +19,6 @@ use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
 };
 use crate::buzz_mcp::BuzzEvent;
-use crate::community::AppState;
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
 use config::Config;
@@ -41,8 +40,6 @@ const HANDOVER: Duration = Duration::from_secs(2 * 60);
 /// The runtime, kept for the app's lifetime.
 pub struct Codex {
     runtime: CodexRuntime,
-    /// The selected community's scope; empty without one.
-    scope: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -62,10 +59,9 @@ pub fn init(cx: &mut App) {
         return;
     }
     let state = cx.new(|cx| {
-        let mut subscriptions =
-            vec![cx.observe_global::<AppState>(|this: &mut Codex, cx| this.bind(cx))];
+        let mut subscriptions = Vec::new();
         if let Some(agents) = Agents2::global(cx) {
-            subscriptions.push(cx.observe(&agents, |this, _, cx| this.sync(cx)));
+            subscriptions.push(cx.observe(&agents, |this: &mut Codex, _, cx| this.sync(cx)));
         }
         subscriptions.push(
             cx.observe_global::<crate::plugins::Plugins>(|this: &mut Codex, cx| this.sync(cx)),
@@ -78,10 +74,9 @@ pub fn init(cx: &mut App) {
         }));
         let mut this = Codex {
             runtime: CodexRuntime::new(None),
-            scope: String::new(),
             _subscriptions: subscriptions,
         };
-        this.bind(cx);
+        this.sync(cx);
         this
     });
     cx.set_global(CodexGlobal(state));
@@ -97,19 +92,9 @@ impl Codex {
             .map(|global| global.0.clone())
     }
 
-    /// Reads the selected community as its owner.
-    fn bind(&mut self, cx: &mut Context<Self>) {
-        let current = owner_relay::current(cx);
-        self.scope = current
-            .as_ref()
-            .map(|(scope, _)| scope.clone())
-            .unwrap_or_default();
-        self.runtime.set_relay(current);
-        self.sync(cx);
-    }
-
-    /// Agents of this type in the selected community keep their servers;
-    /// another community, or none, ends them all.
+    /// Agents of this type that are running keep their servers: agents
+    /// that stop running end theirs; switching communities or a reconnect
+    /// does not.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let _runtime = Runtime::handle(cx).enter();
         // Turning the plugin off ends every server, as unloading it does in
@@ -118,25 +103,24 @@ impl Codex {
             self.runtime.dispose();
             return;
         }
-        if self.scope.is_empty() {
-            self.runtime.sync(&[], "");
-            return;
-        }
         let Some(agents) = Agents2::global(cx) else {
             return;
         };
         let agents = agents.read(cx);
-        if *agents.status() != Status::Ready {
+        // A failed refresh still follows the running agents, so leaving a
+        // community after one ends its servers.
+        if *agents.status() == Status::Loading {
             return;
         }
         let key = key();
         let pubkeys: Vec<String> = agents
-            .agents()
+            .running()
             .iter()
             .filter(|agent| agent.agent_type == key)
             .map(|agent| agent.pubkey.clone())
             .collect();
-        self.runtime.sync(&pubkeys, &self.scope);
+        self.runtime.set_relays(owner_relay::running(agents, cx));
+        self.runtime.sync(&pubkeys);
     }
 }
 

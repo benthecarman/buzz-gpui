@@ -182,9 +182,12 @@ async fn answers_a_mention_through_the_buzz_send_tool() {
     let spawn = host().await;
     let runtime = CodexRuntime::with_storage(Arc::new(Memoryless::default()));
     let scope = "https://relay.live:owner";
-    runtime.set_relay(Some((scope.into(), Arc::new(Relay) as Arc<dyn OwnerRelay>)));
     let agent = Arc::new(Agent::default());
-    runtime.sync(&[agent.pubkey()], scope);
+    runtime.set_relays(HashMap::from([(
+        agent.pubkey(),
+        (scope.into(), Arc::new(Relay) as Arc<dyn OwnerRelay>),
+    )]));
+    runtime.sync(&[agent.pubkey()]);
     let workspace = scratch("workspace");
     let model = std::env::var("BUZZ_CODEX_TEST_MODEL").unwrap_or_else(|_| "gpt-6-luna".into());
     let event = BuzzEvent {
