@@ -125,32 +125,28 @@ impl Session {
         allow_agents: bool,
     ) -> Result<(), String> {
         let key = (channel.to_owned(), pubkey.to_owned());
-        let started = {
-            let key = key.clone();
-            self.ops()
-                .with(move |actor| actor.begin_addition(key))
-                .await?
-        };
-        let intent = match started {
-            Err(mut waiting) => {
-                let result = waiting
-                    .wait_for(Option::is_some)
-                    .await
-                    .map_err(|_| CLOSED.to_owned())?
-                    .clone();
-                return result.unwrap_or_else(|| Err(CLOSED.into()));
-            }
-            Ok(intent) => intent,
-        };
-        let commands = self.commands.clone();
-        let (channel, pubkey) = key.clone();
-        let result = self
-            .runtime
+        let ops = self.ops();
+        // Begin to finish runs in its own task: a dropped caller never
+        // leaves the addition marked in flight.
+        self.runtime
             .spawn(async move {
-                let mut intent = intent;
-                let ops = Ops { commands };
-                let work =
-                    ops.add_member(&channel, &pubkey, participant, allow_agents, &mut intent);
+                let started = {
+                    let key = key.clone();
+                    ops.with(move |actor| actor.begin_addition(key)).await?
+                };
+                let mut intent = match started {
+                    Err(mut waiting) => {
+                        let result = waiting
+                            .wait_for(Option::is_some)
+                            .await
+                            .map_err(|_| CLOSED.to_owned())?
+                            .clone();
+                        return result.unwrap_or_else(|| Err(CLOSED.into()));
+                    }
+                    Ok(intent) => intent,
+                };
+                let (channel, pubkey) = &key;
+                let work = ops.add_member(channel, pubkey, participant, allow_agents, &mut intent);
                 let result = tokio::time::timeout(ADDITION_TIMEOUT, work)
                     .await
                     .unwrap_or_else(|_| {
@@ -159,59 +155,51 @@ impl Session {
                                 .into(),
                         )
                     });
-                (result, intent)
+                let reported = result.clone();
+                let _ = ops
+                    .with(move |actor| actor.finish_addition(key, intent, reported))
+                    .await;
+                result
             })
-            .await;
-        let (result, intent) = match result {
-            Ok(done) => done,
-            Err(_) => (Err(CLOSED.to_owned()), Intent::default()),
-        };
-        let reported = result.clone();
-        let _ = self
-            .ops()
-            .with(move |actor| actor.finish_addition(key, intent, reported))
-            .await;
-        result
+            .await
+            .unwrap_or_else(|_| Err(CLOSED.to_owned()))
     }
 
     /// Changes a member's role or removes them, published directly. One
     /// operation per channel at a time; an uncertain one blocks the next
     /// until [`Session::refresh_members`] shows its result.
     pub async fn change_member(&self, channel: &str, change: MemberChange) -> Result<(), String> {
-        let id = channel.to_owned();
-        let begin = change.clone();
-        self.ops()
-            .with(move |actor| actor.begin_member_operation(&id, begin))
-            .await??;
-        let (commands, id) = (self.commands.clone(), channel.to_owned());
-        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = published.clone();
-        let work_change = change.clone();
-        let result = self
-            .runtime
+        let (ops, id) = (self.ops(), channel.to_owned());
+        // Begin to finish runs in its own task: a dropped caller never
+        // leaves the channel marked busy.
+        self.runtime
             .spawn(async move {
-                let ops = Ops { commands };
-                let work = ops.administer(&id, &work_change, &flag);
-                tokio::time::timeout(RUN_TIMEOUT, work)
+                let begin = (id.clone(), change.clone());
+                ops.with(move |actor| actor.begin_member_operation(&begin.0, begin.1))
+                    .await??;
+                let published = std::sync::atomic::AtomicBool::new(false);
+                let work = ops.administer(&id, &change, &published);
+                let result = tokio::time::timeout(RUN_TIMEOUT, work)
                     .await
-                    .unwrap_or_else(|_| Err("The request timed out. Try again.".into()))
+                    .unwrap_or_else(|_| Err("The request timed out. Try again.".into()));
+                let uncertain = result.is_err()
+                    && published.load(std::sync::atomic::Ordering::SeqCst)
+                    && !matches!(&result, Err(error) if error.starts_with(REFUSED));
+                let result = match result {
+                    Err(_) if uncertain => Err(UNCERTAIN.to_owned()),
+                    Err(error) => Err(error.strip_prefix(REFUSED).unwrap_or(&error).to_owned()),
+                    Ok(()) => Ok(()),
+                };
+                let reported = result.clone();
+                let _ = ops
+                    .with(move |actor| {
+                        actor.finish_member_operation(&id, change, reported, uncertain)
+                    })
+                    .await;
+                result
             })
             .await
-            .unwrap_or_else(|_| Err(CLOSED.to_owned()));
-        let uncertain = result.is_err()
-            && published.load(std::sync::atomic::Ordering::SeqCst)
-            && !matches!(&result, Err(error) if error.starts_with(REFUSED));
-        let result = match result {
-            Err(_) if uncertain => Err(UNCERTAIN.to_owned()),
-            Err(error) => Err(error.strip_prefix(REFUSED).unwrap_or(&error).to_owned()),
-            Ok(()) => Ok(()),
-        };
-        let (id, reported) = (channel.to_owned(), result.clone());
-        let _ = self
-            .ops()
-            .with(move |actor| actor.finish_member_operation(&id, change, reported, uncertain))
-            .await;
-        result
+            .unwrap_or_else(|_| Err(CLOSED.to_owned()))
     }
 
     /// The latest role change or removal in `channel`, if any.
