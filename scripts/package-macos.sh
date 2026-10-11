@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
-# Builds an unsigned Buzz.app and wraps it in a .dmg. Runs on macOS, for the
-# architecture of the machine it runs on. GStreamer comes from Homebrew and
-# is not bundled: the app links against the Homebrew copy.
+# Builds an ad-hoc signed Buzz.app and wraps it in a .dmg. Runs on macOS,
+# for the architecture of the machine it runs on. The app carries the
+# GStreamer it plays media with, copied from the official GStreamer
+# framework (the runtime and development .pkg installers from
+# gstreamer.freedesktop.org), so users need not install GStreamer.
 #
 # Usage: scripts/package-macos.sh   -> dist/Buzz-<version>-macos-<arch>.dmg
+# GSTREAMER_PREFIX overrides where the framework is.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here"
+
+gst="${GSTREAMER_PREFIX:-/Library/Frameworks/GStreamer.framework/Versions/1.0}"
+if [ ! -d "$gst/lib/pkgconfig" ]; then
+  echo "No GStreamer framework with development files at $gst." >&2
+  echo "Install the runtime and devel .pkg from gstreamer.freedesktop.org." >&2
+  exit 1
+fi
+# Build against the framework, not any other GStreamer (Homebrew's).
+export PKG_CONFIG_PATH="$gst/lib/pkgconfig"
+# Its libraries are @rpath/<name>; the app finds them in Contents/Frameworks.
+# The header padding leaves install_name_tool room to rewrite them.
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-headerpad_max_install_names"
 
 version="$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "buzz-gpui"))')"
@@ -55,8 +70,25 @@ cat >"$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Ad-hoc signature: Apple Silicon refuses to run unsigned code at all.
+python3 scripts/bundle-macos-gstreamer.py "$app" "$gst" "$arch"
+
+# Ad-hoc signature: Apple Silicon refuses to run unsigned code at all, and
+# install_name_tool broke the signatures the copies came with. Each
+# library, plugin and helper first, then the app around them (signing the
+# main executable signs the app).
+find "$app/Contents" -type f ! -path "$app/Contents/MacOS/buzz-gpui" \
+  \( -name '*.dylib' -o -name '*.so' -o -perm -u+x \) -print0 \
+  | while IFS= read -r -d '' file; do
+      if file -b "$file" | grep -q Mach-O; then
+        # Quiet about the signatures it replaces, loud about failures.
+        if ! out="$(codesign --force --sign - "$file" 2>&1)"; then
+          echo "$out" >&2
+          exit 1
+        fi
+      fi
+    done
 codesign --force --deep --sign - "$app"
+codesign --verify --deep --strict "$app"
 
 dmg="dist/Buzz-$version-macos-$arch.dmg"
 rm -f "$dmg"
