@@ -121,12 +121,16 @@ pub enum Request {
     },
     /// Installs Pi or Claude Code with a pinned Node.js into this host's own
     /// directory, never user-global, then restarts agents that were waiting
-    /// for Pi. One install runs at a time.
+    /// for Pi. Codex installs only its ACP adapter; the CLI and its sign-in
+    /// stay the user's. One install runs at a time. Hosts before Codex
+    /// cannot read a Codex install and answer it as unsupported.
     InstallHarness {
         kind: HarnessKind,
     },
     /// Asks Claude Code whether it is signed in. Never part of a snapshot.
     ClaudeAuth,
+    /// Asks the Codex CLI whether it is signed in. Never part of a snapshot.
+    CodexAuth,
     /// Adds a mention's replay floor to a start that is already waiting or
     /// starting. Never starts an agent itself.
     AttachMention {
@@ -356,6 +360,8 @@ pub enum Response {
     /// `Some(false)` when Claude Code says it is signed out; `None` when
     /// that could not be confirmed.
     ClaudeAuth(Option<bool>),
+    /// As [`Response::ClaudeAuth`], for the Codex CLI.
+    CodexAuth(Option<bool>),
     /// Answers requests that return nothing.
     Done,
     CloneSettings(CloneSettings),
@@ -478,6 +484,8 @@ pub struct AgentsSnapshot {
     /// older hosts, which answer [`Request::Harnesses`] instead.
     pub harness_options: Option<Vec<HarnessOption>>,
     pub claude_setup: Option<ClaudeSetup>,
+    /// How to sign in to Codex on the host. `None` from hosts before Codex.
+    pub codex_setup: Option<CodexSetup>,
     /// The build's Databricks workspace and model filter.
     pub databricks_defaults: Option<DatabricksSettings>,
     /// The build's model defaults for Buzz Agent.
@@ -499,13 +507,17 @@ pub struct ParkedIdentity {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HarnessOption {
+    /// The controller's `HarnessIntegration`: `buzz-agent`, `goose`, `pi`,
+    /// `codex` or `external`. `None` from hosts before Codex.
+    pub id: Option<String>,
     /// What [`HarnessEdit::command`] holds for this harness.
     pub command: String,
     pub label: String,
     pub available: bool,
-    /// `ready`, `cli-needed` or `adapter-needed`.
+    /// `ready`, `cli-needed`, `adapter-needed`, `check-needed` or
+    /// `not-enabled`.
     pub status: String,
-    /// The host can install it (Pi and Claude Code).
+    /// The host can install it (Pi, Claude Code and Codex's adapter).
     pub install_supported: Option<bool>,
     /// The host's own install is older than the pinned release.
     pub update_supported: Option<bool>,
@@ -532,6 +544,12 @@ pub struct ConfigurationPolicy {
     /// `optional` or `withProvider`.
     pub model: String,
     pub selector_environment: Option<SelectorEnvironment>,
+    /// Saved configuration modes the integration admits: `default`,
+    /// `advanced`. Empty for all but Codex.
+    pub supported_modes: Vec<String>,
+    /// `unknown`, or `modelSpecific` when the integration reports effort
+    /// levels per model.
+    pub effort_discovery: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +567,21 @@ pub struct ClaudeSetup {
     /// Signs in to Claude Code in a terminal on the host.
     pub login_command: Option<String>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CodexSetup {
+    /// Signs in to the Codex CLI in a terminal on the host; `None` while
+    /// the CLI is not installed.
+    pub login_command: Option<String>,
+}
+
+/// The controller's `AiConfiguration` (`{"mode":"default"}` or
+/// `{"mode":"advanced","effort":{"kind":"value","value":…}}` /
+/// `{"kind":"unsupported"}`). Kept as JSON, so a mode a newer host adds
+/// neither breaks this side's snapshot nor is lost when an edit sends it
+/// back.
+pub type AiConfiguration = serde_json::Value;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -639,9 +672,14 @@ pub enum RestartChange {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HarnessSettings {
+    /// The controller's `HarnessIntegration`; `None` for older and custom
+    /// harnesses.
+    pub integration: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub model: String,
+    /// Codex's Default or Advanced choice.
+    pub configuration: Option<AiConfiguration>,
     pub provider: String,
     pub environment_keys: Vec<String>,
     pub databricks: Option<DatabricksSettings>,
@@ -719,9 +757,15 @@ where
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessEdit {
+    /// The controller's `HarnessIntegration`; only Codex agents set one.
+    /// Left out when `None`, as the controller writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<AiConfiguration>,
     pub provider: String,
     /// Buzz Agent's Databricks settings. `None` clears them, so an edit
     /// sends back what it does not change.
@@ -763,6 +807,10 @@ pub enum HarnessStatus {
     CliNeeded,
     /// The CLI is there but its ACP adapter is not.
     AdapterNeeded,
+    /// The tools are there but need checking again.
+    CheckNeeded,
+    /// Not available on this platform yet.
+    NotEnabled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -773,6 +821,8 @@ pub enum HarnessKind {
     Claude,
     Pi,
     Hermes,
+    /// Never sent to GUIs from before Codex.
+    Codex,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -934,6 +984,13 @@ pub struct ModelRequest {
     pub action: ModelAction,
     /// Blank `host` and `filter` follow the host's agent defaults.
     pub inherit_workspace: bool,
+    /// The harness's `HarnessIntegration`. Only `codex` changes the lookup,
+    /// which then lists the models the user's Codex CLI reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration: Option<String>,
+    /// The model whose effort levels a Codex lookup also reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -961,6 +1018,28 @@ pub struct Catalog {
     /// For a test: the `provider/model` that replied, unless an override
     /// chose it.
     pub tested_model: Option<String>,
+    /// What the Codex CLI reported, for Codex lookups only.
+    pub codex: Option<CodexCatalog>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CodexCatalog {
+    /// False when Codex published no usable model list; true with no
+    /// models is a known-empty catalog.
+    pub models_known: bool,
+    /// The effort levels of the selected model.
+    pub effort: Option<CodexEffort>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CodexEffort {
+    /// The model these levels belong to.
+    pub model: String,
+    /// Its default level, when reported.
+    pub current: Option<String>,
+    pub options: Vec<ModelOption>,
 }
 
 /// What the host's loopback sign-in listener answered.
@@ -1085,6 +1164,54 @@ mod tests {
         assert_eq!(older.status_since, None);
         let bytes = wire(&Agent::default());
         assert!(!bytes.windows(11).any(|w| w == b"statusSince"));
+    }
+
+    #[test]
+    fn codex_settings_survive_modes_this_side_does_not_know() {
+        let configuration = serde_json::json!({
+            "mode": "advanced",
+            "effort": { "kind": "value", "value": "high" },
+            "later": { "kind": "something new" },
+        });
+        let harness = HarnessSettings {
+            integration: Some("codex".into()),
+            configuration: Some(configuration.clone()),
+            ..Default::default()
+        };
+        let read: HarnessSettings = rmp_serde::from_slice(&wire(&harness)).unwrap();
+        assert_eq!(read.configuration, Some(configuration));
+        assert_eq!(read.integration.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn edits_without_an_integration_leave_its_fields_out() {
+        // As the controller writes them: no integration, no fields.
+        let edit = HarnessEdit {
+            command: "goose".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&edit).unwrap();
+        assert!(json.get("integration").is_none());
+        assert!(json.get("configuration").is_none());
+        let request = serde_json::to_value(ModelRequest::default()).unwrap();
+        assert!(request.get("integration").is_none());
+        assert!(request.get("selectedModel").is_none());
+    }
+
+    #[test]
+    fn an_older_host_catalog_has_no_codex_details() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldCatalog {
+            host: String,
+            models: Vec<ModelOption>,
+        }
+        let old = wire(&OldCatalog {
+            host: String::new(),
+            models: vec![ModelOption::default()],
+        });
+        let catalog: Catalog = rmp_serde::from_slice(&old).unwrap();
+        assert_eq!((catalog.models.len(), catalog.codex), (1, None));
     }
 }
 

@@ -4,14 +4,16 @@
 //! Discovery uses the controller's tool PATH (the user's login-shell PATH
 //! plus common install locations), the same PATH agents launch with. Pi and
 //! Claude Code may also be installed into the host's own tools, under its
-//! state directory; a complete user install always wins over those.
+//! state directory; a complete user install always wins over those. Codex
+//! runs the user's own `codex` CLI through an ACP adapter, which may be the
+//! host's own.
 
 use crate::api::{
-    ClaudeSetup, ConfigurationPolicy, Harness, HarnessKind, HarnessOption, HarnessStatus,
-    ProviderOption, SelectorEnvironment,
+    ClaudeSetup, CodexSetup, ConfigurationPolicy, Harness, HarnessKind, HarnessOption,
+    HarnessStatus, ProviderOption, SelectorEnvironment,
 };
 use buzz_agent_controller::{
-    HarnessConfigurationPolicy, installed, installed_npm_tool, managed_tool,
+    HarnessConfigurationPolicy, HarnessIntegration, installed, installed_npm_tool, managed_tool,
 };
 /// The preset catalog (Hermes, Claude Code): labels, setup guides and hints
 /// for harnesses Buzz does not configure itself.
@@ -73,7 +75,7 @@ pub fn providers(kind: HarnessKind) -> &'static [Provider] {
         HarnessKind::BuzzAgent => BUZZ_AGENT_PROVIDERS,
         HarnessKind::Goose => GOOSE_PROVIDERS,
         HarnessKind::Pi => PI_PROVIDERS,
-        HarnessKind::Claude | HarnessKind::Hermes => &[],
+        HarnessKind::Claude | HarnessKind::Hermes | HarnessKind::Codex => &[],
     }
 }
 
@@ -83,7 +85,7 @@ pub fn tools_root(state_dir: &Path) -> &Path {
     state_dir
 }
 
-/// Pi and Claude Code installs are supported here.
+/// Pi, Claude Code and Codex adapter installs are supported here.
 pub const INSTALL_SUPPORTED: bool = cfg!(all(
     any(target_os = "macos", target_os = "linux"),
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -99,8 +101,7 @@ fn provider_options(list: &[Provider]) -> Vec<ProviderOption> {
 }
 
 /// Converts through JSON names so policy enums added upstream stay strings.
-fn policy(command: &str) -> Option<ConfigurationPolicy> {
-    let policy = HarnessConfigurationPolicy::for_command(command);
+fn convert_policy(policy: HarnessConfigurationPolicy) -> Option<ConfigurationPolicy> {
     let json = serde_json::to_value(policy).ok()?;
     let text = |key: &str| json.get(key)?.as_str().map(str::to_string);
     Some(ConfigurationPolicy {
@@ -114,8 +115,38 @@ fn policy(command: &str) -> Option<ConfigurationPolicy> {
                 provider: json["provider"].as_str().unwrap_or_default().to_string(),
             }
         }),
+        supported_modes: json["supportedModes"]
+            .as_array()
+            .map(|modes| {
+                modes
+                    .iter()
+                    .filter_map(|mode| mode.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        effort_discovery: text("effortDiscovery").unwrap_or_default(),
     })
 }
+
+fn policy(command: &str) -> Option<ConfigurationPolicy> {
+    convert_policy(HarnessConfigurationPolicy::for_command(command))
+}
+
+/// The policy of a native-owned integration, whatever its command.
+fn integration_policy(integration: HarnessIntegration) -> Option<ConfigurationPolicy> {
+    convert_policy(HarnessConfigurationPolicy::for_integration(integration))
+}
+
+/// The integration's wire name.
+fn integration_id(integration: HarnessIntegration) -> Option<String> {
+    serde_json::to_value(integration)
+        .ok()?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The id of Codex's harness option.
+pub const CODEX: &str = buzz_agent_controller::codex::INTEGRATION_ID;
 
 fn npm_status(cli: bool, adapter: bool, node: bool) -> &'static str {
     if !cli || !node {
@@ -190,7 +221,6 @@ pub fn claude(app_data: &Path) -> Claude {
             node: managed_node.clone(),
         },
     );
-    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     let cli = if managed { managed_cli.or(cli) } else { cli };
     let node = managed.then_some(managed_node).flatten();
     let login_command =
@@ -215,6 +245,43 @@ pub fn claude(app_data: &Path) -> Claude {
     }
 }
 
+/// A path as one single-quoted shell word.
+fn quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Codex's tools: the user's CLI, and its ACP adapter (theirs, else the
+/// host's own), and how to sign in.
+pub struct Codex {
+    pub setup: CodexSetup,
+    pub cli: Option<PathBuf>,
+    pub adapter: Option<PathBuf>,
+}
+
+pub fn codex(app_data: &Path) -> Codex {
+    let cli = installed("codex");
+    Codex {
+        setup: CodexSetup {
+            login_command: cli.as_deref().map(|cli| format!("{} login", quote(cli))),
+        },
+        adapter: buzz_agent_controller::codex::installed_adapter(Some(app_data)),
+        cli,
+    }
+}
+
+/// What Codex still needs. Codex agents run on Unix only for now.
+fn codex_status(cli: bool, adapter: bool) -> &'static str {
+    if !cfg!(unix) {
+        "not-enabled"
+    } else if !cli {
+        "cli-needed"
+    } else if !adapter {
+        "adapter-needed"
+    } else {
+        "ready"
+    }
+}
+
 /// Editing suggestions and executable presence only; availability does not
 /// establish provider credentials or an ACP session.
 pub fn options(app_data: &Path) -> Vec<HarnessOption> {
@@ -232,6 +299,7 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
     );
     let mut options = vec![
         HarnessOption {
+            id: integration_id(HarnessIntegration::BuzzAgent),
             command: "buzz-agent".into(),
             label: "Buzz Agent".into(),
             available: true,
@@ -241,6 +309,7 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
             ..Default::default()
         },
         HarnessOption {
+            id: integration_id(HarnessIntegration::Goose),
             command: "goose".into(),
             label: "Goose".into(),
             available: true,
@@ -250,6 +319,7 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
             ..Default::default()
         },
         HarnessOption {
+            id: integration_id(HarnessIntegration::Pi),
             command: pi.map_or_else(
                 || "buzz-pi-acp".into(),
                 |path| path.to_string_lossy().into_owned(),
@@ -272,7 +342,8 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
             .map(|preset| {
                 let command = installed(&preset.command);
                 HarnessOption {
-                    configuration_policy: policy(&preset.command),
+                    id: integration_id(HarnessIntegration::External),
+                    configuration_policy: integration_policy(HarnessIntegration::External),
                     available: command.is_some(),
                     status: if command.is_some() {
                         "ready"
@@ -294,7 +365,8 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
     );
     let claude = claude(app_data);
     options.push(HarnessOption {
-        configuration_policy: policy("claude-agent-acp"),
+        id: integration_id(HarnessIntegration::External),
+        configuration_policy: integration_policy(HarnessIntegration::External),
         command: claude.adapter.map_or_else(
             || "claude-agent-acp".into(),
             |path| path.to_string_lossy().into_owned(),
@@ -306,6 +378,24 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
         update_supported: Some(false),
         default_args: Vec::new(),
         providers: Vec::new(),
+    });
+    let codex = codex(app_data);
+    let codex_status = codex_status(codex.cli.is_some(), codex.adapter.is_some());
+    options.push(HarnessOption {
+        id: Some(CODEX.into()),
+        command: codex.adapter.map_or_else(
+            || "codex-acp".into(),
+            |path| path.to_string_lossy().into_owned(),
+        ),
+        label: "Codex".into(),
+        // As for Claude Code: executable presence, not sign-in.
+        available: codex_status == "ready",
+        status: codex_status.into(),
+        install_supported: Some(INSTALL_SUPPORTED),
+        update_supported: None,
+        default_args: Vec::new(),
+        providers: Vec::new(),
+        configuration_policy: integration_policy(HarnessIntegration::Codex),
     });
     options
 }
@@ -334,8 +424,18 @@ pub fn status(option: &HarnessOption) -> Option<HarnessStatus> {
         "ready" => Some(HarnessStatus::Ready),
         "cli-needed" => Some(HarnessStatus::CliNeeded),
         "adapter-needed" => Some(HarnessStatus::AdapterNeeded),
+        "check-needed" => Some(HarnessStatus::CheckNeeded),
+        "not-enabled" => Some(HarnessStatus::NotEnabled),
         _ => None,
     }
+}
+
+/// An option's harness kind: Codex by its id, never by its command.
+fn option_kind(option: &HarnessOption) -> Option<HarnessKind> {
+    if option.id.as_deref() == Some(CODEX) {
+        return Some(HarnessKind::Codex);
+    }
+    kind_of(&option.command)
 }
 
 /// A preset harness (Hermes, Claude Code): its own model and sign-in.
@@ -379,14 +479,17 @@ pub fn presets() -> Vec<Preset> {
         .collect()
 }
 
-/// The options as [`Request::Harnesses`](crate::api::Request::Harnesses)
-/// answers them, for GUIs from before harness options. `claude` adds Claude
-/// Code's sign-in command.
-pub fn legacy(options: &[HarnessOption], claude: Option<&ClaudeSetup>) -> Vec<Harness> {
+/// The options as a harness list, which Settings shows. `claude` and
+/// `codex` add their sign-in commands.
+pub fn legacy(
+    options: &[HarnessOption],
+    claude: Option<&ClaudeSetup>,
+    codex: Option<&CodexSetup>,
+) -> Vec<Harness> {
     options
         .iter()
         .filter_map(|option| {
-            let kind = kind_of(&option.command)?;
+            let kind = option_kind(option)?;
             let preset = buzz_agent_controller::harness_preset(&option.command);
             let missing = match option.status.as_str() {
                 "ready" => Vec::new(),
@@ -403,12 +506,30 @@ pub fn legacy(options: &[HarnessOption], claude: Option<&ClaudeSetup>) -> Vec<Ha
                 status: status(option),
                 install_supported: option.install_supported == Some(true),
                 update_supported: option.update_supported == Some(true),
-                login_command: (kind == HarnessKind::Claude)
-                    .then(|| claude.and_then(|setup| setup.login_command.clone()))
-                    .flatten(),
+                login_command: match kind {
+                    HarnessKind::Claude => claude.and_then(|setup| setup.login_command.clone()),
+                    HarnessKind::Codex => codex.and_then(|setup| setup.login_command.clone()),
+                    _ => None,
+                },
             })
         })
         .collect()
+}
+
+/// The list as [`Request::Harnesses`](crate::api::Request::Harnesses)
+/// answers it, for GUIs from before harness options: without Codex or the
+/// statuses those GUIs cannot read.
+pub fn for_older_guis(mut list: Vec<Harness>) -> Vec<Harness> {
+    list.retain(|harness| harness.kind != HarnessKind::Codex);
+    for harness in &mut list {
+        if matches!(
+            harness.status,
+            Some(HarnessStatus::CheckNeeded | HarnessStatus::NotEnabled)
+        ) {
+            harness.status = None;
+        }
+    }
+    list
 }
 
 /// Suggested effort levels (buzz-app's `effortChoices`); not evidence of
@@ -418,7 +539,7 @@ pub fn efforts(kind: HarnessKind) -> &'static [&'static str] {
         HarnessKind::BuzzAgent => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         HarnessKind::Goose => &["off", "low", "medium", "high", "max"],
         HarnessKind::Pi => &["off", "minimal", "low", "medium", "high", "xhigh"],
-        HarnessKind::Claude | HarnessKind::Hermes => &[],
+        HarnessKind::Claude | HarnessKind::Hermes | HarnessKind::Codex => &[],
     }
 }
 
@@ -429,7 +550,7 @@ pub fn defaults_name(kind: HarnessKind) -> Option<&'static str> {
         HarnessKind::BuzzAgent => Some("buzz-agent"),
         HarnessKind::Goose => Some("goose"),
         HarnessKind::Pi => Some("pi"),
-        HarnessKind::Claude | HarnessKind::Hermes => None,
+        HarnessKind::Claude | HarnessKind::Hermes | HarnessKind::Codex => None,
     }
 }
 
@@ -493,7 +614,19 @@ mod tests {
         let labels: Vec<_> = options.iter().map(|o| o.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["Buzz Agent", "Goose", "Pi", "Hermes Agent", "Claude Code"]
+            [
+                "Buzz Agent",
+                "Goose",
+                "Pi",
+                "Hermes Agent",
+                "Claude Code",
+                "Codex"
+            ]
+        );
+        let ids: Vec<_> = options.iter().map(|o| o.id.as_deref().unwrap()).collect();
+        assert_eq!(
+            ids,
+            ["buzz-agent", "goose", "pi", "external", "external", "codex"]
         );
         assert_eq!(options[0].providers[0].value, "databricks_v2");
         assert!(options[0].configuration_policy.is_some());
@@ -509,6 +642,109 @@ mod tests {
     }
 
     #[test]
+    fn codex_needs_its_cli_then_its_adapter() {
+        let root = tempfile::tempdir().unwrap();
+        let options = options(root.path());
+        let codex = options.iter().find(|o| o.label == "Codex").unwrap();
+        let tools = self::codex(root.path());
+        let status = codex_status(tools.cli.is_some(), tools.adapter.is_some());
+        assert_eq!(codex.status, status);
+        assert_eq!(codex.available, status == "ready");
+        assert_eq!(codex.install_supported, Some(INSTALL_SUPPORTED));
+        assert_eq!(codex.update_supported, None);
+        if tools.adapter.is_none() {
+            assert_eq!(codex.command, "codex-acp");
+        }
+        let policy = codex.configuration_policy.as_ref().unwrap();
+        assert_eq!(
+            (
+                policy.authentication.as_str(),
+                policy.provider.as_str(),
+                policy.model.as_str(),
+                policy.effort_discovery.as_str(),
+            ),
+            ("external", "external", "optional", "modelSpecific")
+        );
+        assert_eq!(policy.supported_modes, ["default", "advanced"]);
+        assert!(policy.selector_environment.is_none());
+        // Other integrations admit no saved modes.
+        assert!(
+            options[0]
+                .configuration_policy
+                .as_ref()
+                .unwrap()
+                .supported_modes
+                .is_empty()
+        );
+        if cfg!(unix) {
+            assert_eq!(codex_status(false, true), "cli-needed");
+            assert_eq!(codex_status(true, false), "adapter-needed");
+            assert_eq!(codex_status(true, true), "ready");
+        } else {
+            assert_eq!(codex_status(true, true), "not-enabled");
+        }
+    }
+
+    #[test]
+    fn codex_signs_in_with_its_quoted_cli() {
+        let root = tempfile::tempdir().unwrap();
+        let tools = codex(root.path());
+        assert_eq!(
+            tools.setup.login_command,
+            tools
+                .cli
+                .as_deref()
+                .map(|cli| format!("{} login", quote(cli)))
+        );
+        assert_eq!(quote(Path::new("/opt/it's/codex")), "'/opt/it'\\''s/codex'");
+    }
+
+    #[test]
+    fn codex_is_known_by_its_id_not_its_command() {
+        let option = |id: Option<&str>| HarnessOption {
+            id: id.map(str::to_string),
+            command: "/tools/codex-acp".into(),
+            label: "Codex".into(),
+            status: "not-enabled".into(),
+            ..Default::default()
+        };
+        assert_eq!(option_kind(&option(Some(CODEX))), Some(HarnessKind::Codex));
+        assert_eq!(option_kind(&option(Some("external"))), None);
+        assert_eq!(option_kind(&option(None)), None);
+        let setup = CodexSetup {
+            login_command: Some("'codex' login".into()),
+        };
+        let list = legacy(&[option(Some(CODEX))], None, Some(&setup));
+        assert_eq!(list[0].kind, HarnessKind::Codex);
+        assert_eq!(list[0].status, Some(HarnessStatus::NotEnabled));
+        assert_eq!(list[0].login_command.as_deref(), Some("'codex' login"));
+    }
+
+    #[test]
+    fn older_guis_never_get_codex_or_new_statuses() {
+        let root = tempfile::tempdir().unwrap();
+        let mut options = options(root.path());
+        options[1].status = "check-needed".into();
+        let list = for_older_guis(legacy(&options, None, None));
+        assert!(list.iter().all(|h| h.kind != HarnessKind::Codex));
+        let goose = list.iter().find(|h| h.kind == HarnessKind::Goose).unwrap();
+        assert_eq!(goose.status, None);
+        // What an older GUI decodes: only the kinds and statuses it knew.
+        let wire = rmp_serde::to_vec_named(&list).unwrap();
+        let value: serde_json::Value = rmp_serde::from_slice(&wire).unwrap();
+        for harness in value.as_array().unwrap() {
+            assert!(
+                ["buzzagent", "goose", "claude", "pi", "hermes"]
+                    .contains(&harness["kind"].as_str().unwrap())
+            );
+            assert!(matches!(
+                harness["status"].as_str(),
+                None | Some("ready" | "cli-needed" | "adapter-needed")
+            ));
+        }
+    }
+
+    #[test]
     fn legacy_harnesses_carry_status_and_sign_in() {
         let root = tempfile::tempdir().unwrap();
         let options = options(root.path());
@@ -517,7 +753,7 @@ mod tests {
             install_supported: true,
             login_command: Some("'claude' auth login".into()),
         };
-        let list = legacy(&options, Some(&setup));
+        let list = legacy(&options, Some(&setup), None);
         let find = |kind| list.iter().find(|h| h.kind == kind).unwrap();
         assert_eq!(
             find(HarnessKind::BuzzAgent).status,

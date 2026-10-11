@@ -12,6 +12,7 @@ pub fn mark(kind: HarnessKind, size: f32) -> AnyElement {
         HarnessKind::Pi => BrandMark::Pi,
         HarnessKind::Claude => BrandMark::Claude,
         HarnessKind::Hermes => BrandMark::Hermes,
+        HarnessKind::Codex => BrandMark::Codex,
     };
     Brand::new(brand).size(size).into_any_element()
 }
@@ -22,6 +23,8 @@ pub fn status_label(status: Option<HarnessStatus>) -> &'static str {
         Some(HarnessStatus::Ready) => "Ready",
         Some(HarnessStatus::CliNeeded) => "CLI needed",
         Some(HarnessStatus::AdapterNeeded) => "Adapter needed",
+        Some(HarnessStatus::CheckNeeded) => "Check needed",
+        Some(HarnessStatus::NotEnabled) => "Not enabled",
         None => "Unknown",
     }
 }

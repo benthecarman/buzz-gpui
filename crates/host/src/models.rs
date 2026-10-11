@@ -252,6 +252,7 @@ impl AgentHost {
                     filter: databricks.filter,
                     edit: Some(edit),
                     action: api::ModelAction::Connect,
+                    ..Default::default()
                 },
                 asker,
             )

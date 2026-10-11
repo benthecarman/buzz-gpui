@@ -392,7 +392,11 @@ impl AgentHost {
                 let app_data = self.state_dir.clone();
                 tokio::task::spawn_blocking(move || {
                     let claude = harness::claude(&app_data).setup;
-                    harness::legacy(&harness::options(&app_data), Some(&claude))
+                    harness::for_older_guis(harness::legacy(
+                        &harness::options(&app_data),
+                        Some(&claude),
+                        None,
+                    ))
                 })
                 .await
                 .map(Response::Harnesses)
@@ -556,6 +560,7 @@ impl AgentHost {
                     .map_err(|_| failed("Current Buzz library unavailable"))
             }
             Request::ClaudeAuth => Ok(Response::ClaudeAuth(self.claude_auth().await)),
+            Request::CodexAuth => Ok(Response::CodexAuth(self.codex_auth().await)),
             Request::InstallHarness { kind } => self
                 .install(kind)
                 .await
@@ -1045,6 +1050,7 @@ impl Owner {
         snapshot.local_inventory_actions = true;
         snapshot.harness_options = Some(harness::options(&self.state_dir));
         snapshot.claude_setup = Some(harness::claude(&self.state_dir).setup);
+        snapshot.codex_setup = Some(harness::codex(&self.state_dir).setup);
         snapshot.databricks_defaults = Some(api::DatabricksSettings {
             host: build.host.clone(),
             filter: build.filter.clone(),

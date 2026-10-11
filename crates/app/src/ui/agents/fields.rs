@@ -975,6 +975,7 @@ fn run<T: Owner>(fields: &mut Fields, action: ModelAction, cx: &mut Context<T>) 
         action,
         inherit_workspace: !external
             && ((inherit_host && host.is_empty()) || (inherit_filter && filter.is_empty())),
+        ..Default::default()
     };
     let key = fields.key.clone();
     let goose = draft::is_goose(&fields.draft.command);

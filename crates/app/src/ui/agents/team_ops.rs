@@ -110,6 +110,7 @@ pub fn member_edit(member: &MemberSnapshot, harnesses: &[Harness]) -> Result<Age
             model,
             provider,
             databricks: None,
+            ..Default::default()
         },
         environment: BTreeMap::new(),
         effort: d.effort.clone().map(Some),
