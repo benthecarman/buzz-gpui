@@ -189,6 +189,20 @@ impl AppState {
         Ok(())
     }
 
+    /// Moves the community at `from` to `to` in the rail, keeping the
+    /// same one selected. The order is saved with the communities.
+    pub fn move_community(from: usize, to: usize, cx: &mut App) {
+        let state = cx.global_mut::<Self>();
+        let len = state.communities.len();
+        if from >= len || to >= len || from == to {
+            return;
+        }
+        let community = state.communities.remove(from);
+        state.communities.insert(to, community);
+        state.selected = state.selected.map(|index| moved_index(index, from, to));
+        cx.global::<Self>().save(cx);
+    }
+
     pub fn select(index: usize, cx: &mut App) {
         let state = cx.global_mut::<Self>();
         if index < state.communities.len() {
@@ -682,5 +696,37 @@ pub mod identity {
                 .map(Some)
                 .map_err(|_| IdentityError::Malformed),
         }
+    }
+}
+
+/// Where the item at `index` ends up when the one at `from` moves to `to`.
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < index && index <= to {
+        index - 1
+    } else if to <= index && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::moved_index;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn the_selection_follows_its_community() {
+        // [a, b, c, d]: move b (1) to 3 gives [a, c, d, b].
+        assert_eq!(moved_index(1, 1, 3), 3);
+        assert_eq!(moved_index(0, 1, 3), 0);
+        assert_eq!(moved_index(2, 1, 3), 1);
+        assert_eq!(moved_index(3, 1, 3), 2);
+        // Move d (3) to 0 gives [d, a, b, c].
+        assert_eq!(moved_index(3, 3, 0), 0);
+        assert_eq!(moved_index(0, 3, 0), 1);
+        assert_eq!(moved_index(2, 3, 0), 3);
     }
 }

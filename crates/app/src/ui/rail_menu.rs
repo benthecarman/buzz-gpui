@@ -3,6 +3,10 @@
 //! initials, and each item's context menu: mark everything read, copy the
 //! community URL, invite people to the selected community (owners and
 //! admins only), open the community's settings, and leave it.
+//!
+//! Communities can be reordered by dragging them on the rail or with Move
+//! up / Move down in their menu; buzz-app's rail keeps the order they were
+//! added in.
 
 use super::modal::Dismissed;
 use super::navigation::{Place, Target};
@@ -12,8 +16,8 @@ use super::{moderation, notice};
 use crate::community::{AppState, Community};
 use buzz_relay_client::SessionStatus;
 use buzz_ui::{
-    AlertDialog, Avatar, AvatarSize, Button, IconButton, IconName, Menu, MenuItem, MenuLabel,
-    MenuSeparator, MenuSize, Surface, ToastTone,
+    ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, IconButton, IconName, Menu, MenuItem,
+    MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
 };
 use gpui_kit::*;
 use std::sync::Arc;
@@ -53,13 +57,29 @@ pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElemen
                 community.session.media().clone(),
             )
         };
+        let image = icon.and_then(|icon| icon_source(&icon, &media));
         let mut avatar = Avatar::new(name.clone()).squircle().size(AvatarSize::Small);
-        if let Some(icon) = icon.and_then(|icon| icon_source(&icon, &media)) {
-            avatar = avatar.image(icon);
+        if let Some(image) = image.clone() {
+            avatar = avatar.image(image);
         }
         let menu = menu.clone();
+        let dragged = DraggedCommunity {
+            index,
+            name: name.clone().into(),
+            image,
+        };
         rail = rail.child(
             div()
+                .id(SharedString::from(format!("rail-item-{index}")))
+                .rounded(rems(0.5))
+                .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                .drag_over::<DraggedCommunity>(|style, _, _, cx| {
+                    style.bg(cx.colors().affordance_accent)
+                })
+                .on_drop(cx.listener(move |_, dragged: &DraggedCommunity, _, cx| {
+                    AppState::move_community(dragged.index, index, cx);
+                    cx.notify();
+                }))
                 .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                     open(&menu, index, event.position, cx)
                 })
@@ -82,6 +102,27 @@ pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElemen
             .tooltip("Add a community")
             .on_click(cx.listener(|this, _, window, cx| this.open_add_community(window, cx))),
     )
+}
+
+/// A community being dragged on the rail, drawn as its icon under the
+/// pointer.
+#[derive(Clone)]
+struct DraggedCommunity {
+    index: usize,
+    name: SharedString,
+    image: Option<ImageSource>,
+}
+
+impl Render for DraggedCommunity {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mut avatar = Avatar::new(self.name.clone())
+            .squircle()
+            .size(AvatarSize::Small);
+        if let Some(image) = self.image.clone() {
+            avatar = avatar.image(image);
+        }
+        div().opacity(0.85).child(avatar)
+    }
 }
 
 /// A community icon: inline icons decode here, HTTPS icons load like any
@@ -204,6 +245,34 @@ pub fn render(state: &MenuState, cx: &mut Context<Workspace>) -> Option<AnyEleme
                     this.navigate(target.clone(), window, cx);
                 })),
         );
+    }
+    let count = app.communities.len();
+    if count > 1 {
+        let (up, down) = (state.clone(), state.clone());
+        menu = menu
+            .child(MenuSeparator::new())
+            .child(
+                MenuItem::new("rail-move-up", "Move up")
+                    .icon(IconName::ArrowUp)
+                    .icon_size(14.)
+                    .size(MenuSize::Compact)
+                    .disabled(index == 0)
+                    .on_click(move |_, _, cx| {
+                        close(&up, cx);
+                        AppState::move_community(index, index - 1, cx);
+                    }),
+            )
+            .child(
+                MenuItem::new("rail-move-down", "Move down")
+                    .icon(IconName::ArrowDown)
+                    .icon_size(14.)
+                    .size(MenuSize::Compact)
+                    .disabled(index + 1 >= count)
+                    .on_click(move |_, _, cx| {
+                        close(&down, cx);
+                        AppState::move_community(index, index + 1, cx);
+                    }),
+            );
     }
     let (close_state, target) = (state.clone(), settings(Section::Profile));
     menu = menu.child(
