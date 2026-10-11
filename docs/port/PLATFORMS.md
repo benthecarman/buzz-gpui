@@ -51,7 +51,7 @@ section lists what a person still has to try on real machines.
 |---|---|---|---|
 | Embedded agent host | in-process host (`crates/host`) | DONE | DONE |
 | Agent processes and their descendants | buzz-agent-controller, process groups | DONE | DONE: buzz-agent-controller uses job objects |
-| Refuse to start agents while old Buzz runs | `ps -axo pid=,comm=` | DONE | PLANNED: `ps` does not exist, so every agent start was refused; list processes with `tasklist` |
+| Refuse to start agents while old Buzz runs | `ps -axo pid=,comm=` | DONE | DONE: `tasklist`; before, `ps` did not exist there, so every agent start was refused |
 | Agent-type processes (`crates/host/src/processes.rs`) | own process group; SIGTERM, then SIGKILL to the group | DONE | PLANNED: a job object ends descendants too; no console window |
 | Channel terminals | login shell in a PTY (`buzz_desktop::terminal`) | DONE | DIFFERENT: buzz-desktop's terminal is Unix-only ("Local terminals require macOS or Linux"); buzz-app has none on Windows either. A ConPTY backend belongs in buzz-desktop |
 | Installing Pi and Claude Code into Buzz's tools | `buzz_desktop::harness_setup` | DONE | DIFFERENT: buzz-desktop supports macOS and Linux only, as buzz-app; install them yourself and Buzz finds them on `PATH` |

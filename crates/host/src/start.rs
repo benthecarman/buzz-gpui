@@ -233,16 +233,57 @@ impl Owner {
 /// Advisory only: unmodified old Buzz does not share the controller's
 /// lock. Never inspects other processes beyond their names.
 pub(crate) fn refuse_legacy() -> Result<(), String> {
-    let output = std::process::Command::new("ps")
-        .args(["-axo", "pid=,comm="])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+    let output = process_listing()
         .output()
         .map_err(|_| "Could not check old Buzz processes; Start refused")?;
     if !output.status.success() || output.stdout.len() > 4 * 1024 * 1024 {
         return Err("Could not check old Buzz processes; Start refused".into());
     }
-    refuse_legacy_listing(&String::from_utf8_lossy(&output.stdout))
+    let listing = String::from_utf8_lossy(&output.stdout);
+    #[cfg(windows)]
+    let listing = tasklist_listing(&listing);
+    refuse_legacy_listing(&listing)
+}
+
+#[cfg(not(windows))]
+fn process_listing() -> std::process::Command {
+    let mut command = std::process::Command::new("ps");
+    command
+        .args(["-axo", "pid=,comm="])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin");
+    command
+}
+
+/// Windows has no `ps`; `tasklist` names every process, as CSV rows.
+#[cfg(windows)]
+fn process_listing() -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    /// No console window opens beside the app.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let system = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| r"C:\Windows".into());
+    let mut command = std::process::Command::new(system.join("System32").join("tasklist.exe"));
+    command
+        .args(["/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// `tasklist`'s `"name.exe","pid",…` rows as the `pid name` lines `ps`
+/// prints, the name lowercased and without `.exe`.
+#[cfg(any(windows, test))]
+fn tasklist_listing(csv: &str) -> String {
+    csv.lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().split("\",\"");
+            let name = fields.next()?.strip_prefix('"')?.to_ascii_lowercase();
+            let pid = fields.next()?.trim_end_matches('"');
+            let name = name.strip_suffix(".exe").unwrap_or(&name);
+            Some(format!("{pid} {name}\n"))
+        })
+        .collect()
 }
 
 fn refuse_legacy_listing(listing: &str) -> Result<(), String> {
@@ -611,6 +652,19 @@ mod tests {
         assert!(refuse_legacy_listing("  1 /usr/bin/buzz-desktop\n").is_err());
         assert!(refuse_legacy_listing("12 /Applications/Buzz.app/Contents/MacOS/Buzz\n").is_err());
         assert!(refuse_legacy_listing("1 /usr/bin/bash\n2 buzz-gpui\n").is_ok());
+    }
+
+    #[test]
+    fn tasklist_rows_read_as_ps_lines() {
+        let csv = "\"System Idle Process\",\"0\",\"Services\",\"0\",\"8 K\"\r\n\
+                   \"Buzz-Desktop.EXE\",\"4120\",\"Console\",\"1\",\"91,204 K\"\r\n\
+                   \"buzz-gpui.exe\",\"77\",\"Console\",\"1\",\"1,024 K\"\r\n";
+        assert_eq!(
+            tasklist_listing(csv),
+            "0 system idle process\n4120 buzz-desktop\n77 buzz-gpui\n"
+        );
+        assert!(refuse_legacy_listing(&tasklist_listing(csv)).is_err());
+        assert!(refuse_legacy_listing(&tasklist_listing("\"buzz-gpui.exe\",\"7\"\r\n")).is_ok());
     }
 
     #[test]
