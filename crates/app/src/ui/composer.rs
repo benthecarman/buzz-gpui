@@ -4610,8 +4610,12 @@ impl Composer {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "escape" => this.close_outsiders(window, cx),
-                    // The default button, "Do nothing", has the focus.
-                    "enter" => this.send_without_outsiders(window, cx),
+                    // The default button has the focus: Invite when the
+                    // viewer can add people, else "Send anyway".
+                    "enter" => match this.outsiders.as_ref().is_some_and(|p| p.can_add) {
+                        true => this.invite_outsiders(window, cx),
+                        false => this.send_without_outsiders(window, cx),
+                    },
                     _ => return,
                 }
                 cx.stop_propagation();
