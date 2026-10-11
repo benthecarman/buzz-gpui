@@ -98,10 +98,12 @@ async fn finds_claude_code_missing_when_it_cannot_be_started() {
         Script::Fail("Could not start claude: No such file"),
     )]));
     assert_eq!(check_claude(&spawn).await, ClaudeStatus::Missing);
-    let old: Spawner = Arc::new(scripted(&[(
-        "claude --version",
-        Script::Fail(crate::agent_plugins::process::UPDATE_HOST),
-    )]));
+    let update = "Update this host to run Claude Code agents";
+    assert_eq!(
+        crate::agent_plugins::process::update_host("claude-code"),
+        update
+    );
+    let old: Spawner = Arc::new(scripted(&[("claude --version", Script::Fail(update))]));
     assert_eq!(
         check_claude(&old).await,
         ClaudeStatus::Error {
