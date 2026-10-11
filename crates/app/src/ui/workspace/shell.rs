@@ -119,7 +119,12 @@ impl Workspace {
     pub(super) fn header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let width = Self::viewport_width(window);
         let narrow = layout::narrow(width);
-        let (pad_left, pad_right) = layout::header_padding(width);
+        let (mut pad_left, pad_right) = layout::header_padding(width);
+        // Clear of the window buttons macOS draws there, which full screen
+        // hides.
+        if cfg!(target_os = "macos") && !window.is_fullscreen() {
+            pad_left = window_controls::MAC_BUTTONS_INSET;
+        }
         let header_button = |id: &'static str, icon: IconName| {
             IconButton::new(id, icon)
                 .size(IconButtonSize::Sm)

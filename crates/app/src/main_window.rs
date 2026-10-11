@@ -157,10 +157,13 @@ pub fn open(cx: &mut App) {
             window_min_size: Some(MIN_SIZE),
             app_id: Some("buzz-gpui".into()),
             // For the taskbar, Alt+Tab and the window list; the header
-            // draws no title.
+            // draws no title. On macOS and Windows the header takes the
+            // system title bar's place, with macOS's buttons over it.
             titlebar: Some(TitlebarOptions {
                 title: Some("Buzz".into()),
-                ..Default::default()
+                appears_transparent: cfg!(any(target_os = "macos", windows)),
+                traffic_light_position: cfg!(target_os = "macos")
+                    .then_some(crate::ui::window_controls::MAC_BUTTONS),
             }),
             // The header is the title bar, with buzz-app's own controls.
             window_decorations: Some(WindowDecorations::Client),
