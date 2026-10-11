@@ -273,6 +273,9 @@ impl Processes {
                         // SAFETY: signals a process group this module started.
                         unsafe { libc::kill(-group, libc::SIGTERM) };
                     }
+                    // No polite stop on Windows: end it now.
+                    #[cfg(not(unix))]
+                    let _ = child.start_kill();
                     match tokio::time::timeout(STOP_GRACE, child.wait()).await {
                         Ok(status) => status.ok(),
                         Err(_) => {
