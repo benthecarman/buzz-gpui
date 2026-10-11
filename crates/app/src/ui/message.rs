@@ -161,11 +161,14 @@ pub struct Interaction {
     /// The reaction pill whose preview is open: `(message, index)`, and
     /// the pill it slid from.
     pub preview: Option<(EventId, usize, Option<usize>)>,
+    /// The row holding keyboard focus, which shows its bar.
+    pub focused: Option<EventId>,
 }
 
 impl Interaction {
     fn bar_visible(&self, id: EventId) -> bool {
-        self.hovered == Some(id)
+        self.focused == Some(id)
+            || self.hovered == Some(id)
             || self.bar_hovered == Some(id)
             || self
                 .open
@@ -532,8 +535,18 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
     }
 
     let width = row_width(&id);
+    // The row's tab stop has no size, so a click on the row never takes
+    // focus from where it was.
+    let stop = div()
+        .absolute()
+        .size_0()
+        .track_focus(&row_focus(rows, row.id, cx));
     let mut line = div()
         .id(SharedString::from(format!("message-{id}")))
+        .when(rows.interaction.focused == Some(row.id), |d| {
+            d.bg(c.affordance_subtle)
+        })
+        .child(stop)
         .relative()
         .flex()
         .gap(px(gap))
@@ -729,6 +742,89 @@ fn workflow_info(
         .into_any_element()
 }
 
+/// Keyboard focus for a row and its action bar's buttons, kept by message
+/// across frames: rows render from `&App`, so the page asks which row
+/// holds focus (`keyboard_row`). Channel and thread rows are apart. Rows
+/// are tab stops in the port so the keyboard can reach the bar, which
+/// buzz-app reaches through each row's own controls.
+#[derive(Default)]
+struct RowFocus {
+    row: Option<FocusHandle>,
+    buttons: HashMap<String, FocusHandle>,
+}
+
+thread_local! {
+    static ROW_FOCUS: std::cell::RefCell<HashMap<(bool, EventId), RowFocus>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn with_focus<T>(key: (bool, EventId), f: impl FnOnce(&mut RowFocus) -> T) -> T {
+    ROW_FOCUS.with_borrow_mut(|rows| {
+        if rows.len() > 2048 {
+            rows.clear();
+        }
+        f(rows.entry(key).or_default())
+    })
+}
+
+/// A row is a tab stop, so the keyboard can reach its action bar.
+fn row_focus(rows: &Rows, id: EventId, cx: &App) -> FocusHandle {
+    with_focus((rows.in_thread, id), |focus| {
+        focus
+            .row
+            .get_or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone()
+    })
+}
+
+/// The bar button `name` of row `id`.
+fn bar_focus(rows: &Rows, id: EventId, name: &str, cx: &App) -> FocusHandle {
+    with_focus((rows.in_thread, id), |focus| {
+        focus
+            .buttons
+            .entry(name.to_string())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone()
+    })
+}
+
+/// The row the keyboard is in, whose bar shows (`useFloatingActionBar`).
+pub fn keyboard_row(in_thread: bool, window: &Window) -> Option<EventId> {
+    if !window.last_input_was_keyboard() {
+        return None;
+    }
+    ROW_FOCUS.with_borrow(|rows| {
+        rows.iter()
+            .filter(|((thread, _), _)| *thread == in_thread)
+            .find(|(_, focus)| {
+                focus
+                    .row
+                    .iter()
+                    .chain(focus.buttons.values())
+                    .any(|handle| handle.is_focused(window))
+            })
+            .map(|((_, id), _)| *id)
+    })
+}
+
+/// Gives focus back to a row's bar button as its popup closes from the
+/// keyboard (Base UI's `finalFocus`).
+pub fn focus_bar_button(
+    in_thread: bool,
+    id: EventId,
+    name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let handle = ROW_FOCUS.with_borrow(|rows| {
+        rows.get(&(in_thread, id))
+            .and_then(|focus| focus.buttons.get(name).cloned())
+    });
+    if let Some(handle) = handle {
+        handle.focus(window, cx);
+    }
+}
+
 /// The row's laid-out width, measured each frame.
 fn row_width(id: &str) -> Rc<Cell<f32>> {
     thread_local! {
@@ -788,6 +884,7 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
         IconButton::new(SharedString::from(format!("{name}-{id}")), icon)
             .size(IconButtonSize::Sm)
             .surface(Surface::Floating)
+            .track_focus(&bar_focus(rows, row.id, name, cx))
     };
 
     let mut bar = div()
@@ -853,6 +950,12 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
                             IconButton::new(group.clone(), IconName::Smiley)
                                 .size(IconButtonSize::Sm)
                                 .surface(Surface::Floating)
+                                .track_focus(&bar_focus(
+                                    rows,
+                                    row.id,
+                                    &format!("quick-{index}"),
+                                    cx,
+                                ))
                                 .disabled(busy)
                                 .selected(mine)
                                 .child(lift(glyph, group, busy, cx))
@@ -1296,10 +1399,15 @@ fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>, _cx: &App) -> AnyElement {
                     on_highlight(value, window, cx);
                 }
             };
+            let (in_thread, more) = (keys.in_thread, target.id);
+            let back = move |window: &mut Window, cx: &mut App| {
+                focus_bar_button(in_thread, more, "more", window, cx)
+            };
             match event.keystroke.key.as_str() {
-                "escape" => {
+                "escape" | "tab" => {
                     cx.stop_propagation();
                     keys.popup(None, window, cx);
+                    back(window, cx);
                 }
                 "down" if count > 0 => {
                     cx.stop_propagation();
@@ -1319,6 +1427,7 @@ fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>, _cx: &App) -> AnyElement {
                         cx.stop_propagation();
                         let command = entry.command.clone();
                         keys.popup(None, window, cx);
+                        back(window, cx);
                         keys.command(&target, command, window, cx);
                     }
                 }

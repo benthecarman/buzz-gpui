@@ -118,8 +118,14 @@ impl MessageActions {
                 cx.notify();
             }),
             cx.subscribe_in(&picker, window, |this, _, _: &Dismissed, window, cx| {
-                this.interaction.open = None;
-                window.focus(&this.menu_focus, cx);
+                // Escape gives focus back to the bar's "Add reaction".
+                match this.interaction.open.take() {
+                    Some((id, Popup::Picker { from_bar: true })) => {
+                        let in_thread = this.hooks.thread.is_some();
+                        super::message::focus_bar_button(in_thread, id, "add-reaction", window, cx);
+                    }
+                    _ => window.focus(&this.menu_focus, cx),
+                }
                 cx.notify();
             }),
             cx.observe_in(&community, window, |this, community, window, cx| {

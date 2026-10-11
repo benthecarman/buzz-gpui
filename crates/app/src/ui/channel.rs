@@ -60,6 +60,8 @@ pub struct ChannelPage {
     items: Vec<Item>,
     /// Row 0 is the top edge (load older); messages follow.
     list: ListState,
+    /// The row holding keyboard focus last frame.
+    keyboard_row: Option<EventId>,
     composer: Entity<Composer>,
     input: Entity<TextareaState>,
     /// Row actions: the hover bar, menus, reactions and dialogs.
@@ -256,6 +258,7 @@ impl ChannelPage {
             model,
             items,
             list,
+            keyboard_row: None,
             composer,
             input,
             message_actions,
@@ -967,6 +970,25 @@ impl Render for ChannelPage {
         let mut rows = Rows::new(viewer, directory);
         let actions = self.message_actions.clone();
         MessageActions::fill(&actions, &mut rows, cx);
+        rows.interaction.focused = super::message::keyboard_row(rows.in_thread, window);
+        // A row the keyboard reaches scrolls into view, as focus does.
+        if rows.interaction.focused != self.keyboard_row {
+            self.keyboard_row = rows.interaction.focused;
+            if let Some(index) = self
+                .keyboard_row
+                .and_then(|id| self.items.iter().position(|item| item.row.id == id))
+            {
+                // List row 0 is the edge. Moving stops following the tail,
+                // which would pin the list back to the end.
+                let before = self.list.logical_scroll_top();
+                self.list.scroll_to_reveal_item(index + 1);
+                let after = self.list.logical_scroll_top();
+                if (after.item_ix, after.offset_in_item) != (before.item_ix, before.offset_in_item)
+                {
+                    self.list.scroll_to(after);
+                }
+            }
+        }
         rows.marks = Marks {
             threads: unread.threads.clone(),
             working,

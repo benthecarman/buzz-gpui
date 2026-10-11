@@ -79,6 +79,8 @@ pub struct ThreadPanel {
     snapshot: Arc<ThreadSnapshot>,
     entries: Vec<Entry>,
     list: ListState,
+    /// The row holding keyboard focus last frame.
+    keyboard_row: Option<EventId>,
     /// Nested branches the reader opened; others stay collapsed.
     expanded: HashSet<EventId>,
     /// The reply the composer answers, when not the root.
@@ -233,6 +235,7 @@ impl ThreadPanel {
             snapshot,
             entries: Vec::new(),
             list,
+            keyboard_row: None,
             expanded: HashSet::new(),
             reply_parent: None,
             composer,
@@ -873,6 +876,18 @@ impl Render for ThreadPanel {
             rows.in_thread = true;
             let actions = self.message_actions.clone();
             MessageActions::fill(&actions, &mut rows, cx);
+            rows.interaction.focused = super::message::keyboard_row(rows.in_thread, window);
+            // A row the keyboard reaches scrolls into view, as focus does.
+            if rows.interaction.focused != self.keyboard_row {
+                self.keyboard_row = rows.interaction.focused;
+                if let Some(index) = self.keyboard_row.and_then(|id| {
+                    self.entries
+                        .iter()
+                        .position(|entry| entry.row_id() == Some(id))
+                }) {
+                    self.list.scroll_to_reveal_item(index);
+                }
+            }
             // Media hook: time chips seek the thread's one video.
             rows.media = super::media::thread_media(&self.snapshot, &rows.directory.media);
             let rows = Rc::new(rows);

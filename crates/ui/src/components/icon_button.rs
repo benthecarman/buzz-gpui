@@ -3,8 +3,8 @@
 use super::{ClickHandler, Tooltip, button::Fills};
 use crate::{ActiveTheme, ButtonVariant, Icon, IconName, Surface, tokens::radius};
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
-    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, InteractiveElement, IntoElement,
+    ParentElement, Rems, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, rems,
 };
 use std::{rc::Rc, time::Duration};
@@ -72,6 +72,7 @@ pub struct IconButton {
     disabled: bool,
     tooltip: Option<SharedString>,
     on_click: Option<ClickHandler>,
+    focus: Option<FocusHandle>,
 }
 
 impl IconButton {
@@ -91,7 +92,16 @@ impl IconButton {
             disabled: false,
             tooltip: None,
             on_click: None,
+            focus: None,
         }
+    }
+
+    /// Makes the button take keyboard focus through `focus`, with the
+    /// focus ring while the keyboard drives it. A disabled button takes
+    /// none.
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
+        self
     }
 
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
@@ -168,6 +178,7 @@ impl RenderOnce for IconButton {
         if let Some(color) = self.icon_color.filter(|_| !self.disabled) {
             f.text = color;
         }
+        let focus_ring = c.border_focus;
         let bare = self.variant == ButtonVariant::Bare;
         let icon_size = self.icon_size.unwrap_or_else(|| self.size.icon(bare));
         let interactive = !self.disabled;
@@ -208,6 +219,10 @@ impl RenderOnce for IconButton {
             })
             .when_some(self.on_click.filter(|_| interactive), |this, f| {
                 this.on_click(move |e, w, cx| f(e, w, cx))
+            })
+            .when_some(self.focus.filter(|_| interactive), |this, focus| {
+                this.track_focus(&focus)
+                    .focus_visible(move |s| s.border_2().border_color(focus_ring))
             })
     }
 }
