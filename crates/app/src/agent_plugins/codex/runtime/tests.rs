@@ -291,8 +291,20 @@ impl Fixture {
         self.fake.calls("turn/start")
     }
 
+    /// Waits until `count` turns were asked for and the runtime has taken
+    /// Codex's acceptance of the latest: its thread is saved and its tool
+    /// calls are routed. Seeing the request sent is not enough, as the
+    /// acceptance is read after it.
     async fn starts_reach(&self, count: usize) {
-        until(|| self.starts().len() == count).await;
+        let turn = format!("turn-{count}");
+        until(|| {
+            self.starts().len() == count
+                && self.actives().iter().any(|active| {
+                    active.turn_id().as_ref() == Some(&turn)
+                        && active.ready.clone().now_or_never().is_some()
+                })
+        })
+        .await;
     }
 
     fn published(&self) -> Vec<Template> {
@@ -327,6 +339,34 @@ impl Fixture {
 
     fn steers(&self) -> usize {
         self.fake.calls("turn/steer").len()
+    }
+
+    /// Every turn the runtime is running.
+    fn actives(&self) -> Vec<Arc<Active>> {
+        locked(&self.runtime.inner.entries)
+            .values()
+            .flat_map(|entry| {
+                locked(&entry.lanes)
+                    .values()
+                    .filter_map(|lane| lane.active())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Waits until `count` follow-ups were steered in and the runtime has
+    /// taken Codex's acceptance of each: tools then answer the latest.
+    /// Seeing the request sent is not enough, as the acceptance is read
+    /// after it.
+    async fn steered(&self, count: u64) {
+        until(|| {
+            self.steers() == count as usize
+                && self
+                    .actives()
+                    .iter()
+                    .any(|active| active.version.load(Ordering::SeqCst) == count)
+        })
+        .await;
     }
 
     /// Codex calls a Buzz tool in turn `index` and gets its answer.
@@ -506,7 +546,7 @@ async fn serializes_follow_ups_and_replies_to_the_latest_accepted_request() {
     assert!(f.published().is_empty());
     assert_eq!(f.steers(), 0);
     open.send(()).unwrap();
-    until(|| f.steers() == 2).await;
+    f.steered(2).await;
     f.complete().await;
     f.published_reach(1).await;
     let steering = f.fake.calls("turn/steer");
@@ -545,7 +585,7 @@ async fn reads_follow_the_latest_conversation(dm: bool, scope: &str) {
     };
     f.run(f.delivery_with("LATEST_REQUEST", &latest, config))
         .await;
-    until(|| f.steers() == 1).await;
+    f.steered(1).await;
     let after = f.tool("read", json!({})).await.to_string();
     assert!(after.contains("LATEST_REQUEST"), "{after}");
     assert_eq!(
@@ -854,12 +894,14 @@ async fn a_follow_up_during_startup_steers_once_the_turn_starts() {
     f.fake.state().hold_server = Some(hold);
     f.run(f.delivery("first")).await;
     began.await.unwrap();
-    flush().await;
+    // The first turn holds its lane before the follow-up arrives, or the
+    // follow-up queues as a turn of its own.
+    until(|| !f.actives().is_empty()).await;
     f.run(f.delivery("during startup")).await;
     flush().await;
     assert!(f.starts().is_empty());
     open.send(()).unwrap();
-    until(|| f.steers() == 1).await;
+    f.steered(1).await;
     assert_eq!(f.starts().len(), 1);
     f.complete().await;
     f.published_reach(1).await;
@@ -874,8 +916,12 @@ async fn a_completion_racing_a_follow_up_starts_the_next_turn() {
     f.relay.hold(wait, Ok(vec![]));
     f.run(f.delivery("follow-up")).await;
     until(|| f.relay.reads() == 2).await;
-    // The turn waits for steering in flight before it settles.
+    // The turn waits for steering in flight before it settles. Waiting for
+    // the runtime to see the completion makes it race the follow-up, as
+    // the test means; otherwise the follow-up may steer first and only be
+    // refused as too late.
     f.complete_turn(0, "FIRST").await;
+    until(|| f.actives().iter().all(|active| active.finished())).await;
     flush().await;
     assert_eq!(f.status().as_deref(), Some("Working"));
     open.send(()).unwrap();
@@ -894,7 +940,7 @@ async fn slash_commands_are_ordinary_steering_text() {
         f.starts_reach(1).await;
         let content = format!("{command} ordinary text");
         f.run(f.delivery(&content)).await;
-        until(|| f.steers() == 1).await;
+        f.steered(1).await;
         let steer = &f.fake.calls("turn/steer")[0];
         assert!(
             steer["params"]["input"][0]["text"]
@@ -1049,7 +1095,7 @@ async fn file_tools_use_the_launched_workspace_and_memory_the_owners_view() {
         json!({ "workspace": "/tmp/different" }),
     );
     f.run(moved).await;
-    until(|| f.steers() == 1).await;
+    f.steered(1).await;
     let set = f
         .tool(
             "mem_set",
@@ -1134,7 +1180,7 @@ async fn a_follow_up_pending_after_a_final_send_gets_its_own_answer() {
         .await;
     assert!(f.fake.calls("turn/interrupt").is_empty());
     open.send(()).unwrap();
-    until(|| f.steers() == 1).await;
+    f.steered(1).await;
     f.complete_turn(0, "NEW ANSWER").await;
     f.status_reaches("Idle").await;
     assert_eq!(f.contents(), ["prior answer", "NEW ANSWER"]);
@@ -1196,7 +1242,13 @@ async fn a_file_reader_in_flight_stops_with_its_turn() {
                 open.send(()).unwrap();
             }
         };
-        let (answer, ()) = tokio::join!(reading, interrupt);
+        // The reader's start is awaited with no deadline of its own; a
+        // tool refused before it reads would leave this waiting forever.
+        let (answer, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(reading, interrupt)
+        })
+        .await
+        .expect("the reader starts and stops with its turn");
         assert_eq!(answer["success"], false);
         until(|| f.fake.state().reads_killed == 1).await;
         assert_eq!(f.published().len(), 1);

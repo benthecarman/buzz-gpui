@@ -74,44 +74,49 @@ pub struct State {
     output: Option<mpsc::UnboundedSender<ProcessOutput>>,
 }
 
-/// The fake processes. Cheap to clone.
+/// The fake processes. Cheap to clone. The second lock is held while a
+/// write is recorded and answered, so a message a test emits never lands
+/// between a request the test has seen and that request's answer.
 #[derive(Clone)]
-pub struct FakeCodex(Arc<Mutex<State>>);
+pub struct FakeCodex(Arc<Mutex<State>>, Arc<Mutex<()>>);
 
 impl Default for FakeCodex {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(State {
-            sent: Vec::new(),
-            spawns: Vec::new(),
-            reads: Vec::new(),
-            models: json!([{
-                "model": "test-model",
-                "displayName": "Test model",
-                "isDefault": true,
-                "defaultReasoningEffort": "medium",
-            }]),
-            account: json!({ "account": { "type": "chatgpt", "email": "test@example.com" } }),
-            config: json!({
-                "config": {
-                    "mcp_servers": {
-                        "company.tools": { "command": "secret-tool", "enabled": true, "url": null },
+        Self(
+            Arc::new(Mutex::new(State {
+                sent: Vec::new(),
+                spawns: Vec::new(),
+                reads: Vec::new(),
+                models: json!([{
+                    "model": "test-model",
+                    "displayName": "Test model",
+                    "isDefault": true,
+                    "defaultReasoningEffort": "medium",
+                }]),
+                account: json!({ "account": { "type": "chatgpt", "email": "test@example.com" } }),
+                config: json!({
+                    "config": {
+                        "mcp_servers": {
+                            "company.tools": { "command": "secret-tool", "enabled": true, "url": null },
+                        },
                     },
-                },
-            }),
-            terminals: Vec::new(),
-            termination: None,
-            errors: HashMap::new(),
-            workspace_exit: 0,
-            ended: 0,
-            killed: 0,
-            hold_server: None,
-            hold_read: None,
-            reads_killed: 0,
-            ended_turns: Default::default(),
-            thread: 0,
-            turn: 0,
-            output: None,
-        })))
+                }),
+                terminals: Vec::new(),
+                termination: None,
+                errors: HashMap::new(),
+                workspace_exit: 0,
+                ended: 0,
+                killed: 0,
+                hold_server: None,
+                hold_read: None,
+                reads_killed: 0,
+                ended_turns: Default::default(),
+                thread: 0,
+                turn: 0,
+                output: None,
+            })),
+            Arc::default(),
+        )
     }
 }
 
@@ -142,6 +147,10 @@ impl FakeCodex {
     }
     /// The latest server writes `message`.
     pub fn emit(&self, message: Value) {
+        let _writing = self.1.lock().unwrap();
+        self.output(message);
+    }
+    fn output(&self, message: Value) {
         let mut state = self.state();
         if message["method"] == "turn/completed"
             && let Some(turn) = message["params"]["turn"]["id"].as_str()
@@ -181,7 +190,7 @@ impl FakeCodex {
             }
         };
         if let Some(error) = error {
-            self.emit(json!({ "id": id, "error": { "code": -32600, "message": error } }));
+            self.output(json!({ "id": id, "error": { "code": -32600, "message": error } }));
             return None;
         }
         let result = match method {
@@ -208,7 +217,7 @@ impl FakeCodex {
                 json!({ "turn": { "id": format!("turn-{turn}") } })
             }
             "turn/interrupt" => {
-                self.emit(json!({
+                self.output(json!({
                     "method": "turn/completed",
                     "params": {
                         "threadId": params["threadId"],
@@ -237,7 +246,17 @@ impl FakeCodex {
             }
             _ => json!({}),
         };
-        self.emit(json!({ "id": id, "result": result }));
+        let started = (method == "turn/start").then(|| {
+            json!({
+                "method": "turn/started",
+                "params": { "threadId": params["threadId"], "turn": result["turn"] },
+            })
+        });
+        self.output(json!({ "id": id, "result": result }));
+        // Codex announces each turn before anything happens in it.
+        if let Some(started) = started {
+            self.output(started);
+        }
         None
     }
 }
@@ -247,7 +266,6 @@ struct Server {
     fake: FakeCodex,
     output: mpsc::UnboundedSender<ProcessOutput>,
     alive: AtomicBool,
-    writing: Mutex<()>,
 }
 
 impl Server {
@@ -273,8 +291,9 @@ impl ProcessControl for Server {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        // Recorded and numbered together, so turn ids follow the order sent.
-        let _turn = self.writing.lock().unwrap();
+        // Recorded, numbered and answered together, so turn ids follow the
+        // order sent and a test sees no request before its answer.
+        let _writing = self.fake.1.lock().unwrap();
         self.fake.state().sent.extend(messages.iter().cloned());
         let later: Vec<_> = messages
             .into_iter()
@@ -331,7 +350,6 @@ impl Spawn for FakeCodex {
                         fake: fake.clone(),
                         output: output.clone(),
                         alive: AtomicBool::new(true),
-                        writing: Mutex::default(),
                     });
                     let held = {
                         let mut state = fake.state();
