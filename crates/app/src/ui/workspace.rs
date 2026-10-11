@@ -93,6 +93,8 @@ pub struct Workspace {
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
     route: Option<ChannelRoute>,
+    /// The New message page, while Messages shows that route.
+    new_message: Option<Entity<super::new_message::NewMessagePage>>,
     /// The route a routed page shows (`Place::Route`).
     page_route: Option<serde_json::Value>,
     /// Bumped by every navigation, so a stale open timeout does nothing.
@@ -160,6 +162,7 @@ impl Workspace {
             dialog: None,
             _page_events: None,
             route: None,
+            new_message: None,
             page_route: None,
             attempts: 0,
             held: None,
@@ -274,6 +277,7 @@ impl Workspace {
             self.channel = None;
             self.leave_channel_tabs();
             self.companion = None;
+            self.new_message = None;
             // The shown community's custom emoji load once it is shown
             // (`ChannelsPage` `emoji.ensure`).
             if let Some(community) = &current {
@@ -314,7 +318,9 @@ impl Workspace {
         if self.apply_pending(window, cx) {
             return;
         }
+        // A route (New message, no conversation) is a place of its own.
         if self.channel.is_some()
+            || self.route.is_some()
             || self.page != Page::MESSAGES
             || self.failure.is_some()
             || self.resolving.is_some()
@@ -550,6 +556,14 @@ impl Render for Workspace {
                 Page::SETTINGS => self.settings_page(None, window, cx).into_any_element(),
                 Page::MESSAGES => match &self.channel {
                     Some(_) => self.board(window, cx),
+                    None if self.route == Some(ChannelRoute::NewMessage)
+                        && self.new_message.is_some() =>
+                    {
+                        self.new_message
+                            .clone()
+                            .expect("checked")
+                            .into_any_element()
+                    }
                     None => {
                         let snapshot = self
                             .community

@@ -15,9 +15,9 @@ mod format;
 mod link;
 mod live_markdown;
 mod mention_picker;
-mod mention_rules;
+pub(crate) mod mention_rules;
 mod mentions;
-mod poof;
+pub(crate) mod poof;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
 use super::gif_picker::PickedGif;

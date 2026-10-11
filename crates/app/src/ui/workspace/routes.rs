@@ -28,14 +28,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if route == ChannelRoute::NewMessage {
-            // New message is a dialog over the current place here.
-            self.open_new_message(window, cx);
-            return;
-        }
         self.show_page(Page::MESSAGES, window, cx);
         self.channel = None;
         self.thread = None;
+        if route == ChannelRoute::NewMessage {
+            self.show_new_message(window, cx);
+        } else {
+            self.new_message = None;
+        }
         if let Some(community) = &self.community {
             let community = community.read(cx);
             community.session.select(None);

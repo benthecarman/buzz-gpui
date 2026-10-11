@@ -4,8 +4,9 @@
 use super::Workspace;
 use crate::ui::add_community::AddCommunity;
 use crate::ui::modal::{Dismissed, OpenChannel, OpenConversation};
+use crate::ui::navigation::{ChannelRoute, Place, Target};
 use crate::ui::new_channel::NewChannelDialog;
-use crate::ui::new_message::NewMessageDialog;
+use crate::ui::new_message::{NewMessagePage, OnStarted};
 use crate::ui::onboarding::Step;
 use crate::ui::overlay::{self, Dismiss};
 use crate::ui::pages::Page;
@@ -137,16 +138,51 @@ impl Workspace {
         self.show(dialog, false, cx);
     }
 
+    /// New message: a page of Messages (`routes.ts` `new-message`).
     pub(super) fn open_new_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(community) = &self.community else {
+            return;
+        };
+        let target = Target {
+            community: Some(community.read(cx).origin.to_string()),
+            place: Place::Channels(ChannelRoute::NewMessage),
+        };
+        self.navigate(target, window, cx);
+    }
+
+    /// Shows the New message page, made for the shown community.
+    pub(super) fn show_new_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(community) = self.community.clone() else {
             return;
         };
+        if self.new_message.is_some() {
+            return;
+        }
         let weak = cx.entity().downgrade();
         let on_open: OpenConversation = Rc::new(move |id, window, cx| {
             let _ = weak.update(cx, |this, cx| this.open_conversation(id, window, cx));
         });
-        let dialog = cx.new(|cx| NewMessageDialog::new(community, on_open, window, cx));
-        self.show(dialog, false, cx);
+        let weak = cx.entity().downgrade();
+        let on_started: OnStarted = Rc::new(move |channel, message, window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.new_message = None;
+                let origin = this
+                    .community
+                    .as_ref()
+                    .map(|community| community.read(cx).origin.to_string());
+                let target = Target {
+                    community: origin,
+                    place: Place::Conversation {
+                        channel,
+                        message: Some(message),
+                        thread: None,
+                    },
+                };
+                this.navigate(target, window, cx);
+            });
+        });
+        self.new_message =
+            Some(cx.new(|cx| NewMessagePage::new(community, on_open, on_started, window, cx)));
     }
 
     pub(crate) fn open_add_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
