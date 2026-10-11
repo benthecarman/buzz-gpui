@@ -679,6 +679,14 @@ Rows: DONE 61, DIFFERENT 3.
 | Bar count follows the card width (floor((w+2)/5), at most 64) | src/bundled/voice-notes/VoiceNoteCard.tsx:80-91 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
 | Seeking on the waveform is enabled only after metadata loads (that is, after Play) | src/bundled/voice-notes/VoiceNoteCard.tsx:217-234 | DONE (crates/app/src/ui/media/audio.rs) | - | S |
 
+## 6. buzz-app main of 2026-10-10
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Typed angle-bracket text shows as typed in messages, notification and inbox previews; complete HTML comments stay hidden; Linux banners escape markup only when the server takes `body-markup` (#803) | src/features/messages/MessageMarkdown.tsx; src/features/notifications/content.ts; src/features/relay/message-content.ts; ST/notifications/linux.rs | DONE (ui/markdown.rs, relay/src/fold/attachments.rs, app/src/notifications.rs, notifications/banners.rs) | — | S |
+| The outside-channel mention prompt defaults to Invite when you can add people (#825) | src/features/messages/useNonmemberMentions.tsx | DONE (ui/composer.rs) | — | S |
+| Compact clock shares the byline clock's formatting (#609) | src/shared/datetime.ts; src/features/messages/MessageTimestamp.tsx | DONE (ui/time.rs; output already matched, now pinned by a test) | — | S |
+
 ## Not counted: absent from buzz-app, or not applicable to a native app
 
 These were checked so that nobody ports them by mistake. In each case the port already matches.
@@ -697,6 +705,6 @@ These were checked so that nobody ports them by mistake. In each case the port a
 
 ## DONE count
 
-DONE: **344** of 357 rows (section 1: 60, section 2: 83, section 3: 68, section 4: 72, section 5: 61). The first pass also counted DONE behaviours that are not listed.
+DONE: **347** of 360 rows (section 1: 60, section 2: 83, section 3: 68, section 4: 72, section 5: 61, section 6: 3). The first pass also counted DONE behaviours that are not listed.
 
-Status counts: MISSING 0, PARTIAL 0, DIFFERENT 10, SKIPPED 3, DONE 344.
+Status counts: MISSING 0, PARTIAL 0, DIFFERENT 10, SKIPPED 3, DONE 347.

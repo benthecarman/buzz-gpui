@@ -131,6 +131,15 @@ listed under "Webview / plugin-runtime only" at the end, not as gaps.
 | No tray icon on Linux; closing the window quits | `src-tauri/src/lib.rs` (no tray), `src/app/shell/WindowControls.tsx:57-61` | DONE (port addition: the tray, kept; defaults match buzz-app) | Port adds a tray icon with unread attention, and minimize-to-tray and close-to-tray preferences (`gpui:crates/app/src/tray.rs`, `main_window.rs:113-132`). Defaults match buzz-app (close quits). This is a port-only extra. Keep it or remove it as a product decision. | S |
 | Machine idle on Linux: none (in-app activity only) | `src-tauri/src/os_idle.rs:4-13` | DONE (idle.rs: Mutter idle time plus in-app input) | Port reads GNOME Mutter idle time (`idle.rs`), which is a superset. See §8 for the missing in-app fallback. | S |
 
+## 11. buzz-app main of 2026-10-10
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| App toasts at the bottom right, newest on top, 24rem wide, scrolling past 40% of the window; card padding, subtle description, close button (#813) | src/shared/design-system/ui/Toast.tsx; styles/overlays.css | DONE (ui/src/components/toast.rs, app/src/ui/toasts.rs) | Hover and focus do not pause expiry; separate toast sources are not merged into one list | M |
+| "Live updates need attention" moves inline above the Messages composer; Retry returns focus to the composer (#813) | src/bundled/channels/LiveStatus.tsx; ChannelsPage.tsx | DONE (app/src/ui/live_status.rs, ui/channel.rs) | — | S |
+| Exit-removal timers cancelled on unmount (#843) | patches/sonner@2.0.8.patch | N/A: a fix inside the Sonner library; the port removes expired toasts by generation | — | — |
+| Me and Messages use the design-system chrome tabs: body-type labels; opening from a tab does not focus the composer (#798) | src/app/shell/AppShell.tsx; PageNavigation.tsx; ui/Tabs.tsx | DONE (ui/src/components/tabs.rs, ui/workspace/shell.rs, ui/me/mod.rs) | No keyboard focus or sliding pill: the port's tabs take no focus | S |
+
 ## Platform-specific, not applicable on Linux
 
 - macOS overlay title bar: `titleBarStyle: Overlay`, `hiddenTitle`, traffic lights at (20, 26), and 80px left inset on the header (`src-tauri/tauri.conf.json:18-24`; `globals.css` `.shell-header-mac`).
@@ -158,7 +167,7 @@ listed under "Webview / plugin-runtime only" at the end, not as gaps.
 
 ## Counts
 
-Rows in the tables: DONE 70, SKIPPED (decided) 1 (the developer client
+Rows in the tables: DONE 73, N/A 1, SKIPPED (decided) 1 (the developer client
 metrics panel). Nothing is open.
 
 The first pass also counted these as done without listing them: header geometry and joined panel; window controls with Hyprland/Omarchy policy and compositor-supported filtering; drag, double-click and right-click title bar; default and minimum window size; client decorations; Back/Forward with disabled state and tooltips; 100-entry history with push/dedupe semantics; mouse back/forward buttons; Mod+[ / Mod+] / Mod+Shift+A / Mod+, / interface-size keys / Mod+K; search button and tooltip; palette layout and placeholder; page, channel and DM name matching; from:/in:/after:/before: operators; author chip; scope chip and "Search in …" row; message results and detail line; date presets; people and agents groups; result empty-state copy; avatar button with presence dot and fallback glyph; menu header with availability chip; availability radio persisted per viewer and applied to all communities; 15 s confirm with spinner and failure line; set-a-status row with loading; Settings row with check; `buzz://channel` and `buzz://message` parsing; `buzz://join` to Add community; launch URL from argv; single-instance handoff with activation token; notification click focuses and reveals the message; notification title and body format; 2-minute dedupe and selected-community-only; per-category and master toggles; freedesktop backend with suppressed sound; pending link waits for the channel list; message reveal and thread hint; restore last channel per community; close button quits by default.

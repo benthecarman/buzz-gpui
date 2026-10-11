@@ -571,6 +571,60 @@ The Claude Code harness preset (claude-agent-acp) exists in the port (host/harne
 | After a Pi install, start agents that were waiting for Pi | ST/harness_setup.rs:210-243; ST/agents.rs:796-815 | DONE (host/setup.rs, host/start.rs) | — | S |
 | Detection prefers managed tools over user tools; statuses "Ready" / "CLI needed" / "Adapter needed" / "Unknown"; Pi update available | ST/agents.rs:258-305 | DONE (host/harness.rs; app/src/ui/settings/agents/harnesses.rs) | — | M |
 
+## 30. buzz-app main of 2026-10-10 (fork rev `ec7d795f`)
+
+Upstream changes since the previous pin. `CX/` = `src/bundled/codex/`;
+`codex/` = `app/src/agent_plugins/codex/`.
+
+### 30-A. Native Codex harness (#751 `89ee72a9`)
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Codex harness option: stable integration `id` on every option, status Ready / CLI needed / Adapter needed / Not enabled, install support on macOS and Linux | ST/agents.rs `harness_options` | DONE (host/harness.rs, host/api.rs `HarnessOption.id`) | — | M |
+| Codex sign-in check (`codex login status` exit code) | ST/agents.rs `codex_auth_status` | DONE (host/setup.rs, host `Request::CodexAuth`) | — | S |
+| Codex ACP adapter install (pinned `codex-acp@2.1.1`, app-owned Node) | ST/harness_setup.rs `codex_install`; ST/managed_npm.rs | DONE (host/setup.rs via buzz-desktop `install_codex`; `InstallHarness { Codex }`) | — | M |
+| Codex model and effort discovery (`codex debug models`, Browse/Refresh only) | ST/agent_models.rs; ST/codex_models.rs | DONE (buzz-desktop `agent_models`/`codex_models`; host/api.rs `ModelRequest.integration`/`selected_model`, `Catalog.codex`) | — | M |
+| Settings → Harnesses Codex row: logo, "Checking sign-in…" / "Ready" / "Sign-in needed" / "Sign-in unconfirmed", Install with progress, error and log, manual adapter command, CLI and `codex login` hints | src/app/AgentSettings.tsx | DONE (ui/settings/agents/harnesses.rs, app/src/hosts.rs) | Adds the host's `codex login` terminal command, as the Claude Code row does, for remote hosts | M |
+| Codex blocks the Pi and Claude Code installs while it installs | src/app/ClaudeHarnessSetup.tsx; FA/control.ts | DONE (ui/settings/agents/harnesses.rs, app/src/hosts.rs) | — | S |
+| Agent dialogs: Codex picked by integration, Default / Advanced configuration, model and effort pickers, unavailable saved choices, Provider and Arguments hidden, "(coming in a later update)", missing-Codex hint | BA/AgentHarnessEditor.tsx; BA/AgentSettingsFields.tsx; BA/CodexConfigurationFields.tsx; BA/harness-policy.ts | DONE (ui/agents/fields.rs, ui/agents/fields/codex.rs, ui/agents/draft.rs) | — | L |
+| Codex draft validation messages and edit round trip | BA/agent-edit.ts | DONE (ui/agents/draft.rs) | — | S |
+| Agent-requested runtime switch into or out of Codex | BA/AgentUpdateReview.tsx `requestedDraft` | DONE (ui/agents/review.rs) | — | S |
+| "Saving changes…" while an edit saves | BA/AgentEditor.tsx | DONE (ui/agents/edit.rs) | — | S |
+| Agent defaults note: Codex is configured per agent | src/app/AgentDefaultsCard.tsx | DONE (ui/agents/defaults.rs) | — | S |
+| Codex brand mark and attribution | src/shared/design-system/icons/HarnessLogos.tsx; NOTICE.md | DONE (assets/icons/brand/codex.svg, ui/src/icon.rs, NOTICE.md) | — | S |
+
+### 30-B. Codex agent type in Agents2 (`b23fb875`, #830, #831, #832, #826, #851)
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Agents2 type "Codex" (`buzz.codex/codex`), macOS and Linux only, 2-minute hand-over | CX/index.ts | DONE (codex/mod.rs) | — | M |
+| Declared host processes: `workspace` (`pwd`), `app-server` (`codex app-server`), `read` (`base64 -i`) | CX/manifest.json | DONE (host/processes.rs) | — | S |
+| `codex app-server` JSON-RPC client: request correlation, chunked output, Buzz dynamic tools, refused interactive requests, model paging | CX/rpc.ts | DONE (codex/rpc.rs) | — | L |
+| Runtime: one server per agent, one Codex thread per conversation, steering, idle follow-ups, saved bindings `buzz.codex.sessions.v3` (200), missing-thread recovery, interruptions, background terminal cleanup, 29-minute turns | CX/runtime.ts | DONE (codex/runtime.rs) | — | L |
+| Shared Buzz app client for Claude Code and Codex | src/buzz-mcp/app-client.ts | DONE (app/src/buzz_mcp/app_client.rs, app/src/agent_plugins/owner_relay.rs) | — | M |
+| Conversation history and turn input; thread names `Buzz #<channel> · thread <root> · <agent>`, client `buzz_codex_plugin` (#826) | CX/history.ts; CX/prompt.ts | DONE (codex/history.rs, codex/prompt.rs) | — | M |
+| Codex tab: status, account, Check again, conversations with status and detail | CX/tabs.ts `CodexTab` | DONE (codex/tabs.rs) | Also shows the host's `codex login` command when signed out | M |
+| Settings tab: Model ("Codex default · …", unavailable entries), Thinking, Workspace, Sessions, Instructions, Save | CX/tabs.ts `SettingsTab`; CX/config.ts | DONE (codex/tabs.rs, codex/config.rs) | — | M |
+| Bundled and on by default; formerly installed copies migrate (#830) | crates/plugin-manager; src/bundled/index.ts | DONE (buzzodz-plugins at the pin; agents2/registry.rs gates types by plugin) | — | S |
+| `danger-full-access` sandbox, approval `never` (#832) | CX/runtime.ts | DONE (codex/runtime.rs) | — | S |
+| Default workspace `~/.buzz` (#831) | CX/config.ts; CX/runtime.ts | DONE (codex/config.rs, codex/runtime.rs) | — | S |
+| Replies go to the thread, not under the mention (#851) | CX/prompt.ts; CX/runtime.ts | DONE (codex/prompt.rs, codex/runtime.rs) | — | S |
+| Opt-in live check against the installed CLI | CX/live.mjs | DONE (codex/live.rs, `--ignored`) | — | S |
+| Session viewer docs and export scripts (#826) | docs/view-codex-session.md; scripts/export-*-session.mjs | N/A: buzz-app developer tooling; it reads the rollouts this port's sessions write | — | — |
+
+### 30-C. Other agent changes
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Claude Code agent type bundled and on by default; turning the plugin off hides its type (#818) | crates/plugin-manager; src/bundled/claude-code | DONE (buzzodz-plugins at the pin; agents2/registry.rs, agents2/service.rs) | — | S |
+| Base prompt commit-attribution line (#833) | src/bundled/claude-code/base_prompt.md | DONE (agent_plugins/claude_code/base_prompt.md) | — | S |
+| Each Agents2 agent runs in one copy of the app (#790) | ST/app_agents.rs; src/features/agents2/service.ts | DONE (host/app_agents.rs, host/app_agents/hosting.rs `Claim`/`Release`; agents2/service.rs) | — | M |
+| Shared team instructions in their own `buzz-team-text-v1` record, chunked, owner-checked | src/features/agents/team-instructions.ts; src/features/channel-templates/*; ST/relay/kit.rs (#775) | DONE (relay/src/kit/mod.rs, relay/src/kit/payload.rs, relay/src/session/teams.rs) | — | L |
+| Team save writes the text, then syncs every member's copy; delete and app start sync too; conflicting teams refused (#775) | src/bundled/channel-templates/ChannelTemplatesDialog.tsx; TemplateLibrary.tsx; ST/agents.rs `agent_control_team_sync` | DONE (ui/agents/team_text.rs, team_editor.rs, teams.rs; host `Request::TeamSync`) | Syncs each connected host that runs agents in the community | M |
+| Deploy only adds and starts members; export, share, catalog and import carry the text (#775) | FA/team-deployment.ts; BA/TeamDeployDialog.tsx; BA/TeamExportDialog.tsx; FA/team-import.ts | DONE (ui/agents/team_ops.rs, team_dialogs.rs) | — | M |
+| Bounded stdin for fixed plugin host commands (#769) | ST/host_command.rs | N/A: only external plugins use host commands (skipped by decision); the fork keeps the change in buzz-desktop `process::run_output_with_input` | — | — |
+| Placeholder Builderlab agent type (#788) | src/bundled/builderlab | SKIPPED (decided: Builderlab) | — | — |
+
 ---
 
 ## DONE count
@@ -596,13 +650,13 @@ These features match buzz-app closely enough and are not listed above.
 
 | Status | Rows |
 |---|---|
-| DONE | 347 |
+| DONE | 378 |
 | DIFFERENT | 7 |
 | MISSING | 0 |
-| SKIPPED | 7 |
-| N/A | 10 |
+| SKIPPED | 8 |
+| N/A | 12 |
 | DONE (counted only) | 88 |
 
-Statuses were reconciled with the code on 2026-10-10.
+Statuses were reconciled with the code on 2026-10-10; section 30 on 2026-10-11.
 
 The rows once marked IN PROGRESS are reconciled with the code: each is DONE now.
