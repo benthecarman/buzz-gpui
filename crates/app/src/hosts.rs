@@ -67,10 +67,11 @@ pub struct HostConnection {
     pub harnesses: Option<Vec<Harness>>,
     /// The last harness check failed; `harnesses` holds the one before.
     pub harnesses_failed: bool,
-    /// Pi and Claude Code installs, kept here so they outlive the page
-    /// that started them.
+    /// Pi, Claude Code and Codex adapter installs, kept here so they
+    /// outlive the page that started them.
     pub pi_install: Install,
     pub claude_install: Install,
+    pub codex_install: Install,
     /// Fetched when a form needs them, not on connect: hosts older than
     /// this request drop the connection on it.
     pub defaults: Option<AgentDefaults>,
@@ -443,6 +444,7 @@ impl HostConnection {
                 harnesses_failed: false,
                 pi_install: Install::default(),
                 claude_install: Install::default(),
+                codex_install: Install::default(),
                 defaults: None,
                 control: Default::default(),
                 received: false,
@@ -656,15 +658,18 @@ impl HostConnection {
 
     /// Whether an install is running on this host.
     pub fn installing(&self) -> bool {
-        self.pi_install.installing || self.claude_install.installing
+        self.pi_install.installing
+            || self.claude_install.installing
+            || self.codex_install.installing
     }
 
-    /// Installs Pi or Claude Code on the host, then checks harnesses again
-    /// (buzz-app's `installHarness`).
+    /// Installs Pi, Claude Code or Codex's ACP adapter on the host, then
+    /// checks harnesses again (buzz-app's `installHarness`).
     pub fn install(&mut self, kind: HarnessKind, cx: &mut Context<Self>) {
         let label = match kind {
             HarnessKind::Pi => "Pi",
             HarnessKind::Claude => "Claude Code",
+            HarnessKind::Codex => "the Codex ACP adapter",
             _ => return,
         };
         if self.installing() {
@@ -686,6 +691,16 @@ impl HostConnection {
                         report: Some(report),
                         error: None,
                     },
+                    // Hosts from before an installer cannot read its request.
+                    Err(RpcError::Failed(reason))
+                        if reason.contains("does not support this request") =>
+                    {
+                        Install {
+                            installing: false,
+                            report: None,
+                            error: Some(format!("Update this host to install {label}.").into()),
+                        }
+                    }
                     _ => Install {
                         installing: false,
                         report: None,
@@ -710,6 +725,7 @@ impl HostConnection {
     fn install_mut(&mut self, kind: HarnessKind) -> &mut Install {
         match kind {
             HarnessKind::Claude => &mut self.claude_install,
+            HarnessKind::Codex => &mut self.codex_install,
             _ => &mut self.pi_install,
         }
     }

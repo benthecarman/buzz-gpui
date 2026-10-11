@@ -1,7 +1,7 @@
 //! Settings → Agents → Harnesses (buzz-app's `AgentSettings.tsx` and
-//! `ClaudeHarnessSetup.tsx`): what this computer's host can run, the Pi and
-//! Claude Code installers, manual setup steps, and the "Add harness"
-//! catalog.
+//! `ClaudeHarnessSetup.tsx`): what this computer's host can run, the Pi,
+//! Claude Code and Codex adapter installers, manual setup steps, and the
+//! "Add harness" catalog.
 
 use super::super::{button, form_group, inline_header, preference_row};
 use crate::hosts::{HostConnection, Install};
@@ -28,6 +28,7 @@ const ADAPTER_COMMAND: &str = "npm install -g --install-links=true \
                                'git+https://github.com/salman1993/buzz-pi-acp.git#72015de'";
 const CLAUDE_CLI_COMMAND: &str = "npm install -g @anthropic-ai/claude-code@2.1.289";
 const CLAUDE_ADAPTER_COMMAND: &str = "npm install -g @agentclientprotocol/claude-agent-acp@0.85.1";
+const CODEX_ADAPTER_COMMAND: &str = "npm install -g @agentclientprotocol/codex-acp@2.1.1";
 /// Manual Pi steps: name, title and command.
 const COMMANDS: [(&str, &str, &str); 2] = [
     ("Pi", "Install Pi", PI_COMMAND),
@@ -38,7 +39,8 @@ const CONFIRM_FAILED: &str = "Couldn’t confirm harnesses. Showing the last che
 
 /// The rows buzz-app lists: Buzz Agent, Goose and Pi always (`None` when
 /// the host did not report one), then presets other than Claude Code that
-/// are installed. Claude Code has its own row.
+/// are installed, then Codex when the host offers it. Claude Code has its
+/// own row.
 pub fn rows(list: &[Harness]) -> Vec<(HarnessKind, Option<&Harness>)> {
     let find = |kind| list.iter().find(|harness| harness.kind == kind);
     let mut rows: Vec<_> = CORE.iter().map(|kind| (*kind, find(*kind))).collect();
@@ -48,6 +50,7 @@ pub fn rows(list: &[Harness]) -> Vec<(HarnessKind, Option<&Harness>)> {
             .filter(|harness| harness.command.is_some())
             .map(|harness| (harness.kind, Some(harness))),
     );
+    rows.extend(find(HarnessKind::Codex).map(|codex| (HarnessKind::Codex, Some(codex))));
     rows
 }
 
@@ -84,7 +87,7 @@ fn catalog() -> Vec<(HarnessKind, &'static HarnessPreset)> {
         .collect()
 }
 
-/// Claude Code's sign-in, as `ClaudeHarnessSetup` checks it.
+/// Claude Code's or Codex's sign-in, as `ClaudeHarnessSetup` checks it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Auth {
     Checking,
@@ -103,6 +106,28 @@ pub fn claude_label(status: Option<HarnessStatus>, auth: Auth) -> &'static str {
         },
         Some(HarnessStatus::CliNeeded) => "CLI needed",
         _ => "Adapter needed",
+    }
+}
+
+/// The Codex row's status label: the tools' status, then its sign-in.
+pub fn codex_label(status: Option<HarnessStatus>, auth: Auth) -> &'static str {
+    match (status, auth) {
+        (Some(HarnessStatus::Ready), Auth::Checking) => "Checking sign-in…",
+        (Some(HarnessStatus::Ready), Auth::Known(Some(true))) => "Ready",
+        (Some(HarnessStatus::Ready), Auth::Known(Some(false))) => "Sign-in needed",
+        (Some(HarnessStatus::Ready), Auth::Known(None)) => "Sign-in unconfirmed",
+        (status, _) => status_label(status),
+    }
+}
+
+/// The hint under the Codex row, when it needs one.
+pub fn codex_hint(status: Option<HarnessStatus>, auth: Auth) -> Option<&'static str> {
+    match (status, auth) {
+        (Some(HarnessStatus::CliNeeded), _) => Some("Install the Codex CLI, then use Check again."),
+        (Some(HarnessStatus::Ready), Auth::Known(Some(false) | None)) => {
+            Some("Run codex login in your terminal, then use Check again.")
+        }
+        _ => None,
     }
 }
 
@@ -148,22 +173,37 @@ fn hint_text(hint: &str, c: &Colors) -> StyledText {
     StyledText::new(text).with_highlights(code.into_iter().map(|range| (range, style)))
 }
 
-/// What the last Claude Code sign-in check was made for; another check
-/// runs when it changes.
+/// What the last sign-in check was made for; another check runs when it
+/// changes.
 #[derive(Clone, Debug, PartialEq)]
 struct AuthKey {
     report: Option<InstallReport>,
     checks: u64,
 }
 
+/// One harness's sign-in check.
+struct SignIn {
+    auth: Auth,
+    key: Option<AuthKey>,
+}
+
+impl Default for SignIn {
+    fn default() -> Self {
+        Self {
+            auth: Auth::Checking,
+            key: None,
+        }
+    }
+}
+
 pub struct Harnesses {
     /// This computer's host; `None` when it could not start.
     host: Option<Entity<HostConnection>>,
     checking: bool,
-    /// Check again presses, which also check Claude Code's sign-in again.
+    /// Check again presses, which also check sign-ins again.
     checks: u64,
-    auth: Auth,
-    auth_key: Option<AuthKey>,
+    claude: SignIn,
+    codex: SignIn,
     catalog_open: bool,
     selected: Option<HarnessKind>,
     copy_message: Option<SharedString>,
@@ -183,8 +223,8 @@ impl Harnesses {
             host,
             checking: false,
             checks: 0,
-            auth: Auth::Checking,
-            auth_key: None,
+            claude: SignIn::default(),
+            codex: SignIn::default(),
             catalog_open: false,
             selected: None,
             copy_message: None,
@@ -215,9 +255,16 @@ impl Harnesses {
         cx.notify();
     }
 
-    /// Checks Claude Code's sign-in once its tools are ready and no install
-    /// runs, again after each install and each Check again.
-    fn check_auth(&mut self, cx: &mut Context<Self>) {
+    fn sign_in(&mut self, kind: HarnessKind) -> &mut SignIn {
+        match kind {
+            HarnessKind::Codex => &mut self.codex,
+            _ => &mut self.claude,
+        }
+    }
+
+    /// Checks Claude Code's or Codex's sign-in once its tools are ready and
+    /// no install runs, again after each install and each Check again.
+    fn check_auth(&mut self, kind: HarnessKind, cx: &mut Context<Self>) {
         let Some(host) = self.host.clone() else {
             return;
         };
@@ -225,31 +272,49 @@ impl Harnesses {
         let ready = state
             .harnesses
             .as_ref()
-            .and_then(|list| list.iter().find(|h| h.kind == HarnessKind::Claude))
-            .is_some_and(|claude| claude.status == Some(HarnessStatus::Ready));
-        if !ready || state.claude_install.installing {
+            .and_then(|list| list.iter().find(|h| h.kind == kind))
+            .is_some_and(|harness| harness.status == Some(HarnessStatus::Ready));
+        let install = match kind {
+            HarnessKind::Codex => &state.codex_install,
+            _ => &state.claude_install,
+        };
+        if !ready || install.installing {
             return;
         }
         let key = AuthKey {
-            report: state.claude_install.report.clone(),
+            report: install.report.clone(),
             checks: self.checks,
         };
-        if self.auth_key.as_ref() == Some(&key) {
+        if self.sign_in(kind).key.as_ref() == Some(&key) {
             return;
         }
-        self.auth_key = Some(key.clone());
-        self.auth = Auth::Checking;
-        let response = host.update(cx, |host, cx| {
-            host.request(buzz_host::api::Request::ClaudeAuth, cx)
-        });
+        *self.sign_in(kind) = SignIn {
+            auth: Auth::Checking,
+            key: Some(key.clone()),
+        };
+        let request = match kind {
+            HarnessKind::Codex => buzz_host::api::Request::CodexAuth,
+            _ => buzz_host::api::Request::ClaudeAuth,
+        };
+        let response = host.update(cx, |host, cx| host.request(request, cx));
         cx.spawn(async move |this, cx| {
             let response = response.await;
             let _ = this.update(cx, |this, cx| {
-                if this.auth_key.as_ref() != Some(&key) {
+                let sign_in = this.sign_in(kind);
+                if sign_in.key.as_ref() != Some(&key) {
                     return;
                 }
-                this.auth = Auth::Known(match response {
-                    Ok(buzz_host::api::Response::ClaudeAuth(signed_in)) => signed_in,
+                sign_in.auth = Auth::Known(match response {
+                    Ok(buzz_host::api::Response::ClaudeAuth(signed_in))
+                        if kind == HarnessKind::Claude =>
+                    {
+                        signed_in
+                    }
+                    Ok(buzz_host::api::Response::CodexAuth(signed_in))
+                        if kind == HarnessKind::Codex =>
+                    {
+                        signed_in
+                    }
                     _ => None,
                 });
                 cx.notify();
@@ -377,7 +442,12 @@ impl Harnesses {
         }
         let mut items: Vec<AnyElement> = rows(&list)
             .into_iter()
-            .map(|(kind, harness)| self.row(&host, kind, harness, cx).into_any_element())
+            .map(|(kind, harness)| match (kind, harness) {
+                (HarnessKind::Codex, Some(codex)) => {
+                    self.codex_row(&host, codex, cx).into_any_element()
+                }
+                _ => self.row(&host, kind, harness, cx).into_any_element(),
+            })
             .collect();
         if let Some(claude) = list.iter().find(|h| h.kind == HarnessKind::Claude) {
             items.push(self.claude_row(&host, claude, cx).into_any_element());
@@ -427,7 +497,7 @@ impl Harnesses {
         let state = host.read(cx);
         let connected = matches!(state.state, ConnectionState::Connected { .. });
         let pi = state.pi_install.clone();
-        let claude_installing = state.claude_install.installing;
+        let other_installing = state.claude_install.installing || state.codex_install.installing;
         let label: SharedString = harness.map_or_else(
             || match kind {
                 HarnessKind::BuzzAgent => "Buzz Agent".into(),
@@ -453,7 +523,7 @@ impl Harnesses {
                 Button::new("install-pi", if ready { "Update Pi" } else { "Install" })
                     .size(ButtonSize::Sm)
                     .loading(pi.installing)
-                    .disabled(!connected || claude_installing || pi.installing)
+                    .disabled(!connected || other_installing || pi.installing)
                     .on_click(move |_, _, cx| {
                         host.update(cx, |host, cx| host.install(HarnessKind::Pi, cx))
                     }),
@@ -630,9 +700,9 @@ impl Harnesses {
         let state = host.read(cx);
         let connected = matches!(state.state, ConnectionState::Connected { .. });
         let install = state.claude_install.clone();
-        let pi_installing = state.pi_install.installing;
+        let other_installing = state.pi_install.installing || state.codex_install.installing;
         let tools_ready = setup.status == Some(HarnessStatus::Ready);
-        let auth = self.auth;
+        let auth = self.claude.auth;
         let needs_guidance =
             !tools_ready || matches!(auth, Auth::Known(Some(false)) | Auth::Known(None));
         let failed = install
@@ -652,7 +722,7 @@ impl Harnesses {
                 Button::new("install-claude", "Install")
                     .size(ButtonSize::Sm)
                     .loading(install.installing)
-                    .disabled(!connected || pi_installing || install.installing)
+                    .disabled(!connected || other_installing || install.installing)
                     .on_click(move |_, _, cx| {
                         host.update(cx, |host, cx| host.install(HarnessKind::Claude, cx))
                     }),
@@ -738,6 +808,115 @@ impl Harnesses {
             ));
         }
         row = row.child(block);
+        row
+    }
+
+    /// The Codex row: its tools' status, then its sign-in once they are
+    /// found; the adapter installer; and how to finish setup.
+    fn codex_row(
+        &self,
+        host: &Entity<HostConnection>,
+        codex: &Harness,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let c = *cx.colors();
+        let state = host.read(cx);
+        let connected = matches!(state.state, ConnectionState::Connected { .. });
+        let install = state.codex_install.clone();
+        let other_installing = state.pi_install.installing || state.claude_install.installing;
+        let tools_ready = codex.status == Some(HarnessStatus::Ready);
+        let auth = self.codex.auth;
+        let offer_install =
+            codex.install_supported && codex.status == Some(HarnessStatus::AdapterNeeded);
+        let mut trailing = div().flex().items_center().gap(rems(0.5)).child(
+            div()
+                .text_color(c.text_subtle)
+                .child(codex_label(codex.status, auth)),
+        );
+        if offer_install {
+            let host = host.clone();
+            trailing = trailing.child(
+                Button::new("install-codex", "Install")
+                    .size(ButtonSize::Sm)
+                    .loading(install.installing)
+                    .disabled(!connected || other_installing || install.installing)
+                    .on_click(move |_, _, cx| {
+                        host.update(cx, |host, cx| host.install(HarnessKind::Codex, cx))
+                    }),
+            );
+        }
+        let mut row = div().flex().flex_col().py(rems(0.75)).text_body_sm().child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(rems(0.5))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(rems(0.75))
+                        .child(harness::mark(HarnessKind::Codex, 32.))
+                        .child(codex.label.clone()),
+                )
+                .child(trailing),
+        );
+        if install.installing {
+            row = row.child(
+                Self::setup_block(&c).child("Installing Node.js and the Codex ACP adapter…"),
+            );
+        } else if let Some(failure) = self.install_failure(
+            "codex-install-log",
+            "Codex ACP adapter install log",
+            &install,
+            cx,
+        ) {
+            row = row.child(Self::setup_block(&c).child(failure));
+        }
+        if offer_install && !install.installing {
+            row = row.child(
+                Self::setup_block(&c)
+                    .child(div().text_color(c.text_subtle).child(
+                        "Click Install. Buzz installs Node.js and the Codex ACP adapter for you. \
+                         Your Codex CLI and sign-in are left untouched.",
+                    ))
+                    .child(self.details(
+                        "codex-manual-setup",
+                        "Manual Codex ACP adapter setup",
+                        || {
+                            code_block(CODEX_ADAPTER_COMMAND.to_string())
+                                .mt(rems(0.75))
+                                .into_any_element()
+                        },
+                        cx,
+                    )),
+            );
+        }
+        if let Some(hint) = codex_hint(codex.status, auth) {
+            row = row.child(div().mt(rems(0.5)).text_color(c.text_subtle).child(hint));
+        }
+        // The host may be another machine, so show where to sign in.
+        if tools_ready
+            && matches!(auth, Auth::Known(Some(false) | None))
+            && let Some(login) = codex.login_command.clone()
+        {
+            row = row.child(Self::setup_block(&c).child(self.details(
+                "codex-sign-in",
+                "Sign in to Codex",
+                || {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(rems(0.75))
+                        .mt(rems(0.75))
+                        .child("Run this in your terminal and follow Codex’s sign-in steps:")
+                        .child(code_block(login))
+                        .into_any_element()
+                },
+                cx,
+            )));
+        }
         row
     }
 
@@ -1051,7 +1230,8 @@ fn manual_steps(
 
 impl Render for Harnesses {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.check_auth(cx);
+        self.check_auth(HarnessKind::Claude, cx);
+        self.check_auth(HarnessKind::Codex, cx);
         let body = self.body(cx);
         let page = cx.entity().downgrade();
         let close: overlay::Dismiss = Rc::new(move |_, cx| {
@@ -1162,6 +1342,67 @@ mod tests {
         assert_eq!(
             claude_label(Some(HarnessStatus::AdapterNeeded), Auth::Checking),
             "Adapter needed"
+        );
+    }
+
+    #[test]
+    fn codex_is_listed_last_when_the_host_offers_it() {
+        let ready = Some(HarnessStatus::Ready);
+        let list = vec![
+            harness(HarnessKind::Codex, Some(HarnessStatus::CliNeeded), false),
+            harness(HarnessKind::BuzzAgent, ready, true),
+            harness(HarnessKind::Goose, ready, true),
+            harness(HarnessKind::Pi, ready, true),
+            harness(HarnessKind::Hermes, ready, true),
+        ];
+        let kinds: Vec<_> = rows(&list).into_iter().map(|(kind, _)| kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                HarnessKind::BuzzAgent,
+                HarnessKind::Goose,
+                HarnessKind::Pi,
+                HarnessKind::Hermes,
+                HarnessKind::Codex,
+            ]
+        );
+        assert!(
+            !rows(&list[1..])
+                .iter()
+                .any(|(kind, _)| *kind == HarnessKind::Codex)
+        );
+    }
+
+    #[test]
+    fn codex_needs_its_tools_then_a_confirmed_sign_in() {
+        let ready = Some(HarnessStatus::Ready);
+        assert_eq!(codex_label(ready, Auth::Checking), "Checking sign-in…");
+        assert_eq!(codex_label(ready, Auth::Known(Some(true))), "Ready");
+        assert_eq!(
+            codex_label(ready, Auth::Known(Some(false))),
+            "Sign-in needed"
+        );
+        assert_eq!(codex_label(ready, Auth::Known(None)), "Sign-in unconfirmed");
+        let tools =
+            |status, label| assert_eq!(codex_label(Some(status), Auth::Known(Some(true))), label);
+        tools(HarnessStatus::CliNeeded, "CLI needed");
+        tools(HarnessStatus::AdapterNeeded, "Adapter needed");
+        tools(HarnessStatus::CheckNeeded, "Check needed");
+        tools(HarnessStatus::NotEnabled, "Not enabled");
+        assert_eq!(codex_label(None, Auth::Checking), "Unknown");
+
+        assert_eq!(
+            codex_hint(Some(HarnessStatus::CliNeeded), Auth::Checking),
+            Some("Install the Codex CLI, then use Check again.")
+        );
+        let login = Some("Run codex login in your terminal, then use Check again.");
+        assert_eq!(codex_hint(ready, Auth::Known(Some(false))), login);
+        assert_eq!(codex_hint(ready, Auth::Known(None)), login);
+        assert_eq!(codex_hint(ready, Auth::Checking), None);
+        assert_eq!(codex_hint(ready, Auth::Known(Some(true))), None);
+        assert_eq!(
+            codex_hint(Some(HarnessStatus::AdapterNeeded), Auth::Known(None)),
+            None
         );
     }
 
