@@ -1758,14 +1758,18 @@ impl<F: ThreadFollowStore> Unread<F> {
 
     /// Every retained message's folded text, replies included.
     fn folded_previews(&self, channel_id: &str) -> HashMap<nostr::prelude::EventId, String> {
-        let relay = self
-            .relay_author
-            .as_deref()
-            .and_then(|key| nostr::prelude::PublicKey::from_hex(key).ok())
-            .unwrap_or_else(|| nostr::prelude::Keys::generate().public_key());
+        let key =
+            |key: Option<&str>| key.and_then(|key| nostr::prelude::PublicKey::from_hex(key).ok());
+        let authority = key(self.authority.as_deref());
+        // Evidence holds no relay-signed summaries or system rows, the only
+        // events the relay key decides; without any key, previews stay raw.
+        let Some(relay) = key(self.relay_author.as_deref()).or(authority) else {
+            return HashMap::new();
+        };
         let events: Vec<Verified> = self.events.iter().map(|(_, event)| event.clone()).collect();
         let options = crate::fold::FoldOptions {
             include_replies: true,
+            signing_authority: authority,
             ..Default::default()
         };
         crate::fold::fold_messages(channel_id, &relay, &events, &options)
@@ -3525,6 +3529,33 @@ mod tests {
         let items = activity.items.as_ref().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].preview, "final words");
+    }
+
+    #[test]
+    fn activity_previews_apply_edits_by_the_attributed_author() {
+        let mut h = H::new();
+        let relay = Keys::generate();
+        h.unread = Unread::new(UnreadOptions {
+            viewer: h.vpk(),
+            relay_author: Some(relay.public_key().to_hex()),
+            authority: Some(relay.public_key().to_hex()),
+        });
+        h.grant(&[("room", Some("stream"))]);
+        let root = h.mine("room", "root", 10, vec![]);
+        let mut extra = reply_tags(&root.id_hex(), &root.id_hex());
+        extra.push(vec!["actor".into(), h.alice.public_key().to_hex()]);
+        let reply = h.by(&relay, kinds::CHAT, Some("room"), "first draft", 11, extra);
+        let edit = h.by(
+            &h.alice.clone(),
+            kinds::EDIT,
+            Some("room"),
+            "final words",
+            12,
+            tags(&[&["e", &reply.id_hex()]]),
+        );
+        h.emit(&[root, reply, edit]);
+        let activity = h.unread.activity("room", &h.reads);
+        assert_eq!(activity.items.as_ref().unwrap()[0].preview, "final words");
     }
 
     #[test]
