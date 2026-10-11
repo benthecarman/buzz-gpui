@@ -1,0 +1,1322 @@
+//! Turns Agents2 deliveries into Codex turns, a port of buzz-app's
+//! `runtime.ts`. Agents2 owns admission and identity; this owns the work
+//! after hand-over. Each agent has one `codex app-server` on the host that
+//! holds it, and each conversation is its own Codex thread. A message that
+//! arrives while its conversation works steers the running turn; one that
+//! arrives while it is idle continues the saved thread. Codex answers with
+//! the shared Buzz tools, signed by the agent's host-held key.
+
+use super::config::{Config, absolute_workspace, valid_workspace};
+use super::history::conversation_history;
+use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
+use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
+use crate::agent_plugins::owner_relay::OwnerRelay;
+use crate::agent_plugins::process::{SpawnOptions, Spawner, collect};
+use crate::buzz_mcp::app_client::{AgentActions, AppClient, Check, Memories, Signal};
+use crate::buzz_mcp::tools::{call_tool, tools};
+use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template};
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::Duration;
+use tokio::sync::{oneshot, watch};
+
+/// The longest one turn may run.
+pub const TURN_DEADLINE: Duration = Duration::from_secs(29 * 60);
+/// Saved bindings per agent; older ones are forgotten, never Codex's own
+/// history.
+const SAVED_LIMIT: usize = 200;
+/// Conversations each agent's status view keeps.
+const VIEWS: usize = 32;
+const DETAIL_LIMIT: usize = 4000;
+/// The abort reasons of buzz-app's `AbortController` and `AbortSignal`.
+const ABORTED: &str = "The operation was aborted.";
+const TIMED_OUT: &str = "The operation timed out.";
+const TURN_ENDED: &str = "The Codex turn has ended";
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Why an agent woke, as this type needs it.
+#[derive(Clone, Debug)]
+pub enum Wake {
+    Mention {
+        event: BuzzEvent,
+    },
+    Watch {
+        event: BuzzEvent,
+        /// The matched watch's Interest instructions.
+        interest: Option<String>,
+    },
+    Timer,
+}
+
+/// One delivery.
+pub struct Run {
+    pub wake: Wake,
+    /// The live route's channel.
+    pub channel: Option<String>,
+    pub agent: Arc<dyn AgentActions>,
+    pub config: Value,
+    /// Where the agent's processes run: the host that holds it.
+    pub spawn: Spawner,
+}
+
+/// One conversation's state, for the Codex tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionView {
+    pub key: String,
+    pub status: String,
+    pub detail: String,
+}
+
+/// Where saved bindings are kept: buzz-app's `localStorage`, one JSON
+/// value per key.
+pub trait Storage: Send + Sync {
+    fn get(&self, key: &str) -> Option<Value>;
+    fn set(&self, key: &str, value: Value) -> Result<(), String>;
+}
+
+/// Bindings in one JSON file, shared by every agent of the app.
+pub struct FileStorage {
+    path: PathBuf,
+}
+
+/// Agents of one app share the file; their writes take turns.
+static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+impl FileStorage {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// `<data dir>/buzz-gpui/codex-sessions.json`.
+    pub fn default_path() -> PathBuf {
+        dirs::data_dir()
+            .map(|dir| dir.join("buzz-gpui").join("codex-sessions.json"))
+            .unwrap_or_else(|| PathBuf::from("codex-sessions.json"))
+    }
+
+    fn read_all(&self) -> Map<String, Value> {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Storage for FileStorage {
+    fn get(&self, key: &str) -> Option<Value> {
+        let _turn = locked(&FILE_LOCK);
+        self.read_all().remove(key)
+    }
+
+    fn set(&self, key: &str, value: Value) -> Result<(), String> {
+        let _turn = locked(&FILE_LOCK);
+        let mut all = self.read_all();
+        all.insert(key.into(), value);
+        let written = (|| {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let temporary = self.path.with_extension("json.tmp");
+            std::fs::write(&temporary, serde_json::to_vec(&all)?)?;
+            std::fs::rename(&temporary, &self.path)
+        })();
+        written.map_err(|error| error.to_string())
+    }
+}
+
+/// One request, as its turn or steering needs it.
+#[derive(Clone)]
+struct Request {
+    event: BuzzEvent,
+    agent: Arc<dyn AgentActions>,
+    settings: Config,
+    conversation: Conversation,
+    /// The latest request's thread, whatever the session scope; `None` in
+    /// DMs.
+    tool_root: Option<String>,
+    interest: String,
+}
+
+/// A conversation's Codex thread, saved across restarts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Saved {
+    thread_id: String,
+    workspace: String,
+}
+
+/// The turn a conversation is running.
+struct Active {
+    thread_id: Mutex<Option<String>>,
+    turn_id: Mutex<Option<String>>,
+    /// Settles once the turn has started, or failed to.
+    ready: Shared<BoxFuture<'static, Result<(), String>>>,
+    /// Follow-ups being steered in, in order.
+    steering: Mutex<Shared<BoxFuture<'static, ()>>>,
+    /// The latest accepted request, which tools reply to.
+    reply: Mutex<Request>,
+    finished: AtomicBool,
+    /// Where the turn started, for file tools.
+    workspace: Mutex<String>,
+    signal: Signal,
+    /// Bumps with each accepted follow-up.
+    version: AtomicU64,
+    /// The version a final `send` answered.
+    sent_version: Mutex<Option<u64>>,
+}
+
+impl Active {
+    fn finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+    fn thread_id(&self) -> Option<String> {
+        locked(&self.thread_id).clone()
+    }
+    fn turn_id(&self) -> Option<String> {
+        locked(&self.turn_id).clone()
+    }
+    fn reply(&self) -> Request {
+        locked(&self.reply).clone()
+    }
+}
+
+/// One conversation's queue of turns.
+struct Lane {
+    /// The last job queued, by id.
+    tail: Mutex<(u64, Shared<BoxFuture<'static, ()>>)>,
+    active: Mutex<Option<Arc<Active>>>,
+}
+
+impl Lane {
+    fn new() -> Self {
+        Self {
+            tail: Mutex::new((0, futures::future::ready(()).boxed().shared())),
+            active: Mutex::default(),
+        }
+    }
+    fn active(&self) -> Option<Arc<Active>> {
+        locked(&self.active).clone()
+    }
+}
+
+/// One agent's server and conversations.
+struct Entry {
+    pubkey: String,
+    storage_key: String,
+    abort: Signal,
+    rpc: AppServer,
+    opening: Shared<BoxFuture<'static, Result<(), String>>>,
+    lanes: Mutex<HashMap<String, Arc<Lane>>>,
+    /// Bindings in the order they were first saved.
+    saved: Mutex<Vec<(String, Saved)>>,
+    spawn: Spawner,
+}
+
+impl Entry {
+    fn saved(&self, key: &str) -> Option<Saved> {
+        locked(&self.saved)
+            .iter()
+            .find(|(other, _)| other == key)
+            .map(|(_, saved)| saved.clone())
+    }
+}
+
+struct Inner {
+    entries: Mutex<HashMap<String, Arc<Entry>>>,
+    views: Mutex<HashMap<String, Vec<SessionView>>>,
+    /// The community the entries belong to.
+    scope: Mutex<String>,
+    /// The selected community, as its owner reads it, and its scope.
+    relay: Mutex<Option<(String, Arc<dyn OwnerRelay>)>>,
+    storage: Arc<dyn Storage>,
+    changes: watch::Sender<u64>,
+    next_job: AtomicU64,
+}
+
+/// Every Codex agent's server and conversations. Cheap to clone.
+#[derive(Clone)]
+pub struct CodexRuntime {
+    inner: Arc<Inner>,
+}
+
+fn input(text: String) -> Value {
+    json!([{ "type": "text", "text": text, "text_elements": [] }])
+}
+
+/// The request without the bot marker or the leading mention of the agent.
+fn text_of(event: &BuzzEvent, name: &str) -> String {
+    let mut text = event.content.trim();
+    if let Some(rest) = text.strip_prefix('🤖')
+        && rest.starts_with(char::is_whitespace)
+    {
+        text = rest.trim_start();
+    }
+    let mention = format!("@{name}");
+    match text.strip_prefix(&mention) {
+        Some(rest) => rest.trim().to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// The `buzz` namespace of dynamic tools Codex is given.
+fn dynamic_tools() -> Value {
+    let tools: Vec<Value> = tools()
+        .into_iter()
+        .map(|tool| {
+            let mut function = Map::new();
+            function.insert("type".into(), json!("function"));
+            if let Value::Object(tool) = tool {
+                function.extend(tool);
+            }
+            Value::Object(function)
+        })
+        .collect();
+    json!([{
+        "type": "namespace",
+        "name": "buzz",
+        "description": "Read and act in Buzz as this agent.",
+        "tools": tools,
+    }])
+}
+
+fn text_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |value, key| value.get(key))
+        .and_then(Value::as_str)
+}
+
+impl CodexRuntime {
+    /// Bindings go to `path`, a JSON file shared by all agents.
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self::with_storage(Arc::new(FileStorage::new(
+            path.unwrap_or_else(FileStorage::default_path),
+        )))
+    }
+
+    pub fn with_storage(storage: Arc<dyn Storage>) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                entries: Mutex::default(),
+                views: Mutex::default(),
+                scope: Mutex::default(),
+                relay: Mutex::default(),
+                storage,
+                changes: watch::Sender::new(0),
+                next_job: AtomicU64::new(1),
+            }),
+        }
+    }
+
+    /// The selected community as its owner reads it, and its scope; `None`
+    /// while there is none.
+    pub fn set_relay(&self, relay: Option<(String, Arc<dyn OwnerRelay>)>) {
+        *locked(&self.inner.relay) = relay;
+    }
+
+    /// The relay, while it belongs to the entries' community.
+    fn relay(&self) -> Option<Arc<dyn OwnerRelay>> {
+        let relay = locked(&self.inner.relay).clone()?;
+        (relay.0 == *locked(&self.inner.scope)).then_some(relay.1)
+    }
+
+    /// Bumps whenever a conversation's status changes.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.inner.changes.subscribe()
+    }
+    fn notify(&self) {
+        self.inner.changes.send_modify(|count| *count += 1);
+    }
+
+    /// Each conversation's status, for the agent's Codex tab.
+    pub fn sessions(&self, pubkey: &str) -> Vec<SessionView> {
+        locked(&self.inner.views)
+            .get(pubkey)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn status(&self, pubkey: &str, key: &str, status: &str, detail: &str) {
+        {
+            let mut views = locked(&self.inner.views);
+            let views = views.entry(pubkey.into()).or_default();
+            views.retain(|view| view.key != key);
+            let excess = views.len().saturating_sub(VIEWS - 1);
+            views.drain(..excess);
+            views.push(SessionView {
+                key: key.into(),
+                status: status.into(),
+                detail: detail.chars().take(DETAIL_LIMIT).collect(),
+            });
+        }
+        self.notify();
+    }
+
+    /// Keeps the servers of `pubkeys` in `scope`: another community ends
+    /// them all, and an agent no longer present ends its own. Must run
+    /// inside tokio.
+    pub fn sync(&self, pubkeys: &[String], scope: &str) {
+        if *locked(&self.inner.scope) != scope {
+            self.dispose();
+            *locked(&self.inner.scope) = scope.into();
+        }
+        let gone: Vec<Arc<Entry>> = {
+            let mut entries = locked(&self.inner.entries);
+            let gone = entries
+                .iter()
+                .filter(|(pubkey, _)| !pubkeys.contains(pubkey))
+                .map(|(_, entry)| entry.clone())
+                .collect();
+            entries.retain(|pubkey, _| pubkeys.contains(pubkey));
+            gone
+        };
+        for entry in gone {
+            entry.abort.abort(ABORTED);
+            drop(entry.rpc.close());
+            locked(&self.inner.views).remove(&entry.pubkey);
+        }
+        self.notify();
+    }
+
+    /// Ends every server. Must run inside tokio.
+    pub fn dispose(&self) {
+        let entries: Vec<Arc<Entry>> = locked(&self.inner.entries)
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect();
+        for entry in entries {
+            entry.abort.abort(ABORTED);
+            drop(entry.rpc.close());
+        }
+        locked(&self.inner.views).clear();
+        self.notify();
+    }
+
+    fn storage_key(&self, pubkey: &str) -> String {
+        // Resume restores the persisted tool schema; bindings from before
+        // tools start fresh.
+        format!(
+            "buzz.codex.sessions.v3:{}:{pubkey}",
+            locked(&self.inner.scope)
+        )
+    }
+
+    fn entry(&self, request: &Request, spawn: &Spawner) -> Arc<Entry> {
+        let pubkey = request.agent.pubkey();
+        let mut entries = locked(&self.inner.entries);
+        if let Some(prior) = entries.get(&pubkey) {
+            return prior.clone();
+        }
+        let storage_key = self.storage_key(&pubkey);
+        // Malformed local data starts fresh.
+        let saved: Vec<(String, Saved)> = match self.inner.storage.get(&storage_key) {
+            Some(Value::Object(stored)) => stored
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let weak = Arc::downgrade(&self.inner);
+        let entry = Arc::new_cyclic(|this: &Weak<Entry>| {
+            let tool: ToolHandler = {
+                let (runtime, entry) = (weak.clone(), this.clone());
+                Arc::new(move |call: ToolCall| {
+                    let (runtime, entry) = (runtime.upgrade(), entry.upgrade());
+                    async move {
+                        match (runtime, entry) {
+                            (Some(inner), Some(entry)) => {
+                                CodexRuntime { inner }.tool(&entry, call).await
+                            }
+                            _ => Err("No active Buzz tool for this thread and turn".into()),
+                        }
+                    }
+                    .boxed()
+                })
+            };
+            let rpc = AppServer::new(Some(tool));
+            let opening = {
+                let (rpc, spawn, cwd) = (
+                    rpc.clone(),
+                    spawn.clone(),
+                    request.settings.workspace.clone(),
+                );
+                let task = tokio::spawn(async move { rpc.open(&spawn, Some(cwd)).await });
+                async move {
+                    task.await
+                        .unwrap_or_else(|_| Err("Codex connection closed".into()))
+                }
+                .boxed()
+                .shared()
+            };
+            Entry {
+                pubkey: pubkey.clone(),
+                storage_key,
+                abort: Signal::default(),
+                rpc,
+                opening,
+                lanes: Mutex::default(),
+                saved: Mutex::new(saved),
+                spawn: spawn.clone(),
+            }
+        });
+        // An exit fails current work and lets the next mention reopen.
+        let closed: Listener = {
+            let (runtime, this) = (weak.clone(), Arc::downgrade(&entry));
+            Arc::new(move |wire: &Value| {
+                if wire.get("method").and_then(Value::as_str) == Some("connection/closed")
+                    && let (Some(inner), Some(this)) = (runtime.upgrade(), this.upgrade())
+                {
+                    CodexRuntime { inner }.forget(&this);
+                }
+            })
+        };
+        entry.rpc.on_message(closed);
+        let failed = {
+            let (runtime, this) = (self.clone(), entry.clone());
+            async move {
+                if this.opening.clone().await.is_err() {
+                    runtime.forget(&this);
+                    this.rpc.close().await;
+                }
+            }
+        };
+        tokio::spawn(failed);
+        entries.insert(pubkey, entry.clone());
+        entry
+    }
+
+    /// Drops `entry` if it is still its agent's.
+    fn forget(&self, entry: &Arc<Entry>) {
+        let mut entries = locked(&self.inner.entries);
+        if entries
+            .get(&entry.pubkey)
+            .is_some_and(|current| Arc::ptr_eq(current, entry))
+        {
+            entries.remove(&entry.pubkey);
+        }
+    }
+
+    fn save(&self, request: &Request, entry: &Entry, key: &str, saved: Saved) {
+        let value = {
+            let mut bindings = locked(&entry.saved);
+            match bindings.iter_mut().find(|(other, _)| other == key) {
+                Some((_, binding)) => *binding = saved,
+                None => bindings.push((key.into(), saved)),
+            }
+            let excess = bindings.len().saturating_sub(SAVED_LIMIT);
+            bindings.drain(..excess);
+            Value::Object(
+                bindings
+                    .iter()
+                    .map(|(key, saved)| (key.clone(), json!(saved)))
+                    .collect(),
+            )
+        };
+        if let Err(error) = self.inner.storage.set(&entry.storage_key, value) {
+            self.status(
+                &request.agent.pubkey(),
+                key,
+                "Session could not be saved",
+                &error,
+            );
+        }
+    }
+
+    /// Takes one delivery. Resolves once its work is handed over, not when
+    /// Codex has answered. Must run inside tokio.
+    pub async fn run(&self, run: Run) -> Result<(), String> {
+        let Run {
+            wake,
+            channel,
+            agent,
+            config,
+            spawn,
+        } = run;
+        let (event, interest) = match wake {
+            Wake::Timer => {
+                return Err(
+                    "Codex timers are not supported yet; use mentions or event watches.".into(),
+                );
+            }
+            Wake::Mention { event } => (event, String::new()),
+            Wake::Watch { event, interest } => (event, interest.unwrap_or_default()),
+        };
+        if event.pubkey != agent.owner() {
+            return Ok(());
+        }
+        let relay = locked(&self.inner.relay).clone();
+        let Some((_, relay)) = relay else {
+            return Err("Connect to the agent's community first".into());
+        };
+        let channel_id = channel.ok_or("The event has no unambiguous channel")?;
+        let settings = Config::read(&config);
+        let info = relay.channel(&channel_id);
+        let dm = info.as_ref().is_some_and(|info| info.dm);
+        let tool_root = (!dm).then(|| root_of(&event));
+        let root = if settings.channel_scope() {
+            None
+        } else {
+            tool_root.clone()
+        };
+        let request = Request {
+            event,
+            agent,
+            settings,
+            tool_root,
+            conversation: Conversation {
+                name: info
+                    .and_then(|info| info.name)
+                    .unwrap_or_else(|| channel_id.clone()),
+                channel_id: channel_id.clone(),
+                root: root.clone(),
+            },
+            interest,
+        };
+        if !valid_workspace(&request.settings.workspace) {
+            return self
+                .publish(
+                    &request,
+                    "Choose an absolute workspace path or ~/.buzz in Codex settings first.",
+                )
+                .await;
+        }
+        let key = json!([channel_id, root.as_deref().unwrap_or("channel")]).to_string();
+        let text = text_of(&request.event, &request.agent.name());
+        let entry = self.entry(&request, &spawn);
+        let lane = locked(&entry.lanes)
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Lane::new()))
+            .clone();
+        match lane.active() {
+            Some(active) => {
+                // Startup and history reads stay ordered without holding the
+                // delivery.
+                let mut steering = locked(&active.steering);
+                let previous = steering.clone();
+                let (this, accepted) = (self.clone(), active.clone());
+                let task = tokio::spawn(async move {
+                    previous.await;
+                    this.steer(request, text, key, lane, entry, accepted).await;
+                });
+                *steering = async move {
+                    if task.await.is_err() {
+                        tracing::error!("Codex steering failed");
+                    }
+                }
+                .boxed()
+                .shared();
+            }
+            None => self.start(request, text, key, lane, entry),
+        }
+        Ok(())
+    }
+
+    /// Steers `active` with a follow-up, or starts the next turn when it
+    /// has finished meanwhile.
+    async fn steer(
+        &self,
+        request: Request,
+        text: String,
+        key: String,
+        lane: Arc<Lane>,
+        entry: Arc<Entry>,
+        active: Arc<Active>,
+    ) {
+        /// What became of the follow-up, when it did not fail.
+        enum Steered {
+            Done,
+            NextTurn,
+        }
+        let steered = async {
+            active.ready.clone().await?;
+            if entry.abort.aborted() {
+                return Ok(Steered::Done);
+            }
+            if active.finished() {
+                return Ok(Steered::NextTurn);
+            }
+            let context = self.history(&request, &entry.abort).await?;
+            if entry.abort.aborted() {
+                return Ok(Steered::Done);
+            }
+            if active.finished() {
+                return Ok(Steered::NextTurn);
+            }
+            let mut params = json!({
+                "threadId": active.thread_id(),
+                "input": input(format!(
+                    "{context}{}",
+                    turn_input(&request.event, &request.conversation, &text, &request.interest, true)
+                )),
+            });
+            if let Some(turn) = active.turn_id() {
+                params["expectedTurnId"] = json!(turn);
+            }
+            entry.rpc.request("turn/steer", params).await?;
+            *locked(&active.reply) = request.clone();
+            active.version.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, String>(Steered::Done)
+        }
+        .await;
+        match steered {
+            Ok(Steered::Done) => {}
+            Ok(Steered::NextTurn) => self.start(request, text, key, lane, entry),
+            Err(_) if entry.abort.aborted() => {}
+            // A completion racing the request means this is the next
+            // ordinary turn.
+            Err(error) if error == "no active turn to steer" => {
+                self.start(request, text, key, lane, entry)
+            }
+            Err(error) => {
+                let notice = format!(
+                    "Steering was not accepted: {error}. Send another mention to continue."
+                );
+                if let Err(failure) = self.publish(&request, &notice).await {
+                    tracing::error!(%failure, "Codex steering failed");
+                }
+            }
+        }
+    }
+
+    /// Queues a turn behind the conversation's last one.
+    fn start(
+        &self,
+        request: Request,
+        text: String,
+        key: String,
+        lane: Arc<Lane>,
+        entry: Arc<Entry>,
+    ) {
+        let id = self.inner.next_job.fetch_add(1, Ordering::Relaxed);
+        let pubkey = request.agent.pubkey();
+        let job = {
+            let mut tail = locked(&lane.tail);
+            let previous = tail.1.clone();
+            let (this, key, lane, entry) = (self.clone(), key.clone(), lane.clone(), entry.clone());
+            let task = tokio::spawn(async move {
+                previous.await;
+                if entry.abort.aborted() {
+                    return;
+                }
+                this.execute(request, text, key, lane, entry).await;
+            });
+            let job = async move {
+                if task.await.is_err() {
+                    tracing::error!("Codex turn failed");
+                }
+            }
+            .boxed()
+            .shared();
+            *tail = (id, job.clone());
+            job
+        };
+        self.status(&pubkey, &key, "Starting", "");
+        // Agents2 can deliver follow-ups and other conversations at once.
+        tokio::spawn(async move {
+            job.await;
+            let idle = locked(&lane.tail).0 == id && lane.active().is_none();
+            let mut lanes = locked(&entry.lanes);
+            if idle
+                && lanes
+                    .get(&key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &lane))
+            {
+                lanes.remove(&key);
+            }
+        });
+    }
+
+    /// The request's conversation before it, read as the owner.
+    async fn history(&self, request: &Request, signal: &Signal) -> Result<String, String> {
+        signal.check()?;
+        let relay = self.relay().ok_or("The community changed")?;
+        let read = move |filters: Vec<Value>| relay.read(filters);
+        tokio::select! {
+            history = conversation_history(&request.event, &request.conversation, &read) => history,
+            reason = signal.wait() => Err(reason),
+        }
+    }
+
+    /// Replies to the request in its thread, as the agent.
+    async fn publish(&self, request: &Request, content: &str) -> Result<(), String> {
+        let event = &request.event;
+        let root = root_of(event);
+        let mut tags = vec![vec![
+            "h".to_string(),
+            request.conversation.channel_id.clone(),
+        ]];
+        if root != event.id {
+            tags.push(vec!["e".into(), root, String::new(), "root".into()]);
+        }
+        tags.push(vec![
+            "e".into(),
+            event.id.clone(),
+            String::new(),
+            "reply".into(),
+        ]);
+        tags.push(vec!["p".into(), event.pubkey.clone()]);
+        request
+            .agent
+            .publish(Template {
+                kind: 9,
+                content: content.into(),
+                tags,
+            })
+            .await
+            .map(drop)
+    }
+
+    /// Runs one Buzz tool for the turn that called it.
+    async fn tool(&self, entry: &Entry, call: ToolCall) -> Result<String, String> {
+        let active = locked(&entry.lanes)
+            .values()
+            .filter_map(|lane| lane.active())
+            .find(|active| {
+                active.thread_id() == call.thread_id && active.turn_id() == call.turn_id
+            });
+        let known = tools()
+            .iter()
+            .any(|tool| tool.get("name").and_then(Value::as_str) == Some(call.tool.as_str()));
+        let Some(active) = active.filter(|_| call.namespace.as_deref() == Some("buzz") && known)
+        else {
+            return Err("No active Buzz tool for this thread and turn".into());
+        };
+        let check: Check = {
+            let active = active.clone();
+            Arc::new(move || {
+                active.signal.check()?;
+                if active.finished() {
+                    return Err(TURN_ENDED.into());
+                }
+                Ok(())
+            })
+        };
+        check()?;
+        let Value::Object(mut args) = call.arguments else {
+            return Err("Buzz tool arguments must be an object".into());
+        };
+        let version = active.version.load(Ordering::SeqCst);
+        let request = active.reply();
+        let memories: Memories = {
+            let (this, agent, check, signal) = (
+                self.clone(),
+                request.agent.pubkey(),
+                check.clone(),
+                active.signal.clone(),
+            );
+            Arc::new(move || {
+                let (this, agent, check, signal) =
+                    (this.clone(), agent.clone(), check.clone(), signal.clone());
+                async move {
+                    let relay = this
+                        .relay()
+                        .ok_or("Buzz is not connected to this community")?;
+                    let memories: Vec<Memory> = tokio::select! {
+                        memories = relay.memories(&agent) => memories?,
+                        reason = signal.wait() => return Err(reason),
+                    };
+                    check()?;
+                    Ok(memories)
+                }
+                .boxed()
+            })
+        };
+        let client = AppClient {
+            agent: request.agent.clone(),
+            spawn: entry.spawn.clone(),
+            cwd: locked(&active.workspace).clone(),
+            memories,
+            remembered: Arc::new(|_| {}),
+            check: Some(check),
+            signal: Some(active.signal.clone()),
+        };
+        let send = call.tool == "send";
+        let fin = send && args.get("final") == Some(&Value::Bool(true));
+        // By default a reply goes to the latest request's thread.
+        if send && !args.contains_key("reply") && !args.contains_key("channel") {
+            args.insert("reply".into(), json!(root_of(&request.event)));
+        }
+        let context = Context {
+            channel: Some(request.conversation.channel_id.clone()),
+            root: request.tool_root.clone(),
+        };
+        let text = call_tool(
+            Arc::new(client) as Arc<dyn BuzzClient>,
+            &context,
+            &call.tool,
+            &args,
+        )
+        .await?;
+        if fin {
+            let mut sent = locked(&active.sent_version);
+            *sent = Some(sent.map_or(version, |sent| sent.max(version)));
+        }
+        Ok(text)
+    }
+
+    /// Stops the thread's background terminals. Interrupting a turn does
+    /// not stop the shells it started, which run in their own groups.
+    async fn terminals(&self, rpc: &AppServer, thread_id: &str) -> Result<(), String> {
+        let cleaned = async {
+            rpc.request(
+                "thread/backgroundTerminals/clean",
+                json!({ "threadId": thread_id }),
+            )
+            .await?;
+            // `clean` acknowledges the request; terminating each shell
+            // still reported is the barrier.
+            let mut cursor = Value::Null;
+            loop {
+                let page = rpc
+                    .request(
+                        "thread/backgroundTerminals/list",
+                        json!({ "threadId": thread_id, "limit": 100, "cursor": cursor }),
+                    )
+                    .await?;
+                let terminals: Vec<String> = page
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .map(|data| {
+                        data.iter()
+                            .filter_map(|terminal| text_at(terminal, &["processId"]))
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                futures::future::try_join_all(terminals.iter().map(|process| {
+                    rpc.request(
+                        "thread/backgroundTerminals/terminate",
+                        json!({ "threadId": thread_id, "processId": process }),
+                    )
+                }))
+                .await?;
+                cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+                if cursor.is_null() {
+                    break;
+                }
+            }
+            let remaining = rpc
+                .request(
+                    "thread/backgroundTerminals/list",
+                    json!({ "threadId": thread_id, "limit": 1 }),
+                )
+                .await?;
+            if remaining
+                .get("data")
+                .and_then(Value::as_array)
+                .is_some_and(|data| !data.is_empty())
+            {
+                return Err("Codex background terminals could not be stopped".to_string());
+            }
+            Ok(())
+        }
+        .await;
+        if cleaned.is_err() {
+            // A failed cleanup must not leave shells unreachable behind an
+            // idle conversation.
+            rpc.close().await;
+        }
+        cleaned
+    }
+
+    /// Runs one turn to its end, and says in the thread when it did not
+    /// finish.
+    async fn execute(
+        &self,
+        request: Request,
+        text: String,
+        key: String,
+        lane: Arc<Lane>,
+        entry: Arc<Entry>,
+    ) {
+        let signal = Signal::default();
+        // The entry's end, the turn's deadline, or the turn's own end.
+        let deadline = {
+            let (signal, abort) = (signal.clone(), entry.abort.clone());
+            tokio::spawn(async move {
+                tokio::select! {
+                    reason = abort.wait() => signal.abort(&reason),
+                    () = tokio::time::sleep(TURN_DEADLINE) => signal.abort(TIMED_OUT),
+                    _ = signal.wait() => {}
+                }
+            })
+        };
+        let (ready_sender, ready) = oneshot::channel::<Result<(), String>>();
+        let ready_sender = Mutex::new(Some(ready_sender));
+        let active = Arc::new(Active {
+            thread_id: Mutex::default(),
+            turn_id: Mutex::default(),
+            ready: async move { ready.await.unwrap_or_else(|_| Err(TURN_ENDED.into())) }
+                .boxed()
+                .shared(),
+            steering: Mutex::new(futures::future::ready(()).boxed().shared()),
+            reply: Mutex::new(request.clone()),
+            finished: AtomicBool::new(false),
+            workspace: Mutex::new(request.settings.workspace.clone()),
+            signal: signal.clone(),
+            version: AtomicU64::new(0),
+            sent_version: Mutex::default(),
+        });
+        *locked(&lane.active) = Some(active.clone());
+        let pubkey = request.agent.pubkey();
+        let (settle, mut completed) = watch::channel::<Option<Result<String, String>>>(None);
+        let settle = Arc::new(settle);
+        let finish = {
+            let settle = settle.clone();
+            move |result: Result<String, String>| {
+                settle.send_if_modified(|current| {
+                    if current.is_some() {
+                        return false;
+                    }
+                    *current = Some(result);
+                    true
+                });
+            }
+        };
+        let aborted = {
+            let (signal, finish) = (signal.clone(), finish.clone());
+            tokio::spawn(async move { finish(Err(signal.wait().await)) })
+        };
+        let listener: Listener = {
+            let (this, active, pubkey, key) =
+                (self.clone(), active.clone(), pubkey.clone(), key.clone());
+            Arc::new(move |wire: &Value| {
+                let method = wire.get("method").and_then(Value::as_str);
+                let params = wire.get("params").filter(|params| params.is_object());
+                if method == Some("connection/closed") {
+                    let message = params
+                        .and_then(|params| text_at(params, &["message"]))
+                        .unwrap_or("Codex connection closed");
+                    return finish(Err(message.into()));
+                }
+                let Some(params) = params else {
+                    return;
+                };
+                if text_at(params, &["threadId"]).map(str::to_string) != active.thread_id() {
+                    return;
+                }
+                let turn = params.get("turn").filter(|turn| turn.is_object());
+                let item = params.get("item").filter(|item| item.is_object());
+                match (method, turn, item) {
+                    (Some("turn/started"), Some(turn), _) => {
+                        *locked(&active.turn_id) = text_at(turn, &["id"]).map(str::to_string);
+                    }
+                    (Some("item/started"), _, Some(item)) => {
+                        if let Some(command) = text_at(item, &["command"]).filter(|c| !c.is_empty())
+                        {
+                            this.status(&pubkey, &key, "Working", command);
+                        }
+                    }
+                    (Some("item/completed"), _, Some(item))
+                        if text_at(item, &["type"]) == Some("commandExecution") =>
+                    {
+                        let detail = format!(
+                            "{}\n{}",
+                            text_at(item, &["command"]).unwrap_or_default(),
+                            text_at(item, &["aggregatedOutput"]).unwrap_or_default()
+                        );
+                        this.status(&pubkey, &key, "Working", &detail);
+                    }
+                    (Some("turn/completed"), Some(turn), _) => {
+                        active.finished.store(true, Ordering::SeqCst);
+                        let status = text_at(turn, &["status"]).unwrap_or_default();
+                        finish(if status == "failed" {
+                            Err(text_at(turn, &["error", "message"])
+                                .unwrap_or("Codex turn failed")
+                                .to_string())
+                        } else {
+                            Ok(status.to_string())
+                        });
+                    }
+                    _ => {}
+                }
+            })
+        };
+        let listening = entry.rpc.on_message(listener);
+        let rpc = entry.rpc.clone();
+        let outcome = async {
+            entry.opening.clone().await?;
+            signal.check()?;
+            // The host expands ~/.buzz and makes it; Codex needs an
+            // absolute path rather than shell-style home notation.
+            let mut workspace = request.settings.workspace.clone();
+            if !absolute_workspace(&workspace) {
+                let mut spawned = entry
+                    .spawn
+                    .spawn(
+                        "workspace",
+                        SpawnOptions {
+                            cwd: Some(workspace.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let (code, stdout, _) = collect(&mut spawned.output).await;
+                workspace = stdout.trim().to_string();
+                if code != Some(0) || !absolute_workspace(&workspace) {
+                    return Err("Could not resolve the default Codex workspace.".to_string());
+                }
+                signal.check()?;
+            }
+            *locked(&active.workspace) = workspace.clone();
+            let existing = entry.saved(&key);
+            let normalized = rpc
+                .request("config/read", json!({ "cwd": workspace }))
+                .await?;
+            let models = list_models(&rpc).await?;
+            let configured = text_at(&normalized, &["config", "model"]).filter(|m| !m.is_empty());
+            let model = Some(request.settings.model.as_str())
+                .filter(|model| !model.is_empty())
+                .or(configured)
+                .map(str::to_string)
+                .or_else(|| {
+                    models
+                        .iter()
+                        .find(|row| row.is_default)
+                        .map(|row| row.model.clone())
+                });
+            let Some(selected) = models
+                .iter()
+                .find(|row| Some(&row.model) == model.as_ref())
+            else {
+                return Err(
+                    "The selected Codex model is unavailable. Choose an available model in Settings."
+                        .to_string(),
+                );
+            };
+            let effort = if request.settings.effort.is_empty() {
+                selected.default_reasoning_effort.clone()
+            } else {
+                request.settings.effort.clone()
+            };
+            // CLI overrides replace this table; disabled servers still need
+            // a transport.
+            let mcp: Map<String, Value> = normalized
+                .pointer("/config/mcp_servers")
+                .and_then(Value::as_object)
+                .map(|servers| {
+                    servers
+                        .iter()
+                        .map(|(name, server)| {
+                            let mut disabled = Map::new();
+                            match server.get("command") {
+                                Some(Value::String(command)) => {
+                                    disabled.insert("command".into(), json!(command));
+                                }
+                                _ => {
+                                    if let Some(url) = server.get("url") {
+                                        disabled.insert("url".into(), url.clone());
+                                    }
+                                }
+                            }
+                            disabled.insert("enabled".into(), json!(false));
+                            (name.clone(), Value::Object(disabled))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (name, agent) = (request.agent.name(), request.agent.pubkey());
+            let params = json!({
+                "model": model,
+                "cwd": workspace,
+                "developerInstructions": developer_instructions(&name, &agent, None),
+                "approvalPolicy": "never",
+                // Matches Claude Code's bypassPermissions; only the owner
+                // can start work.
+                "sandbox": "danger-full-access",
+                "config": {
+                    "web_search": "disabled",
+                    "mcp_servers": mcp,
+                    "features.plugins": false,
+                    "features.apps": false,
+                },
+            });
+            let with = |extra: Value| {
+                let mut params = params.clone();
+                if let (Some(params), Value::Object(extra)) = (params.as_object_mut(), extra) {
+                    params.extend(extra);
+                }
+                params
+            };
+            let fresh = || with(json!({ "dynamicTools": dynamic_tools() }));
+            let resumed = existing
+                .as_ref()
+                .filter(|existing| existing.workspace == workspace);
+            let started = match resumed {
+                Some(existing) => {
+                    let resume = rpc
+                        .request(
+                            "thread/resume",
+                            with(json!({ "threadId": existing.thread_id, "excludeTurns": true })),
+                        )
+                        .await;
+                    match resume {
+                        Err(error)
+                            if error
+                                == format!(
+                                    "no rollout found for thread id {}",
+                                    existing.thread_id
+                                ) =>
+                        {
+                            rpc.request("thread/start", fresh()).await?
+                        }
+                        other => other?,
+                    }
+                }
+                None => rpc.request("thread/start", fresh()).await?,
+            };
+            let thread_id = text_at(&started, &["thread", "id"])
+                .ok_or("Codex did not start a thread")?
+                .to_string();
+            *locked(&active.thread_id) = Some(thread_id.clone());
+            signal.check()?;
+            rpc.request(
+                "thread/name/set",
+                json!({
+                    "threadId": thread_id,
+                    "name": session_name(&name, &request.conversation),
+                }),
+            )
+            .await?;
+            let context = self.history(&request, &signal).await?;
+            signal.check()?;
+            let turn = rpc
+                .request(
+                    "turn/start",
+                    json!({
+                        "threadId": thread_id,
+                        "input": input(format!(
+                            "{context}{}",
+                            turn_input(&request.event, &request.conversation, &text, &request.interest, false)
+                        )),
+                        "model": model,
+                        "effort": effort,
+                        // Application context is a developer message that
+                        // updates on each turn.
+                        "additionalContext": {
+                            "buzz.instructions": {
+                                "kind": "application",
+                                "value": developer_instructions(&name, &agent, Some(&request.settings)),
+                            },
+                        },
+                    }),
+                )
+                .await?;
+            *locked(&active.turn_id) = text_at(&turn, &["turn", "id"]).map(str::to_string);
+            // An empty thread has no resumable rollout until a turn is
+            // accepted.
+            self.save(
+                &request,
+                &entry,
+                &key,
+                Saved {
+                    thread_id: thread_id.clone(),
+                    workspace,
+                },
+            );
+            if let Some(ready) = locked(&ready_sender).take() {
+                let _ = ready.send(Ok(()));
+            }
+            self.status(&pubkey, &key, "Working", "");
+            let status = completed
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| TURN_ENDED.to_string())?
+                .clone()
+                .unwrap_or_else(|| Err(TURN_ENDED.into()))?;
+            let steering = locked(&active.steering).clone();
+            steering.await;
+            signal.check()?;
+            let reply = active.reply();
+            if status == "interrupted" {
+                self.terminals(&rpc, &thread_id).await?;
+                self.publish(
+                    &reply,
+                    "Codex’s turn was interrupted. Send another mention to continue.",
+                )
+                .await?;
+                self.status(&pubkey, &key, "Interrupted", "");
+            } else {
+                let sent = *locked(&active.sent_version);
+                if sent != Some(active.version.load(Ordering::SeqCst)) {
+                    self.publish(
+                        &reply,
+                        "Codex ended this turn without a final reply through buzz.send. Send another mention to ask it to continue.",
+                    )
+                    .await?;
+                }
+                self.status(&pubkey, &key, "Idle", "");
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = outcome {
+            active.finished.store(true, Ordering::SeqCst);
+            if let Some(ready) = locked(&ready_sender).take() {
+                let _ = ready.send(Err(error.clone()));
+            }
+            let steering = locked(&active.steering).clone();
+            steering.await;
+            if let (true, Some(thread_id), Some(turn_id), false) = (
+                signal.aborted(),
+                active.thread_id(),
+                active.turn_id(),
+                entry.abort.aborted(),
+            ) {
+                let stopped = async {
+                    rpc.request(
+                        "turn/interrupt",
+                        json!({ "threadId": thread_id, "turnId": turn_id }),
+                    )
+                    .await?;
+                    self.terminals(&rpc, &thread_id).await
+                }
+                .await;
+                if stopped.is_err() {
+                    rpc.close().await;
+                }
+            }
+            if !entry.abort.aborted() {
+                let reason = format!("Codex could not finish: {error}.");
+                if let Err(failure) = self.publish(&active.reply(), &reason).await {
+                    tracing::error!(%failure, "Codex could not publish its failure");
+                }
+                self.status(&pubkey, &key, "Needs attention", &reason);
+            }
+        }
+        signal.abort(TURN_ENDED);
+        deadline.abort();
+        aborted.abort();
+        rpc.off(listening);
+        // Leave the thread before it is resumed: rejoining a loaded thread
+        // ignores instruction and config overrides while a client is
+        // subscribed.
+        if let Some(thread_id) = active.thread_id()
+            && !entry.abort.aborted()
+            && rpc
+                .request("thread/unsubscribe", json!({ "threadId": thread_id }))
+                .await
+                .is_err()
+        {
+            rpc.close().await;
+        }
+        let mut current = locked(&lane.active);
+        if current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &active))
+        {
+            *current = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
