@@ -164,6 +164,26 @@ impl Store {
         f(&mut connection)
     }
 
+    /// Runs a write of view state or preferences, which buzz-app keeps in
+    /// localStorage: it commits without waiting for the disk
+    /// (`synchronous=NORMAL` under WAL), so a power cut may lose it but a
+    /// crash cannot. The UI thread saves these as the user moves around, and
+    /// a full sync costs milliseconds each. Everything else, the outbox
+    /// first, keeps `synchronous=FULL`.
+    fn with_relaxed<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.with(|c| {
+            c.pragma_update(None, "synchronous", "NORMAL")?;
+            let result = f(c);
+            let restored = c.pragma_update(None, "synchronous", "FULL");
+            let value = result?;
+            restored?;
+            Ok(value)
+        })
+    }
+
     pub fn view_state(
         &self,
         partition: &Partition,
@@ -186,7 +206,7 @@ impl Store {
         key: &str,
         value: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.with(|c| {
+        self.with_relaxed(|c| {
             match value {
                 Some(value) => c.execute(
                     "INSERT INTO view_state (origin, viewer, key, value_json, updated_ms)
@@ -247,7 +267,7 @@ impl Store {
         name: &str,
         value: &str,
     ) -> Result<(), StoreError> {
-        self.with(|c| {
+        self.with_relaxed(|c| {
             c.execute(
                 "INSERT INTO partition_prefs (origin, viewer, name, value_json) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (origin, viewer, name) DO UPDATE SET value_json = excluded.value_json",
@@ -269,7 +289,7 @@ impl Store {
     }
 
     pub fn set_viewer_pref(&self, viewer: &str, name: &str, value: &str) -> Result<(), StoreError> {
-        self.with(|c| {
+        self.with_relaxed(|c| {
             c.execute(
                 "INSERT INTO viewer_prefs (viewer, name, value_json) VALUES (?1, ?2, ?3)
                  ON CONFLICT (viewer, name) DO UPDATE SET value_json = excluded.value_json",
@@ -291,7 +311,7 @@ impl Store {
     }
 
     pub fn set_device_pref(&self, name: &str, value: &str) -> Result<(), StoreError> {
-        self.with(|c| {
+        self.with_relaxed(|c| {
             c.execute(
                 "INSERT INTO device_prefs (name, value_json) VALUES (?1, ?2)
                  ON CONFLICT (name) DO UPDATE SET value_json = excluded.value_json",
