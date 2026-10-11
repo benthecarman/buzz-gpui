@@ -29,6 +29,7 @@ use super::overlay;
 use crate::community::{AppState, Community};
 use attachments::{AttachmentDraft, BackgroundSend, DraftFile, MAX_FILES, NewFile, Queue, Voice};
 use buzz_relay_client::fold::MessageRow;
+use buzz_relay_client::kit::{KitStatus, KitValue};
 use buzz_relay_client::members::can_add_members;
 use buzz_relay_client::upload::Source;
 use buzz_relay_client::{
@@ -179,6 +180,8 @@ pub struct Composer {
     dismissed: Option<usize>,
     /// The text length and caret the completion was computed for.
     completion_key: Option<(usize, usize)>,
+    /// Follows the saved teams while `@` completion is used.
+    teams_watch: Option<Task<()>>,
     completion_scroll: ScrollHandle,
     picker: Entity<EmojiPicker>,
     picker_open: bool,
@@ -455,6 +458,7 @@ impl Composer {
             recent_public: Vec::new(),
             dismissed: None,
             completion_key: None,
+            teams_watch: None,
             completion_scroll: ScrollHandle::new(),
             picker,
             picker_open: false,
@@ -1322,6 +1326,7 @@ impl Composer {
             }
             Trigger::Mention => {
                 super::archives::ensure(&self.community, false, cx);
+                self.watch_teams(cx);
                 self.search_people(&query.text, cx);
                 let Some(found) = self.mention_suggestions(&query, cx) else {
                     self.completion = None;
@@ -1449,7 +1454,9 @@ impl Composer {
     /// `@` rows, status line, retry and the Space pick (`MentionCompletion`).
     /// `None` when the query is prose, not a search.
     fn mention_suggestions(&self, query: &Query, cx: &App) -> Option<MentionRows> {
-        let found = self.mention_choices(&query.text, cx);
+        let (teams, catalog) = self.saved_teams(cx);
+        let team_names: Vec<String> = teams.iter().map(|(_, name, _)| name.clone()).collect();
+        let found = self.mention_choices(&query.text, &team_names, cx);
         if found.closed {
             return None;
         }
@@ -1460,24 +1467,149 @@ impl Composer {
             .iter()
             .find(|c| c.id == self.channel);
         let dm = channel.is_some_and(|c| c.channel_type == Some(ChannelType::Dm));
+        let rows = self.team_suggestions(&teams, catalog, &query.text, cx);
+        let people = found.people.len();
+        let mut items: Vec<Suggestion> = found
+            .people
+            .into_iter()
+            .map(|person| Suggestion::Person {
+                pubkey: person.pubkey,
+                name: person.name.into(),
+                label: person.label.into(),
+                picture: person.picture,
+                agent: person.agent,
+                member: person.member,
+                dm,
+            })
+            .collect();
+        let teams_shown = rows.len();
+        // Teams follow the people, in one budget of 50 (`MentionCompletion`).
+        items.truncate(mentions::LIMIT.saturating_sub(teams_shown));
+        items.extend(rows.into_iter().take(mentions::LIMIT));
+        let team_status = teams_status(catalog);
+        let status = found
+            .status
+            .or_else(|| {
+                (people + teams_shown > mentions::LIMIT)
+                    .then_some("Narrow your search to see more members.")
+            })
+            .or(team_status);
+        let retry = if found.retry {
+            Some(channels::Retry::People)
+        } else {
+            (catalog == KitStatus::Error).then_some(channels::Retry::Teams)
+        };
         Some(MentionRows {
-            items: found
-                .people
-                .into_iter()
-                .map(|person| Suggestion::Person {
-                    pubkey: person.pubkey,
-                    name: person.name.into(),
-                    label: person.label.into(),
-                    picture: person.picture,
-                    agent: person.agent,
-                    member: person.member,
-                    dm,
-                })
-                .collect(),
-            status: found.status.map(SharedString::from),
-            retry: found.retry.then_some(channels::Retry::People),
-            space: found.space,
+            items,
+            status: status.map(SharedString::from),
+            retry,
+            space: found
+                .space
+                .filter(|_| !mentions::teams_block_space(&team_names, &query.text)),
         })
+    }
+
+    /// Saved team rows for `query`, as `@` completion and the mention
+    /// picker show them (`useTeamMentions`).
+    pub(super) fn team_suggestions(
+        &self,
+        teams: &[(String, String, Vec<String>)],
+        catalog: KitStatus,
+        query: &str,
+        cx: &App,
+    ) -> Vec<Suggestion> {
+        let community = self.community.read(cx);
+        let channel = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|c| c.id == self.channel);
+        let members: std::collections::HashSet<&str> = channel
+            .map(|c| c.members.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let library = crate::ui::identity::AgentLibrary::from_hosts(cx);
+        let agents: std::collections::HashSet<&str> = library
+            .agents
+            .iter()
+            .map(|(key, _, _)| key.as_str())
+            .collect();
+        // Saved keys grant nothing: each agent must still be one this
+        // draft can address (`mentionCandidates`).
+        let rows = mentions::team_rows(
+            teams,
+            query,
+            catalog == KitStatus::Ready,
+            channel,
+            |key| (members.contains(key) || agents.contains(key)) && self.admits(key, cx),
+            |key| members.contains(key),
+        );
+        let profiles = &community.snapshot.profiles;
+        let names = crate::ui::identity::names(
+            profiles,
+            &library,
+            community.session.viewer(),
+            Some(&community.origin),
+            channel.map(|c| c.members.as_slice()),
+        );
+        rows.into_iter()
+            .map(|team| Suggestion::Team {
+                name: team.name.into(),
+                recipients: team
+                    .recipients
+                    .iter()
+                    .map(|key| {
+                        let name = profiles
+                            .get(key)
+                            .map(|p| p.name.clone())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| names.display(key));
+                        let picture = profiles.get(key).and_then(|p| p.picture.clone());
+                        (key.clone(), SharedString::from(name), picture)
+                    })
+                    .collect(),
+                detail: team.detail.into(),
+                disabled: team.disabled.is_some(),
+            })
+            .collect()
+    }
+
+    /// The community's saved teams (`useTeamMentions`): id, name and
+    /// agents, with the catalog's state.
+    pub(super) fn saved_teams(&self, cx: &App) -> (Vec<(String, String, Vec<String>)>, KitStatus) {
+        let kit = self.community.read(cx).session.kit().borrow().clone();
+        let teams = kit
+            .entries
+            .iter()
+            .filter(|entry| !entry.record.deleted)
+            .filter_map(|entry| match &entry.record.value {
+                KitValue::Team(team) => {
+                    Some((team.id.clone(), team.name.clone(), team.agents.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        (teams, kit.status)
+    }
+
+    /// Reads the saved teams and refreshes `@` completion as they change.
+    pub(super) fn watch_teams(&mut self, cx: &mut Context<Self>) {
+        if self.teams_watch.is_some() {
+            return;
+        }
+        let session = self.community.read(cx).session.clone();
+        session.kit_ensure();
+        let mut kit = session.kit();
+        self.teams_watch = Some(cx.spawn(async move |this, cx| {
+            while kit.changed().await.is_ok() {
+                let alive = this.update(cx, |this, cx| {
+                    this.completion_key = None;
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     /// `mentionAdmission`: whether this draft may still address `pubkey`.
@@ -1510,7 +1642,7 @@ impl Composer {
     }
 
     /// The `@` choices for `text`, ranked, with the directory search's state.
-    fn mention_choices(&self, text: &str, cx: &App) -> mentions::Completion {
+    fn mention_choices(&self, text: &str, teams: &[String], cx: &App) -> mentions::Completion {
         let community = self.community.read(cx);
         let snapshot = &community.snapshot;
         let channel = snapshot.channels.iter().find(|c| c.id == self.channel);
@@ -1546,6 +1678,7 @@ impl Composer {
             origin: Some(&community.origin),
             presence: &snapshot.presence,
             history: &history,
+            teams,
         };
         let mut completion = mentions::complete(&inputs, text, directory);
         // Archived identities leave the choices (`archiveHides`).
@@ -1706,6 +1839,13 @@ impl Composer {
                 self.public = None;
             }
             channels::Retry::Emoji => self.community.read(cx).session.refresh_emoji(),
+            channels::Retry::Teams => {
+                let session = self.community.read(cx).session.clone();
+                cx.background_spawn(async move {
+                    let _ = session.kit_refresh().await;
+                })
+                .detach();
+            }
         }
         self.completion_key = None;
         cx.notify();
@@ -1799,6 +1939,7 @@ impl Composer {
                     name.to_lowercase() == wanted
                 }
                 Suggestion::Emoji(candidate) => candidate.shortcode().to_lowercase() == wanted,
+                Suggestion::Team { .. } => false,
             })
             .map(|(index, _)| index)
             .collect();
@@ -1852,6 +1993,20 @@ impl Composer {
                 .or_default()
                 .remember(&channel, &pubkey);
         }
+        if let Some(Suggestion::Team {
+            recipients,
+            disabled,
+            ..
+        }) = self.completion.as_ref().and_then(|c| c.items.get(index))
+        {
+            // A disabled team takes Enter and Tab without sending.
+            if *disabled || self.editing.is_some() {
+                return;
+            }
+            let recipients = recipients.clone();
+            self.accept_team(recipients, window, cx);
+            return;
+        }
         let Some(completion) = self.completion.take() else {
             return;
         };
@@ -1873,10 +2028,11 @@ impl Composer {
                 InlineToken::new(id.clone(), channel_reference(id, name))
                     .with_label(format!("#{name}")),
             ),
-            Suggestion::Emoji(_) => None,
+            Suggestion::Emoji(_) | Suggestion::Team { .. } => None,
         };
         let text = match item {
             Suggestion::Emoji(candidate) => candidate.pick(None).text(),
+            Suggestion::Team { name, .. } => format!("@{name} "),
             Suggestion::Person { name, .. } => format!("@{name} "),
             Suggestion::Channel { id, name, .. } => format!("{} ", channel_reference(id, name)),
         };
@@ -1896,6 +2052,74 @@ impl Composer {
         });
         self.completion = None;
         cx.notify();
+    }
+
+    /// A saved team's pick: a chip for each of its agents, each a
+    /// recipient (`edit: { mentions }`).
+    fn accept_team(
+        &mut self,
+        recipients: Vec<(String, SharedString, Option<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        let range = completion.query.start..completion.query.end;
+        if self.insert_team(&recipients, Some(range), window, cx) {
+            self.completion = None;
+        } else {
+            self.completion = Some(completion);
+        }
+        cx.notify();
+    }
+
+    /// Puts a chip for each of a team's agents over `range`, or at the
+    /// caret. False when that would pass 32 recipients.
+    pub(super) fn insert_team(
+        &mut self,
+        recipients: &[(String, SharedString, Option<String>)],
+        range: Option<std::ops::Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let chosen = self.recipients(cx);
+        let added = recipients
+            .iter()
+            .filter(|(key, _, _)| !chosen.iter().any(|(have, _)| have == key))
+            .count();
+        if chosen.len() + added > 32 {
+            self.error = Some("Choose at most 32 recipients".into());
+            return false;
+        }
+        let community = self.community.read(cx);
+        let (origin, channel) = (community.origin.http(), self.channel.clone());
+        let history = cx
+            .default_global::<MentionHistory>()
+            .0
+            .entry(origin)
+            .or_default();
+        for (key, _, _) in recipients {
+            history.remember(&channel, key);
+        }
+        self.input.update(cx, |state, cx| {
+            state.focus(window, cx);
+            let range = range.unwrap_or_else(|| state.selected_range());
+            for (index, (key, name, _)) in recipients.iter().enumerate() {
+                let token = InlineToken::new(key.clone(), format!("@{name}"));
+                let placed = if index == 0 {
+                    state.replace_range_with_token(range.clone(), token, window, cx)
+                } else {
+                    state.insert(" ", window, cx);
+                    state.replace_with_token(token, window, cx)
+                };
+                if placed.is_err() {
+                    break;
+                }
+            }
+            state.insert(" ", window, cx);
+        });
+        true
     }
 
     // ----- formatting -----
@@ -2923,7 +3147,7 @@ struct PublicSearch {
     _task: Task<()>,
 }
 
-enum Suggestion {
+pub(super) enum Suggestion {
     Person {
         pubkey: String,
         /// The identity's own name, which a pick inserts.
@@ -2944,6 +3168,23 @@ enum Suggestion {
         detail: Option<SharedString>,
     },
     Emoji(Candidate),
+    /// A saved team: its agents as `(key, name, picture)`, the detail line
+    /// (its reason when disabled).
+    Team {
+        name: SharedString,
+        recipients: Vec<(String, SharedString, Option<String>)>,
+        detail: SharedString,
+        disabled: bool,
+    },
+}
+
+/// The saved teams' state line (`useTeamMentions` status).
+fn teams_status(catalog: KitStatus) -> Option<&'static str> {
+    match catalog {
+        KitStatus::Idle | KitStatus::Loading => Some("Loading saved teams…"),
+        KitStatus::Error => Some("Could not load saved teams. Retry to refresh."),
+        _ => None,
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -4369,6 +4610,52 @@ impl Composer {
                                 .truncate()
                                 .text_caption()
                                 .child(detail),
+                        )
+                        .into_any_element()
+                }
+                Suggestion::Team {
+                    name,
+                    recipients,
+                    detail,
+                    disabled,
+                    ..
+                } => {
+                    // Up to four agents, then "+N" (`TeamMentionAvatars`).
+                    let avatars = div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(4.))
+                        .children(recipients.iter().take(4).map(|(_, name, picture)| {
+                            let mut avatar =
+                                Avatar::new(name.clone()).size(AvatarSize::Small).squircle();
+                            if let Some(picture) = picture {
+                                avatar = avatar.image(media::avatar(picture, &media));
+                            }
+                            avatar
+                        }))
+                        .when(recipients.len() > 4, |d| {
+                            d.child(
+                                div()
+                                    .text_caption()
+                                    .text_color(c.text_subtle)
+                                    .child(format!("+{}", recipients.len() - 4)),
+                            )
+                        });
+                    row.h(px(48.))
+                        .p(px(8.))
+                        .when(*disabled, |d| d.cursor_default().text_color(c.text_subtle))
+                        .child(avatars)
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .max_w(px(200.))
+                                .truncate()
+                                .text_caption()
+                                .text_color(c.text_subtle)
+                                .child(detail.clone()),
                         )
                         .into_any_element()
                 }

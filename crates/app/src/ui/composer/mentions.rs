@@ -57,6 +57,8 @@ pub struct Inputs<'a> {
     pub origin: Option<&'a buzz_relay_client::RelayOrigin>,
     pub presence: &'a HashMap<String, PresenceState>,
     pub history: &'a HashMap<String, u64>,
+    /// Saved team names, which also make a query a search.
+    pub teams: &'a [String],
 }
 
 /// Whether people outside the channel can be found: not in sessions.
@@ -151,7 +153,9 @@ pub fn complete(inputs: &Inputs, query: &str, directory: Directory) -> Completio
                 .chain(std::iter::once(c.label.as_str()))
         })
         .collect();
-    let admitted = mention_rules::admitted(query, &all_names);
+    let teams: Vec<&str> = inputs.teams.iter().map(String::as_str).collect();
+    let admitted = mention_rules::admitted(query, &all_names)
+        || (!teams.is_empty() && mention_rules::admitted(query, &teams));
     if !admitted && !searching && !failed && inputs.roster_ready {
         return Completion {
             people: Vec::new(),
@@ -217,6 +221,107 @@ pub fn complete(inputs: &Inputs, query: &str, directory: Directory) -> Completio
         space,
         closed: false,
     }
+}
+
+/// A saved team row (`useTeamMentions`): a shortcut to its agents, never
+/// a new identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TeamRow {
+    pub id: String,
+    pub name: String,
+    /// The agents a pick adds, in the team's order.
+    pub recipients: Vec<String>,
+    /// Why it cannot be picked, shown as its detail.
+    pub disabled: Option<&'static str>,
+    pub detail: String,
+}
+
+/// Saved teams matching `query`, by name then id, at most 20. `eligible`
+/// says whether the draft may address a key (`mentionCandidates`), and
+/// `member` whether it is in the conversation.
+pub fn team_rows(
+    teams: &[(String, String, Vec<String>)],
+    query: &str,
+    ready: bool,
+    channel: Option<&ChannelSummary>,
+    eligible: impl Fn(&str) -> bool,
+    member: impl Fn(&str) -> bool,
+) -> Vec<TeamRow> {
+    let mut matching: Vec<&(String, String, Vec<String>)> = teams
+        .iter()
+        .filter(|(id, name, _)| {
+            let choice = Choice {
+                key: id.clone(),
+                name: name.clone(),
+                label: name.clone(),
+                aliases: vec![name.clone()],
+                agent: true,
+                owned: true,
+                ..Default::default()
+            };
+            mention_rules::mention_match(&choice, query) != u32::MAX
+        })
+        .collect();
+    matching.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    matching.truncate(20);
+    matching
+        .into_iter()
+        .map(|(id, name, agents)| {
+            let recipients: Vec<String> =
+                agents.iter().filter(|key| eligible(key)).cloned().collect();
+            let disabled = if !ready {
+                Some("Team changed or unavailable. Reopen to refresh.")
+            } else if agents.is_empty() {
+                Some("This team has no agents.")
+            } else if agents.len() > 32 {
+                Some("Teams can mention at most 32 agents.")
+            } else if recipients.len() != agents.len() {
+                Some("A team member is unavailable. Edit the team or refresh choices.")
+            } else {
+                None
+            };
+            let outside = recipients.iter().filter(|key| !member(key)).count();
+            let consequence = match channel.and_then(|c| c.channel_type) {
+                _ if outside == 0 => String::new(),
+                Some(ChannelType::Dm) => format!("{outside} not in DM · Will not be notified"),
+                Some(ChannelType::Session) => {
+                    let parent = channel.is_some_and(|c| c.parent_channel_id.is_some());
+                    format!(
+                        "Adds {outside} to session{} when you send",
+                        if parent { " and parent channel" } else { "" }
+                    )
+                }
+                _ => format!("{outside} not in channel · Choose whether to add when you send"),
+            };
+            let detail = match disabled {
+                Some(reason) => reason.to_string(),
+                None => [
+                    format!("Saved team · {} agents", recipients.len()),
+                    consequence,
+                ]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · "),
+            };
+            TeamRow {
+                id: id.clone(),
+                name: name.clone(),
+                recipients,
+                disabled,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// A saved team with this name, or one that continues it, keeps Space
+/// from picking a person (`blocksSpace`).
+pub fn teams_block_space(names: &[String], query: &str) -> bool {
+    let needle = mention_rules::normalize_name(query);
+    names.iter().any(|name| {
+        mention_rules::normalize_name(name) == needle || mention_rules::extends_name(name, &needle)
+    })
 }
 
 /// Explicit picks per channel, newest highest, for 100 channels of 100
@@ -314,6 +419,7 @@ mod tests {
             origin: None,
             presence: &presence,
             history: &history,
+            teams: &[],
         };
         let found = vec![alice.clone()];
         let done = complete(
@@ -374,5 +480,54 @@ mod tests {
         let picks = history.get("c");
         assert!(picks["b"] > picks["a"]);
         assert!(history.get("other").is_empty());
+    }
+
+    #[test]
+    fn teams_match_by_name_and_explain_what_blocks_them() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let teams = vec![
+            (
+                "t2".to_string(),
+                "Reviewers".to_string(),
+                vec![a.clone(), b.clone()],
+            ),
+            (
+                "t1".to_string(),
+                "Release crew".to_string(),
+                vec![a.clone()],
+            ),
+            ("t3".to_string(), "Empty".to_string(), Vec::new()),
+        ];
+        let channel = ChannelSummary {
+            id: "c".into(),
+            channel_type: Some(ChannelType::Stream),
+            members: vec![a.clone()],
+            ..Default::default()
+        };
+        let member = |key: &str| key == a;
+        let rows = team_rows(&teams, "re", true, Some(&channel), |_| true, member);
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["Release crew", "Reviewers"]);
+        assert_eq!(rows[0].detail, "Saved team · 1 agents");
+        assert_eq!(
+            rows[1].detail,
+            "Saved team · 2 agents · 1 not in channel · Choose whether to add when you send"
+        );
+        let only_a = |key: &str| key == a;
+        let rows = team_rows(&teams, "rev", true, Some(&channel), only_a, member);
+        assert_eq!(
+            rows[0].disabled,
+            Some("A team member is unavailable. Edit the team or refresh choices.")
+        );
+        let rows = team_rows(&teams, "empty", true, Some(&channel), only_a, member);
+        assert_eq!(rows[0].disabled, Some("This team has no agents."));
+        let rows = team_rows(&teams, "rev", false, Some(&channel), only_a, member);
+        assert_eq!(
+            rows[0].disabled,
+            Some("Team changed or unavailable. Reopen to refresh.")
+        );
+        let names: Vec<String> = teams.iter().map(|(_, name, _)| name.clone()).collect();
+        assert!(teams_block_space(&names, "release"));
+        assert!(!teams_block_space(&names, "rel"));
     }
 }

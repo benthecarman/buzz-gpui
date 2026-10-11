@@ -4,7 +4,7 @@
 //! the directory search's status.
 
 use super::mention_rules;
-use super::{Composer, media};
+use super::{Composer, Suggestion, media};
 use buzz_relay_client::ChannelType;
 use buzz_ui::{ActiveTheme, Avatar, AvatarSize, Button, SearchField, Surface, TypeStyled};
 use gpui_kit::component::input::{InlineToken, InputEvent, InputState, MoveDown, MoveUp};
@@ -62,7 +62,34 @@ impl Composer {
             _subscription: subscription,
         });
         self.search_people("", cx);
+        self.watch_teams(cx);
         cx.notify();
+    }
+
+    /// The picker's saved teams for `query`, and the catalog's status line.
+    fn picker_teams(&self, query: &str, cx: &App) -> (Vec<Suggestion>, Option<&'static str>) {
+        let (teams, catalog) = self.saved_teams(cx);
+        (
+            self.team_suggestions(&teams, catalog, query, cx),
+            super::teams_status(catalog),
+        )
+    }
+
+    /// The teams the keyboard can choose: the enabled ones.
+    fn picker_team_choices(&self, query: &str, cx: &App) -> Vec<Suggestion> {
+        self.picker_teams(query, cx)
+            .0
+            .into_iter()
+            .filter(|team| {
+                matches!(
+                    team,
+                    Suggestion::Team {
+                        disabled: false,
+                        ..
+                    }
+                )
+            })
+            .collect()
     }
 
     fn picker_query(&self, cx: &App) -> String {
@@ -81,11 +108,24 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         let query = self.picker_query(cx);
-        let found = self.mention_choices(&query, cx);
+        let found = self.mention_choices(&query, &[], cx);
         let Some(picker) = &self.mention_picker else {
             return;
         };
-        let Some(person) = found.people.get(index.unwrap_or(picker.selected)).cloned() else {
+        let index = index.unwrap_or(picker.selected);
+        let Some(person) = found.people.get(index).cloned() else {
+            // After the people come the enabled saved teams.
+            let teams = self.picker_team_choices(&query, cx);
+            if self.editing.is_some() {
+                return;
+            }
+            if let Some(Suggestion::Team { recipients, .. }) =
+                teams.into_iter().nth(index - found.people.len())
+                && self.insert_team(&recipients, None, window, cx)
+            {
+                self.mention_picker = None;
+            }
+            cx.notify();
             return;
         };
         if self.editing.is_none() {
@@ -133,10 +173,9 @@ impl Composer {
     }
 
     fn move_picker(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self
-            .mention_choices(&self.picker_query(cx), cx)
-            .people
-            .len();
+        let query = self.picker_query(cx);
+        let count = self.mention_choices(&query, &[], cx).people.len()
+            + self.picker_team_choices(&query, cx).len();
         if let Some(picker) = &mut self.mention_picker
             && count > 0
         {
@@ -150,7 +189,7 @@ impl Composer {
         let picker = self.mention_picker.as_ref()?;
         let c = *cx.colors();
         let query = picker.search.read(cx).value().to_string();
-        let found = self.mention_choices(&query, cx);
+        let found = self.mention_choices(&query, &[], cx);
         let community = self.community.read(cx);
         let channel = community
             .snapshot
@@ -237,7 +276,87 @@ impl Composer {
                     this.choose_from_picker(Some(index), window, cx)
                 }))
         });
-        let empty = !members.is_empty() && found.people.is_empty() && !searching;
+        // Saved teams after the people; only enabled ones take the keyboard.
+        let (teams, team_status) = self.picker_teams(&query, cx);
+        let people = found.people.len();
+        let mut next = people;
+        let team_rows: Vec<AnyElement> = teams
+            .iter()
+            .enumerate()
+            .filter_map(|(row, team)| {
+                let Suggestion::Team {
+                    name,
+                    recipients,
+                    detail,
+                    disabled,
+                } = team
+                else {
+                    return None;
+                };
+                let index = (!*disabled).then(|| {
+                    next += 1;
+                    next - 1
+                });
+                let avatars = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.))
+                    .children(recipients.iter().take(4).map(|(_, name, picture)| {
+                        let mut avatar =
+                            Avatar::new(name.clone()).size(AvatarSize::Small).squircle();
+                        if let Some(picture) = picture {
+                            avatar = avatar.image(media::avatar(picture, &media));
+                        }
+                        avatar
+                    }))
+                    .when(recipients.len() > 4, |d| {
+                        d.child(
+                            div()
+                                .text_caption()
+                                .text_color(c.text_subtle)
+                                .child(format!("+{}", recipients.len() - 4)),
+                        )
+                    });
+                let selected = index == Some(picker.selected);
+                Some(
+                    div()
+                        .id(SharedString::from(format!("mention-team-{row}")))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(8.))
+                        .min_h(px(32.))
+                        .p(px(8.))
+                        .rounded(px(8.))
+                        .when(*disabled, |d| d.text_color(c.text_subtle))
+                        .when(selected, |d| d.bg(c.affordance_floating_selected))
+                        .when_some(index.filter(|_| !selected), |d, _| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(c.affordance_floating_hover))
+                        })
+                        .child(avatars)
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .max_w(px(180.))
+                                .text_caption()
+                                .text_color(c.text_subtle)
+                                .child(detail.clone()),
+                        )
+                        .when_some(index, |d, index| {
+                            d.on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose_from_picker(Some(index), window, cx)
+                            }))
+                        })
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        let empty =
+            !members.is_empty() && found.people.is_empty() && teams.is_empty() && !searching;
         let content = div()
             .flex()
             .flex_col()
@@ -269,6 +388,25 @@ impl Composer {
                 found.status == Some("Channel membership unavailable."),
                 |d| d.child(caption("Channel membership unavailable.")),
             )
+            .when_some(team_status, |d, status| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(caption(status))
+                        .when(status.starts_with("Could not"), |d| {
+                            d.child(
+                                Button::new("retry-mention-teams", "Retry teams")
+                                    .surface(Surface::Floating)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.retry_completion(super::channels::Retry::Teams, cx)
+                                    })),
+                            )
+                        }),
+                )
+            })
             .child(
                 div()
                     .id("mention-choices")
@@ -279,6 +417,7 @@ impl Composer {
                     .gap(px(4.))
                     .overflow_y_scroll()
                     .children(rows)
+                    .children(team_rows)
                     .when(
                         found.status == Some("Narrow your search to see more members."),
                         |d| d.child(caption("Narrow your search to see more members.")),

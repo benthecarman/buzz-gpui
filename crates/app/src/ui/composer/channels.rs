@@ -55,6 +55,8 @@ pub enum Retry {
     People,
     /// The community's custom emoji catalog.
     Emoji,
+    /// The saved teams (the channel kit).
+    Teams,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
