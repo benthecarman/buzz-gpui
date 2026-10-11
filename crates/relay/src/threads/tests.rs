@@ -1796,3 +1796,209 @@ fn exact_seeded_tombstones_keep_a_deleted_target_hidden() {
     assert_eq!(snapshot.target_status, Some(TargetStatus::Unavailable));
     assert!(snapshot.target.is_none());
 }
+
+// ----- retargeting an open thread -----
+
+/// A legacy thread opened on its root, with two replies loaded.
+fn opened() -> (Fx, Verified, Verified, Verified, ThreadState) {
+    let (fx, root) = legacy();
+    let first = fx.reply(&root, "First", 2);
+    let second = fx.reply(&root, "Second", 3);
+    let mut state = fx.state(root.id, false, Some(&root));
+    let read = state.refresh().unwrap();
+    let page = [root.clone(), first.clone(), second.clone()];
+    assert!(step(&mut state, read, &page).is_none());
+    (fx, root, first, second, state)
+}
+
+/// Answers a retarget's reads until it ends.
+fn answer(
+    state: &mut ThreadState,
+    mut read: ThreadRead,
+    respond: impl Fn(ReadStep) -> Vec<Verified>,
+) -> Retarget {
+    loop {
+        let completion = state.complete(read.token, ok(&respond(read.step)));
+        state.receive(&completion.admit);
+        if let Some(outcome) = completion.retarget {
+            assert!(completion.next.is_none());
+            return outcome;
+        }
+        read = completion.next.expect("the retarget's next read");
+    }
+}
+
+#[test]
+fn retarget_selects_within_the_thread_without_reloading_it() {
+    let (fx, root, first, second, mut state) = opened();
+    let read = state.retarget(first.id).unwrap();
+    assert_eq!(read.step, ReadStep::Target);
+    assert!(state.selecting() && !state.loading());
+    let completion = state.complete(read.token, ok(std::slice::from_ref(&first)));
+    let overlays = completion.next.unwrap();
+    assert_eq!(overlays.step, ReadStep::Overlays);
+    // Nothing is selected until the target's overlays have folded.
+    assert!(state.snapshot().target.is_none());
+    let edit = fx.aux(40003, &first, "Edited first", 4);
+    let completion = state.complete(overlays.token, ok(std::slice::from_ref(&edit)));
+    let tombstones = completion.next.unwrap();
+    assert_eq!(tombstones.step, ReadStep::Tombstones);
+    assert!(state.snapshot().target.is_none());
+    let completion = state.complete(tombstones.token, ok(&[]));
+    assert_eq!(completion.retarget, Some(Retarget::Selected));
+    assert!(completion.admit.iter().any(|event| event.id == edit.id));
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.status, ThreadStatus::Ready);
+    assert_eq!(snapshot.target_status, Some(TargetStatus::Ready));
+    assert_eq!(snapshot.target.as_ref().unwrap().content, "Edited first");
+    assert_eq!(snapshot.root.as_ref().unwrap().id, root.id);
+    assert_eq!(reply_ids(&snapshot), [first.id, second.id]);
+    assert!(!state.loading() && !state.selecting());
+    assert_eq!((state.message_id(), state.exact()), (&first.id, true));
+
+    // Again, from an exact selection.
+    let read = state.retarget(second.id).unwrap();
+    let outcome = answer(&mut state, read, |step| match step {
+        ReadStep::Target => vec![second.clone()],
+        _ => Vec::new(),
+    });
+    assert_eq!(outcome, Retarget::Selected);
+    assert_eq!(state.snapshot().target.as_ref().unwrap().id, second.id);
+    // A later repair reads the new target.
+    assert_eq!(state.refresh().unwrap().step, ReadStep::Target);
+}
+
+#[test]
+fn retarget_leaves_the_view_as_it_was_when_the_message_cannot_be_selected() {
+    let (fx, root, first, _, mut state) = opened();
+    let elsewhere = fx.message("Other root", 5, &[]);
+    let other = fx.reply(&elsewhere, "Other reply", 6);
+    let before = reply_ids(&state.snapshot());
+    let unchanged = |state: &ThreadState| {
+        assert!(!state.selecting());
+        assert_eq!((state.message_id(), state.exact()), (&root.id, false));
+        assert_eq!(reply_ids(&state.snapshot()), before);
+        assert!(state.snapshot().target.is_none());
+    };
+    for (id, response, expected) in [
+        (other.id, vec![other.clone()], Retarget::Different),
+        (elsewhere.id, vec![elsewhere.clone()], Retarget::Different),
+        (first.id, Vec::new(), Retarget::Unavailable),
+    ] {
+        let read = state.retarget(id).unwrap();
+        let completion = state.complete(read.token, ok(&response));
+        assert_eq!(completion.retarget, Some(expected));
+        unchanged(&state);
+    }
+    let read = state.retarget(first.id).unwrap();
+    let offline = Err(error(ReadErrorKind::Unavailable, "offline"));
+    let completion = state.complete(read.token, offline);
+    assert_eq!(completion.retarget, Some(Retarget::Error));
+    unchanged(&state);
+
+    // A deleted message is unavailable; its tombstone is kept, and so is
+    // the earlier selection.
+    let deletion = fx.aux(5, &first, "", 7);
+    let read = state.retarget(first.id).unwrap();
+    let outcome = answer(&mut state, read, |step| match step {
+        ReadStep::Target => vec![first.clone()],
+        ReadStep::Overlays => vec![deletion.clone()],
+        _ => Vec::new(),
+    });
+    assert_eq!(outcome, Retarget::Unavailable);
+    assert_eq!((state.message_id(), state.exact()), (&root.id, false));
+    assert!(!reply_ids(&state.snapshot()).contains(&first.id));
+
+    // Without a verified root, nothing is known to share it.
+    let mut unread = fx.state(root.id, false, None);
+    assert!(matches!(
+        unread.retarget(first.id),
+        Err(Retarget::Different)
+    ));
+}
+
+#[test]
+fn a_newer_retarget_wins_and_runs_beside_paging() {
+    let (_, root, first, second, mut state) = opened();
+    let older = state.retarget(first.id).unwrap();
+    let newer = state.retarget(second.id).unwrap();
+    let completion = state.complete(older.token, ok(std::slice::from_ref(&first)));
+    assert!(completion.retarget.is_none() && completion.next.is_none());
+    // A repair starts beside the selection; neither interrupts the other.
+    let repair = state.refresh().unwrap();
+    let outcome = answer(&mut state, newer, |step| match step {
+        ReadStep::Target => vec![second.clone()],
+        _ => Vec::new(),
+    });
+    assert_eq!(outcome, Retarget::Selected);
+    assert!(state.loading());
+    assert_eq!(state.snapshot().status, ThreadStatus::Loading);
+    let page = [root.clone(), first.clone(), second.clone()];
+    assert!(step(&mut state, repair, &page).is_none());
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.status, ThreadStatus::Ready);
+    assert_eq!(snapshot.target.as_ref().unwrap().id, second.id);
+
+    // A failed selection leaves a pending repair to finish.
+    let repair = state.refresh().unwrap();
+    let read = state.retarget(first.id).unwrap();
+    let offline = Err(error(ReadErrorKind::Unavailable, "offline"));
+    let completion = state.complete(read.token, offline);
+    assert_eq!(completion.retarget, Some(Retarget::Error));
+    assert!(state.loading());
+    let next = step(&mut state, repair, std::slice::from_ref(&second)).unwrap();
+    let next = step(&mut state, next, &[]).unwrap();
+    assert!(step(&mut state, next, &page).is_none());
+    assert_eq!(state.snapshot().status, ThreadStatus::Ready);
+    assert_eq!(state.snapshot().target.as_ref().unwrap().id, second.id);
+}
+
+#[test]
+fn a_retarget_during_an_exact_repair_keeps_its_selection() {
+    let (fx, root, reply) = exact();
+    let other = fx.reply(&root, "Other reply", 10_001);
+    let mut state = fx.state(reply.id, true, None);
+    let page = target_read(&mut state, &reply, &[]).unwrap();
+    let thread = [root.clone(), reply.clone(), other.clone()];
+    step(&mut state, page, &thread);
+    let repair = state.refresh().unwrap();
+    assert_eq!(repair.step, ReadStep::Target);
+    let read = state.retarget(other.id).unwrap();
+    let outcome = answer(&mut state, read, |step| match step {
+        ReadStep::Target => vec![other.clone()],
+        _ => Vec::new(),
+    });
+    assert_eq!(outcome, Retarget::Selected);
+    // The repair's late read of the old target neither reselects it nor
+    // hides the new one; the thread is still read.
+    let page = step(&mut state, repair, std::slice::from_ref(&reply)).unwrap();
+    assert_eq!(page.step, ReadStep::Legacy);
+    assert!(step(&mut state, page, &thread).is_none());
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.target_status, Some(TargetStatus::Ready));
+    assert_eq!(snapshot.target.as_ref().unwrap().id, other.id);
+}
+
+#[test]
+fn access_loss_or_a_clear_cancels_a_retarget() {
+    for clear in [false, true] {
+        let (_, root, first, _, mut state) = opened();
+        let read = state.retarget(first.id).unwrap();
+        if clear {
+            state.clear();
+        } else {
+            state.revoke();
+        }
+        assert!(!state.selecting());
+        let completion = state.complete(read.token, ok(std::slice::from_ref(&first)));
+        assert!(completion.retarget.is_none() && completion.next.is_none());
+        assert_eq!(state.message_id(), &root.id);
+    }
+    let (_, _, first, _, mut state) = opened();
+    let read = state.retarget(first.id).unwrap();
+    let denied = Err(error(ReadErrorKind::Denied, "denied"));
+    let completion = state.complete(read.token, denied);
+    assert!(completion.denied);
+    assert_eq!(completion.retarget, Some(Retarget::Cancelled));
+    assert!(matches!(state.retarget(first.id), Err(Retarget::Cancelled)));
+}

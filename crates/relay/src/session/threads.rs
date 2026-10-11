@@ -5,10 +5,12 @@ use crate::Events;
 use crate::event::Verified;
 use crate::fold::LocalDelivery;
 use crate::reader::{ReadError, ReadErrorKind};
-use crate::threads::{ThreadConfig, ThreadRead, ThreadSnapshot, ThreadState, thread_authority};
+use crate::threads::{
+    Retarget, ThreadConfig, ThreadRead, ThreadSnapshot, ThreadState, thread_authority,
+};
 use nostr::prelude::{EventId, PublicKey};
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Thread views one session may own.
 const MAX_THREAD_VIEWS: usize = 64;
@@ -27,6 +29,19 @@ impl ThreadView {
 
     pub fn refresh(&self) {
         let _ = self.commands.send(Message::ThreadRefresh(self.id));
+    }
+
+    /// Selects `message` in this open thread without reloading it
+    /// ([`ThreadState::retarget`]). The snapshot is published before the
+    /// outcome arrives. A later call, access loss, a cache clear or
+    /// closing the view answers [`Retarget::Cancelled`].
+    pub fn retarget(&self, message: EventId) -> oneshot::Receiver<Retarget> {
+        let (reply, outcome) = oneshot::channel();
+        let id = self.id;
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            actor.thread_retarget(id, message, reply)
+        })));
+        outcome
     }
 
     /// Reports what the panel shows, as [`super::ChannelView::viewport`]
@@ -53,6 +68,8 @@ pub(super) struct OpenThread {
     pub state: ThreadState,
     pub channel: String,
     view: watch::Sender<Arc<ThreadSnapshot>>,
+    /// Answers the retarget in flight.
+    retarget: Option<oneshot::Sender<Retarget>>,
 }
 
 impl OpenThread {
@@ -62,8 +79,20 @@ impl OpenThread {
     }
 
     fn publish(&mut self) {
+        self.settle(None);
+    }
+
+    /// Publishes, then answers the retarget in flight with `outcome`, or
+    /// as cancelled once the state dropped it.
+    fn settle(&mut self, outcome: Option<Retarget>) {
         if let Some(snapshot) = self.state.take_snapshot() {
             self.view.send_replace(snapshot);
+        }
+        let outcome = outcome.or_else(|| (!self.state.selecting()).then_some(Retarget::Cancelled));
+        if let Some(outcome) = outcome
+            && let Some(reply) = self.retarget.take()
+        {
+            let _ = reply.send(outcome);
         }
     }
 }
@@ -143,6 +172,7 @@ impl Actor {
             state,
             channel,
             view,
+            retarget: None,
         };
         thread.publish();
         self.threads.insert(id, thread);
@@ -195,7 +225,7 @@ impl Actor {
             return;
         };
         let completion = thread.state.complete(token, result);
-        thread.publish();
+        thread.settle(completion.retarget);
         if completion.denied {
             if let Some(discovery) = &mut self.discovery {
                 discovery.deny(channel);
@@ -208,6 +238,38 @@ impl Actor {
         }
         if let Some(next) = completion.next {
             self.thread_read(id, next);
+        }
+    }
+
+    pub(super) fn thread_retarget(
+        &mut self,
+        id: u64,
+        message: EventId,
+        reply: oneshot::Sender<Retarget>,
+    ) {
+        let Some(thread) = self.threads.get_mut(&id) else {
+            let _ = reply.send(Retarget::Cancelled);
+            return;
+        };
+        let readable = self
+            .discovery
+            .as_ref()
+            .is_some_and(|discovery| discovery.can_access(&thread.channel));
+        if !readable {
+            let _ = reply.send(Retarget::Cancelled);
+            return;
+        }
+        match thread.state.retarget(message) {
+            Err(outcome) => {
+                let _ = reply.send(outcome);
+            }
+            Ok(read) => {
+                if let Some(earlier) = thread.retarget.replace(reply) {
+                    let _ = earlier.send(Retarget::Cancelled);
+                }
+                thread.publish();
+                self.thread_read(id, read);
+            }
         }
     }
 

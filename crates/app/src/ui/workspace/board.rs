@@ -16,7 +16,7 @@ use crate::ui::message::channel_icon;
 use crate::ui::pages::Page;
 use crate::ui::panels::{self, Close, Dock, TabItem};
 use crate::ui::thread::{self, ThreadPanel};
-use buzz_relay_client::{ChannelSummary, ChannelType};
+use buzz_relay_client::{ChannelSummary, ChannelType, Retarget};
 use buzz_ui::{ActiveTheme, IconName, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -365,9 +365,31 @@ impl Workspace {
                 this.record(cx);
             });
         });
-        let panel = cx.new(|cx| match target.exact {
-            true => ThreadPanel::exact(community, channel, target.root, on_close, window, cx),
-            false => ThreadPanel::new(community, channel, target.root, on_close, window, cx),
+        let weak = cx.entity().downgrade();
+        let on_selection: thread::OnSelection = Rc::new(move |message, outcome, window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                let target = ThreadTarget {
+                    root: message,
+                    exact: true,
+                };
+                match outcome {
+                    // The channel keeps the selection for its next visit.
+                    Retarget::Selected => {
+                        this.update_tabs(cx, |state| state.open_thread(target));
+                    }
+                    Retarget::Different => this.open_thread_tab(target, window, cx),
+                    _ => {}
+                }
+                cx.notify();
+            });
+        });
+        let panel = cx.new(|cx| {
+            let mut panel = match target.exact {
+                true => ThreadPanel::exact(community, channel, target.root, on_close, window, cx),
+                false => ThreadPanel::new(community, channel, target.root, on_close, window, cx),
+            };
+            panel.on_selection = Some(on_selection);
+            panel
         });
         // Media hook: a clip started in the replaced thread stops with it.
         if let Some(old) = &self.thread {
@@ -379,7 +401,6 @@ impl Workspace {
         })
         .detach();
         self.thread = Some(panel.clone());
-        self.thread_exact = target.exact;
         Some(panel)
     }
 

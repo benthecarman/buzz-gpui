@@ -380,6 +380,21 @@ async fn opens_a_thread_with_its_replies() {
     for name in ["thread_reply_bob", "thread_reply_carol"] {
         assert!(replies.contains(&seed["events"][name].as_str().unwrap().to_string()));
     }
+
+    // Selecting a reply keeps the thread open on its rows; a message of
+    // another thread is left for a new view.
+    let event = |name: &str| -> nostr::prelude::EventId {
+        seed["events"][name].as_str().unwrap().parse().unwrap()
+    };
+    let reply = event("thread_reply_bob");
+    let outcome = view.retarget(reply).await.unwrap();
+    assert_eq!(outcome, Retarget::Selected);
+    let selected = thread.borrow().clone();
+    assert_eq!(selected.target.as_ref().unwrap().id, reply);
+    assert_eq!(selected.replies.len(), loaded.replies.len());
+    let elsewhere = view.retarget(event("bob_hi")).await.unwrap();
+    assert_eq!(elsewhere, Retarget::Different);
+    assert_eq!(thread.borrow().target.as_ref().unwrap().id, reply);
 }
 
 #[tokio::test(flavor = "multi_thread")]

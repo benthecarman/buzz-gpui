@@ -87,8 +87,6 @@ pub struct Workspace {
     /// The pending place is a conversation just opened, so it waits for
     /// the channel to be listed even once the roster has loaded.
     pending_listing: bool,
-    /// The thread panel reveals a message rather than showing a thread.
-    thread_exact: bool,
     /// Waits for the channel's first page to reveal a message in it.
     _revealing: Option<Subscription>,
     /// A routed channel the viewer has not joined, being looked up.
@@ -172,7 +170,6 @@ impl Workspace {
             history: History::default(),
             pending: None,
             pending_listing: false,
-            thread_exact: false,
             _revealing: None,
             resolving: None,
             failure: None,
@@ -468,12 +465,24 @@ impl Workspace {
             return;
         }
         if let Some(thread) = &self.thread
-            && thread.read(cx).root_id() == id
-            && self.thread_exact == exact
+            && thread.read(cx).message_id() == id
+            && thread.read(cx).is_exact() == exact
         {
             let thread = thread.clone();
             self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
             ThreadPanel::focus(&thread, window, cx);
+            return;
+        }
+        // A link into the open thread selects its message there, keeping
+        // the reply being written (`retainThread`); one into another
+        // thread comes back through `on_selection`.
+        if exact
+            && let Some(thread) = self.thread.clone()
+            && thread.read(cx).can_select()
+        {
+            self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
+            thread.update(cx, |thread, cx| thread.select(id, window, cx));
+            cx.notify();
             return;
         }
         self.open_thread_tab(ThreadTarget { root: id, exact }, window, cx);
@@ -731,11 +740,13 @@ impl Workspace {
         let place = match (self.page, &self.channel) {
             (Page::MESSAGES, Some(channel)) => {
                 let channel = channel.read(cx).channel_id().to_string();
-                let thread = self.thread.as_ref().map(|thread| thread.read(cx).root_id());
+                let thread = self.thread.as_ref().map(|thread| thread.read(cx));
+                let exact = thread.is_some_and(|thread| thread.is_exact());
+                let thread = thread.map(|thread| thread.message_id());
                 Place::Conversation {
                     channel,
                     message: thread,
-                    thread: thread.filter(|_| !self.thread_exact),
+                    thread: thread.filter(|_| !exact),
                     members: self.members_open(cx),
                 }
             }
@@ -774,7 +785,7 @@ impl Workspace {
                 // An exact panel's root is known once it loads.
                 thread
                     .loaded_root()
-                    .or((!self.thread_exact).then(|| thread.root_id()))
+                    .or((!thread.is_exact()).then(|| thread.message_id()))
             });
         Some(Conversation {
             community,

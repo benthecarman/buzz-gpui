@@ -102,8 +102,8 @@ pub use store::{
     Partition, SqliteJournal, SqliteReadJournal, SqliteThreadFollows, Store, StoreError,
 };
 pub use threads::{
-    Completion, TargetStatus, ThreadConfig, ThreadRead, ThreadSnapshot, ThreadState, ThreadStatus,
-    thread_authority, verify_thread_windows,
+    Completion, Retarget, TargetStatus, ThreadConfig, ThreadRead, ThreadSnapshot, ThreadState,
+    ThreadStatus, thread_authority, verify_thread_windows,
 };
 pub use unread::{
     AttentionStatus, Category, ChannelInfo, Freshness, InboxItem, InboxSnapshot, Manual,

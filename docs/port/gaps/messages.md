@@ -686,6 +686,7 @@ Rows: DONE 61, DIFFERENT 3.
 | Typed angle-bracket text shows as typed in messages, notification and inbox previews; complete HTML comments stay hidden; Linux banners escape markup only when the server takes `body-markup` (#803) | src/features/messages/MessageMarkdown.tsx; src/features/notifications/content.ts; src/features/relay/message-content.ts; ST/notifications/linux.rs | DONE (ui/markdown.rs, relay/src/fold/attachments.rs, app/src/notifications.rs, notifications/banners.rs) | — | S |
 | The outside-channel mention prompt defaults to Invite when you can add people (#825) | src/features/messages/useNonmemberMentions.tsx | DONE (ui/composer.rs) | — | S |
 | Compact clock shares the byline clock's formatting (#609) | src/shared/datetime.ts; src/features/messages/MessageTimestamp.tsx | DONE (ui/time.rs; output already matched, now pinned by a test) | — | S |
+| A link to another message of the open thread selects it in place, keeping the reply being written, its reply target, the scroll position and open branches. The message must name the thread's root in its own signed ancestry and its overlays fold before it shows; a newer link wins; a link into another thread still opens that thread; one that cannot open keeps the thread and notes "That message is no longer available." or "Couldn’t open that message." with Try again (#853, ported ahead of merge) | src/features/relay/threads.ts `retarget`; src/features/relay/session.ts; src/features/messages/ThreadPanel.tsx `RetainedThreadPanel` | DONE (relay/src/threads.rs `ThreadState::retarget`, relay/src/session/threads.rs `ThreadView::retarget`, app/src/ui/thread.rs `select`, ui/workspace.rs `show_thread`) | Only message links retain the panel: a thread-root link from a panel opened on a reply still rebuilds it, as history keeps no thread hint for a selected message. The PR's popover close fix has no counterpart: GPUI popovers keep no library hover state | M |
 
 ## Not counted: absent from buzz-app, or not applicable to a native app
 
@@ -705,6 +706,6 @@ These were checked so that nobody ports them by mistake. In each case the port a
 
 ## DONE count
 
-DONE: **347** of 360 rows (section 1: 60, section 2: 83, section 3: 68, section 4: 72, section 5: 61, section 6: 3). The first pass also counted DONE behaviours that are not listed.
+DONE: **348** of 361 rows (section 1: 60, section 2: 83, section 3: 68, section 4: 72, section 5: 61, section 6: 4). The first pass also counted DONE behaviours that are not listed.
 
-Status counts: MISSING 0, PARTIAL 0, DIFFERENT 10, SKIPPED 3, DONE 347.
+Status counts: MISSING 0, PARTIAL 0, DIFFERENT 10, SKIPPED 3, DONE 348.

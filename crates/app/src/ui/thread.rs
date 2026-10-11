@@ -14,7 +14,8 @@ use buzz_relay_client::fold::{MessageRow, ReplyTree};
 use buzz_relay_client::session::ThreadView;
 use buzz_relay_client::threads::{Direction, ReadKind};
 use buzz_relay_client::{
-    Media, Profiles, TargetStatus, ThreadSnapshot, ThreadStatus, UnreadDetail, UnreadWatch,
+    Media, Profiles, Retarget, TargetStatus, ThreadSnapshot, ThreadStatus, UnreadDetail,
+    UnreadWatch,
 };
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconName, PanelHeader, Tab, TabVariant,
@@ -53,6 +54,18 @@ fn max_indent(width: Pixels) -> usize {
 
 /// Asks the workspace to close the panel.
 pub type OnClose = Arc<dyn Fn(&mut Window, &mut App)>;
+/// Tells the host a link's message was selected in the panel, or belongs
+/// to another thread.
+pub type OnSelection = Rc<dyn Fn(EventId, Retarget, &mut Window, &mut App)>;
+
+/// A same-thread link that could not open; the thread stays usable.
+struct SelectionFailure {
+    message: EventId,
+    /// Gone for good, so Try again would not help.
+    unavailable: bool,
+    /// Try again is running.
+    pending: bool,
+}
 
 /// A reply just sent, kept in sight once it lands.
 struct Sent {
@@ -75,6 +88,8 @@ pub struct ThreadPanel {
     viewer: String,
     channel: String,
     root_id: EventId,
+    /// Opened on any message, revealed in its thread.
+    exact: bool,
     view: ThreadView,
     snapshot: Arc<ThreadSnapshot>,
     entries: Vec<Entry>,
@@ -99,6 +114,13 @@ pub struct ThreadPanel {
     pub require_ready_root: bool,
     /// Exact mode: the message to reveal once its thread has loaded.
     revealing: Option<EventId>,
+    /// A link's message being selected in this thread, then the one
+    /// selected (`RetainedThreadPanel`).
+    requested: Option<EventId>,
+    selected: Option<EventId>,
+    selection_failure: Option<SelectionFailure>,
+    pub on_selection: Option<OnSelection>,
+    _selecting: Option<Task<()>>,
     /// The panel, focused when it opens; focus here (the history or the
     /// composer) is reading.
     focus: FocusHandle,
@@ -208,9 +230,8 @@ impl ThreadPanel {
             cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
             cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
         ];
-        if exact {
-            subscriptions.push(cx.observe_self(|this, cx| this.reveal_target(cx)));
-        }
+        // A selected message is revealed once its thread has loaded.
+        subscriptions.push(cx.observe_self(|this, cx| this.reveal_target(cx)));
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
             if event.visible_range.start < LOAD_OLDER_WITHIN && event.is_scrolled {
@@ -231,6 +252,7 @@ impl ThreadPanel {
             viewer,
             channel,
             root_id,
+            exact,
             view,
             snapshot,
             entries: Vec::new(),
@@ -246,6 +268,11 @@ impl ThreadPanel {
             show_header: false,
             require_ready_root: false,
             revealing: exact.then_some(root_id),
+            requested: None,
+            selected: None,
+            selection_failure: None,
+            on_selection: None,
+            _selecting: None,
             focus,
             reporter: Reporter::default(),
             jump: Jump::default(),
@@ -273,11 +300,100 @@ impl ThreadPanel {
         actions.update(cx, |actions, cx| actions.set_presented(presented, cx));
     }
 
-    pub fn root_id(&self) -> EventId {
-        self.root_id
+    /// The message the panel shows: the one it opened on, or one a link
+    /// selected in it since, from the moment it was asked for.
+    pub fn message_id(&self) -> EventId {
+        self.requested.or(self.selected).unwrap_or(self.root_id)
     }
 
-    /// The thread's root once it has loaded; in exact mode [`Self::root_id`]
+    /// The panel shows [`message_id`](Self::message_id) as any message
+    /// revealed in its thread, not as the thread's root.
+    pub fn is_exact(&self) -> bool {
+        self.exact || self.requested.is_some() || self.selected.is_some()
+    }
+
+    /// A link may select a message here: the thread's root has loaded.
+    pub fn can_select(&self) -> bool {
+        self.snapshot.root.is_some()
+    }
+
+    /// Selects `message` without rebuilding the panel, so the reply being
+    /// written, its target, the scroll position and the open branches all
+    /// stay (`RetainedThreadPanel`). The session first verifies that the
+    /// message belongs to this thread; one of another thread goes to
+    /// [`on_selection`](Self::on_selection), and one that cannot open
+    /// leaves a notice with the thread as it was.
+    pub fn select(&mut self, message: EventId, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_selection(message, false, window, cx);
+    }
+
+    /// With `retry`, the failure notice stays, its Try again busy, until
+    /// the new attempt ends.
+    fn start_selection(
+        &mut self,
+        message: EventId,
+        retry: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &mut self.selection_failure {
+            Some(failure) if retry => failure.pending = true,
+            _ => self.selection_failure = None,
+        }
+        self.requested = Some(message);
+        let outcome = self.view.retarget(message);
+        self._selecting = Some(cx.spawn_in(window, async move |this, cx| {
+            let outcome = outcome.await.unwrap_or(Retarget::Cancelled);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.selection_ended(message, outcome, window, cx)
+            });
+        }));
+        cx.notify();
+    }
+
+    fn selection_ended(
+        &mut self,
+        message: EventId,
+        outcome: Retarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.requested = None;
+        match outcome {
+            Retarget::Selected => {
+                self.selection_failure = None;
+                self.selected = Some(message);
+                // The session published the new fold before answering.
+                self.snapshot = self.view.snapshot.borrow().clone();
+                self.snapshot_changed();
+                self.revealing = Some(message);
+                self.reveal_target(cx);
+                window.focus(&self.focus, cx);
+            }
+            Retarget::Different => self.selection_failure = None,
+            outcome => {
+                self.selection_failure = Some(SelectionFailure {
+                    message,
+                    unavailable: outcome == Retarget::Unavailable,
+                    pending: false,
+                });
+            }
+        }
+        if matches!(outcome, Retarget::Selected | Retarget::Different)
+            && let Some(on_selection) = self.on_selection.clone()
+        {
+            on_selection(message, outcome, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn retry_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(message) = self.selection_failure.as_ref().map(|f| f.message) {
+            self.start_selection(message, true, window, cx);
+        }
+    }
+
+    /// The thread's root once it has loaded; in exact mode [`Self::message_id`]
     /// may be a reply.
     pub fn loaded_root(&self) -> Option<EventId> {
         self.snapshot.root.as_ref().map(|root| root.id)
@@ -1030,7 +1146,13 @@ impl Render for ThreadPanel {
         if snapshot.status == ThreadStatus::Loading && self.entries.is_empty() {
             status.push(note("Loading thread…".into()).into_any_element());
         }
-        let unavailable = snapshot.target_status == Some(TargetStatus::Unavailable);
+        // A failed link selection notes itself instead of the target.
+        let selection = self
+            .selection_failure
+            .as_ref()
+            .filter(|_| snapshot.error.is_none());
+        let unavailable =
+            snapshot.target_status == Some(TargetStatus::Unavailable) && selection.is_none();
         if unavailable {
             status.push(note("Selected message unavailable.".into()).into_any_element());
         }
@@ -1048,6 +1170,30 @@ impl Render for ThreadPanel {
                     .child(retry("retry-thread", false, cx))
                     .into_any_element(),
             );
+        }
+        if let Some(failure) = selection {
+            let text = match failure.unavailable {
+                true => "That message is no longer available.",
+                false => "Couldn’t open that message.",
+            };
+            status.push(note(text.into()).into_any_element());
+            // Retrying cannot bring back a message that no longer exists.
+            if !failure.unavailable {
+                status.push(
+                    div()
+                        .px(px(16.))
+                        .pb(px(12.))
+                        .child(
+                            Button::new("retry-selection", "Try again")
+                                .size(ButtonSize::Sm)
+                                .loading(failure.pending)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.retry_selection(window, cx)
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
         }
         // The older page's error shows with the replies; with none to show
         // it falls back here.
