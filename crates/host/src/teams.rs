@@ -75,16 +75,32 @@ impl AgentHost {
                             "Team no longer contains this member; refresh before deploying".into(),
                         );
                     }
+                    if agent.revision != revision {
+                        return Err("Agent changed; refresh before deploying".into());
+                    }
+                    // A GUI from before team text records: the team's text
+                    // reaches its members through the same sync, and teams
+                    // it leaves out keep theirs.
+                    let texts = BTreeMap::from([(team, instructions)]);
                     owner
                         .controller
-                        .reconcile_team_bindings(&community, &human, &teams)?;
-                    owner.controller.apply_team_instructions(
-                        &id,
-                        revision,
-                        &instructions,
-                        &human,
-                        (&team, &community),
-                    )?;
+                        .sync_team_instructions(&community, &human, &teams, &texts)?;
+                    owner.snapshot().map(Response::Agents)
+                })
+                .await
+            }
+            Request::TeamSync {
+                community,
+                owner: human,
+                teams,
+                texts,
+            } => {
+                self.run(move |owner| {
+                    let teams: BTreeMap<String, TeamCatalogEntry> =
+                        convert(&teams, "team catalog")?;
+                    owner
+                        .controller
+                        .sync_team_instructions(&community, &human, &teams, &texts)?;
                     owner.snapshot().map(Response::Agents)
                 })
                 .await
