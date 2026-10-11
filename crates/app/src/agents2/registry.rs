@@ -170,18 +170,28 @@ pub fn register_type(plugin: &str, kind: Arc<dyn AgentType>, cx: &mut App) -> Re
     Ok(())
 }
 
-/// Every registered type.
+/// Every registered type whose plugin is on. A plugin turned off takes its
+/// types with it, as unloading it does in buzz-app: its agents show their
+/// type as unavailable and stop running until it is back.
 pub fn types(cx: &App) -> Vec<RegisteredType> {
     cx.try_global::<AgentTypes>()
-        .map(|types| types.0.clone())
+        .map(|types| {
+            types
+                .0
+                .iter()
+                .filter(|registered| crate::plugins::enabled_key(&registered.key))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// The registered type with this key.
+/// The registered type with this key, while its plugin is on.
 pub fn type_of(key: &str, cx: &App) -> Option<RegisteredType> {
     cx.try_global::<AgentTypes>()?
         .0
         .iter()
         .find(|registered| registered.key == key)
+        .filter(|registered| crate::plugins::enabled_key(&registered.key))
         .cloned()
 }

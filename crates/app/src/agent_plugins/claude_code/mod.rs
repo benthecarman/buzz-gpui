@@ -64,6 +64,9 @@ pub fn init(cx: &mut App) {
         if let Some(agents) = Agents2::global(cx) {
             subscriptions.push(cx.observe(&agents, |this, _, cx| this.sync(cx)));
         }
+        subscriptions.push(
+            cx.observe_global::<crate::plugins::Plugins>(|this: &mut ClaudeCode, cx| this.sync(cx)),
+        );
         // Quitting stops every session's process, as buzz-app does on exit.
         subscriptions.push(cx.on_app_quit(|this: &mut ClaudeCode, cx| {
             let _runtime = Runtime::handle(cx).enter();
@@ -106,6 +109,13 @@ impl ClaudeCode {
         let Some(agents) = Agents2::global(cx) else {
             return;
         };
+        // Turning the plugin off stops every session, as unloading it does
+        // in buzz-app.
+        if !crate::plugins::enabled(PLUGIN) {
+            let _runtime = Runtime::handle(cx).enter();
+            self.runtime.dispose();
+            return;
+        }
         let agents = agents.read(cx);
         // Agents leaving view, the app signing out included, stop their
         // processes.
