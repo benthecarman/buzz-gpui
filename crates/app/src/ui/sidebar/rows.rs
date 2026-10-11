@@ -51,7 +51,7 @@ pub(super) fn typing_label(names: &[String]) -> String {
 }
 
 /// The viewer's own agents, from every connected host.
-fn own_agents(cx: &App) -> HashSet<String> {
+pub(crate) fn own_agents(cx: &App) -> HashSet<String> {
     cx.try_global::<crate::hosts::Hosts>()
         .map(|hosts| {
             hosts
@@ -65,7 +65,7 @@ fn own_agents(cx: &App) -> HashSet<String> {
 
 /// Agents working in a channel: the viewer's own agents typing at its top
 /// level (`working-agents.ts`; observer turns are not decoded here).
-pub(super) fn working_agents(
+pub(crate) fn working_agents(
     snapshot: &SessionSnapshot,
     channel: &str,
     own: &HashSet<String>,
@@ -81,6 +81,53 @@ pub(super) fn working_agents(
     agents.sort();
     agents.dedup();
     agents
+}
+
+/// The working indicator (`WorkingAgentsBadge`): a pill of pulsing dots
+/// naming the agents working in the conversation, in a tooltip where
+/// nothing covers it.
+pub(crate) fn working_badge(
+    id: &str,
+    agents: &[String],
+    profiles: &buzz_relay_client::Profiles,
+    channel_name: &str,
+    tooltip: bool,
+    cx: &App,
+) -> Option<AnyElement> {
+    if agents.is_empty() {
+        return None;
+    }
+    let c = cx.colors();
+    let names = agents
+        .iter()
+        .map(|agent| display_name(profiles, agent).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(
+        div()
+            .id(SharedString::from(format!("working-{id}")))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(26.))
+            .h(px(15.))
+            .rounded(radius::PILL)
+            .bg(c.affordance_subtle_hover)
+            .when(tooltip, |this| {
+                this.tooltip(Tooltip::text(format!("{names} working in {channel_name}")))
+            })
+            .child(pulsing_dots(
+                "working",
+                3.,
+                c.text_standard,
+                Duration::from_millis(1200),
+                0.08,
+                0.45,
+                2.,
+            ))
+            .into_any_element(),
+    )
 }
 
 /// Three dots pulsing in sequence: `period`, per-dot `delay`, opacity from
@@ -593,38 +640,14 @@ impl ChannelSidebar {
         if let Some(badge) = crate::ui::unread_badge::trailing(&id, &unread, dm, cx) {
             trailing.push(badge);
         }
-        if !agents.is_empty() {
-            let names = agents
-                .iter()
-                .map(|agent| display_name(profiles, agent).to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            trailing.push(
-                div()
-                    .id(SharedString::from(format!("working-{id}")))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(26.))
-                    .h(px(15.))
-                    .rounded(radius::PILL)
-                    .bg(c.affordance_subtle_hover)
-                    .tooltip(Tooltip::text(format!(
-                        "{names} working in {}",
-                        channel.name
-                    )))
-                    .child(pulsing_dots(
-                        "working",
-                        3.,
-                        c.text_standard,
-                        Duration::from_millis(1200),
-                        0.08,
-                        0.45,
-                        2.,
-                    ))
-                    .into_any_element(),
-            );
-        }
+        trailing.extend(working_badge(
+            &id,
+            &agents,
+            profiles,
+            &channel.name,
+            true,
+            cx,
+        ));
 
         let draggable = snapshot.sidebar.writable
             && snapshot.sidebar.data.is_some()

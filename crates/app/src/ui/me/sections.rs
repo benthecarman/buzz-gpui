@@ -1,6 +1,7 @@
 //! Me's sidebar (`me/MeSidebar.tsx`) and its grouped history
 //! (`sessions/SessionSections.tsx`): "New conversation", the viewer's Me
-//! groups, then "Conversations", each row with its actions menu.
+//! groups, then "Conversations", each row with its actions menu. Rows share
+//! the Messages sidebar's working indicator and activity popover.
 //!
 //! Groups and moves go through the Me groups store, which shows a move at
 //! once and keeps a failure until it is retried or dismissed.
@@ -482,6 +483,26 @@ impl MeSidebar {
             .map(|community| community.read(cx).snapshot.unread.channel(&id))
             .unwrap_or_default();
         let bold = !is_selected && unread.bold;
+        let community = self.community(cx);
+        let working = community.as_ref().map(|community| {
+            let snapshot = community.read(cx).snapshot.clone();
+            let own = crate::ui::sidebar::own_agents(cx);
+            let agents = crate::ui::agent_activity::with_observed(
+                crate::ui::sidebar::working_agents(&snapshot, &id, &own),
+                community,
+                &id,
+                cx,
+            );
+            let badge = crate::ui::sidebar::working_badge(
+                &id,
+                &agents,
+                &snapshot.profiles,
+                &channel.name,
+                false,
+                cx,
+            );
+            (snapshot, own, agents, badge)
+        });
         let open = id.clone();
         let (menu_id, menu_title, menu_section) =
             (id.clone(), channel.name.clone(), section.to_owned());
@@ -495,7 +516,7 @@ impl MeSidebar {
             let content = self.row_menu_content(cx);
             overlay::dropdown(window, Align::End, content, dismiss)
         });
-        div()
+        let row = div()
             .id(group.clone())
             .group(group.clone())
             .relative()
@@ -592,8 +613,76 @@ impl MeSidebar {
                             )
                             .children(dropdown),
                     ),
+            );
+        let Some((snapshot, own, agents, badge)) = working else {
+            return row.into_any_element();
+        };
+        // Working takes the actions button's slot, as in Messages, and
+        // gives way to the button on hover.
+        let row = match badge {
+            Some(badge) => row.child(
+                div()
+                    .absolute()
+                    .right(px(4.))
+                    .top_0()
+                    .bottom_0()
+                    .w(rems(2.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(menu_open, |this| this.opacity(0.))
+                    .group_hover(group, |s| s.opacity(0.))
+                    .child(badge),
+            ),
+            None => row,
+        };
+        let community = community.expect("working needs a community");
+        let media = community.read(cx).session.media().clone();
+        crate::ui::channel_activity::ActivityRow::new(&id, row)
+            .activity(
+                snapshot.unread.activity.get(&id).cloned(),
+                agents,
+                std::sync::Arc::new(own),
             )
+            .directory(snapshot.profiles.clone(), Some(media), Some(community))
+            .opens(self.opens())
             .into_any_element()
+    }
+
+    /// The activity popover's entries: messages and threads open in the
+    /// channel reader, as other Me links do; a working agent without a
+    /// message, and its activity, open in Me's conversation and its panels.
+    fn opens(&self) -> crate::ui::channel_activity::Opens {
+        let message = |channel: &str, id: &str, window: &mut Window, cx: &mut App| {
+            if let Ok(id) = buzz_relay_client::EventId::from_hex(id) {
+                let url = buzz_relay_client::message_link(channel, &id);
+                crate::ui::navigation::open_url(&url, window, cx);
+            }
+        };
+        let (agent_model, activity_model) = (self.model.downgrade(), self.model.downgrade());
+        crate::ui::channel_activity::Opens {
+            thread: Rc::new(message),
+            agent: Rc::new(move |channel, _, id, window, cx| match id {
+                Some(id) => message(channel, id, window, cx),
+                None => {
+                    let _ = agent_model.update(cx, |model, cx| {
+                        model.select(Selection::Session(channel.to_owned()), cx)
+                    });
+                }
+            }),
+            activity: Rc::new(move |channel, agent, _, cx| {
+                let _ = activity_model.update(cx, |model, cx| {
+                    model.update_tab_state(channel, cx, |state| {
+                        state.open_panel(crate::ui::channel_tabs::PanelTab {
+                            panel: crate::ui::agent_activity::PANEL,
+                            channel: channel.to_owned(),
+                            target: crate::agent_activity::target(agent, Some(channel), None),
+                        })
+                    });
+                    model.select(Selection::Session(channel.to_owned()), cx)
+                });
+            }),
+        }
     }
 
     /// The row actions (`SessionActionsMenu` content), with its submenu.
