@@ -105,4 +105,4 @@ its defaults are complete. The status is a quick check of the port only.
 ## Counts
 
 - Main table, 35 rows: DONE 26, SKIPPED (decided) 8, DIFFERENT 1 (`managed_npm.rs`: the port uses harnesses installed on PATH, by design).
-- Other slices' plugins, 12 rows: DONE 10, SKIPPED (decided) 1 (Composer lab), PARTIAL 1 (Profiles, whose instance list is channels.md's open row).
+- Other slices' plugins, 12 rows: DONE 11, SKIPPED (decided) 1 (Composer lab).

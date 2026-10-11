@@ -16,13 +16,12 @@ Audit date: 2026-10-09. Read-only audit of the main checkouts (`.claude/worktree
 | 1. Message rows, Markdown, links, embeds and diffs | 0 | 0 | 1 | 60 | 2 |
 | 2. Hover actions, menus, edit/delete/report, reactions, emoji and GIF pickers | 0 | 0 | 1 | 83 | 0 |
 | 3. Timeline, scrolling, unread, jump-to, threads, typing and search | 0 | 0 | 1 | 68 | 0 |
-| 4. Composer, autocomplete, formatting, attachments and voice recording | 0 | 1 | 4 | 71 | 1 |
+| 4. Composer, autocomplete, formatting, attachments and voice recording | 0 | 0 | 4 | 72 | 1 |
 | 5. Rendered attachments, media viewer, audio/video and voice-note playback | 0 | 0 | 3 | 61 | 0 |
-| **Total** | **0** | **1** | **10** | **343** | **3** |
+| **Total** | **0** | **0** | **10** | **344** | **3** |
 
 Counts are of the rows in the tables. What is left:
 
-- New message is not yet the full composer. It is the same work as channels.md's "New message as a full page" row, which the channels audit owns (section 4).
 - DIFFERENT where GPUI cannot match: no HTML clipboard flavour, no inline custom emoji images in the draft, no AVIF decoding, no squircle clipping, no zoom-in cursor, no exit motion for overlay docks (sections 1, 3, 4 and 5).
 - DIFFERENT by design or by the relay: the composer edits Markdown source, so there is no conversion undo step; the relay refuses the `waveform` imeta key; a GPUI clipboard write cannot fail; the desktop session always writes (sections 2 and 4).
 
@@ -30,7 +29,7 @@ Counts are of the rows in the tables. What is left:
 
 Note: Confirmed in buzz-app: there are no OpenGraph/unfurl cards and no YouTube embeds. Links get only a host icon. The only link "previews" are hover cards for Buzz message and channel links. Code blocks have no syntax highlighting or copy button. Edited messages show no "(edited)" marker.
 
-Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them closed after the audit and still listed).
+Rows: DONE 60, DIFFERENT 1, SKIPPED 2.
 
 ### Message rows: kinds, grouping, byline, avatar
 
@@ -149,7 +148,7 @@ Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them c
 
 Note: buzz-app has no right-click context menu on messages, no pin action, and no rename/delete in custom emoji settings. Message editing happens in the composer ("Editing message" mode), not inline in the row. The port does the same.
 
-Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them closed after the audit and still listed).
+Rows: DONE 83, DIFFERENT 1.
 
 ### Hover action bar: buttons, tooltips, visibility
 
@@ -294,7 +293,7 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 
 Note: buzz-app draws no "new messages" unread line in the timeline; the only cue is the jump button's new-message count, which the port matches.
 
-Counts: MISSING 43, PARTIAL 13, DIFFERENT 13, IN PROGRESS 0, DONE 61.
+Rows: DONE 68, DIFFERENT 1.
 
 ### Timeline layout, day dividers and grouping
 
@@ -436,7 +435,7 @@ Note: buzz-app's composer is a WYSIWYG ProseMirror editor (marks and blocks are 
 
 Note: buzz-app does not turn a URL pasted over a selection into a link; it replaces the selection (`src/features/messages/EditableInput.tsx:1447-1492`).
 
-Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
+Rows: DONE 72, DIFFERENT 4, SKIPPED 1.
 
 ### Input basics, keyboard and states
 
@@ -559,7 +558,7 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 
 Note: Main gaps: no inline video playback (play opens the viewer), no timecoded-reply parsing (no time chips, timeline markers or quick reactions at the current frame), no shared-element open/close or gallery slide animation, no "Copy image", no download error notices, no snapshot attachments, and media keeps playing when the conversation is hidden.
 
-Counts: MISSING 1, PARTIAL 2, DIFFERENT 2, IN PROGRESS 0, DONE 127 (59 of them closed after the audit and still listed).
+Rows: DONE 61, DIFFERENT 3.
 
 ### Attachment layout, thumbnails and placeholders
 
@@ -698,6 +697,6 @@ These were checked so that nobody ports them by mistake. In each case the port a
 
 ## DONE count
 
-DONE: **458** features at parity (section 1: 101, section 2: 127, section 3: 61, section 4: 42, section 5: 127).
+DONE: **344** of 357 rows (section 1: 60, section 2: 83, section 3: 68, section 4: 72, section 5: 61). The first pass also counted DONE behaviours that are not listed.
 
-Status counts: MISSING 90, PARTIAL 42, DIFFERENT 28, IN PROGRESS 4, DONE 458.
+Status counts: MISSING 0, PARTIAL 0, DIFFERENT 10, SKIPPED 3, DONE 344.

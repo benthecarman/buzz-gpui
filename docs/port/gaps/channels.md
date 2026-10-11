@@ -11,14 +11,14 @@
 
 | Area | DONE | PARTIAL | DIFFERENT | MISSING | SKIPPED | Rows |
 |---|---|---|---|---|---|---|
-| Connection, transport, native host, enterprise | 61 | 1 | 2 | 0 | 2 | 66 |
+| Connection, transport, native host, enterprise | 61 | 0 | 2 | 0 | 3 | 66 |
 | Session, caching, windows, folding | 68 | 0 | 2 | 0 | 0 | 70 |
 | Outbox, publishing, attachments, media | 59 | 0 | 5 | 0 | 0 | 64 |
 | Read state and unread | 62 | 0 | 1 | 0 | 0 | 63 |
 | Sidebar, discovery, navigation, DMs; members, moderation, profiles; communities, hosted, inbox | 134 | 0 | 0 | 0 | 1 | 135 |
 | Other relay-layer features | 90 | 0 | 1 | 0 | 0 | 91 |
 | Channel page, settings, lifecycle, create, canvas, templates, usage | 73 | 0 | 0 | 0 | 0 | 73 |
-| **Total** | **547** | **1** | **11** | **0** | **3** | **562** |
+| **Total** | **547** | **0** | **11** | **0** | **4** | **562** |
 
 Statuses were reconciled with the code on 2026-10-10. The findings below are from the original audit and most are closed.
 
@@ -162,7 +162,7 @@ Biggest gaps: no connection or live-status UI (session exposes only `live: bool`
 
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
-| Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | PARTIAL | Every request is traced with timings and Server-Timing (http.rs `send`, target `buzz_relay::profile`). The 2048-sample ring and client metrics show only in buzz-app's Developer settings (`ClientMetricsPanel`), which this port does not have | S |
+| Relay profiler (2048-sample ring, stages, Server-Timing) and client metrics | profiling.ts:1-94; transport.ts:247-283, 1361-1381 | SKIPPED (decided: Developer settings) | Every request is traced with timings and Server-Timing (http.rs `send`, target `buzz_relay::profile`). The 2048-sample ring and client metrics show only in buzz-app's Developer settings (`ClientMetricsPanel`), which this port does not have | S |
 | Frame traffic log and `relayDebug` | live.ts:280-286, 689, 718; debug.ts:1-7 | DONE (socket.rs: `relay-ws` trace target for every frame) | - | - |
 | `yieldToHost` batches of 12 | yield.ts:1-12; transport.ts:234-241 | DONE (reader.rs:544-547, `spawn_blocking`) | - | - |
 | Budgets (32 KiB input, byteSize, ByteLru) | budget.ts:1-71 | DONE (outbox.rs:51, 749; unread.rs:319) | - | - |
@@ -1021,4 +1021,4 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 
 **DONE: 547** of 562 rows.
 
-Other statuses: PARTIAL 1, DIFFERENT 11, MISSING 0, SKIPPED 3.
+Other statuses: PARTIAL 0, DIFFERENT 11, MISSING 0, SKIPPED 4.

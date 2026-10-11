@@ -231,10 +231,9 @@ localhost dev-server build.
 | Status | Count |
 |---|---|
 | MISSING | 0 |
-| PARTIAL | 1 |
+| PARTIAL | 0 |
 | DIFFERENT | 0 |
-| DONE | 96 |
+| DONE | 97 |
 | SKIPPED (decided) | 6 |
 
-Counts are of the rows in the tables. The one open row, the app-local
-instance target, waits on channels.md's instance profile panel.
+Counts are of the rows in the tables. Nothing is open.

@@ -48,7 +48,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Inventory warnings: "{warning} Retry local discovery by reopening the app." | BA/UnifiedInventory.tsx:342-346 | DONE (host/lib.rs, ui/agents.rs) | — | S |
 | "Refresh agents" also refreshes the relay library, archives and community reads | BA/UnifiedInventory.tsx:356-371 | DONE (ui/agents.rs, ui/agents/discovery.rs) | — | S |
 | Background fetch of public profiles (names, pictures) for agent keys | BA/UnifiedInventory.tsx:205-214 | DONE (ui/agents/discovery.rs, ui/agents/relay.rs) | — | S |
-| Focus and scroll to a newly imported card; focus returns to "Actions for…" after archive | BA/InventoryView.tsx:150-167; BA/AgentCard.tsx:107-112 | Not done: a new card shows "Review agent status", but the page does not scroll to it or move focus | Scroll and focus handling | S |
+| Focus and scroll to a newly imported card; focus returns to "Actions for…" after archive | BA/InventoryView.tsx:150-167; BA/AgentCard.tsx:107-112 | DONE (ui/agents/card.rs, ui/agents.rs `FocusTarget`): an imported or created card scrolls into view and focuses "Review agent status", else its menu, once no dialog is open; a confirmed Archive focuses the "Archived (N)" header and Unarchive the card's menu | — | S |
 
 ## 2. Agent card (`BA/AgentCard.tsx`, `FA/AgentAvatar.tsx`)
 
@@ -66,7 +66,7 @@ Another agent is adding these. They are marked **IN PROGRESS** wherever they app
 | Menu item "Share" (direct share or export) | BA/AgentCard.tsx:342-350 | DONE (ui/agents/card.rs, ui/agents/share.rs) | — | S |
 | Several local setups: "Edit/Duplicate/Delete {name}" choice rows with relay URL and npub | BA/AgentCard.tsx:296-365 | DONE (ui/agents/card.rs) | — | S |
 | Disabled Edit with a note: "Import this identity to edit in Foundation." / "No linked identity to edit." | BA/AgentCard.tsx:368-380 | DONE (ui/agents/card.rs) | — | S |
-| Identity popover "{name} identity details" with npubs | BA/AgentCard.tsx:448-474 | Not done: the npubs are in Manage → "Identity & sources" instead of a popover | Popover | S |
+| Identity popover "{name} identity details" with npubs | BA/AgentCard.tsx:448-474 | DONE (ui/agents/card.rs `card_menu`): a row with no setup, profile or archive opens the popover from its "Actions for {name}" button; buzz-app's rows here have no menu at all | — | S |
 | "No linked identity" | BA/AgentCard.tsx:476-480 | DONE (ui/agents/card.rs) | — | S |
 | Feedback slot: "Archiving…" / "Unarchiving…" / "{Archive\|Unarchive} failed: {error}" with Retry | BA/InventoryIdentityCard.tsx:200-235 | DONE (ui/agents/card.rs) | — | S |
 | Port-only menu items "Start on launch" (check) and "Retry profile publication" | n/a (buzz-app has no start-on-launch UI; profile retry is in Manage and Edit) | DIFFERENT (kept): "Start on launch" stays because the host restores those agents; "Retry profile publication" moved to Manage and Edit (ui/agents/card.rs) | Decide whether to keep Start on launch | S |
@@ -596,9 +596,9 @@ These features match buzz-app closely enough and are not listed above.
 
 | Status | Rows |
 |---|---|
-| DONE | 345 |
+| DONE | 347 |
 | DIFFERENT | 7 |
-| MISSING | 2 |
+| MISSING | 0 |
 | SKIPPED | 7 |
 | N/A | 10 |
 | DONE (counted only) | 88 |
