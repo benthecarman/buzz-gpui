@@ -153,17 +153,23 @@ impl Drop for PresenceLease {
     }
 }
 
-/// Removes a request from the queue if its caller gives up waiting.
+/// Removes a request from the queue if its caller gives up waiting, and
+/// frees the slot if it was granted after the caller's last poll.
 struct Waiting<'a> {
     lane: &'a Lane,
-    id: Option<u64>,
+    id: u64,
+    started: Option<oneshot::Receiver<Result<(), HttpError>>>,
 }
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        if let Some(id) = self.id {
+        if let Some(mut started) = self.started.take() {
             let mut state = self.lane.state.lock().expect("lane lock");
-            state.queue.retain(|ticket| ticket.id != id);
+            state.queue.retain(|ticket| ticket.id != self.id);
+            if let Ok(Ok(())) = started.try_recv() {
+                state.active -= 1;
+                state.pump();
+            }
         }
     }
 }
@@ -201,10 +207,11 @@ impl Lane {
         };
         let mut waiting = Waiting {
             lane: self,
-            id: Some(id),
+            id,
+            started: Some(started),
         };
-        let started = started.await;
-        waiting.id = None;
+        let started = waiting.started.as_mut().expect("waiting receiver").await;
+        waiting.started = None;
         match started {
             Ok(Ok(())) => Ok(Slot(self.clone())),
             Ok(Err(error)) => Err(error),
@@ -585,6 +592,22 @@ mod tests {
         let _ = background.await.unwrap();
         drop(held);
         assert_eq!(*order.lock().unwrap(), ["foreground", "background"]);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_dropped_after_its_grant_frees_the_slot() {
+        let lane = Lane::new();
+        let mut slots = Vec::new();
+        for _ in 0..LANE_SLOTS {
+            slots.push(lane.admit(Priority::Foreground).await.unwrap());
+        }
+        let mut waiter = Box::pin(lane.admit(Priority::Foreground));
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        // The freed slot goes to the waiter, which never polls again.
+        drop(slots.pop());
+        assert!(lane.state.lock().unwrap().queue.is_empty());
+        drop(waiter);
+        assert_eq!(lane.state.lock().unwrap().active, LANE_SLOTS - 1);
     }
 
     #[tokio::test]
