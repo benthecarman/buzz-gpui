@@ -1060,7 +1060,7 @@ dependencies = [
 [[package]]
 name = "buzz-agent-controller"
 version = "0.1.0"
-source = "git+https://github.com/benthecarman/buzz-app?rev=ec7d795f2da780c93f927e7f8ae18eda921155cf#ec7d795f2da780c93f927e7f8ae18eda921155cf"
+source = "git+https://github.com/benthecarman/buzz-app?rev=73b42b716903f622f612b88d169906799dc30592#73b42b716903f622f612b88d169906799dc30592"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.11.1",
@@ -1087,7 +1087,7 @@ dependencies = [
 [[package]]
 name = "buzz-credential-store"
 version = "0.1.0"
-source = "git+https://github.com/benthecarman/buzz-app?rev=ec7d795f2da780c93f927e7f8ae18eda921155cf#ec7d795f2da780c93f927e7f8ae18eda921155cf"
+source = "git+https://github.com/benthecarman/buzz-app?rev=73b42b716903f622f612b88d169906799dc30592#73b42b716903f622f612b88d169906799dc30592"
 dependencies = [
  "dirs 6.0.0",
  "keyring",
@@ -1100,7 +1100,7 @@ dependencies = [
 [[package]]
 name = "buzz-desktop"
 version = "0.0.0"
-source = "git+https://github.com/benthecarman/buzz-app?rev=ec7d795f2da780c93f927e7f8ae18eda921155cf#ec7d795f2da780c93f927e7f8ae18eda921155cf"
+source = "git+https://github.com/benthecarman/buzz-app?rev=73b42b716903f622f612b88d169906799dc30592#73b42b716903f622f612b88d169906799dc30592"
 dependencies = [
  "base64 0.22.1",
  "buzz-agent",
@@ -1289,7 +1289,7 @@ dependencies = [
 [[package]]
 name = "buzz-pairing"
 version = "0.0.0"
-source = "git+https://github.com/benthecarman/buzz-app?rev=ec7d795f2da780c93f927e7f8ae18eda921155cf#ec7d795f2da780c93f927e7f8ae18eda921155cf"
+source = "git+https://github.com/benthecarman/buzz-app?rev=73b42b716903f622f612b88d169906799dc30592#73b42b716903f622f612b88d169906799dc30592"
 dependencies = [
  "hex",
  "nostr 0.44.8",
@@ -1372,7 +1372,7 @@ dependencies = [
 [[package]]
 name = "buzzodz-plugins"
 version = "0.1.0"
-source = "git+https://github.com/benthecarman/buzz-app?rev=ec7d795f2da780c93f927e7f8ae18eda921155cf#ec7d795f2da780c93f927e7f8ae18eda921155cf"
+source = "git+https://github.com/benthecarman/buzz-app?rev=73b42b716903f622f612b88d169906799dc30592#73b42b716903f622f612b88d169906799dc30592"
 dependencies = [
  "bech32 0.11.1",
  "buzz-credential-store",
