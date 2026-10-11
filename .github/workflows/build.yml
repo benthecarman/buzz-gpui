@@ -1,0 +1,95 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/build.yml
+      - .github/actions/**
+      - scripts/package-*
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x86_64 (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds inside ubuntu:26.04, so the package links Ubuntu's libraries.
+      - run: scripts/package-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-linux-x86_64
+          path: dist/*.deb
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }} (.dmg)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gstreamer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-macos-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64 (.zip)
+    runs-on: windows-latest
+    steps:
+      # The buzz-app git dependencies have paths past MAX_PATH.
+      - run: git config --system core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gstreamer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p buzz-gpui -p buzzd
+      - run: |
+          python -m pip install pefile
+          python scripts/package-windows.py "$env:GSTREAMER_ROOT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buzz-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
