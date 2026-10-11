@@ -7,7 +7,9 @@
 use super::import::{ImportDialog, source_label};
 use super::inventory::{self, Action, Decision, Group, Row, Setup};
 use super::relay::Definition;
-use super::{AgentsPage, Handover, Modal, OpenMenu, Outcome, View, model_line, process_label};
+use super::{
+    AgentsPage, FocusTarget, Handover, Modal, OpenMenu, Outcome, View, model_line, process_label,
+};
 use crate::community::{AppState, IdentityState};
 use crate::hosts::HostConnection;
 use crate::hosts::control::Status;
@@ -113,6 +115,19 @@ impl AgentsPage {
         let restart = setups
             .iter()
             .any(|setup| super::restart_required(&setup.agent));
+        let focused = self.focus_target(|target| match target {
+            FocusTarget::Imported((host, id)) => setups.iter().any(|setup| {
+                self.host(setup.host)
+                    .is_some_and(|h| h.entity_id() == *host)
+                    && setup.agent.id == *id
+            }),
+            FocusTarget::Card(key) => *key == pubkey,
+            FocusTarget::Archived => false,
+        });
+        // An imported tile focuses "Review agent status"; anything else
+        // focuses the card's menu.
+        let review_focus =
+            focused && tile && reveal && matches!(self.focus_at, Some(FocusTarget::Imported(_)));
         let mut avatar = Avatar::new(name.clone())
             .squircle()
             .size(if tile {
@@ -189,6 +204,7 @@ impl AgentsPage {
             archived,
             run.is_some(),
             tile,
+            focused && !review_focus,
             window,
             cx,
         );
@@ -293,6 +309,7 @@ impl AgentsPage {
                                 "Review agent status",
                             )
                             .size(ButtonSize::Sm)
+                            .when(review_focus, |this| this.track_focus(&self.target_focus))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.modal = Some(Modal::Manage(review_key.clone()));
@@ -304,6 +321,7 @@ impl AgentsPage {
                 })
                 .children(feedback.map(|feedback| div().px(rems(1.)).pb(rems(1.)).child(feedback)))
                 .child(div().absolute().top(rems(0.5)).right(rems(0.5)).child(menu))
+                .when(focused, |this| this.child(self.reveal_on_focus()))
                 .into_any_element()
         } else {
             let children =
@@ -340,6 +358,7 @@ impl AgentsPage {
                 )
                 .children(feedback.map(|feedback| div().w_full().child(feedback)))
                 .child(div().absolute().top(rems(0.5)).right(rems(0.5)).child(menu))
+                .when(focused, |this| this.child(self.reveal_on_focus()))
                 .into_any_element()
         }
     }
@@ -398,6 +417,7 @@ impl AgentsPage {
         archived: bool,
         archive_pending: bool,
         tile: bool,
+        focused: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -410,6 +430,7 @@ impl AgentsPage {
         )
         .size(IconButtonSize::Sm)
         .selected(open)
+        .when(focused, |this| this.track_focus(&self.target_focus))
         .when(!open, |this| this.tooltip(format!("Actions for {name}")))
         .on_click(cx.listener({
             let pubkey = pubkey.clone();
@@ -762,6 +783,12 @@ impl AgentsPage {
                 archive,
                 move |cx| {
                     let _ = page.update(cx, |this, cx| {
+                        // The card moved; focus follows it to its new place.
+                        this.focus(if archive {
+                            FocusTarget::Archived
+                        } else {
+                            FocusTarget::Card(key.clone())
+                        });
                         this.show_toast(
                             format!(
                                 "{name} {} in {community}",
@@ -1371,6 +1398,7 @@ impl AgentsPage {
             }),
             cx.subscribe(&dialog, move |this, _, super::import::Imported(id), cx| {
                 this.imported = Some((host_id, id.clone()));
+                this.focus(FocusTarget::Imported((host_id, id.clone())));
                 this.close_modal(cx);
             }),
         ];

@@ -98,6 +98,19 @@ use std::rc::Rc;
 /// An agent on a host.
 type AgentKey = (EntityId, String);
 
+/// What takes keyboard focus once it renders. buzz-app focuses a newly
+/// imported card, and after a confirmed archive change the card's new
+/// place (`InventoryView.tsx`, `AgentCard.tsx`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FocusTarget {
+    /// The imported card's "Review agent status", else its menu.
+    Imported(AgentKey),
+    /// A card's "Actions for…" button.
+    Card(String),
+    /// The "Archived (N)" accordion header.
+    Archived,
+}
+
 #[derive(Clone, PartialEq)]
 enum OpenMenu {
     Page,
@@ -209,6 +222,17 @@ pub struct AgentsPage {
     toasts: usize,
     /// Holds focus inside the page's own dialogs so Escape reaches them.
     modal_focus: FocusHandle,
+    /// The element `focus_at` names tracks this handle.
+    target_focus: FocusHandle,
+    focus_at: Option<FocusTarget>,
+    /// `focus_at` is still to take focus.
+    focus_pending: bool,
+    /// Set while rendering when the `focus_at` element is on the page.
+    focus_placed: Cell<bool>,
+    /// The page scroll, and whether the focused element must scroll into
+    /// view on the next paint.
+    scroll: ScrollHandle,
+    scroll_pending: Rc<Cell<bool>>,
     /// Agent teams and the community catalog.
     teams: Entity<teams::TeamsSection>,
 }
@@ -309,6 +333,12 @@ impl AgentsPage {
             toast: None,
             toasts: 0,
             modal_focus: cx.focus_handle(),
+            target_focus: cx.focus_handle(),
+            focus_at: None,
+            focus_pending: false,
+            focus_placed: Cell::new(false),
+            scroll: ScrollHandle::new(),
+            scroll_pending: Rc::new(Cell::new(false)),
         };
         page.sync_hosts(cx);
         page
@@ -407,6 +437,49 @@ impl AgentsPage {
         cx.notify();
     }
 
+    /// Moves focus to `target` once it renders and no dialog is open.
+    fn focus(&mut self, target: FocusTarget) {
+        self.focus_at = Some(target);
+        self.focus_pending = true;
+    }
+
+    /// Whether the element for `target` takes the focus handle.
+    fn focus_target(&self, target: impl FnOnce(&FocusTarget) -> bool) -> bool {
+        let placed = self.focus_at.as_ref().is_some_and(target);
+        if placed {
+            self.focus_placed.set(true);
+        }
+        placed
+    }
+
+    /// Scrolls the page so the element this fills is in view (block
+    /// "nearest") on the paint after it takes focus, as a browser does.
+    fn reveal_on_focus(&self) -> impl IntoElement {
+        let scroll = self.scroll.clone();
+        let pending = self.scroll_pending.clone();
+        canvas(
+            move |bounds, window, _| {
+                if !pending.replace(false) {
+                    return;
+                }
+                let view = scroll.bounds();
+                let mut offset = scroll.offset();
+                if bounds.top() < view.top() {
+                    offset.y += view.top() - bounds.top();
+                } else if bounds.bottom() > view.bottom() {
+                    offset.y -= (bounds.bottom() - view.bottom()).min(bounds.top() - view.top());
+                } else {
+                    return;
+                }
+                scroll.set_offset(offset);
+                window.refresh();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         cx.notify();
@@ -471,7 +544,9 @@ impl AgentsPage {
         let subscriptions = vec![
             cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
             cx.subscribe(&dialog, |this, _, create::Created(host, id), _| {
-                this.imported = Some((host.entity_id(), id.clone()));
+                let key = (host.entity_id(), id.clone());
+                this.imported = Some(key.clone());
+                this.focus(FocusTarget::Imported(key));
             }),
             cx.subscribe_in(
                 &dialog,
@@ -1197,8 +1272,16 @@ impl AgentsPage {
                 .filter(|row| view.archived.contains(&row.pubkey))
                 .collect();
             let count = archived.len();
+            let focused = self.focus_target(|target| *target == FocusTarget::Archived);
+            let focus_ring = c.border_focus;
             let header = div()
                 .id("archived-toggle")
+                .relative()
+                .when(focused, |this| {
+                    this.track_focus(&self.target_focus)
+                        .focus_visible(move |s| s.border_2().border_color(focus_ring))
+                        .child(self.reveal_on_focus())
+                })
                 .flex()
                 .items_center()
                 .justify_between()
@@ -1405,11 +1488,17 @@ impl Render for AgentsPage {
                 self.archived_open = None;
             }
         }
+        self.focus_placed.set(false);
         let mut sections: Vec<AnyElement> = (0..self.hosts.len())
             .map(|ix| self.host_section(ix, &view, window, cx))
             .collect();
         sections.extend(self.shared_sections(&view, window, cx));
         let modal = self.modal(window, cx);
+        if self.focus_pending && self.focus_placed.get() && self.modal.is_none() {
+            self.focus_pending = false;
+            window.focus(&self.target_focus, cx);
+            self.scroll_pending.set(true);
+        }
         // The page's own dialogs take focus when they open.
         let own = matches!(
             self.modal,
@@ -1464,6 +1553,7 @@ impl Render for AgentsPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .p(rems(1.5))
                     .text_body()
                     .child(
