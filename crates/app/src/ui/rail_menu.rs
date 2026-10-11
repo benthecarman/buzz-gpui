@@ -93,7 +93,8 @@ pub fn rail(window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElemen
                     .child(avatar)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         crate::perf::begin(crate::perf::SWITCH);
-                        this.select_community(index, window, cx)
+                        this.select_community(index, window, cx);
+                        crate::perf::step(crate::perf::SWITCH, "handled");
                     })),
                 ),
         );
