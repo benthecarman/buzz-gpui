@@ -242,6 +242,19 @@ mod tests {
     }
 
     #[test]
+    fn the_compact_clock_is_the_byline_clock_without_its_day_period() {
+        let s = |t: DateTime<Local>| t.timestamp() as u64;
+        for (h, min) in [(9, 5), (12, 0), (0, 30), (14, 34), (23, 59)] {
+            let time = at(2026, 10, 9, h, min);
+            let byline = byline_at(s(time), time);
+            let period = if h < 12 { " AM" } else { " PM" };
+            assert_eq!(compact(s(time)), byline.trim_end_matches(period));
+        }
+        assert_eq!(compact(s(at(2026, 10, 9, 9, 5))), "9:05");
+        assert_eq!(compact(s(at(2026, 10, 9, 0, 30))), "12:30");
+    }
+
+    #[test]
     fn checks_the_day_just_after_midnight_or_every_quarter_hour() {
         let late = at(2026, 10, 9, 23, 58);
         assert_eq!(until_next_check(late), Duration::from_secs(121));
