@@ -138,7 +138,10 @@ impl Setup {
         let relay = Arc::new(FakeRelay {
             thread: Mutex::new(thread),
         });
-        runtime.set_relay(Some(relay.clone()));
+        runtime.set_relays(HashMap::from([
+            (own(), relay.clone() as Arc<dyn OwnerRelay>),
+            (alice(), relay.clone() as Arc<dyn OwnerRelay>),
+        ]));
         Self {
             runtime,
             fake: FakeSpawn::default(),
@@ -374,10 +377,10 @@ async fn shows_the_whole_thread_to_a_session_started_over_from_a_lost_one() {
     setup.mention(&mention).await;
     flush().await;
     flush().await;
-    let claudes = setup.fake.claudes();
-    assert!(claudes[0].args().contains(&"lost".into()));
-    assert!(claudes[0].prompts().is_empty() || claudes[0].killed());
-    let fresh = setup.used().last().unwrap().clone();
+    let lost = setup.fake.claudes()[0].clone();
+    assert!(lost.args().contains(&"lost".into()));
+    assert!(lost.prompts().is_empty());
+    let fresh = setup.used()[0].clone();
     assert!(fresh.prompts()[0].contains("<thread-context included=\"1\" total=\"2\""));
 }
 
@@ -424,14 +427,43 @@ async fn runs_a_timer_in_its_own_session() {
 }
 
 #[tokio::test]
-async fn warms_a_spare_for_each_agent_and_stops_those_that_go_away() {
+async fn keeps_one_spare_for_all_its_agents_and_none_once_they_are_gone() {
     let setup = Setup::new(vec![]);
-    setup.sync(Config::default());
+    let agent = |pubkey: String| Synced {
+        pubkey,
+        config: Config::default().value(),
+        spawn: setup.fake.spawner(),
+    };
+    setup.runtime.sync(vec![agent(own()), agent(alice())]);
     flush().await;
     assert_eq!(setup.fake.claudes().len(), 1);
+    assert_eq!(
+        setup.fake.claudes()[0].state().options.cwd.as_deref(),
+        Some("~/.buzz")
+    );
     setup.runtime.sync(vec![]);
     flush().await;
     assert!(setup.fake.claudes().iter().all(FakeClaude::killed));
+}
+
+#[tokio::test]
+async fn replaces_the_spare_when_no_agent_runs_where_it_was_started() {
+    let setup = Setup::new(vec![]);
+    setup.sync(Config::default());
+    flush().await;
+    setup.sync(Config {
+        model: "sonnet".into(),
+        ..Config::default()
+    });
+    flush().await;
+    let claudes = setup.fake.claudes();
+    assert_eq!(claudes.len(), 2);
+    assert!(claudes[0].killed());
+    let args = claudes[1].args();
+    assert!(
+        args.windows(2).any(|pair| pair == ["--model", "sonnet"]),
+        "{args:?}"
+    );
 }
 
 #[test]

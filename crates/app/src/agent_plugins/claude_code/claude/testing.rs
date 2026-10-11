@@ -261,6 +261,11 @@ impl Spawn for FakeSpawn {
             })
         })
     }
+
+    /// Clones are one host; each new fake is another.
+    fn host(&self) -> usize {
+        Arc::as_ptr(&self.processes) as *const () as usize
+    }
 }
 
 /// Lets spawned tasks run.

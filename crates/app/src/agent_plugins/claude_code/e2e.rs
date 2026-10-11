@@ -205,8 +205,11 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
     // A mention becomes a turn; Claude answers with a final `send`.
     let sessions = scratch("sessions").join("sessions.json");
     let runtime = ClaudeRuntime::new(Some(sessions.clone()));
-    runtime.set_relay(Some(Arc::new(Relay)));
     let agent = Arc::new(Agent::default());
+    runtime.set_relays(HashMap::from([(
+        agent.pubkey(),
+        Arc::new(Relay) as Arc<dyn OwnerRelay>,
+    )]));
     let workspace = scratch("workspace");
     let config = Config {
         workspace: workspace.to_string_lossy().into_owned(),
@@ -422,7 +425,10 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
     .await;
     let event: BuzzEvent = serde_json::from_value(serde_json::to_value(&mention).unwrap()).unwrap();
     let runtime = ClaudeRuntime::new(Some(scratch("relay-sessions").join("sessions.json")));
-    runtime.set_relay(Some(owner));
+    runtime.set_relays(HashMap::from([(
+        pubkey.clone(),
+        owner as Arc<dyn OwnerRelay>,
+    )]));
     let config = Config {
         workspace: scratch("relay-workspace").to_string_lossy().into_owned(),
         ..Config::default()

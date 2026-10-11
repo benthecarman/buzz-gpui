@@ -15,7 +15,6 @@ pub mod sessions;
 pub mod setup;
 pub mod tabs;
 
-use crate::agent_plugins::owner_relay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
@@ -97,10 +96,10 @@ impl ClaudeCode {
             .map(|global| global.0.clone())
     }
 
-    /// Reads the selected community as its owner.
-    fn bind(&mut self, cx: &mut Context<Self>) {
-        let relay = owner_relay::current(cx).map(|(_, relay)| relay);
-        self.runtime.set_relay(relay);
+    /// Reads each agent's own community as its owner.
+    fn bind(&mut self, _cx: &mut Context<Self>) {
+        // TODO(port): the owner's connection to each agent's own community.
+        self.runtime.set_relays(HashMap::new());
     }
 
     /// Agents come and go with the community; a spare session is warmed

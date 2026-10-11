@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::agent_plugins::claude_code::claude::testing::{FakeClaude, FakeSpawn, flush};
+use crate::agent_plugins::process::{Spawn, SpawnOptions, Spawned};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::watch;
@@ -27,6 +29,7 @@ struct Pool {
     fake: FakeSpawn,
     model: Arc<Mutex<String>>,
     release: watch::Sender<bool>,
+    spare: Option<Spare>,
 }
 
 impl Pool {
@@ -39,78 +42,153 @@ impl Pool {
     fn set_model(&self, model: &str) {
         *self.model.lock().unwrap() = model.into();
     }
-    fn keys(&self) -> Vec<String> {
-        self.pool
-            .snapshot()
-            .into_iter()
-            .map(|view| view.key)
-            .collect()
-    }
     fn deliver(&self, key: &str, text: &str, seen: u64) -> BoxFuture<'static, Settled> {
         self.pool
             .deliver(key.into(), text.into(), seen, DeliverOptions::default())
     }
+    fn spare(&self) -> &Spare {
+        self.spare.as_ref().expect("made with a spare")
+    }
+    /// `cwd` on this pool's host, with its model.
+    fn at(&self, cwd: &str) -> Where {
+        Where {
+            spawn: self.fake.spawner(),
+            cwd: cwd.into(),
+            model: Some("opus".into()),
+        }
+    }
 }
 
-/// `hold`: every process keeps its turns open until finished. `held`:
-/// each launch waits, after reading the settings, until released, as a
-/// memory read does.
-fn sessions(store: Option<Arc<MemoryStore>>, hold: bool, held: bool, idle: Duration) -> Pool {
-    let fake = FakeSpawn {
-        hold,
+#[derive(Default)]
+struct Options {
+    store: Option<Arc<MemoryStore>>,
+    /// Every process keeps its turns open until finished.
+    hold: bool,
+    /// Each launch waits, after reading the settings, until released, as a
+    /// memory read does.
+    held: bool,
+    idle: Option<Duration>,
+    /// The shared spare its new conversations look for.
+    spare: Option<Spare>,
+    tools: Option<ToolServer>,
+    /// Another agent's processes on the same host.
+    fake: Option<FakeSpawn>,
+}
+
+fn sessions(options: Options) -> Pool {
+    let fake = options.fake.unwrap_or_else(|| FakeSpawn {
+        hold: options.hold,
         ..Default::default()
-    };
-    let store = store.unwrap_or_default();
+    });
+    let store = options.store.unwrap_or_default();
     let model = Arc::new(Mutex::new("opus".to_string()));
-    let (release, released) = watch::channel(!held);
+    let (release, released) = watch::channel(!options.held);
     let ids = Arc::new(AtomicUsize::new(0));
     let launch_model = model.clone();
     let fingerprint_model = model.clone();
-    let mut options = SessionsOptions::new(
+    let tools = options.tools;
+    let mut sessions_options = SessionsOptions::new(
         fake.spawner(),
         store.clone(),
         Arc::new(move || {
             let current = launch_model.lock().unwrap().clone();
             let mut released = released.clone();
+            let tools = tools.clone();
             Box::pin(async move {
                 let _ = released.wait_for(|released| *released).await;
                 Ok(Launch {
                     cwd: "/work".into(),
                     system_prompt: "prompt".into(),
                     model: Some(current),
+                    tools,
                     ..Default::default()
                 })
             })
         }),
         Arc::new(move || fingerprint_model.lock().unwrap().clone()),
     );
-    options.new_id = Arc::new(move || format!("new-{}", ids.fetch_add(1, Ordering::SeqCst) + 1));
-    options.idle = idle;
+    sessions_options.new_id =
+        Arc::new(move || format!("new-{}", ids.fetch_add(1, Ordering::SeqCst) + 1));
+    sessions_options.idle = options.idle.unwrap_or(IDLE);
+    sessions_options.spare = options.spare.clone();
     Pool {
-        pool: AgentSessions::new(options),
+        pool: AgentSessions::new(sessions_options),
         store,
         fake,
         model,
         release,
+        spare: options.spare,
     }
 }
 
 fn pool() -> Pool {
-    sessions(None, false, false, IDLE)
+    sessions(Options::default())
+}
+
+/// A spare whose tools answer `{"from": "spare"}`, and whose sessions are
+/// `spare-1`, `spare-2`, ….
+fn spare() -> Spare {
+    let ids = Arc::new(AtomicUsize::new(0));
+    let tools: ToolServer = Arc::new(|_, _| async { Ok(json!({ "from": "spare" })) }.boxed());
+    Spare::with_ids(
+        tools,
+        Arc::new(move || format!("spare-{}", ids.fetch_add(1, Ordering::SeqCst) + 1)),
+    )
+}
+
+/// Sessions with a spare, spawned like their own processes.
+fn with_spare(options: Options) -> Pool {
+    sessions(Options {
+        spare: Some(spare()),
+        ..options
+    })
+}
+
+fn tool(process: &FakeClaude, id: &str) {
+    process.emit(json!({
+        "type": "control_request", "request_id": id,
+        "request": {
+            "subtype": "mcp_message", "server_name": "buzz",
+            "message": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+        },
+    }));
+}
+
+fn answered(process: &FakeClaude, id: &str) -> Option<Value> {
+    process
+        .responses()
+        .into_iter()
+        .find(|response| response["request_id"] == id)
+}
+
+/// A host whose processes never finish starting.
+struct Never;
+
+impl Spawn for Never {
+    fn spawn(&self, _: &str, _: SpawnOptions) -> BoxFuture<'static, Result<Spawned, String>> {
+        Box::pin(futures::future::pending())
+    }
 }
 
 #[tokio::test]
-async fn starts_a_new_conversation_on_the_warm_spare_and_warms_another() {
-    let pool = pool();
-    pool.pool.warm();
+async fn starts_a_new_conversation_on_the_shared_spare_and_warms_another() {
+    let pool = with_spare(Options::default());
+    pool.spare().warm(vec![pool.at("/work")]);
     flush().await;
     assert_eq!(pool.claudes().len(), 1);
+    // Started before any agent asked: no prompt yet.
+    assert!(pool.claudes()[0].state().received.is_empty());
     assert_eq!(pool.deliver("c/root", "hello", 10).await, Settled::ok());
     flush().await;
     assert_eq!(pool.claudes().len(), 2);
-    assert_eq!(pool.claudes()[0].prompts(), ["hello"]);
+    let used = pool.claudes()[0].clone();
+    let initialize = used.state().received[0].clone();
+    assert_eq!(initialize["type"], "control_request");
+    assert_eq!(initialize["request"]["subtype"], "initialize");
+    assert_eq!(initialize["request"]["appendSystemPrompt"], "prompt");
+    assert_eq!(used.prompts(), ["hello"]);
     let saved = pool.store.get("c/root").unwrap();
-    assert_eq!((saved.id.as_str(), saved.seen), ("new-1", 10));
+    assert_eq!((saved.id.as_str(), saved.seen), ("spare-1", 10));
     assert_eq!(
         pool.pool.snapshot(),
         vec![SessionView {
@@ -118,6 +196,150 @@ async fn starts_a_new_conversation_on_the_warm_spare_and_warms_another() {
             busy: false
         }]
     );
+}
+
+#[tokio::test]
+async fn hands_the_spares_tools_to_the_agent_that_takes_it() {
+    let agent_tools: ToolServer = Arc::new(|_, _| async { Ok(json!({ "from": "agent" })) }.boxed());
+    let pool = with_spare(Options {
+        tools: Some(agent_tools),
+        ..Options::default()
+    });
+    pool.spare().warm(vec![pool.at("/work")]);
+    flush().await;
+    let process = pool.claudes()[0].clone();
+    // Claude lists the tools as it starts, before any agent has the spare.
+    tool(&process, "early");
+    flush().await;
+    assert_eq!(
+        answered(&process, "early").unwrap()["response"]["mcp_response"]["from"],
+        "spare"
+    );
+    pool.deliver("c/root", "hi", 1).await;
+    tool(&process, "later");
+    flush().await;
+    assert_eq!(
+        answered(&process, "later").unwrap()["response"]["mcp_response"]["from"],
+        "agent"
+    );
+}
+
+#[tokio::test]
+async fn serves_whichever_agent_starts_the_next_conversation() {
+    let one = with_spare(Options::default());
+    // Another agent on the same host.
+    let two = sessions(Options {
+        spare: one.spare.clone(),
+        fake: Some(one.fake.clone()),
+        ..Options::default()
+    });
+    one.spare().warm(vec![one.at("/work")]);
+    flush().await;
+    one.deliver("c/a", "for one", 1).await;
+    flush().await;
+    two.deliver("c/b", "for two", 2).await;
+    // Each took the spare; neither agent started a process of its own.
+    let prompts: Vec<Vec<String>> = one.claudes().iter().map(FakeClaude::prompts).collect();
+    assert_eq!(
+        prompts,
+        vec![vec!["for one".to_string()], vec!["for two".into()], vec![]]
+    );
+}
+
+#[tokio::test]
+async fn starts_a_conversation_elsewhere_afresh_and_the_spare_follows_it() {
+    let pool = with_spare(Options::default());
+    pool.spare().warm(vec![pool.at("/other"), pool.at("/work")]);
+    flush().await;
+    let other = pool.claudes()[0].clone();
+    pool.deliver("c/root", "hi", 1).await;
+    flush().await;
+    assert!(other.killed());
+    assert!(other.prompts().is_empty());
+    let used: Vec<FakeClaude> = pool
+        .claudes()
+        .into_iter()
+        .filter(|process| !process.prompts().is_empty())
+        .collect();
+    assert!(used[0].args().contains(&"new-1".into()));
+    let next = pool
+        .claudes()
+        .into_iter()
+        .find(|process| process.args().contains(&"spare-2".into()))
+        .unwrap();
+    assert_eq!(next.state().options.cwd.as_deref(), Some("/work"));
+    assert!(!next.killed());
+}
+
+#[tokio::test]
+async fn does_not_wait_for_a_spare_started_elsewhere() {
+    // The spare for another folder never finishes starting.
+    let pool = with_spare(Options::default());
+    pool.spare().warm(vec![Where {
+        spawn: Arc::new(Never),
+        cwd: "/other".into(),
+        model: Some("opus".into()),
+    }]);
+    let settled = tokio::time::timeout(Duration::from_secs(5), pool.deliver("c/root", "hi", 1))
+        .await
+        .expect("waited for the spare");
+    assert_eq!(settled, Settled::ok());
+    assert_eq!(pool.claudes()[0].prompts(), ["hi"]);
+}
+
+#[tokio::test]
+async fn uses_no_spare_started_on_another_host() {
+    let pool = with_spare(Options::default());
+    let elsewhere = FakeSpawn::default();
+    pool.spare().warm(vec![Where {
+        spawn: elsewhere.spawner(),
+        ..pool.at("/work")
+    }]);
+    flush().await;
+    let other = elsewhere.claudes()[0].clone();
+    assert_eq!(pool.deliver("c/root", "hi", 1).await, Settled::ok());
+    flush().await;
+    assert!(other.killed());
+    assert!(other.prompts().is_empty());
+    assert_eq!(pool.claudes()[0].prompts(), ["hi"]);
+    assert!(pool.claudes()[0].args().contains(&"new-1".into()));
+    // A spare is still wanted on the other host.
+    assert_eq!(elsewhere.live().len(), 1);
+}
+
+#[tokio::test]
+async fn keeps_a_spare_that_fits_any_agent_and_replaces_one_that_fits_none() {
+    let pool = with_spare(Options::default());
+    let (work, other) = (pool.at("/work"), pool.at("/other"));
+    pool.spare().warm(vec![work.clone()]);
+    flush().await;
+    pool.spare().warm(vec![other.clone(), work]);
+    flush().await;
+    assert_eq!(pool.claudes().len(), 1);
+    pool.spare().warm(vec![other]);
+    flush().await;
+    assert_eq!(pool.claudes().len(), 2);
+    assert!(pool.claudes()[0].killed());
+    assert_eq!(
+        pool.claudes()[1].state().options.cwd.as_deref(),
+        Some("/other")
+    );
+}
+
+#[tokio::test]
+async fn starts_no_spare_again_after_one_dies_until_a_conversation_starts() {
+    let pool = with_spare(Options::default());
+    pool.spare().warm(vec![pool.at("/work")]);
+    flush().await;
+    pool.claudes()[0].exit(Some(1), Some("not signed in"));
+    flush().await;
+    pool.spare().warm(vec![pool.at("/work")]);
+    flush().await;
+    assert_eq!(pool.claudes().len(), 1);
+    pool.deliver("c/root", "hi", 1).await;
+    flush().await;
+    // One for the conversation, and a spare again.
+    assert_eq!(pool.claudes().len(), 3);
 }
 
 #[tokio::test]
@@ -133,13 +355,13 @@ async fn continues_a_conversation_in_its_own_process_apart_from_others() {
 
 #[tokio::test]
 async fn steers_a_conversation_that_is_still_working_instead_of_queueing() {
-    let pool = pool();
-    pool.pool.warm();
-    flush().await;
-    let process = pool.claudes()[0].clone();
-    process.set_hold(true);
+    let pool = sessions(Options {
+        hold: true,
+        ..Options::default()
+    });
     let first = tokio::spawn(pool.deliver("c/root", "first", 1));
     flush().await;
+    let process = pool.claudes()[0].clone();
     let second = tokio::spawn(pool.pool.deliver(
         "c/root".into(),
         "plain".into(),
@@ -182,7 +404,10 @@ async fn opens_one_process_for_messages_that_arrive_together() {
 
 #[tokio::test]
 async fn resumes_a_saved_conversation_after_its_process_stops() {
-    let pool = sessions(None, false, false, Duration::from_millis(50));
+    let pool = sessions(Options {
+        idle: Some(Duration::from_millis(50)),
+        ..Options::default()
+    });
     pool.deliver("c/root", "first", 1).await;
     let first = pool.claudes()[0].clone();
     tokio::time::sleep(Duration::from_millis(120)).await;
@@ -208,7 +433,10 @@ async fn starts_over_when_a_saved_session_no_longer_loads() {
             at: 1,
         },
     );
-    let pool = sessions(Some(store), false, false, IDLE);
+    let pool = sessions(Options {
+        store: Some(store),
+        ..Options::default()
+    });
     let settled = pool
         .pool
         .deliver(
@@ -231,55 +459,25 @@ async fn starts_over_when_a_saved_session_no_longer_loads() {
 }
 
 #[tokio::test]
-async fn stops_the_longest_idle_conversation_to_stay_within_its_limit() {
-    let pool = pool();
-    for index in 0..MAX_LIVE + 2 {
-        pool.deliver(&format!("c/{index}"), "hi", index as u64)
-            .await;
+async fn runs_any_number_of_conversations_at_once() {
+    let pool = sessions(Options {
+        hold: true,
+        ..Options::default()
+    });
+    for index in 0..12 {
+        tokio::spawn(pool.deliver(&format!("c/{index}"), "hi", index));
     }
     flush().await;
-    assert!(pool.live().len() <= MAX_LIVE);
-    let keys = pool.keys();
-    assert!(!keys.contains(&"c/0".to_string()));
-    assert!(keys.contains(&format!("c/{}", MAX_LIVE + 1)));
-}
-
-#[tokio::test]
-async fn says_it_is_busy_rather_than_start_a_process_past_its_limit() {
-    let pool = sessions(None, true, false, IDLE);
-    pool.pool.warm();
-    for index in 0..MAX_LIVE {
-        tokio::spawn(pool.deliver(&format!("c/{index}"), "hi", index as u64));
-    }
-    flush().await;
-    assert_eq!(pool.live().len(), MAX_LIVE);
-    assert_eq!(
-        pool.deliver("c/extra", "hi", 9).await,
-        Settled::failed(format!(
-            "Claude Code is already working in {MAX_LIVE} conversations; try again when one finishes"
-        ))
-    );
-    assert_eq!(pool.live().len(), MAX_LIVE);
-    assert!(!pool.keys().contains(&"c/extra".to_string()));
-}
-
-#[tokio::test]
-async fn counts_conversations_still_starting_toward_its_limit() {
-    let pool = sessions(None, true, true, IDLE);
-    let results: Vec<_> = (0..=MAX_LIVE)
-        .map(|index| tokio::spawn(pool.deliver(&format!("c/{index}"), "hi", index as u64)))
-        .collect();
-    let last = results.into_iter().last().unwrap();
-    flush().await;
-    assert!(!last.await.unwrap().ok);
-    pool.release.send_replace(true);
-    flush().await;
-    assert_eq!(pool.live().len(), MAX_LIVE);
+    assert_eq!(pool.live().len(), 12);
+    assert!(pool.pool.snapshot().iter().all(|session| session.busy));
 }
 
 #[tokio::test]
 async fn starts_again_with_settings_saved_while_a_process_started() {
-    let pool = sessions(None, false, true, IDLE);
+    let pool = sessions(Options {
+        held: true,
+        ..Options::default()
+    });
     let done = tokio::spawn(pool.deliver("c/root", "hi", 1));
     flush().await;
     pool.set_model("sonnet");
@@ -287,7 +485,6 @@ async fn starts_again_with_settings_saved_while_a_process_started() {
     pool.release.send_replace(true);
     assert_eq!(done.await.unwrap(), Settled::ok());
     let claudes = pool.claudes();
-    // The conversation's first start and the new spare race to spawn.
     let old: Vec<&FakeClaude> = claudes
         .iter()
         .filter(|process| process.args().contains(&"opus".into()))
@@ -303,23 +500,15 @@ async fn starts_again_with_settings_saved_while_a_process_started() {
 }
 
 #[tokio::test]
-async fn restarts_idle_processes_and_the_spare_when_settings_change() {
+async fn restarts_idle_processes_when_settings_change() {
     let pool = pool();
     pool.deliver("c/root", "hi", 1).await;
     flush().await;
-    let (conversation, spare) = (pool.claudes()[0].clone(), pool.claudes()[1].clone());
+    let conversation = pool.claudes()[0].clone();
     pool.set_model("sonnet");
     pool.pool.reconfigure();
     flush().await;
     assert!(conversation.killed());
-    assert!(spare.killed());
-    assert!(
-        pool.claudes()
-            .last()
-            .unwrap()
-            .args()
-            .contains(&"sonnet".into())
-    );
     pool.deliver("c/root", "again", 2).await;
     let args = pool.claudes().last().unwrap().args();
     for wanted in ["--resume", "new-1", "--model", "sonnet"] {
@@ -329,14 +518,35 @@ async fn restarts_idle_processes_and_the_spare_when_settings_change() {
 
 #[tokio::test]
 async fn stops_every_process_when_disposed() {
-    let pool = pool();
-    pool.pool.warm();
+    let pool = with_spare(Options::default());
+    pool.spare().warm(vec![pool.at("/work")]);
     pool.deliver("c/root", "hi", 1).await;
     flush().await;
     pool.pool.dispose();
+    pool.spare().dispose();
     flush().await;
+    assert_eq!(pool.claudes().len(), 2);
     assert!(pool.claudes().iter().all(FakeClaude::killed));
     assert!(!pool.deliver("c/root", "late", 2).await.ok);
+    assert_eq!(pool.claudes().len(), 2);
+}
+
+#[tokio::test]
+async fn starts_no_spare_for_a_conversation_that_starts_after_its_agents_are_gone() {
+    let pool = with_spare(Options {
+        held: true,
+        ..Options::default()
+    });
+    pool.spare().warm(vec![pool.at("/work")]);
+    let done = tokio::spawn(pool.deliver("c/root", "hi", 1));
+    flush().await;
+    // As the runtime does when its last agent goes, mid-launch.
+    pool.pool.dispose();
+    pool.spare().warm(vec![]);
+    pool.release.send_replace(true);
+    assert!(!done.await.unwrap().ok);
+    flush().await;
+    assert!(pool.live().is_empty());
 }
 
 #[test]

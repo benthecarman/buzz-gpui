@@ -148,7 +148,8 @@ struct State {
 
 struct Inner {
     process: Process,
-    tools: Option<ToolServer>,
+    /// Replaced when a spare is given to the agent that takes it.
+    tools: Mutex<Option<ToolServer>>,
     state: Mutex<State>,
     /// Lines for stdin, written one at a time in the order sent.
     writes: mpsc::UnboundedSender<(String, oneshot::Sender<Result<(), String>>)>,
@@ -163,24 +164,40 @@ pub struct ClaudeProcess {
 
 impl ClaudeProcess {
     pub async fn start(spawn: &Spawner, launch: Launch) -> Result<Self, String> {
+        let claude = Self::spawn(spawn, &launch).await?;
+        claude.initialize(&launch).await?;
+        Ok(claude)
+    }
+
+    /// Starts `claude` without its prompt, which `launch` may leave empty.
+    /// This is most of what a start costs, and fixes nothing about the agent
+    /// it serves but its folder and model.
+    pub async fn spawn(spawn: &Spawner, launch: &Launch) -> Result<Self, String> {
         let spawned = spawn
             .spawn(
                 "claude",
                 SpawnOptions {
-                    args: args(&launch),
+                    args: args(launch),
                     cwd: Some(launch.cwd.clone()),
                     env: env(),
                 },
             )
             .await?;
-        let claude = Self::attach(
+        Ok(Self::attach(
             spawned.process,
             spawned.output,
             launch.resume.clone().or(launch.session_id.clone()),
             launch.tools.clone(),
-        );
-        // Loads settings, tools and MCP servers now rather than on the
-        // first message.
+        ))
+    }
+
+    /// Gives a started process its prompt, and its tools to whoever it now
+    /// works for. Loads settings and tools now rather than on the first
+    /// message.
+    pub async fn initialize(&self, launch: &Launch) -> Result<(), String> {
+        if let Some(tools) = &launch.tools {
+            *self.tools() = Some(tools.clone());
+        }
         let mut initialize = json!({
             "subtype": "initialize",
             "appendSystemPrompt": launch.system_prompt,
@@ -191,8 +208,7 @@ impl ClaudeProcess {
                 "PostToolUse": [{ "matcher": FINAL_TOOL, "hookCallbackIds": ["final"] }],
             });
         }
-        claude.request(initialize).await?;
-        Ok(claude)
+        self.request(initialize).await
     }
 
     /// Drives a spawned process: reads its output and writes its input.
@@ -206,7 +222,7 @@ impl ClaudeProcess {
             mpsc::unbounded_channel::<(String, oneshot::Sender<Result<(), String>>)>();
         let inner = Arc::new(Inner {
             process: process.clone(),
-            tools,
+            tools: Mutex::new(tools),
             state: Mutex::new(State {
                 session_id,
                 conversation: None,
@@ -250,6 +266,12 @@ impl ClaudeProcess {
     fn state(&self) -> MutexGuard<'_, State> {
         self.inner
             .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+    fn tools(&self) -> MutexGuard<'_, Option<ToolServer>> {
+        self.inner
+            .tools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
@@ -487,9 +509,9 @@ impl ClaudeProcess {
         let request = message.get("request").cloned().unwrap_or_else(|| json!({}));
         let subtype = request.get("subtype").and_then(Value::as_str);
         let success = |response: Value| json!({ "subtype": "success", "request_id": id, "response": response });
-        let response = match subtype {
-            Some("mcp_message") if self.inner.tools.is_some() => {
-                let tools = self.inner.tools.clone().expect("checked");
+        let tools = self.tools().clone();
+        let response = match (subtype, tools) {
+            (Some("mcp_message"), Some(tools)) => {
                 let conversation = self.state().conversation.clone();
                 let mcp = request.get("message").cloned().unwrap_or(Value::Null);
                 let claude = self.clone();
@@ -514,16 +536,16 @@ impl ClaudeProcess {
                 });
                 return;
             }
-            Some("can_use_tool") => success(json!({
+            (Some("can_use_tool"), _) => success(json!({
                 "behavior": "allow",
                 "updatedInput": request.get("input").cloned().unwrap_or_else(|| json!({})),
             })),
-            Some("hook_callback") => success(if self.is_final(request.get("input")) {
+            (Some("hook_callback"), _) => success(if self.is_final(request.get("input")) {
                 json!({ "continue": false })
             } else {
                 json!({})
             }),
-            other => json!({
+            (other, _) => json!({
                 "subtype": "error",
                 "request_id": id,
                 "error": format!("Buzz does not handle {}", other.unwrap_or("undefined")),

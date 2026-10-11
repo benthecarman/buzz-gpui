@@ -11,7 +11,8 @@ use super::prompt::{
     CONTEXT_LIMIT, Channel, Scope, Thread, steer_prompt, system_prompt, timer_prompt, turn_prompt,
 };
 use super::sessions::{
-    AgentSessions, DeliverOptions, FileSessions, SessionStore, SessionView, SessionsOptions,
+    AgentSessions, DeliverOptions, FileSessions, SessionStore, SessionView, SessionsOptions, Spare,
+    Where,
 };
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
@@ -95,6 +96,17 @@ impl Config {
     fn fingerprint(&self) -> String {
         json!([self.model, self.workspace, self.instructions, self.scope]).to_string()
     }
+
+    /// Where an agent's processes run, on `spawn`'s host, and with which
+    /// model.
+    fn at(&self, spawn: &Spawner) -> Where {
+        let model = self.model.trim();
+        Where {
+            spawn: spawn.clone(),
+            cwd: self.workspace.clone(),
+            model: (!model.is_empty()).then(|| model.to_string()),
+        }
+    }
 }
 
 /// How long a read of the agent's core memory is reused.
@@ -168,7 +180,12 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct Inner {
     agents: Mutex<HashMap<String, Arc<Entry>>>,
     reading: Mutex<HashMap<String, MemoryRead>>,
-    relay: Mutex<Option<Arc<dyn OwnerRelay>>>,
+    /// The owner's connection to each agent's own community, by agent
+    /// pubkey.
+    relays: Mutex<HashMap<String, Arc<dyn OwnerRelay>>>,
+    /// One process started ahead of need, for any agent's next new
+    /// conversation.
+    spare: Spare,
     changes: watch::Sender<u64>,
     /// Where each agent's saved sessions are kept.
     store: StoreFn,
@@ -197,19 +214,23 @@ impl ClaudeRuntime {
             inner: Arc::new(Inner {
                 agents: Mutex::default(),
                 reading: Mutex::default(),
-                relay: Mutex::default(),
+                relays: Mutex::default(),
+                spare: Spare::new(Arc::new(|_, message: Value| {
+                    async move { Ok(rpc::respond(None, &Context::default(), &message).await) }
+                        .boxed()
+                })),
                 changes: watch::Sender::new(0),
                 store,
             }),
         }
     }
 
-    /// The selected community, as its owner reads it.
-    pub fn set_relay(&self, relay: Option<Arc<dyn OwnerRelay>>) {
-        *locked(&self.inner.relay) = relay;
+    /// Each agent's own community, as its owner reads it, by agent pubkey.
+    pub fn set_relays(&self, relays: HashMap<String, Arc<dyn OwnerRelay>>) {
+        *locked(&self.inner.relays) = relays;
     }
-    fn relay(&self) -> Option<Arc<dyn OwnerRelay>> {
-        locked(&self.inner.relay).clone()
+    fn relay(&self, pubkey: &str) -> Option<Arc<dyn OwnerRelay>> {
+        locked(&self.inner.relays).get(pubkey).cloned()
     }
 
     /// Bumps whenever a session starts, stops or settles.
@@ -220,14 +241,13 @@ impl ClaudeRuntime {
         self.inner.changes.send_modify(|count| *count += 1);
     }
 
-    /// Brings the runtime in line with this type's agents: new ones get a
-    /// warm session, changed settings restart idle sessions, removed agents
-    /// stop. Must run inside tokio.
+    /// Brings the runtime in line with this type's agents: changed settings
+    /// restart idle sessions, removed agents stop, and a spare waits while
+    /// any agent is here. Must run inside tokio.
     pub fn sync(&self, agents: Vec<Synced>) {
         let current: HashSet<&str> = agents.iter().map(|agent| agent.pubkey.as_str()).collect();
-        // Out of view (another community, offline) or deleted: either way
-        // its processes stop. Saved sessions stay so it resumes when it is
-        // back.
+        // Deleted, signed out or its community disconnected: either way its
+        // processes stop. Saved sessions stay so it resumes when it is back.
         let gone: Vec<Arc<Entry>> = {
             let mut entries = locked(&self.inner.agents);
             let gone = entries
@@ -241,11 +261,15 @@ impl ClaudeRuntime {
         for entry in gone {
             entry.sessions.dispose();
         }
+        let mut wheres = Vec::new();
         for agent in agents {
             let next = Config::read(&agent.config);
+            wheres.push(next.at(&agent.spawn));
             let existing = locked(&self.inner.agents).get(&agent.pubkey).cloned();
             match existing {
-                None => self.entry(&agent.pubkey, next, agent.spawn).sessions.warm(),
+                None => {
+                    self.entry(&agent.pubkey, next, agent.spawn);
+                }
                 Some(entry) => {
                     let changed = {
                         let mut state = locked(&entry.state);
@@ -259,6 +283,7 @@ impl ClaudeRuntime {
                 }
             }
         }
+        self.inner.spare.warm(wheres);
         self.notify();
     }
 
@@ -271,6 +296,7 @@ impl ClaudeRuntime {
     }
 
     pub fn dispose(&self) {
+        self.inner.spare.dispose();
         let entries: Vec<Arc<Entry>> = locked(&self.inner.agents)
             .drain()
             .map(|(_, entry)| entry)
@@ -293,6 +319,13 @@ impl ClaudeRuntime {
         }
         let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone());
         locked(&entry.state).handle = Some(run.agent.clone());
+        // Read while the turn's prompt is built, not after: a new session's
+        // prompt needs it, and a spare is only faster if nothing else is
+        // awaited.
+        {
+            let (this, pubkey, state) = (self.clone(), pubkey.clone(), entry.state.clone());
+            tokio::spawn(async move { this.memory(&pubkey, &state).await });
+        }
         let (event, label, interest) = match run.wake {
             Wake::Timer {
                 slug,
@@ -429,7 +462,7 @@ impl ClaudeRuntime {
         label: &str,
         interest: Option<&str>,
     ) -> (String, String) {
-        let relay = self.relay();
+        let relay = self.relay(own);
         let summary = relay.as_ref().and_then(|relay| relay.channel(channel_id));
         let dm = summary.as_ref().is_some_and(|summary| summary.dm);
         let thread = thread_reference(event);
@@ -552,11 +585,11 @@ impl ClaudeRuntime {
                 async move {
                     let config = locked(&state).config.clone();
                     let memory = this.memory(&pubkey, &state).await;
-                    let model = config.model.trim();
+                    let Where { cwd, model, .. } = config.at(&spawn);
                     Ok(Launch {
-                        cwd: config.workspace.clone(),
+                        cwd,
                         tools: Some(this.tools(&pubkey, &state, &spawn, &config.workspace)),
-                        model: (!model.is_empty()).then(|| model.to_string()),
+                        model,
                         system_prompt: system_prompt(
                             config.scope(),
                             &config.workspace,
@@ -575,6 +608,7 @@ impl ClaudeRuntime {
         };
         let mut options =
             SessionsOptions::new(spawn, (self.inner.store)(pubkey), launch, fingerprint);
+        options.spare = Some(self.inner.spare.clone());
         let changes = self.clone();
         options.on_change = Arc::new(move || changes.notify());
         let entry = Arc::new(Entry {
@@ -602,9 +636,6 @@ impl ClaudeRuntime {
             cwd.to_string(),
         );
         Arc::new(move |conversation: Option<String>, message: Value| {
-            // A spare starts before any delivery: it can list the tools,
-            // and has a handle to call them with by the time it is given a
-            // turn.
             let (handle, context) = {
                 let state = locked(&state);
                 let context = conversation
@@ -665,8 +696,8 @@ impl ClaudeRuntime {
         value
     }
 
-    /// The agent's memory, read back by the owner. Calls at once share one
-    /// read.
+    /// The agent's memory, read back by the owner in the agent's own
+    /// community. Calls at once share one read.
     fn memories(
         &self,
         pubkey: &str,
@@ -676,7 +707,7 @@ impl ClaudeRuntime {
             .or_insert_with(|| {
                 let (this, pubkey) = (self.clone(), pubkey.to_string());
                 async move {
-                    let result = match this.relay() {
+                    let result = match this.relay(&pubkey) {
                         Some(relay) => {
                             tokio::time::timeout(MEMORY_TIMEOUT, relay.memories(&pubkey))
                                 .await

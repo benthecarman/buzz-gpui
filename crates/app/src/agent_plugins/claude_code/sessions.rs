@@ -1,23 +1,22 @@
 //! One agent's Claude sessions, a port of buzz-app's `sessions.ts`: one per
 //! conversation (a thread, or a whole DM), each continuing across messages
 //! and app restarts. A conversation in use keeps its process; a quiet one is
-//! stopped and resumed from its saved session when it is next addressed. A
-//! spare process waits for the next new conversation, so that starts
-//! without a spawn.
+//! stopped and resumed from its saved session when it is next addressed.
+//! One spare process, shared by every agent, waits for the next new
+//! conversation, so that starts without a spawn.
 
-use super::claude::{ClaudeProcess, Launch, Settled};
+use super::claude::{ClaudeProcess, Launch, Settled, ToolServer};
 use crate::agent_plugins::process::Spawner;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-/// Processes an agent keeps, the spare included.
-pub const MAX_LIVE: usize = 6;
 /// A conversation's process stops after this long without a message.
 pub const IDLE: Duration = Duration::from_secs(15 * 60);
 /// Saved sessions per agent; the least recently used are forgotten.
@@ -43,6 +42,8 @@ pub type LaunchFn = Arc<dyn Fn() -> BoxFuture<'static, Result<Launch, String>> +
 
 pub struct SessionsOptions {
     pub spawn: Spawner,
+    /// Where a new conversation looks for a process already started.
+    pub spare: Option<Spare>,
     pub store: Arc<dyn SessionStore>,
     /// How to start a process with the agent's current settings; `resume`
     /// and `session_id` are filled in here.
@@ -66,6 +67,7 @@ impl SessionsOptions {
     ) -> Self {
         Self {
             spawn,
+            spare: None,
             store,
             launch,
             fingerprint,
@@ -91,7 +93,6 @@ struct State {
     /// In the order they started, for the status view.
     live: Vec<(String, Arc<Live>)>,
     opening: BTreeMap<String, (u64, Starting)>,
-    spare: Option<(u64, Starting)>,
     disposed: bool,
 }
 
@@ -104,10 +105,6 @@ impl State {
     }
     fn holds(&self, key: &str, live: &Arc<Live>) -> bool {
         self.get(key).is_some_and(|held| Arc::ptr_eq(&held, live))
-    }
-    /// Processes running or starting, the spare included.
-    fn count(&self) -> usize {
-        self.live.len() + self.opening.len() + usize::from(self.spare.is_some())
     }
 }
 
@@ -140,15 +137,11 @@ pub struct DeliverOptions {
 }
 
 fn kill_later(live: Arc<Live>) {
-    tokio::spawn(async move { live.process.kill().await });
+    kill_process(live.process.clone());
 }
 
-fn kill_starting(starting: Starting) {
-    tokio::spawn(async move {
-        if let Some(live) = starting.await {
-            live.process.kill().await;
-        }
-    });
+fn kill_process(process: ClaudeProcess) {
+    tokio::spawn(async move { process.kill().await });
 }
 
 impl AgentSessions {
@@ -193,41 +186,6 @@ impl AgentSessions {
                 busy: live.process.busy(),
             })
             .collect()
-    }
-
-    /// Starts a spare process unless one exists or the agent is at its
-    /// limit.
-    pub fn warm(&self) {
-        let mut state = self.state();
-        if state.disposed || state.spare.is_some() || state.count() >= MAX_LIVE {
-            return;
-        }
-        let this = self.clone();
-        let spare: Starting = async move {
-            match this.start(None).await {
-                Ok(live) => Some(live),
-                Err(error) => {
-                    tracing::warn!(%error, "Claude Code could not start a spare session");
-                    None
-                }
-            }
-        }
-        .boxed()
-        .shared();
-        let id = self.next_id();
-        state.spare = Some((id, spare.clone()));
-        drop(state);
-        // A spare that dies, or was started with old settings, is not kept.
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Some(live) = spare.await {
-                live.process.exited().await;
-                let mut state = this.state();
-                if state.spare.as_ref().is_some_and(|(other, _)| *other == id) {
-                    state.spare = None;
-                }
-            }
-        });
     }
 
     /// Sends `text` into the conversation `key`, and resolves when the
@@ -284,14 +242,7 @@ impl AgentSessions {
         // Adopted as part of the start, so a message that waited on it finds
         // the conversation's process.
         let starting: Starting = async move {
-            let started = match resume {
-                Some(resume) => this.start(Some(resume)).await,
-                None => match this.claim_spare().await {
-                    Some(live) => Ok(live),
-                    None => this.start(None).await,
-                },
-            };
-            let live = match started {
+            let live = match this.start(resume).await {
                 Ok(live) => Some(live),
                 Err(error) => {
                     tracing::warn!(%error, "Claude Code could not start");
@@ -318,33 +269,9 @@ impl AgentSessions {
         }
         .boxed()
         .shared();
-        let dropped = {
-            // A new conversation takes the spare's place; any other start
-            // needs room, reserved here, before anything is awaited.
-            let mut state = self.state();
-            let needs_room = saved.is_some() || state.spare.is_none();
-            let (room, dropped) = if needs_room {
-                self.room(&mut state)
-            } else {
-                (true, Vec::new())
-            };
-            if room {
-                state.opening.insert(key.clone(), (id, starting.clone()));
-            }
-            drop(state);
-            if !room {
-                for (key, live) in dropped {
-                    self.drop_live(&key, &live);
-                }
-                return Settled::failed(format!(
-                    "Claude Code is already working in {MAX_LIVE} conversations; try again when one finishes"
-                ));
-            }
-            dropped
-        };
-        for (key, live) in dropped {
-            self.drop_live(&key, &live);
-        }
+        self.state()
+            .opening
+            .insert(key.clone(), (id, starting.clone()));
         let Some(live) = starting.await else {
             return Settled::failed("Claude Code could not start");
         };
@@ -370,40 +297,30 @@ impl AgentSessions {
         delivered
     }
 
-    /// Stops idle processes started with old settings and replaces the
-    /// spare; busy ones stop when they next fall idle.
+    /// Stops idle processes started with old settings; busy ones stop when
+    /// they next fall idle.
     pub fn reconfigure(&self) {
         let fingerprint = self.fingerprint();
-        let (stale, spare) = {
-            let mut state = self.state();
-            let stale: Vec<(String, Arc<Live>)> = state
-                .live
-                .iter()
-                .filter(|(_, live)| live.fingerprint != fingerprint && !live.process.busy())
-                .cloned()
-                .collect();
-            (stale, state.spare.take())
-        };
+        let stale: Vec<(String, Arc<Live>)> = self
+            .state()
+            .live
+            .iter()
+            .filter(|(_, live)| live.fingerprint != fingerprint && !live.process.busy())
+            .cloned()
+            .collect();
         for (key, live) in stale {
             self.drop_live(&key, &live);
         }
-        if let Some((_, spare)) = spare {
-            kill_starting(spare);
-        }
-        self.warm();
     }
 
     pub fn dispose(&self) {
-        let (live, spare) = {
+        let live = {
             let mut state = self.state();
             state.disposed = true;
-            (state.live.clone(), state.spare.take())
+            state.live.clone()
         };
         for (key, live) in live {
             self.drop_live(&key, &live);
-        }
-        if let Some((_, spare)) = spare {
-            kill_starting(spare);
         }
     }
 
@@ -413,11 +330,13 @@ impl AgentSessions {
             // describes newer ones.
             let fingerprint = self.fingerprint();
             let mut launch = (self.options().launch)().await?;
-            match &resume {
-                Some(resume) => launch.resume = Some(resume.clone()),
-                None => launch.session_id = Some((self.options().new_id)()),
-            }
-            let process = ClaudeProcess::start(&self.options().spawn, launch).await?;
+            let process = match &resume {
+                Some(resume) => {
+                    launch.resume = Some(resume.clone());
+                    ClaudeProcess::start(&self.options().spawn, launch).await?
+                }
+                None => self.fresh(launch).await?,
+            };
             if fingerprint == self.fingerprint() || self.state().disposed {
                 return Ok(Arc::new(Live {
                     process,
@@ -432,14 +351,23 @@ impl AgentSessions {
         }
     }
 
-    async fn claim_spare(&self) -> Option<Arc<Live>> {
-        let spare = self.state().spare.take()?;
-        let live = spare.1.await?;
-        if live.process.running() && live.fingerprint == self.fingerprint() {
-            return Some(live);
+    /// A process for a new session: the spare when it fits, else a new one.
+    async fn fresh(&self, mut launch: Launch) -> Result<ClaudeProcess, String> {
+        let at = Where {
+            spawn: self.options().spawn.clone(),
+            cwd: launch.cwd.clone(),
+            model: launch.model.clone(),
+        };
+        if let Some(spare) = &self.options().spare
+            && let Some(process) = spare.take(&at).await
+        {
+            match process.initialize(&launch).await {
+                Ok(()) => return Ok(process),
+                Err(_) => kill_process(process),
+            }
         }
-        live.process.kill().await;
-        None
+        launch.session_id = Some((self.options().new_id)());
+        ClaudeProcess::start(&self.options().spawn, launch).await
     }
 
     fn adopt(&self, key: &str, live: &Arc<Live>, seen: u64) {
@@ -457,7 +385,6 @@ impl AgentSessions {
                 sessions.drop_live(&key, &watched);
             }
         });
-        self.warm();
     }
 
     async fn answer(&self, key: &str, live: &Arc<Live>, text: &str) -> Settled {
@@ -515,32 +442,6 @@ impl AgentSessions {
         );
     }
 
-    /// Makes room for one more process by stopping the longest-idle
-    /// conversation, else the spare. False when every process is working.
-    /// Returns the conversations to stop once the lock is released.
-    fn room(&self, state: &mut State) -> (bool, Vec<(String, Arc<Live>)>) {
-        let mut dropped = Vec::new();
-        while state.count() >= MAX_LIVE {
-            let idle = state
-                .live
-                .iter()
-                .filter(|(_, live)| !live.process.busy())
-                .min_by_key(|(_, live)| *live.used.lock().unwrap_or_else(PoisonError::into_inner))
-                .cloned();
-            if let Some((key, live)) = idle {
-                state
-                    .live
-                    .retain(|(other, held)| !(other == &key && Arc::ptr_eq(held, &live)));
-                dropped.push((key, live));
-            } else if let Some((_, spare)) = state.spare.take() {
-                kill_starting(spare);
-            } else {
-                return (false, dropped);
-            }
-        }
-        (true, dropped)
-    }
-
     fn drop_live(&self, key: &str, live: &Arc<Live>) {
         if let Some(timer) = live
             .timer
@@ -550,7 +451,6 @@ impl AgentSessions {
         {
             timer.abort();
         }
-        // Taken out of the list here, or already by `room`.
         self.state()
             .live
             .retain(|(other, held)| !(other == key && Arc::ptr_eq(held, live)));
@@ -561,6 +461,199 @@ impl AgentSessions {
 
 fn upgrade(inner: &Weak<Inner>) -> Option<AgentSessions> {
     inner.upgrade().map(|inner| AgentSessions { inner })
+}
+
+/// Where a process runs and its model: all a spare is started with. Each
+/// agent's processes run on the host that holds it, so that is part of it.
+#[derive(Clone)]
+pub struct Where {
+    pub spawn: Spawner,
+    pub cwd: String,
+    pub model: Option<String>,
+}
+
+impl Where {
+    fn place(&self) -> String {
+        json!([
+            self.spawn.host(),
+            self.cwd,
+            self.model.as_deref().unwrap_or("")
+        ])
+        .to_string()
+    }
+}
+
+type SpareProcess = Shared<BoxFuture<'static, Option<ClaudeProcess>>>;
+
+struct Next {
+    id: u64,
+    place: String,
+    process: SpareProcess,
+}
+
+#[derive(Default)]
+struct SpareState {
+    next: Option<Next>,
+    /// Where a spare is wanted: set by the runtime alone.
+    wanted: Vec<Where>,
+    /// Not started again after it failed to start or died, until a
+    /// conversation asks for one, so a `claude` that cannot run is not
+    /// started over and over.
+    stopped: bool,
+}
+
+struct SpareInner {
+    /// Answers the tool server before any agent has it: it lists the tools.
+    tools: ToolServer,
+    new_id: Arc<dyn Fn() -> String + Send + Sync>,
+    state: Mutex<SpareState>,
+    next: AtomicU64,
+}
+
+/// One process started ahead of need, for whichever agent next starts a
+/// conversation where it runs and with its model. Starting is most of the
+/// wait before a new conversation's first reply; giving the process its
+/// prompt is not. It is kept only where the runtime's agents run, and
+/// follows the latest new conversation among those places, the likeliest
+/// place for the next. Cheap to clone; clones are the same spare.
+#[derive(Clone)]
+pub struct Spare {
+    inner: Arc<SpareInner>,
+}
+
+fn kill_spare(process: SpareProcess) {
+    tokio::spawn(async move {
+        if let Some(process) = process.await {
+            process.kill().await;
+        }
+    });
+}
+
+impl Spare {
+    pub fn new(tools: ToolServer) -> Self {
+        Self::with_ids(tools, Arc::new(|| uuid::Uuid::new_v4().to_string()))
+    }
+
+    pub fn with_ids(tools: ToolServer, new_id: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
+        Self {
+            inner: Arc::new(SpareInner {
+                tools,
+                new_id,
+                state: Mutex::default(),
+                next: AtomicU64::new(1),
+            }),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, SpareState> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wants a spare for one of `wheres`, or none when there are none. Must
+    /// run inside tokio.
+    pub fn warm(&self, wheres: Vec<Where>) {
+        let mut state = self.state();
+        if wheres.is_empty() {
+            state.stopped = false;
+        }
+        state.wanted = wheres.clone();
+        self.fill(&mut state, &wheres);
+    }
+
+    /// The spare, when it was started for `at`. Another is started for `at`
+    /// when a spare is wanted there, else where one is wanted.
+    pub async fn take(&self, at: &Where) -> Option<ClaudeProcess> {
+        let place = at.place();
+        let next = {
+            let mut state = self.state();
+            let next = state.next.take();
+            state.stopped = false;
+            let here = state.wanted.iter().any(|wanted| wanted.place() == place);
+            let wheres = if here {
+                vec![at.clone()]
+            } else {
+                state.wanted.clone()
+            };
+            self.fill(&mut state, &wheres);
+            next
+        }?;
+        if next.place != place {
+            kill_spare(next.process);
+            return None;
+        }
+        let process = next.process.await?;
+        if process.running() {
+            return Some(process);
+        }
+        process.kill().await;
+        None
+    }
+
+    pub fn dispose(&self) {
+        self.warm(Vec::new());
+    }
+
+    /// Keeps the spare when it fits one of `wheres`, else starts one for the
+    /// first; with none, keeps none.
+    fn fill(&self, state: &mut SpareState, wheres: &[Where]) {
+        if let Some(current) = &state.next
+            && wheres.iter().any(|at| at.place() == current.place)
+        {
+            return;
+        }
+        if let Some(current) = state.next.take() {
+            kill_spare(current.process);
+        }
+        let Some(first) = wheres.first() else {
+            return;
+        };
+        if state.stopped {
+            return;
+        }
+        let launch = Launch {
+            cwd: first.cwd.clone(),
+            model: first.model.clone(),
+            session_id: Some((self.inner.new_id)()),
+            tools: Some(self.inner.tools.clone()),
+            ..Default::default()
+        };
+        let spawn = first.spawn.clone();
+        let process: SpareProcess = async move {
+            match ClaudeProcess::spawn(&spawn, &launch).await {
+                Ok(process) => Some(process),
+                Err(error) => {
+                    tracing::warn!(%error, "Claude Code could not start a spare session");
+                    None
+                }
+            }
+        }
+        .boxed()
+        .shared();
+        let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
+        state.next = Some(Next {
+            id,
+            place: first.place(),
+            process: process.clone(),
+        });
+        let this = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            if let Some(process) = process.await {
+                process.exited().await;
+            }
+            let Some(inner) = this.upgrade() else {
+                return;
+            };
+            let spare = Spare { inner };
+            let mut state = spare.state();
+            if state.next.as_ref().is_some_and(|next| next.id == id) {
+                state.next = None;
+                state.stopped = true;
+            }
+        });
+    }
 }
 
 /// Sessions saved in a JSON file, by agent and then conversation: what

@@ -60,6 +60,12 @@ impl Process {
 pub trait Spawn: Send + Sync {
     fn spawn(&self, id: &str, options: SpawnOptions)
     -> BoxFuture<'static, Result<Spawned, String>>;
+
+    /// Which host its processes run on: equal for spawners that start them
+    /// in the same place. Spawners that do not say share one.
+    fn host(&self) -> usize {
+        0
+    }
 }
 
 pub type Spawner = Arc<dyn Spawn>;
@@ -207,6 +213,11 @@ impl Spawn for HostSpawner {
                 output,
             })
         })
+    }
+
+    /// Its connection: every spawner made for one host shares it.
+    fn host(&self) -> usize {
+        Arc::as_ptr(&self.client) as *const () as usize
     }
 }
 
