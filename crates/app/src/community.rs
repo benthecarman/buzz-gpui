@@ -7,7 +7,7 @@ use crate::runtime::Runtime;
 use buzz_identity::Identity;
 use buzz_relay_client::{
     ChannelType, ChannelView, LeaveOutcome, PresenceMode, RelayOrigin, Session, SessionSnapshot,
-    Store, TimelineSnapshot,
+    Store, TimelineSnapshot, TimelineStatus,
 };
 use gpui_kit::{App, AppContext, Context, Entity, Global, Task};
 use serde::{Deserialize, Serialize};
@@ -483,29 +483,49 @@ impl Community {
         }
     }
 
-    pub fn open_channel(&mut self, channel: &str, cx: &mut App) -> Entity<ChannelModel> {
+    /// Opens `channel`. `seed` is what it showed when it closed a moment
+    /// ago: it stands in for the session's loading state, so the rows show
+    /// at once rather than a frame later, when the session answers.
+    pub fn open_channel(
+        &mut self,
+        channel: &str,
+        seed: Option<Arc<TimelineSnapshot>>,
+        cx: &mut App,
+    ) -> Entity<ChannelModel> {
         let view = self.session.open_channel(channel);
         self.session.select(Some(channel.to_string()));
         self.reading = Some(channel.to_string());
         cx.new(|cx| {
             let current = view.snapshot.borrow().clone();
-            Self::channel_model(view, current, cx)
+            let seed = seed.filter(|seed| {
+                current.status == TimelineStatus::Loading && *seed.channel == *channel
+            });
+            Self::channel_model(view, current, seed, cx)
         })
     }
 
     fn channel_model(
         view: ChannelView,
         current: Arc<TimelineSnapshot>,
+        seed: Option<Arc<TimelineSnapshot>>,
         cx: &mut Context<ChannelModel>,
     ) -> ChannelModel {
         ChannelModel {
             _watch: mirror(
                 view.snapshot.clone(),
                 cx,
-                |this: &mut ChannelModel, value| this.snapshot = value,
+                |this: &mut ChannelModel, value| {
+                    // The session's first value is the loading state the
+                    // seed stands in for.
+                    if std::mem::take(&mut this.seeded) && value.status == TimelineStatus::Loading {
+                        return;
+                    }
+                    this.snapshot = value
+                },
             ),
             view,
-            snapshot: current,
+            seeded: seed.is_some(),
+            snapshot: seed.unwrap_or(current),
         }
     }
 
@@ -589,6 +609,8 @@ impl Community {
 pub struct ChannelModel {
     pub view: ChannelView,
     pub snapshot: Arc<TimelineSnapshot>,
+    /// `snapshot` is a seed until the session's first value arrives.
+    seeded: bool,
     _watch: Task<()>,
 }
 
