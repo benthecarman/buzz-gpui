@@ -260,6 +260,17 @@ impl PresenceDirectory {
         self.demand = next;
     }
 
+    /// Reads everyone again at the next allowed moment (`refresh`): a
+    /// harness publishes presence just after a start or stop, so a read
+    /// can race it.
+    pub fn refresh(&mut self, now: u64) {
+        if !self.connected || self.demand.is_empty() {
+            return;
+        }
+        let at = now.max(self.gate);
+        self.next_read = Some(self.next_read.map_or(at, |next| next.min(at)));
+    }
+
     /// The live socket's state. Either way all evidence becomes unknown:
     /// nothing tells us what changed while it was down.
     pub fn set_connected(&mut self, connected: bool, now: u64) {
@@ -641,6 +652,17 @@ mod tests {
         directory.set_demand(authors, 0);
         assert_eq!(directory.demand().len(), MAX_SUBJECTS);
         assert_eq!(directory.demand()[0], viewer);
+    }
+
+    #[test]
+    fn refresh_reads_again_at_once() {
+        let a = hex(1);
+        let mut directory = connected(&hex(0), std::slice::from_ref(&a));
+        directory.refresh(10);
+        assert_eq!(directory.deadline(), Some(10));
+        let mut idle = PresenceDirectory::new(hex(0));
+        idle.refresh(10);
+        assert_eq!(idle.deadline(), None);
     }
 
     #[test]

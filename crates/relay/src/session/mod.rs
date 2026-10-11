@@ -693,6 +693,13 @@ impl Session {
         let _ = self.commands.send(Message::WatchPresence(authors));
     }
 
+    /// Reads the followed people's presence again soon.
+    pub fn refresh_presence(&self) {
+        let _ = self.commands.send(Message::With(Box::new(|actor| {
+            actor.presence.refresh(unread::now_ms());
+        })));
+    }
+
     /// Whether the machine has been idle long enough to show away. Only
     /// matters in [`PresenceMode::Auto`].
     pub fn set_idle(&self, idle: bool) {

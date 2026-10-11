@@ -151,6 +151,9 @@ struct PageToast {
 }
 
 pub struct AgentsPage {
+    /// Presence re-reads after a start or stop, by agent key and the
+    /// status they follow.
+    presence_checks: HashMap<String, (ProcessStatus, Task<()>)>,
     hosts: Vec<Entity<HostConnection>>,
     discovery: Entity<Discovery>,
     _observers: Vec<Subscription>,
@@ -256,6 +259,7 @@ impl AgentsPage {
         });
         let mut page = Self {
             teams: cx.new(|cx| teams::TeamsSection::new(add_agent, cx)),
+            presence_checks: HashMap::new(),
             hosts: Vec::new(),
             _observers: vec![cx.observe(&discovery, |_, _, cx| cx.notify())],
             discovery,
@@ -1239,6 +1243,58 @@ impl AgentsPage {
     }
 }
 
+impl AgentsPage {
+    /// After a start or stop the presence dot can lag: re-read presence
+    /// now and every 5 s, six times, until it agrees with the process
+    /// (running and online, or not running and not online).
+    fn recheck_presence(&mut self, view: &View, cx: &mut Context<Self>) {
+        let Some(community) = AppState::current(cx) else {
+            self.presence_checks.clear();
+            return;
+        };
+        let presence = community.read(cx).snapshot.presence.clone();
+        let mut wanted = HashMap::new();
+        for row in view.rows.values() {
+            let setups = row.local_setups(&view.destination);
+            let [setup] = setups.as_slice() else {
+                continue;
+            };
+            let status = setup.agent.status;
+            if matches!(status, ProcessStatus::Waiting | ProcessStatus::Starting) {
+                continue;
+            }
+            let online =
+                presence.get(&row.pubkey) == Some(&buzz_relay_client::PresenceState::Online);
+            let settled = if status == ProcessStatus::Running {
+                online
+            } else {
+                !online
+            };
+            if !settled {
+                wanted.insert(row.pubkey.clone(), status);
+            }
+        }
+        self.presence_checks
+            .retain(|pubkey, (status, _)| wanted.get(pubkey) == Some(status));
+        for (pubkey, status) in wanted {
+            if self.presence_checks.contains_key(&pubkey) {
+                continue;
+            }
+            let session = community.read(cx).session.clone();
+            let task = cx.spawn(async move |_, cx| {
+                session.refresh_presence();
+                for _ in 0..6 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(5))
+                        .await;
+                    session.refresh_presence();
+                }
+            });
+            self.presence_checks.insert(pubkey, (status, task));
+        }
+    }
+}
+
 impl Render for AgentsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
@@ -1258,6 +1314,7 @@ impl Render for AgentsPage {
         .size_full();
 
         let view = self.view(cx);
+        self.recheck_presence(&view, cx);
         // Entering the all-archived state opens the Archived section again.
         let all_archived =
             !view.archived.is_empty() && view.rows.keys().all(|key| view.archived.contains(key));
