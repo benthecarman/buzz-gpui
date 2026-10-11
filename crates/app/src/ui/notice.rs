@@ -68,25 +68,14 @@ fn dismiss(generation: usize, cx: &mut App) {
     }
 }
 
-/// The current toast, 128px from the top right, 384px wide.
+/// The current toast, in the toast region.
 pub fn render(window: &Window, cx: &App) -> Option<AnyElement> {
     let notice = cx.try_global::<Notices>()?.current.clone()?;
-    let right = window.viewport_size().width - px(16.) - px(384.);
     let generation = notice.generation;
-    Some(
-        deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(point(right, px(128.)))
-                .child(
-                    div().w(px(384.)).child(
-                        Toast::new(("message-notice", generation), notice.text)
-                            .tone(notice.tone)
-                            .on_dismiss(move |_, _, cx| dismiss(generation, cx)),
-                    ),
-                ),
-        )
-        .with_priority(3)
-        .into_any_element(),
-    )
+    Some(super::toasts::place(
+        window,
+        Toast::new(("message-notice", generation), notice.text)
+            .tone(notice.tone)
+            .on_dismiss(move |_, _, cx| dismiss(generation, cx)),
+    ))
 }

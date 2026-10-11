@@ -394,8 +394,11 @@ impl Workspace {
                 }
             });
         });
-        let page =
-            cx.new(|cx| ChannelPage::new(community, channel.clone(), open_thread, window, cx));
+        let page = cx.new(|cx| {
+            let mut page = ChannelPage::new(community, channel.clone(), open_thread, window, cx);
+            page.live_status = true;
+            page
+        });
         let composer = page.read(cx).composer();
         composer.update(cx, |state, cx| state.focus(window, cx));
         self._page_events = Some(cx.subscribe_in(
@@ -607,13 +610,7 @@ impl Render for Workspace {
             .community
             .as_ref()
             .filter(|_| self.onboarding.is_none())
-            .and_then(|community| {
-                let channel = self
-                    .channel
-                    .as_ref()
-                    .map(|channel| channel.read(cx).channel_id().to_string());
-                super::live_status::toast(community, channel.as_deref(), window, cx)
-            });
+            .and_then(|community| super::live_status::toast(community, window, cx));
         // No shadow around the frame: that needs a translucent surface,
         // which not every GPU path gives; edges resize from just inside.
         window_border().shadow_size(px(0.)).child(

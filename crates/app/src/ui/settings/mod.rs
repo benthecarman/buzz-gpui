@@ -506,20 +506,15 @@ impl Render for SettingsPage {
         let detail = self.detail(window, cx);
         let modal = self.modal(window, cx);
         let toast = self.toast.as_ref().map(|(text, generation)| {
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(crate::ui::toasts::origin(window))
-                    .child(
-                        Toast::new(("settings-toast", *generation), text.clone())
-                            .tone(self.toast_tone)
-                            .on_dismiss(cx.listener(|this, _, _, cx| {
-                                this.toast = None;
-                                cx.notify();
-                            })),
-                    ),
+            crate::ui::toasts::place(
+                window,
+                Toast::new(("settings-toast", *generation), text.clone())
+                    .tone(self.toast_tone)
+                    .on_dismiss(cx.listener(|this, _, _, cx| {
+                        this.toast = None;
+                        cx.notify();
+                    })),
             )
-            .with_priority(3)
         });
         div()
             .flex()

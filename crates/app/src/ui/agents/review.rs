@@ -379,17 +379,7 @@ pub fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         dismiss(cx);
         return None;
     }
-    let right = window.viewport_size().width - px(16.) - px(384.);
-    let place = |element: AnyElement| {
-        deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(point(right, px(72.)))
-                .child(element),
-        )
-        .with_priority(3)
-        .into_any_element()
-    };
+    let place = |element: AnyElement| crate::ui::toasts::place(window, element);
     if membership.is_none() {
         let retry_community = community.clone();
         return Some(place(

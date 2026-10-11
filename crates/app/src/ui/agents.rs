@@ -1528,7 +1528,6 @@ impl Render for AgentsPage {
             window.focus(&self.modal_focus, cx);
         }
         let toast = self.toast.as_ref().map(|toast| {
-            let right = window.viewport_size().width - px(16.) - px(384.);
             let mut notice = Toast::new(("agents-toast", toast.generation), toast.text.clone())
                 .tone(ToastTone::Success)
                 .on_dismiss(cx.listener(|this, _, _, cx| {
@@ -1545,13 +1544,7 @@ impl Render for AgentsPage {
                         })),
                 );
             }
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(point(right, px(128.)))
-                    .child(notice),
-            )
-            .with_priority(3)
+            super::toasts::place(window, notice)
         });
         div()
             .flex()

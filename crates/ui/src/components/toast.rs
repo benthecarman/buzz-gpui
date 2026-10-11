@@ -20,8 +20,9 @@ pub enum ToastTone {
     Error,
 }
 
-/// A toast card: floating surface, padding 16, gap 8. Stack them in a
-/// column 384px wide with 12px gaps, 128px from the top right.
+/// A toast card (`.buzz-toast`): floating surface, padding 12, gap 12.
+/// It fills the toast region, which sets the width; the title and
+/// description group sits apart from the close button.
 #[derive(IntoElement)]
 pub struct Toast {
     id: ElementId,
@@ -79,34 +80,50 @@ impl RenderOnce for Toast {
         div()
             .flex()
             .flex_col()
-            .gap(rems(0.5))
-            .w(rems(24.))
-            .p(rems(1.))
+            .gap(rems(0.75))
+            .w_full()
+            .p(rems(0.75))
             .floating_surface(c)
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
+                    .items_start()
                     .gap(rems(0.5))
                     .child(
+                        // A title-only confirmation stays centered beside
+                        // the close button.
                         div()
-                            .text_label_sm()
-                            .text_color(title_color)
-                            .child(self.title),
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .self_center()
+                            .gap(rems(0.25))
+                            .child(
+                                div()
+                                    .text_label_sm()
+                                    .text_color(title_color)
+                                    .child(self.title),
+                            )
+                            .when_some(self.description, |this, text| {
+                                this.child(
+                                    div().text_body_sm().text_color(c.text_subtle).child(text),
+                                )
+                            }),
                     )
                     .when_some(self.on_dismiss, |this, f| {
+                        // The 32px target reaches into the padding, so it
+                        // opens no gap between title and description.
                         this.child(
-                            IconButton::new(id, IconName::X)
-                                .size(IconButtonSize::Sm)
-                                .surface(Surface::Floating)
-                                .on_click(move |e, w, cx| f(e, w, cx)),
+                            div().flex_shrink_0().my(rems(-0.25)).mr(rems(-0.5)).child(
+                                IconButton::new(id, IconName::X)
+                                    .size(IconButtonSize::Sm)
+                                    .surface(Surface::Floating)
+                                    .on_click(move |e, w, cx| f(e, w, cx)),
+                            ),
                         )
                     }),
             )
-            .when_some(self.description, |this, text| {
-                this.child(div().text_body_sm().child(text))
-            })
             .when(!self.actions.is_empty(), |this| {
                 this.child(
                     div()

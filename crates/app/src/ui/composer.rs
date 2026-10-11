@@ -3748,7 +3748,7 @@ impl Composer {
     }
 
     /// "Could not attach file", and the queue's notices when this composer
-    /// hosts them: toasts at the window's top right.
+    /// hosts them: toasts in the toast region.
     fn toasts(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let host = cx.entity_id();
         let queue = self.queue.read(cx);
@@ -3797,17 +3797,7 @@ impl Composer {
             };
             cards.push(toast.into_any_element());
         }
-        let right = window.viewport_size().width - px(16.) - px(384.);
-        Some(
-            deferred(
-                anchored()
-                    .position_mode(AnchoredPositionMode::Window)
-                    .position(point(right, px(128.)))
-                    .child(div().flex().flex_col().gap(px(12.)).children(cards)),
-            )
-            .with_priority(3)
-            .into_any_element(),
-        )
+        super::toasts::stack(window, cards)
     }
 
     /// The saved draft's trouble and what to do about it

@@ -610,25 +610,16 @@ impl SettingsPage {
         // "Identity wasn’t copied": an error toast that stays until
         // dismissed.
         if let Some(failure) = self.profile.copy_failed.clone() {
-            let right = window.viewport_size().width - px(16.) - px(384.);
-            parts.push(
-                deferred(
-                    anchored()
-                        .position_mode(AnchoredPositionMode::Window)
-                        .position(point(right, px(128.)))
-                        .child(
-                            Toast::new("identity-copy-failed", "Identity wasn’t copied")
-                                .description(failure)
-                                .tone(ToastTone::Error)
-                                .on_dismiss(cx.listener(|this, _, _, cx| {
-                                    this.profile.copy_failed = None;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .with_priority(3)
-                .into_any_element(),
-            );
+            parts.push(crate::ui::toasts::place(
+                window,
+                Toast::new("identity-copy-failed", "Identity wasn’t copied")
+                    .description(failure)
+                    .tone(ToastTone::Error)
+                    .on_dismiss(cx.listener(|this, _, _, cx| {
+                        this.profile.copy_failed = None;
+                        cx.notify();
+                    })),
+            ));
         }
         section(parts)
     }
