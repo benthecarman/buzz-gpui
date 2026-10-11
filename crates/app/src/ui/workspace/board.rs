@@ -366,23 +366,24 @@ impl Workspace {
             });
         });
         let weak = cx.entity().downgrade();
-        let on_selection: thread::OnSelection = Rc::new(move |message, outcome, window, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                let target = ThreadTarget {
-                    root: message,
-                    exact: true,
-                };
-                match outcome {
-                    // The channel keeps the selection for its next visit.
-                    Retarget::Selected => {
-                        this.update_tabs(cx, |state| state.open_thread(target));
+        let on_selection: thread::OnSelection =
+            Rc::new(move |message, exact, outcome, window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    let target = ThreadTarget {
+                        root: message,
+                        exact,
+                    };
+                    match outcome {
+                        // The channel keeps the selection for its next visit.
+                        Retarget::Selected => {
+                            this.update_tabs(cx, |state| state.open_thread(target));
+                        }
+                        Retarget::Different => this.open_thread_tab(target, window, cx),
+                        _ => {}
                     }
-                    Retarget::Different => this.open_thread_tab(target, window, cx),
-                    _ => {}
-                }
-                cx.notify();
+                    cx.notify();
+                });
             });
-        });
         let panel = cx.new(|cx| {
             let mut panel = match target.exact {
                 true => ThreadPanel::exact(community, channel, target.root, on_close, window, cx),

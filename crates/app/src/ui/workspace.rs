@@ -12,14 +12,14 @@ use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::channel_states::{self, Failed, Reason};
 use super::channel_tabs::{TabState, ThreadTarget};
-use super::navigation::{ChannelRoute, History, Place, Request, Target};
+use super::navigation::{Beside, ChannelRoute, History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
 use super::settings::{
     CloseSettings, OpenHostSettings, OpenSettings, Section, SectionChanged, SettingsPage,
 };
 use super::sidebar::SidebarView;
-use super::thread::{self, ThreadPanel};
+use super::thread::{self, Opening, ThreadPanel};
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
 use crate::notifications::Conversation;
@@ -464,29 +464,29 @@ impl Workspace {
         if self.channel.is_none() {
             return;
         }
-        if let Some(thread) = &self.thread
-            && thread.read(cx).message_id() == id
-            && thread.read(cx).is_exact() == exact
-        {
-            let thread = thread.clone();
-            self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
-            ThreadPanel::focus(&thread, window, cx);
-            return;
+        let opening = self.thread.as_ref().map(|thread| {
+            let opening = thread.read(cx).shown().open(id, exact);
+            (thread.clone(), opening)
+        });
+        match opening {
+            Some((thread, Opening::Shown)) => {
+                self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
+                ThreadPanel::focus(&thread, window, cx);
+            }
+            // A link into the open thread, to a message or to its root,
+            // selects it there, keeping the reply being written
+            // (`retainThread`); one into another thread comes back
+            // through `on_selection`.
+            Some((thread, Opening::Select)) => {
+                self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
+                thread.update(cx, |thread, cx| thread.select(id, window, cx));
+                cx.notify();
+            }
+            Some((_, Opening::Replace)) | None => {
+                self.open_thread_tab(ThreadTarget { root: id, exact }, window, cx);
+                cx.notify();
+            }
         }
-        // A link into the open thread selects its message there, keeping
-        // the reply being written (`retainThread`); one into another
-        // thread comes back through `on_selection`.
-        if exact
-            && let Some(thread) = self.thread.clone()
-            && thread.read(cx).can_select()
-        {
-            self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
-            thread.update(cx, |thread, cx| thread.select(id, window, cx));
-            cx.notify();
-            return;
-        }
-        self.open_thread_tab(ThreadTarget { root: id, exact }, window, cx);
-        cx.notify();
     }
 
     fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -740,13 +740,12 @@ impl Workspace {
         let place = match (self.page, &self.channel) {
             (Page::MESSAGES, Some(channel)) => {
                 let channel = channel.read(cx).channel_id().to_string();
-                let thread = self.thread.as_ref().map(|thread| thread.read(cx));
-                let exact = thread.is_some_and(|thread| thread.is_exact());
-                let thread = thread.map(|thread| thread.message_id());
+                let shown = self.thread.as_ref().map(|thread| thread.read(cx).shown());
+                let (message, thread) = shown.map(|shown| shown.place()).unzip();
                 Place::Conversation {
                     channel,
-                    message: thread,
-                    thread: thread.filter(|_| !exact),
+                    message,
+                    thread: thread.flatten(),
                     members: self.members_open(cx),
                 }
             }
@@ -1065,12 +1064,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.show_channel(summary, window, cx);
-        match (message, thread) {
-            (Some(message), Some(thread)) if message == thread => {
-                self.show_thread(message, false, window, cx)
-            }
-            (Some(message), _) => self.reveal(message, window, cx),
-            (None, _) => self.close_thread(window, cx),
+        // The thread open beside the channel, once its root has loaded.
+        let open = self
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.read(cx).loaded_root());
+        match Beside::of(message, thread, open) {
+            Beside::Thread(root) => self.show_thread(root, false, window, cx),
+            Beside::InThread(message) => self.show_thread(message, true, window, cx),
+            Beside::Find(message) => self.reveal(message, window, cx),
+            Beside::Nothing => self.close_thread(window, cx),
         }
         if let Some(channel) = &self.channel {
             let actions = channel.read(cx).header_actions();

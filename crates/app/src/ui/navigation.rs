@@ -49,8 +49,10 @@ pub enum Place {
     /// is a visit.
     Settings(super::settings::Section),
     /// A channel, optionally revealing a message. `thread` equal to
-    /// `message` opens that thread; any other value is a hint only, as the
-    /// root is re-derived from signed ancestry.
+    /// `message` opens that thread; any other value names the thread the
+    /// message is in (history records it for a message selected in an
+    /// open thread), a hint only, as the root is re-derived from signed
+    /// ancestry.
     Conversation {
         channel: String,
         message: Option<EventId>,
@@ -67,6 +69,36 @@ pub enum Place {
         page: Page,
         params: serde_json::Value,
     },
+}
+
+/// What a conversation place shows beside its channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Beside {
+    /// The thread from this root.
+    Thread(EventId),
+    /// The message, selected in the thread already open.
+    InThread(EventId),
+    /// The message in the timeline when it is a top-level row there, else
+    /// in its thread.
+    Find(EventId),
+    /// No thread.
+    Nothing,
+}
+
+impl Beside {
+    /// For a place's `message` and `thread`, with `open` the root of the
+    /// thread open beside the channel once it has loaded. A message that
+    /// names the open thread goes back there without a search of the
+    /// timeline, where a reply never shows; the panel still checks the
+    /// message's own ancestry before it selects it.
+    pub fn of(message: Option<EventId>, thread: Option<EventId>, open: Option<EventId>) -> Self {
+        match (message, thread) {
+            (Some(message), Some(thread)) if message == thread => Self::Thread(message),
+            (Some(message), Some(thread)) if open == Some(thread) => Self::InThread(message),
+            (Some(message), _) => Self::Find(message),
+            (None, _) => Self::Nothing,
+        }
+    }
 }
 
 /// The Channels page's routes that are not a conversation.
@@ -120,6 +152,37 @@ impl Target {
     }
 }
 
+/// `current` and `next` show the same message in the same way, telling
+/// apart at most by which thread they say it is in. That is a hint (a
+/// thread other than the message); a thread equal to the message opens it
+/// instead, a different place.
+fn same_message(current: &Target, next: &Target) -> bool {
+    let (
+        Place::Conversation {
+            channel,
+            message: Some(message),
+            thread,
+            members,
+        },
+        Place::Conversation {
+            channel: next_channel,
+            message: next_message,
+            thread: next_thread,
+            members: next_members,
+        },
+    ) = (&current.place, &next.place)
+    else {
+        return false;
+    };
+    let hint = |thread: &Option<EventId>| *thread != Some(*message);
+    current.community == next.community
+        && channel == next_channel
+        && Some(*message) == *next_message
+        && members == next_members
+        && hint(thread)
+        && hint(next_thread)
+}
+
 /// The places visited, as a browser keeps them: pushing drops anything
 /// ahead of the current place.
 #[derive(Default)]
@@ -134,11 +197,34 @@ impl History {
     }
 
     /// Records a new place. Returns false when it is already the current
-    /// one, which adds nothing.
+    /// one, which adds nothing. A place that only names the thread of the
+    /// current message (a link opened a reply without saying its thread,
+    /// then the thread loaded) is the same place: it fills in the current
+    /// entry, so Back never lands on a spot that looks the same.
     pub fn push(&mut self, target: Target) -> bool {
-        if self.current() == Some(&target) {
+        let Some(current) = self.entries.get_mut(self.index) else {
+            return self.add(target);
+        };
+        if *current == target {
             return false;
         }
+        if same_message(current, &target) {
+            // The newer thread wins; a place naming none keeps the known one.
+            if let (
+                Place::Conversation { thread, .. },
+                Place::Conversation {
+                    thread: Some(next), ..
+                },
+            ) = (&mut current.place, &target.place)
+            {
+                *thread = Some(*next);
+            }
+            return false;
+        }
+        self.add(target)
+    }
+
+    fn add(&mut self, target: Target) -> bool {
         self.entries.truncate(self.index + 1);
         self.entries.push(target);
         if self.entries.len() > CAPACITY {
@@ -401,6 +487,118 @@ mod tests {
             history.back(),
             Some(Target::channel(Some("ws://other".into()), "a"))
         );
+    }
+
+    #[test]
+    fn a_root_link_keeps_the_thread_and_back_returns_to_the_reply() {
+        use crate::ui::thread::{Opening, Shown};
+        let root = EventId::from_byte_array([1; 32]);
+        let reply = EventId::from_byte_array([2; 32]);
+        let at = |(message, thread): (EventId, Option<EventId>)| Target {
+            community: Some("ws://relay".into()),
+            place: Place::Conversation {
+                channel: "a".into(),
+                message: Some(message),
+                thread,
+                members: false,
+            },
+        };
+        let beside = |target: &Target, shown: &Shown| match target.place {
+            Place::Conversation {
+                message, thread, ..
+            } => Beside::of(message, thread, shown.root),
+            _ => unreachable!(),
+        };
+        let mut history = History::default();
+        // A panel opened on a reply; once the root loads, history knows
+        // the thread the reply is in.
+        let mut shown = Shown {
+            message: reply,
+            exact: true,
+            root: None,
+        };
+        assert_eq!(shown.place(), (reply, None));
+        shown.root = Some(root);
+        assert_eq!(shown.place(), (reply, Some(root)));
+        history.push(at(shown.place()));
+
+        // A link to the thread's root selects it in the same panel.
+        let link = at((root, Some(root)));
+        assert!(history.push(link.clone()));
+        assert_eq!(beside(&link, &shown), Beside::Thread(root));
+        assert_eq!(shown.open(root, false), Opening::Select);
+        shown.message = root;
+        // The selected root is recorded as its thread, which is where the
+        // window already is.
+        assert_eq!(shown.place(), (root, Some(root)));
+        assert!(!history.push(at(shown.place())));
+        assert_eq!(shown.open(root, false), Opening::Shown);
+
+        // Back selects the reply again in the same panel.
+        let back = history.back().unwrap();
+        assert_eq!(beside(&back, &shown), Beside::InThread(reply));
+        assert_eq!(shown.open(reply, true), Opening::Select);
+        shown.message = reply;
+        // Forward selects the root again.
+        let forward = history.forward().unwrap();
+        assert_eq!(beside(&forward, &shown), Beside::Thread(root));
+        assert_eq!(shown.open(root, false), Opening::Select);
+
+        // A place naming another thread, or none, looks for the message.
+        let other = EventId::from_byte_array([3; 32]);
+        assert_eq!(
+            Beside::of(Some(reply), Some(other), Some(root)),
+            Beside::Find(reply)
+        );
+        assert_eq!(
+            Beside::of(Some(reply), None, Some(root)),
+            Beside::Find(reply)
+        );
+        assert_eq!(
+            Beside::of(Some(reply), Some(root), None),
+            Beside::Find(reply)
+        );
+        assert_eq!(Beside::of(None, None, Some(root)), Beside::Nothing);
+    }
+
+    #[test]
+    fn naming_the_thread_of_the_current_message_adds_no_visit() {
+        let root = EventId::from_byte_array([1; 32]);
+        let reply = EventId::from_byte_array([2; 32]);
+        let at = |message, thread, members| Target {
+            community: Some("ws://relay".into()),
+            place: Place::Conversation {
+                channel: "a".into(),
+                message: Some(message),
+                thread,
+                members,
+            },
+        };
+        let mut history = History::default();
+        history.push(channel("a"));
+        // A link opened the reply without naming its thread.
+        assert!(history.push(at(reply, None, false)));
+        history.push(channel("b"));
+        assert_eq!(history.back(), Some(at(reply, None, false)));
+        // Recorded once the thread loads: the same entry, filled in, with
+        // the places ahead kept.
+        assert!(!history.push(at(reply, Some(root), false)));
+        assert_eq!(history.current(), Some(&at(reply, Some(root), false)));
+        assert!(history.can_go_forward());
+        // A place naming no thread keeps the one known.
+        assert!(!history.push(at(reply, None, false)));
+        assert_eq!(history.current(), Some(&at(reply, Some(root), false)));
+        // Back goes straight to the channel, not to the same spot again.
+        assert_eq!(history.back(), Some(channel("a")));
+
+        // The thread opened from its root, or the members dialog over the
+        // message, is another place.
+        let mut history = History::default();
+        history.push(at(root, None, false));
+        assert!(history.push(at(root, Some(root), false)));
+        history.push(at(reply, None, false));
+        assert!(history.push(at(reply, Some(root), true)));
+        assert!(history.push(at(reply, Some(reply), true)));
     }
 
     #[test]

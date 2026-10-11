@@ -55,8 +55,64 @@ fn max_indent(width: Pixels) -> usize {
 /// Asks the workspace to close the panel.
 pub type OnClose = Arc<dyn Fn(&mut Window, &mut App)>;
 /// Tells the host a link's message was selected in the panel, or belongs
-/// to another thread.
-pub type OnSelection = Rc<dyn Fn(EventId, Retarget, &mut Window, &mut App)>;
+/// to another thread. The flag is false when the message selected is the
+/// thread's root, which then shows as its thread.
+pub type OnSelection = Rc<dyn Fn(EventId, bool, Retarget, &mut Window, &mut App)>;
+
+/// What a thread panel shows, as navigation sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown {
+    /// The message it opened on, or one a link selected in it since.
+    pub message: EventId,
+    /// `message` is revealed as any message in its thread, not as the
+    /// thread from its root.
+    pub exact: bool,
+    /// The thread's root, once it has loaded.
+    pub root: Option<EventId>,
+}
+
+/// How an open panel takes a request to show a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opening {
+    /// It already shows it.
+    Shown,
+    /// It selects the message in place, keeping the reply being written
+    /// ([`ThreadPanel::select`]); one of another thread comes back
+    /// through [`ThreadPanel::on_selection`].
+    Select,
+    /// A new panel replaces it.
+    Replace,
+}
+
+impl Shown {
+    /// The message and the thread it is in, as history records them
+    /// (`Place::Conversation`); the thread is known once its root has
+    /// loaded. A selected root is its thread, so going back to it opens
+    /// the thread rather than revealing the root in the timeline, which
+    /// would close the panel.
+    pub fn place(&self) -> (EventId, Option<EventId>) {
+        let thread = match self.exact {
+            true => self.root,
+            false => Some(self.message),
+        };
+        (self.message, thread)
+    }
+
+    /// A request to show `id`: with `exact` as any message revealed in its
+    /// thread, else as the thread from its root. Once the root has loaded,
+    /// a message link, or a link to this thread's root, stays in this
+    /// panel (`RetainedThreadPanel`).
+    pub fn open(&self, id: EventId, exact: bool) -> Opening {
+        let this_thread = !exact && self.root == Some(id);
+        if self.message == id && (self.exact == exact || this_thread) {
+            Opening::Shown
+        } else if self.root.is_some() && (exact || this_thread) {
+            Opening::Select
+        } else {
+            Opening::Replace
+        }
+    }
+}
 
 /// A same-thread link that could not open; the thread stays usable.
 struct SelectionFailure {
@@ -312,9 +368,12 @@ impl ThreadPanel {
         self.exact || self.requested.is_some() || self.selected.is_some()
     }
 
-    /// A link may select a message here: the thread's root has loaded.
-    pub fn can_select(&self) -> bool {
-        self.snapshot.root.is_some()
+    pub fn shown(&self) -> Shown {
+        Shown {
+            message: self.message_id(),
+            exact: self.is_exact(),
+            root: self.loaded_root(),
+        }
     }
 
     /// Selects `message` without rebuilding the panel, so the reply being
@@ -382,7 +441,8 @@ impl ThreadPanel {
         if matches!(outcome, Retarget::Selected | Retarget::Different)
             && let Some(on_selection) = self.on_selection.clone()
         {
-            on_selection(message, outcome, window, cx);
+            let exact = outcome == Retarget::Different || self.loaded_root() != Some(message);
+            on_selection(message, exact, outcome, window, cx);
         }
         cx.notify();
     }
@@ -1698,6 +1758,57 @@ fn render_summary(
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn an_open_panel_keeps_links_into_its_thread() {
+        let root = EventId::from_byte_array([1; 32]);
+        let reply = EventId::from_byte_array([2; 32]);
+        let other = EventId::from_byte_array([3; 32]);
+        let thread = Shown {
+            message: root,
+            exact: false,
+            root: Some(root),
+        };
+        assert_eq!(thread.place(), (root, Some(root)));
+        assert_eq!(thread.open(root, false), Opening::Shown);
+        assert_eq!(thread.open(reply, true), Opening::Select);
+        // Exact on the root highlights it in place.
+        assert_eq!(thread.open(root, true), Opening::Select);
+        // Another thread's root replaces the panel.
+        assert_eq!(thread.open(other, false), Opening::Replace);
+
+        let on_reply = Shown {
+            message: reply,
+            exact: true,
+            root: Some(root),
+        };
+        assert_eq!(on_reply.place(), (reply, Some(root)));
+        assert_eq!(on_reply.open(reply, true), Opening::Shown);
+        assert_eq!(on_reply.open(root, false), Opening::Select);
+        assert_eq!(on_reply.open(other, true), Opening::Select);
+        assert_eq!(on_reply.open(other, false), Opening::Replace);
+        // A link claiming a reply is a root opens it as before.
+        assert_eq!(on_reply.open(reply, false), Opening::Replace);
+
+        // Until its root loads, nothing is known to share its thread.
+        let loading = Shown {
+            root: None,
+            ..on_reply
+        };
+        assert_eq!(loading.place(), (reply, None));
+        assert_eq!(loading.open(reply, true), Opening::Shown);
+        assert_eq!(loading.open(root, false), Opening::Replace);
+        assert_eq!(loading.open(other, true), Opening::Replace);
+
+        // A root selected by a link shows as its thread.
+        let selected_root = Shown {
+            message: root,
+            ..on_reply
+        };
+        assert_eq!(selected_root.place(), (root, Some(root)));
+        assert_eq!(selected_root.open(root, false), Opening::Shown);
+        assert_eq!(selected_root.open(root, true), Opening::Shown);
+    }
 
     #[test]
     fn narrow_panels_flatten_indentation_sooner() {

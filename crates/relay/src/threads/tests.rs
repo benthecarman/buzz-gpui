@@ -1869,6 +1869,29 @@ fn retarget_selects_within_the_thread_without_reloading_it() {
 }
 
 #[test]
+fn retarget_selects_the_root_from_a_reply() {
+    let (fx, root, reply) = exact();
+    let other = fx.reply(&root, "Other reply", 10_001);
+    let mut state = fx.state(reply.id, true, None);
+    let page = target_read(&mut state, &reply, &[]).unwrap();
+    let thread = [root.clone(), reply.clone(), other.clone()];
+    assert!(step(&mut state, page, &thread).is_none());
+    let before = reply_ids(&state.snapshot());
+    let read = state.retarget(root.id).unwrap();
+    let outcome = answer(&mut state, read, |step| match step {
+        ReadStep::Target => vec![root.clone()],
+        _ => Vec::new(),
+    });
+    assert_eq!(outcome, Retarget::Selected);
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.target_status, Some(TargetStatus::Ready));
+    assert_eq!(snapshot.target.as_ref().unwrap().id, root.id);
+    assert_eq!(snapshot.root.as_ref().unwrap().id, root.id);
+    assert_eq!(reply_ids(&snapshot), before);
+    assert_eq!((state.message_id(), state.exact()), (&root.id, true));
+}
+
+#[test]
 fn retarget_leaves_the_view_as_it_was_when_the_message_cannot_be_selected() {
     let (fx, root, first, _, mut state) = opened();
     let elsewhere = fx.message("Other root", 5, &[]);
