@@ -5,7 +5,7 @@ use super::jump::{self, Jump};
 use super::markdown::Directory;
 use super::message::{self, Item, Layout, Rows};
 use super::message_actions::{Hooks, MessageActions};
-use super::reading::{self, Reporter};
+use super::reading::{self, Drawn, Reporter};
 use super::typing::{self, Activity, AgentChooser};
 use super::{media, time};
 use crate::community::Community;
@@ -181,6 +181,8 @@ pub struct ThreadPanel {
     /// composer) is reading.
     focus: FocusHandle,
     reporter: Reporter,
+    /// Where the replies were drawn, for the reporter.
+    drawn: Drawn,
     jump: Jump,
     seen: Seen,
     /// Unread replies, for the "(N new)" of collapsed branches.
@@ -331,6 +333,7 @@ impl ThreadPanel {
             _selecting: None,
             focus,
             reporter: Reporter::default(),
+            drawn: Drawn::default(),
             jump: Jump::default(),
             seen: Seen::default(),
             unread_watch,
@@ -916,7 +919,9 @@ impl ThreadPanel {
             cx.notify();
         }
         let entries = &self.entries;
-        let view = reading::view(&self.list, |ix| entries.get(ix).and_then(Entry::row_id));
+        let view = reading::view(&self.list, &self.drawn, |ix| {
+            entries.get(ix).and_then(Entry::row_id)
+        });
         let input = self.input.read(cx).focus_handle(cx);
         let active = window.is_window_active()
             && (self.focus.contains_focused(window, cx) || input.contains_focused(window, cx));
@@ -1094,6 +1099,7 @@ impl Render for ThreadPanel {
             rows.media = super::media::thread_media(&self.snapshot, &rows.directory.media);
             let rows = Rc::new(rows);
             let entries = self.entries.clone();
+            let drawn = self.drawn.clone();
             let weak = cx.entity().downgrade();
             let older_error = snapshot
                 .error
@@ -1173,10 +1179,12 @@ impl Render for ThreadPanel {
                                     })
                             });
                         div()
+                            .relative()
                             .pl(px(24.))
                             .pr(if narrow_panel { px(12.) } else { px(24.) })
                             .children(status)
                             .child(render_entry(entry, &rows, &branch, &weak, cx))
+                            .child(drawn.probe(index))
                             .into_any_element()
                     })
                     .flex_1()

@@ -7,7 +7,7 @@ use super::jump::{self, Jump};
 use super::markdown::Directory;
 use super::message::{self, Item, Marks, Rows};
 use super::message_actions::{Hooks, MessageActions};
-use super::reading::{self, Reporter};
+use super::reading::{self, Drawn, Reporter};
 use super::typing::{self, Activity, AgentChooser};
 use super::{scroll, time};
 use crate::community::{ChannelModel, Community};
@@ -74,6 +74,8 @@ pub struct ChannelPage {
     /// message history"). Focus here or in the composer is reading.
     focus: FocusHandle,
     reporter: Reporter,
+    /// Where the history's rows were drawn, for the reporter.
+    drawn: Drawn,
     /// Unread state of the rows on screen: thread dots, "Mark read".
     unread_watch: UnreadWatch,
     unread: Arc<UnreadDetail>,
@@ -278,6 +280,7 @@ impl ChannelPage {
             jump: Jump::default(),
             focus,
             reporter: Reporter::default(),
+            drawn: Drawn::default(),
             unread,
             unread_watch,
             watched: (Vec::new(), Vec::new()),
@@ -451,7 +454,7 @@ impl ChannelPage {
     /// jump pill, and follows the unread state of the rows on screen.
     fn after_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let items = &self.items;
-        let view = reading::view(&self.list, |ix| {
+        let view = reading::view(&self.list, &self.drawn, |ix| {
             ix.checked_sub(1)
                 .and_then(|ix| items.get(ix))
                 .filter(|item| item.row.membership.is_none())
@@ -1048,6 +1051,7 @@ impl Render for ChannelPage {
         };
         let rows = Rc::new(rows);
         let items = self.items.clone();
+        let drawn = self.drawn.clone();
         let weak = cx.entity().downgrade();
         let after_layout = canvas(
             move |_, window, cx| {
@@ -1122,8 +1126,10 @@ impl Render for ChannelPage {
                         }
                         match items.get(index - 1) {
                             Some(item) => div()
+                                .relative()
                                 .px(inset)
                                 .child(message::render(item, &rows, cx))
+                                .child(drawn.probe(index))
                                 // The end space scrolls with the history.
                                 .when(index == count, |d| d.pb(END_SPACE))
                                 .into_any_element(),
