@@ -478,10 +478,12 @@ impl ResourcePicker {
 impl Render for ResourcePicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        if matches!(self.home, HomeState::None) {
+        // Hidden until the home project is known, unlike buzz-app, which
+        // shows it disabled while loading: most channels have none, so it
+        // flashed in the composer on every switch.
+        if matches!(self.home, HomeState::None | HomeState::Loading) {
             return div().into_any_element();
         }
-        let loading = matches!(self.home, HomeState::Loading);
         let disabled = self.disabled(cx);
         if disabled && self.open {
             // A hidden choice must not insert after the composer is
@@ -491,15 +493,13 @@ impl Render for ResourcePicker {
             self.checking = None;
             self.rejected = None;
         }
-        let tooltip = if loading {
-            "Loading project…".to_string()
-        } else if self.project().is_some() {
+        let tooltip = if self.project().is_some() {
             LABEL.to_string()
         } else {
             format!("{LABEL} (unavailable)")
         };
         let unavailable = matches!(self.home, HomeState::Ambiguous | HomeState::Error);
-        let open = self.open && !disabled && !loading;
+        let open = self.open && !disabled;
         let popup = open.then(|| {
             let content = self.popup(cx);
             div().absolute().left_0().top_0().child(deferred(
@@ -576,7 +576,7 @@ impl Render for ResourcePicker {
                 IconButton::new("resource-picker-trigger", IconName::GitPullRequest)
                     .size(IconButtonSize::Sm)
                     .selected(open)
-                    .disabled(disabled || loading)
+                    .disabled(disabled)
                     .tooltip(tooltip)
                     .when(unavailable, |b| b.icon_color(c.text_warning))
                     .on_click(cx.listener(|this, _, window, cx| {
