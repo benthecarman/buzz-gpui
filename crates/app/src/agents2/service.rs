@@ -14,7 +14,7 @@ use super::attention::{
     self, AttentionObject, AttentionValue, CHAT_KINDS, EventData, Predicate, TimerState,
     addressed_to, compile_filter, tags_agent, timer_spent, timer_state, watch_matches,
 };
-use super::registry::{self, RegisteredType};
+use super::registry::{self, AgentType, RegisteredType};
 use super::runtime::{
     AgentHandle, Bounded, CancelSource, Cancellation, Delivery, HostLink, Trigger, UNSUPPORTED,
 };
@@ -170,9 +170,11 @@ enum Start {
     Idle,
     /// The agent or its type changed while the claim was out.
     Changed,
+    /// The type runs the delivery once this service's update has ended:
+    /// a type reads the service (its agent's host) as it starts.
     Run(
-        Task<Result<(), String>>,
-        Duration,
+        Arc<dyn AgentType>,
+        Box<Delivery>,
         Cancellation,
         CancelSource,
     ),
@@ -1101,13 +1103,15 @@ impl Agents2 {
                 let next = this.update(cx, |this, cx| {
                     this.start(&pubkey, serial, claimed, &seen, cx)
                 });
-                let (run, timeout, lifetime, source) = match next {
-                    Ok(Start::Run(run, timeout, lifetime, source)) => {
-                        (run, timeout, lifetime, source)
+                let (kind, delivery, lifetime, source) = match next {
+                    Ok(Start::Run(kind, delivery, lifetime, source)) => {
+                        (kind, delivery, lifetime, source)
                     }
                     Ok(Start::Changed) => continue,
                     Ok(Start::Idle) | Err(_) => break,
                 };
+                let timeout = kind.timeout();
+                let run = cx.update(|cx| kind.run(*delivery, cx));
                 let deadline = cx.background_executor().timer(timeout);
                 let ended = futures::future::select(
                     run,
@@ -1232,8 +1236,7 @@ impl Agents2 {
             config: agent.config.clone(),
             cancel,
         };
-        let run = kind.kind.run(delivery, cx);
-        Start::Run(run, kind.kind.timeout(), lifetime, source)
+        Start::Run(kind.kind, Box::new(delivery), lifetime, source)
     }
 
     // ----- changes -----
