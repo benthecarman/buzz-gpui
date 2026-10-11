@@ -1,13 +1,12 @@
 //! "Copy image" (buzz-app's `image_clipboard.rs`): one clipboard owned for
 //! the app's lifetime, because on Linux a copied image is only available
 //! while its owner runs. GPUI's own clipboard offers only text on Wayland,
-//! so this goes through `arboard` as buzz-app does. The pixels come
-//! decoded from buzz-desktop's `media::copy_image`.
+//! so this goes through `arboard` as buzz-app does, on every platform. The
+//! pixels come decoded from buzz-desktop's `media::copy_image`.
 
 use std::sync::{Mutex, OnceLock};
 
 /// Puts RGBA pixels on the clipboard. Blocking: run it off the UI thread.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn write(width: usize, height: usize, rgba: Vec<u8>) -> Result<(), String> {
     static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
     if width.checked_mul(height).and_then(|n| n.checked_mul(4)) != Some(rgba.len()) {
@@ -29,12 +28,6 @@ pub fn write(width: usize, height: usize, rgba: Vec<u8>) -> Result<(), String> {
             bytes: std::borrow::Cow::Owned(rgba),
         })
         .map_err(|_| "Could not copy image".to_string())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub fn write(_width: usize, _height: usize, _rgba: Vec<u8>) -> Result<(), String> {
-    let _ = (OnceLock::<()>::new(), Mutex::new(()));
-    Err("Clipboard unavailable".into())
 }
 
 #[cfg(test)]

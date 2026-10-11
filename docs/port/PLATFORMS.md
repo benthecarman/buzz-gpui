@@ -38,7 +38,7 @@ section lists what a person still has to try on real machines.
 | Window position and size across launches | GPUI window bounds | DONE | DONE |
 | Machine idle for automatic away | GNOME Mutter idle monitor | DONE: `user-idle`, as buzz-app | DONE: `user-idle`, as buzz-app |
 | Network back online: reconnect communities | default route in `/proc/net/route` | PLANNED: probe for a default route with an unconnected UDP socket | PLANNED: same probe |
-| Copy image | `arboard` (GPUI's clipboard has text only on Wayland) | PLANNED: `arboard` | PLANNED: `arboard` |
+| Copy image | `arboard` (GPUI's clipboard has text only on Wayland) | DONE: `arboard` | DONE: `arboard` |
 | Paste and drop files | vendored GPUI patch for `text/uri-list` | DONE: GPUI reads file names from the pasteboard | DONE: GPUI reads `CF_HDROP` |
 | Time zone abbreviation in times | `localtime_r` | DONE | DIFFERENT: Windows names zones in full ("Pacific Standard Time"), so times show a GMT offset |
 | HEIC avatars through ffmpeg | `ffmpeg` from the package's dependencies | DIFFERENT: needs `brew install ffmpeg` | PLANNED: run it without a console window. DIFFERENT: ffmpeg must be on `PATH`; the zip does not carry it |
