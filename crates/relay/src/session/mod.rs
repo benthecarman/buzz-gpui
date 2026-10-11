@@ -496,6 +496,7 @@ impl Session {
             outbox_changes: None,
             reads: None,
             threads: HashMap::new(),
+            waiting_threads: HashMap::new(),
             presence: PresenceDirectory::new(viewer.clone()),
             publisher: PresencePublisher::default(),
             typing: Typing::new(viewer.clone()),
@@ -1153,6 +1154,8 @@ struct Actor {
     /// Read state and unread, from NIP-11 on.
     reads: Option<Reads>,
     threads: HashMap<u64, threads::OpenThread>,
+    /// Thread views opened before the relay identified itself.
+    waiting_threads: HashMap<u64, threads::WaitingThread>,
     presence: PresenceDirectory,
     publisher: PresencePublisher,
     typing: Typing,
@@ -1281,6 +1284,7 @@ impl Actor {
             } => self.open_thread(id, channel, message, exact, view),
             Message::CloseThread(id) => {
                 self.threads.remove(&id);
+                self.waiting_threads.remove(&id);
                 self.thread_closed(id);
             }
             Message::ThreadMore(id) => self.thread_more(id, false),
@@ -1571,6 +1575,7 @@ impl Actor {
                 self.open(&channel, view);
             }
         }
+        self.open_waiting_threads();
         // Saved heads shown while offline revalidate.
         for channel in self.open_channels() {
             self.ensure(&channel);

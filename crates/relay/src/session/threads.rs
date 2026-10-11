@@ -64,6 +64,14 @@ impl Drop for ThreadView {
     }
 }
 
+/// A thread view opened before the relay identified itself.
+pub(super) struct WaitingThread {
+    channel: String,
+    message: EventId,
+    exact: bool,
+    view: watch::Sender<Arc<ThreadSnapshot>>,
+}
+
 pub(super) struct OpenThread {
     pub state: ThreadState,
     pub channel: String,
@@ -121,17 +129,27 @@ impl Actor {
     ) {
         // At most 64 views a session owns (`session.ts` `thread`).
         self.threads.retain(|_, thread| !thread.view.is_closed());
-        if self.threads.len() >= MAX_THREAD_VIEWS {
+        self.waiting_threads
+            .retain(|_, waiting| !waiting.view.is_closed());
+        if self.threads.len() + self.waiting_threads.len() >= MAX_THREAD_VIEWS {
             let mut refused = ThreadSnapshot::idle(exact);
             refused.status = crate::threads::ThreadStatus::Error;
             refused.error = Some("Relay view capacity unavailable".into());
             view.send_replace(Arc::new(refused));
             return;
         }
-        let (Some(relay), Ok(viewer)) = (
-            self.relay_author(),
-            PublicKey::from_hex(&self.identity.pubkey_hex()),
-        ) else {
+        let Some(relay) = self.relay_author() else {
+            // Opened once the relay answers (`connected`).
+            let waiting = WaitingThread {
+                channel,
+                message,
+                exact,
+                view,
+            };
+            self.waiting_threads.insert(id, waiting);
+            return;
+        };
+        let Ok(viewer) = PublicKey::from_hex(&self.identity.pubkey_hex()) else {
             return;
         };
         let readable = self
@@ -178,6 +196,21 @@ impl Actor {
         self.threads.insert(id, thread);
         if let Some(read) = first {
             self.thread_read(id, read);
+        }
+    }
+
+    /// Opens the thread views that waited for the relay's identity.
+    pub(super) fn open_waiting_threads(&mut self) {
+        for (id, waiting) in std::mem::take(&mut self.waiting_threads) {
+            if !waiting.view.is_closed() {
+                let WaitingThread {
+                    channel,
+                    message,
+                    exact,
+                    view,
+                } = waiting;
+                self.open_thread(id, channel, message, exact, view);
+            }
         }
     }
 
