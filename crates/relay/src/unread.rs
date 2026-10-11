@@ -885,6 +885,8 @@ struct Index {
     by_channel: HashMap<String, Vec<usize>>,
     by_id: HashMap<String, usize>,
     tombstones: HashSet<String>,
+    /// Retained auxiliary events by the ids they target.
+    overlays: HashMap<String, Vec<String>>,
     own: HashMap<String, String>,
     joined: HashSet<String>,
     own_threads: HashSet<String>,
@@ -1210,7 +1212,17 @@ impl<F: ThreadFollowStore> Unread<F> {
             return;
         }
         let mut index = Index::default();
-        for (_, event) in self.events.iter() {
+        for (aux_id, event) in self.events.iter() {
+            if !is_auxiliary(event.kind_u16()) {
+                continue;
+            }
+            for id in e_targets(event) {
+                index
+                    .overlays
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push(aux_id.clone());
+            }
             if !matches!(event.kind_u16(), kinds::DELETION | kinds::MODERATOR_DELETE) {
                 continue;
             }
@@ -1766,7 +1778,26 @@ impl<F: ThreadFollowStore> Unread<F> {
         let Some(relay) = key(self.relay_author.as_deref()).or(authority) else {
             return HashMap::new();
         };
-        let events: Vec<Verified> = self.events.iter().map(|(_, event)| event.clone()).collect();
+        // The channel's messages and their overlays, including overlays of
+        // overlays (a deletion of an edit).
+        let index = self.index.as_ref().expect("indexed");
+        let mut events: Vec<Verified> = index
+            .channel(channel_id)
+            .map(|entry| entry.event.clone())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut next = 0;
+        while next < events.len() {
+            let id = events[next].id_hex();
+            next += 1;
+            for aux in index.overlays.get(&id).into_iter().flatten() {
+                if seen.insert(aux.as_str())
+                    && let Some(event) = self.events.get(aux)
+                {
+                    events.push(event.clone());
+                }
+            }
+        }
         let options = crate::fold::FoldOptions {
             include_replies: true,
             signing_authority: authority,
