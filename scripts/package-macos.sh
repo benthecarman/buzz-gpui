@@ -62,6 +62,10 @@ dmg="dist/Buzz-$version-macos-$arch.dmg"
 rm -f "$dmg"
 ln -s /Applications "$work/Applications"
 rm -rf "$iconset"
-hdiutil create -volname Buzz -srcfolder "$work" -ov -format UDZO "$dmg"
+# hdiutil's own estimate of the image size can fall short ("No space left
+# on device"), so give it the contents' size and room to spare.
+size_mb="$(du -sm "$work" | cut -f1)"
+hdiutil create -volname Buzz -srcfolder "$work" -size "$((size_mb * 5 / 4 + 20))m" \
+  -ov -format UDZO "$dmg"
 rm -rf "$work"
 ls -la "$dmg"
