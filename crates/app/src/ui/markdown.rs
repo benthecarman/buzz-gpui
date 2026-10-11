@@ -14,14 +14,14 @@
 //! recipients, finds custom emoji, bare Buzz links and `#channel` names in
 //! prose only (never in code or link labels), pairs `||spoiler||` marks
 //! across formatting, turns single newlines into hard breaks (remark-breaks)
-//! and drops raw HTML (`skipHtml`). Bodies over the size or depth limits
-//! render as plain text.
+//! and shows raw HTML as the text the author typed (`remarkLiteralHtml`).
+//! Bodies over the size or depth limits render as plain text.
 
 use super::identity::{self, AgentLibrary, Names};
 use super::links::{self, Chip, StyledLabel};
 use super::{media, navigation};
 use crate::community::Community;
-use buzz_relay_client::fold::{CustomEmoji, MessageRow, message_markdown};
+use buzz_relay_client::fold::{CustomEmoji, MessageRow, message_markdown, visible_html_source};
 use buzz_relay_client::{ChannelSummary, Media, Profiles, Session};
 use buzz_ui::{ActiveTheme, Icon, IconName, Tooltip, TypeStyled, tokens::font};
 use gpui_kit::base::SelectableText;
@@ -571,7 +571,16 @@ impl Prep<'_> {
                     .collect(),
             },
             Node::ThematicBreak(_) => Block::Rule,
-            // Raw HTML is skipped; definitions only resolve references.
+            // Raw HTML among blocks is a paragraph of its source.
+            Node::Html(html) => {
+                let mut text = String::new();
+                literal_html(&html.value, &mut text);
+                if text.trim().is_empty() {
+                    return None;
+                }
+                Block::Paragraph(text.into())
+            }
+            // Definitions only resolve references.
             _ => return None,
         })
     }
@@ -754,7 +763,7 @@ impl Prep<'_> {
                 };
                 image_md(&number.to_string(), &format!("buzz-footnote:{number}"), out);
             }
-            Node::Html(_) => {}
+            Node::Html(html) => literal_html(&html.value, out),
             other => escape(&other.to_string(), out),
         }
     }
@@ -1181,7 +1190,9 @@ fn plain_text(nodes: &[Node]) -> String {
             Node::InlineCode(code) => out.push_str(&code.value),
             Node::Image(image) => out.push_str(&image.alt),
             Node::Break(_) => out.push(' '),
-            Node::Html(_) => {}
+            Node::Html(html) => {
+                out.push_str(&html_lines(&visible_html_source(&html.value)).join(" "))
+            }
             other => out.push_str(&plain_text(other.children().map_or(&[][..], Vec::as_slice))),
         }
     }
@@ -1210,6 +1221,28 @@ fn escape(text: &str, out: &mut String) {
             c => escape_char(c, out),
         }
     }
+}
+
+/// Chat never renders raw HTML, but `<harness>` is still something the
+/// author typed: its exact source as text, with chat line breaks, and no
+/// mention, emoji or link processing. Complete HTML comments stay hidden.
+fn literal_html(value: &str, out: &mut String) {
+    let source = visible_html_source(value);
+    for (index, line) in html_lines(&source).iter().enumerate() {
+        if index > 0 {
+            out.push_str("\\\n");
+        }
+        escape(line, out);
+    }
+}
+
+/// Lines split at `\r\n`, `\n` or `\r`.
+fn html_lines(source: &str) -> Vec<String> {
+    source
+        .replace("\r\n", "\n")
+        .split(['\n', '\r'])
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `<…>` destinations allow any character but these.
@@ -1747,7 +1780,7 @@ fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
                 }
                 Node::Break(_) => " ".into(),
                 Node::Image(image) => image.alt.clone(),
-                Node::Html(_) => continue,
+                Node::Html(html) => html_lines(&visible_html_source(&html.value)).join(" "),
                 _ => {
                     match node {
                         Node::Strong(_) => style.font_weight = Some(FontWeight::MEDIUM),
@@ -2378,8 +2411,57 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn drops_raw_html_and_keeps_structure() {
-        assert_eq!(paragraph("a <b>b</b> c"), "a b c");
+    fn shows_raw_html_as_the_typed_text() {
+        let visible = |content| plain_markdown(&paragraph(content));
+        assert_eq!(visible("a <b>b</b> c"), "a <b>b</b> c");
+        assert_eq!(
+            visible("<harness stuff goes here>"),
+            "<harness stuff goes here>"
+        );
+        assert_eq!(visible("run the <harness> now"), "run the <harness> now");
+        assert_eq!(
+            paragraph("**<harness>** and _<b>x</b>_"),
+            "**\\<harness\\>** and *\\<b\\>x\\<\\/b\\>*"
+        );
+        // A block keeps its lines and is never Markdown or emoji; a
+        // complete comment stays hidden.
+        let mut block = row("<div onclick=\"x()\">\n**not bold** :party:\n</div>\n\n<!-- note -->");
+        block.emoji = vec![CustomEmoji {
+            shortcode: "party".into(),
+            url: "https://x.test/p.png".into(),
+        }];
+        assert_eq!(
+            prepare(&block, &directory(), &[]).body,
+            Document::Blocks(vec![Block::Paragraph(
+                "\\<div onclick\\=\\\"x\\(\\)\\\"\\>\\\n\\*\\*not bold\\*\\* \\:party\\:\\\n\\<\\/div\\>"
+                    .into()
+            )])
+        );
+        // Buzz Desktop's wave marker.
+        assert_eq!(
+            visible("<!-- buzz:wave:v1 -->\nLogan waved at you."),
+            "Logan waved at you."
+        );
+        assert_eq!(visible("a <!-- hidden --> b"), "a  b");
+        assert_eq!(paragraph("<!-- x --> <harness>"), " \\<harness\\>");
+        assert_eq!(
+            visible("an <!-- unclosed comment"),
+            "an <!-- unclosed comment"
+        );
+        assert!(blocks("<!-- buzz:wave:v1 -->").is_empty());
+        // Inside a spoiler it stays inline text.
+        let prepared = prepare(&row("Before ||<harness>|| after"), &directory(), &[]);
+        assert_eq!(
+            prepared.body,
+            Document::Blocks(vec![Block::Paragraph(
+                "Before ![\\<harness\\>](<buzz-spoiler:0>) after".into()
+            )])
+        );
+        assert_eq!(&*prepared.spoilers, &[SharedString::from("\\<harness\\>")]);
+    }
+
+    #[test]
+    fn keeps_structure() {
         assert_eq!(
             blocks("# T\n\n> q\n\n- [x] done\n\n```\nfn main() {}\n```\n\n---"),
             vec![

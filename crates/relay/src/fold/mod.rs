@@ -18,6 +18,7 @@ mod tests;
 
 pub use attachments::{
     Attachment, AttachmentKind, Dimensions, message_markdown, parse_attachments,
+    visible_html_source,
 };
 pub use membership::{MembershipChange, MembershipKind, membership_change};
 pub use order::{MessageClock, compare_messages, event_ms};
