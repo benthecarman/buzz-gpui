@@ -78,6 +78,10 @@ zbus = "5"
 # "Copy image": GPUI's clipboard offers only text on Wayland.
 arboard = { version = "3", features = ["wayland-data-control"] }
 
+[target.'cfg(windows)'.dependencies]
+# The user's `buzz://` registration; GPUI already uses it.
+windows-registry = "0.6"
+
 [package.metadata.deb]
 name = "buzz-gpui"
 maintainer = "Ben Carman <benthecarman@live.com>"

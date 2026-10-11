@@ -1163,6 +1163,7 @@ dependencies = [
  "unicode-properties",
  "url",
  "uuid",
+ "windows-registry 0.6.1",
  "zbus 5.19.0",
  "zeroize",
 ]

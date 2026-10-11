@@ -44,6 +44,13 @@ cat >"$app/Contents/Info.plist" <<EOF
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Buzz records voice notes.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>Buzz link</string>
+      <key>CFBundleURLSchemes</key><array><string>buzz</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 EOF
