@@ -1,17 +1,17 @@
 //! The template and team editor (`ChannelTemplatesDialog.tsx`): name,
-//! description and lineup for a template; name, agents and, for portable
-//! teams, description and team instructions for a team.
+//! description and lineup for a template; name and agents for a team.
+//! A team's instructions live in their own record and are edited from
+//! the Agents page (`agents/team_editor.rs`).
 
 use super::{Catalog, field, line, watch_kit};
 use crate::community::Community;
 use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::EventId;
 use buzz_relay_client::kit::{KitStatus, KitValue, Lineup, Team, Template};
-use buzz_ui::{Button, Dialog, DialogSize, Surface, TextArea, TextField, tokens::space};
+use buzz_ui::{Button, Dialog, DialogSize, Surface, TextField, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use serde_json::{Value, json};
 use std::rc::Rc;
 
 /// The dialog closed, saved or not.
@@ -21,7 +21,6 @@ pub struct TemplateDialog {
     pub(super) community: Entity<Community>,
     /// What is being edited; its lineup is edited in place.
     pub(super) draft: KitValue,
-    initial: KitValue,
     expected: Option<EventId>,
     notice: Option<SharedString>,
     name: Entity<InputState>,
@@ -31,13 +30,6 @@ pub struct TemplateDialog {
     /// Open disclosures of the template fields.
     pub(super) members_open: bool,
     pub(super) canvas_open: bool,
-    /// The loaded portable definition of a version 2 team.
-    portable: Option<Value>,
-    loading: bool,
-    team_description: Entity<TextareaState>,
-    team_instructions: Entity<TextareaState>,
-    /// One revision per edit, kept across retries of the same save.
-    revision: String,
     busy: bool,
     error: Option<SharedString>,
     _kit: Task<()>,
@@ -69,13 +61,6 @@ impl TemplateDialog {
             TextareaState::new(window, cx).placeholder("# Goal\n\n# Scope\n\n# Success criteria")
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Name or npub"));
-        let team_description = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("Optional description for this team.")
-        });
-        let team_instructions = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("Optional instructions applied to every deployed team member.")
-        });
         name.update(cx, |state, cx| {
             state.set_value(initial.name().to_owned(), window, cx);
             state.focus(window, cx);
@@ -95,15 +80,11 @@ impl TemplateDialog {
             ),
             _ => (false, false),
         };
-        let edited = |this: &mut Self, cx: &mut Context<Self>| {
-            this.revision = uuid::Uuid::new_v4().to_string();
-            this.error = None;
-            cx.notify();
-        };
         let subscriptions = vec![
             cx.subscribe(&name, move |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    edited(this, cx);
+                    this.error = None;
+                    cx.notify();
                 }
             }),
             cx.subscribe(&description, |_, _, event: &InputEvent, cx| {
@@ -121,26 +102,11 @@ impl TemplateDialog {
                     cx.notify();
                 }
             }),
-            cx.subscribe(&team_description, move |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    edited(this, cx);
-                }
-            }),
-            cx.subscribe(
-                &team_instructions,
-                move |this, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        edited(this, cx);
-                    }
-                },
-            ),
         ];
-        let loading = matches!(&initial, KitValue::Team(team) if team.portable.is_some());
         let kit = watch_kit(&community, cx);
-        let mut this = Self {
+        Self {
             community,
-            draft: initial.clone(),
-            initial,
+            draft: initial,
             expected,
             notice: notice.map(Into::into),
             name,
@@ -149,57 +115,11 @@ impl TemplateDialog {
             search,
             members_open: lineup_open.0,
             canvas_open: lineup_open.1,
-            portable: None,
-            loading,
-            team_description,
-            team_instructions,
-            revision: uuid::Uuid::new_v4().to_string(),
             busy: false,
             error: None,
             _kit: kit,
             _subscriptions: subscriptions,
-        };
-        if loading {
-            this.load_portable(window, cx);
         }
-        this
-    }
-
-    /// Loads a portable team's definition before it can be edited.
-    fn load_portable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let KitValue::Team(team) = self.initial.clone() else {
-            return;
-        };
-        let session = self.community.read(cx).session.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let agents = team.agents.len();
-            let result = session.kit_load_team(team).await.and_then(|value| {
-                let members = value["members"].as_array().map_or(0, Vec::len);
-                if members != agents {
-                    return Err("Portable team members do not match their definitions".into());
-                }
-                Ok(value)
-            });
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(value) => {
-                        let text =
-                            |key: &str| value["team"][key].as_str().unwrap_or_default().to_owned();
-                        let (description, instructions) =
-                            (text("description"), text("instructions"));
-                        this.team_description
-                            .update(cx, |state, cx| state.set_value(description, window, cx));
-                        this.team_instructions
-                            .update(cx, |state, cx| state.set_value(instructions, window, cx));
-                        this.portable = Some(value);
-                        this.loading = false;
-                    }
-                    Err(error) => this.error = Some(error.into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub(super) fn lineup(&self, cx: &App) -> Lineup {
@@ -219,10 +139,7 @@ impl TemplateDialog {
     pub(super) fn set_agents(&mut self, agents: Vec<String>, cx: &mut Context<Self>) {
         match &mut self.draft {
             KitValue::Template(template) => template.agents = agents,
-            KitValue::Team(team) => {
-                team.agents = agents;
-                self.revision = uuid::Uuid::new_v4().to_string();
-            }
+            KitValue::Team(team) => team.agents = agents,
             KitValue::Groups(_) => {}
         }
         self.error = None;
@@ -242,15 +159,8 @@ impl TemplateDialog {
         }
     }
 
-    fn portable_initial(&self) -> Option<&Team> {
-        match &self.initial {
-            KitValue::Team(team) if team.portable.is_some() => Some(team),
-            _ => None,
-        }
-    }
-
     fn save(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.loading {
+        if self.busy {
             return;
         }
         let name = self.name.read(cx).value().to_string();
@@ -269,56 +179,19 @@ impl TemplateDialog {
             }),
             KitValue::Groups(_) => return,
         };
-        // A portable team saves its definitions with it.
-        let portable = match (&value, self.portable_initial(), &self.portable) {
-            (KitValue::Team(team), Some(previous), Some(snapshot)) => {
-                let members: Option<Vec<Value>> = team
-                    .agents
-                    .iter()
-                    .map(|key| {
-                        let index = previous.agents.iter().position(|k| k == key)?;
-                        snapshot["members"].get(index).cloned()
-                    })
-                    .collect();
-                let Some(members) = members else {
-                    self.error = Some("A selected agent has no portable definition".into());
-                    cx.notify();
-                    return;
-                };
-                let mut definition = snapshot["team"].clone();
-                definition["name"] = json!(name);
-                definition["description"] =
-                    json!(self.team_description.read(cx).value().to_string());
-                definition["instructions"] =
-                    json!(self.team_instructions.read(cx).value().to_string());
-                let snapshot = json!({
-                    "format": "buzz-team-snapshot",
-                    "version": 1,
-                    "team": definition,
-                    "members": members,
-                });
-                Some((
-                    Team {
-                        portable: None,
-                        ..team.clone()
-                    },
-                    snapshot,
-                ))
-            }
-            _ => None,
-        };
+        // A team imported from a file keeps its manifest as it is.
+        if let KitValue::Team(team) = &value
+            && team.portable.is_some()
+            && team.agents.is_empty()
+        {
+            self.error = Some("A team imported from a file needs at least one member.".into());
+            cx.notify();
+            return;
+        }
         self.busy = true;
         self.error = None;
-        let revision = self.revision.clone();
         cx.spawn(async move |this, cx| {
-            let result = match portable {
-                Some((team, snapshot)) => {
-                    session
-                        .kit_save_portable(team, snapshot, expected, revision)
-                        .await
-                }
-                None => session.kit_save(value, expected, false).await,
-            };
+            let result = session.kit_save(value, expected, false).await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
@@ -375,24 +248,6 @@ impl TemplateDialog {
                 cx,
             ));
         if team {
-            if self.portable_initial().is_some() {
-                body = body
-                    .child(field(
-                        "Description",
-                        None,
-                        TextArea::new(&self.team_description).surface(Surface::Floating),
-                        cx,
-                    ))
-                    .child(field(
-                        "Team Instructions",
-                        None,
-                        TextArea::new(&self.team_instructions).surface(Surface::Floating),
-                        cx,
-                    ));
-            }
-            if self.loading {
-                body = body.child(line("Loading team definitions…", false, cx));
-            }
             body = body.child(self.agent_selection(&catalog, window, cx));
         } else {
             body = body
@@ -423,7 +278,7 @@ impl TemplateDialog {
                 Button::new("template-save", format!("Save {noun}"))
                     .prominent()
                     .loading(self.busy)
-                    .disabled(name_blank || catalog.kit.status != KitStatus::Ready || self.loading)
+                    .disabled(name_blank || catalog.kit.status != KitStatus::Ready)
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             )
     }
