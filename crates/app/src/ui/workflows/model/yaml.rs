@@ -197,15 +197,42 @@ fn scalar(value: &Value, indent: usize) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(number) => number.to_string(),
         Value::String(text) => string(text, indent, false),
-        Value::Tagged(tagged) => scalar(&tagged.value, indent),
-        Value::Sequence(_) | Value::Mapping(_) => unreachable!("collections are not scalars"),
+        Value::Tagged(tagged) => format!("{} {}", tagged.tag, scalar(&tagged.value, indent)),
+        // Only a tagged collection at the top of a document gets here.
+        Value::Sequence(_) | Value::Mapping(_) => flow(value),
+    }
+}
+
+/// A value on one line in flow style, for where block style cannot go.
+fn flow(value: &Value) -> String {
+    match value {
+        Value::String(text)
+            if !needs_quotes(text) && !text.contains([',', '[', ']', '{', '}', '\n']) =>
+        {
+            text.clone()
+        }
+        Value::String(text) => double_quoted(text),
+        Value::Tagged(tagged) => format!("{} {}", tagged.tag, flow(&tagged.value)),
+        Value::Sequence(items) => {
+            let items: Vec<String> = items.iter().map(flow).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Mapping(map) => {
+            let entries: Vec<String> = map
+                .iter()
+                .map(|(name, value)| format!("{}: {}", flow(name), flow(value)))
+                .collect();
+            format!("{{{}}}", entries.join(", "))
+        }
+        other => scalar(other, 0),
     }
 }
 
 fn key(value: &Value) -> String {
     match value {
         Value::String(text) => string(text, 0, true),
-        other => scalar(other, 0),
+        Value::Null | Value::Bool(_) | Value::Number(_) => scalar(value, 0),
+        Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => flow(value),
     }
 }
 
@@ -223,6 +250,11 @@ fn mapping(map: &Mapping, indent: usize, out: &mut String, first_inline: bool) {
 /// What follows `key:` on its line and below.
 fn entry(value: &Value, indent: usize, out: &mut String) {
     match value {
+        Value::Tagged(tagged) => {
+            out.push(' ');
+            out.push_str(&tagged.tag.to_string());
+            entry(&tagged.value, indent, out);
+        }
         Value::Mapping(map) if map.is_empty() => out.push_str(" {}\n"),
         Value::Mapping(map) => {
             out.push('\n');
@@ -562,5 +594,29 @@ mod tests {
             assert_eq!(parsed["steps"][0]["text"].as_str(), Some(text), "{written}");
         }
         assert_eq!(block("a\nb", 0), "|-\n  a\n  b");
+    }
+
+    #[test]
+    fn writes_tagged_collections_and_collection_keys() {
+        for text in [
+            "{name: a, x: !t {b: 1}}",
+            "{name: a, x: !t [1, {c: !u d}], y: [!t {b: 1}, !t [2]], z: !t {}}",
+            "{name: a, [k, 1]: v, {m: \"n, o\"}: w, ? !t {p: q} : r}",
+        ] {
+            let renamed = with_name(text, "b").unwrap();
+            let toggled = with_enabled(&renamed, false).unwrap();
+            let Value::Mapping(mut expected) = parse(text).unwrap() else {
+                panic!()
+            };
+            expected.insert("name".into(), "b".into());
+            expected.insert("enabled".into(), false.into());
+            assert_eq!(
+                parse(&toggled).unwrap(),
+                Value::Mapping(expected),
+                "{toggled}"
+            );
+        }
+        let tagged = parse("!t {b: [1, \"x, y\"]}").unwrap();
+        assert_eq!(parse(&stringify(&tagged)).unwrap(), tagged);
     }
 }
