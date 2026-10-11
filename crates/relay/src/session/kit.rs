@@ -436,8 +436,14 @@ impl Session {
                     (Some(sender), _) => {
                         let _ = sender.send(Err(error));
                     }
-                    // Admitted: the form is gone, so setup reports here.
-                    (None, Some(id)) => shared.notice(SetupNotice { id, name, error }),
+                    // Admitted: the form is gone, so setup reports here,
+                    // and the receipt goes so it cannot fill the budget.
+                    (None, Some(id)) => {
+                        if let Ok(ctx) = session.kit_context().await {
+                            let _ = Receipts::remove(&ctx.store, &ctx.partition, &id);
+                        }
+                        shared.notice(SetupNotice { id, name, error });
+                    }
                     (None, None) => {}
                 }
             }
@@ -611,18 +617,19 @@ async fn run(
     if shared.admitting.swap(true, Ordering::SeqCst) {
         return Err("Another channel is still being created.".into());
     }
-    let result = start(session, &ctx, input, admitted).await;
+    let admission = start(session, &ctx, input, admitted).await;
+    // Admitted or failed: another creation may start while setup runs.
     shared.admitting.store(false, Ordering::SeqCst);
-    result
+    complete(session, &ctx, admission?).await
 }
 
-/// `preflight` and the first steps up to admission, then setup.
+/// `preflight` and the first steps up to admission.
 async fn start(
     session: &Arc<Session>,
     ctx: &Kit,
     input: ChannelCreationInput,
     admitted: &mut Admitted,
-) -> Result<(), String> {
+) -> Result<Progress, String> {
     input.check()?;
     if let Some(setup) = &input.setup {
         if !setup.canvas.is_empty() && crate::canvas::too_large(&setup.canvas) {
@@ -667,13 +674,16 @@ async fn start(
                 .and_then(|id| ctx.outbox.get(&id))
                 .is_some_and(|op| op.delivery == Delivery::Failed);
             if create.is_none() || failed {
-                retire(ctx, &p).await?;
+                // Never left behind for "Retry channel", even if retiring
+                // fails.
                 *shared.running.lock().expect("kit lock") = None;
+                shared.set_creation();
+                retire(ctx, &p).await?;
             } else {
                 // Uncertain: "Retry channel" checks this exact Create.
                 *shared.running.lock().expect("kit lock") = Some(p.clone());
+                shared.set_creation();
             }
-            shared.set_creation();
             return Err(error);
         }
     }
@@ -682,7 +692,7 @@ async fn start(
     shared.set_creation();
     admit(admitted, &p.id);
     Receipts::write(&ctx.store, &ctx.partition, &p)?;
-    complete(session, ctx, p).await
+    Ok(p)
 }
 
 /// Group, Canvas and agents after admission; then the receipt and its
@@ -801,9 +811,9 @@ async fn retry_running(
             .get(&op)
             .is_some_and(|saved| saved.delivery == Delivery::Failed)
         {
-            retire(ctx, &checking).await?;
             *shared.running.lock().expect("kit lock") = None;
             shared.set_creation();
+            retire(ctx, &checking).await?;
         }
         return Err(error);
     }
