@@ -575,21 +575,32 @@ impl ThreadPanel {
             }
             None => self.list.set_follow_mode(FollowMode::Tail),
         }
+        let thread = Some((root, parent.unwrap_or(root)));
+        // Without files to upload, the intent is queued now, so the reply
+        // shows on the next frame.
+        let queued = submission.upload.is_none().then(|| {
+            session.send(
+                &channel,
+                &submission.content,
+                mentions.clone(),
+                Vec::new(),
+                thread,
+            )
+        });
         cx.spawn_in(window, async move |this, cx| {
-            // Files upload in the background first; a failed upload is
-            // handed back to the composer's draft.
-            let Some(attachments) = submission.attachments().await else {
-                return;
+            let result = match queued {
+                Some(queued) => queued.await,
+                None => {
+                    // Files upload in the background first; a failed
+                    // upload is handed back to the composer's draft.
+                    let Some(attachments) = submission.attachments().await else {
+                        return;
+                    };
+                    session
+                        .send(&channel, &submission.content, mentions, attachments, thread)
+                        .await
+                }
             };
-            let result = session
-                .send(
-                    &channel,
-                    &submission.content,
-                    mentions,
-                    attachments,
-                    Some((root, parent.unwrap_or(root))),
-                )
-                .await;
             let handed_back = cx
                 .update(|_, cx| submission.settle(&result, cx))
                 .unwrap_or(false);

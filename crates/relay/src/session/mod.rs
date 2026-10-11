@@ -740,22 +740,36 @@ impl Session {
     /// Sends a message, or a thread reply when `thread` names
     /// `(root, parent)`, with uploaded `attachments`. Resolves once the
     /// intent is safely queued; the timeline shows its delivery.
-    pub async fn send(
+    ///
+    /// The intent is handed to the session when this is called, not when
+    /// the future is first polled: a caller on the UI thread would
+    /// otherwise wait for its executor's next turn, often a frame, before
+    /// the message shows.
+    pub fn send(
         &self,
         channel: &str,
         content: &str,
         mentions: Mentions,
         attachments: Vec<Attachment>,
         thread: Option<(EventId, EventId)>,
-    ) -> Result<(), String> {
-        self.write(Write::Send {
-            channel: channel.to_string(),
-            content: content.to_string(),
-            mentions,
-            attachments,
-            thread,
-        })
-        .await
+    ) -> impl Future<Output = Result<(), String>> + use<> {
+        let (reply, answer) = oneshot::channel();
+        let queued = self.commands.send(Message::Write {
+            write: Write::Send {
+                channel: channel.to_string(),
+                content: content.to_string(),
+                mentions,
+                attachments,
+                thread,
+            },
+            reply,
+        });
+        async move {
+            queued.map_err(|_| "The session has closed".to_string())?;
+            answer
+                .await
+                .unwrap_or_else(|_| Err("The session has closed".to_string()))
+        }
     }
 
     /// Reads the custom emoji catalog again, e.g. after an error.
