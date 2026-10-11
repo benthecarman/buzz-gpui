@@ -154,6 +154,9 @@ fn ffmpeg() -> Command {
         .env("LANG", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::null());
+    // No console window opens beside the app.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
     command
 }
 
