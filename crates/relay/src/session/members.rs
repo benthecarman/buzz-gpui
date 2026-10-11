@@ -493,6 +493,7 @@ impl AddOps {
                     .send(
                         draft,
                         SendOptions {
+                            supersedes: None,
                             recovery: Some(recovery),
                             gate: None,
                         },

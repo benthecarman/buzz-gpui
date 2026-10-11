@@ -72,6 +72,7 @@ pub fn queue(
         .send(
             draft,
             SendOptions {
+                supersedes: None,
                 recovery: Some(recovery),
                 gate: None,
             },

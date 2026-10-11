@@ -429,6 +429,7 @@ fn recovery() -> Recovery {
 
 fn with_recovery() -> SendOptions {
     SendOptions {
+        supersedes: None,
         recovery: Some(recovery()),
         gate: None,
     }
@@ -527,6 +528,7 @@ async fn send_guards_refuse_bad_input() {
         h.outbox.send(draft(27235, &[]), SendOptions::default())
     ));
     let bad_recovery = SendOptions {
+        supersedes: None,
         recovery: Some(Recovery {
             key: String::new(),
             value: String::new(),
@@ -1232,6 +1234,7 @@ async fn guarded_operations_check_admission_before_signing_and_at_publisher_entr
         .send(
             invitation(),
             SendOptions {
+                supersedes: None,
                 recovery: None,
                 gate: Some(gate(&active)),
             },
@@ -1275,6 +1278,7 @@ async fn guarded_operations_never_replay_without_live_admission() {
         .send(
             invitation(),
             SendOptions {
+                supersedes: None,
                 recovery: None,
                 gate: Some(gate(&active)),
             },
@@ -1305,6 +1309,7 @@ async fn a_closed_gate_refuses_the_send_itself() {
     let result = h.outbox.send(
         invitation(),
         SendOptions {
+            supersedes: None,
             recovery: None,
             gate: Some(closed),
         },
@@ -1505,6 +1510,7 @@ async fn member_additions_retire_on_acknowledgement_without_retry() {
         .send(
             invitation(),
             SendOptions {
+                supersedes: None,
                 recovery: Some(Recovery {
                     key: "member-add:c:person".into(),
                     value: "1".into(),

@@ -13,7 +13,6 @@ use crate::reader::Reader;
 use nostr::prelude::EventId;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
 const CLOSED: &str = "The session has closed";
@@ -294,25 +293,13 @@ impl CommunityCatalog {
                 )
             };
             let body = body.ok_or("Nothing has been shared from this coordinate.")?;
-            // Replaceable heads have second precision: wait out the head's
-            // second rather than publish one that cannot outrank it.
-            if let Some(at) = head_at {
-                for _ in 0..30 {
-                    if now() > at {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                if now() <= at {
-                    return Err(
-                        "Please wait a second before changing catalog sharing again.".into(),
-                    );
-                }
-            }
             let id = outbox
                 .send(
                     catalog_draft(kind, &d, body, shared),
-                    SendOptions::default(),
+                    SendOptions {
+                        supersedes: head_at,
+                        ..SendOptions::default()
+                    },
                 )
                 .map_err(|error| error.to_string())?;
             // The new head is newer, so a refused older change is clutter.
@@ -388,10 +375,4 @@ impl CommunityCatalog {
         })
         .await
     }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
