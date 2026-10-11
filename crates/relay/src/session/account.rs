@@ -12,7 +12,7 @@ use crate::outbox::{PublishError, accept_publish};
 use crate::reader::{ReadOptions, Reader};
 use crate::user_status::{self, StatusInput, UserStatus};
 use buzz_identity::{Identity, Purpose};
-use nostr::prelude::Event;
+use nostr::prelude::{Event, EventId};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +66,29 @@ async fn post(http: &RelayHttp, event: &Event) -> Result<Vec<u8>, crate::http::H
     .await
 }
 
+/// Puts the viewer's previous profile back when dropped while armed
+/// (`previous` is `Some`).
+struct RevertProfile {
+    commands: tokio::sync::mpsc::UnboundedSender<Message>,
+    viewer: String,
+    failed: EventId,
+    previous: Option<Option<Verified>>,
+}
+
+impl Drop for RevertProfile {
+    fn drop(&mut self) {
+        let Some(previous) = self.previous.take() else {
+            return;
+        };
+        let (viewer, failed) = (std::mem::take(&mut self.viewer), self.failed);
+        let _ = self.commands.send(Message::With(Box::new(move |actor| {
+            if actor.profiles.revert(&viewer, &failed, previous) {
+                actor.publish();
+            }
+        })));
+    }
+}
+
 impl Session {
     /// Publishes the viewer's profile (§5f.5): reads the current kind 0
     /// fresh so fields this app does not edit survive, signs the new one,
@@ -104,21 +127,26 @@ impl Session {
             let verified = Verifier::default()
                 .verify(event.clone())
                 .map_err(|error| error.to_string())?;
-            // Shown at once; put back below if the relay does not take it.
+            // Shown at once; put back unless the relay takes it, also when
+            // a timeout drops this future.
+            let mut revert = RevertProfile {
+                commands: commands.clone(),
+                viewer: viewer.clone(),
+                failed: event.id,
+                previous: Some(existing),
+            };
             let _ = commands.send(Message::With(Box::new(move |actor| {
                 if actor.profiles.accept(&[verified]) {
                     actor.publish();
                 }
             })));
             match accept_publish(post(&http, &event).await, &event.id) {
-                Ok(_) => Ok(()),
+                Ok(_) => {
+                    revert.previous = None;
+                    Ok(())
+                }
                 Err(error) => {
-                    let (failed, viewer) = (event.id, viewer.clone());
-                    let _ = commands.send(Message::With(Box::new(move |actor| {
-                        if actor.profiles.revert(&viewer, &failed, existing) {
-                            actor.publish();
-                        }
-                    })));
+                    drop(revert);
                     Err(match error {
                         PublishError::Rejected(message) => message,
                         PublishError::Uncertain(message) => {
