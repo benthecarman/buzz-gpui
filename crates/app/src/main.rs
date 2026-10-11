@@ -23,7 +23,6 @@ mod plugins;
 mod runtime;
 mod shortcuts;
 mod sign_out;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod single_instance;
 mod snapshot;
 mod sounds;
@@ -48,9 +47,10 @@ fn main() {
     if let Some(cache) = dirs::cache_dir() {
         buzz_relay_client::set_disk_cache(cache.join("buzz-gpui").join("media"));
     }
-    // A `buzz://` link the OS launched us with (`Exec=buzz-gpui %U`).
+    // A `buzz://` link the OS launched us with (`Exec=buzz-gpui %U` on
+    // Linux, the registered command on Windows). macOS sends links as
+    // events instead (`on_open_urls` below).
     let link = deep_links::from_args(std::env::args().skip(1));
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let instance = {
         let path = single_instance::socket_path(&community::data_dir());
         let handoff = single_instance::Handoff {
@@ -74,6 +74,22 @@ fn main() {
     deep_links::register_scheme();
     let config = config::Config::load();
     let app = gpui_kit::application().with_assets(buzz_ui::Assets);
+    // Launch Services opens the running app rather than a second copy, and
+    // hands it links (on a cold start too) and Dock clicks as events.
+    #[cfg(target_os = "macos")]
+    let os_requests = {
+        let (sender, requests) = futures::channel::mpsc::unbounded();
+        let links = sender.clone();
+        app.on_open_urls(move |urls| {
+            if let Some(link) = deep_links::from_args(urls) {
+                let _ = links.unbounded_send(Request::Url(link));
+            }
+        });
+        app.on_reopen(move |_| {
+            let _ = sender.unbounded_send(Request::Focus);
+        });
+        requests
+    };
     app.run(move |cx| {
         gpui_kit::init(cx);
         buzz_ui::init(cx);
@@ -108,7 +124,16 @@ fn main() {
         if let Some(link) = link {
             let _ = requests.unbounded_send(Request::Url(link).into());
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(target_os = "macos")]
+        {
+            let requests = requests.clone();
+            cx.background_executor()
+                .spawn(futures::StreamExt::for_each(os_requests, move |request| {
+                    let _ = requests.unbounded_send(request.into());
+                    std::future::ready(())
+                }))
+                .detach();
+        }
         if let Some(listener) = instance {
             single_instance::serve(listener, move |handoff| {
                 let request = match handoff.link.is_empty() {

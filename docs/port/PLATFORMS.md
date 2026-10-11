@@ -22,7 +22,7 @@ section lists what a person still has to try on real machines.
 | Feature | Linux | macOS | Windows |
 |---|---|---|---|
 | Credentials (human key, agent keys, host tokens) | Secret Service through buzz-credential-store | DONE: login keychain, generic passwords (`crates/keychain`) | DONE: Credential Manager through buzz-credential-store's `keyring` backend, as buzz-app does |
-| One running app; a second launch hands its link over and exits | Unix socket in `$XDG_RUNTIME_DIR` (`single_instance.rs`) | PLANNED: Launch Services already keeps one app and sends links as open-URL events; also claim the Unix socket (in `$TMPDIR`) for launches outside Launch Services | PLANNED: a named pipe per user and profile |
+| One running app; a second launch hands its link over and exits | Unix socket in `$XDG_RUNTIME_DIR` (`single_instance.rs`) | DONE: Launch Services keeps one app and sends links as open-URL events; the Unix socket (in `$TMPDIR`) covers launches outside Launch Services | DONE: a named pipe per user and profile |
 | `buzz://` links from the OS | `Exec=buzz-gpui %U`, read from argv | PLANNED: `CFBundleURLTypes` in Info.plist; links arrive as open-URL events (`App::on_open_urls`), also on a cold start | PLANNED: argv, as on Linux |
 | `buzz://` scheme registration | `.desktop` file; portable release builds write a user handler (`deep_links::register_scheme`) | PLANNED: Info.plist; Launch Services registers the app when it is copied to Applications | PLANNED: release builds write `HKCU\Software\Classes\buzz` at launch, since the zip has no installer |
 | Desktop notifications | freedesktop notification service over D-Bus (`notifications/banners.rs`) | PLANNED: GPUI's `UNUserNotificationCenter` backend | PLANNED: GPUI's WinRT toast backend, with the app's AppUserModelID |
@@ -30,7 +30,7 @@ section lists what a person still has to try on real machines.
 | Notification service status in Settings | probes the D-Bus service | PLANNED | PLANNED |
 | Bringing the window forward (hand-off, tray, notification) | xdg-activation token (`gpui_linux::set_activation_token`) | PLANNED: activate the app first | PLANNED: the second launch allows the running one to take the foreground |
 | Tray icon: open, quit, unread attention, minimize or close to tray | StatusNotifierItem over D-Bus (`tray.rs`) | PLANNED: menu-bar status item (`tray-icon`) | PLANNED: notification-area icon (`tray-icon`) |
-| Dock icon click reopens a hidden window | n/a | PLANNED: `App::on_reopen` | n/a |
+| Dock icon click reopens a hidden window | n/a | DONE: `App::on_reopen` | n/a |
 | Quit shortcut | none (Ctrl+Q is reserved) | PLANNED: app menu with Quit Buzz (⌘Q) | n/a |
 | Window chrome | client-side: the header is the title bar, with Buzz's own minimize, maximize and close | PLANNED: transparent title bar with the system traffic lights, header inset for them | PLANNED: no system caption; the header drags the window through the OS hit test |
 | App icon | hicolor PNGs from the .deb | DONE: `.icns` in the bundle | PLANNED: icon resource in the .exe (window, taskbar, Explorer) |
