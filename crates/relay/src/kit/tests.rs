@@ -404,3 +404,155 @@ fn creations_restore_only_from_this_apps_command_shape() {
     session[4][1] = "Buzz session (x)".into();
     assert!(pending_creation(&op(session)).is_none());
 }
+
+fn text_head(owner: &str, bytes: u64) -> Value {
+    json!({"version": 1, "community": COMMUNITY, "deleted": false, "value": {
+        "type": "team-text", "id": "crew", "owner": owner,
+        "manifest": {"version": 1, "owner": owner,
+            "revision": "11111111-1111-4111-8111-111111111111",
+            "digest": "cd".repeat(32), "bytes": bytes, "chunks": bytes.div_ceil(16 * 1024)}
+    }})
+}
+
+/// Signs `raw` encrypted as is, so invalid records reach admission.
+fn sealed(identity: &Identity, raw: &Value, tags: Vec<Vec<String>>) -> Verified {
+    let content = identity.encrypt_to_self(&raw.to_string()).unwrap();
+    let unsigned = identity
+        .template(Purpose::AppData, 30078, 1_700_000_000, tags, content)
+        .unwrap();
+    Verifier::default()
+        .verify(identity.sign(Purpose::AppData, unsigned).unwrap())
+        .unwrap()
+}
+
+/// buzz-app's shared corpus (`team-text-admission-contract.json`), run
+/// against the port's decode of the viewer's own heads.
+#[test]
+fn team_text_heads_match_the_shared_admission_corpus() {
+    let identity = Identity::ephemeral();
+    let corpus =
+        include_str!("team-text-admission-contract.json").replace("OWNER", &identity.pubkey_hex());
+    let cases: Vec<Value> = serde_json::from_str(&corpus).unwrap();
+    assert!(cases.len() > 10);
+    for case in cases {
+        let tags = serde_json::from_value(case["tags"].clone()).unwrap();
+        let event = sealed(&identity, &case["record"], tags);
+        assert_eq!(
+            open(&identity, &event, COMMUNITY).is_ok(),
+            case["accepted"] == true,
+            "{}",
+            case["name"]
+        );
+    }
+}
+
+#[test]
+fn team_text_records_parse_with_their_own_coordinate_and_owner() {
+    let identity = Identity::ephemeral();
+    let owner = identity.pubkey_hex();
+    let live = parse_text_record(&text_head(&owner, 3), COMMUNITY).unwrap();
+    assert_eq!(
+        live.coordinate(),
+        format!("buzz-team-text-v1:https%3A%2F%2Frelay.test:{owner}:crew")
+    );
+    assert_eq!(live.to_json(), text_head(&owner, 3));
+    let tombstone = TextRecord::new(COMMUNITY, "crew", &owner, None);
+    assert!(tombstone.deleted);
+    assert_eq!(
+        parse_private_record(&tombstone.to_json(), COMMUNITY).unwrap(),
+        PrivateRecord::Text(tombstone)
+    );
+    let mut bad = vec![text_head(&owner, 2), text_head(&owner, 4 + 128 * 1024)];
+    let mut mismatched = text_head(&owner, 3);
+    mismatched["value"]["manifest"]["owner"] = json!(key(9));
+    bad.push(mismatched);
+    let mut live_null = text_head(&owner, 3);
+    live_null["value"]["manifest"] = Value::Null;
+    bad.push(live_null);
+    let mut dead_manifest = text_head(&owner, 3);
+    dead_manifest["deleted"] = json!(true);
+    bad.push(dead_manifest);
+    let mut inline = text_head(&owner, 3);
+    inline["value"]["text"] = json!("inline");
+    bad.push(inline);
+    let mut v2 = text_head(&owner, 3);
+    v2["version"] = json!(2);
+    bad.push(v2);
+    for raw in &bad {
+        assert!(parse_text_record(raw, COMMUNITY).is_err(), "{raw}");
+    }
+    assert!(parse_text_record(&text_head(&owner, 3), "https://other.test").is_err());
+    // Another owner's head, even self-consistent, is never opened.
+    let other = text_head(&key(9), 3);
+    let d = native::coordinate(&other, COMMUNITY).unwrap();
+    let event = sealed(
+        &identity,
+        &other,
+        vec![vec!["d".into(), d], vec!["t".into(), TEXT_TAG.into()]],
+    );
+    assert!(open(&identity, &event, COMMUNITY).is_err());
+}
+
+#[test]
+fn team_text_round_trips_through_chunks_up_to_its_cap() {
+    let owner = key(1);
+    // 4-byte characters and JSON escapes, exactly 128 KiB.
+    let unit = "\u{1F600}\"\\\n";
+    let text =
+        unit.repeat(TEAM_TEXT_BYTES / unit.len()) + &"x".repeat(TEAM_TEXT_BYTES % unit.len());
+    assert_eq!(text.len(), TEAM_TEXT_BYTES);
+    let revision = "11111111-1111-4111-8111-111111111111";
+    let (manifest, payloads) =
+        encode_team_text(&text, COMMUNITY, &owner, "crew", revision).unwrap();
+    assert_eq!(manifest.bytes as usize, TEAM_TEXT_BYTES + 3);
+    assert_eq!(payloads.len(), 9);
+    assert_eq!(
+        decode_team_text(&manifest, &payloads, COMMUNITY, &owner, "crew").unwrap(),
+        text
+    );
+    // Its chunks are ordinary payload records.
+    for chunk in &payloads {
+        assert!(chunk.coordinate().starts_with("buzz-team-payload-v1:"));
+    }
+    // Empty text is a live head too.
+    let (empty, chunks) = encode_team_text("", COMMUNITY, &owner, "crew", revision).unwrap();
+    assert_eq!((empty.bytes, chunks.len()), (3, 1));
+    assert_eq!(
+        decode_team_text(&empty, &chunks, COMMUNITY, &owner, "crew").unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn team_text_refuses_oversized_nul_and_tampered_text() {
+    let owner = key(1);
+    let revision = "11111111-1111-4111-8111-111111111111";
+    let over = "x".repeat(TEAM_TEXT_BYTES + 1);
+    let error = encode_team_text(&over, COMMUNITY, &owner, "crew", revision).unwrap_err();
+    assert!(error.contains("exceed"), "{error}");
+    let error = encode_team_text("a\0b", COMMUNITY, &owner, "crew", revision).unwrap_err();
+    assert!(error.contains("NUL"), "{error}");
+    let (manifest, payloads) =
+        encode_team_text("SHARED", COMMUNITY, &owner, "crew", revision).unwrap();
+    let mut tampered = manifest.clone();
+    tampered.digest = "ab".repeat(32);
+    assert_eq!(
+        decode_team_text(&tampered, &payloads, COMMUNITY, &owner, "crew").unwrap_err(),
+        "Portable team integrity check failed"
+    );
+    assert!(decode_team_text(&manifest, &payloads, COMMUNITY, &owner, "other").is_err());
+    // A text manifest has exactly the six manifest fields.
+    let mut extra = serde_json::to_value(&manifest).unwrap();
+    extra["note"] = json!("x");
+    assert!(parse_text_manifest(&extra).is_err());
+    // A portable snapshot's bytes are not text.
+    let (snapshot, chunks) = encode_team_payload(
+        &json!({"team": {"name": "Crew"}, "members": []}),
+        COMMUNITY,
+        &owner,
+        "crew",
+        revision,
+    )
+    .unwrap();
+    assert!(decode_team_text(&snapshot, &chunks, COMMUNITY, &owner, "crew").is_err());
+}

@@ -23,7 +23,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub use crate::session::{CreationSnapshot, KitSnapshot, KitStatus};
-pub use native::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG};
+pub use native::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG, TEXT_TAG};
 pub use payload::{TeamManifest, TeamPayload};
 
 /// Largest serialized recipe (`KIT_RECORD_BYTES`).
@@ -486,24 +486,131 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
     Ok(record)
 }
 
-/// A decoded private record: a recipe, or a portable team chunk.
+/// A team's shared instructions head (`TextRecord`): a manifest of the
+/// text's chunks, or a tombstone. It is kept apart from the team record,
+/// so builds that only read team records never see it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextRecord {
+    pub community: String,
+    pub deleted: bool,
+    /// The team's ID.
+    pub id: String,
+    pub owner: String,
+    /// `None` exactly when deleted.
+    pub manifest: Option<TeamManifest>,
+}
+
+impl TextRecord {
+    /// A live head for `manifest`, or a tombstone without one.
+    pub fn new(community: &str, id: &str, owner: &str, manifest: Option<TeamManifest>) -> Self {
+        Self {
+            community: community.to_owned(),
+            deleted: manifest.is_none(),
+            id: id.to_owned(),
+            owner: owner.to_owned(),
+            manifest,
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "version": 1,
+            "community": self.community,
+            "deleted": self.deleted,
+            "value": {
+                "type": "team-text",
+                "id": self.id,
+                "owner": self.owner,
+                "manifest": self.manifest,
+            },
+        })
+    }
+
+    pub fn coordinate(&self) -> String {
+        text_coordinate(&self.community, &self.owner, &self.id)
+    }
+}
+
+/// The `d` coordinate of a team's text head (`textCoordinate`).
+pub fn text_coordinate(community: &str, owner: &str, team_id: &str) -> String {
+    format!(
+        "{TEXT_TAG}:{}:{owner}:{team_id}",
+        encode_component(community)
+    )
+}
+
+/// `parseTextRecord`: exact fields, a live head's manifest owned by the
+/// record's owner, a tombstone without one, within the record budget.
+pub fn parse_text_record(raw: &Value, community: &str) -> Result<TextRecord, String> {
+    const INVALID_TEXT: &str = "Invalid team instructions record";
+    let r = raw.as_object().ok_or(INVALID_TEXT)?;
+    let v = r
+        .get("value")
+        .and_then(Value::as_object)
+        .ok_or(INVALID_TEXT)?;
+    let deleted = r.get("deleted").and_then(Value::as_bool);
+    let owner = v
+        .get("owner")
+        .and_then(Value::as_str)
+        .filter(|o| hex_key(o));
+    let (Some(deleted), Some(owner)) = (deleted, owner) else {
+        return Err(INVALID_TEXT.into());
+    };
+    if r.keys()
+        .any(|key| !["version", "community", "deleted", "value"].contains(&key.as_str()))
+        || v.keys()
+            .any(|key| !["type", "id", "owner", "manifest"].contains(&key.as_str()))
+        || r.get("version") != Some(&json!(1))
+        || r.get("community").and_then(Value::as_str) != Some(community)
+        || v.get("type").and_then(Value::as_str) != Some("team-text")
+    {
+        return Err(INVALID_TEXT.into());
+    }
+    let manifest = match (deleted, v.get("manifest").unwrap_or(&Value::Null)) {
+        (true, Value::Null) => None,
+        (true, _) => return Err(INVALID_TEXT.into()),
+        (false, raw) => {
+            let manifest = payload::parse_text_manifest(raw)?;
+            if manifest.owner != owner {
+                return Err(INVALID_TEXT.into());
+            }
+            Some(manifest)
+        }
+    };
+    let record = TextRecord {
+        community: community.to_owned(),
+        deleted,
+        id: id(v.get("id"))?,
+        owner: owner.to_owned(),
+        manifest,
+    };
+    if serde_json::to_vec(&record.to_json()).map_or(true, |bytes| bytes.len() > KIT_RECORD_BYTES) {
+        return Err(INVALID_TEXT.into());
+    }
+    Ok(record)
+}
+
+/// A decoded private record: a recipe, a portable team chunk, or a team's
+/// text head.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrivateRecord {
     Kit(KitRecord),
     Payload(TeamPayload),
+    Text(TextRecord),
 }
 
 /// `parsePrivateRecord`.
 pub fn parse_private_record(raw: &Value, community: &str) -> Result<PrivateRecord, String> {
-    if raw
+    match raw
         .get("value")
         .and_then(|v| v.get("type"))
         .and_then(Value::as_str)
-        == Some("team-payload")
     {
-        payload::parse_payload_record(raw, community).map(PrivateRecord::Payload)
-    } else {
-        parse_kit_record(raw, community).map(PrivateRecord::Kit)
+        Some("team-payload") => {
+            payload::parse_payload_record(raw, community).map(PrivateRecord::Payload)
+        }
+        Some("team-text") => parse_text_record(raw, community).map(PrivateRecord::Text),
+        _ => parse_kit_record(raw, community).map(PrivateRecord::Kit),
     }
 }
 
@@ -519,8 +626,8 @@ pub fn seal(identity: &Identity, raw: &Value, community: &str) -> Result<String,
 }
 
 /// The kit cipher's read side (`relay_kit_decode`): the viewer's own 30078
-/// event, decrypted and admitted against its tags. Portable records must
-/// belong to the viewer.
+/// event, decrypted and admitted against its tags. Portable records and
+/// team text heads must belong to the viewer.
 pub fn open(identity: &Identity, event: &Verified, community: &str) -> Result<Value, String> {
     let viewer = identity.pubkey_hex();
     if event.kind_u16() != kinds::APP_DATA
@@ -538,7 +645,10 @@ pub fn open(identity: &Identity, event: &Verified, community: &str) -> Result<Va
     let raw: Value = serde_json::from_str(&plaintext).map_err(|_| INVALID.to_owned())?;
     let event_json = serde_json::to_value(event.event()).map_err(|_| INVALID.to_owned())?;
     native::admission(&event_json, &raw, community)?;
-    let owner = if raw["value"]["type"] == "team-payload" {
+    let owner = if matches!(
+        raw["value"]["type"].as_str(),
+        Some("team-payload" | "team-text")
+    ) {
         Some(&raw["value"]["owner"])
     } else if raw["version"] == 2 {
         Some(&raw["value"]["portable"]["owner"])

@@ -7,7 +7,7 @@ use buzz_relay_client::catalog::{
     CatalogDelivery, CatalogKind, CatalogStatus, CatalogView, PersonaSource, Publication,
     SessionPolicy, TeamSource, agent_catalog_content, team_catalog_content,
 };
-use buzz_relay_client::session::{CommunityCatalog, TeamKit, TeamsStatus, TeamsView};
+use buzz_relay_client::session::{CommunityCatalog, Resume, TeamKit, TeamsStatus, TeamsView};
 use buzz_relay_client::teams::Team;
 use buzz_relay_client::*;
 use serde_json::{Value, json};
@@ -311,4 +311,164 @@ async fn saves_loads_and_deletes_a_portable_team() {
     let saved = teams_ready(&kit).await;
     assert!(saved.teams().all(|e| e.team.id != id));
     assert!(kit.current_members().await.unwrap()[&id].members.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saves_reads_and_retires_team_text_in_its_own_record() {
+    let Some((origin, identities)) = fixture() else {
+        return;
+    };
+    let alice = open(&origin, &identities, "alice");
+    let mut snapshot = alice.snapshot();
+    until(&mut snapshot, "the session", |s| {
+        s.status == SessionStatus::Ready
+    })
+    .await;
+    let kit = alice.team_kit();
+    let listed = teams_ready(&kit).await;
+    assert_eq!(listed.status, TeamsStatus::Ready, "{:?}", listed.error);
+    let id = throwaway();
+    let team = Team {
+        id: id.clone(),
+        name: "Throwaway team".into(),
+        agents: vec![key_of(&id)],
+        portable: None,
+    };
+    let team_head = kit.save(team.clone(), None, false).await.unwrap();
+    // No head yet: a fresh read proves it.
+    assert_eq!(kit.read_text(&id).await.unwrap(), None);
+
+    // A live head only over the team's current live head.
+    let manifest = kit
+        .prepare_text(&id, "SHARED", &uuid::Uuid::new_v4().to_string())
+        .await
+        .unwrap();
+    let stale = kit
+        .publish_text(
+            &id,
+            Some(manifest.clone()),
+            None,
+            Some("00".repeat(32)),
+            Resume::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.contains("changed or was deleted"), "{stale}");
+    let resume = Resume::new();
+    let head = kit
+        .publish_text(
+            &id,
+            Some(manifest.clone()),
+            None,
+            Some(team_head.clone()),
+            resume.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resume.id().as_deref(), Some(head.as_str()));
+    let read = kit.read_text(&id).await.unwrap().expect("a text head");
+    assert_eq!(
+        (read.text.as_str(), read.head.as_str()),
+        ("SHARED", head.as_str())
+    );
+    // A retry confirms the event the earlier attempt enqueued.
+    let again = kit
+        .publish_text(&id, Some(manifest), None, Some(team_head.clone()), resume)
+        .await
+        .unwrap();
+    assert_eq!(again, head);
+    // The team record keeps its format; the head is not a catalog entry.
+    let saved = teams_ready(&kit).await;
+    assert_eq!(saved.entries.iter().filter(|e| e.team.id == id).count(), 1);
+
+    // A stale text head, and a revision reused with other text, are refused.
+    let revision = uuid::Uuid::new_v4().to_string();
+    let second = kit.prepare_text(&id, "SECOND", &revision).await.unwrap();
+    let stale = kit
+        .publish_text(
+            &id,
+            Some(second),
+            None,
+            Some(team_head.clone()),
+            Resume::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.contains("changed"), "{stale}");
+    let reused = kit.prepare_text(&id, "OTHER", &revision).await.unwrap_err();
+    assert!(reused.contains("different content"), "{reused}");
+
+    // Retiring the head leaves a tombstone, read as empty text.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let tombstone = kit
+        .publish_text(&id, None, Some(head), None, Resume::new())
+        .await
+        .unwrap();
+    let read = kit.read_text(&id).await.unwrap().expect("a tombstone");
+    assert_eq!(
+        (read.text.as_str(), read.head.as_str()),
+        ("", tombstone.as_str())
+    );
+    let current = kit.read_text_head(&id).await.unwrap().unwrap();
+    assert_eq!((current.head, current.deleted), (tombstone, true));
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    kit.save(team, Some(team_head), true).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_portable_record_supersedes_the_later_retired_ordinary_one() {
+    let Some((origin, identities)) = fixture() else {
+        return;
+    };
+    let alice = open(&origin, &identities, "alice");
+    let mut snapshot = alice.snapshot();
+    until(&mut snapshot, "the session", |s| {
+        s.status == SessionStatus::Ready
+    })
+    .await;
+    let kit = alice.team_kit();
+    teams_ready(&kit).await;
+    let id = throwaway();
+    let member = key_of(&id);
+    let team = Team {
+        id: id.clone(),
+        name: "Throwaway team".into(),
+        agents: vec![member.clone()],
+        portable: None,
+    };
+    let ordinary = kit.save(team.clone(), None, false).await.unwrap();
+    let portable = json!({
+        "format": "buzz-team-snapshot",
+        "version": 1,
+        "team": { "name": "Throwaway team" },
+        "members": [{
+            "format": "buzz-agent-snapshot",
+            "version": 1,
+            "definition": { "name": "Member", "systemPrompt": "Help.", "sessionPolicy": "channel" },
+            "profile": { "displayName": "Member" },
+            "memory": { "level": "none", "entries": [] },
+        }],
+    });
+    let revision = uuid::Uuid::new_v4().to_string();
+    let head = kit
+        .save_portable(team.clone(), portable, None, revision)
+        .await
+        .unwrap();
+    // Retiring the ordinary record is the later write.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    kit.save(team, Some(ordinary), true).await.unwrap();
+    let listed = teams_ready(&kit).await;
+    let entries: Vec<_> = listed.entries.iter().filter(|e| e.team.id == id).collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].event_id, head);
+    assert!(!entries[0].deleted);
+    let heads = kit.current_members().await.unwrap();
+    assert_eq!(heads[&id].event_id, head);
+    assert_eq!(heads[&id].members, vec![member]);
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    kit.save(entries[0].team.clone(), Some(head), true)
+        .await
+        .unwrap();
 }

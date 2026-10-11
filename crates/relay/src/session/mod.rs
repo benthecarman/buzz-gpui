@@ -58,7 +58,7 @@ pub use memories::{MemoryEntry, MemoryError, MemoryListing};
 pub use observer::{ActivityFeed, FeedStatus};
 pub use projects::Projects;
 pub use statuses::StatusWatch;
-pub use teams::{TeamKit, TeamsStatus, TeamsView};
+pub use teams::{Resume, TeamKit, TeamText, TeamsStatus, TeamsView, TextHead};
 pub use threads::ThreadView;
 pub use timeline::{TimelineSnapshot, TimelineStatus};
 pub use unread::{

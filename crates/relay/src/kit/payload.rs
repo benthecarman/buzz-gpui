@@ -1,7 +1,8 @@
 //! Portable team payloads (`features/channel-templates/team-payload.ts`):
 //! a team snapshot of up to 8 MiB split into 16 KiB chunks, each its own
 //! private 30078 record, bound to a manifest by owner, team, revision,
-//! index and a SHA-256 digest.
+//! index and a SHA-256 digest. A team's shared instructions are stored
+//! the same way, as `v1:` and their UTF-8 bytes.
 
 use super::{hex_key, identifier};
 use base64::Engine;
@@ -171,24 +172,21 @@ pub fn without_team_memories(snapshot: &Value) -> Value {
     snapshot
 }
 
-/// `encodeTeamPayload`: the manifest and its chunks.
-pub fn encode_team_payload(
-    snapshot: &Value,
+/// `encodePayloadBytes`: splits bytes into immutable digest-bound chunks
+/// for one revision.
+fn encode_payload_bytes(
+    bytes: &[u8],
     community: &str,
     owner: &str,
     team_id: &str,
     revision: &str,
+    parse_manifest: fn(&Value) -> Result<TeamManifest, String>,
 ) -> Result<(TeamManifest, Vec<TeamPayload>), String> {
-    let bytes = serde_json::to_vec(&without_team_memories(snapshot))
-        .map_err(|_| "Team snapshot exceeds the size limit".to_owned())?;
-    if bytes.is_empty() || bytes.len() > TEAM_PAYLOAD_BYTES {
-        return Err("Team snapshot exceeds the size limit".into());
-    }
-    let manifest = parse_team_manifest(&json!({
+    let manifest = parse_manifest(&json!({
         "version": 1,
         "owner": owner,
         "revision": revision,
-        "digest": digest(&bytes),
+        "digest": digest(bytes),
         "bytes": bytes.len(),
         "chunks": bytes.len().div_ceil(TEAM_CHUNK_BYTES),
     }))?;
@@ -213,15 +211,15 @@ pub fn encode_team_payload(
     Ok((manifest, payloads))
 }
 
-/// `decodeTeamPayload`: every binding checked before the JSON is parsed.
-pub fn decode_team_payload(
+/// `decodePayloadBytes`: checks every immutable binding, exact chunk
+/// length and the digest before returning the bytes.
+fn decode_payload_bytes(
     manifest: &TeamManifest,
     payloads: &[TeamPayload],
     community: &str,
     owner: &str,
     team_id: &str,
-) -> Result<Value, String> {
-    let manifest = parse_team_manifest(&serde_json::to_value(manifest).unwrap_or_default())?;
+) -> Result<Vec<u8>, String> {
     if manifest.owner != owner || payloads.len() as u64 != manifest.chunks {
         return Err("Incomplete portable team payload".into());
     }
@@ -250,9 +248,117 @@ pub fn decode_team_payload(
     if digest(&bytes) != manifest.digest {
         return Err("Portable team integrity check failed".into());
     }
+    Ok(bytes)
+}
+
+/// `encodeTeamPayload`: the manifest and its chunks.
+pub fn encode_team_payload(
+    snapshot: &Value,
+    community: &str,
+    owner: &str,
+    team_id: &str,
+    revision: &str,
+) -> Result<(TeamManifest, Vec<TeamPayload>), String> {
+    let bytes = serde_json::to_vec(&without_team_memories(snapshot))
+        .map_err(|_| "Team snapshot exceeds the size limit".to_owned())?;
+    if bytes.is_empty() || bytes.len() > TEAM_PAYLOAD_BYTES {
+        return Err("Team snapshot exceeds the size limit".into());
+    }
+    encode_payload_bytes(
+        &bytes,
+        community,
+        owner,
+        team_id,
+        revision,
+        parse_team_manifest,
+    )
+}
+
+/// `decodeTeamPayload`: every binding checked before the JSON is parsed.
+pub fn decode_team_payload(
+    manifest: &TeamManifest,
+    payloads: &[TeamPayload],
+    community: &str,
+    owner: &str,
+    team_id: &str,
+) -> Result<Value, String> {
+    let manifest = parse_team_manifest(&serde_json::to_value(manifest).unwrap_or_default())?;
+    let bytes = decode_payload_bytes(&manifest, payloads, community, owner, team_id)?;
     let text =
         String::from_utf8(bytes).map_err(|_| "Portable team integrity check failed".to_owned())?;
     serde_json::from_str(&text).map_err(|_| "Portable team integrity check failed".into())
+}
+
+/// Largest team instructions, in UTF-8 bytes (`TEAM_TEXT_BYTES`). They
+/// travel as ASCII `v1:` plus their raw UTF-8 bytes.
+pub const TEAM_TEXT_BYTES: usize = 128 * 1024;
+const TEXT_PREFIX: &str = "v1:";
+
+/// `parseTextManifest`: a team manifest with exactly its six fields, as
+/// native admission requires, sized for the prefix and 128 KiB of text.
+pub fn parse_text_manifest(raw: &Value) -> Result<TeamManifest, String> {
+    let manifest = parse_team_manifest(raw)?;
+    if raw.as_object().map_or(0, |fields| fields.len()) != 6
+        || manifest.bytes < TEXT_PREFIX.len() as u64
+        || manifest.bytes > (TEXT_PREFIX.len() + TEAM_TEXT_BYTES) as u64
+    {
+        return Err("Invalid team instructions manifest".into());
+    }
+    Ok(manifest)
+}
+
+/// `teamTextBytes`: no NUL and at most 128 KiB before any trimming. A
+/// Rust string is always valid UTF-8.
+pub fn team_text_bytes(text: &str) -> Result<&[u8], String> {
+    if text.contains('\0') {
+        return Err("Team instructions cannot contain NUL characters".into());
+    }
+    if text.len() > TEAM_TEXT_BYTES {
+        return Err("Team instructions exceed 128 KiB".into());
+    }
+    Ok(text.as_bytes())
+}
+
+/// `encodeTeamText`: the text's manifest and chunks for one revision.
+pub fn encode_team_text(
+    text: &str,
+    community: &str,
+    owner: &str,
+    team_id: &str,
+    revision: &str,
+) -> Result<(TeamManifest, Vec<TeamPayload>), String> {
+    let body = team_text_bytes(text)?;
+    let mut bytes = Vec::with_capacity(TEXT_PREFIX.len() + body.len());
+    bytes.extend_from_slice(TEXT_PREFIX.as_bytes());
+    bytes.extend_from_slice(body);
+    encode_payload_bytes(
+        &bytes,
+        community,
+        owner,
+        team_id,
+        revision,
+        parse_text_manifest,
+    )
+}
+
+/// `decodeTeamText`: the text of a manifest's chunks, with every binding
+/// and the digest checked first.
+pub fn decode_team_text(
+    manifest: &TeamManifest,
+    payloads: &[TeamPayload],
+    community: &str,
+    owner: &str,
+    team_id: &str,
+) -> Result<String, String> {
+    let manifest = parse_text_manifest(&serde_json::to_value(manifest).unwrap_or_default())?;
+    let bytes = decode_payload_bytes(&manifest, payloads, community, owner, team_id)?;
+    let decoded =
+        String::from_utf8(bytes).map_err(|_| "Portable team integrity check failed".to_owned())?;
+    let text = decoded
+        .strip_prefix(TEXT_PREFIX)
+        .ok_or("Unsupported team instructions format")?;
+    team_text_bytes(text)?;
+    Ok(text.to_owned())
 }
 
 /// The manifest's chunk coordinates, in order.
