@@ -1,7 +1,7 @@
 //! buzz-app's `claude.test.ts`: recorded stream-json lines in, settled
 //! turns and control responses out.
 
-use super::testing::{FakeSpawn, flush};
+use super::testing::{FakeSpawn, flush, until};
 use super::*;
 use crate::agent_plugins::process::{ProcessControl, Spawn, Spawned};
 use std::sync::Mutex as StdMutex;
@@ -194,14 +194,19 @@ async fn serves_the_buzz_tools_and_ends_a_turn_on_a_final_send() {
     let fake = FakeSpawn::default();
     let calls = Arc::new(StdMutex::new(Vec::new()));
     let recorded = calls.clone();
+    // The tool answers when the test lets it, after the hooks, as a relay
+    // round trip would. A fixed delay raced the test's own fixed waits on
+    // a busy machine.
+    let answer = Arc::new(tokio::sync::Notify::new());
+    let release = answer.clone();
     let tools: ToolServer = Arc::new(move |conversation, message: Value| {
         recorded
             .lock()
             .unwrap()
             .push((conversation, message.clone()));
+        let release = release.clone();
         Box::pin(async move {
-            // Answers after the hooks, as a relay round trip would.
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            release.notified().await;
             Ok(json!({
                 "jsonrpc": "2.0", "id": message["id"],
                 "result": { "content": [{ "type": "text", "text": "sent" }] },
@@ -253,17 +258,24 @@ async fn serves_the_buzz_tools_and_ends_a_turn_on_a_final_send() {
     };
     process.emit(hook(false));
     process.emit(hook(true));
-    flush().await;
+    until(|| process.responses().len() == 2).await;
     assert_eq!(
         *calls.lock().unwrap(),
         vec![(Some("chan/root".to_string()), call)]
     );
+    let hooks = [
+        json!({ "subtype": "success", "request_id": "final-false", "response": {} }),
+        json!({ "subtype": "success", "request_id": "final-true",
+                "response": { "continue": false } }),
+    ];
+    assert_eq!(process.responses(), hooks);
+    answer.notify_one();
+    until(|| process.responses().len() == 3).await;
     assert_eq!(
         process.responses(),
         [
-            json!({ "subtype": "success", "request_id": "final-false", "response": {} }),
-            json!({ "subtype": "success", "request_id": "final-true",
-                    "response": { "continue": false } }),
+            hooks[0].clone(),
+            hooks[1].clone(),
             json!({ "subtype": "success", "request_id": "r1", "response": { "mcp_response": {
                 "jsonrpc": "2.0", "id": 3,
                 "result": { "content": [{ "type": "text", "text": "sent" }] },

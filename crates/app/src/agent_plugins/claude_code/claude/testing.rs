@@ -272,3 +272,14 @@ impl Spawn for FakeSpawn {
 pub async fn flush() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 }
+
+/// Waits until `ready` holds, for at most five seconds.
+pub async fn until(mut ready: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting");
+}
