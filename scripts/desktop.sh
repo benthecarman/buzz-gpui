@@ -9,13 +9,16 @@
 #   scripts/desktop.sh eval 'js'       evaluate in GNOME Shell
 #   scripts/desktop.sh status          is the desktop up
 #
-# The app runs in the dev shell, with its log at /tmp/desktop-app.log. The
+# The app runs in the dev shell as the user unit $DESKTOP_UNIT (default
+# desktop-app), with its log at /tmp/$DESKTOP_UNIT.log; give each concurrent
+# user its own unit. The
 # session has no secret service: sign in with BUZZ_DEV_NSEC_FILE, and set
 # HOME (or the XDG dirs) to keep test data out of your own profile.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP=${APP:-$ROOT/target/debug/buzz-gpui}
+export DESKTOP_UNIT=${DESKTOP_UNIT:-desktop-app}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/gui-testing-bus
 
@@ -30,8 +33,8 @@ case ${1:-} in
       echo "gui-testing is not running: systemctl --user start gui-testing" >&2
       exit 1
     }
-    systemctl --user stop desktop-app 2>/dev/null || true
-    systemctl --user reset-failed desktop-app 2>/dev/null || true
+    systemctl --user stop "$DESKTOP_UNIT" 2>/dev/null || true
+    systemctl --user reset-failed "$DESKTOP_UNIT" 2>/dev/null || true
     # nix develop resolves the dev shell's libraries; its environment then
     # carries into the transient unit. Unset variables stay unset.
     nix develop "$ROOT" --command bash -c '
@@ -41,11 +44,11 @@ case ${1:-} in
         XDG_STATE_HOME XDG_CACHE_HOME; do
         [[ -v $var ]] && env+=(-E "$var")
       done
-      exec systemd-run --user --unit=desktop-app --collect --same-dir "${env[@]}" \
-        -p StandardOutput=file:/tmp/desktop-app.log -p StandardError=inherit "$@"
+      exec systemd-run --user --unit="$DESKTOP_UNIT" --collect --same-dir "${env[@]}" \
+        -p StandardOutput=file:/tmp/$DESKTOP_UNIT.log -p StandardError=inherit "$@"
     ' _ "$APP" "$@"
     ;;
-  stop) systemctl --user stop desktop-app ;;
+  stop) systemctl --user stop "$DESKTOP_UNIT" ;;
   shot)
     file=${2:-/tmp/desktop.png}
     shell_call Shell/Screenshot Shell.Screenshot.Screenshot false false "$file" >/dev/null
