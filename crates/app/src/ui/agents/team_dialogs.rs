@@ -14,6 +14,7 @@ use super::snapshot_preview;
 use super::snapshots::{self, LayerDialog};
 use super::team_file::{self, Format};
 use super::team_ops::{self, ImportOptions, MemoryLevel};
+use super::team_text::team_export_meta;
 use super::teams::TeamsState;
 use crate::community::{AppState, IdentityState};
 use crate::snapshot::Kind;
@@ -454,11 +455,6 @@ impl TeamExportDialog {
         if self.busy || (self.memory != MemoryLevel::None && !self.confirmed) {
             return;
         }
-        if self.team.portable.is_none() {
-            self.error = Some("This team has no portable definition".into());
-            cx.notify();
-            return;
-        }
         self.busy = true;
         self.error = None;
         cx.notify();
@@ -700,11 +696,10 @@ impl TeamDeployDialog {
         self.busy = true;
         self.error = None;
         cx.notify();
-        let teams = self.teams.read(cx);
-        let (kit, community) = (teams.kit.clone(), teams.community.clone());
+        let community = self.teams.read(cx).community.clone();
         let team = self.team.clone();
         cx.spawn(async move |this, cx| {
-            let result = team_ops::deploy_team(kit, community, team, channel, cx).await;
+            let result = team_ops::deploy_team(community, team, channel, cx).await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
@@ -808,25 +803,17 @@ impl Render for TeamDeployDialog {
 // Share
 
 /// The complete catalog projection of a saved team (`buildTeamCatalogContent`):
-/// a portable team shares its saved description and instructions, and
-/// refuses to share without them rather than publish a lossy copy.
+/// the team's current instructions and a portable team's retained
+/// description. It refuses to share when either can't be read rather than
+/// publish a lossy copy.
 pub fn team_content(teams: Entity<TeamsState>, team: Team) -> Content {
     Rc::new(move |cx: &mut App| {
         let state = teams.read(cx);
         let (kit, community) = (state.kit.clone(), state.community.clone());
         let team = team.clone();
         cx.spawn(async move |cx| {
-            let (description, instructions) = match &team.portable {
-                Some(_) => {
-                    let loaded = kit.load_team(&team).await?;
-                    let host = cx
-                        .update(|cx| team_ops::import_host(cx))
-                        .ok_or("Team preview is unavailable")?;
-                    let snapshot = team_ops::preview(&host, loaded.to_string(), cx).await?;
-                    (snapshot.team.description, snapshot.team.instructions)
-                }
-                None => (None, None),
-            };
+            let meta = team_export_meta(&kit, &team, cx).await?;
+            let (description, instructions) = (meta.description, meta.instructions);
             // Inheriting members share the defaults of the host they run on.
             let members = cx.update(|cx| {
                 community_agents(&community, cx)
@@ -906,9 +893,6 @@ pub fn open_share(
                 SnapshotLevel::Everything => MemoryLevel::Everything,
             };
             cx.spawn(async move |cx| {
-                if team.portable.is_none() {
-                    return Err("Team export is unavailable".to_string());
-                }
                 let json = team_ops::export_team(kit, community, team.clone(), memory, cx).await?;
                 Ok(EncodedSnapshot {
                     bytes: team_file::encode(&json, Format::Png)?,
