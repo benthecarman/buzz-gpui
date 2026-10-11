@@ -43,6 +43,33 @@ pub(crate) use editor::Dismissed as EditorDismissed;
 pub(crate) fn init(cx: &mut App) {
     snapshot_preview::register();
     team_dialogs::register(cx);
+    crate::ui::pages::register_routes(
+        crate::ui::pages::Page::AGENTS,
+        crate::ui::pages::PageRoutes {
+            validate: |params| edit_route(params).is_some(),
+            open: |view, params, window, cx| {
+                if let (Ok(page), Some(pubkey)) = (
+                    view.clone().downcast::<AgentsPage>(),
+                    params.and_then(edit_route),
+                ) {
+                    page.update(cx, |page, cx| page.open_edit_route(pubkey, window, cx));
+                }
+            },
+        },
+        cx,
+    );
+}
+
+/// `editAgentRoute`: exactly `{pubkey}`, a lowercase hex key. A public
+/// identity is an address; the host's records supply what is edited.
+fn edit_route(params: &serde_json::Value) -> Option<String> {
+    let map = params.as_object().filter(|map| map.len() == 1)?;
+    let pubkey = map.get("pubkey")?.as_str()?;
+    (pubkey.len() == 64
+        && pubkey
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| pubkey.to_owned())
 }
 
 pub(crate) use defaults::{DefaultsCard, DefaultsDialog};
@@ -151,6 +178,8 @@ struct PageToast {
 }
 
 pub struct AgentsPage {
+    /// A routed edit waiting for the hosts' first answer.
+    pending_edit: Option<String>,
     /// Presence re-reads after a start or stop, by agent key and the
     /// status they follow.
     presence_checks: HashMap<String, (ProcessStatus, Task<()>)>,
@@ -260,6 +289,7 @@ impl AgentsPage {
         let mut page = Self {
             teams: cx.new(|cx| teams::TeamsSection::new(add_agent, cx)),
             presence_checks: HashMap::new(),
+            pending_edit: None,
             hosts: Vec::new(),
             _observers: vec![cx.observe(&discovery, |_, _, cx| cx.notify())],
             discovery,
@@ -486,6 +516,47 @@ impl AgentsPage {
 
     fn add_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_dialog(None, create::Kind::Add, window, cx);
+    }
+
+    /// The routed edit target: Edit for the one record of `pubkey` in the
+    /// shown community, once the hosts have answered. Never guesses among
+    /// several records.
+    fn open_edit_route(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(community) = AppState::current(cx) else {
+            self.show_toast("Agent editing is unavailable.".into(), None, cx);
+            return;
+        };
+        let origin = community.read(cx).origin.clone();
+        let loading = self
+            .hosts
+            .iter()
+            .any(|host| host.read(cx).status() == Status::Loading);
+        let matches = crate::ui::profile_panel::community_agents(&origin, &pubkey, cx);
+        match matches.as_slice() {
+            [(host, agent)] => {
+                self.pending_edit = None;
+                let name = agent.name.clone();
+                self.edit_agent(host.clone(), agent.clone(), name, None, window, cx);
+            }
+            [] if loading => self.pending_edit = Some(pubkey),
+            _ => {
+                self.pending_edit = None;
+                let ready = self
+                    .hosts
+                    .iter()
+                    .all(|host| host.read(cx).status() == Status::Ready);
+                self.show_toast(
+                    if ready {
+                        "That agent was not found in this community."
+                    } else {
+                        "Agent editing is unavailable."
+                    }
+                    .into(),
+                    None,
+                    cx,
+                );
+            }
+        }
     }
 
     fn edit_agent(
@@ -1315,6 +1386,16 @@ impl Render for AgentsPage {
 
         let view = self.view(cx);
         self.recheck_presence(&view, cx);
+        if let Some(pubkey) = self.pending_edit.clone().filter(|_| {
+            !self
+                .hosts
+                .iter()
+                .any(|h| h.read(cx).status() == Status::Loading)
+        }) {
+            cx.defer_in(window, move |this, window, cx| {
+                this.open_edit_route(pubkey, window, cx)
+            });
+        }
         // Entering the all-archived state opens the Archived section again.
         let all_archived =
             !view.archived.is_empty() && view.rows.keys().all(|key| view.archived.contains(key));
@@ -1401,5 +1482,21 @@ impl Render for AgentsPage {
             )
             .children(modal)
             .children(toast)
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::edit_route;
+    use core::prelude::v1::test;
+    use serde_json::json;
+
+    #[test]
+    fn edit_routes_name_exactly_one_key() {
+        let key = "a".repeat(64);
+        assert_eq!(edit_route(&json!({"pubkey": key})), Some(key.clone()));
+        assert_eq!(edit_route(&json!({"pubkey": key, "x": 1})), None);
+        assert_eq!(edit_route(&json!({"pubkey": "A".repeat(64)})), None);
+        assert_eq!(edit_route(&json!([key])), None);
     }
 }
