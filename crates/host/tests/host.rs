@@ -152,6 +152,8 @@ async fn create_save_and_delete_over_rpc() {
         (id.as_str(), "Scout")
     );
     assert_eq!(agent.status, ProcessStatus::Stopped);
+    // Mission control reads how long it has been in that status.
+    assert!(agent.status_since.is_some_and(|since| since > 0));
     assert!(
         state.path().join("keys").join(format!("{id}.key")).exists(),
         "the key is saved before the agent"

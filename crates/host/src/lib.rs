@@ -115,6 +115,9 @@ struct Owner {
     /// Refuses a start while old Buzz runs; replaced in tests.
     legacy_check: fn() -> Result<(), String>,
     last: Option<AgentsSnapshot>,
+    /// Each agent's status and when this host first saw it in it, Unix
+    /// milliseconds (`Agent::status_since`).
+    statuses: BTreeMap<String, (api::ProcessStatus, u64)>,
     seq: u64,
     events: broadcast::Sender<(u64, HostEvent)>,
     gate: Gate,
@@ -195,6 +198,7 @@ impl AgentHost {
             log_challenges: BTreeMap::new(),
             legacy_check: start::refuse_legacy,
             last: None,
+            statuses: BTreeMap::new(),
             seq: 0,
             events: events.clone(),
             gate,
@@ -1052,6 +1056,7 @@ impl Owner {
             owner_only: build.owner_only,
         });
         snapshot.default_settings = convert(&data.default_settings).ok();
+        status_times(&mut self.statuses, &mut snapshot.agents, now_ms());
         Ok(snapshot)
     }
 
@@ -1076,6 +1081,31 @@ impl Owner {
             let _ = self.events.send((self.seq, HostEvent::Agents(snapshot)));
         }
     }
+}
+
+/// Stamps each agent with when it entered its status: the time stays
+/// while the status holds, and agents that are gone are forgotten.
+fn status_times(
+    statuses: &mut BTreeMap<String, (api::ProcessStatus, u64)>,
+    agents: &mut [api::Agent],
+    now: u64,
+) {
+    statuses.retain(|id, _| agents.iter().any(|agent| agent.id == *id));
+    for agent in agents {
+        let entry = statuses
+            .entry(agent.id.clone())
+            .or_insert((agent.status, now));
+        if entry.0 != agent.status {
+            *entry = (agent.status, now);
+        }
+        agent.status_since = Some(entry.1);
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 /// A harness command of another kind than `command` that accepts the same
@@ -1134,5 +1164,43 @@ impl HostHandler<HostProtocol> for RpcHandler {
             }
             host.request_with(request, Some(Arc::new(peer))).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use api::ProcessStatus;
+
+    fn agent(id: &str, status: ProcessStatus) -> api::Agent {
+        api::Agent {
+            id: id.into(),
+            status,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn status_times_follow_changes_only() {
+        let mut statuses = BTreeMap::new();
+        let mut agents = vec![
+            agent("a", ProcessStatus::Starting),
+            agent("b", ProcessStatus::Stopped),
+        ];
+        status_times(&mut statuses, &mut agents, 1_000);
+        assert_eq!(agents[0].status_since, Some(1_000));
+        // The same status keeps its time; a new one starts a new time.
+        let mut agents = vec![
+            agent("a", ProcessStatus::Running),
+            agent("b", ProcessStatus::Stopped),
+        ];
+        status_times(&mut statuses, &mut agents, 5_000);
+        assert_eq!(agents[0].status_since, Some(5_000));
+        assert_eq!(agents[1].status_since, Some(1_000));
+        // A deleted agent is forgotten, so a new one with its ID starts over.
+        status_times(&mut statuses, &mut [], 6_000);
+        let mut agents = vec![agent("b", ProcessStatus::Stopped)];
+        status_times(&mut statuses, &mut agents, 7_000);
+        assert_eq!(agents[0].status_since, Some(7_000));
     }
 }

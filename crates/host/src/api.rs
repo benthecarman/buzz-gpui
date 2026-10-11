@@ -580,6 +580,10 @@ pub struct Agent {
     /// ("team instructions", "idle timeout", ...). `None` from hosts that
     /// predate snapshots.
     pub snapshot_export_limitations: Option<Vec<String>>,
+    /// When the host saw the agent enter its current status, in Unix
+    /// milliseconds. `None` from hosts that predate it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_since: Option<u64>,
 }
 
 fn yes() -> bool {
@@ -1031,6 +1035,42 @@ mod tests {
         };
         let old: OldSnapshot = rmp_serde::from_slice(&wire(&snapshot)).unwrap();
         assert_eq!((old.seq, old.agents.len()), (7, 1));
+    }
+
+    #[test]
+    fn status_since_travels_and_older_peers_ignore_it() {
+        let agent = Agent {
+            id: "a".into(),
+            status: ProcessStatus::Running,
+            status_since: Some(1_760_000_000_000),
+            ..Default::default()
+        };
+        let read: Agent = rmp_serde::from_slice(&wire(&agent)).unwrap();
+        assert_eq!(read, agent);
+        // An older GUI reads the agent it knows.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldAgent {
+            id: String,
+            status: ProcessStatus,
+        }
+        let old: OldAgent = rmp_serde::from_slice(&wire(&agent)).unwrap();
+        assert_eq!((old.id.as_str(), old.status), ("a", ProcessStatus::Running));
+        // An older host's agent has no time, and none is written for it.
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OlderAgent {
+            id: String,
+            status: ProcessStatus,
+        }
+        let older: Agent = rmp_serde::from_slice(&wire(&OlderAgent {
+            id: "a".into(),
+            status: ProcessStatus::Failed,
+        }))
+        .unwrap();
+        assert_eq!(older.status_since, None);
+        let bytes = wire(&Agent::default());
+        assert!(!bytes.windows(11).any(|w| w == b"statusSince"));
     }
 }
 
