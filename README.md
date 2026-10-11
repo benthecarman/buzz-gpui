@@ -31,12 +31,9 @@ keyring, and they stop when the app quits.
 
 ## Laptop: install the app (macOS)
 
-The macOS build is not signed or notarized. It needs GStreamer from
-Homebrew to play audio and video:
-
-```sh
-brew install gstreamer
-```
+The macOS build is not signed or notarized. It carries the GStreamer
+libraries and plugins it plays audio and video with, so nothing else has
+to be installed.
 
 1. Open `Buzz-<version>-macos-arm64.dmg` (Apple silicon) or
    `Buzz-<version>-macos-x86_64.dmg` (Intel).
@@ -45,7 +42,15 @@ brew install gstreamer
    macOS still refuses, run `xattr -dr com.apple.quarantine /Applications/Buzz.app`.
 
 Build the image on a Mac with `scripts/package-macos.sh`. It writes
-`dist/Buzz-<version>-macos-<arch>.dmg` for the Mac's own architecture.
+`dist/Buzz-<version>-macos-<arch>.dmg` for the Mac's own architecture. It
+needs the official GStreamer framework: install the runtime and
+development packages (`gstreamer-1.0-<version>-universal.pkg` and
+`gstreamer-1.0-devel-<version>-universal.pkg`) from
+[gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/).
+The script copies the libraries and plugins the app uses into `Buzz.app`.
+`scripts/check-macos-dmg.sh <dmg>` then checks that the app loads nothing
+from outside itself and the system, and plays media with the framework
+moved aside (it uses `sudo`).
 
 ## Laptop: install the app (Windows)
 

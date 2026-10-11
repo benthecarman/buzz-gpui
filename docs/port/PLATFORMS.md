@@ -41,7 +41,7 @@ section lists what a person still has to try on real machines.
 | Paste and drop files | vendored GPUI patch for `text/uri-list` | DONE: GPUI reads file names from the pasteboard | DONE: GPUI reads `CF_HDROP` |
 | Time zone abbreviation in times | `localtime_r` | DONE | DIFFERENT: Windows names zones in full ("Pacific Standard Time"), so times show a GMT offset |
 | HEIC avatars through ffmpeg | `ffmpeg` from the package's dependencies | DIFFERENT: needs `brew install ffmpeg` | DIFFERENT: ffmpeg must be on `PATH`; the zip does not carry it. It runs without a console window |
-| Media playback and sounds | GStreamer from the distribution | DONE: GStreamer from Homebrew | DONE: GStreamer bundled in the zip |
+| Media playback and sounds | GStreamer from the distribution | DONE: GStreamer bundled in Buzz.app | DONE: GStreamer bundled in the zip |
 | Data and config locations | XDG directories | DONE: `~/Library/Application Support` | DONE: `%APPDATA%` |
 
 ## Agents and hosts
