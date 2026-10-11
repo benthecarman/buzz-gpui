@@ -29,6 +29,8 @@ pub struct EditDialog {
     fields: Fields,
     notice: Option<SharedString>,
     uploading: bool,
+    /// A save is in flight; closing leaves it to finish on the host.
+    saving: bool,
     /// Writes wait (an unconfirmed agent request).
     paused: bool,
     /// Shown above the settings, such as an unconfirmed request's state.
@@ -110,6 +112,7 @@ impl EditDialog {
             fields,
             notice: notice.map(Into::into),
             uploading: false,
+            saving: false,
             paused: false,
             banner: None,
             runtime_open: false,
@@ -128,12 +131,19 @@ impl EditDialog {
 
     fn can_close(&self, cx: &App) -> bool {
         let control = &self.host.read(cx).control;
-        !control.busy || control.pending_launch.is_some() || control.pending_credential_write
+        self.saving
+            || !control.busy
+            || control.pending_launch.is_some()
+            || control.pending_credential_write
     }
 
     fn blocked(&self, cx: &App) -> bool {
         let host = self.host.read(cx);
-        self.paused || host.control.busy || self.uploading || host.status() != Status::Ready
+        self.paused
+            || self.saving
+            || host.control.busy
+            || self.uploading
+            || host.status() != Status::Ready
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -178,6 +188,8 @@ impl EditDialog {
         };
         let id = agent.id.clone();
         let revision = self.fields.draft.revision;
+        self.saving = true;
+        cx.notify();
         let save = self.host.update(cx, |host, cx| {
             host.write(
                 Request::Save {
@@ -194,6 +206,10 @@ impl EditDialog {
         });
         cx.spawn(async move |this, cx| {
             let result = save.await;
+            let _ = this.update(cx, |this, cx| {
+                this.saving = false;
+                cx.notify();
+            });
             let snapshot = match result {
                 Ok(Response::Agents(snapshot)) => snapshot,
                 Ok(_) => return,
@@ -699,6 +715,9 @@ impl EditDialog {
                  you need, then discard to load the latest settings."
                     .into(),
             ));
+        }
+        if self.saving {
+            tail = tail.child(div().text_color(c.text_subtle).child("Saving changes…"));
         }
         if let Some(notice) = self.notice.clone() {
             tail = tail.child(div().text_color(c.text_subtle).child(notice));
