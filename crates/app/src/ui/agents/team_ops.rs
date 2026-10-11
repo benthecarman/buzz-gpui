@@ -1,24 +1,25 @@
 //! What the team dialogs do (`team-bundles.ts`, `team-import.ts`,
-//! `team-deployment.ts`): import a team snapshot as fresh agents, capture
-//! and export saved teams, and deploy a team to a channel.
+//! `team-deployment.ts`): import a team snapshot as fresh agents, export
+//! saved teams, and deploy a team to a channel.
 //!
 //! Agents may run on several hosts. A team's members are found on
 //! whichever host runs them in this community; an import creates its
 //! members on one host.
 
 use super::catalog::community_agents;
+use super::team_text::team_export_meta;
 use crate::community::{AppState, Community};
 use crate::hosts::{HostConnection, Hosts};
 use crate::runtime::Runtime;
 use buzz_host::api::{
     Agent, AgentAction, AgentEdit, BundleMember, Harness, HarnessEdit, HarnessKind, MemberMemory,
-    MemberSnapshot, MemoryEntry, MemoryRestore, ProcessStatus, Request, Response, TeamCatalogEntry,
-    TeamMeta, TeamSnapshot,
+    MemberSnapshot, MemoryEntry, MemoryRestore, ProcessStatus, Request, Response, TeamMeta,
+    TeamSnapshot,
 };
 use buzz_host_rpc::ConnectionState;
 use buzz_identity::Identity;
 use buzz_relay_client::Partition;
-use buzz_relay_client::session::TeamKit;
+use buzz_relay_client::session::{Resume, TeamKit};
 use buzz_relay_client::teams::Team;
 use gpui_kit::{AppContext, AsyncApp, Entity};
 use serde::{Deserialize, Serialize};
@@ -120,9 +121,17 @@ pub fn member_edit(member: &MemberSnapshot, harnesses: &[Harness]) -> Result<Age
 /// The resumable receipt of one import (`resumeTeamImport`): only public
 /// operation IDs are kept, never instructions, snapshots or memories.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Receipt {
     pub id: String,
     pub requests: Vec<String>,
+    /// The revision of the team's text head. Receipts from before text
+    /// heads get one on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The text head this import enqueued, once it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_head: Option<String>,
 }
 
 /// Where an import's receipt is kept: the same destination, owner,
@@ -138,7 +147,7 @@ fn uuid(value: &str) -> bool {
 
 /// The saved receipt, or a new one for `members` members.
 pub fn receipt(saved: Option<&str>, members: usize) -> Result<Receipt, String> {
-    let receipt = match saved {
+    let mut receipt = match saved {
         Some(json) => serde_json::from_str::<Receipt>(json)
             .map_err(|_| "Saved team import receipt is invalid.".to_string())?,
         None => Receipt {
@@ -146,14 +155,26 @@ pub fn receipt(saved: Option<&str>, members: usize) -> Result<Receipt, String> {
             requests: (0..members)
                 .map(|_| uuid::Uuid::new_v4().to_string())
                 .collect(),
+            text: None,
+            text_head: None,
         },
     };
+    let event_id =
+        |id: &str| id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     if !uuid(&receipt.id)
         || receipt.requests.len() != members
         || !receipt.requests.iter().all(|r| uuid(r))
+        || receipt.text.as_deref().is_some_and(|text| !uuid(text))
+        || receipt
+            .text_head
+            .as_deref()
+            .is_some_and(|head| !event_id(head))
     {
         return Err("Saved team import receipt is invalid.".into());
     }
+    receipt
+        .text
+        .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
     Ok(receipt)
 }
 
@@ -368,8 +389,9 @@ async fn restore_member_memory(
 /// The one import path for files, direct shares and catalog adoption
 /// (`importTeamSnapshot`): validates the snapshot, creates every member
 /// with a fresh identity bound to the new team, publishes their profiles,
-/// saves the portable team record, then restores memories if asked. An
-/// interrupted import resumes from its saved receipt without new keys.
+/// saves the portable team record and its text head, then restores
+/// memories if asked. An interrupted import resumes from its saved receipt
+/// without new keys.
 pub async fn import_team(
     host: Entity<HostConnection>,
     kit: TeamKit,
@@ -504,6 +526,44 @@ pub async fn import_team(
         )
         .await?;
     }
+    // An explicit text head, even when empty, so later reads never fall
+    // back to bundle text. The receipt keeps its revision and enqueued
+    // head, so a retry confirms that same event. Any other head is a later
+    // edit (or an earlier session's) and is left alone.
+    let current = kit.read_text_head(&receipt.id).await?;
+    if current
+        .as_ref()
+        .is_none_or(|current| Some(&current.head) == receipt.text_head.as_ref())
+    {
+        let resume = {
+            let (store, partition, key, receipt) = (
+                store.clone(),
+                partition.clone(),
+                key.clone(),
+                receipt.clone(),
+            );
+            Resume::with(receipt.text_head.clone(), move |id| {
+                let receipt = Receipt {
+                    text_head: Some(id.to_owned()),
+                    ..receipt.clone()
+                };
+                let json = serde_json::to_string(&receipt).expect("receipts serialize");
+                let _ = store.set_view_state(&partition, &key, Some(&json));
+            })
+        };
+        let revision = receipt.text.clone().unwrap_or_default();
+        let instructions = validated.team.instructions.clone().unwrap_or_default();
+        let manifest = kit
+            .prepare_text(&receipt.id, &instructions, &revision)
+            .await?;
+        let team = kit
+            .snapshot()
+            .teams()
+            .find(|entry| entry.team.id == receipt.id)
+            .map(|entry| entry.event_id.clone());
+        kit.publish_text(&receipt.id, Some(manifest), None, team, resume)
+            .await?;
+    }
     let mut memory_failures = Vec::new();
     if options.restore_memory {
         for (index, agent) in agents.iter().enumerate() {
@@ -541,8 +601,8 @@ pub async fn import_team(
 // ---------------------------------------------------------------------------
 // Export
 
-/// A saved portable team with its members' current settings and, when
-/// asked, their memories (`exportTeam`), as validated snapshot JSON.
+/// A saved team with its members' current settings and, when asked,
+/// their memories (`exportTeam`), as validated snapshot JSON.
 pub async fn export_team(
     kit: TeamKit,
     community: Entity<Community>,
@@ -553,14 +613,10 @@ pub async fn export_team(
     let host = cx
         .update(|cx| import_host(cx))
         .ok_or("Team export is unavailable")?;
-    let loaded = kit.load_team(&team).await?;
-    let portable = preview(&host, loaded.to_string(), cx).await?;
-    if portable.members.len() != team.agents.len() {
-        return Err("Portable team members do not match their definitions".into());
-    }
-    // The members' current saved settings; the portable team owns the
-    // team's own metadata.
-    let mut snapshot = capture(&community, portable.team, &team.agents, cx).await?;
+    // The members' current saved settings with the team's current name and
+    // text, and a portable team's retained description.
+    let meta = team_export_meta(&kit, &team, cx).await?;
+    let mut snapshot = capture(&community, meta, &team.agents, cx).await?;
     if memory != MemoryLevel::None {
         for (member, pubkey) in snapshot.members.iter_mut().zip(&team.agents) {
             let listing = kit.agent_memories(pubkey).await?;
@@ -629,93 +685,21 @@ fn agent_in(response: Response, id: &str) -> Option<Agent> {
     }
 }
 
-/// Deploys a saved team to a channel (`deployTeam`): reuses the exact
-/// saved agents, applying a portable team's instructions (restarting a
-/// member that runs stale settings), publishing pending profiles, adding
-/// each member to the channel and starting it. Failures are per member.
+/// Deploys a saved team to a channel (`deployTeam`): only adds the exact
+/// saved agents to the channel, publishing pending profiles, and starts
+/// any that are stopped. Team text is delivered by team Save, never here.
+/// Failures are per member.
 pub async fn deploy_team(
-    kit: TeamKit,
     community: Entity<Community>,
     team: Team,
     channel: String,
     cx: &mut AsyncApp,
 ) -> Result<(), String> {
-    let snapshot = match &team.portable {
-        Some(_) => {
-            let host = cx
-                .update(|cx| import_host(cx))
-                .ok_or("Team preview is unavailable")?;
-            let loaded = kit.load_team(&team).await?;
-            Some(preview(&host, loaded.to_string(), cx).await?)
-        }
-        None => None,
-    };
-    let (session, origin) = cx.read_entity(&community, |community, _| {
-        (community.session.clone(), community.origin.http())
-    });
+    let session = cx.read_entity(&community, |community, _| community.session.clone());
     let mut failures = Vec::new();
     for pubkey in &team.agents {
         let result: Result<(), String> = async {
-            let mut found = find_member(&community, pubkey, cx).await?;
-            if let Some(snapshot) = &snapshot {
-                let unavailable = || "A portable team member is unavailable locally".to_string();
-                let (host, agent) = found.clone().ok_or_else(unavailable)?;
-                let teams: BTreeMap<String, TeamCatalogEntry> = kit
-                    .current_members()
-                    .await?
-                    .into_iter()
-                    .map(|(id, head)| {
-                        (
-                            id,
-                            TeamCatalogEntry {
-                                created_at: head.created_at,
-                                event_id: head.event_id,
-                                members: head.members,
-                            },
-                        )
-                    })
-                    .collect();
-                let response = request(
-                    &host,
-                    Request::TeamInstructions {
-                        id: agent.id.clone(),
-                        revision: agent.revision,
-                        instructions: snapshot.team.instructions.clone().unwrap_or_default(),
-                        team: team.id.clone(),
-                        community: origin.clone(),
-                        owner: session.viewer().to_string(),
-                        teams,
-                    },
-                    cx,
-                )
-                .await?;
-                let agent = agent_in(response, &agent.id).ok_or_else(unavailable)?;
-                if agent.status == ProcessStatus::Running
-                    && agent.running_revision != Some(agent.revision)
-                {
-                    let response = request(
-                        &host,
-                        Request::Action {
-                            id: agent.id.clone(),
-                            action: AgentAction::Restart,
-                            replay_floor: None,
-                            owner: Some(session.viewer().to_string()),
-                        },
-                        cx,
-                    )
-                    .await?;
-                    let current = agent_in(response, &agent.id);
-                    if !current
-                        .as_ref()
-                        .is_some_and(|current| alive(current.status))
-                    {
-                        return Err(current
-                            .and_then(|current| current.error)
-                            .unwrap_or_else(|| "Team member did not restart".into()));
-                    }
-                }
-                found = Some((host, agent));
-            }
+            let found = find_member(&community, pubkey, cx).await?;
             if let Some((host, agent)) = &found
                 && agent.profile_pending
             {
@@ -870,5 +854,23 @@ mod tests {
             "Saved team import receipt is invalid."
         );
         assert!(receipt(Some("{\"id\":\"x\",\"requests\":[]}"), 0).is_err());
+        // A receipt from before text heads gets a text revision on resume.
+        let old = format!("{{\"id\":\"{}\",\"requests\":[]}}", fresh.id);
+        let resumed = receipt(Some(&old), 0).unwrap();
+        assert!(resumed.text.as_deref().is_some_and(uuid));
+        assert_eq!(resumed.text_head, None);
+        let headed = Receipt {
+            text_head: Some("ab".repeat(32)),
+            ..resumed.clone()
+        };
+        let saved = serde_json::to_string(&headed).unwrap();
+        assert!(saved.contains("\"textHead\""));
+        assert_eq!(receipt(Some(&saved), 0).unwrap(), headed);
+        let tampered = Receipt {
+            text_head: Some("not an event".into()),
+            ..resumed
+        };
+        let saved = serde_json::to_string(&tampered).unwrap();
+        assert!(receipt(Some(&saved), 0).is_err());
     }
 }

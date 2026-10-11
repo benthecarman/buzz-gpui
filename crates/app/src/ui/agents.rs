@@ -31,6 +31,7 @@ mod team_dialogs;
 mod team_editor;
 mod team_file;
 mod team_ops;
+mod team_text;
 mod teams;
 pub(crate) mod wake;
 
@@ -39,10 +40,12 @@ pub(crate) use edit::EditDialog;
 pub(crate) use editor::Dismissed as EditorDismissed;
 
 /// Hooks agent snapshots, teams and the catalog into chat at startup, so
-/// received files open before the Agents page has been visited.
+/// received files open before the Agents page has been visited, and
+/// delivers team instructions once teams load.
 pub(crate) fn init(cx: &mut App) {
     snapshot_preview::register();
     team_dialogs::register(cx);
+    team_text::init(cx);
     crate::ui::pages::register_routes(
         crate::ui::pages::Page::AGENTS,
         crate::ui::pages::PageRoutes {

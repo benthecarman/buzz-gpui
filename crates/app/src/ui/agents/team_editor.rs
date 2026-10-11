@@ -1,16 +1,22 @@
 //! The Add team and Edit team dialog (`ChannelTemplatesDialog.tsx` for a
-//! team): a name, the portable description and team instructions, and the
-//! member agents. A new team can also be imported from a file or added
-//! from the community catalog through the sidebar.
+//! team): a name, the team instructions every member gets after its own,
+//! and the member agents. A new team can also be imported from a file or
+//! added from the community catalog through the sidebar.
+//!
+//! The instructions live in their own record. Save writes the members
+//! first, then the text, then delivers every team's text to the members'
+//! settings; a retry repeats only the phases that did not finish.
 
 use super::catalog::{AddTeam, CatalogState, HasTeam, Toggle, community_agents, team_preview};
 use super::editor::Dismissed;
 use super::form::field;
-use super::team_ops::{self, capture};
+use super::team_text::{
+    deliver_team_texts, read_team_texts, resolve_team_text, team_text_conflict,
+};
 use super::teams::{ImportFile, TeamsState};
-use buzz_host::api::{TeamMeta, TeamSnapshot};
 use buzz_relay_client::catalog::{Publication, TeamPublication, unsupported_transport_message};
-use buzz_relay_client::session::TeamsStatus;
+use buzz_relay_client::kit::TeamManifest;
+use buzz_relay_client::session::{Resume, TeamKit, TeamsStatus};
 use buzz_relay_client::teams::{Team, TeamEntry};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, Checkbox, Dialog, IconName,
@@ -22,6 +28,43 @@ use gpui_kit::*;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+/// Instructions as saved, and the text head they came from.
+#[derive(Clone, Debug, Default)]
+struct Saved {
+    text: String,
+    head: Option<String>,
+}
+
+/// One save attempt: its text revision and the phases it finished or
+/// enqueued, so a retry confirms the same events instead of writing again.
+/// Any draft edit starts a new attempt.
+#[derive(Clone)]
+struct Attempt {
+    serial: u64,
+    revision: String,
+    team_head: Option<String>,
+    manifest: Option<TeamManifest>,
+    team_done: bool,
+    text_done: bool,
+    team: Resume,
+    text: Resume,
+}
+
+impl Attempt {
+    fn new(serial: u64, team_head: Option<String>) -> Self {
+        Self {
+            serial,
+            revision: uuid::Uuid::new_v4().to_string(),
+            team_head,
+            manifest: None,
+            team_done: false,
+            text_done: false,
+            team: Resume::new(),
+            text: Resume::new(),
+        }
+    }
+}
+
 pub struct TeamEditor {
     teams: Entity<TeamsState>,
     catalog: Entity<CatalogState>,
@@ -29,16 +72,16 @@ pub struct TeamEditor {
     initial: Option<TeamEntry>,
     id: String,
     name: Entity<InputState>,
-    description: Entity<TextareaState>,
     instructions: Entity<TextareaState>,
     search: Entity<InputState>,
     agents: Vec<String>,
-    /// The saved portable definition, or the text typed for a new one.
-    portable: Option<TeamSnapshot>,
+    /// The instructions as saved; `None` until they load.
+    saved: Option<Saved>,
+    /// The roster as last saved, so a text-only retry never rewrites the
+    /// team.
+    saved_team: Option<Team>,
+    attempt: Attempt,
     loading: bool,
-    /// Names this save's payload, so a retry reuses its chunks.
-    revision: String,
-    prepared: Option<TeamSnapshot>,
     busy: bool,
     error: Option<SharedString>,
     /// The catalog team selected in the sidebar, `owner:d`.
@@ -65,12 +108,9 @@ impl TeamEditor {
         cx: &mut Context<Self>,
     ) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Engineering Squad"));
-        let description = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("Optional description for this team.")
-        });
         let instructions = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Optional instructions applied to every deployed team member.")
+                .placeholder("Optional instructions every member gets after its own.")
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Name or npub"));
         if let Some(entry) = &initial {
@@ -78,15 +118,17 @@ impl TeamEditor {
             name.update(cx, |state, cx| state.set_value(value, window, cx));
         }
         name.update(cx, |state, cx| state.focus(window, cx));
+        let edited = |this: &mut Self, event: &InputEvent, cx: &mut Context<Self>| {
+            if matches!(event, InputEvent::Change) {
+                this.changed(cx);
+            }
+        };
         let subscriptions = vec![
-            cx.subscribe(&name, |this: &mut Self, _, _: &InputEvent, cx| {
-                this.changed(cx)
+            cx.subscribe(&name, move |this, _, event: &InputEvent, cx| {
+                edited(this, event, cx)
             }),
-            cx.subscribe(&description, |this: &mut Self, _, _: &InputEvent, cx| {
-                this.text_changed(cx)
-            }),
-            cx.subscribe(&instructions, |this: &mut Self, _, _: &InputEvent, cx| {
-                this.text_changed(cx)
+            cx.subscribe(&instructions, move |this, _, event: &InputEvent, cx| {
+                edited(this, event, cx)
             }),
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe(&teams, |_, _, cx| cx.notify()),
@@ -96,6 +138,7 @@ impl TeamEditor {
             catalog.read(cx).catalog.retain();
         }
         teams.read(cx).kit.ensure();
+        let team_head = initial.as_ref().map(|entry| entry.event_id.clone());
         let mut editor = Self {
             id: initial
                 .as_ref()
@@ -105,19 +148,18 @@ impl TeamEditor {
                 .as_ref()
                 .map(|entry| entry.team.agents.clone())
                 .unwrap_or_default(),
-            loading: initial
-                .as_ref()
-                .is_some_and(|entry| entry.team.portable.is_some()),
+            // Only an edited saved team loads its instructions; a new team
+            // starts empty with no head.
+            loading: initial.is_some(),
+            saved: initial.is_none().then(Saved::default),
+            saved_team: initial.as_ref().map(|entry| entry.team.clone()),
+            attempt: Attempt::new(0, team_head),
             teams,
             catalog,
             initial,
             name,
-            description,
             instructions,
             search,
-            portable: None,
-            revision: uuid::Uuid::new_v4().to_string(),
-            prepared: None,
             busy: false,
             error: None,
             selected: None,
@@ -128,46 +170,37 @@ impl TeamEditor {
             has_team,
             _subscriptions: subscriptions,
         };
-        editor.load_portable(window, cx);
+        editor.load_text(window, cx);
         editor
     }
 
-    /// Loads a portable team's saved definition for its text fields.
-    fn load_portable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.initial.clone().filter(|e| e.team.portable.is_some()) else {
+    /// Loads an edited team's current instructions: its text head, else a
+    /// legacy portable bundle's text. A team whose text can't be read can't
+    /// be saved, so stale text never overwrites it.
+    fn load_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.initial.clone() else {
             return;
         };
         let kit = self.teams.read(cx).kit.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result: Result<TeamSnapshot, String> = async {
-                let loaded = kit.load_team(&entry.team).await?;
-                let host = cx
-                    .update(|_, cx| team_ops::import_host(cx))
-                    .ok()
-                    .flatten()
-                    .ok_or("Team preview is unavailable")?;
-                let snapshot = team_ops::preview(&host, loaded.to_string(), cx).await?;
-                if snapshot.members.len() != entry.team.agents.len() {
-                    return Err("Portable team members do not match their definitions".into());
-                }
-                Ok(snapshot)
-            }
-            .await;
+            let result = resolve_team_text(&kit, &entry.team, cx).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(snapshot) => {
-                        let (description, instructions) = (
-                            snapshot.team.description.clone().unwrap_or_default(),
-                            snapshot.team.instructions.clone().unwrap_or_default(),
-                        );
-                        this.description
-                            .update(cx, |state, cx| state.set_value(description, window, cx));
+                    Ok((text, head)) => {
+                        let value = text.clone();
                         this.instructions
-                            .update(cx, |state, cx| state.set_value(instructions, window, cx));
-                        this.portable = Some(snapshot);
+                            .update(cx, |state, cx| state.set_value(value, window, cx));
+                        this.saved = Some(Saved { text, head });
                         this.loading = false;
                     }
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => {
+                        this.error = Some(
+                            format!(
+                                "This team's instructions can't be read, so it can't be saved now: {error}"
+                            )
+                            .into(),
+                        )
+                    }
                 }
                 cx.notify();
             });
@@ -175,69 +208,14 @@ impl TeamEditor {
         .detach();
     }
 
-    /// Any change makes a new save.
+    /// Any edit starts a new save attempt.
     fn changed(&mut self, cx: &mut Context<Self>) {
-        self.revision = uuid::Uuid::new_v4().to_string();
-        self.prepared = None;
+        self.attempt = Attempt::new(self.attempt.serial + 1, self.attempt.team_head.clone());
         cx.notify();
-    }
-
-    fn text_changed(&mut self, cx: &mut Context<Self>) {
-        let description = self.description.read(cx).value().to_string();
-        let instructions = self.instructions.read(cx).value().to_string();
-        let name = self.name.read(cx).value().to_string();
-        let portable = self.portable.get_or_insert_with(|| TeamSnapshot {
-            format: "buzz-team-snapshot".into(),
-            version: 1,
-            team: TeamMeta::default(),
-            members: Vec::new(),
-        });
-        let changed = portable.team.description.as_deref().unwrap_or_default() != description
-            || portable.team.instructions.as_deref().unwrap_or_default() != instructions;
-        portable.team.name = name;
-        portable.team.description = Some(description);
-        portable.team.instructions = Some(instructions);
-        if changed {
-            self.changed(cx);
-        }
     }
 
     fn draft_name(&self, cx: &App) -> String {
         self.name.read(cx).value().to_string()
-    }
-
-    fn has_portable_fields(&self) -> bool {
-        self.portable.as_ref().is_some_and(|portable| {
-            portable
-                .team
-                .description
-                .as_deref()
-                .is_some_and(|text| !text.trim().is_empty())
-                || portable
-                    .team
-                    .instructions
-                    .as_deref()
-                    .is_some_and(|text| !text.trim().is_empty())
-        })
-    }
-
-    fn saved_portable(&self) -> bool {
-        self.initial
-            .as_ref()
-            .is_some_and(|entry| entry.team.portable.is_some())
-    }
-
-    /// A new team whose members all run here can carry a portable
-    /// definition.
-    fn can_capture(&self, cx: &App) -> bool {
-        let community = self.teams.read(cx).community.clone();
-        let local = community_agents(&community, cx);
-        self.initial.is_none()
-            && !self.agents.is_empty()
-            && self
-                .agents
-                .iter()
-                .all(|key| local.iter().any(|(_, agent)| agent.pubkey == *key))
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -245,100 +223,108 @@ impl TeamEditor {
         if self.busy || self.loading || self.catalog_busy || name.trim().is_empty() {
             return;
         }
-        let portable_save = self.saved_portable() || self.can_capture(cx);
-        if !portable_save && self.has_portable_fields() {
-            self.error = Some(
-                "Description and team instructions require nonempty local team members".into(),
-            );
+        let Some(saved) = self.saved.clone() else {
+            self.error = Some("Team instructions are still loading".into());
+            cx.notify();
+            return;
+        };
+        let draft = Team {
+            id: self.id.clone(),
+            name,
+            agents: self.agents.clone(),
+            portable: self
+                .initial
+                .as_ref()
+                .and_then(|entry| entry.team.portable.clone()),
+        };
+        if draft.portable.is_some() && draft.agents.is_empty() {
+            self.error = Some("A team imported from a file needs at least one member.".into());
             cx.notify();
             return;
         }
         self.busy = true;
         self.error = None;
         cx.notify();
-        let teams = self.teams.read(cx);
-        let (kit, community) = (teams.kit.clone(), teams.community.clone());
-        let team = Team {
-            id: self.id.clone(),
-            name: name.clone(),
-            agents: self.agents.clone(),
-            portable: None,
-        };
-        let expected = self.initial.as_ref().map(|entry| entry.event_id.clone());
-        let previous = self
-            .initial
+        let text = self.instructions.read(cx).value().to_string();
+        let roster_changed = self
+            .saved_team
             .as_ref()
-            .filter(|entry| entry.team.portable.is_some())
-            .map(|entry| entry.team.agents.clone())
-            .unwrap_or_default();
-        let portable = self.portable.clone();
-        let prepared = self.prepared.clone();
-        let revision = self.revision.clone();
+            .is_none_or(|base| base.name != draft.name || base.agents != draft.agents);
+        let text_changed = text != saved.text;
+        let teams = self.teams.clone();
+        let kit = teams.read(cx).kit.clone();
+        let mut run = self.attempt.clone();
         cx.spawn(async move |this, cx| {
+            let check = Check {
+                kit: &kit,
+                draft: &draft,
+                saved: &saved,
+                text: &text,
+                roster_changed,
+            };
             let result: Result<(), String> = async {
-                if !portable_save {
-                    kit.save(team, expected, false).await?;
-                    return Ok(());
+                if text_changed && run.manifest.is_none() {
+                    check.recheck(&run, cx).await?;
+                    run.manifest = Some(kit.prepare_text(&draft.id, &text, &run.revision).await?);
                 }
-                let snapshot = match prepared {
-                    Some(prepared) => prepared,
-                    None => {
-                        let loaded = portable.as_ref().filter(|p| !p.members.is_empty());
-                        let added: Vec<String> = team
-                            .agents
-                            .iter()
-                            .filter(|key| loaded.is_none() || !previous.contains(key))
-                            .cloned()
-                            .collect();
-                        let captured = if added.is_empty() {
-                            None
-                        } else {
-                            let meta = TeamMeta {
-                                name: team.name.clone(),
-                                ..Default::default()
-                            };
-                            Some(capture(&community, meta, &added, cx).await?)
-                        };
-                        let members = team
-                            .agents
-                            .iter()
-                            .map(|key| {
-                                let saved = previous
-                                    .iter()
-                                    .position(|known| known == key)
-                                    .and_then(|index| loaded?.members.get(index).cloned());
-                                saved
-                                    .or_else(|| {
-                                        let index = added.iter().position(|k| k == key)?;
-                                        captured.as_ref()?.members.get(index).cloned()
-                                    })
-                                    .ok_or_else(|| {
-                                        "A selected agent has no portable definition".to_string()
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let mut meta = portable.map(|p| p.team).unwrap_or_default();
-                        meta.name = team.name.clone();
-                        TeamSnapshot {
-                            format: "buzz-team-snapshot".into(),
-                            version: 1,
-                            team: meta,
-                            members,
-                        }
+                if roster_changed && !run.team_done {
+                    if run.team.id().is_none() {
+                        check.recheck(&run, cx).await?;
                     }
-                };
-                let _ = this.update(cx, |this, _| this.prepared = Some(snapshot.clone()));
-                let value = serde_json::to_value(&snapshot).map_err(|e| e.to_string())?;
-                kit.save_portable(team, value, expected, revision).await?;
-                Ok(())
+                    let head = kit
+                        .save_resumable(
+                            draft.clone(),
+                            run.team_head.clone(),
+                            false,
+                            run.team.clone(),
+                        )
+                        .await?;
+                    run.team_head = Some(head);
+                    run.team_done = true;
+                    let _ = this.update(cx, |this, _| this.saved_team = Some(draft.clone()));
+                }
+                if let Some(manifest) = run.manifest.clone().filter(|_| !run.text_done) {
+                    if run.text.id().is_none() {
+                        check.recheck(&run, cx).await?;
+                    }
+                    let head = kit
+                        .publish_text(
+                            &draft.id,
+                            Some(manifest),
+                            saved.head.clone(),
+                            run.team_head.clone(),
+                            run.text.clone(),
+                        )
+                        .await?;
+                    run.text_done = true;
+                    let saved = Saved {
+                        text: text.clone(),
+                        head: Some(head),
+                    };
+                    let _ = this.update(cx, |this, _| this.saved = Some(saved));
+                }
+                deliver_team_texts(&teams, cx).await
             }
             .await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
-                match result {
-                    Ok(()) => cx.emit(Dismissed),
-                    Err(error) => {
-                        this.error = Some(error.into());
+                let message = result.err().map(|message| {
+                    if run.team_done && run.manifest.is_some() && !run.text_done {
+                        format!("Members and name saved; instructions not saved: {message}")
+                    } else if run.text_done || (run.team_done && run.manifest.is_none()) {
+                        format!("Saved; members' instructions not updated: {message}")
+                    } else {
+                        message
+                    }
+                });
+                // An edit during the save started a new attempt.
+                if this.attempt.serial == run.serial {
+                    this.attempt = run;
+                }
+                match message {
+                    None => cx.emit(Dismissed),
+                    Some(message) => {
+                        this.error = Some(message.into());
                         cx.notify();
                     }
                 }
@@ -357,7 +343,46 @@ impl TeamEditor {
             .find(|team| format!("{}:{}", team.owner, team.d) == *key)
             .cloned()
     }
+}
 
+/// What a save rechecks before every phase it has not enqueued yet,
+/// retries included: other teams and this team's text can change between
+/// attempts. Saving goes members first, then text, so the in-between
+/// roster is checked against the old text too.
+struct Check<'a> {
+    kit: &'a TeamKit,
+    draft: &'a Team,
+    saved: &'a Saved,
+    text: &'a str,
+    roster_changed: bool,
+}
+
+impl Check<'_> {
+    async fn recheck(&self, run: &Attempt, cx: &mut AsyncApp) -> Result<(), String> {
+        let others = read_team_texts(self.kit, cx).await?;
+        // Members-only saves check too: the conflict checks assume the text
+        // this dialog loaded is still the team's current text.
+        if !run.text_done {
+            let current = self.kit.read_text_head(&self.draft.id).await?;
+            if current.map(|current| current.head) != self.saved.head {
+                return Err(
+                    "This team's instructions changed. Refresh and review them before saving."
+                        .into(),
+                );
+            }
+        }
+        let (id, agents) = (&self.draft.id, &self.draft.agents);
+        let before = (self.roster_changed && !run.team_done)
+            .then(|| team_text_conflict(&others, id, agents, &self.saved.text))
+            .flatten();
+        match before.or_else(|| team_text_conflict(&others, id, agents, self.text)) {
+            Some(conflict) => Err(conflict),
+            None => Ok(()),
+        }
+    }
+}
+
+impl TeamEditor {
     fn add_from_catalog(&mut self, cx: &mut Context<Self>) {
         let (Some(add), Some(listed)) = (self.add_team.clone(), self.publication(cx)) else {
             return;
@@ -605,7 +630,6 @@ impl TeamEditor {
     fn form(&self, cx: &mut Context<Self>) -> Div {
         let c = *cx.colors();
         let state = self.teams.read(cx).view.clone();
-        let show_text = self.saved_portable() || self.can_capture(cx) || self.has_portable_fields();
         div()
             .flex()
             .flex_col()
@@ -633,26 +657,17 @@ impl TeamEditor {
                 TextField::new(&self.name).surface(Surface::Floating),
                 &c,
             ))
-            .when(show_text, |this| {
-                this.child(field(
-                    "Description",
-                    None,
-                    TextArea::new(&self.description)
-                        .rows(3)
-                        .surface(Surface::Floating),
-                    &c,
-                ))
-                .child(field(
-                    "Team Instructions",
-                    None,
-                    TextArea::new(&self.instructions)
-                        .rows(3)
-                        .surface(Surface::Floating),
-                    &c,
-                ))
-            })
-            .when(self.loading, |this| {
-                this.child(div().text_body_sm().child("Loading team definitions…"))
+            .child(field(
+                "Team Instructions",
+                None,
+                TextArea::new(&self.instructions)
+                    .rows(3)
+                    .disabled(self.saved.is_none())
+                    .surface(Surface::Floating),
+                &c,
+            ))
+            .when(self.loading && self.error.is_none(), |this| {
+                this.child(div().text_body_sm().child("Loading team instructions…"))
             })
             .child(self.selection(cx))
     }

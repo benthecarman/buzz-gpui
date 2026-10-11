@@ -9,13 +9,14 @@ use super::team_dialogs::{self, TeamDeployDialog, TeamImportDialog};
 use super::team_editor::TeamEditor;
 use super::team_file;
 use super::team_ops::{self, ImportOptions};
+use super::team_text::deliver_team_texts;
 use crate::community::{AppState, Community, IdentityState};
 use crate::mirror::mirror;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::catalog::{
     Publication, TeamPublication, catalog_team_snapshot, unsupported_transport_message,
 };
-use buzz_relay_client::session::{TeamKit, TeamsStatus, TeamsView};
+use buzz_relay_client::session::{Resume, TeamKit, TeamsStatus, TeamsView};
 use buzz_relay_client::teams::TeamEntry;
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, ButtonSize, Icon, IconButton,
@@ -33,6 +34,11 @@ pub struct TeamsState {
     pub kit: TeamKit,
     pub view: Arc<TeamsView>,
     pub community: Entity<Community>,
+    /// Why app-start delivery of team instructions gave up, until a
+    /// delivery succeeds (`teamSyncError`).
+    pub sync_error: Option<String>,
+    /// Team instruction deliveries run one at a time.
+    pub delivery: Arc<tokio::sync::Mutex<()>>,
     _watch: Task<()>,
 }
 
@@ -54,6 +60,8 @@ impl TeamsState {
             _watch: mirror(kit.view(), cx, |this: &mut Self, view| this.view = view),
             kit,
             community,
+            sync_error: None,
+            delivery: Arc::default(),
         });
         cx.global_mut::<Kits>().0.insert(id, state.clone());
         state
@@ -126,6 +134,16 @@ enum Modal {
     Catalog(Entity<CatalogDialog>),
 }
 
+/// One team delete: its team tombstone, then its text head's, so a retry
+/// confirms the same events and repeats only unfinished phases.
+struct Removal {
+    event_id: String,
+    team_done: bool,
+    text_done: bool,
+    team: Resume,
+    text: Resume,
+}
+
 /// The Agents page's "Agent teams" section, for the current community.
 pub struct TeamsSection {
     /// The page's create form, seeded from a catalog agent.
@@ -135,6 +153,8 @@ pub struct TeamsSection {
     catalog: Option<Entity<CatalogState>>,
     menu: Option<String>,
     modal: Option<Modal>,
+    /// The phases of the current delete that finished or were enqueued.
+    removed: Option<Removal>,
     preview_error: Option<SharedString>,
     /// The section width, measured after layout, for the card grid.
     width: Rc<Cell<Pixels>>,
@@ -152,6 +172,7 @@ impl TeamsSection {
             catalog: None,
             menu: None,
             modal: None,
+            removed: None,
             preview_error: None,
             width: Rc::new(Cell::new(px(0.))),
             _subscriptions: Vec::new(),
@@ -354,12 +375,73 @@ impl TeamsSection {
         *error = None;
         let (team, expected) = (entry.team.clone(), entry.event_id.clone());
         let kit = teams.read(cx).kit.clone();
+        // A retry of the same delete repeats only its unfinished phases.
+        let mut run = self
+            .removed
+            .take()
+            .filter(|run| run.event_id == expected)
+            .unwrap_or_else(|| Removal {
+                event_id: expected.clone(),
+                team_done: false,
+                text_done: false,
+                team: Resume::new(),
+                text: Resume::new(),
+            });
         cx.spawn(async move |this, cx| {
-            let result = kit.save(team, Some(expected), true).await;
+            let result: Result<(), String> = async {
+                if !run.team_done {
+                    kit.save_resumable(team.clone(), Some(expected), true, run.team.clone())
+                        .await?;
+                    run.team_done = true;
+                }
+                let mut cleanup = None;
+                if !run.text_done {
+                    // Retire the text head with a tombstone so legacy text
+                    // never reappears. No head, or one already retired,
+                    // needs nothing.
+                    let retired: Result<(), String> = async {
+                        let current = match run.text.id() {
+                            Some(_) => None,
+                            None => kit.read_text_head(&team.id).await?,
+                        };
+                        if run.text.id().is_some() || current.as_ref().is_some_and(|c| !c.deleted)
+                        {
+                            kit.publish_text(
+                                &team.id,
+                                None,
+                                current.map(|current| current.head),
+                                None,
+                                run.text.clone(),
+                            )
+                            .await?;
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    match retired {
+                        Ok(()) => run.text_done = true,
+                        Err(error) => cleanup = Some(error),
+                    }
+                }
+                // Members lose the deleted team's text even if cleanup
+                // failed.
+                deliver_team_texts(&teams, cx).await?;
+                cleanup.map_or(Ok(()), Err)
+            }
+            .await;
             let _ = this.update(cx, |this, cx| {
+                let team_done = run.team_done;
+                this.removed = Some(run);
                 match result {
-                    Ok(_) => this.close(cx),
+                    Ok(()) => this.close(cx),
                     Err(message) => {
+                        let message = if team_done {
+                            format!(
+                                "Team deleted; instructions cleanup or member update pending: {message}"
+                            )
+                        } else {
+                            message
+                        };
                         if let Some(Modal::Delete { busy, error, .. }) = &mut this.modal {
                             *busy = false;
                             *error = Some(message.into());
@@ -748,12 +830,16 @@ impl Render for TeamsSection {
             )
         };
         let modal = self.modal_element(window, cx);
+        let sync_error = teams.read(cx).sync_error.clone();
         div()
             .relative()
             .flex()
             .flex_col()
             .gap(rems(0.75))
             .child(measure)
+            .children(
+                sync_error.map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
+            )
             .children(status.map(|text| div().text_body_sm().text_color(c.text_subtle).child(text)))
             .child(header)
             .children(body)
