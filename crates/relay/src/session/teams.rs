@@ -77,7 +77,6 @@ struct Inner {
 struct State {
     loading: bool,
     saving: bool,
-    epoch: u64,
     /// Teams whose text head this session has seen; its later absence is
     /// an error, never permission to fall back to legacy bundle text.
     known_text: HashSet<String>,
@@ -297,7 +296,7 @@ impl Inner {
 
     /// Reads the list unless a read is in flight; `false` when it was.
     async fn refresh(self: Arc<Self>) -> bool {
-        let epoch = {
+        {
             let mut state = self.lock();
             if state.loading {
                 return false;
@@ -309,24 +308,21 @@ impl Inner {
                 view.status = TeamsStatus::Loading;
                 view.error = None;
             });
-            state.epoch
-        };
+        }
         let result = self.read_entries().await;
         let mut state = self.lock();
         state.loading = false;
-        if state.epoch == epoch {
-            self.update(|view| match result {
-                Ok(entries) => {
-                    view.status = TeamsStatus::Ready;
-                    view.error = None;
-                    view.entries = entries;
-                }
-                Err(error) => {
-                    view.status = TeamsStatus::Error;
-                    view.error = Some(error);
-                }
-            });
-        }
+        self.update(|view| match result {
+            Ok(entries) => {
+                view.status = TeamsStatus::Ready;
+                view.error = None;
+                view.entries = entries;
+            }
+            Err(error) => {
+                view.status = TeamsStatus::Error;
+                view.error = Some(error);
+            }
+        });
         true
     }
 
