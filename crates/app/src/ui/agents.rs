@@ -88,7 +88,8 @@ use buzz_host::api::{Agent, ImportSource, ProcessStatus};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, Badge, BadgeTone, Button, ButtonSize, Icon, IconButton, IconButtonSize, IconName,
-    Menu, MenuItem, MenuSeparator, PanelHeader, Toast, ToastTone, TypeStyled, tokens::radius,
+    Menu, MenuItem, MenuSeparator, PanelHeader, Select, Toast, ToastTone, TypeStyled,
+    tokens::radius,
 };
 use discovery::{Discovery, ReadStatus};
 use gpui_kit::prelude::FluentBuilder;
@@ -117,6 +118,8 @@ enum FocusTarget {
 #[derive(Clone, PartialEq)]
 enum OpenMenu {
     Page,
+    /// The host picker in the header.
+    HostPick,
     Host(EntityId),
     /// A card's actions, by identity.
     Card(String),
@@ -205,6 +208,9 @@ pub struct AgentsPage {
     _hosts_observer: Subscription,
     _app_observer: Subscription,
     menu: Option<OpenMenu>,
+    /// The host whose agents show when there are several; `None` is this
+    /// computer.
+    shown_host: Option<EntityId>,
     modal: Option<Modal>,
     outcomes: HashMap<AgentKey, Outcome>,
     /// The agent an import just added: its card asks for review.
@@ -323,6 +329,7 @@ impl AgentsPage {
             _hosts_observer: cx.observe_global::<Hosts>(|this, cx| this.sync_hosts(cx)),
             _app_observer: cx.observe_global::<AppState>(|this, cx| this.sync_community(cx)),
             menu: None,
+            shown_host: None,
             modal: None,
             outcomes: HashMap::new(),
             imported: None,
@@ -593,7 +600,70 @@ impl AgentsPage {
     }
 
     fn add_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.create_dialog(None, create::Kind::Add, window, cx);
+        // Onto the host shown, when it can take one.
+        let host = self
+            .shown_ix(cx)
+            .and_then(|ix| self.hosts.get(ix).cloned())
+            .filter(|host| editor::connected(host, cx));
+        self.create_dialog(host, create::Kind::Add, window, cx);
+    }
+
+    /// The index of the host whose agents show: the picked one, else this
+    /// computer's, else the first.
+    fn shown_ix(&self, cx: &App) -> Option<usize> {
+        self.shown_host
+            .and_then(|id| self.hosts.iter().position(|host| host.entity_id() == id))
+            .or_else(|| {
+                self.hosts
+                    .iter()
+                    .position(|host| host.read(cx).remote.is_none())
+            })
+            .or((!self.hosts.is_empty()).then_some(0))
+    }
+
+    /// Picks which host's agents show, in the header when there are several.
+    fn host_picker(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.hosts.len() < 2 {
+            return None;
+        }
+        let shown = self.shown_ix(cx);
+        let open = self.menu == Some(OpenMenu::HostPick);
+        let mut menu = Menu::new();
+        for (ix, host) in self.hosts.iter().enumerate() {
+            let id = host.entity_id();
+            menu = menu.child(
+                MenuItem::new(("agents-host", ix), host.read(cx).label.clone())
+                    .checked(shown == Some(ix))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.shown_host = Some(id);
+                        this.set_menu(None, cx);
+                    })),
+            );
+        }
+        Some(
+            div()
+                .relative()
+                .w(rems(12.))
+                .child(
+                    Select::new("agents-host-pick")
+                        .when_some(shown.and_then(|ix| self.hosts.get(ix)), |this, host| {
+                            this.value(host.read(cx).label.clone())
+                        })
+                        .open(open)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_menu((!open).then_some(OpenMenu::HostPick), cx)
+                        })),
+                )
+                .when(open, |this| {
+                    this.child(overlay::dropdown(
+                        window,
+                        Align::End,
+                        div().min_w(rems(12.)).child(menu),
+                        Self::dismiss(cx),
+                    ))
+                })
+                .into_any_element(),
+        )
     }
 
     /// The routed edit target: Edit for the one record of `pubkey` in the
@@ -613,6 +683,8 @@ impl AgentsPage {
         match matches.as_slice() {
             [(host, agent)] => {
                 self.pending_edit = None;
+                // Show the host the agent is on behind its editor.
+                self.shown_host = Some(host.entity_id());
                 let name = agent.name.clone();
                 self.edit_agent(host.clone(), agent.clone(), name, None, window, cx);
             }
@@ -792,6 +864,9 @@ impl AgentsPage {
         PanelHeader::new()
             .joined(true)
             .title("Agents")
+            .when_some(self.host_picker(window, cx), |this, picker| {
+                this.action(picker)
+            })
             .action(
                 Button::new("mission-control", "Mission control")
                     .size(ButtonSize::Sm)
@@ -1503,7 +1578,13 @@ impl Render for AgentsPage {
             }
         }
         self.focus_placed.set(false);
-        let mut sections: Vec<AnyElement> = (0..self.hosts.len())
+        // One host at a time when there are several, picked in the header.
+        let shown: Vec<usize> = match self.shown_ix(cx) {
+            Some(ix) if self.hosts.len() > 1 => vec![ix],
+            _ => (0..self.hosts.len()).collect(),
+        };
+        let mut sections: Vec<AnyElement> = shown
+            .into_iter()
             .map(|ix| self.host_section(ix, &view, window, cx))
             .collect();
         sections.extend(self.shared_sections(&view, window, cx));
