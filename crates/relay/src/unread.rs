@@ -3865,6 +3865,57 @@ mod tests {
     }
 
     #[test]
+    fn own_messages_edits_and_reactions_leave_a_read_channel_read() {
+        let mut h = H::new();
+        h.grant(&[("room", Some("stream"))]);
+        let mine = h.mine("room", "mine", 10, vec![]);
+        let reply = h.mine(
+            "room",
+            "my reply",
+            11,
+            reply_tags(&mine.id_hex(), &mine.id_hex()),
+        );
+        h.emit(&[mine.clone(), reply]);
+        assert_eq!(h.counts(&room()), (Some(0), Some(0)));
+        let peer = h.alice("room", "hello", 12, vec![]);
+        h.emit(std::slice::from_ref(&peer));
+        assert_eq!(h.room().observed_count, Some(1));
+        h.unread
+            .mark_channel_read(&mut h.reads, "room", 12, T)
+            .unwrap();
+        assert!(!h.room().unread());
+        // Later edits, reactions and the viewer's own posts are not new
+        // messages.
+        let alice = h.alice.clone();
+        let edit = h.by(
+            &alice,
+            kinds::EDIT,
+            Some("room"),
+            "hello!",
+            20,
+            tags(&[&["e", &peer.id_hex()]]),
+        );
+        let reaction = h.by(
+            &alice,
+            kinds::REACTION,
+            Some("room"),
+            "+",
+            21,
+            tags(&[&["e", &mine.id_hex()]]),
+        );
+        let later = h.mine("room", "later", 22, vec![]);
+        h.emit(&[edit, reaction, later]);
+        assert!(!h.room().unread());
+        // Deleting an unread message takes its unread with it.
+        let gone = h.alice("room", "oops", 23, vec![]);
+        h.emit(std::slice::from_ref(&gone));
+        assert_eq!(h.room().observed_count, Some(1));
+        let deletion = h.by(&alice, 5, None, "", 24, tags(&[&["e", &gone.id_hex()]]));
+        h.emit(&[deletion]);
+        assert!(!h.room().unread());
+    }
+
+    #[test]
     fn a_newer_manual_unread_cancels_an_older_lease() {
         let mut h = H::new();
         h.grant(&[("room", Some("stream"))]);
