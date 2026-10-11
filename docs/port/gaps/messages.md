@@ -5,30 +5,26 @@ Audit date: 2026-10-09. Read-only audit of the main checkouts (`.claude/worktree
 - Reference: `/home/ben/projects/buzz-app` (paths in the "buzz-app reference" column are relative to it).
 - Port: `/home/ben/projects/buzz-gpui` (paths in "Port status" are relative to it).
 - Slice: `src/features/messages`, `src/features/conversation`, `src/features/search`, and `src/bundled/{composer,emoji,mentions,links,link-lab,diffs,voice-notes}`. Where a search behaviour lives in `src/app/shell/*` (the only consumer of `src/features/search`), that file is cited.
-- Statuses: MISSING, PARTIAL (what is missing is stated), DIFFERENT (how is stated), IN PROGRESS (live Markdown styling in the composer, being added by another agent). DONE items are counted only and are not listed.
+- Statuses: MISSING, PARTIAL (what is missing is stated), DIFFERENT (how is stated), DONE (with the files), SKIPPED (decided: one of the decisions in GAPS.md). The first pass counted DONE behaviours without listing them; later passes kept the closed rows in the tables.
 - Sizes: S = under about a day, M = a few days, L = a large subsystem.
 - Each behaviour appears once. Where it touches two areas, it is listed in the area that owns it (for example, report and "Send to channel" are under section 2, timecoded replies under section 5, membership grouping under section 1).
 
 ## Summary
 
-| Area | MISSING | PARTIAL | DIFFERENT | IN PROGRESS | DONE |
+| Area | MISSING | PARTIAL | DIFFERENT | DONE | SKIPPED |
 |---|---|---|---|---|---|
-| 1. Message rows, Markdown, links, embeds and diffs | 3 | 1 | 1 | 0 | 101 |
-| 2. Hover actions, menus, edit/delete/report, reactions, emoji and GIF pickers | 1 | 6 | 1 | 0 | 127 |
-| 3. Timeline, scrolling, unread, jump-to, threads, typing and search | 43 | 13 | 13 | 0 | 61 |
-| 4. Composer, autocomplete, formatting, attachments and voice recording | 9 | 1 | 3 | 0 | 106 |
-| 5. Rendered attachments, media viewer, audio/video and voice-note playback | 1 | 2 | 2 | 0 | 127 |
-| **Total** | **57** | **23** | **20** | **0** | **522** |
+| 1. Message rows, Markdown, links, embeds and diffs | 0 | 0 | 1 | 60 | 2 |
+| 2. Hover actions, menus, edit/delete/report, reactions, emoji and GIF pickers | 0 | 0 | 1 | 83 | 0 |
+| 3. Timeline, scrolling, unread, jump-to, threads, typing and search | 0 | 0 | 1 | 68 | 0 |
+| 4. Composer, autocomplete, formatting, attachments and voice recording | 0 | 1 | 4 | 71 | 1 |
+| 5. Rendered attachments, media viewer, audio/video and voice-note playback | 0 | 0 | 3 | 61 | 0 |
+| **Total** | **0** | **1** | **10** | **343** | **3** |
 
-Largest gaps, in short:
+Counts are of the rows in the tables. What is left:
 
-- Diff messages render as raw Markdown: there is no diff card, hunk view, file headers or expanded split/unified dialog (section 1).
-- No report flow, "Send to channel", "Follow thread", "Mark read", or outbox-aware gating and recovery for edits, deletes and reactions (section 2).
-- Thread rows have no hover action bar or reaction picker. There is no thread typing indicator, jump-to-latest or read tracking in threads (sections 2 and 3).
-- No per-channel scroll restore, no midnight relabel, and the dock is not resizable or responsive (section 3).
-- Composer: no team mentions, no new-message composer reuse, no inline custom-emoji decorations, and no unavailable-recipient states (section 4).
-- Media: snapshot imports have no preview to open, AVIF does not decode, and media corners are not smoothed (section 5).
-- Link and message hover cards, channel `#name` references in prose, membership grouping and avatars, workflow bylines, and cross-block text selection are missing (section 1).
+- New message is not yet the full composer. It is the same work as channels.md's "New message as a full page" row, which the channels audit owns (section 4).
+- DIFFERENT where GPUI cannot match: no HTML clipboard flavour, no inline custom emoji images in the draft, no AVIF decoding, no squircle clipping, no zoom-in cursor, no exit motion for overlay docks (sections 1, 3, 4 and 5).
+- DIFFERENT by design or by the relay: the composer edits Markdown source, so there is no conversion undo step; the relay refuses the `waveform` imeta key; a GPUI clipboard write cannot fail; the desktop session always writes (sections 2 and 4).
 
 ## 1. Message rows, Markdown, links, embeds and diffs
 
@@ -101,7 +97,7 @@ Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them c
 | URL tooltip on plain links (`title=url`); "Private channel. You aren’t a member, or it no longer exists." on withheld links | src/features/conversation/MessageLink.tsx:228-234 | DONE (crates/app/src/ui/links.rs) | Add the tooltips | S |
 | Middle-click a Buzz link opens it in-app | src/features/conversation/MessageLink.tsx:190-205 | DONE (crates/app/src/ui/links.rs) | Handle the middle mouse button on Buzz link chips | S |
 | Status "This Buzz link couldn’t be opened here." when navigation fails | src/features/conversation/MessageLink.tsx:367-369 | DONE (crates/app/src/ui/links.rs, crates/app/src/ui/navigation.rs `try_open_url`) | The port only logs. Show the inline status (or a toast) | S |
-| External link right-click / ContextMenu / Shift+F10 menu: "Open in browser", "Preview snapshot" (agent snapshots), "Copy link" with "Link copied" toast or error toast | src/features/conversation/MessageLink.tsx:246-301, 127-144 | PARTIAL (crates/app/src/ui/links.rs): right-click opens "Open in browser" and "Copy link" with the "Link copied" toast. Not done: the ContextMenu/Shift+F10 keys (link chips take no focus) and "Preview snapshot" (snapshot attachments are not ported) | Add a context menu on link chips with these items and toasts | M |
+| External link right-click / ContextMenu / Shift+F10 menu: "Open in browser", "Preview snapshot" (agent snapshots), "Copy link" with "Link copied" toast or error toast | src/features/conversation/MessageLink.tsx:246-301, 127-144 | DONE (crates/app/src/ui/links.rs): links are tab stops; the context-menu key and Shift+F10 open the menu, which takes the arrow keys and gives focus back to the link; Preview snapshot shows for agent snapshot links | - | M |
 | Session link chip: "Session · {id8}" with a file icon for session channels the viewer belongs to | src/features/conversation/MessageLink.tsx:145-159, 209-215; src/features/conversation/LinkPreview.module.css:1-27 | DONE (crates/app/src/ui/links.rs) | Detect the session label form and draw the chip | S |
 | Join/invite links render as "Join {host}" (port-only behaviour) | n/a | DONE (crates/app/src/ui/links.rs): the "Join" chip is gone; join links show as plain underlined links, as in buzz-app, and still open the invite flow | buzz-app has no such chip in message rendering. Keep or remove on purpose | S |
 
@@ -113,7 +109,7 @@ Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them c
 | Message preview loading and error states: "Loading message…", "Message preview unavailable." | src/features/conversation/BuzzLinkPreview.tsx:42-46, 99-104 | DONE (crates/app/src/ui/link_preview.rs) | Part of the hover card | S |
 | Clicking the preview card opens the link | src/features/conversation/MessageLink.tsx:330-341 | DONE (crates/app/src/ui/link_preview.rs) | Part of the hover card | S |
 | Channel link hover card: name, "Public/Private channel · Archived · Joined/Not joined · N members", description | src/features/conversation/BuzzLinkPreview.tsx:180-212 | DONE (crates/app/src/ui/link_preview.rs, crates/app/src/ui/links.rs) | Add a hover card for channel-only links using the channel-reference lookup | M |
-| Embedded thread (a plugin page hosting a full thread panel, with panel and media-review overlays) | src/features/conversation/EmbeddedThread.tsx:45-180 | MISSING: not done. Plugin pages are not ported, so nothing hosts an embedded thread | Plugin page API only. Needed only if plugin pages are ported | L |
+| Embedded thread (a plugin page hosting a full thread panel, with panel and media-review overlays) | src/features/conversation/EmbeddedThread.tsx:45-180 | SKIPPED (decided): only external plugins mount it (no bundled plugin does), and external plugin import is skipped | - | L |
 
 ### Diff messages
 
@@ -134,7 +130,7 @@ Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them c
 |---|---|---|---|---|
 | Select across paragraphs, blocks and several message rows in one drag | src/features/messages/selection-copy.ts:344-402 | DONE (crates/app/src/ui/markdown.rs; third_party/gpui-base/src/selectable_text.rs orders plain runs): the window selection spans paragraphs, blocks and rows. Table cells copy column by column | Each paragraph is a separate `TextView`. A shared selection across a row and across rows is needed | L |
 | Code blocks, tables, plain-text (over-limit) bodies and jumbo emoji are selectable | src/features/messages/Messages.module.css:1386-1438 | DONE (crates/app/src/ui/markdown.rs) | These are plain `div`/`StyledText`, not selectable. Render them in selectable text views | M |
-| Rich clipboard: `text/html` flavour, and a Markdown flavour on paste into the composer that keeps mentions, links and code blocks | src/features/messages/selection-copy.ts:186-230, 365-388 | MISSING: not done. GPUI's Linux clipboard writes plain text only, so there is no HTML or Markdown flavour to add | Write HTML (and Markdown) along with plain text when copying from messages | M |
+| Rich clipboard: `text/html` flavour, and a Markdown flavour on paste into the composer that keeps mentions, links and code blocks | src/features/messages/selection-copy.ts:186-230, 365-388 | DIFFERENT: GPUI's clipboard carries plain text and images only, with no `text/html` or custom flavour to write or read | - | M |
 | Plain-text copy rules: links as "label (url)", mentions as "@Name", custom emoji as `:shortcode:`, bylines/timestamps/screen-reader text left out | src/features/messages/selection-copy.ts:144-176, src/bundled/emoji/copy-emoji.ts:7-33 | DONE (crates/app/src/ui/markdown.rs) | Inline objects copy their visible text, so labeled links lose the URL. Copy links as "label (url)" | S |
 | "Copy link" gives `buzz://message?channel=…&id=…&thread=…` (thread kept for replies) | src/features/messages/message-copy.ts:51-78 | DONE (crates/app/src/ui/message_copy.rs) | The port omits `thread=` for replies. Add the thread root | S |
 
@@ -147,7 +143,7 @@ Counts: MISSING 3, PARTIAL 1, DIFFERENT 1, IN PROGRESS 0, DONE 101 (58 of them c
 | Link renderer registry (bundled links plugin, lowest order wins, catch-all for web) | src/features/conversation/MessageLink.tsx:49-52, src/bundled/links/index.tsx:7-16 | DONE (crates/app/src/ui/renderers.rs, crates/app/src/ui/links.rs) | Native in the port. A registry is needed only if plugins are ported | L |
 | Attachment renderer registry (voice notes) | src/features/conversation/AttachmentView.tsx:10-37 | DONE (crates/app/src/ui/renderers.rs) | Voice notes are native in the port | M |
 | A plugin that throws falls back to the host rendering | src/features/conversation/ContributionBoundary.tsx:14-25 | DONE (crates/app/src/ui/renderers.rs) | Needed only with a plugin system | S |
-| Link Lab page (visual fixture for link chips; not in buzz-app's default plugin catalog) | src/bundled/link-lab/index.tsx:38-164 | MISSING: not done. A dev-only fixture page outside buzz-app's default catalog; nothing user-facing | Optional dev-only page; nothing user-facing | S |
+| Link Lab page (visual fixture for link chips; not in buzz-app's default plugin catalog) | src/bundled/link-lab/index.tsx:38-164 | SKIPPED (decided) | - | S |
 
 ## 2. Hover actions, menus, edit/delete/report, reactions, emoji and GIF pickers
 
@@ -159,10 +155,10 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Action bar also appears when keyboard focus is inside the row (Tab into the row) | src/features/messages/useFloatingActionBar.ts:108-111, 36-43 | MISSING: not done. Rows take no keyboard focus in the port; this needs a row focus model in the timeline and thread lists | Rows cannot take focus and there is no keyboard path to the bar. Add focusable rows (or a row-focus model), show the bar on focus, and Tab into its buttons. | M |
+| Action bar also appears when keyboard focus is inside the row (Tab into the row) | src/features/messages/useFloatingActionBar.ts:108-111, 36-43 | DONE (crates/app/src/ui/message.rs, crates/app/src/main_window.rs): Tab moves focus; rows are size-less tab stops (buzz-app reaches the bar through each row's controls), and the focused row scrolls into view and shows its bar, whose buttons take focus | - | M |
 | Action bar on thread-panel rows (reactions, reply, copy link, more menu) | src/features/messages/MessageRow.tsx:500-574 (same row component in threads) | DONE (crates/app/src/ui/message_actions.rs, crates/app/src/ui/thread.rs) | The thread panel passes no `on_hover`/`on_popup`/`on_command`, so it has no action bar. It has only a group-hover "Reply" button. Give thread rows the same bar, more menu and picker as the channel. | M |
 | Quick reaction label/pressed state: "Remove X" and pressed when the viewer already reacted with it, else "React with X" | src/features/messages/MessageReactions.tsx:152-165 | DONE (crates/app/src/ui/message.rs) | The tooltip is always "React with X" and there is no selected state. Show "Remove X" and `.selected(true)` when the viewer's reaction exists. | S |
-| Quick reaction glyph lift on hover (translateY -1px, scale 1.12) and press (0.96), 120ms | src/features/messages/Messages.module.css:1601-1626 | PARTIAL (crates/app/src/ui/message.rs): the glyph lifts and grows under the pointer. Not done: the 0.96 press and the 120ms ease, since GPUI styles have no transitions or group-active state | Add a hover/press transform animation to the quick-reaction glyph. | S |
+| Quick reaction glyph lift on hover (translateY -1px, scale 1.12) and press (0.96), 120ms | src/features/messages/Messages.module.css:1601-1626 | DONE (crates/app/src/ui/message.rs) | - | S |
 | Quick reactions hidden when the row is 260px wide or narrower | src/features/messages/Messages.module.css:1829-1830 | DONE (crates/app/src/ui/message.rs) | Hide the quick-reaction buttons when the row width is 260px or less. | S |
 | Quick reactions and picker disabled while a reaction to this message is pending/failed in the outbox | src/features/messages/MessageReactions.tsx:67-72, 98, 163 | DONE (crates/app/src/ui/message.rs, crates/app/src/ui/outbox_ops.rs) | Track pending kind-7/kind-5 reaction ops per message. Disable quick reactions, pills and add-reaction while one is in flight (stops double toggles). | S |
 | Reactions/add-reaction hidden for read-only, archived or unlisted channels or when the outbox lacks kind 7/5 (`canReact`) | src/features/messages/MessageRow.tsx:260-269 | DONE (crates/app/src/ui/message.rs): the port's outbox takes every kind, so only the conversation is checked | Rows always get `on_react` (channel.rs:500). Gate reactions on `!read_only && !archived` and on channel membership. | S |
@@ -190,7 +186,7 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 | Plugin actions in the menu (e.g. "Remind me") and the dialogs they open | src/features/messages/MessageRow.tsx:279-295, 323-334, 472-480 | DONE (crates/app/src/ui/renderers.rs, crates/app/src/ui/message.rs): the registry is there; no bundled plugin registers an action yet | Needs a message-action contribution registry. | M |
 | "Report" (flag) on any delivered, non-membership message | src/features/messages/MessageRow.tsx:307-322 | DONE (crates/app/src/ui/message.rs, crates/app/src/ui/report.rs) | Add the menu item (see Report dialog section). | S |
 | Menu item order: read state, Copy, Send to channel, Edit, Delete, Follow, plugin, Report | src/features/messages/MessageActionBar.tsx:217-250; MessageRow.tsx:559-573 | DONE (crates/app/src/ui/message.rs) | The order of the existing items matches. The missing items need to go in these positions. | S |
-| Menu closes on outside press; Escape closes it; arrow-key navigation and Enter activation; focus returns to trigger | src/features/messages/MessageActionBar.tsx:161-210 (Base UI Menu) | PARTIAL (crates/app/src/ui/message.rs, crates/app/src/ui/message_actions.rs): outside press, Escape, arrow keys, Home/End and Enter work. Not done: focus going back to the trigger, since bar buttons take no focus | An outside press closes the menu. There is no Escape, no arrow/Enter keyboard navigation and no focus return. | S |
+| Menu closes on outside press; Escape closes it; arrow-key navigation and Enter activation; focus returns to trigger | src/features/messages/MessageActionBar.tsx:161-210 (Base UI Menu) | DONE (crates/app/src/ui/message.rs): Escape, Tab or a choice from the keyboard gives focus back to the More button | - | S |
 
 ### Message edit mode (in the composer, channel and thread)
 
@@ -229,7 +225,7 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 | Cancel / "Submit report" (prominent, disabled until a reason, loading while pending, dialog cannot close while pending) | src/features/messages/ReportMessageDialog.tsx:72, 82-95 | DONE (crates/app/src/ui/report.rs) | Buttons and the pending state. | S |
 | Error "Failed to submit report. Try again." on the Reason field | src/features/messages/ReportMessageDialog.tsx:51-53, 107 | DONE (crates/app/src/ui/report.rs) | Error display. | S |
 | Success toast "Report submitted to community moderators" (5s) | src/features/messages/MessageRow.tsx:490-497 | DONE (crates/app/src/ui/report.rs) | Toast on success. | S |
-| Submitted report survives leaving the conversation: "Submitting report…" status or error + "Review report" | src/features/messages/ReportMessageDialog.tsx:40-65 | PARTIAL (crates/app/src/ui/report.rs): a sent report keeps running after the dialog or page closes and still shows its toast. Not done: the "Submitting report…" and "Review report" states, since the port has no hidden-conversation presentation | Keep the in-flight report owned outside the row. | S |
+| Submitted report survives leaving the conversation: "Submitting report…" status or error + "Review report" | src/features/messages/ReportMessageDialog.tsx:40-65 | DONE (crates/app/src/ui/message_actions.rs, crates/app/src/ui/report.rs, crates/app/src/ui/inbox/detail.rs) | - | S |
 
 ### Reaction chips
 
@@ -260,7 +256,7 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 |---|---|---|---|---|
 | Category header labels stay sticky while scrolling | src/bundled/emoji/emoji-mart.ts:195-202 | DONE (crates/app/src/ui/emoji_picker.rs) | Headers are plain list rows. Pin the current section's header at the top of the grid. | S |
 | Nav icons: clock, smiley, paw, orange, barbell, car, lightbulb, shapes, flag, asterisk | src/bundled/emoji/emoji-mart.ts:16-28 | DONE (crates/app/src/ui/emoji_picker.rs): buzz-app's orange and shapes are Tabler `lemon-2` and `category`, which the port already used | The port uses Lemon for food and Category for symbols. Use the orange and shapes glyphs. | S |
-| Responsive width: 1 to 6 per line from the composer/viewport width; the nav is hidden below 6 per line | src/bundled/emoji/EmojiPicker.tsx:103-139, 343-349; emoji-mart.ts:117 | PARTIAL (crates/app/src/ui/emoji_picker/mart.rs): 1 to 6 per line from the viewport width, the nav hidden below 6. The composer picker would size from the composer width, which needs composer.rs to pass it | Fixed at 360px and 6 per line. Compute per-line from the available width and hide the nav when narrow. | S |
+| Responsive width: 1 to 6 per line from the composer/viewport width; the nav is hidden below 6 per line | src/bundled/emoji/EmojiPicker.tsx:103-139, 343-349; emoji-mart.ts:117 | DONE (crates/app/src/ui/emoji_picker.rs, crates/app/src/ui/composer.rs) | - | S |
 | Frequently used: emoji-mart history of every picker pick (composer and reactions), up to 2 rows; defaults +1, grinning, kissing_heart, heart_eyes, laughing, stuck_out_tongue_winking_eye (first row) | src/bundled/emoji/emoji-mart.ts:96-104, 115; node_modules/emoji-mart DEFAULTS | DONE (crates/app/src/ui/emoji_picker/mart.rs) | The port shows one row from reaction usage only, so composer inserts never count. Record every pick, allow 2 rows (12), and keep the emoji-mart default order. | S |
 | Skin tone persisted across opens/sessions (emoji-mart `skin` in localStorage); tooltip "Choose default skin tone" | src/bundled/emoji/emoji-mart.ts:364-368 (Mart storage) | DONE (crates/app/src/ui/emoji_picker.rs) | The tone lives only in the picker entity and is not saved. The tooltip says "Skin tone". Persist it as a device pref and match the copy. | S |
 | Search ranking: Mart word-prefix results first, then fuzzy shortcode matches (exact, prefix, substring, subsequence); alias shortcodes | src/bundled/emoji/emoji-mart.ts:566-594; emoji-search.ts:48-67 | DONE (crates/app/src/ui/emoji_picker/mart.rs) | The port uses the composer's `searchEmoji` order (limit 240), not Mart's result order (limit 90). The results are close but not identical. | S |
@@ -268,7 +264,7 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 | Search results header "Search Results" | @emoji-mart i18n `categories.search` | DONE (crates/app/src/ui/emoji_picker.rs) | The port says "Search results" (lower-case r). | S |
 | Empty search state | Mart with preview off shows an empty result list | DONE (crates/app/src/ui/emoji_picker.rs) | The port shows "No emoji found". buzz-app shows nothing. Keep or drop, as you choose. | S |
 | Keyboard navigation: arrow keys move a selection through results/grid from the search field; Enter picks the selection | src/bundled/emoji/emoji-mart.ts:474-496 (Mart owns arrows/Enter) | DONE (crates/app/src/ui/emoji_picker/mart.rs) | There is no grid selection or arrow/Enter handling. Add a selected cell, arrow movement and Enter to pick. | M |
-| Escape closes the picker and returns focus to its trigger | src/bundled/emoji/EmojiPicker.tsx:309-323 | PARTIAL (crates/app/src/ui/message_actions.rs): Escape closes the reaction picker without moving focus to the composer. Not done: focus on the trigger, since bar buttons take no focus | It closes, but the reaction picker sends focus to the composer input, not the trigger. | S |
+| Escape closes the picker and returns focus to its trigger | src/bundled/emoji/EmojiPicker.tsx:309-323 | DONE (crates/app/src/ui/message_actions.rs): focus goes back to the bar's Add reaction button | - | S |
 | Reaction picker opens above the trigger (side top, 6px offset); composer picker anchored to the composer form (top, 4px) | src/bundled/emoji/EmojiPicker.tsx:328-337 | DONE (crates/app/src/ui/message.rs): above with a 6px gap, below when there is no room. The composer picker keeps its anchor in composer.rs | The port opens the reaction picker below the bar or button. Anchor it above with a 6px gap, flipping on collision. | S |
 | Custom emoji catalog error inside the picker + "Retry emoji" | src/bundled/emoji/EmojiPicker.tsx:271-278 | DONE (crates/app/src/ui/emoji_picker.rs) | Show the catalog error and a refresh button (`session.refresh_emoji`, relay session/mod.rs:385). | S |
 | Search query carried between the Emoji and GIF tabs (both directions) | src/bundled/emoji/EmojiPicker.tsx:187-190, 236-239 | DONE (crates/app/src/ui/emoji_picker.rs) | The emoji query goes to the GIF tab, but GIF edits do not come back to the emoji search. | S |
@@ -292,7 +288,7 @@ Counts: MISSING 1, PARTIAL 6, DIFFERENT 1, IN PROGRESS 0, DONE 127 (76 of them c
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Media viewer modal: Escape closes, Tab trapped inside, focus restored to opener | src/features/messages/useModalBoundary.ts:11-113 | PARTIAL: not done here. The focus trap belongs in crates/app/src/ui/media/review.rs, which the media section owns | Escape and focus restore are done. There is no Tab focus trap (the viewer occludes the background). | S |
+| Media viewer modal: Escape closes, Tab trapped inside, focus restored to opener | src/features/messages/useModalBoundary.ts:11-113 | DONE (crates/app/src/ui/media/review.rs, crates/app/src/main_window.rs) | - | S |
 
 ## 3. Timeline, scrolling, unread, jump-to, threads, typing and search
 
@@ -364,9 +360,9 @@ Counts: MISSING 43, PARTIAL 13, DIFFERENT 13, IN PROGRESS 0, DONE 61.
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
 | Close button takes focus when the panel opens (standalone header) | src/features/messages/ThreadPanel.tsx:129 | DONE (crates/app/src/ui/thread.rs, crates/app/src/ui/workspace.rs): the panel takes focus, as the tab's close button cannot; Reply puts it in the composer. | The port focuses the thread composer on open. buzz-app focuses the close button (or the composer for a "reply" intent). Match per intent. | S |
-| Resizable dock: 16px handle on the border, width clamped [316px, available − 320px], double-click resets | docs/port/ui.md (4.11) | MISSING (crates/app/src/ui/thread.rs:556). Not done here: the dock and thread::board belong to the panel shell rework. | Add a drag handle that sets the dock width, clamps it and resets on double-click; persist the width. | M |
-| Narrow layouts: <= 1000px viewport or <= 651px container overlays the thread on the right (min(420px,100%)), <= 650px full width | docs/port/ui.md (4.11) | MISSING (crates/app/src/ui/thread.rs:556). Not done here: the dock and thread::board belong to the panel shell rework. | Switch the board to an overlay layout under the breakpoints. | M |
-| Open/close motion: translateX(12px) + opacity over 180ms | docs/port/ui.md (4.11) | MISSING (crates/app/src/ui/thread.rs:556). Not done here: the dock's motion belongs to the panel shell rework. | Animate the dock in and out. | S |
+| Resizable dock: 16px handle on the border, width clamped [316px, available − 320px], double-click resets | docs/port/ui.md (4.11) | DONE (crates/app/src/ui/panels.rs, crates/app/src/ui/resize_handle.rs, crates/app/src/ui/workspace/board.rs) | - | M |
+| Narrow layouts: <= 1000px viewport or <= 651px container overlays the thread on the right (min(420px,100%)), <= 650px full width | docs/port/ui.md (4.11) | DONE (crates/app/src/ui/panels.rs, crates/app/src/ui/workspace/layout.rs) | - | M |
+| Open/close motion: translateX(12px) + opacity over 180ms | docs/port/ui.md (4.11) | DIFFERENT (crates/app/src/ui/panels.rs): the dock opens with buzz-app's motion; closing has none, as on a desktop window in buzz-app, but overlays do not slide out either: GPUI drops a closed panel's elements at once and has nothing left to animate | - | S |
 
 ### Thread panel: content and reply tree
 
@@ -385,7 +381,7 @@ Counts: MISSING 43, PARTIAL 13, DIFFERENT 13, IN PROGRESS 0, DONE 61.
 |---|---|---|---|---|
 | Older-page error shown inline at the top of the reply list with its own "Retry thread" (re-pages older) | src/features/messages/ThreadPanel.tsx:1038 | DONE (crates/app/src/ui/thread.rs) | The port shows every error below the list. Put the older-page error at the top of the replies. | S |
 | Loading older replies indicator | src/features/messages/ThreadPanel.tsx:914 | DONE (crates/app/src/ui/thread.rs) | The port adds "Loading earlier replies…", which buzz-app does not show. Remove it or keep as an intended extra. | S |
-| Saved-draft guard: "This saved draft does not identify a thread root. Open its origin to check the destination." and composer disabled until the root verifies | src/features/messages/ThreadPanel.tsx:1049 | MISSING (crates/app/src/ui/thread.rs:538). Not applicable yet: no saved draft opens a thread in the port. | Only relevant if drafts can open threads; add the guard to that entry point. | S |
+| Saved-draft guard: "This saved draft does not identify a thread root. Open its origin to check the destination." and composer disabled until the root verifies | src/features/messages/ThreadPanel.tsx:1049 | DONE (crates/app/src/ui/thread.rs, crates/app/src/ui/inbox/drafts.rs) | - | S |
 
 ### Thread panel: composer and actions
 
@@ -401,10 +397,10 @@ Counts: MISSING 43, PARTIAL 13, DIFFERENT 13, IN PROGRESS 0, DONE 61.
 |---|---|---|---|---|
 | Narrow (<= 650px) inset 12px | src/features/messages/TypingIndicator.module.css:108 | DONE (crates/app/src/ui/typing.rs) | Use 12px insets below 650px. | S |
 | Typing indicator in the thread panel, scoped to that thread root | src/features/messages/TypingIndicator.tsx:88 | DONE (crates/app/src/ui/thread.rs, crates/app/src/ui/typing.rs) | Data exists (`thread_typing`, crates/relay/src/session/mod.rs:112). Render `typing::overlay` above the thread composer. | S |
-| Names use channel-scoped identity names (nicknames) | src/features/messages/TypingIndicator.tsx:94 | PARTIAL (crates/app/src/ui/typing.rs:64). Blocked: identity names do not exist yet (settings.md §10); names use the bylines' resolver. | The port uses the profile name. Use the same resolver as message bylines once identity names exist. | S |
+| Names use channel-scoped identity names (nicknames) | src/features/messages/TypingIndicator.tsx:94 | DONE (crates/app/src/ui/typing.rs) | - | S |
 | Viewer's own working agents split out of "typing" into an agent chooser on the right: up to 4 overlapping 24px squircle avatars, "+N" | src/features/messages/TypingIndicator.tsx:188 | DONE (crates/app/src/ui/typing.rs) | The port lists every pulse author as "typing". Split owned agents (agent choices) from others and render the avatar stack as a ghost xs button. | M |
 | Agent chooser hover (250ms) opens a "Working now" popover listing each agent row with status, scope ("Channel conversation", "Thread · {excerpt}", "+N more") and open actions | src/features/messages/TypingIndicator.tsx:137 / src/features/messages/TypingIndicator.tsx:353 | DONE (crates/app/src/ui/typing.rs): rows say "Working" and have no "View activity", as the port captures no agent turns and has no activity panel. | Build the popover with `AgentActivityRow` equivalents and conversation/activity navigation. | M |
-| Single-agent click opens its activity panel directly (Down Arrow previews the list); Escape closes the popover | src/features/messages/TypingIndicator.tsx:280 | MISSING (crates/app/src/ui/typing.rs). Blocked: the port has no agent activity panel; a click toggles the list. | Add click-to-open and keyboard handling once the chooser exists. | S |
+| Single-agent click opens its activity panel directly (Down Arrow previews the list); Escape closes the popover | src/features/messages/TypingIndicator.tsx:280 | DONE (crates/app/src/ui/typing.rs) | - | S |
 
 ### Search palette (Search Buzz / Search this conversation)
 
@@ -454,10 +450,10 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Emoji-only draft shows large emoji in the composer | src/features/messages/MessageComposer.tsx:567-570, 1506 | DONE (crates/app/src/ui/composer.rs) | When the draft is Unicode or custom emoji only, render the textarea text at the large emoji size. | S |
 | Archived channel: the draft is kept, but the composer is disabled until the channel is restored | src/features/messages/MessageComposer.tsx:313-322, 495-498 | DONE (crates/app/src/ui/composer.rs) | Disable input and Send for archived channels and keep the draft visible. | S |
 | Cached channel (offline, not yet confirmed): composer shows the local draft, disabled, with no completion or typing | src/features/messages/MessageComposer.tsx:320-322, 1264-1276 | DONE (crates/app/src/ui/composer.rs, crates/app/src/ui/channel.rs) | A cached summary is `read_only`, so the port shows the "Read-only preview · You haven't joined" join notice. Show the disabled composer with its draft instead. | S |
-| Relay connection that cannot write: "This relay connection supports reading only." | src/features/messages/MessageComposer.tsx:1329-1337 | MISSING | The port's relay connection always writes; there is no read-only connection to report. | S |
+| Relay connection that cannot write: "This relay connection supports reading only." | src/features/messages/MessageComposer.tsx:1329-1337 | DIFFERENT: buzz-app's desktop writer always supports kind 9 (`native.ts` `nativeWriteKinds`), so the footer never shows there; the port's session always writes the same way and has no read-only connection to report | - | S |
 | Composer disabled while a send, admission or edit save is in flight | src/features/messages/MessageComposer.tsx:499-506, 1478 | DONE (crates/app/src/ui/composer.rs) | `sending` blocks Send only. The text stays editable while the send is in flight. Make the input read-only while busy. | S |
-| New-conversation composer (New message) is the full MessageComposer in submission mode, with a draft roster | src/features/messages/MessageComposer.tsx:216-227, 245-260, src/features/messages/draft-mention-roster.ts:5 | PARTIAL (crates/app/src/ui/new_message.rs:51) | Not done here: `Composer` is bound to an open channel (draft key, members, outsiders, background uploads to that channel). Reusing it before the DM exists needs a channel-less submission mode with a draft roster and New-message outbox recovery. | M |
-| Composer lab / state gallery (developer specimens: unavailable, read-only, validation) | src/bundled/composer/lab/ComposerStateGallery.tsx:53-78, src/bundled/composer/lab/ComposerCopyPreview.tsx:6-28 | MISSING | Developer-only gallery; optional, not ported. | S |
+| New-conversation composer (New message) is the full MessageComposer in submission mode, with a draft roster | src/features/messages/MessageComposer.tsx:216-227, 245-260, src/features/messages/draft-mention-roster.ts:5 | PARTIAL (crates/app/src/ui/new_message.rs): the same work as channels.md's open row "New message as a full page", which the channels audit owns; done here it would collide | Not done here: `Composer` is bound to an open channel (draft key, members, outsiders, background uploads to that channel). Reusing it before the DM exists needs a channel-less submission mode with a draft roster and New-message outbox recovery. | M |
+| Composer lab / state gallery (developer specimens: unavailable, read-only, validation) | src/bundled/composer/lab/ComposerStateGallery.tsx:53-78, src/bundled/composer/lab/ComposerCopyPreview.tsx:6-28 | SKIPPED (decided) | - | S |
 
 ### Drafts and send
 
@@ -467,8 +463,8 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Draft storage failure: "Could not save this draft on this device..." + Retry draft save | src/features/messages/MessageComposer.tsx:459-467, 1676, 1691-1695 | DONE (crates/app/src/ui/composer.rs) | Surface the save error in the composer with a retry button. | S |
 | Accepted-send cleanup failure: "Message accepted. Could not update the saved draft..." + Retry draft cleanup | src/features/messages/MessageComposer.tsx:672-696, 1672-1681 | DONE (crates/app/src/ui/composer.rs) | Follows from the draft-storage rows. | S |
 | Remember mentioned agents: after a send, the next draft is prefilled with the agent chips (setting in Agent settings) | src/features/messages/MessageComposer.tsx:1124-1133, src/features/messages/mention-preferences.ts:7-43 | DONE (crates/app/src/ui/composer.rs) | Build a follow-up draft of the agent recipients, and add the "remember mentioned agents" preference. | S |
-| A selected recipient is archived: "A selected recipient is archived. Remove it before sending." | src/features/messages/MessageComposer.tsx:1046-1049 | MISSING | The port has no identity archives to check. | S |
-| Session / personal ("Me") composer: mentioned agents are added to the session (and parent channel) on send; "Retry agents" | src/features/messages/MessageComposer.tsx:245-260, 942-982, 1069-1073 | DIFFERENT (crates/app/src/ui/composer.rs:184-191) | The port turns session outsiders into references. buzz-app adds them as session members before sending. This may belong to the Sessions audit. | M |
+| A selected recipient is archived: "A selected recipient is archived. Remove it before sending." | src/features/messages/MessageComposer.tsx:1046-1049 | DONE (crates/app/src/ui/composer.rs) | - | S |
+| Session / personal ("Me") composer: mentioned agents are added to the session (and parent channel) on send; "Retry agents" | src/features/messages/MessageComposer.tsx:245-260, 942-982, 1069-1073 | DONE (crates/app/src/ui/me/recipients.rs, crates/app/src/ui/channel.rs) | - | M |
 | "Retry message preparation" when the custom emoji catalog failed | src/features/messages/MessageComposer.tsx:1710-1728 | DONE (crates/app/src/ui/composer.rs) | Offer `refresh_emoji` next to a send error while the catalog is in error. | S |
 
 ### Formatting tools and link dialog
@@ -495,7 +491,7 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Pasted identity links (`[@Name](nostr:npub…)`) become recipient chips when admitted (at most 32, at a mention boundary); otherwise they stay display chips | src/features/messages/EditableInput.tsx:899-938, src/features/messages/mention-admission.ts:58-82 | DONE (crates/app/src/ui/composer.rs) | After a paste, scan for profile links and convert the admitted ones to chips. | M |
 | A pasted lone URL gets a trailing space | src/features/messages/EditableInput.tsx:1467-1488 | DONE (crates/app/src/ui/composer.rs) | Append a space after a paste that is exactly one link. | S |
 | Copy/cut from the composer writes humanized text and semantic HTML (chips read as `@Name` / `#channel`) | src/features/messages/EditableInput.tsx:885-897, 1437-1446, src/features/messages/composer-clipboard.ts:112-160 | DONE (crates/app/src/ui/composer/clipboard.rs): text flavour as the reference; no HTML flavour, which GPUI's Linux clipboard cannot hold | Plain text only, and channel chips copy as raw Markdown link source. Copy chip labels and add the HTML flavour. | S |
-| Pasting an agent snapshot (Buzz HTML) attaches the uploaded snapshot | src/features/messages/MessageComposer.tsx:1361-1387 | MISSING | Agent snapshot copying is not ported, so there is no clipboard payload to recognise yet. | M |
+| Pasting an agent snapshot (Buzz HTML) attaches the uploaded snapshot | src/features/messages/MessageComposer.tsx:1361-1387 | DONE (crates/app/src/ui/composer.rs, crates/app/src/ui/agents/snapshot_preview.rs) | - | M |
 | The whole conversation pane is the drop zone (`data-attachment-drop-zone`), routed to that pane's composer only | src/features/messages/use-file-drop.ts:17-82 | DONE (crates/app/src/ui/composer.rs, hooks in channel.rs and thread.rs) | Only the composer box accepts drops. Extend the drop target to the channel and thread panes. | S |
 
 ### Attachments and uploads
@@ -530,13 +526,13 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Space accepts only an exact, unique name with no continuing name and a complete choice set | src/bundled/mentions/README.md:176-194 | DONE (crates/app/src/ui/composer/mention_rules.rs:255) | Exactness is checked only among the shown rows; continuations (`Jose Luis`) and pending searches are ignored. | S |
 | At most 50 rows with the status "Narrow your search to see more members." | src/bundled/mentions/MentionCompletion.tsx:171-178, 211-213 | DONE (crates/app/src/ui/composer/mentions.rs:209) | Truncates silently. Add the status line. | S |
 | Completion status lines (Loading recipients…, Searching community…, membership unavailable, names unavailable) and Retry | src/bundled/mentions/MentionCompletion.tsx:189-235 | DONE (crates/app/src/ui/composer/mentions.rs:199-209) | Add a status/retry footer to the completion popup. | S |
-| Disabled rows with a reason (unavailable recipient); Enter/Tab on them do not fall through to Send | src/features/conversation/ComposerCompletions.tsx:291-301, 377 | MISSING | No recipient can be unavailable in the port yet (no identity archives or per-recipient admission), so no row is ever disabled. | S |
+| Disabled rows with a reason (unavailable recipient); Enter/Tab on them do not fall through to Send | src/features/conversation/ComposerCompletions.tsx:291-301, 377 | DONE (crates/app/src/ui/composer.rs) | - | S |
 | Mention picker popover from the @ button: search field ("Search community people and agents"), list, keyboard highlight, "No matching channel members." | src/bundled/mentions/MentionPicker.tsx:150-399 | DONE (crates/app/src/ui/composer/mention_picker.rs:149) | The port's @ button only types "@" to open inline completion. Build the popover. | M |
-| Saved teams: mention a whole team (avatars, "Saved team · N agents", outsider consequence), with team names blocking Space selection | src/bundled/mentions/use-team-mentions.ts:13-207, src/bundled/mentions/TeamMentionAvatars.tsx:6 | MISSING | Needs the channel-kit team catalog, which the port does not have yet; the catalog/teams work owns it. | L |
+| Saved teams: mention a whole team (avatars, "Saved team · N agents", outsider consequence), with team names blocking Space selection | src/bundled/mentions/use-team-mentions.ts:13-207, src/bundled/mentions/TeamMentionAvatars.tsx:6 | DONE (crates/app/src/ui/composer.rs, crates/app/src/ui/composer/mentions.rs, crates/app/src/ui/composer/mention_picker.rs) | - | L |
 | Batch insertion is atomic: "Choose at most 32 recipients" and the length limit ("The team would exceed…") | src/features/messages/MessageComposer.tsx:801-804, 825-885 | DONE (crates/app/src/ui/composer.rs:1728) | Only the writer rejects more than 32 at send. Check at insertion. | S |
 | Recipient avatar spring scale-in animation | src/features/messages/MessageComposer.tsx:1756-1772 | DONE (crates/app/src/ui/composer.rs:3785) | Add the 0.9 → 1 scale on appearance (skipped for keyboard navigation and reduced motion). | S |
 | Namesake qualifiers on chips (`Honey · 4prr`), revealed when a second namesake joins | src/features/messages/RichComposerInput.tsx:73-107, 237-245 | DONE (crates/app/src/ui/composer.rs:2801) | Use the contextual identity-name resolver for chip labels. | M |
-| Recipient no longer admissible at insertion: "This recipient is no longer available. Remove it or refresh choices." | src/features/messages/MessageComposer.tsx:787-800, src/features/messages/mention-admission.ts:29-50 | MISSING | Needs per-recipient admission state (archives, agent availability) the port does not track yet. | S |
+| Recipient no longer admissible at insertion: "This recipient is no longer available. Remove it or refresh choices." | src/features/messages/MessageComposer.tsx:787-800, src/features/messages/mention-admission.ts:29-50 | DONE (crates/app/src/ui/composer.rs) | - | S |
 
 ### Channel and emoji completion, emoji picker
 
@@ -547,7 +543,7 @@ Counts: MISSING 42, PARTIAL 20, DIFFERENT 11, IN PROGRESS 4, DONE 42.
 | Channel completion statuses (Loading channels…, Searching open channels…, Keep typing to narrow the list.) | src/bundled/channels/ChannelCompletion.tsx:156-175 | DONE (crates/app/src/ui/composer/channels.rs) | Status footer (shared with the mention row). | S |
 | Typing the closing colon accepts an exact shortcode; Space never accepts an emoji; a shortcode inside inline code stays literal | src/features/messages/MessageComposer.tsx:908-920, src/features/messages/MessageComposer.test.tsx:2861-2885 | DONE (crates/app/src/ui/composer.rs:1690, crates/app/src/ui/composer/live_markdown.rs:161) | The closing colon works. Add protection for code literals (including a Space-accepted mention inside code). | S |
 | Shared shortcodes are labelled "Community emoji" / "Unicode emoji"; catalog error statuses with retry | src/bundled/emoji/EmojiCompletion.tsx:133, 149-177 | DONE (crates/app/src/ui/composer.rs:1300-1310, 4315-4325) | Detail labels and status lines. | S |
-| Custom emoji shortcodes, links and profile links render inline in the draft (decorations), with Shift+Arrow treating a rendered shortcode as one unit | src/features/messages/RichComposerInput.tsx:114-276, src/features/messages/emoji-selection.ts:2-33 | MISSING | Needs inline images and chip decorations inside the vendored text field (gpui-base), which lays out text runs only; concealment can swap text but not draw an image. Not done here. | M |
+| Custom emoji shortcodes, links and profile links render inline in the draft (decorations), with Shift+Arrow treating a rendered shortcode as one unit | src/features/messages/RichComposerInput.tsx:114-276, src/features/messages/emoji-selection.ts:2-33 | DIFFERENT: GPUI shapes a text field's lines from text runs only, so a custom emoji image cannot sit inside the draft; shortcodes stay text there | - | M |
 | Project resource picker inserts resource atoms ("Resource: …") at the caret | src/features/messages/MessageComposer.tsx:886-896, src/features/messages/EditableInput.tsx:1764-1772 | DONE (crates/app/src/ui/composer_tools.rs, crates/app/src/ui/projects/resource_picker.rs; no hidden "Resource: " prefix, as the port has no screen-reader text) | - | M |
 
 ### Voice notes
@@ -574,7 +570,7 @@ Counts: MISSING 1, PARTIAL 2, DIFFERENT 2, IN PROGRESS 0, DONE 127 (59 of them c
 | The original replaces the blurhash immediately once it is decoded. | src/features/messages/AttachmentImage.tsx:193-207 | DONE (crates/app/src/ui/media.rs) | - | S |
 | If the original fails to load, the tile keeps the blur/placeholder. "Image unavailable" appears only when the URL cannot be resolved. | src/features/messages/AttachmentImage.tsx:61-69, 158 | DONE (crates/app/src/ui/media.rs; crates/app/src/ui/media/attachments.rs) | - | S |
 | Thumbnail labels ("Open image N of M"), keyboard focus ring, and the strip scrolls a keyboard-focused tile into view | src/features/messages/MessageRow.tsx:120-140, 719-722; Messages.module.css:449 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
-| Any format the browser decodes renders (for example AVIF and SVG). | src/features/messages/AttachmentImage.tsx:204 | PARTIAL (crates/app/src/ui/media.rs) | SVG from other hosts renders (relay media never renders SVG, as the reference host refuses it). AVIF still shows as unavailable: GPUI's image decoder has no AVIF support. | S |
+| Any format the browser decodes renders (for example AVIF and SVG). | src/features/messages/AttachmentImage.tsx:204 | DIFFERENT (crates/app/src/ui/media.rs): SVG renders; AVIF shows as unavailable because GPUI's image decoder has no AVIF support | - | S |
 | Non-thumbnail image preview (`MediaAttachment` image mode, min(360, w, 320*w/h)) | src/features/messages/MediaAttachment.tsx:134-189; AttachmentImage.tsx:42-51 | DONE (crates/app/src/ui/media/preview.rs, MediaAttachment's image mode that GitHub bodies use) | - | S |
 | Attachment renderer registry: plugins can claim attachments, with a fallback renderer | src/features/conversation/AttachmentView.tsx:8-36; MessageRow.tsx:684 | DONE (crates/app/src/ui/renderers.rs; crates/app/src/ui/media/attachments.rs) | - | M |
 
@@ -590,7 +586,7 @@ Counts: MISSING 1, PARTIAL 2, DIFFERENT 2, IN PROGRESS 0, DONE 127 (59 of them c
 
 | Feature | buzz-app reference | Port status | What's needed | Size (S/M/L) |
 |---|---|---|---|---|
-| Agent/team snapshot attachment: a file card plus an "Add agent" or "Add team" button that opens the snapshot import preview. The button is disabled when the message is cached or has no source. | src/features/messages/SnapshotAttachment.tsx:12-48; MessageRow.tsx:660 | PARTIAL (crates/app/src/ui/media/attachments.rs) | Detection, the card and the "Add agent"/"Add team" button are done. The port has no snapshot import preview yet; the agents page registers it with `media::attachments::set_snapshot_preview`, and until then the button reports the preview unavailable, as buzz-app does without a listener. | M |
+| Agent/team snapshot attachment: a file card plus an "Add agent" or "Add team" button that opens the snapshot import preview. The button is disabled when the message is cached or has no source. | src/features/messages/SnapshotAttachment.tsx:12-48; MessageRow.tsx:660 | DONE (crates/app/src/ui/media/attachments.rs, crates/app/src/ui/agents/snapshot_preview.rs) | - | M |
 | Snapshot preview error alert (message or "Snapshot preview is unavailable.") | src/features/messages/SnapshotAttachment.tsx:30-38, 47 | DONE (crates/app/src/ui/media/attachments.rs) | - | S |
 
 ### Inline video preview (timeline)

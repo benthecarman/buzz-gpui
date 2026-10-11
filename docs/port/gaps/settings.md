@@ -5,8 +5,8 @@ Port: `/home/ben/projects/buzz-gpui` main checkout (cited relative to
 `crates/app/src/` unless another crate is named). Worktrees were not read.
 
 Statuses: MISSING, PARTIAL (what is missing is stated), DIFFERENT (how is
-stated), IN PROGRESS (another agent is adding it), DONE (counted at the end,
-not listed).
+stated), DONE (with the files), SKIPPED (decided: one of the decisions in
+GAPS.md).
 
 Line numbers in buzz-app `src/app/*` files are for the file itself.
 
@@ -17,7 +17,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | "Updates" section in the App group ("Software updates": version, status text, Check for updates / Update now / Retry) | `src/app/settings-sections.ts:48`; `src/app/Settings.tsx:177-182` (renders `features/updates/UpdateSettings.tsx`) | DONE (ui/settings/updates.rs: this build has no updater, so a check ends in buzz-app's "unavailable on this build" state; the updater is deferred per GAPS.md) | Add an Updates section and an updater backend for Linux packages. The section contents belong to the updates audit. | M |
-| Plugin-card nav entries: community group "Templates" and "Personal groups"; "Administration → Membership" (only for owner/admin, by card visibility); "Integrations → Builderlab"; "Account → Pair mobile"; "Communities → Hosted communities" | `src/app/settings-sections.ts:62-127`; `src/features/settings/service.ts:50-69,93-105` (visibility gating) | PARTIAL: Personal groups (crates/app/src/ui/settings/personal_groups.rs) and Account → Pair mobile (settings/pairing/) are registered cards; Builderlab and Hosted communities are skipped (GAPS.md); Templates and Membership are their slices' cards | Native sections for each bundled card that the port keeps. Permission-gated visibility is needed for Administration. The card contents belong to other audits. | L |
+| Plugin-card nav entries: community group "Templates" and "Personal groups"; "Administration → Membership" (only for owner/admin, by card visibility); "Integrations → Builderlab"; "Account → Pair mobile"; "Communities → Hosted communities" | `src/app/settings-sections.ts:62-127`; `src/features/settings/service.ts:50-69,93-105` (visibility gating) | DONE (crates/app/src/ui/settings/cards.rs, crates/app/src/ui/settings/personal_groups.rs, crates/app/src/ui/settings/pairing/): Builderlab and Hosted communities are skipped by decision | - | L |
 | "Communities" section (saved communities, Selected badge, Leave) | No equivalent page. buzz-app's "Communities" group holds only the Hosted plugin card (`settings-sections.ts:106-112`). | DONE (port addition, kept: the rail menu's Leave lives here until the rail menu exists) | Decide whether to keep it. If kept, it is an addition to the reference. | S |
 | Leave a community end to end | Community rail menu in buzz-app (outside this slice) | DONE (ui/settings/communities.rs, community.rs) | Another agent is adding it. | — |
 | "About" section (version, license, notices) | None (version is shown on the Updates page) | DONE (port addition, kept for the license notices; the version is also on Updates) | Keep as an addition, or fold the version into Updates. | S |
@@ -121,7 +121,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 | Warning "{KEY} overrides this provider selection. Replace or remove it under Environment variables." | `src/app/AgentDefaultsCard.tsx:206-240` | DONE (`ui/agents/defaults.rs`) | Provider override detection and warning. | S |
 | Note "A saved GOOSE_PROVIDER override has a hidden value…" | `src/app/AgentDefaultsCard.tsx:673-679` | DONE (`ui/agents/defaults.rs`) | Add the note. | S |
 | API key help: "{ENV} is used for model lookup and every local agent without its own value… Saved values are never shown again." | `src/app/AgentDefaultsCard.tsx:680-706` | DONE (`ui/agents/defaults.rs`) | Align it for the defaults form. | S |
-| Browse models for Buzz Agent (Databricks "connect" with build host and filter) | `src/app/AgentDefaultsCard.tsx:388-460` | PARTIAL (`ui/agents/defaults.rs`): the card sends buzz-app's "connect" lookup with the build host and filter, but the host still refuses Databricks catalogs. Blocked on the Databricks browser sign-in and catalog (agents.md, L). | Databricks model lookup for buzz-agent. | M |
+| Browse models for Buzz Agent (Databricks "connect" with build host and filter) | `src/app/AgentDefaultsCard.tsx:388-460` | DONE (crates/app/src/ui/agents/defaults.rs, crates/app/src/hosts/models.rs) | - | M |
 | "Search models" field when there are more than 10 models (up to 10 matches plus the selected one) | `src/app/AgentDefaultsCard.tsx:462-475` | DONE (`ui/agents/defaults.rs`): the defaults card now has buzz-app's search field and 10-match list. | Acceptable. Note the difference. | S |
 | "Cancel model lookup" while a lookup runs | `src/app/AgentDefaultsCard.tsx:495-506` | DONE (`ui/agents/defaults.rs`). The host lookup itself runs on to its timeout; its result is dropped. | Cancellable lookup. | S |
 | Lookup status lines: "Loading {label} models…", "Model choices loaded. Availability does not confirm inference access.", "No {label} models found…", "Cancelled. Retry when ready." | `src/app/AgentDefaultsCard.tsx:404,445-458,503` | DONE (`ui/agents/defaults.rs`) | Add the status lines. | S |
@@ -150,7 +150,7 @@ Line numbers in buzz-app `src/app/*` files are for the file itself.
 |---|---|---|---|---|
 | Namesake disambiguation: a public-key suffix ("Alice · pktz"), "{Owner}’s {Agent}" and "{Name} (agent)", with the viewer and the viewer's own agents given priority | `src/features/identity-names/policy.ts:11-112` | DONE (ui/identity.rs, with the messages rework) | A shared resolver used by messages, mentions and member lists. | M |
 | Agent directory names: signed agent profile, then library alias, then same-community native agent name overriding the profile | `src/features/identity-names/directory.ts:15-149`; `src/features/identity-names/service.ts` | DONE (ui/identity.rs, with the messages rework) | Merge host agent names, scoped to the community. | M |
-| App-local profile targets `buzz:agent-profile:<hex>` and `buzz:agent-instance:<json>` (agent avatar hint, instance profile panel) | `src/features/profiles/target.ts:1-36`; `src/features/profiles/instance-target.ts:1-52` | PARTIAL (crates/app/src/ui/profile_panel.rs): the profile panel opens `buzz:agent-profile:<hex>` with the agent hint (squircle avatar, "Unknown agent"). Not done: `buzz:agent-instance:<json>` and the instance profile panel (channels.md "Instance profile panel") | The instance target and panel | M |
+| App-local profile targets `buzz:agent-profile:<hex>` and `buzz:agent-instance:<json>` (agent avatar hint, instance profile panel) | `src/features/profiles/target.ts:1-36`; `src/features/profiles/instance-target.ts:1-52` | PARTIAL (crates/app/src/ui/profile_panel.rs): `buzz:agent-instance:<json>` needs the instance profile panel, channels.md's open row "Instance profile panel", which the channels audit owns | The instance target and panel | M |
 
 ## 11. Account actions (features/account-actions)
 
@@ -167,16 +167,16 @@ manager (`crates/app/src/plugins.rs`); external plugins are skipped.
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Plugins section: one row per plugin with an enable switch; Channels shows "Required" | `src/app/Settings.tsx:219-364` (rows 277-315) | DONE (crates/app/src/ui/settings/plugins.rs, crates/app/src/plugins.rs) | - | L |
-| Roll back / Reload / Delete per plugin, plus the rollback-blocked reason | `src/app/Settings.tsx:321-357` | N/A (external plugins are skipped by decision; bundled plugins have no rollback, reload or delete) | - | M |
+| Roll back / Reload / Delete per plugin, plus the rollback-blocked reason | `src/app/Settings.tsx:321-357` | SKIPPED (decided) | - | M |
 | "External plugins are paused for this launch…", "Plugin settings couldn’t refresh", "Plugin change wasn’t confirmed", RecoveryScreen, "Plugin settings are unavailable…" | `src/app/Settings.tsx:244-275` | DONE for bundled plugins (crates/app/src/plugins.rs, crates/app/src/ui/settings/plugins.rs): the recovery screen, "Plugin change wasn’t confirmed" and "Plugin settings are unavailable…"; the paused and refresh notices concern external plugins and catalog polling, which this port does not have | - | S |
-| "Load a plugin" → "Load from folder" | `src/app/PluginImport.tsx:120-146` | N/A (external plugin import is skipped by decision) | - | M |
-| "Load from Git": repository and branch/tag form, SSH/HTTPS help, Buzz git sign-in for community repositories, "Find plugins" | `src/app/PluginImport.tsx:147-195`; `src/app/Settings.tsx:235-242` | N/A (external plugin import is skipped by decision) | - | M |
-| Import preview: source and commit, candidate folders (radio), "Folders skipped (N)", declared host access with new/changed/removed grants, replace and rollback notice, Install/Update plugin, Close preview, discarding the token on unmount | `src/app/PluginImport.tsx:16-30,57-118,207-331` | N/A (external plugin import is skipped by decision) | - | M |
+| "Load a plugin" → "Load from folder" | `src/app/PluginImport.tsx:120-146` | SKIPPED (decided) | - | M |
+| "Load from Git": repository and branch/tag form, SSH/HTTPS help, Buzz git sign-in for community repositories, "Find plugins" | `src/app/PluginImport.tsx:147-195`; `src/app/Settings.tsx:235-242` | SKIPPED (decided) | - | M |
+| Import preview: source and commit, candidate folders (radio), "Folders skipped (N)", declared host access with new/changed/removed grants, replace and rollback notice, Install/Update plugin, Close preview, discarding the token on unmount | `src/app/PluginImport.tsx:16-30,57-118,207-331` | SKIPPED (decided) | - | M |
 | Plugin contributions shown in Settings: settings cards, notification categories, shortcut groups, account actions | `src/features/settings/service.ts:50-160`; `src/app/NotificationSettings.tsx:174-185`; `src/app/ShortcutSettings.tsx:168-183`; `src/features/account-actions/service.ts` | DONE (notification categories: crates/app/src/notifications/categories.rs; account action: crates/app/src/ui/account.rs; every contribution is hidden while its plugin is off). Settings cards come from the shared card registry (ui/settings/cards.rs, another slice), which should hide cards with `plugins::enabled_key`; shortcut groups belong to Terminal | - | L |
-| Builderlab identity-binding signer (kind 24243, pinned origin) | `src-tauri/src/identity.rs:969-1032` | MISSING (needed only if Builderlab is ported) | A purpose-bound signer in `crates/identity`. | S |
+| Builderlab identity-binding signer (kind 24243, pinned origin) | `src-tauri/src/identity.rs:969-1032` | SKIPPED (decided) | - | S |
 | Channel-recipe NIP-44 cipher (`kit_cipher`, used by Templates) | `src-tauri/src/identity.rs:1058-1083` | DONE (crates/relay/src/kit/mod.rs `seal`/`open`) | - | S |
 | "Managed by" agent-owner preview (used by Templates) | `src/features/profiles/AgentOwnerPreview.tsx:1-70` | DONE (crates/app/src/ui/templates/owner.rs) | - | S |
-| Sign-out also ends Builderlab and hosted-community logins | `src/app/ProfileSettings.tsx:404` | MISSING (only if those plugins are ported) | Clear plugin logins on sign-out. | S |
+| Sign-out also ends Builderlab and hosted-community logins | `src/app/ProfileSettings.tsx:404` | SKIPPED (decided) | - | S |
 
 ---
 
@@ -230,15 +230,11 @@ localhost dev-server build.
 
 | Status | Count |
 |---|---|
-| MISSING | 53 |
-| PARTIAL | 13 |
-| DIFFERENT | 27 |
-| IN PROGRESS | 10 |
-| DONE | 67 |
+| MISSING | 0 |
+| PARTIAL | 1 |
+| DIFFERENT | 0 |
+| DONE | 96 |
+| SKIPPED (decided) | 6 |
 
-DONE by area: shell 8, profile 13, identity setup and native identity 7,
-appearance 5, notifications 3, shortcuts 1, agents (harness list and defaults
-form) 13, user status 13, profile helpers 4.
-
-Of the 53 MISSING rows, 11 are in section 12 and come from the missing plugin
-runtime. Treat them as one design decision before sizing them one by one.
+Counts are of the rows in the tables. The one open row, the app-local
+instance target, waits on channels.md's instance profile panel.
