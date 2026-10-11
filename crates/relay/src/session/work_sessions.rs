@@ -10,7 +10,6 @@
 
 use super::actions::{Context, Ops, read};
 use super::{Session, SessionSnapshot};
-use crate::RosterStatus;
 use crate::discovery::{ChannelSummary, ChannelType, SESSION_CHANNEL_DESCRIPTION, ScanOptions};
 use crate::event::{Verified, kinds};
 use crate::lifecycle;
@@ -18,6 +17,7 @@ use crate::messages::Draft;
 use crate::outbox::{Delivery, SendOptions};
 use crate::reader::{Priority, ReadOptions};
 use crate::socket::Filter;
+use crate::{RosterRefresh, RosterStatus};
 use nostr::prelude::EventId;
 use serde_json::json;
 use std::collections::HashSet;
@@ -294,6 +294,32 @@ fn listed(snapshot: &SessionSnapshot, id: &str) -> Option<ChannelSummary> {
         .cloned()
 }
 
+/// Tells a roster error from a scan that started after a refresh began
+/// apart from an earlier one, which stays until the next scan finishes.
+#[derive(Default)]
+struct FreshScan {
+    /// No scan was running at some point since the refresh began.
+    idle: bool,
+    /// A scan started after that.
+    started: bool,
+}
+
+impl FreshScan {
+    /// The roster error that decides the refresh, if any.
+    fn error(&mut self, refresh: &RosterRefresh, roster: &RosterStatus) -> Option<String> {
+        let pending = *refresh == RosterRefresh::Pending;
+        if pending {
+            self.started |= self.idle;
+            return None;
+        }
+        self.idle = true;
+        match roster {
+            RosterStatus::Error(error) if self.started => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
 impl Session {
     fn work_ops(&self) -> Ops {
         self.ops()
@@ -427,19 +453,19 @@ impl Session {
                             .is_some_and(|channel| expected.satisfied(&channel, session_only))
                 };
                 let gate = async {
-                    // An earlier roster error does not decide this retry.
-                    let mut first = true;
+                    let mut scans = FreshScan::default();
                     loop {
                         {
                             let current = snapshot.borrow_and_update();
-                            if !first && let RosterStatus::Error(error) = &current.roster {
-                                return Err(error.clone());
+                            if let Some(error) =
+                                scans.error(&current.live_status.roster, &current.roster)
+                            {
+                                return Err(error);
                             }
                             if satisfied(&current) {
                                 return Ok(());
                             }
                         }
-                        first = false;
                         if snapshot.changed().await.is_err() {
                             return Err("The community connection changed.".to_owned());
                         }
@@ -792,6 +818,30 @@ mod tests {
 
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     const PARENT: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn ignores_a_roster_error_from_an_earlier_scan() {
+        let stale = RosterStatus::Error("old".into());
+        let mut scans = FreshScan::default();
+        // The old error stays while idle, and while the new scan runs.
+        assert_eq!(
+            scans.error(&RosterRefresh::Error("old".into()), &stale),
+            None
+        );
+        assert_eq!(scans.error(&RosterRefresh::Pending, &stale), None);
+        let fresh = RosterStatus::Error("new".into());
+        assert_eq!(
+            scans.error(&RosterRefresh::Error("new".into()), &fresh),
+            Some("new".into())
+        );
+        // A scan already running when the refresh began is not fresh.
+        let mut scans = FreshScan::default();
+        assert_eq!(scans.error(&RosterRefresh::Pending, &stale), None);
+        assert_eq!(
+            scans.error(&RosterRefresh::Error("old".into()), &stale),
+            None
+        );
+    }
 
     #[test]
     fn create_draft_carries_session_metadata() {
