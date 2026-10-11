@@ -9,6 +9,8 @@ on:
       - .github/workflows/build.yml
       - .github/actions/**
       - scripts/package-*
+      - scripts/bundle-macos-*
+      - scripts/check-macos-*
 
 concurrency:
   group: build-${{ github.ref }}
@@ -50,7 +52,14 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the release build when packaging fails after it.
+          cache-on-failure: true
       - run: scripts/package-macos.sh
+      # The bundle loads only what it carries, and plays media with the
+      # GStreamer framework moved away.
+      - run: scripts/check-macos-dmg.sh dist/*.dmg
+      - run: ls -l dist/*.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: buzz-macos-${{ matrix.arch }}
