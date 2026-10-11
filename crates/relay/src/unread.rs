@@ -4646,6 +4646,65 @@ mod tests {
         assert!(!mention.muted_suppresses());
     }
 
+    /// Someone else's threads and top-level mentions, read in the channel
+    /// timeline: nothing stays unread, and no thread dot remains.
+    #[test]
+    fn reading_the_timeline_leaves_no_dot_for_unfollowed_threads() {
+        let mut h = H::new();
+        h.grant(&[("room", Some("stream"))]);
+        let viewer = h.vpk();
+        let mut at = 10;
+        let mut next = |h: &H, content: &str, extra: Vec<Vec<String>>| {
+            at += 1;
+            h.alice("room", content, at, extra)
+        };
+        let (mut top, mut replies) = (Vec::new(), Vec::new());
+        for content in ["one", "two"] {
+            top.push(next(&h, content, vec![]));
+        }
+        let root = next(&h, "root", vec![]);
+        let r = root.id_hex();
+        top.push(root);
+        for content in ["a", "b", "c"] {
+            replies.push(next(&h, content, reply_tags(&r, &r)));
+        }
+        top.push(next(&h, "@viewer", tags(&[&["p", &viewer]])));
+        top.push(next(&h, "after", vec![]));
+        for content in ["three", "four"] {
+            top.push(next(&h, content, vec![]));
+        }
+        let second = next(&h, "second root", vec![]);
+        let s = second.id_hex();
+        top.push(second);
+        for content in ["d", "e"] {
+            replies.push(next(&h, content, reply_tags(&s, &s)));
+        }
+        replies.push(next(&h, "late", reply_tags(&r, &r)));
+        top.push(next(&h, "@viewer again", tags(&[&["p", &viewer]])));
+        top.push(next(&h, "final", vec![]));
+        replies.extend(top.iter().cloned());
+        h.emit(&replies);
+        h.room();
+        h.unread.activity("room", &h.reads);
+        h.settle();
+        assert_eq!(h.counts(&room()), (Some(top.len() as u32), Some(2)));
+        assert_eq!(h.unread.activity("room", &h.reads).items, Some(vec![]));
+
+        // The session's dwell: catch up the bottom, then observe each row.
+        let mut lease = h.unread.reading("room", &h.reads).unwrap();
+        let bottom = top.last().unwrap().id_hex();
+        h.unread
+            .catch_up(&mut h.reads, &mut lease, &bottom, None, T)
+            .unwrap();
+        for row in &top {
+            let id = [row.id_hex()];
+            h.unread.observe(&mut h.reads, &mut lease, &id, T).unwrap();
+        }
+        h.unread.end_reading(lease);
+        assert_eq!(h.counts(&room()), (Some(0), Some(0)));
+        assert_eq!(h.unread.activity("room", &h.reads).items, Some(vec![]));
+    }
+
     #[test]
     fn badges_follow_the_sidebar_rules() {
         let mut snapshot = UnreadSnapshot::inaccessible(room());
