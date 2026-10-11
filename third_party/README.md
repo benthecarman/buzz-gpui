@@ -14,6 +14,10 @@ Patches:
   xdg-activation token the app was handed, so GNOME and other Wayland
   compositors raise the window when a notification is clicked or a second
   launch hands over. Without it they refuse, since the app isn't focused.
+- Naming windows at once: a Wayland toplevel gets its title and app id as
+  soon as it is created, not after its renderer, whose setup can flush the
+  connection first. GNOME otherwise showed the window as an unknown app,
+  a second dock icon, for the ~180 ms in between.
 - Pasting files: a `text/uri-list` clipboard offer of local files reads as
   `ClipboardEntry::ExternalPaths`, followed by the paths as text, on Wayland
   and X11. Other URI lists still read as text.
