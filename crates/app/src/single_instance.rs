@@ -1,16 +1,24 @@
 //! One running app per profile. A second launch hands its `buzz://` URL
 //! (or nothing, just to be focused) and its activation token to the
-//! running instance over a Unix socket and exits.
+//! running instance and exits: over a Unix socket on Linux and macOS, over
+//! a named pipe on Windows.
 //!
 //! The socket is keyed by the data directory, so separate profiles (and
 //! development runs with their own `XDG_DATA_HOME`) never capture each
-//! other's launches. It lives in `$XDG_RUNTIME_DIR`, which only the user
-//! can enter; without one it falls back to the data directory.
+//! other's launches. On Linux it lives in `$XDG_RUNTIME_DIR`, which only
+//! the user can enter; without one it falls back to the data directory.
+//! On macOS it lives in the user's own `$TMPDIR`, which keeps the path
+//! within the socket address limit. On Windows the data directory is in
+//! the user's profile, so the pipe's name is the user's own too.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+#[cfg(unix)]
+pub use unix::{Listener, claim, serve};
+#[cfg(windows)]
+pub use windows::{Listener, claim, serve};
 
 /// Longest message accepted: a URL as long as the link parser takes.
 const MAX_MESSAGE: u64 = 32_768;
@@ -28,18 +36,26 @@ pub struct Handoff {
 
 pub enum Claim {
     /// This is the running instance; serve the socket.
-    Primary(UnixListener),
+    Primary(Listener),
     /// Another instance took the message.
     Forwarded,
 }
 
 /// The socket for the profile stored in `data_dir`.
 pub fn socket_path(data_dir: &Path) -> PathBuf {
-    let base = dirs::runtime_dir().unwrap_or_else(|| data_dir.to_path_buf());
-    base.join(format!(
-        "buzz-gpui-{:016x}.sock",
+    let name = format!(
+        "buzz-gpui-{:016x}",
         fnv1a(data_dir.as_os_str().as_encoded_bytes())
-    ))
+    );
+    if cfg!(windows) {
+        return PathBuf::from(format!(r"\\.\pipe\{name}"));
+    }
+    let base = if cfg!(target_os = "macos") {
+        std::env::temp_dir()
+    } else {
+        dirs::runtime_dir().unwrap_or_else(|| data_dir.to_path_buf())
+    };
+    base.join(format!("{name}.sock"))
 }
 
 /// A hash that stays the same across builds, so differently built copies
@@ -50,35 +66,15 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-/// Becomes the running instance, or hands `handoff` to the one that is.
-pub fn claim(path: &Path, handoff: &Handoff) -> io::Result<Claim> {
+/// The line or two a second launch writes, each ending in a line break.
+fn message(handoff: &Handoff) -> String {
     let mut message = single_line(&handoff.link);
     if let Some(token) = &handoff.activation_token {
         message.push('\n');
         message.push_str(&single_line(token));
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    for _ in 0..2 {
-        match UnixListener::bind(path) {
-            Ok(listener) => return Ok(Claim::Primary(listener)),
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                match UnixStream::connect(path) {
-                    Ok(mut stream) => {
-                        stream.set_write_timeout(Some(TIMEOUT))?;
-                        stream.write_all(message.as_bytes())?;
-                        stream.write_all(b"\n")?;
-                        return Ok(Claim::Forwarded);
-                    }
-                    // Left behind by an instance that exited.
-                    Err(_) => std::fs::remove_file(path)?,
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::other("the instance socket stayed in use"))
+    message.push('\n');
+    message
 }
 
 /// A field may not break the line-based message.
@@ -86,27 +82,8 @@ fn single_line(value: &str) -> String {
     value.replace(['\r', '\n'], "")
 }
 
-/// Passes each handoff from later launches to `deliver`, on a thread of
-/// its own, for as long as the process runs.
-pub fn serve(listener: UnixListener, deliver: impl Fn(Handoff) + Send + 'static) {
-    let spawned = std::thread::Builder::new()
-        .name("buzz-instance".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                match stream.and_then(read_message) {
-                    Ok(message) => deliver(message),
-                    Err(error) => tracing::warn!(%error, "could not read from a second launch"),
-                }
-            }
-        });
-    if let Err(error) = spawned {
-        tracing::warn!(%error, "could not listen for second launches");
-    }
-}
-
-fn read_message(stream: UnixStream) -> io::Result<Handoff> {
-    stream.set_read_timeout(Some(TIMEOUT))?;
-    let mut reader = BufReader::new(stream.take(MAX_MESSAGE + 1));
+fn read_message(reader: impl Read) -> io::Result<Handoff> {
+    let mut reader = BufReader::new(reader.take(MAX_MESSAGE + 1));
     let mut link = String::new();
     reader.read_line(&mut link)?;
     let mut token = String::new();
@@ -121,10 +98,211 @@ fn read_message(stream: UnixStream) -> io::Result<Handoff> {
     })
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+mod unix {
+    use super::{Claim, Handoff, TIMEOUT, message, read_message};
+    use std::io::{self, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::Path;
+
+    pub type Listener = UnixListener;
+
+    /// Becomes the running instance, or hands `handoff` to the one that is.
+    pub fn claim(path: &Path, handoff: &Handoff) -> io::Result<Claim> {
+        let message = message(handoff);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        for _ in 0..2 {
+            match UnixListener::bind(path) {
+                Ok(listener) => return Ok(Claim::Primary(listener)),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    match UnixStream::connect(path) {
+                        Ok(mut stream) => {
+                            stream.set_write_timeout(Some(TIMEOUT))?;
+                            stream.write_all(message.as_bytes())?;
+                            return Ok(Claim::Forwarded);
+                        }
+                        // Left behind by an instance that exited.
+                        Err(_) => std::fs::remove_file(path)?,
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other("the instance socket stayed in use"))
+    }
+
+    /// Passes each handoff from later launches to `deliver`, on a thread of
+    /// its own, for as long as the process runs.
+    pub fn serve(listener: UnixListener, deliver: impl Fn(Handoff) + Send + 'static) {
+        let spawned = std::thread::Builder::new()
+            .name("buzz-instance".into())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    let message = stream.and_then(|stream| {
+                        stream.set_read_timeout(Some(TIMEOUT))?;
+                        read_message(stream)
+                    });
+                    match message {
+                        Ok(message) => deliver(message),
+                        Err(error) => tracing::warn!(%error, "could not read from a second launch"),
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not listen for second launches");
+        }
+    }
+}
+
+/// The same over a named pipe. A pipe goes away with the last process that
+/// has it open, so there is never a stale one to replace.
+#[cfg(windows)]
+mod windows {
+    use super::{Claim, Handoff, MAX_MESSAGE, TIMEOUT, message, read_message};
+    use std::io;
+    use std::path::Path;
+    use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+    use tokio::runtime::Runtime;
+
+    /// What `CreateNamedPipe` reports when another process made the first
+    /// instance, and what `CreateFile` reports while every instance is
+    /// connected to someone else.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    /// The first instance of the pipe, and the runtime that drives it.
+    pub struct Listener {
+        name: String,
+        server: NamedPipeServer,
+        runtime: Runtime,
+    }
+
+    /// Becomes the running instance, or hands `handoff` to the one that is.
+    pub fn claim(path: &Path, handoff: &Handoff) -> io::Result<Claim> {
+        let name = path.to_string_lossy().into_owned();
+        let message = message(handoff);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        for _ in 0..2 {
+            let created = {
+                let _entered = runtime.enter();
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .reject_remote_clients(true)
+                    .create(&name)
+            };
+            match created {
+                Ok(server) => {
+                    return Ok(Claim::Primary(Listener {
+                        name,
+                        server,
+                        runtime,
+                    }));
+                }
+                Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                    match runtime.block_on(forward(&name, &message)) {
+                        Ok(()) => return Ok(Claim::Forwarded),
+                        // It exited between the two calls.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other("the instance pipe stayed in use"))
+    }
+
+    async fn forward(name: &str, message: &str) -> io::Result<()> {
+        let until = Instant::now() + TIMEOUT;
+        let mut client = loop {
+            match ClientOptions::new().open(name) {
+                Ok(client) => break client,
+                Err(error)
+                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < until =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        tokio::time::timeout(TIMEOUT, client.write_all(message.as_bytes()))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    }
+
+    /// Passes each handoff from later launches to `deliver`, on a thread of
+    /// its own, for as long as the process runs.
+    pub fn serve(listener: Listener, deliver: impl Fn(Handoff) + Send + 'static) {
+        let Listener {
+            name,
+            mut server,
+            runtime,
+        } = listener;
+        let spawned = std::thread::Builder::new()
+            .name("buzz-instance".into())
+            .spawn(move || {
+                runtime.block_on(async move {
+                    loop {
+                        if let Err(error) = server.connect().await {
+                            tracing::warn!(%error, "could not accept a second launch");
+                        }
+                        // The next launch finds a fresh instance while this
+                        // one is read.
+                        let next = match ServerOptions::new().create(&name) {
+                            Ok(next) => next,
+                            Err(error) => {
+                                tracing::warn!(%error, "stopped listening for second launches");
+                                return;
+                            }
+                        };
+                        let connected = std::mem::replace(&mut server, next);
+                        let message = tokio::time::timeout(TIMEOUT, read_lines(connected))
+                            .await
+                            .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
+                            .and_then(|bytes| read_message(bytes.as_slice()));
+                        match message {
+                            Ok(message) => deliver(message),
+                            Err(error) => {
+                                tracing::warn!(%error, "could not read from a second launch")
+                            }
+                        }
+                    }
+                })
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not listen for second launches");
+        }
+    }
+
+    /// Reads until the client closes the pipe or has sent both lines.
+    async fn read_lines(mut pipe: NamedPipeServer) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        while bytes.iter().filter(|byte| **byte == b'\n').count() < 2
+            && bytes.len() as u64 <= MAX_MESSAGE
+        {
+            match pipe.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixDatagram;
+    use std::io::Write;
+    use std::os::unix::net::{UnixDatagram, UnixStream};
     use std::sync::mpsc;
 
     fn scratch(name: &str) -> PathBuf {
