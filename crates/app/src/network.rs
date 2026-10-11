@@ -2,8 +2,9 @@
 //! buzz-app: when a default route appears again, every community showing a
 //! saved snapshot reconnects.
 //!
-//! Sampled every 5 s from the kernel's routing tables. Where they cannot be
-//! read the machine counts as always online, so nothing ever fires.
+//! Sampled every 5 s: on Linux from the kernel's routing tables, elsewhere
+//! by asking the system for a route to the internet. Where neither answers
+//! the machine counts as always online, so nothing ever fires.
 
 use crate::community::AppState;
 use futures::StreamExt;
@@ -44,6 +45,7 @@ pub fn init(cx: &mut App) {
 }
 
 /// Whether a default route exists, over IPv4 or IPv6.
+#[cfg(target_os = "linux")]
 fn reachable() -> Option<bool> {
     let v4 = std::fs::read_to_string("/proc/net/route").ok();
     let v6 = std::fs::read_to_string("/proc/net/ipv6_route").ok();
@@ -53,7 +55,21 @@ fn reachable() -> Option<bool> {
     Some(v4.as_deref().is_some_and(default_v4) || v6.as_deref().is_some_and(default_v6))
 }
 
+/// Whether a route to the internet exists, over IPv4 or IPv6. Connecting
+/// a UDP socket sends nothing: the system only picks the route, and
+/// refuses when it has none. The addresses are reserved for documentation,
+/// so only a default route reaches them.
+#[cfg(not(target_os = "linux"))]
+fn reachable() -> Option<bool> {
+    use std::net::UdpSocket;
+    let routed = |local: &str, remote: &str| {
+        UdpSocket::bind(local).and_then(|socket| socket.connect(remote))
+    };
+    Some(routed("0.0.0.0:0", "192.0.2.1:9").is_ok() || routed("[::]:0", "[2001:db8::1]:9").is_ok())
+}
+
 /// `/proc/net/route`: a line with destination 0 and the up flag.
+#[cfg(any(target_os = "linux", test))]
 fn default_v4(table: &str) -> bool {
     table.lines().skip(1).any(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -64,6 +80,7 @@ fn default_v4(table: &str) -> bool {
 }
 
 /// `/proc/net/ipv6_route`: `::/0` on any interface but loopback.
+#[cfg(any(target_os = "linux", test))]
 fn default_v6(table: &str) -> bool {
     table.lines().any(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
