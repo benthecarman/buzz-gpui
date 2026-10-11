@@ -3,6 +3,7 @@
 use super::*;
 use crate::agent_plugins::claude_code::claude::testing::{FakeClaude, FakeSpawn, flush};
 use crate::agent_plugins::claude_code::sessions::SavedSession;
+use crate::agent_plugins::owner_relay::ChannelInfo;
 use crate::buzz_mcp::{ClientResult, Upload};
 
 fn own() -> String {
@@ -78,6 +79,9 @@ impl AgentActions for FakeAgent {
     }
     fn owner(&self) -> String {
         alice()
+    }
+    fn name(&self) -> String {
+        "Claude".into()
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
         let mut published = locked(&self.published);

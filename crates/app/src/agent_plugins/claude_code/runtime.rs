@@ -7,14 +7,15 @@
 //! only reports a turn that fails.
 
 use super::claude::{Launch, Settled, ToolServer};
-use super::client::{AgentActions, AppClient};
 use super::prompt::{
     CONTEXT_LIMIT, Channel, Scope, Thread, steer_prompt, system_prompt, timer_prompt, turn_prompt,
 };
 use super::sessions::{
     AgentSessions, DeliverOptions, FileSessions, SessionStore, SessionView, SessionsOptions,
 };
+use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
+use crate::buzz_mcp::app_client::{self, AgentActions, AppClient};
 use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template, rpc, tools::hex};
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -101,31 +102,6 @@ const MEMORY_TTL: Duration = Duration::from_secs(5 * 60);
 const MEMORY_TIMEOUT: Duration = Duration::from_secs(5);
 const NAMES_TIMEOUT: Duration = Duration::from_secs(2);
 const CHAT: [u32; 2] = [9, 40002];
-
-/// A channel as the owner's session sees it.
-#[derive(Clone, Debug, Default)]
-pub struct ChannelInfo {
-    pub name: Option<String>,
-    pub dm: bool,
-    pub members: Vec<String>,
-}
-
-/// What the runtime reads as the owner: the selected community's session.
-pub trait OwnerRelay: Send + Sync {
-    fn channel(&self, id: &str) -> Option<ChannelInfo>;
-    /// Reads the community as the owner.
-    fn read(&self, filters: Vec<Value>) -> BoxFuture<'static, Result<Vec<BuzzEvent>, String>>;
-    /// Display names of `pubkeys`, waiting briefly for profiles not yet
-    /// known.
-    fn names(
-        &self,
-        pubkeys: Vec<String>,
-        members: Vec<String>,
-    ) -> BoxFuture<'static, HashMap<String, String>>;
-    /// The agent's memory, read back with the owner's key: it is encrypted
-    /// to the owner, so no agent key is needed to read it.
-    fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>>;
-}
 
 /// Why an agent woke, as this type needs it.
 #[derive(Clone, Debug)]
@@ -640,7 +616,7 @@ impl ClaudeRuntime {
             let client: Option<Arc<dyn BuzzClient>> = handle.map(|agent| {
                 let memories = {
                     let (this, pubkey) = (this.clone(), pubkey.clone());
-                    Arc::new(move || this.memories(&pubkey).boxed()) as super::client::Memories
+                    Arc::new(move || this.memories(&pubkey).boxed()) as app_client::Memories
                 };
                 let remembered = {
                     let state = state.clone();
@@ -648,7 +624,7 @@ impl ClaudeRuntime {
                         if slug == "core" {
                             locked(&state).memory = None;
                         }
-                    }) as super::client::Remembered
+                    }) as app_client::Remembered
                 };
                 Arc::new(AppClient {
                     agent,
@@ -656,6 +632,8 @@ impl ClaudeRuntime {
                     cwd: cwd.clone(),
                     memories,
                     remembered,
+                    check: None,
+                    signal: None,
                 }) as Arc<dyn BuzzClient>
             });
             async move { Ok(rpc::respond(client, &context, &message).await) }.boxed()

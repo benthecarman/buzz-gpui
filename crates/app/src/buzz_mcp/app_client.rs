@@ -1,17 +1,19 @@
-//! The Buzz tools' client inside the app (buzz-app's `client.ts`): the
-//! agent's host-held key signs and reads through its Agents2 handle, files
-//! are read by a declared process on that host, and memory is read back
-//! through the owner, to whom it is encrypted.
+//! The Buzz tools' client inside the app (buzz-app's
+//! `src/buzz-mcp/app-client.ts`), shared by the Claude Code and Codex
+//! types: the agent's host-held key signs and reads through its Agents2
+//! handle, files are read by a declared process on that host, and memory is
+//! read back through the owner, to whom it is encrypted.
 
+use super::{BuzzClient, BuzzEvent, ClientResult, Memory, Template, Upload};
 use crate::agent_plugins::process::{SpawnOptions, Spawner};
 use crate::agents2::AgentHandle;
-use crate::buzz_mcp::{BuzzClient, BuzzEvent, ClientResult, Memory, Template, Upload};
 use base64::Engine;
 use buzz_host::api::{AppAgentEvent, ProcessOutput};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 
 /// The largest file a tool reads: the community's upload limit.
 const READ_LIMIT: usize = 50 * 1024 * 1024;
@@ -21,6 +23,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 pub trait AgentActions: Send + Sync {
     fn pubkey(&self) -> String;
     fn owner(&self) -> String;
+    /// Its display name, as Agents2 shows it.
+    fn name(&self) -> String;
     fn publish(&self, event: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>>;
     fn query(&self, filters: Vec<Value>) -> BoxFuture<'static, ClientResult<Vec<BuzzEvent>>>;
     fn upload(&self, data: Vec<u8>, mime: String) -> BoxFuture<'static, ClientResult<Upload>>;
@@ -42,6 +46,9 @@ impl AgentActions for AgentHandle {
     }
     fn owner(&self) -> String {
         self.owner.clone()
+    }
+    fn name(&self) -> String {
+        self.name.clone()
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
         let handle = self.clone();
@@ -87,9 +94,58 @@ impl AgentActions for AgentHandle {
     }
 }
 
+/// Ends work in flight, with the reason it ended (buzz-app's
+/// `AbortSignal`). The first reason wins. Cheap to clone; clones share it.
+#[derive(Clone)]
+pub struct Signal(Arc<watch::Sender<Option<String>>>);
+
+impl Default for Signal {
+    fn default() -> Self {
+        Self(Arc::new(watch::Sender::new(None)))
+    }
+}
+
+impl Signal {
+    pub fn abort(&self, reason: &str) {
+        self.0.send_if_modified(|current| {
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(reason.into());
+            true
+        });
+    }
+    /// Why it was aborted, once it is.
+    pub fn reason(&self) -> Option<String> {
+        self.0.borrow().clone()
+    }
+    pub fn aborted(&self) -> bool {
+        self.0.borrow().is_some()
+    }
+    /// `throwIfAborted`.
+    pub fn check(&self) -> Result<(), String> {
+        self.reason().map_or(Ok(()), Err)
+    }
+    /// Resolves with the reason once it is aborted.
+    pub async fn wait(&self) -> String {
+        let mut changes = self.0.subscribe();
+        let reason = changes
+            .wait_for(Option::is_some)
+            .await
+            .map(|reason| reason.clone().unwrap_or_default());
+        match reason {
+            Ok(reason) => reason,
+            // The sender lives as long as this signal.
+            Err(_) => std::future::pending().await,
+        }
+    }
+}
+
 pub type Memories = Arc<dyn Fn() -> BoxFuture<'static, ClientResult<Vec<Memory>>> + Send + Sync>;
 /// Called after a memory write, with its slug.
 pub type Remembered = Arc<dyn Fn(&str) + Send + Sync>;
+/// Rejects operations after the owning turn or community has ended.
+pub type Check = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// The tools' client for one agent.
 pub struct AppClient {
@@ -99,6 +155,22 @@ pub struct AppClient {
     pub cwd: String,
     pub memories: Memories,
     pub remembered: Remembered,
+    pub check: Option<Check>,
+    /// Stops file reads in flight, and every later operation.
+    pub signal: Option<Signal>,
+}
+
+impl AppClient {
+    fn checked(&self) -> Result<(), String> {
+        if let Some(signal) = &self.signal {
+            signal.check()?;
+        }
+        self.check.as_ref().map_or(Ok(()), |check| check())
+    }
+}
+
+fn refused<T: Send + 'static>(error: String) -> BoxFuture<'static, ClientResult<T>> {
+    Box::pin(async move { Err(error) })
 }
 
 impl BuzzClient for AppClient {
@@ -106,20 +178,35 @@ impl BuzzClient for AppClient {
         self.agent.pubkey()
     }
     fn query(&self, filters: Vec<Value>) -> BoxFuture<'static, ClientResult<Vec<BuzzEvent>>> {
-        self.agent.query(filters)
+        match self.checked() {
+            Ok(()) => self.agent.query(filters),
+            Err(error) => refused(error),
+        }
     }
     fn publish(&self, event: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
-        self.agent.publish(event)
+        match self.checked() {
+            Ok(()) => self.agent.publish(event),
+            Err(error) => refused(error),
+        }
     }
     fn upload(&self, data: Vec<u8>, mime: String) -> BoxFuture<'static, ClientResult<Upload>> {
-        self.agent.upload(data, mime)
+        match self.checked() {
+            Ok(()) => self.agent.upload(data, mime),
+            Err(error) => refused(error),
+        }
     }
     fn read(&self, path: String) -> BoxFuture<'static, ClientResult<Vec<u8>>> {
-        let (spawn, cwd) = (self.spawn.clone(), self.cwd.clone());
-        Box::pin(async move { read_file(&spawn, &cwd, &path).await })
+        if let Err(error) = self.checked() {
+            return refused(error);
+        }
+        let (spawn, cwd, signal) = (self.spawn.clone(), self.cwd.clone(), self.signal.clone());
+        Box::pin(async move { read_file(&spawn, &cwd, &path, signal.as_ref()).await })
     }
     fn memories(&self) -> BoxFuture<'static, ClientResult<Vec<Memory>>> {
-        (self.memories)()
+        match self.checked() {
+            Ok(()) => (self.memories)(),
+            Err(error) => refused(error),
+        }
     }
     fn remember(
         &self,
@@ -127,6 +214,9 @@ impl BuzzClient for AppClient {
         body: String,
         after: u64,
     ) -> BoxFuture<'static, ClientResult<()>> {
+        if let Err(error) = self.checked() {
+            return refused(error);
+        }
         let write = self.agent.remember(slug.clone(), body, after);
         let remembered = self.remembered.clone();
         Box::pin(async move {
@@ -138,8 +228,14 @@ impl BuzzClient for AppClient {
 }
 
 /// Reads a file with the type's declared `read` process (`base64 -i`),
-/// which passes binary files through intact.
-pub async fn read_file(spawn: &Spawner, cwd: &str, path: &str) -> ClientResult<Vec<u8>> {
+/// which passes binary files through intact. An aborted `signal` stops
+/// the reader, even one that starts after it fired.
+pub async fn read_file(
+    spawn: &Spawner,
+    cwd: &str,
+    path: &str,
+    signal: Option<&Signal>,
+) -> ClientResult<Vec<u8>> {
     // `-` would wait on stdin.
     if path.trim() == "-" || path.trim().is_empty() {
         return Err(format!("Cannot read {path}"));
@@ -158,6 +254,13 @@ pub async fn read_file(spawn: &Spawner, cwd: &str, path: &str) -> ClientResult<V
     let timer = tokio::spawn(async move {
         tokio::time::sleep(READ_TIMEOUT).await;
         let _ = process.kill().await;
+    });
+    let stop = signal.cloned().map(|signal| {
+        let process = spawned.process.clone();
+        tokio::spawn(async move {
+            signal.wait().await;
+            let _ = process.kill().await;
+        })
     });
     let (mut output, mut error) = (String::new(), String::new());
     let mut large = false;
@@ -179,6 +282,12 @@ pub async fn read_file(spawn: &Spawner, cwd: &str, path: &str) -> ClientResult<V
         }
     }
     timer.abort();
+    if let Some(stop) = stop {
+        stop.abort();
+    }
+    if let Some(signal) = signal {
+        signal.check()?;
+    }
     if large {
         return Err(format!("{path} is larger than 50 MB"));
     }

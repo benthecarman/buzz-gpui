@@ -3,11 +3,12 @@
 //! and the runtime serves it the Buzz tools as the agent. No network and no
 //! Claude account.
 
-use super::runtime::{ChannelInfo, ClaudeRuntime, Config, OwnerRelay, Run, Synced, Wake};
+use super::runtime::{ClaudeRuntime, Config, Run, Synced, Wake};
 use super::sessions::SessionView;
 use super::setup::{ClaudeSetup, ClaudeStatus};
-use crate::agent_plugins::claude_code::client::AgentActions;
+use crate::agent_plugins::owner_relay::{ChannelInfo, OwnerRelay};
 use crate::agent_plugins::process::{HostSpawner, ProcessSinks, Spawner};
+use crate::buzz_mcp::app_client::AgentActions;
 use crate::buzz_mcp::{BuzzEvent, ClientResult, Memory, Template, Upload};
 use buzz_host::api::{HostAnswer, HostAsk, HostProtocol};
 use buzz_host::credentials::FileCredentials;
@@ -78,6 +79,9 @@ impl AgentActions for Agent {
     }
     fn owner(&self) -> String {
         "a".repeat(64)
+    }
+    fn name(&self) -> String {
+        "Claude".into()
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
         self.published.lock().unwrap().push(template.clone());
@@ -393,7 +397,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
         .remember("core", "I am the relay test agent.", 0)
         .await
         .unwrap();
-    let owner = Arc::new(super::AppRelay {
+    let owner = Arc::new(crate::agent_plugins::owner_relay::AppRelay {
         http: http.clone(),
         identity: alice.clone(),
         snapshot: None,
