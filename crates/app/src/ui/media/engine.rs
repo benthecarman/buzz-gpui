@@ -137,15 +137,22 @@ impl Engine {
             playbin.set_property("video-sink", video_sink(slot.clone()));
             slot
         });
+        // Every pipeline names both sinks. Left unset, playbin opens the
+        // system's devices for a stream its flags leave out (pulse, ALSA,
+        // OSS for sound; X for pictures) while it autoplugs, and an open
+        // that never returns wedges the streaming thread and with it the
+        // state changes that would stop it.
+        let null_sink = || {
+            gst::ElementFactory::make("fakesink")
+                .build()
+                .map_err(|error| error.to_string())
+        };
         match kind {
             Kind::Audio | Kind::Video => playbin.set_property("audio-sink", audio_sink()),
-            Kind::Metadata => playbin.set_property(
-                "audio-sink",
-                gst::ElementFactory::make("fakesink")
-                    .build()
-                    .map_err(|error| error.to_string())?,
-            ),
-            Kind::Poster => {}
+            Kind::Metadata | Kind::Poster => playbin.set_property("audio-sink", null_sink()?),
+        }
+        if matches!(kind, Kind::Audio | Kind::Metadata) {
+            playbin.set_property("video-sink", null_sink()?);
         }
         let bus = playbin.bus().ok_or("The player has no bus")?;
         playbin
@@ -299,6 +306,10 @@ pub fn probe_source(source: Source, kind: Kind) -> Result<Probe, String> {
     while !engine.ready {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
+            // A pipeline that never prerolled may never stop either:
+            // stopping waits for its streaming threads. Stop it elsewhere
+            // so the timeout still returns.
+            std::thread::spawn(move || drop(engine));
             return Err("Timed out decoding the video".into());
         }
         let wait = gst::ClockTime::from_mseconds(left.as_millis().min(200) as u64);
