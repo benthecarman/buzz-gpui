@@ -228,12 +228,18 @@ impl MeKit {
         let kit = self.clone();
         let work = async move {
             let result = kit.read_catalog().await;
-            if kit.inner.epoch.load(Ordering::SeqCst) == epoch {
-                *kit.inner.refreshing.lock().expect("kit lock") = None;
-                match result {
-                    Ok(entries) => kit.set(MeKitStatus::Ready, Some(entries.into())),
-                    Err(error) => kit.set(MeKitStatus::Error(error), None),
+            if kit.inner.epoch.load(Ordering::SeqCst) != epoch {
+                // Superseded: whoever joined this read waits for the newer.
+                let newer = kit.inner.refreshing.lock().expect("kit lock").clone();
+                if let Some(newer) = newer {
+                    newer.await;
                 }
+                return;
+            }
+            *kit.inner.refreshing.lock().expect("kit lock") = None;
+            match result {
+                Ok(entries) => kit.set(MeKitStatus::Ready, Some(entries.into())),
+                Err(error) => kit.set(MeKitStatus::Error(error), None),
             }
         }
         .boxed()
@@ -241,6 +247,22 @@ impl MeKit {
         *slot = Some(work.clone());
         self.inner.runtime.spawn(work.clone());
         work
+    }
+
+    /// Reads the catalog again after a write. A read already running may
+    /// have started before the write, so it is superseded, not joined.
+    fn reload(&self) -> Shared<BoxFuture<'static, ()>> {
+        if self
+            .inner
+            .refreshing
+            .lock()
+            .expect("kit lock")
+            .take()
+            .is_some()
+        {
+            self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        self.refresh()
     }
 
     async fn read_catalog(&self) -> Result<Vec<KitEntry>, String> {
@@ -341,7 +363,7 @@ impl MeKit {
         .await;
         self.inner.saving.store(false, Ordering::SeqCst);
         let id = result?;
-        self.refresh().await;
+        self.reload().await;
         Ok(id)
     }
 
