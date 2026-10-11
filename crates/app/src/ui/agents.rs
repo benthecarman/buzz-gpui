@@ -34,6 +34,10 @@ mod team_ops;
 mod teams;
 pub(crate) mod wake;
 
+pub(crate) use create::OpenHarnesses;
+pub(crate) use edit::EditDialog;
+pub(crate) use editor::Dismissed as EditorDismissed;
+
 /// Hooks agent snapshots, teams and the catalog into chat at startup, so
 /// received files open before the Agents page has been visited.
 pub(crate) fn init(cx: &mut App) {
@@ -186,7 +190,7 @@ fn columns(width: Pixels) -> u16 {
 }
 
 /// Process status text, ui.md §5a.6 (c).
-pub(super) fn process_label(status: ProcessStatus) -> &'static str {
+pub(crate) fn process_label(status: ProcessStatus) -> &'static str {
     match status {
         ProcessStatus::Running => "Process running · relay readiness unverified",
         ProcessStatus::Waiting => "Waiting to start · unlock Keychain if prompted",

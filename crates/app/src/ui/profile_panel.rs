@@ -8,6 +8,10 @@
 //! `buzz:agent-profile:<hex>`), so a profile opens as a tab in the
 //! channel's tab pane; the companion dock shows the same view.
 
+mod agent;
+
+pub use agent::parse_instance_target;
+
 use super::channel_panels::{self, ChannelPanel, Opening};
 use super::media;
 use super::message::channel_icon;
@@ -69,7 +73,9 @@ pub fn init(cx: &mut App) {
             key: KEY,
             title: "Profile",
             icon: IconName::User,
-            matches: |target| parse_target(target).is_some(),
+            matches: |target| {
+                parse_target(target).is_some() || parse_instance_target(target).is_some()
+            },
             tool: false,
             launcher: None,
             menu: None,
@@ -130,7 +136,8 @@ pub struct ProfilePanel {
     /// The profile read has had its chance to answer.
     settled: bool,
     copy_status: Option<SharedString>,
-    nip05_copied: bool,
+    /// The copy field that just copied, by label.
+    copied: Option<&'static str>,
     opening_message: bool,
     message_error: Option<SharedString>,
     memories: Memories,
@@ -139,6 +146,7 @@ pub struct ProfilePanel {
     runtime_notice: Option<(SharedString, bool)>,
     /// "Add agent to channel", while open.
     add_channel: Option<AddChannel>,
+    agent: agent::AgentState,
     focus: FocusHandle,
     _status: StatusWatch,
     _wait: Option<Task<()>>,
@@ -147,8 +155,18 @@ pub struct ProfilePanel {
 
 impl ProfilePanel {
     fn from_opening(opening: Opening, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (pubkey, agent_hint) = parse_target(&opening.target).unwrap_or_default();
+        // An instance link shows that one record, for its viewer only.
+        let instance = parse_instance_target(&opening.target).filter(|instance| {
+            let community = opening.community.read(cx);
+            instance.viewer == community.session.viewer()
+                && instance.community_origin == community.origin.http()
+        });
+        let (pubkey, agent_hint) = match &instance {
+            Some(instance) => (instance.pubkey.clone(), true),
+            None => parse_target(&opening.target).unwrap_or_default(),
+        };
         let mut panel = Self::new(opening.community, pubkey, agent_hint, window, cx);
+        panel.agent.instance = instance.map(|instance| instance.id);
         panel.context = Some(opening.channel);
         panel.close = Some(opening.close);
         panel
@@ -169,6 +187,8 @@ impl ProfilePanel {
         let observe = cx.observe(&community, |this, _, cx| {
             if !this.settled && this.profile(cx).is_some() {
                 this.settled = true;
+                // The verified owner scopes the public metadata.
+                this.load_agent(cx);
             }
             cx.notify();
         });
@@ -197,7 +217,7 @@ impl ProfilePanel {
             tab: Section::Info,
             settled: false,
             copy_status: None,
-            nip05_copied: false,
+            copied: None,
             opening_message: false,
             message_error: None,
             memories: Memories::Idle,
@@ -205,6 +225,7 @@ impl ProfilePanel {
             open_memories: HashSet::new(),
             runtime_notice: None,
             add_channel: None,
+            agent: agent::AgentState::default(),
             focus: cx.focus_handle(),
             _status: status,
             _wait: None,
@@ -235,6 +256,7 @@ impl ProfilePanel {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.settled = self.profile(cx).is_some();
         self.session(cx).want_profiles(vec![self.pubkey.clone()]);
+        self.load_agent(cx);
         self._wait = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PROFILE_WAIT).await;
             let _ = this.update(cx, |this, cx| {
@@ -350,15 +372,18 @@ impl ProfilePanel {
         cx.notify();
     }
 
-    fn copy_nip05(&mut self, nip05: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(nip05));
-        self.nip05_copied = true;
+    fn copy_value(&mut self, label: &'static str, value: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.copied = Some(label);
+        super::notice::success(format!("Copied {}", label.to_lowercase()), cx);
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(1500))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.nip05_copied = false;
+                if this.copied == Some(label) {
+                    this.copied = None;
+                }
                 cx.notify();
             });
         })
@@ -777,6 +802,27 @@ impl ProfilePanel {
         {
             items.push(div().child(about).into_any_element());
         }
+        // The local agent, its actions, archive and delete
+        // (`ProfileAgentRuntime`, `ProfileAgentActions`, `ProfileAgentArchive`).
+        items.extend(self.agent_runtime_items(window, cx));
+        // An Agents2 agent's sections and Delete, then a known agent's
+        // latest activity (`ProfileActivity`).
+        items.extend(crate::ui::agents2::profile_sections(
+            &self.pubkey,
+            window,
+            cx,
+        ));
+        if self.known_agent(cx) {
+            items.extend(crate::ui::agent_activity::profile::latest_activity(
+                &self.community,
+                &self.pubkey,
+                self.context.as_deref(),
+                cx,
+            ));
+        }
+        if !self.can_view_runtime(cx) {
+            items.extend(self.instances(cx));
+        }
         items.push(
             div()
                 .flex()
@@ -819,23 +865,21 @@ impl ProfilePanel {
                 )
                 .into_any_element(),
         );
-        // An Agents2 agent's sections and Delete, then a known agent's
-        // latest activity (`ProfileActivity`).
-        items.extend(crate::ui::agents2::profile_sections(
-            &self.pubkey,
-            window,
-            cx,
-        ));
-        if self.known_agent(cx) {
-            items.extend(crate::ui::agent_activity::profile::latest_activity(
-                &self.community,
-                &self.pubkey,
-                self.context.as_deref(),
-                cx,
-            ));
-        }
+        items.extend(self.agent_identity_items(cx));
         if let Some(nip05) = profile.as_ref().and_then(|p| p.nip05.clone()) {
             items.push(self.copy_field("NIP-05", nip05, cx));
+        }
+        items.extend(self.agent_metadata_items(cx));
+        if profile.is_some() && self.metadata_failed() {
+            items.push(
+                div()
+                    .child(
+                        Button::new("profile-retry-metadata", "Retry profile")
+                            .size(ButtonSize::Sm)
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_metadata(cx))),
+                    )
+                    .into_any_element(),
+            );
         }
         if profile.is_none() {
             let (note, retry) = match self.settled {
@@ -860,9 +904,21 @@ impl ProfilePanel {
 
     /// A field that copies its value (`ProfileCopyField`).
     fn copy_field(&self, label: &'static str, value: String, cx: &mut Context<Self>) -> AnyElement {
+        self.copy_field_shown(label, value.clone(), value, cx)
+    }
+
+    /// [`Self::copy_field`] showing `display` for the value it copies.
+    fn copy_field_shown(
+        &self,
+        label: &'static str,
+        value: String,
+        display: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let c = *cx.colors();
-        let copied = self.nip05_copied;
-        let copy = value.clone();
+        let copied = self.copied == Some(label);
+        let copy = value;
+        let value = display;
         div()
             .id(SharedString::from(format!("profile-copy-{label}")))
             .group("profile-copy-field")
@@ -877,7 +933,7 @@ impl ProfilePanel {
             .cursor_pointer()
             .hover(|this| this.bg(c.surface_inset))
             .tooltip(buzz_ui::Tooltip::text(format!("Copy {label}")))
-            .on_click(cx.listener(move |this, _, _, cx| this.copy_nip05(copy.clone(), cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.copy_value(label, copy.clone(), cx)))
             .child(
                 div()
                     .flex()
@@ -1118,9 +1174,8 @@ impl ProfilePanel {
 
     fn runtime(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let c = *cx.colors();
-        let agents = self.runtime_agents(cx);
-        let Some((host, agent)) = agents.first().cloned() else {
-            return Vec::new();
+        let Some((host, agent)) = self.exact_agent(cx) else {
+            return self.instances(cx).into_iter().collect();
         };
         let (status, busy, runtime_available, runtime_message, error) = {
             let host = host.read(cx);
@@ -1164,12 +1219,34 @@ impl ProfilePanel {
                             .text_color(c.text_subtle)
                             .child(AUTO_RESTART_OFF_BLURB),
                     )
-                    .children(
-                        agent
-                            .restart_diff
-                            .iter()
-                            .map(|entry| div().text_body_sm().child(field_label(&entry.field))),
-                    )
+                    .children(agent.restart_diff.iter().map(|entry| {
+                        let change = entry.change.as_ref().map(agent::diff_change);
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(space::S1)
+                            .text_body_sm()
+                            .child(format!("{}:", field_label(&entry.field)))
+                            .children(change.map(|(before, after)| {
+                                div()
+                                    .flex()
+                                    .gap(space::S1)
+                                    .children(
+                                        before.map(|before| div().line_through().child(before)),
+                                    )
+                                    .when(
+                                        entry.change.as_ref().is_some_and(|change| {
+                                            matches!(
+                                                change,
+                                                buzz_host::api::RestartChange::Value { .. }
+                                                    | buzz_host::api::RestartChange::Masked { .. }
+                                            )
+                                        }),
+                                        |this| this.child("→"),
+                                    )
+                                    .child(after)
+                            }))
+                    }))
                     .into_any_element(),
             );
         }
@@ -1211,6 +1288,12 @@ impl ProfilePanel {
                                     .disabled(busy || !ready)
                                     .on_change(move |value, window, cx| toggle(&value, window, cx)),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .border_t_1()
+                                .border_color(c.border_standard)
+                                .child(self.log_entry(&agent, ready, cx)),
                         ),
                 )
                 .into_any_element(),
@@ -1276,21 +1359,8 @@ impl ProfilePanel {
                     .into_any_element(),
             );
         }
-        let model = |value: &Option<String>, env: &Option<String>| match env {
-            Some(env) => format!("Set by environment ({env})"),
-            None => value.clone().unwrap_or_else(|| "—".into()),
-        };
-        items.push(
-            section("Model settings")
-                .child(rows(vec![
-                    ("Model", model(&agent.launch_model, &agent.launch_model_env)),
-                    (
-                        "Provider",
-                        model(&agent.launch_provider, &agent.launch_provider_env),
-                    ),
-                ]))
-                .into_any_element(),
-        );
+        items.push(self.model_settings(&agent, cx));
+        items.extend(self.instances(cx));
         let databricks = agent.harness.databricks.clone().unwrap_or_default();
         let advanced: Vec<(&'static str, String)> = [
             ("Workspace", agent.workspace.clone()),
@@ -1346,12 +1416,17 @@ impl Render for ProfilePanel {
                     .on_click(cx.listener(move |this, _, _, cx| this.select(section, cx))),
             );
         }
+        let instance = self.instance_header(cx);
         let content = match selected {
+            _ if instance.as_ref().is_some_and(|(_, valid)| !valid) => Vec::new(),
             Section::Info => self.info(window, cx),
             Section::Runtime => self.runtime(cx),
             Section::Channels => self.channels(cx),
             Section::Memories => self.memories(cx),
         };
+        let editor = self.editor_view(window);
+        let dialogs = self.agent_dialogs(window, cx);
+        let log = self.log_view();
         let close = self.close.clone();
         div()
             .id("profile-panel")
@@ -1375,19 +1450,25 @@ impl Render for ProfilePanel {
             .bg(c.surface_panel)
             .text_body()
             .text_color(c.text_standard)
-            .child(self.identity(cx))
-            .child(
-                div().flex().flex_col().child(tabs).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space::S6)
-                        .pt(space::S4)
-                        .min_w_0()
-                        .children(content),
+            .children(instance.map(|(header, _)| header))
+            .map(|panel| match log {
+                // The log replaces the profile while it is open.
+                Some(log) => panel.child(log),
+                None => panel.child(self.identity(cx)).child(
+                    div().flex().flex_col().child(tabs).child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(space::S6)
+                            .pt(space::S4)
+                            .min_w_0()
+                            .children(content),
+                    ),
                 ),
-            )
+            })
             .children(add_channel)
+            .children(editor)
+            .children(dialogs)
     }
 }
 

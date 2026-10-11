@@ -590,6 +590,32 @@ fn yes() -> bool {
 #[serde(rename_all = "camelCase", default)]
 pub struct RestartDiffEntry {
     pub field: String,
+    /// The redacted change, as the controller reports it. Absent from
+    /// older hosts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<RestartChange>,
+}
+
+/// A saved-versus-running difference (the controller's `RestartChange`):
+/// safe values verbatim, long text as character counts, secrets masked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RestartChange {
+    Value {
+        before: serde_json::Value,
+        after: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    Text {
+        before_chars: Option<usize>,
+        after_chars: Option<usize>,
+    },
+    Masked {
+        before: Option<String>,
+        after: Option<String>,
+    },
+    Added,
+    Removed,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
