@@ -402,6 +402,20 @@ impl EditDialog {
 
 impl Render for EditDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Escape closes an open select or the model list before the dialog.
+        div()
+            .capture_action(cx.listener(|this, _: &buzz_ui::Cancel, _, cx| {
+                if this.fields.open.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(self.dialog(window, cx))
+    }
+}
+
+impl EditDialog {
+    fn dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Dialog {
         let c = *cx.colors();
         self.fields.sync(window, cx);
         let agent = self.current(cx);
