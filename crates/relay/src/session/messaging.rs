@@ -6,8 +6,8 @@
 
 use super::{Actor, Message, Session};
 use crate::event::Verified;
-use crate::messages::{self, AgentOwner, Author};
-use crate::outbox::{Outbox, SendOptions};
+use crate::messages;
+use crate::outbox::Outbox;
 use nostr::prelude::EventId;
 use tokio::sync::oneshot;
 
@@ -16,7 +16,7 @@ const NOT_CONNECTED: &str = "Not connected to the relay yet";
 
 impl Actor {
     /// A message shown in `channel`'s timeline or in an open thread.
-    fn find_message(&self, channel: &str, id: &EventId) -> Option<Verified> {
+    pub(super) fn find_message(&self, channel: &str, id: &EventId) -> Option<Verified> {
         self.timelines
             .get(channel)
             .and_then(|timeline| timeline.find(id))
@@ -62,28 +62,13 @@ impl Session {
         content: &str,
         emoji: Option<messages::CustomEmoji>,
     ) -> Result<(), String> {
-        let (channel, content) = (channel.to_owned(), content.to_owned());
-        self.with_actor(move |actor| {
-            let outbox = actor.outbox.clone().ok_or(NOT_CONNECTED)?;
-            let original = actor
-                .find_message(&channel, &id)
-                .ok_or("Load the message first")?;
-            let catalog = actor.emoji.snapshot();
-            let custom = emoji.or_else(|| {
-                content
-                    .strip_prefix(':')
-                    .and_then(|code| code.strip_suffix(':'))
-                    .and_then(|code| catalog.get(&code.to_ascii_lowercase()))
-                    .cloned()
-            });
-            let draft = messages::react(&original, &content, custom.as_ref(), catalog.catalog())
-                .map_err(|error| error.to_string())?;
-            outbox
-                .send(draft, SendOptions::default())
-                .map(drop)
-                .map_err(|error| error.to_string())
+        self.write(super::Write::React {
+            channel: channel.to_owned(),
+            id,
+            content: content.to_owned(),
+            emoji,
         })
-        .await?
+        .await
     }
 
     /// Whether the viewer follows the thread rooted at `root`.
@@ -143,35 +128,11 @@ impl Session {
         id: EventId,
         agent: &str,
     ) -> Result<(), String> {
-        let (channel, agent) = (channel.to_owned(), agent.to_owned());
-        self.with_actor(move |actor| {
-            let outbox = actor.outbox.clone().ok_or(NOT_CONNECTED)?;
-            let target = actor
-                .find_message(&channel, &id)
-                .ok_or("Load the message first")?;
-            let viewer = actor.identity.pubkey_hex();
-            let authority = actor.relay.as_ref().map(|relay| relay.authority.clone());
-            let author = Author {
-                viewer: &viewer,
-                signing_authority: authority.as_deref(),
-            };
-            let drafts = messages::remove(
-                &author,
-                &[id.to_hex()],
-                |_| Some(target.event()),
-                Some(AgentOwner {
-                    agent_id: &agent,
-                    owner_id: &viewer,
-                }),
-            )
-            .map_err(|error| error.to_string())?;
-            for draft in drafts {
-                outbox
-                    .send(draft, SendOptions::default())
-                    .map_err(|error| error.to_string())?;
-            }
-            Ok(())
+        self.write(super::Write::Remove {
+            channel: channel.to_owned(),
+            id,
+            agent: Some(agent.to_owned()),
         })
-        .await?
+        .await
     }
 }

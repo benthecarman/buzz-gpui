@@ -806,6 +806,7 @@ impl Session {
             channel: channel.to_string(),
             id,
             content: emoji.to_string(),
+            emoji: None,
         })
         .await
     }
@@ -973,6 +974,8 @@ enum Write {
         channel: String,
         id: EventId,
         content: String,
+        /// A reaction pill's own emoji tag, used over the catalog's.
+        emoji: Option<messages::CustomEmoji>,
     },
     Remove {
         channel: String,
@@ -2434,20 +2437,28 @@ impl Actor {
                 channel,
                 id,
                 content,
+                emoji: pill,
             } => {
-                let original = find(&channel, &id)?;
+                let original = self
+                    .find_message(&channel, &id)
+                    .ok_or("Load the message first")?;
                 // A palette emoji needs no ready catalog to react with.
-                let custom = content
-                    .strip_prefix(':')
-                    .and_then(|code| code.strip_suffix(':'))
-                    .and_then(|code| emoji.get(&code.to_ascii_lowercase()));
+                let custom = pill.or_else(|| {
+                    content
+                        .strip_prefix(':')
+                        .and_then(|code| code.strip_suffix(':'))
+                        .and_then(|code| emoji.get(&code.to_ascii_lowercase()))
+                        .cloned()
+                });
                 vec![
-                    messages::react(&original, &content, custom, emoji.catalog())
+                    messages::react(&original, &content, custom.as_ref(), emoji.catalog())
                         .map_err(|error| error.to_string())?,
                 ]
             }
             Write::Remove { channel, id, agent } => {
-                let target = find(&channel, &id)?;
+                let target = self
+                    .find_message(&channel, &id)
+                    .ok_or("Load the message first")?;
                 let ids = vec![id.to_hex()];
                 let authorization = agent.as_deref().map(|agent_id| messages::AgentOwner {
                     agent_id,
