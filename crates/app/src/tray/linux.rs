@@ -13,6 +13,7 @@ use super::{TrayEvent, icon, tool_tip};
 use crate::ui::navigation::{Arrival, Request};
 use futures::channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -29,6 +30,9 @@ const QUIT: i32 = 3;
 
 /// The tray icon while it is up; dropping it takes the icon down.
 pub struct Tray {
+    /// Holds a copy of the connection, so it is stopped first: the
+    /// connection closes, and its name goes, once the last copy is dropped.
+    _watcher: zbus::Task<()>,
     connection: zbus::Connection,
 }
 
@@ -60,8 +64,14 @@ impl Tray {
             open,
             events: events.clone(),
         };
-        // Unique per process, as the specification asks.
-        let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
+        // Unique per process and icon, as the specification asks, so an
+        // icon put up again never waits for the last one's name to go.
+        static ICONS: AtomicU32 = AtomicU32::new(0);
+        let name = format!(
+            "org.kde.StatusNotifierItem-{}-{}",
+            std::process::id(),
+            ICONS.fetch_add(1, Ordering::Relaxed) + 1
+        );
         let connection = zbus::connection::Builder::session()?
             .name(name.clone())?
             .serve_at(ITEM_PATH, item)?
@@ -73,30 +83,30 @@ impl Tray {
         // Panels come and go (GNOME extensions reload, Plasma restarts):
         // register again whenever a watcher appears.
         let watch = connection.clone();
-        connection
-            .executor()
-            .spawn(
-                async move {
-                    use futures::StreamExt;
-                    let Ok(bus) = zbus::fdo::DBusProxy::new(&watch).await else {
-                        return;
-                    };
-                    let Ok(mut changes) = bus.receive_name_owner_changed().await else {
-                        return;
-                    };
-                    while let Some(change) = changes.next().await {
-                        let Ok(args) = change.args() else { continue };
-                        if args.name().as_str() != WATCHER {
-                            continue;
-                        }
-                        let shown = args.new_owner().is_some() && register(&watch, &name).await;
-                        let _ = events.unbounded_send(TrayEvent::Shown(shown));
+        let watcher = connection.executor().spawn(
+            async move {
+                use futures::StreamExt;
+                let Ok(bus) = zbus::fdo::DBusProxy::new(&watch).await else {
+                    return;
+                };
+                let Ok(mut changes) = bus.receive_name_owner_changed().await else {
+                    return;
+                };
+                while let Some(change) = changes.next().await {
+                    let Ok(args) = change.args() else { continue };
+                    if args.name().as_str() != WATCHER {
+                        continue;
                     }
-                },
-                "tray-watcher",
-            )
-            .detach();
-        Ok(Self { connection })
+                    let shown = args.new_owner().is_some() && register(&watch, &name).await;
+                    let _ = events.unbounded_send(TrayEvent::Shown(shown));
+                }
+            },
+            "tray-watcher",
+        );
+        Ok(Self {
+            _watcher: watcher,
+            connection,
+        })
     }
 
     /// Asks for attention while `count` mentions and direct messages are
