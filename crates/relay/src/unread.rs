@@ -20,13 +20,14 @@
 //! [`MessageAttention::muted_suppresses`].
 
 use crate::event::{Verified, kinds};
+use crate::fold::{FoldOptions, has_tag};
 use crate::read_state::{
     MarkCoverage, MessageRead, ReadCapability, ReadLookup, ReadMutationResult, ReadState,
     ReadStateError, ReadStateJournal, ReadStateSync, ReadTarget, ReadUpdate, effective_frontier,
     is_hex64, mark_message, override_active,
 };
 use crate::socket::Filter;
-use nostr::prelude::Event;
+use nostr::prelude::{Event, PublicKey};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -106,14 +107,6 @@ fn channel_of(event: &Event) -> Option<&str> {
     }
 }
 
-fn has_tag(event: &Event, name: &str, value: &str) -> bool {
-    event.tags.iter().any(|tag| {
-        let tag = tag.as_slice();
-        tag.first().map(String::as_str) == Some(name)
-            && tag.get(1).map(String::as_str) == Some(value)
-    })
-}
-
 fn is_broadcast(event: &Event) -> bool {
     has_tag(event, "broadcast", "1")
 }
@@ -128,7 +121,8 @@ fn e_targets(event: &Event) -> Vec<&str> {
         .collect()
 }
 
-/// A NIP-10 reply's parent and root (`thread-reference.ts`).
+/// A NIP-10 reply's parent and root as lowercase hex, as evidence keys
+/// them ([`crate::fold::thread_reference`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThreadReference {
     pub root_id: String,
@@ -136,93 +130,18 @@ pub struct ThreadReference {
 }
 
 /// The last valid `root` and `reply` markers win; a lone root marker is not
-/// a reply. IDs are lowercased.
+/// a reply.
 pub fn thread_reference(event: &Event) -> Option<ThreadReference> {
-    let (mut root, mut reply) = (None, None);
-    for tag in event.tags.iter() {
-        let tag = tag.as_slice();
-        let Some(value) = tag.get(1) else { continue };
-        if tag[0] != "e" || value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-            continue;
-        }
-        match tag.get(3).map(String::as_str) {
-            Some("root") => root = Some(value.to_ascii_lowercase()),
-            Some("reply") => reply = Some(value.to_ascii_lowercase()),
-            _ => {}
-        }
-    }
-    let parent_id = reply?;
-    Some(ThreadReference {
-        root_id: root.unwrap_or_else(|| parent_id.clone()),
-        parent_id,
+    crate::fold::thread_reference(event).map(|reference| ThreadReference {
+        root_id: reference.root_id.to_hex(),
+        parent_id: reference.parent_id.to_hex(),
     })
 }
 
-/// The displayed author: relay-signed output names it in `actor`, or in a
-/// leading `p` on channel events (`fold.ts` `messageAuthor`).
-fn message_author(event: &Event, authority: Option<&str>) -> String {
-    let pubkey = event.pubkey.to_hex();
-    if authority != Some(pubkey.as_str()) {
-        return pubkey;
-    }
-    let tags: Vec<&[String]> = event.tags.iter().map(|tag| tag.as_slice()).collect();
-    if let Some(actor) = tags
-        .iter()
-        .find(|tag| tag[0] == "actor" && tag.get(1).is_some_and(|v| is_hex64(v)))
-    {
-        return actor[1].clone();
-    }
-    match tags.first() {
-        Some(first)
-            if first[0] == "p"
-                && first.get(1).is_some_and(|v| is_hex64(v))
-                && tags.iter().any(|tag| tag[0] == "h") =>
-        {
-            first[1].clone()
-        }
-        _ => pubkey,
-    }
-}
-
-/// Whether a verified NIP-09 deletion removes its target (`deletionApplies`).
-pub fn deletion_applies(deletion: &Event, event: &Event, authority: Option<&str>) -> bool {
-    let message_kind = matches!(event.kind.as_u16(), kinds::CHAT | kinds::AGENT_MESSAGE);
-    let deletion_kind = deletion.kind.as_u16();
-    let nip09 = matches!(deletion_kind, kinds::DELETION | kinds::MODERATOR_DELETE);
-    (nip09 && deletion.pubkey == event.pubkey)
-        || (nip09 && message_kind && deletion.pubkey.to_hex() == message_author(event, authority))
-        || (deletion_kind == kinds::DELETION
-            && message_kind
-            && has_tag(deletion, "k", &event.kind.as_u16().to_string()))
-}
-
-/// The owner of trusted workflow output (`workflowOwner`): kind 9 signed by
-/// the authority with exactly one `["buzz:workflow","true"]` and one
-/// `["buzz:workflow-owner",<hex>]`.
+/// [`crate::fold::workflow_owner`] for a hex authority, as hex.
 pub fn workflow_owner(event: &Event, authority: Option<&str>) -> Option<String> {
-    if authority != Some(event.pubkey.to_hex().as_str()) || event.kind.as_u16() != kinds::CHAT {
-        return None;
-    }
-    let named = |name: &str| -> Vec<&[String]> {
-        event
-            .tags
-            .iter()
-            .map(|tag| tag.as_slice())
-            .filter(|tag| tag[0] == name)
-            .collect()
-    };
-    let (markers, owners) = (named("buzz:workflow"), named("buzz:workflow-owner"));
-    match (markers.as_slice(), owners.as_slice()) {
-        ([marker], [owner])
-            if marker.len() == 2
-                && marker[1] == "true"
-                && owner.len() == 2
-                && is_hex64(&owner[1]) =>
-        {
-            Some(owner[1].clone())
-        }
-        _ => None,
-    }
+    let authority = authority.and_then(|key| PublicKey::from_hex(key).ok());
+    crate::fold::workflow_owner(event, authority.as_ref()).map(|owner| owner.to_hex())
 }
 
 /// Preview text: agent envelopes (40002) carry `{"content": ...}`.
@@ -952,7 +871,9 @@ pub struct UnreadOptions {
 pub struct Unread<F: ThreadFollowStore = MemoryThreadFollows> {
     viewer: String,
     relay_author: Option<String>,
-    authority: Option<String>,
+    /// The parsed signing authority, for attributed deletions, edits and
+    /// workflow owners.
+    fold: FoldOptions,
     follows: F,
     choices: Lru<bool>,
     channels: Vec<ChannelInfo>,
@@ -1063,7 +984,13 @@ impl<F: ThreadFollowStore> Unread<F> {
         Self {
             viewer: options.viewer,
             relay_author: options.relay_author,
-            authority: options.authority,
+            fold: FoldOptions {
+                signing_authority: options
+                    .authority
+                    .as_deref()
+                    .and_then(|key| PublicKey::from_hex(key).ok()),
+                ..Default::default()
+            },
             follows,
             choices,
             channels: Vec::new(),
@@ -1165,6 +1092,11 @@ impl<F: ThreadFollowStore> Unread<F> {
         None
     }
 
+    fn workflow_owner(&self, event: &Event) -> Option<String> {
+        crate::fold::workflow_owner(event, self.fold.signing_authority.as_ref())
+            .map(|owner| owner.to_hex())
+    }
+
     fn mentions_viewer(&self, event: &Event) -> bool {
         if !has_tag(event, "p", &self.viewer) {
             return false;
@@ -1228,7 +1160,12 @@ impl<F: ThreadFollowStore> Unread<F> {
             }
             for id in e_targets(event) {
                 if let Some(target) = self.events.get(id)
-                    && deletion_applies(event, target, self.authority.as_deref())
+                    && crate::fold::deletion_applies(
+                        event,
+                        target,
+                        channel_of(target).unwrap_or_default(),
+                        &self.fold,
+                    )
                 {
                     index.tombstones.insert(target.id_hex());
                 }
@@ -1770,12 +1707,14 @@ impl<F: ThreadFollowStore> Unread<F> {
 
     /// Every retained message's folded text, replies included.
     fn folded_previews(&self, channel_id: &str) -> HashMap<nostr::prelude::EventId, String> {
-        let key =
-            |key: Option<&str>| key.and_then(|key| nostr::prelude::PublicKey::from_hex(key).ok());
-        let authority = key(self.authority.as_deref());
         // Evidence holds no relay-signed summaries or system rows, the only
         // events the relay key decides; without any key, previews stay raw.
-        let Some(relay) = key(self.relay_author.as_deref()).or(authority) else {
+        let Some(relay) = self
+            .relay_author
+            .as_deref()
+            .and_then(|key| PublicKey::from_hex(key).ok())
+            .or(self.fold.signing_authority)
+        else {
             return HashMap::new();
         };
         // The channel's messages and their overlays, including overlays of
@@ -1798,10 +1737,9 @@ impl<F: ThreadFollowStore> Unread<F> {
                 }
             }
         }
-        let options = crate::fold::FoldOptions {
+        let options = FoldOptions {
             include_replies: true,
-            signing_authority: authority,
-            ..Default::default()
+            ..self.fold.clone()
         };
         crate::fold::fold_messages(channel_id, &relay, &events, &options)
             .into_iter()
@@ -1849,7 +1787,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                 root_id: root.clone(),
                 latest_message_id: event.id_hex(),
                 author_id: event.pubkey_hex(),
-                workflow_owner_id: workflow_owner(event, self.authority.as_deref()),
+                workflow_owner_id: self.workflow_owner(event),
                 created_at: event.created_at_secs(),
                 preview: presented
                     .get(&event.id)
@@ -2024,7 +1962,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                     message_ids: entries.iter().map(|entry| entry.event.id_hex()).collect(),
                     root_id: representative.root_id.clone(),
                     author_id: event.pubkey_hex(),
-                    workflow_owner_id: workflow_owner(event, self.authority.as_deref()),
+                    workflow_owner_id: self.workflow_owner(event),
                     preview: preview_text(event),
                     created_at: latest.event.created_at_secs(),
                     mentioned: entries.iter().any(|entry| entry.mentioned),

@@ -559,7 +559,7 @@ fn normalize_shortcode(value: &str) -> Option<String> {
 
 /// `workflow-attribution.ts:5-26`. Every fold input is a [`Verified`]
 /// event, so the reference's admission-proof check always holds here.
-fn workflow_owner(event: &Event, authority: Option<&PublicKey>) -> Option<PublicKey> {
+pub(crate) fn workflow_owner(event: &Event, authority: Option<&PublicKey>) -> Option<PublicKey> {
     if authority != Some(&event.pubkey) || event.kind.as_u16() != kinds::CHAT {
         return None;
     }
@@ -655,7 +655,7 @@ fn non_negative_integer(value: &Value) -> Option<u64> {
     })
 }
 
-fn has_tag(event: &Event, name: &str, value: &str) -> bool {
+pub(crate) fn has_tag(event: &Event, name: &str, value: &str) -> bool {
     event
         .tags
         .iter()
