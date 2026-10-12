@@ -534,7 +534,7 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         body = body.child(thread_summary(row, rows, cx));
     }
 
-    let width = row_width(&id);
+    let width = markdown::measured("row-width", &id);
     // The row's tab stop has no size, so a click on the row never takes
     // focus from where it was.
     let stop = div()
@@ -552,7 +552,7 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         .gap(px(gap))
         .pt(if item.head { px(14.) } else { px(2.) })
         .pb(px(2.))
-        .child(measure(width.clone()))
+        .child(measure_width(width.clone()))
         .child(left)
         .child(body);
     if let Some(on_hover) = rows.actions.on_hover.clone() {
@@ -818,39 +818,14 @@ pub fn focus_bar_button(
     }
 }
 
-/// The row's laid-out width, measured each frame.
-fn row_width(id: &str) -> Rc<Cell<f32>> {
-    thread_local! {
-        static WIDTHS: std::cell::RefCell<HashMap<String, Rc<Cell<f32>>>> =
-            std::cell::RefCell::new(HashMap::new());
-    }
-    WIDTHS.with_borrow_mut(|widths| {
-        if widths.len() > 4096 {
-            widths.clear();
-        }
-        widths
-            .entry(id.to_string())
-            .or_insert_with(|| Rc::new(Cell::new(f32::MAX)))
-            .clone()
-    })
-}
-
-fn measure(width: Rc<Cell<f32>>) -> impl IntoElement {
-    canvas(
-        move |bounds, window, _| {
-            let next = f32::from(bounds.size.width);
-            if (width.get() - next).abs() > 0.5 {
-                let was_narrow = width.get() <= QUICK_REACTIONS_MIN_WIDTH;
-                width.set(next);
-                if was_narrow != (next <= QUICK_REACTIONS_MIN_WIDTH) {
-                    window.refresh();
-                }
-            }
-        },
-        |_, _, _, _| {},
+/// The row's laid-out width, measured each frame; only crossing the quick
+/// reactions' minimum redraws.
+fn measure_width(width: Rc<Cell<f32>>) -> impl IntoElement {
+    markdown::measure(
+        width,
+        |bounds| bounds.size.width.into(),
+        |before, now| (before <= QUICK_REACTIONS_MIN_WIDTH) != (now <= QUICK_REACTIONS_MIN_WIDTH),
     )
-    .absolute()
-    .inset_0()
 }
 
 /// Links, reactions and edits need the relay to have the message.
@@ -1057,38 +1032,18 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
 /// Room the reaction picker needs above its trigger.
 const PICKER_ROOM: f32 = 380.;
 
-/// The window y of a row's action bar, measured each frame.
+/// The window y of a row's action bar, measured each frame; only crossing
+/// the picker's room redraws.
 fn bar_top(id: &str) -> Rc<Cell<f32>> {
-    thread_local! {
-        static TOPS: std::cell::RefCell<HashMap<String, Rc<Cell<f32>>>> =
-            std::cell::RefCell::new(HashMap::new());
-    }
-    TOPS.with_borrow_mut(|tops| {
-        if tops.len() > 256 {
-            tops.clear();
-        }
-        tops.entry(id.to_string())
-            .or_insert_with(|| Rc::new(Cell::new(f32::MAX)))
-            .clone()
-    })
+    markdown::measured("bar-top", id)
 }
 
 fn measure_top(top: Rc<Cell<f32>>) -> impl IntoElement {
-    canvas(
-        move |bounds, window, _| {
-            let next = f32::from(bounds.origin.y);
-            if (top.get() - next).abs() > 0.5 {
-                let was = top.get() > PICKER_ROOM;
-                top.set(next);
-                if was != (next > PICKER_ROOM) {
-                    window.refresh();
-                }
-            }
-        },
-        |_, _, _, _| {},
+    markdown::measure(
+        top,
+        |bounds| bounds.origin.y.into(),
+        |before, now| (before > PICKER_ROOM) != (now > PICKER_ROOM),
     )
-    .absolute()
-    .inset_0()
 }
 
 /// A quick reaction's pointer state, which its glyph eases toward.

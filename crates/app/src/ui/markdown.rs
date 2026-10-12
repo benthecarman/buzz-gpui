@@ -112,7 +112,8 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
     let document = prepared(row, directory);
     let c = cx.colors();
     let id = row.id.to_hex();
-    let width = body_width(&id);
+    // The body's width, so inline chips and spoilers can wrap inside it.
+    let width = measured("body-width", &id);
     let objects = Objects {
         directory: directory.clone(),
         emoji: row.emoji.clone().into(),
@@ -142,35 +143,49 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
     div()
         .relative()
         .w_full()
-        .child(measure(width))
+        .child(measure(
+            width,
+            |bounds| bounds.size.width.into(),
+            |_, _| true,
+        ))
         .child(content)
         .into_any_element()
 }
 
-/// A body's laid-out width, so inline chips and spoilers can wrap inside
-/// it.
-fn body_width(id: &str) -> Rc<Cell<f32>> {
+/// What the last frame measured of an element, by `kind` and id: the
+/// canvas from [`measure`] writes it, and the next render reads it. It
+/// starts at `f32::MAX`.
+pub(super) fn measured(kind: &'static str, id: &str) -> Rc<Cell<f32>> {
     thread_local! {
-        static WIDTHS: RefCell<HashMap<String, Rc<Cell<f32>>>> = RefCell::new(HashMap::new());
+        static MEASURED: RefCell<HashMap<String, Rc<Cell<f32>>>> =
+            RefCell::new(HashMap::new());
     }
-    WIDTHS.with_borrow_mut(|widths| {
-        if widths.len() > 4096 {
-            widths.clear();
+    MEASURED.with_borrow_mut(|measured| {
+        if measured.len() > 8192 {
+            measured.clear();
         }
-        widths
-            .entry(id.to_string())
+        measured
+            .entry(format!("{kind}:{id}"))
             .or_insert_with(|| Rc::new(Cell::new(f32::MAX)))
             .clone()
     })
 }
 
-fn measure(width: Rc<Cell<f32>>) -> impl IntoElement {
+/// A canvas over its parent that writes `read(bounds)` into `cell` each
+/// frame, and redraws the window when `matters(before, now)`.
+pub(super) fn measure(
+    cell: Rc<Cell<f32>>,
+    read: fn(&Bounds<Pixels>) -> f32,
+    matters: fn(f32, f32) -> bool,
+) -> impl IntoElement {
     canvas(
         move |bounds, window, _| {
-            let next = f32::from(bounds.size.width);
-            if (width.get() - next).abs() > 0.5 {
-                width.set(next);
-                window.refresh();
+            let (before, now) = (cell.get(), read(&bounds));
+            if (before - now).abs() > 0.5 {
+                cell.set(now);
+                if matters(before, now) {
+                    window.refresh();
+                }
             }
         },
         |_, _, _, _| {},
