@@ -134,10 +134,24 @@ impl Inner {
             state.operations = operations.clone();
             operations
         };
-        self.operations.send_replace(operations);
+        // Most outbox changes are chat sends: watchers wake only on a change.
+        self.operations.send_if_modified(|current| {
+            let changed = current[..] != operations[..];
+            if changed {
+                *current = operations;
+            }
+            changed
+        });
     }
 
     fn operation(&self, state: &State, op: &Operation) -> Option<WorkflowOperation> {
+        // Skip other kinds before formatting anything.
+        if !matches!(
+            op.kind(),
+            protocol::DEFINITION | protocol::TRIGGER | protocol::DELETION
+        ) {
+            return None;
+        }
         let (kind, pubkey, tags) = command_view(op);
         if !protocol::is_operation(kind, &tags) {
             return None;
