@@ -293,6 +293,9 @@ pub struct MePage {
     new: Option<(EntityId, String, Entity<NewSession>)>,
     /// The open conversation, by community, id and visit.
     work: Option<(EntityId, String, u64, Entity<SessionWork>)>,
+    /// The draft whose saved start creates the selected conversation, by
+    /// community, conversation and [`pending::generation`].
+    pending: Option<(EntityId, String, u64, Option<String>)>,
     _model: Subscription,
 }
 
@@ -304,6 +307,7 @@ impl MePage {
             model,
             new: None,
             work: None,
+            pending: None,
             _model: subscription,
         }
     }
@@ -352,6 +356,28 @@ impl MePage {
                 )
             })
             .into_any_element()
+    }
+
+    /// [`pending::draft_key_for`], read again only when the selection or
+    /// a saved start changes.
+    fn draft_key_for(
+        &mut self,
+        community: &Entity<Community>,
+        id: &str,
+        cx: &App,
+    ) -> Option<String> {
+        let scope = community.entity_id();
+        let generation = pending::generation();
+        if let Some((owner, open, at, key)) = &self.pending
+            && *owner == scope
+            && open == id
+            && *at == generation
+        {
+            return key.clone();
+        }
+        let key = pending::draft_key_for(community, id, cx);
+        self.pending = Some((scope, id.to_owned(), generation, key.clone()));
+        key
     }
 
     /// A conversation that is not (or not yet) on Me's list.
@@ -444,7 +470,7 @@ impl Render for MePage {
             let focus = model.autofocus;
             let pending = selection
                 .session()
-                .and_then(|id| pending::draft_key_for(&community, id, cx));
+                .and_then(|id| self.draft_key_for(&community, id, cx));
             match (&selection, pending) {
                 (Selection::Session(id), None) => {
                     self.new = None;

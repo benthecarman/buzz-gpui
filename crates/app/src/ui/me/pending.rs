@@ -11,11 +11,21 @@
 use crate::community::{AppState, Community};
 use gpui_kit::{App, Entity};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The view-state entry listing the draft keys with a saved start.
 const INDEX: &str = "me:pending-starts";
 pub const SAVE_FAILED: &str =
     "Your session start couldn’t be saved on this device. No further changes were sent.";
+
+/// Bumped by every save and clear, so a cached [`draft_key_for`] can
+/// tell it is out of date.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current generation of saved starts.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
 
 /// The draft key of a new conversation, in a group or not.
 pub fn draft_key(section: Option<&str>) -> String {
@@ -123,6 +133,7 @@ pub fn save(
     let community = community.read(cx);
     let store = &cx.global::<AppState>().store;
     let partition = community.partition();
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     let json = serde_json::to_string(start).map_err(|_| SAVE_FAILED.to_owned())?;
     store
         .set_view_state(&partition, &format!("{key}:pending"), Some(&json))
@@ -143,6 +154,7 @@ pub fn clear(community: &Entity<Community>, key: &str, cx: &App) {
     let community = community.read(cx);
     let store = &cx.global::<AppState>().store;
     let partition = community.partition();
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     let _ = store.set_view_state(&partition, &format!("{key}:pending"), None);
     let mut keys = index(community, cx);
     keys.retain(|known| known != key);
