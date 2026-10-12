@@ -125,15 +125,20 @@ impl TeamImportDialog {
     /// A received team file, validated by the host before it shows.
     pub fn reading(
         teams: Entity<TeamsState>,
-        content: String,
+        bytes: Vec<u8>,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
+            let content = cx
+                .background_executor()
+                .spawn(async move { team_file::decode(&bytes) })
+                .await;
             let host = cx.update(|cx| team_ops::import_host(cx));
-            let result = match host {
-                Some(host) => team_ops::preview(&host, content, cx).await,
-                None => Err("Team preview is unavailable".into()),
+            let result = match (content, host) {
+                (Ok(content), Some(host)) => team_ops::preview(&host, content, cx).await,
+                (Ok(_), None) => Err("Team preview is unavailable".into()),
+                (Err(error), _) => Err(error),
             };
             let _ = this.update(cx, |this, cx| {
                 match result {
@@ -466,7 +471,10 @@ impl TeamExportDialog {
         cx.spawn(async move |this, cx| {
             let result: Result<bool, String> = async {
                 let json = team_ops::export_team(kit, community, team, memory, cx).await?;
-                let bytes = team_file::encode(&json, format)?;
+                let bytes = cx
+                    .background_executor()
+                    .spawn(async move { team_file::encode(&json, format) })
+                    .await?;
                 let path = match dev {
                     Some(path) => Some(path),
                     None => {
@@ -895,8 +903,12 @@ pub fn open_share(
             };
             cx.spawn(async move |cx| {
                 let json = team_ops::export_team(kit, community, team.clone(), memory, cx).await?;
+                let bytes = cx
+                    .background_executor()
+                    .spawn(async move { team_file::encode(&json, Format::Png) })
+                    .await?;
                 Ok(EncodedSnapshot {
-                    bytes: team_file::encode(&json, Format::Png)?,
+                    bytes,
                     file_name: team_file::file_name(&team.name, Format::Png),
                 })
             })
@@ -938,10 +950,9 @@ pub fn register(cx: &mut App) {
     );
     snapshot_preview::set_team_preview(
         Rc::new(|bytes, window, cx| {
-            let content = team_file::decode(&bytes)?;
             let community = AppState::current(cx).ok_or("Choose a community to import a team.")?;
             let teams = TeamsState::of(&community, cx);
-            let dialog = cx.new(|cx| TeamImportDialog::reading(teams, content, window, cx));
+            let dialog = cx.new(|cx| TeamImportDialog::reading(teams, bytes, window, cx));
             show_in_layer(dialog, cx);
             Ok(())
         }),

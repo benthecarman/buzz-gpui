@@ -324,21 +324,22 @@ impl TeamsSection {
                 },
                 (None, None) => return,
             };
-            let bytes = cx
+            let content = cx
                 .background_executor()
                 .spawn(async move {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     if size > team_file::MAX_PNG_BYTES as u64 {
                         return Err("Team snapshot exceeds the size limit".to_string());
                     }
-                    std::fs::read(&path).map_err(|error| error.to_string())
+                    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                    team_file::decode(&bytes)
                 })
                 .await;
             let host = this
                 .update(cx, |_, cx| team_ops::import_host(cx))
                 .ok()
                 .flatten();
-            let result = match (bytes.and_then(|bytes| team_file::decode(&bytes)), host) {
+            let result = match (content, host) {
                 (Ok(content), Some(host)) => team_ops::preview(&host, content, cx).await,
                 (Ok(_), None) => Err("Team preview is unavailable".into()),
                 (Err(error), _) => Err(error),
