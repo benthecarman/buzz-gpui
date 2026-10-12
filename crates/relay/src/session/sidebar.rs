@@ -14,6 +14,8 @@ use super::{Actor, Message, Session};
 use crate::ChannelType;
 use crate::event::Verified;
 use crate::http::RelayHttp;
+use crate::kit::GroupsId;
+use crate::kit::me::{self, KitEntry};
 use crate::read_state::ReadTarget;
 use crate::reader::{Priority, ReadOptions, Reader};
 use crate::sidebar::{
@@ -48,6 +50,8 @@ pub(super) struct SidebarPrefs {
     probed: Option<String>,
     probing: bool,
     state: Arc<SidebarState>,
+    /// The Me placement parsed from these catalog entries.
+    me_channels: Option<(Arc<[KitEntry]>, Vec<String>)>,
 }
 
 impl SidebarPrefs {
@@ -74,6 +78,7 @@ impl SidebarPrefs {
             probed: None,
             probing: false,
             state: Arc::default(),
+            me_channels: None,
         }
     }
 
@@ -552,7 +557,18 @@ impl Actor {
             .sidebar
             .store
             .state(self.sidebar.hidden.ids().collect());
-        next.me_channels = self.me_kit.snapshot().me_channels();
+        // Parse the Me record again only when the catalog entries change.
+        let entries = self.me_kit.snapshot().entries.clone();
+        next.me_channels = match &self.sidebar.me_channels {
+            Some((parsed, ids)) if Arc::ptr_eq(parsed, &entries) => ids.clone(),
+            _ => {
+                let ids = me::groups(&entries, GroupsId::Me)
+                    .map(|groups| groups.channels)
+                    .unwrap_or_default();
+                self.sidebar.me_channels = Some((entries, ids.clone()));
+                ids
+            }
+        };
         if *self.sidebar.state != next {
             self.sidebar.state = Arc::new(next);
         }
