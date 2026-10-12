@@ -852,8 +852,10 @@ pub struct ImportDialog {
     snapshot: Option<AgentSnapshot>,
     artwork: Option<Vec<u8>>,
     restore_memory: bool,
-    /// Whether the chosen host can restore memory; `None` while asking.
+    /// Whether the chosen host can restore memory; `None` while asking,
+    /// or until the host answers.
     restore_supported: Option<bool>,
+    probing: bool,
     manifest_open: bool,
     file_error: Option<SharedString>,
     memory_error: Option<SharedString>,
@@ -898,7 +900,19 @@ impl ImportDialog {
             .cloned();
         let observers = hosts
             .iter()
-            .map(|host| cx.observe(host, |_, _, cx| cx.notify()))
+            .map(|host| {
+                cx.observe(host, |this: &mut Self, host, cx| {
+                    // Ask again once a host that could not answer connects.
+                    if this.restore_supported.is_none()
+                        && !this.probing
+                        && this.host.as_ref().map(Entity::entity_id) == Some(host.entity_id())
+                        && connected(&host, cx)
+                    {
+                        this.probe_restore(cx);
+                    }
+                    cx.notify();
+                })
+            })
             .collect();
         let mut dialog = Self {
             hosts,
@@ -909,6 +923,7 @@ impl ImportDialog {
             artwork: None,
             restore_memory: false,
             restore_supported: None,
+            probing: false,
             manifest_open: false,
             file_error: None,
             memory_error: None,
@@ -938,7 +953,16 @@ impl ImportDialog {
         self.request_id = uuid::Uuid::new_v4().to_string();
         self.restore_supported = None;
         self.restore_memory = false;
-        // Hosts from before snapshots answer the probe as unsupported.
+        self.probe_restore(cx);
+        cx.notify();
+    }
+
+    /// Asks the chosen host whether it can restore memory.
+    fn probe_restore(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        self.probing = true;
         let probe = host.update(cx, |host, cx| {
             host.request(
                 Request::RestoreMemory {
@@ -950,16 +974,22 @@ impl ImportDialog {
             )
         });
         cx.spawn(async move |this, cx| {
-            let supported = matches!(probe.await, Ok(Response::MemoryRestored { .. }));
+            // Hosts from before snapshots answer the probe as unsupported;
+            // one that could not answer stays unknown.
+            let supported = match probe.await {
+                Ok(Response::MemoryRestored { .. }) => Some(true),
+                Ok(_) | Err(buzz_host_rpc::RpcError::Failed(_)) => Some(false),
+                Err(_) => None,
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.host.as_ref().map(Entity::entity_id) == Some(host.entity_id()) {
-                    this.restore_supported = Some(supported);
+                    this.probing = false;
+                    this.restore_supported = supported;
                     cx.notify();
                 }
             });
         })
         .detach();
-        cx.notify();
     }
 
     fn supports_restore(&self) -> bool {
