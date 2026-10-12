@@ -84,8 +84,9 @@ pub struct Updater {
     status: Status,
     /// The newer release, once one is found.
     release: Option<Release>,
-    /// The verified package for [`Self::release`].
-    package: Option<PathBuf>,
+    /// The verified package for [`Self::release`], and its digest so it is
+    /// checked again just before it installs.
+    package: Option<(PathBuf, [u8; 32])>,
     kind: InstallKind,
     platform: Platform,
     preferences: Preferences,
@@ -342,14 +343,14 @@ fn download(cx: &mut App) {
             }
         }
         if release::verify(&dest, &expected).is_ok() {
-            return Ok(dest);
+            return Ok((dest, expected));
         }
         fetch::download(&client, &asset.browser_download_url, &dest, &progress).await?;
         if let Err(error) = release::verify(&dest, &expected) {
             let _ = std::fs::remove_file(&dest);
             return Err(error);
         }
-        Ok(dest)
+        Ok((dest, expected))
     });
     // The percentage in Settings.
     cx.spawn(async move |cx| {
@@ -373,9 +374,9 @@ fn download(cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
         cx.update(|cx| match result {
-            Ok(path) => {
+            Ok((path, digest)) => {
                 tracing::info!(path = %path.display(), "update downloaded and verified");
-                cx.global_mut::<Updater>().package = Some(path);
+                cx.global_mut::<Updater>().package = Some((path, digest));
                 set_status(Status::Ready, cx);
                 announce(cx);
             }
@@ -391,31 +392,45 @@ fn download(cx: &mut App) {
 /// Installs the verified package; polkit asks for a password.
 pub fn install(cx: &mut App) {
     let updater = cx.global::<Updater>();
-    let (Status::Ready, Some(package)) = (&updater.status, updater.package.clone()) else {
+    let (Status::Ready, Some((package, digest))) = (&updater.status, updater.package.clone())
+    else {
         return;
     };
     let version = updater.version();
     set_status(Status::Installing, cx);
     toast(cx);
     let task = Runtime::handle(cx).spawn_blocking(move || {
-        install::install_deb(&package)?;
+        // The cached file may have changed since it was checked, including
+        // one kept from an earlier check of the same release. A changed one
+        // goes, so the next check downloads it again.
+        if let Err(error) = release::verify(&package, &digest) {
+            let _ = std::fs::remove_file(&package);
+            return Err((error, true));
+        }
+        install::install_deb(&package).map_err(|error| (error, false))?;
         // The prompt can succeed while apt changed nothing.
         if let (Some(installed), Some(version)) = (install::installed_version(), version) {
             let installed = installed.split('-').next().unwrap_or_default();
             if semver::Version::parse(installed).ok() != Some(version.clone()) {
-                return Err(format!(
-                    "Buzz {version} didn't install; {installed} is still installed."
+                return Err((
+                    format!("Buzz {version} didn't install; {installed} is still installed."),
+                    false,
                 ));
             }
         }
         Ok(())
     });
     cx.spawn(async move |cx| {
-        let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
+        let result = task
+            .await
+            .unwrap_or_else(|error| Err((error.to_string(), false)));
         cx.update(|cx| {
             match result {
                 Ok(()) => set_status(Status::Installed, cx),
-                Err(error) => {
+                Err((error, changed)) => {
+                    if changed {
+                        cx.global_mut::<Updater>().package = None;
+                    }
                     // Ready again, so Update now can try once more.
                     tracing::warn!(%error, "update install failed");
                     set_status(Status::Error(error.into()), cx);
