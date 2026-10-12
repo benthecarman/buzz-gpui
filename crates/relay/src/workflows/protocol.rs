@@ -311,7 +311,9 @@ fn chrono_like(value: &str) -> bool {
         return false;
     }
     // Time: HH:MM, optional :SS and fraction, then Z or ±HH:MM.
-    let rest = &value[11..];
+    let Some(rest) = value.get(11..) else {
+        return false;
+    };
     let (time, zone) = match rest.find(['Z', '+', '-']) {
         Some(at) => rest.split_at(at),
         None => (rest, ""),
@@ -605,6 +607,13 @@ mod tests {
             before_id: RUN.into(),
         };
         assert!(runs_path(ID, Some(&bad)).is_err());
+        for short in ["2026-09-12", "2026-09-12é12:00Z"] {
+            let short = RunCursor {
+                before: short.into(),
+                before_id: RUN.into(),
+            };
+            assert!(runs_path(ID, Some(&short)).is_err());
+        }
         assert!(runs_path("not-a-uuid", None).is_err());
         assert_eq!(
             hook_url("https://relay.example", ID).unwrap(),
