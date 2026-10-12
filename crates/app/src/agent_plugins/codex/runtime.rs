@@ -382,16 +382,33 @@ impl CodexRuntime {
 
     /// Ends every server. Must run inside tokio.
     pub fn dispose(&self) {
+        drop(self.close_all());
+    }
+
+    /// [`Self::dispose`], resolving once every server has stopped. Must
+    /// run inside tokio.
+    pub fn dispose_and_wait(&self) -> impl std::future::Future<Output = ()> + Send + use<> {
+        let closing = self.close_all();
+        async move {
+            futures::future::join_all(closing).await;
+        }
+    }
+
+    fn close_all(&self) -> Vec<Shared<BoxFuture<'static, ()>>> {
         let entries: Vec<Arc<Entry>> = locked(&self.inner.entries)
             .drain()
             .map(|(_, entry)| entry)
             .collect();
-        for entry in entries {
-            entry.abort.abort(ABORTED);
-            drop(entry.rpc.close());
-        }
+        let closing = entries
+            .iter()
+            .map(|entry| {
+                entry.abort.abort(ABORTED);
+                entry.rpc.close()
+            })
+            .collect();
         locked(&self.inner.views).clear();
         self.notify();
+        closing
     }
 
     fn storage_key(request: &Request) -> String {

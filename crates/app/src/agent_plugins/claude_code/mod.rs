@@ -65,11 +65,11 @@ pub fn init(cx: &mut App) {
         subscriptions.push(
             cx.observe_global::<crate::plugins::Plugins>(|this: &mut ClaudeCode, cx| this.sync(cx)),
         );
-        // Quitting stops every session's process, as buzz-app does on exit.
+        // Quitting stops every session's process, as buzz-app does on exit,
+        // and waits for them as long as GPUI lets quit handlers run.
         subscriptions.push(cx.on_app_quit(|this: &mut ClaudeCode, cx| {
             let _runtime = Runtime::handle(cx).enter();
-            this.runtime.dispose();
-            async {}
+            this.runtime.dispose_and_wait()
         }));
         let mut this = ClaudeCode {
             runtime: ClaudeRuntime::new(None),

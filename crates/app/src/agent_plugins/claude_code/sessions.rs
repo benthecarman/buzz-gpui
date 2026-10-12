@@ -346,6 +346,15 @@ impl AgentSessions {
         }
     }
 
+    /// The processes it runs, so a caller can wait for them to exit.
+    pub fn processes(&self) -> Vec<ClaudeProcess> {
+        self.state()
+            .live
+            .iter()
+            .map(|(_, live)| live.process.clone())
+            .collect()
+    }
+
     pub fn dispose(&self) {
         let live = {
             let mut state = self.state();
@@ -655,6 +664,15 @@ impl Spare {
 
     pub fn dispose(&self) {
         self.warm(Vec::new());
+    }
+
+    /// The spare's process once it has started, so a caller can wait for
+    /// it to exit.
+    pub fn process(&self) -> Option<BoxFuture<'static, Option<ClaudeProcess>>> {
+        self.state()
+            .next
+            .as_ref()
+            .map(|next| next.process.clone().boxed())
     }
 
     /// Keeps the spare when it fits one of `wheres`, else starts one for the

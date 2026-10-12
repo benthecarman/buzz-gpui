@@ -237,6 +237,19 @@ async fn hands_a_mention_to_its_threads_session() {
 }
 
 #[tokio::test]
+async fn disposing_waits_for_the_processes_to_exit() {
+    let (root, mention) = thread_root_and_mention();
+    let setup = Setup::new(vec![root, mention.clone()]);
+    setup.mention(&mention).await;
+    flush().await;
+    let stopped = setup.runtime.dispose_and_wait();
+    tokio::time::timeout(Duration::from_secs(5), stopped)
+        .await
+        .unwrap();
+    assert!(setup.used().iter().all(FakeClaude::killed));
+}
+
+#[tokio::test]
 async fn answers_claudes_tool_calls_as_the_agent_in_its_thread() {
     let (root, mention) = thread_root_and_mention();
     let setup = Setup::new(vec![root.clone(), mention.clone()]);

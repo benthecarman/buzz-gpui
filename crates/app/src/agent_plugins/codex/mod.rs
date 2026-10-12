@@ -66,11 +66,11 @@ pub fn init(cx: &mut App) {
         subscriptions.push(
             cx.observe_global::<crate::plugins::Plugins>(|this: &mut Codex, cx| this.sync(cx)),
         );
-        // Quitting ends every agent's server.
+        // Quitting ends every agent's server, and waits for them as long
+        // as GPUI lets quit handlers run.
         subscriptions.push(cx.on_app_quit(|this: &mut Codex, cx| {
             let _runtime = Runtime::handle(cx).enter();
-            this.runtime.dispose();
-            async {}
+            this.runtime.dispose_and_wait()
         }));
         let mut this = Codex {
             runtime: CodexRuntime::new(None),

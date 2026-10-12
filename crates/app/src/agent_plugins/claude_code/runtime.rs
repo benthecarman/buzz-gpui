@@ -298,6 +298,28 @@ impl ClaudeRuntime {
             .unwrap_or_default()
     }
 
+    /// [`Self::dispose`], resolving once the processes it stops have
+    /// exited.
+    pub fn dispose_and_wait(&self) -> impl std::future::Future<Output = ()> + Send + use<> {
+        let spare = self.inner.spare.process();
+        let processes: Vec<_> = locked(&self.inner.agents)
+            .values()
+            .flat_map(|entry| entry.sessions.processes())
+            .collect();
+        self.dispose();
+        async move {
+            let spare = async {
+                if let Some(spare) = spare
+                    && let Some(process) = spare.await
+                {
+                    process.exited().await;
+                }
+            };
+            let sessions = futures::future::join_all(processes.iter().map(|p| p.exited()));
+            futures::join!(spare, sessions);
+        }
+    }
+
     pub fn dispose(&self) {
         self.inner.spare.dispose();
         let entries: Vec<Arc<Entry>> = locked(&self.inner.agents)
