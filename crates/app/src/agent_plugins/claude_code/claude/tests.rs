@@ -40,6 +40,7 @@ async fn starts_claude_code_as_the_sdk_does_and_initializes_it() {
             "--input-format",
             "stream-json",
             "--verbose",
+            "--replay-user-messages",
             "--permission-mode",
             "bypassPermissions",
             "--model",
@@ -94,6 +95,84 @@ async fn answers_both_messages_of_a_turn_that_took_a_second_mid_way() {
     process.finish(None);
     assert_eq!(first.await.unwrap(), Settled::ok());
     assert_eq!(second.await.unwrap(), Settled::ok());
+}
+
+/// Spawns as `inner` does, but the fake does not echo messages by itself,
+/// so a test decides when Claude takes each one.
+struct ManualReplay(FakeSpawn);
+
+impl Spawn for ManualReplay {
+    fn spawn(
+        &self,
+        id: &str,
+        mut options: SpawnOptions,
+    ) -> BoxFuture<'static, Result<Spawned, String>> {
+        options.args.retain(|arg| arg != "--replay-user-messages");
+        self.0.spawn(id, options)
+    }
+}
+
+fn manual_replay(fake: &FakeSpawn) -> Spawner {
+    Arc::new(ManualReplay(fake.clone()))
+}
+
+fn replay(text: &str) -> Value {
+    json!({
+        "type": "user", "isReplay": true, "session_id": "s1",
+        "message": { "role": "user", "content": text },
+    })
+}
+
+fn state(state: &str) -> Value {
+    json!({
+        "type": "system", "subtype": "session_state_changed",
+        "state": state, "session_id": "s1",
+    })
+}
+
+/// As recorded from Claude Code 2.1: a message written just as a turn
+/// ends is followed by idle, then running, and only then taken.
+#[tokio::test]
+async fn a_message_written_as_the_turn_ends_waits_for_its_own_turn() {
+    let fake = FakeSpawn::default();
+    let claude = ClaudeProcess::start(&manual_replay(&fake), launch())
+        .await
+        .unwrap();
+    let process = fake.claudes()[0].clone();
+    process.set_hold(true);
+    let first = tokio::spawn(claude.send("first"));
+    flush().await;
+    process.emit(replay("first"));
+    let second = tokio::spawn(claude.send("second"));
+    flush().await;
+    process.finish(None);
+    flush().await;
+    assert!(
+        !first.is_finished(),
+        "settled before Claude read the second"
+    );
+    assert!(claude.busy());
+    process.emit(state("running"));
+    process.emit(replay("second"));
+    process.emit(json!({ "type": "result", "subtype": "success", "is_error": false }));
+    process.emit(state("idle"));
+    assert_eq!(first.await.unwrap(), Settled::ok());
+    assert_eq!(second.await.unwrap(), Settled::ok());
+    assert!(!claude.busy());
+}
+
+#[tokio::test]
+async fn a_message_claude_never_takes_is_settled_after_a_grace() {
+    let fake = FakeSpawn::default();
+    let claude = ClaudeProcess::start(&manual_replay(&fake), launch())
+        .await
+        .unwrap();
+    let sent = tokio::spawn(claude.send("lost"));
+    flush().await;
+    assert!(!sent.is_finished());
+    tokio::time::sleep(UNREAD_GRACE * 2).await;
+    assert_eq!(sent.await.unwrap(), Settled::ok());
+    assert!(!claude.busy());
 }
 
 /// Spawns as `inner` does, without the environment that asks for idle

@@ -30,6 +30,16 @@ pub struct FakeState {
     output: mpsc::UnboundedSender<ProcessOutput>,
 }
 
+impl FakeState {
+    /// Claude Code reports running and idle only when asked to.
+    fn reports_state(&self) -> bool {
+        self.options
+            .env
+            .get("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS")
+            == Some(&Some("1".into()))
+    }
+}
+
 /// One fake process. Cheap to clone.
 #[derive(Clone)]
 pub struct FakeClaude(Arc<Mutex<FakeState>>, Arc<Mutex<HashSet<String>>>);
@@ -76,12 +86,7 @@ impl FakeClaude {
                 return;
             }
             state.open = 0;
-            let idle = state
-                .options
-                .env
-                .get("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS")
-                == Some(&Some("1".into()));
-            (state.session.clone(), idle)
+            (state.session.clone(), state.reports_state())
         };
         let mut result = json!({
             "type": "result",
@@ -142,17 +147,34 @@ impl FakeClaude {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let (session, first, hold) = {
+        let (session, first, hold, starts) = {
             let mut state = self.state();
             state.prompts.push(content.clone());
             let first = !state.started;
             state.started = true;
+            let starts = state.open == 0 && state.reports_state();
             state.open += 1;
-            (state.session.clone(), first, state.hold)
+            (state.session.clone(), first, state.hold, starts)
         };
+        if starts {
+            self.emit(json!({
+                "type": "system", "subtype": "session_state_changed",
+                "state": "running", "session_id": session,
+            }));
+        }
         if first {
             self.1.lock().unwrap().insert(session.clone());
             self.emit(json!({ "type": "system", "subtype": "init", "session_id": session }));
+        }
+        if self
+            .args()
+            .iter()
+            .any(|arg| arg == "--replay-user-messages")
+        {
+            self.emit(json!({
+                "type": "user", "isReplay": true, "session_id": session,
+                "message": { "role": "user", "content": content },
+            }));
         }
         self.emit(json!({
             "type": "assistant",

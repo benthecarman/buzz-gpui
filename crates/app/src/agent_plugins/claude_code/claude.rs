@@ -12,12 +12,20 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// Its tools are `mcp__buzz__<name>`.
 pub const TOOL_SERVER: &str = "buzz";
 const FINAL_TOOL: &str = "mcp__buzz__send";
 const STDERR_LIMIT: usize = 4_000;
+/// How long Claude may stay idle with a message it has not taken before
+/// the messages are settled anyway.
+const UNREAD_GRACE: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(3)
+};
 /// The longest line of output read. Tool results with images run to a
 /// few megabytes.
 const FRAME_LIMIT: usize = 64 * 1024 * 1024;
@@ -103,6 +111,9 @@ pub fn args(launch: &Launch) -> Vec<String> {
         "--input-format",
         "stream-json",
         "--verbose",
+        // Echoes each message as Claude takes it, so a turn that ends just
+        // as one arrives is not taken for the answer to it.
+        "--replay-user-messages",
         "--permission-mode",
         "bypassPermissions",
     ]
@@ -136,6 +147,11 @@ struct State {
     conversation: Option<String>,
     /// Messages sent and not yet answered.
     pending: usize,
+    /// Messages sent that Claude has not echoed back as taken yet.
+    unread: usize,
+    /// Bumped on every reported state change, so a late check can tell
+    /// whether Claude moved on.
+    state_changes: u64,
     /// It has begun a turn, so its session loaded.
     began: bool,
     waiters: Vec<oneshot::Sender<Settled>>,
@@ -230,6 +246,8 @@ impl ClaudeProcess {
                 session_id,
                 conversation: None,
                 pending: 0,
+                unread: 0,
+                state_changes: 0,
                 began: false,
                 waiters: Vec::new(),
                 buffer: Lines::default(),
@@ -312,6 +330,7 @@ impl ClaudeProcess {
             let mut state = self.state();
             if state.alive {
                 state.pending += 1;
+                state.unread += 1;
                 state.waiters.push(sender);
             }
             state.alive
@@ -376,6 +395,7 @@ impl ClaudeProcess {
         let waiters = {
             let mut state = self.state();
             state.pending = 0;
+            state.unread = 0;
             state.last_error = None;
             std::mem::take(&mut state.waiters)
         };
@@ -451,14 +471,38 @@ impl ClaudeProcess {
             self.answer(message);
             return;
         }
+        if kind == Some("user") && message.get("isReplay") == Some(&Value::Bool(true)) {
+            let mut state = self.state();
+            state.unread = state.unread.saturating_sub(1);
+            return;
+        }
         if kind == Some("system") && subtype == Some("session_state_changed") {
-            let idle = {
+            let (idle, unread, change) = {
                 let mut state = self.state();
                 state.reports_state = true;
-                message.get("state").and_then(Value::as_str) == Some("idle") && state.pending > 0
+                state.state_changes += 1;
+                let idle = message.get("state").and_then(Value::as_str) == Some("idle")
+                    && state.pending > 0;
+                (idle, state.unread, state.state_changes)
             };
-            if idle {
+            if idle && unread == 0 {
                 self.done();
+            } else if idle {
+                // A message written as the turn ended is still to be read:
+                // Claude goes running again for it. Should it stay idle
+                // instead, the messages are settled anyway, never left
+                // waiting.
+                let claude = self.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(UNREAD_GRACE).await;
+                    let still_idle = {
+                        let state = claude.state();
+                        state.state_changes == change && state.pending > 0
+                    };
+                    if still_idle {
+                        claude.done();
+                    }
+                });
             }
             return;
         }

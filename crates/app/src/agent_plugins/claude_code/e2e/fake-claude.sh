@@ -15,9 +15,11 @@ auth)
 esac
 
 session=fresh
+replay=
 while [ $# -gt 0 ]; do
   case "$1" in
   --session-id | --resume) session="$2"; shift ;;
+  --replay-user-messages) replay=1 ;;
   esac
   shift
 done
@@ -34,6 +36,9 @@ while IFS= read -r line; do
     if [ -z "$started" ]; then
       started=1
       printf '{"type":"system","subtype":"init","session_id":"%s","cwd":"%s"}\n' "$session" "$(pwd)"
+    fi
+    if [ -n "$replay" ]; then
+      printf '{"type":"user","isReplay":true,"session_id":"%s","message":{"role":"user","content":""}}\n' "$session"
     fi
     calls=$((calls + 1))
     path=$(printf '%s' "$line" | sed -n 's/.*READ:\([^ \\"]*\).*/\1/p')
