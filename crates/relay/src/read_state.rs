@@ -21,6 +21,7 @@
 //! every inherited channel and thread frontier in the published copy, so a
 //! smaller publication can never reactivate a peer's register.
 
+use crate::discovery::is_uuid;
 use crate::event::{Verified, Verifier, kinds};
 use crate::socket::Filter;
 use buzz_identity::{Identity, Purpose};
@@ -142,7 +143,9 @@ pub(crate) fn is_hex64(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn is_channel_key(value: &str) -> bool {
+/// 1–128 ASCII letters, digits, `_` or `-`: a channel id a filter or key
+/// may name.
+pub(crate) fn is_channel_key(value: &str) -> bool {
     (1..=128).contains(&value.len())
         && value
             .bytes()
@@ -635,15 +638,6 @@ impl SnapshotDescriptor {
             community_id: community.to_owned(),
         })
     }
-}
-
-fn is_uuid(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(index, b)| match index {
-            8 | 13 | 18 | 23 => *b == b'-',
-            _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
-        })
 }
 
 /// Checks a complete snapshot response and verifies its events. Every event

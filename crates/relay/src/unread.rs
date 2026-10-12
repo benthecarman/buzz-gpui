@@ -94,19 +94,6 @@ fn is_auxiliary(kind: u16) -> bool {
     AUXILIARY_KINDS.contains(&kind)
 }
 
-/// The sole `h` tag value; `None` when absent or repeated.
-fn channel_of(event: &Event) -> Option<&str> {
-    let mut channels = event
-        .tags
-        .iter()
-        .filter(|tag| tag.kind() == "h")
-        .map(|tag| tag.as_slice().get(1).map(String::as_str));
-    match (channels.next(), channels.next()) {
-        (Some(channel), None) => channel,
-        _ => None,
-    }
-}
-
 fn is_broadcast(event: &Event) -> bool {
     has_tag(event, "broadcast", "1")
 }
@@ -203,7 +190,7 @@ fn owners(
         return None;
     }
     visiting.insert(id.clone());
-    let direct = channel_of(event);
+    let direct = event.channel();
     let kind = event.kind_u16();
     let resolved = if is_content(kind) {
         direct.map(|channel| BTreeSet::from([channel.to_owned()]))
@@ -1074,7 +1061,7 @@ impl<F: ThreadFollowStore> Unread<F> {
     /// The canonical root of a content event: walk parents through retained
     /// or looked-up content in the same channel (≤32 hops).
     fn root(&self, event: &Verified) -> Option<String> {
-        let channel = channel_of(event);
+        let channel = event.channel();
         let mut current = event;
         let mut seen = HashSet::new();
         for _ in 0..ANCESTRY_DEPTH {
@@ -1085,7 +1072,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                 return Some(current.id_hex());
             };
             let next = self.structural(&reference.root_id)?;
-            if !is_content(next.kind_u16()) || channel_of(next) != channel {
+            if !is_content(next.kind_u16()) || next.channel() != channel {
                 return None;
             }
             current = next;
@@ -1164,7 +1151,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                     && crate::fold::deletion_applies(
                         event,
                         target,
-                        channel_of(target).unwrap_or_default(),
+                        target.channel().unwrap_or_default(),
                         &self.fold,
                     )
                 {
@@ -1177,7 +1164,7 @@ impl<F: ThreadFollowStore> Unread<F> {
             if !is_content(event.kind_u16()) || index.tombstones.contains(id) {
                 continue;
             }
-            let Some(channel) = channel_of(event) else {
+            let Some(channel) = event.channel() else {
                 continue;
             };
             let root = self.root(event);
@@ -1461,9 +1448,8 @@ impl<F: ThreadFollowStore> Unread<F> {
         };
         // Thread and message targets need their root or message retained
         // (or looked up) in the same channel.
-        let same_channel = |event: &Verified| {
-            channel_of(event) == Some(channel_id) && is_content(event.kind_u16())
-        };
+        let same_channel =
+            |event: &Verified| event.channel() == Some(channel_id) && is_content(event.kind_u16());
         let accessible = self.allowed(channel_id)
             && match target {
                 ReadTarget::Channel { .. } => true,
@@ -1564,7 +1550,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         if event.kind_u16() == kinds::DIFF {
             return latest_preview(event);
         }
-        let channel = channel_of(event).unwrap_or_default();
+        let channel = event.channel().unwrap_or_default();
         self.folded_previews(channel, std::iter::once(event))
             .remove(&event.id)
             .unwrap_or_else(|| latest_preview(event))
@@ -1667,7 +1653,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         let Some(event) = self.events.get(message_id) else {
             return MessageAttention::unknown();
         };
-        if channel_of(event) != Some(channel_id) || !is_content(event.kind_u16()) {
+        if event.channel() != Some(channel_id) || !is_content(event.kind_u16()) {
             return MessageAttention::unknown();
         }
         let index = self.index.as_ref().expect("indexed");
@@ -2216,9 +2202,9 @@ impl<F: ThreadFollowStore> Unread<F> {
         self.channel_tokens.retain(|id, _| allowed(id));
         self.lookups.retain(|_, lookup| allowed(&lookup.channel_id));
         self.lookup_events
-            .retain(|_, event| channel_of(event).is_some_and(allowed));
+            .retain(|_, event| event.channel().is_some_and(allowed));
         self.witnesses
-            .retain(|_, event| channel_of(event).is_some_and(allowed));
+            .retain(|_, event| event.channel().is_some_and(allowed));
         self.queued.retain(|_, item| allowed(&item.channel_id));
         self.known.retain(|id| allowed(id));
         self.forced.retain(|id, _| allowed(id));
@@ -2402,7 +2388,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         let found: BTreeMap<String, String> = events
             .iter()
             .filter(|event| is_content(event.kind_u16()) && wanted.contains(&event.id_hex()))
-            .filter_map(|event| Some((event.id_hex(), channel_of(event)?.to_owned())))
+            .filter_map(|event| Some((event.id_hex(), event.channel()?.to_owned())))
             .collect();
         (!found.is_empty()).then_some(found)
     }
@@ -2526,7 +2512,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         let live = |unread: &Self, event: &Verified| {
             let author = event.pubkey_hex();
             is_content(event.kind_u16())
-                && channel_of(event) == Some(channel_id.as_str())
+                && event.channel() == Some(channel_id.as_str())
                 && !removed.contains(&format!("{author}:{}", event.id_hex()))
                 && !(author == viewer && unread.retracted.contains(&event.id_hex()))
         };
@@ -2673,7 +2659,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         let event = self
             .events
             .get(id)
-            .filter(|event| is_content(event.kind_u16()) && channel_of(event) == Some(channel_id))
+            .filter(|event| is_content(event.kind_u16()) && event.channel() == Some(channel_id))
             .cloned();
         let Some(event) = event.filter(|_| self.allowed(channel_id)) else {
             return Err(UnreadError::MessageUnavailable);

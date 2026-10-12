@@ -663,7 +663,7 @@ pub(crate) fn has_tag(event: &Event, name: &str, value: &str) -> bool {
 }
 
 /// Distinct ids this event's `e` tags point at, in tag order.
-fn e_targets(event: &Event) -> Vec<EventId> {
+pub(crate) fn e_targets(event: &Event) -> Vec<EventId> {
     let mut targets = Vec::new();
     for tag in event.tags.iter() {
         if let [name, value, ..] = tag.as_slice()

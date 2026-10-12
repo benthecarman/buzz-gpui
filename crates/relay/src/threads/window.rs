@@ -7,6 +7,7 @@
 //! viewer, host, root, page size or cursor.
 
 use crate::event::{Verified, kinds};
+use crate::read_state::is_hex64;
 use crate::socket::Filter;
 use nostr::prelude::EventId;
 use serde_json::{Map, Value, json};
@@ -21,7 +22,7 @@ pub const DEPTH_LIMIT: u64 = 100;
 /// The relay's `thread_window` row allowlist excludes legacy diffs (40008).
 pub const STRICT_WINDOW_KINDS: [u16; 2] = [kinds::CHAT, kinds::AGENT_MESSAGE];
 /// Content kinds a thread shows, and the legacy traversal's `kinds`.
-pub const CONTENT_KINDS: [u16; 3] = [kinds::CHAT, kinds::AGENT_MESSAGE, kinds::DIFF];
+pub use crate::unread::CONTENT_KINDS;
 /// Overlays fetched for an exact target (`threads.ts:356-364`).
 pub const TARGET_OVERLAY_KINDS: [u16; 5] = [
     kinds::DELETION,
@@ -96,21 +97,7 @@ pub enum ThreadWindowError {
 
 /// `/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/` (`thread-window.ts:14`).
 /// Only such channels can use strict windows; others go straight to legacy.
-pub fn is_canonical_channel(channel: &str) -> bool {
-    let bytes = channel.as_bytes();
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(i, b)| match i {
-            8 | 13 | 18 | 23 => *b == b'-',
-            _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
-        })
-}
-
-pub(crate) fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
+pub use crate::discovery::is_uuid as is_canonical_channel;
 
 fn object(value: Value) -> Filter {
     match value {

@@ -20,6 +20,7 @@
 
 use crate::discovery::{ChannelSummary, ChannelType, is_uuid, locale_compare};
 use crate::event::{Verified, kinds};
+use crate::read_state::is_channel_key;
 use crate::socket::Filter;
 use buzz_identity::{Identity, IdentityError, Purpose};
 use nostr::prelude::{SecretKey, UnsignedEvent};
@@ -554,28 +555,14 @@ pub const ACTIVITY_KINDS: &[u16] = &[
 /// Channels per activity query.
 pub const ACTIVITY_BATCH: usize = 128;
 
-fn activity_channel(event: &Verified) -> Option<&str> {
-    let mut h = event.tags_named("h");
-    match (h.next(), h.next()) {
-        (Some(tag), None) => tag.get(1).map(String::as_str),
-        _ => None,
-    }
-}
-
 /// One query for up to [`ACTIVITY_BATCH`] channels: one `limit: 1` filter
 /// per channel (`native.ts:813-829`). This exceeds the reader's 4-filter
 /// budget, so the session sends it on the raw `/query` path with
 /// background priority and a 10 s timeout, as the reference does.
 pub fn activity_filters(channel_ids: &[String]) -> Result<Vec<Filter>, SidebarError> {
-    let valid = |id: &String| {
-        (1..=128).contains(&id.len())
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    };
     if channel_ids.is_empty()
         || channel_ids.len() > ACTIVITY_BATCH
-        || !channel_ids.iter().all(valid)
+        || !channel_ids.iter().all(|id| is_channel_key(id))
     {
         return Err(SidebarError::Invalid("Activity filter rejected"));
     }
@@ -604,7 +591,7 @@ impl ActivityRefresh {
     /// Takes the answer to [`activity_filters`] for `batch`.
     pub fn collect(&mut self, batch: &[String], events: &[Verified]) {
         for event in events {
-            let Some(id) = activity_channel(event) else {
+            let Some(id) = event.channel() else {
                 continue;
             };
             let at = event.created_at_secs();
@@ -630,7 +617,7 @@ impl ChannelActivity {
             if !ACTIVITY_KINDS.contains(&event.kind_u16()) {
                 continue;
             }
-            let Some(id) = activity_channel(event) else {
+            let Some(id) = event.channel() else {
                 continue;
             };
             let at = event.created_at_secs();

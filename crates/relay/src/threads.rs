@@ -81,7 +81,7 @@ pub use window::{
 use crate::event::{Verified, kinds};
 use crate::fold::{
     Delivery, FoldOptions, LocalDelivery, MessageClock, MessageProjection, MessageRow, ReplyTree,
-    reply_tree, thread_reference,
+    e_targets, reply_tree, thread_reference,
 };
 use crate::reader::{Events, ReadError, ReadErrorKind, ReadOptions};
 use crate::socket::Filter;
@@ -89,7 +89,6 @@ use nostr::prelude::{EventId, PublicKey};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use window::is_hex64;
 
 /// Pages one view may hold: 10 + 9 × 50 = 460 strict replies at most.
 pub const MAX_PAGES: usize = 10;
@@ -1338,7 +1337,7 @@ impl ThreadState {
                 if !AUX.contains(&event.kind_u16()) || taken.contains(&event.id) {
                     continue;
                 }
-                if targets(event).any(|target| known(&target, &taken)) {
+                if e_targets(event).iter().any(|target| known(target, &taken)) {
                     taken.insert(event.id);
                     result.push(event.clone());
                 }
@@ -1482,23 +1481,12 @@ fn is_content(event: &Verified) -> bool {
 }
 
 /// Ids named by `e` tags, compared as lowercase hex like the reference.
-fn targets(event: &Verified) -> impl Iterator<Item = EventId> + '_ {
-    event.tags_named("e").filter_map(|tag| {
-        tag.get(1)
-            .filter(|value| is_hex64(value))
-            .and_then(|value| EventId::from_hex(value).ok())
-    })
-}
-
-/// The overlays in `events` naming `id`.
 /// The overlays in `maps` that target `id`, sorted and distinct.
 fn overlays_of(maps: &[&EventMap], id: &EventId) -> Vec<EventId> {
     let overlays: BTreeSet<EventId> = maps
         .iter()
         .flat_map(|map| map.values())
-        .filter(|event| {
-            AUX.contains(&event.kind_u16()) && targets(event).any(|target| target == *id)
-        })
+        .filter(|event| AUX.contains(&event.kind_u16()) && e_targets(event).contains(id))
         .map(|event| event.id)
         .collect();
     overlays.into_iter().collect()

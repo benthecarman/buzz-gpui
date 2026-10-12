@@ -569,7 +569,11 @@ fn pages_tied_replies_newest_first_and_repairs_retained_overlays() {
             overlays
                 .borrow()
                 .iter()
-                .filter(|o| targets(o).any(|t| page.iter().any(|row| row.id == t)))
+                .filter(|o| {
+                    e_targets(o)
+                        .into_iter()
+                        .any(|t| page.iter().any(|row| row.id == t))
+                })
                 .cloned(),
         );
         let next = (eligible.len() > page.len())
