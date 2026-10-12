@@ -290,8 +290,21 @@ impl Fields {
         self.name.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    /// The host's settings the form reads, with an older host's harnesses
+    /// as options. This runs several times a frame, so the agent list and
+    /// the other fields no form helper reads are left at their defaults
+    /// rather than copied.
     fn data(&self, cx: &App) -> AgentsSnapshot {
-        self.host.read(cx).snapshot()
+        let host = self.host.read(cx);
+        let agents = &host.agents;
+        AgentsSnapshot {
+            harness_options: host.harness_options(),
+            default_workspace: agents.default_workspace.clone(),
+            databricks_defaults: agents.databricks_defaults.clone(),
+            agent_defaults: agents.agent_defaults.clone(),
+            default_settings: agents.default_settings.clone(),
+            ..Default::default()
+        }
     }
 
     /// Copies a changed input into the draft.
