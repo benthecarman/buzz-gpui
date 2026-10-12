@@ -20,6 +20,8 @@ type Result<T> = std::result::Result<T, String>;
 /// Who asks: a connection to this host.
 pub(crate) trait Holder: Clone {
     fn same(&self, other: &Self) -> bool;
+    /// False once the connection has closed, and so let go of all it held.
+    fn alive(&self) -> bool;
 }
 
 pub(crate) struct Hosting<H> {
@@ -61,7 +63,9 @@ impl<H: Holder> Hosting<H> {
         std::fs::create_dir_all(&self.dir).map_err(|_| "Could not open agent hosting")?;
         let packaged = self.dir.join(format!("{pubkey}.packaged"));
         let mut held = self.held();
-        if held.get(pubkey).is_some_and(|(holder, _)| !holder.same(by)) {
+        // A connection that closed while this claim waited has already
+        // let go of everything; holding for it now would hold for good.
+        if !by.alive() || held.get(pubkey).is_some_and(|(holder, _)| !holder.same(by)) {
             return Ok(false);
         }
         if self.packaged {
@@ -133,9 +137,24 @@ fn open_lock(path: &Path) -> Result<File> {
 mod tests {
     use super::*;
 
+    /// 0 stands for a closed connection.
     impl Holder for u32 {
         fn same(&self, other: &Self) -> bool {
             self == other
+        }
+        fn alive(&self) -> bool {
+            *self != 0
+        }
+    }
+
+    #[test]
+    fn a_closed_connection_holds_nothing() {
+        for packaged in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let agent = "a".repeat(64);
+            let host = Hosting::new(dir.path().join("hosts"), packaged);
+            assert!(!host.claim(&agent, &0).unwrap());
+            assert!(host.claim(&agent, &1).unwrap());
         }
     }
 

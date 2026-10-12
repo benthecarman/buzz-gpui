@@ -82,6 +82,11 @@ impl<P: Protocol> Peer<P> {
         self.outgoing.closed().await
     }
 
+    /// Whether this connection has closed.
+    pub fn is_closed(&self) -> bool {
+        self.outgoing.is_closed()
+    }
+
     /// Whether `other` came from the same connection as this peer.
     pub fn same_connection(&self, other: &Self) -> bool {
         self.outgoing.same_channel(&other.outgoing)

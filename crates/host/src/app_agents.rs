@@ -88,6 +88,10 @@ impl Holder for Peer<HostProtocol> {
     fn same(&self, other: &Self) -> bool {
         self.same_connection(other)
     }
+
+    fn alive(&self) -> bool {
+        !self.is_closed()
+    }
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
