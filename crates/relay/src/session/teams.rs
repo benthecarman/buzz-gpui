@@ -8,20 +8,19 @@ use super::delivery::{Wait, delivered};
 use super::{Message, Session};
 use crate::event::Verified;
 use crate::kit::payload::{self, TeamPayload};
-use crate::kit::{self, TeamManifest as TextManifest, TextRecord};
+use crate::kit::{self, TeamManifest, TextRecord};
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Outbox, SendOptions};
 use crate::reader::{ReadOptions, Reader};
 use crate::socket::Filter;
 use crate::teams::{
-    KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, Team, TeamEntry, TeamHead, check_manifest, decode_payload,
-    decode_record, encode_payload, in_catalog, newest, parse_team, payload_record, record_tags,
+    KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, Team, TeamEntry, TeamHead, parse_team, record_tags,
     team_record,
 };
 use buzz_identity::Identity;
 use nostr::prelude::EventId;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -247,29 +246,16 @@ impl Inner {
                 "Recipe catalog reached its read limit; no partial catalog will be used".into(),
             );
         }
-        let mut heads: HashMap<String, Vec<Verified>> = HashMap::new();
-        for event in events {
-            let d = event
-                .tags
-                .iter()
-                .map(|tag| tag.as_slice())
-                .find(|tag| tag.first().map(String::as_str) == Some("d"))
-                .and_then(|tag| tag.get(1))
-                .cloned();
-            if let Some(d) = d.filter(|d| in_catalog(d, &self.community)) {
-                heads.entry(d).or_default().push(event);
-            }
-        }
-        Ok(heads
-            .into_values()
-            .filter_map(|events| newest(&events).cloned())
+        Ok(kit::catalog_heads(&events, &self.community)
+            .into_iter()
+            .cloned()
             .collect())
     }
 
     async fn read_entries(&self) -> Result<Vec<TeamEntry>, String> {
         let mut entries = Vec::new();
         for event in self.heads(false).await? {
-            let raw = decode_record(&self.identity, &event, &self.community)?;
+            let raw = kit::open(&self.identity, &event, &self.community)?;
             if let Some((team, deleted)) = parse_team(&raw) {
                 entries.push(TeamEntry {
                     team,
@@ -338,7 +324,7 @@ impl Inner {
             query["consistency"] = json!("strong");
         }
         let events = self.fresh(query).await?;
-        Ok(newest(&events).cloned())
+        Ok(kit::selected_head(&events).cloned())
     }
 
     /// Waits until the relay holds exactly `id`.
@@ -520,7 +506,7 @@ impl Inner {
         // disappears stays unreadable rather than unlocking the legacy
         // fallback.
         self.lock().known_text.insert(team.to_owned());
-        let raw = decode_record(&self.identity, &event, &self.community)?;
+        let raw = kit::open(&self.identity, &event, &self.community)?;
         let record = kit::parse_text_record(&raw, &self.community)?;
         if record.owner != self.viewer || event.tag("d") != Some(d.as_str()) {
             return Err("Team instructions coordinate mismatch".into());
@@ -532,7 +518,7 @@ impl Inner {
     async fn read_chunks(
         &self,
         team: &str,
-        manifest: &TextManifest,
+        manifest: &TeamManifest,
     ) -> Result<Vec<TeamPayload>, String> {
         let mut payloads = Vec::with_capacity(manifest.chunks as usize);
         for d in payload::chunk_coordinates(manifest, &self.community, team) {
@@ -540,7 +526,7 @@ impl Inner {
                 .read_coordinate(&d, true)
                 .await?
                 .ok_or("Portable team payload is unavailable")?;
-            let raw = decode_record(&self.identity, &event, &self.community)?;
+            let raw = kit::open(&self.identity, &event, &self.community)?;
             let chunk = payload::parse_payload_record(&raw, &self.community)?;
             if chunk.coordinate() != d || event.tag("d") != Some(d.as_str()) {
                 return Err("Portable team payload coordinate mismatch".into());
@@ -558,7 +544,7 @@ impl Inner {
             let record = chunk.record();
             let d = chunk.coordinate();
             if let Some(existing) = self.read_coordinate(&d, true).await? {
-                let raw = decode_record(&self.identity, &existing, &self.community)?;
+                let raw = kit::open(&self.identity, &existing, &self.community)?;
                 if payload::parse_payload_record(&raw, &self.community)? != *chunk {
                     return Err("Portable team revision already has different content".into());
                 }
@@ -609,7 +595,7 @@ impl Inner {
         team: &str,
         text: &str,
         revision: &str,
-    ) -> Result<TextManifest, String> {
+    ) -> Result<TeamManifest, String> {
         let (manifest, payloads) =
             payload::encode_team_text(text, &self.community, &self.viewer, team, revision)?;
         self.write_chunks(&payloads).await?;
@@ -629,7 +615,7 @@ impl Inner {
     async fn publish_text(
         &self,
         team: &str,
-        manifest: Option<TextManifest>,
+        manifest: Option<TeamManifest>,
         expected: Option<String>,
         team_head: Option<String>,
         resume: &Resume,
@@ -657,37 +643,16 @@ impl Inner {
             .portable
             .as_ref()
             .ok_or("This team has no portable definition")?;
-        check_manifest(manifest)?;
         if manifest.owner != self.viewer {
             return Err("Portable team belongs to another viewer".into());
         }
-        let mut payloads = Vec::with_capacity(manifest.chunks as usize);
-        for index in 0..manifest.chunks as usize {
-            let record = payload_record(
-                &self.community,
-                &self.viewer,
-                &team.id,
-                &manifest.revision,
-                index,
-                String::new(),
-            );
-            // Exact revision reads only; chunks are never discovered.
-            let coordinate = record_tags(&record, &self.community)?
-                .swap_remove(0)
-                .swap_remove(1);
-            let event = self
-                .read_coordinate(&coordinate, true)
-                .await?
-                .ok_or("Portable team payload is unavailable")?;
-            let raw = decode_record(&self.identity, &event, &self.community)?;
-            if raw["value"]["type"] != "team-payload"
-                || record_tags(&raw, &self.community)?[0][1] != coordinate
-            {
-                return Err("Portable team payload coordinate mismatch".into());
-            }
-            payloads.push(raw["value"].clone());
-        }
-        decode_payload(manifest, &payloads, &self.community, &self.viewer, &team.id)
+        payload::decode_team_payload(
+            manifest,
+            &self.read_chunks(&team.id, manifest).await?,
+            &self.community,
+            &self.viewer,
+            &team.id,
+        )
     }
 
     async fn save_portable(
@@ -704,44 +669,14 @@ impl Inner {
         {
             return Err("Portable team members do not match their definitions".into());
         }
-        let (manifest, payloads) = encode_payload(
+        let (manifest, payloads) = payload::encode_team_payload(
             &snapshot,
             &self.community,
             &self.viewer,
             &team.id,
             &revision,
         )?;
-        let outbox = self.outbox().await?;
-        for payload in payloads {
-            let tags = record_tags(&payload, &self.community)?;
-            let d = tags[0][1].clone();
-            if let Some(existing) = self.read_coordinate(&d, true).await? {
-                let saved = decode_record(&self.identity, &existing, &self.community)?;
-                if saved != payload {
-                    return Err("Portable team revision already has different content".into());
-                }
-                continue;
-            }
-            let pending = outbox
-                .visible()
-                .iter()
-                .find(|op| op.kind() == 30078 && op.tag("d") == Some(d.as_str()))
-                .map(|op| op.id());
-            let id = match pending {
-                Some(id) => id,
-                None => outbox
-                    .send(
-                        Draft {
-                            kind: 30078,
-                            content: self.encrypt(&payload)?,
-                            tags,
-                        },
-                        SendOptions::default(),
-                    )
-                    .map_err(|error| error.to_string())?,
-            };
-            self.confirm(&outbox, id).await?;
-        }
+        self.write_chunks(&payloads).await?;
         let team = Team {
             portable: Some(manifest),
             ..team
@@ -754,7 +689,7 @@ impl Inner {
     async fn current_members(&self) -> Result<BTreeMap<String, TeamHead>, String> {
         let mut heads: BTreeMap<String, (bool, TeamHead)> = BTreeMap::new();
         for event in self.heads(true).await? {
-            let raw = decode_record(&self.identity, &event, &self.community)?;
+            let raw = kit::open(&self.identity, &event, &self.community)?;
             let Some((team, deleted)) = parse_team(&raw) else {
                 continue;
             };
@@ -921,7 +856,7 @@ impl TeamKit {
         team: &str,
         text: &str,
         revision: &str,
-    ) -> Result<TextManifest, String> {
+    ) -> Result<TeamManifest, String> {
         let inner = self.inner.clone();
         let (team, text, revision) = (team.to_owned(), text.to_owned(), revision.to_owned());
         self.run(async move { inner.prepare_text(&team, &text, &revision).await })
@@ -935,7 +870,7 @@ impl TeamKit {
     pub async fn publish_text(
         &self,
         team: &str,
-        manifest: Option<TextManifest>,
+        manifest: Option<TeamManifest>,
         expected: Option<String>,
         team_head: Option<String>,
         resume: Resume,
