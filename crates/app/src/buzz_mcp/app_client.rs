@@ -236,8 +236,9 @@ pub async fn read_file(
     path: &str,
     signal: Option<&Signal>,
 ) -> ClientResult<Vec<u8>> {
-    // `-` would wait on stdin.
-    if path.trim() == "-" || path.trim().is_empty() {
+    // `-` would wait on stdin, and anything else starting with `-` would be
+    // read as an option. Like buzz-app, any other path is read.
+    if path.trim().starts_with('-') || path.trim().is_empty() {
         return Err(format!("Cannot read {path}"));
     }
     let mut spawned = spawn
