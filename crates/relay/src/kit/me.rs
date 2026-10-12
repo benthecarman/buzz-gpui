@@ -8,7 +8,6 @@
 //! [`super::catalog_filter`] and [`decode`]; these entries keep each
 //! record's raw JSON for the Me settings that edit it in place.
 
-use super::KitRecord;
 use crate::event::Verified;
 use crate::sidebar::{PersonalGroup, PersonalGroups};
 use buzz_desktop::relay::kit as native;
@@ -201,7 +200,7 @@ pub fn coordinate(record: &Value, community: &str) -> Result<String, String> {
 
 /// The `t` tag a record is filed under (`kitTag`).
 pub fn tag(record: &Value) -> &'static str {
-    serde_json::from_value::<KitRecord>(record.clone()).map_or(PAYLOAD_TAG, |record| record.tag())
+    crate::teams::record_tag(record)
 }
 
 /// Opens one catalog head (`relay_kit_decode`) with the kit cipher, and
@@ -369,6 +368,15 @@ mod tests {
             "native counts chars"
         );
         assert!(prepare(&Identity::ephemeral(), &record, COMMUNITY).is_err());
+    }
+
+    #[test]
+    fn tags_follow_the_record_shape() {
+        let text = json!({"version": 1, "value": {"type": "team-text"}});
+        assert_eq!(tag(&text), crate::kit::TEXT_TAG);
+        // Not a valid recipe, but still a recipe, never a payload.
+        let template = json!({"version": 1, "value": {"type": "template", "id": 7}});
+        assert_eq!(tag(&template), KIT_TAG);
     }
 
     #[test]
