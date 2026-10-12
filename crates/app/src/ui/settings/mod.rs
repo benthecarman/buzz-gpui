@@ -717,6 +717,47 @@ fn note(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// A bordered, centered card: a large icon, a title over a line of text,
+/// then an optional action.
+fn empty_card(
+    icon: IconName,
+    icon_color: Hsla,
+    title: impl Into<SharedString>,
+    text: impl IntoElement,
+    action: Option<AnyElement>,
+    cx: &App,
+) -> Div {
+    let c = cx.colors();
+    div()
+        .w_full()
+        .border_1()
+        .border_color(c.border_standard)
+        .rounded(radius::CONTAINER)
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(rems(1.))
+        .py(rems(2.))
+        .px(rems(1.5))
+        .text_center()
+        .child(
+            div()
+                .flex()
+                .text_color(icon_color)
+                .child(Icon::new(icon).size(32.)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(rems(0.5))
+                .max_w(rems(24.))
+                .child(div().text_label_sm().child(title.into()))
+                .child(text),
+        )
+        .children(action.map(|action| div().mt(rems(0.5)).child(action)))
+}
+
 fn section(children: Vec<AnyElement>) -> AnyElement {
     div()
         .flex()

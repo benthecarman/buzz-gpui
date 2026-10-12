@@ -3,9 +3,11 @@
 //! automatic-check switch and the new release's notes. The work happens
 //! in `crate::updates`.
 
-use super::{SettingsPage, button, header, inline_header, preference_row, rows_group, section};
+use super::{
+    SettingsPage, button, empty_card, header, inline_header, preference_row, rows_group, section,
+};
 use crate::updates::{self, InstallKind, Status, Updater};
-use buzz_ui::{ActiveTheme, Icon, IconName, Switch, TypeStyled, tokens::radius};
+use buzz_ui::{ActiveTheme, IconName, Switch, TypeStyled, tokens::radius};
 use gpui_kit::base::text::{TextView, TextViewStyle};
 use gpui_kit::*;
 
@@ -134,55 +136,27 @@ impl SettingsPage {
                 c.text_subtle
             })
             .child(state.message);
-        let card = div()
-            .w_full()
-            .border_1()
-            .border_color(c.border_standard)
-            .rounded(radius::CONTAINER)
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(rems(1.))
-            .py(rems(2.))
-            .px(rems(1.5))
-            .text_center()
-            .child(
-                div()
-                    .flex()
-                    .text_color(if offered {
-                        c.text_standard
-                    } else {
-                        c.text_subtle
-                    })
-                    .child(
-                        Icon::new(if offered {
-                            IconName::Download
-                        } else {
-                            IconName::ArrowsClockwise
-                        })
-                        .size(32.),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(rems(0.5))
-                    .max_w(rems(24.))
-                    .child(
-                        div()
-                            .text_label_sm()
-                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .child(status),
-            )
-            .children(state.action.map(|(label, action)| {
-                div().mt(rems(0.5)).child(
-                    button("check-updates", label)
-                        .loading(state.loading)
-                        .on_click(move |_, _, cx| click(action, cx)),
-                )
-            }));
+        let card = empty_card(
+            if offered {
+                IconName::Download
+            } else {
+                IconName::ArrowsClockwise
+            },
+            if offered {
+                c.text_standard
+            } else {
+                c.text_subtle
+            },
+            format!("Version {}", env!("CARGO_PKG_VERSION")),
+            status,
+            state.action.map(|(label, action)| {
+                button("check-updates", label)
+                    .loading(state.loading)
+                    .on_click(move |_, _, cx| click(action, cx))
+                    .into_any_element()
+            }),
+            cx,
+        );
         let mut children = vec![
             header("Software updates", None, cx).into_any_element(),
             card.into_any_element(),

@@ -7,7 +7,7 @@
 //! visible ones into the draft.
 
 use super::cards::{self, CardPlacement, SettingsCard};
-use super::{button, header, section};
+use super::{button, empty_card, header, section};
 use crate::community::{AppState, Community};
 use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::SessionStatus;
@@ -15,9 +15,7 @@ use buzz_relay_client::kit::me::{self as kit, GroupsId};
 use buzz_relay_client::session::{MeKitSnapshot, MeKitStatus};
 use buzz_relay_client::sidebar::{PersonalGroup, SidebarPreferences};
 use buzz_relay_client::sidebar_store::PreferencesStatus;
-use buzz_ui::{
-    ActiveTheme, Button, Dialog, Icon, IconName, Surface, TextField, TypeStyled, tokens::radius,
-};
+use buzz_ui::{ActiveTheme, Button, Dialog, IconName, Surface, TextField, TypeStyled};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -138,47 +136,25 @@ impl Render for PersonalGroupsSettings {
                             .is_some_and(|data| data.sections.is_empty())
                 }
             };
-        let card = div()
-            .w_full()
-            .border_1()
-            .border_color(c.border_standard)
-            .rounded(radius::CONTAINER)
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(rems(1.))
-            .py(rems(2.))
-            .px(rems(1.5))
-            .text_center()
-            .child(
-                div()
-                    .flex()
-                    .text_color(c.text_subtle)
-                    .child(Icon::new(IconName::FolderSimple).size(32.)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(rems(0.5))
-                    .max_w(rems(24.))
-                    .child(div().text_label_sm().child(if empty {
-                        "No personal groups yet"
-                    } else {
-                        "Organize your channels"
-                    }))
-                    .child(div().text_body_sm().text_color(c.text_subtle).child(
-                        "Group channels privately in your sidebar. Members and Canvas \
-                                 stay unchanged.",
-                    )),
-            )
-            .child(
-                div().mt(rems(0.5)).child(
-                    button("manage-personal-groups", "Manage personal groups")
-                        .disabled(!ready)
-                        .on_click(cx.listener(|this, _, window, cx| this.open(window, cx))),
-                ),
-            );
+        let card = empty_card(
+            IconName::FolderSimple,
+            c.text_subtle,
+            if empty {
+                "No personal groups yet"
+            } else {
+                "Organize your channels"
+            },
+            div().text_body_sm().text_color(c.text_subtle).child(
+                "Group channels privately in your sidebar. Members and Canvas stay unchanged.",
+            ),
+            Some(
+                button("manage-personal-groups", "Manage personal groups")
+                    .disabled(!ready)
+                    .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
+                    .into_any_element(),
+            ),
+            cx,
+        );
         let status = (!ready).then(|| {
             let kit = community.read(cx).session.me_kit().clone();
             div()
