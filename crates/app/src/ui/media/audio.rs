@@ -46,8 +46,9 @@ pub struct Audio {
     durations: HashMap<String, f64>,
     /// Lengths corrected when a clip ended short of them.
     corrected: HashMap<String, f64>,
-    /// Clips whose length is being read (`preload="metadata"`).
-    probing: HashSet<String>,
+    /// Clips whose length is being or has been read (`preload="metadata"`),
+    /// kept after a failure too so a clip is read once, not every layout.
+    probed: HashSet<String>,
     failed: HashSet<String>,
     rates: HashMap<String, f64>,
     /// Clips that play from memory, not the relay: voice note drafts.
@@ -198,7 +199,7 @@ fn probe(url: &str, media: &Media, cx: &mut App) {
     let audio = audio(cx);
     let (url, media) = (url.to_string(), media.clone());
     audio.update(cx, |audio, cx| {
-        if audio.durations.contains_key(&url) || !audio.probing.insert(url.clone()) {
+        if audio.durations.contains_key(&url) || !audio.probed.insert(url.clone()) {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -211,19 +212,19 @@ fn probe(url: &str, media: &Media, cx: &mut App) {
                     .map_err(|error| error.to_string()),
             };
             let duration = match source {
+                // A probe can block for its whole timeout; give it a
+                // thread of its own, as video posters do.
                 Ok(source) => {
-                    cx.background_executor()
-                        .spawn(async move {
-                            super::engine::probe_source(source, Kind::Metadata)
-                                .ok()
-                                .and_then(|probe| probe.duration)
-                        })
-                        .await
+                    let (sender, receiver) = futures::channel::oneshot::channel();
+                    std::thread::spawn(move || {
+                        let probe = super::engine::probe_source(source, Kind::Metadata);
+                        let _ = sender.send(probe.ok().and_then(|probe| probe.duration));
+                    });
+                    receiver.await.ok().flatten()
                 }
                 Err(_) => None,
             };
             let _ = this.update(cx, |audio, cx| {
-                audio.probing.remove(&url);
                 if let Some(duration) = finite_duration(duration) {
                     audio.durations.entry(url).or_insert(duration);
                     cx.notify();
