@@ -21,6 +21,7 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::tray::{Tray, TrayEvent};
@@ -255,21 +256,35 @@ pub fn close(window: &mut Window, cx: &mut App) {
 }
 
 /// Quits once this computer's agents have stopped; if that cannot be
-/// confirmed the app keeps running, as buzz-app refuses the exit.
+/// confirmed the app keeps running, as buzz-app refuses the exit. They
+/// can take up to 30 seconds to stop, so that waits off the UI thread.
 pub fn quit(cx: &mut App) {
-    save_geometry(cx);
-    match crate::hosts::Hosts::shutdown_local(cx) {
-        Ok(()) => cx.quit(),
-        Err(error) => {
-            tracing::error!(%error, "agent shutdown incomplete; app exit was refused");
-            crate::ui::toasts::show(
-                crate::ui::toasts::Notice::error("quit", "Buzz couldn’t quit").description(
-                    format!("{error}. Your agents may still be running; try again."),
-                ),
-                cx,
-            );
-        }
+    // A second request while agents are stopping joins the first.
+    static STOPPING: AtomicBool = AtomicBool::new(false);
+    if STOPPING.swap(true, Ordering::SeqCst) {
+        return;
     }
+    save_geometry(cx);
+    let host = crate::hosts::Hosts::embedded(cx);
+    cx.spawn(async move |cx| {
+        let stopped = cx
+            .background_spawn(async move { host.map_or(Ok(()), |host| host.shutdown()) })
+            .await;
+        cx.update(|cx| match stopped {
+            Ok(()) => cx.quit(),
+            Err(error) => {
+                STOPPING.store(false, Ordering::SeqCst);
+                tracing::error!(%error, "agent shutdown incomplete; app exit was refused");
+                crate::ui::toasts::show(
+                    crate::ui::toasts::Notice::error("quit", "Buzz couldn’t quit").description(
+                        format!("{error}. Your agents may still be running; try again."),
+                    ),
+                    cx,
+                );
+            }
+        });
+    })
+    .detach();
 }
 
 /// Quits as [`quit`] does, then starts `program`: the update just
