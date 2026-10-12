@@ -5,7 +5,7 @@
 //! notifications go to whoever listens.
 
 use super::config::Model;
-use crate::agent_plugins::process::{Process, SpawnOptions, Spawner};
+use crate::agent_plugins::process::{Lines, Process, SpawnOptions, Spawner};
 use buzz_host::api::ProcessOutput;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -66,7 +66,7 @@ struct State {
     pending: HashMap<u64, Answer>,
     listeners: Vec<(u64, Listener)>,
     closing: Option<Shared<BoxFuture<'static, ()>>>,
-    buffer: String,
+    buffer: Lines,
     stderr: String,
 }
 
@@ -195,21 +195,7 @@ impl AppServer {
     }
 
     fn read(&self, data: &str) {
-        let lines = {
-            let mut state = self.state();
-            state.buffer.push_str(data);
-            let mut lines = Vec::new();
-            while let Some(newline) = state.buffer.find('\n') {
-                if newline > FRAME_LIMIT {
-                    break;
-                }
-                let line: String = state.buffer.drain(..=newline).collect();
-                lines.push(line);
-            }
-            let oversized = state.buffer.find('\n').unwrap_or(state.buffer.len()) > FRAME_LIMIT;
-            (lines, oversized)
-        };
-        let (lines, oversized) = lines;
+        let (lines, oversized) = self.state().buffer.push(data, FRAME_LIMIT);
         for line in lines {
             if line.trim().is_empty() {
                 continue;

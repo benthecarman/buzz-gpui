@@ -6,7 +6,7 @@
 //! the SDK serves an in-process MCP server, so the process holds no Buzz
 //! key.
 
-use crate::agent_plugins::process::{Process, SpawnOptions, Spawner};
+use crate::agent_plugins::process::{Lines, Process, SpawnOptions, Spawner};
 use buzz_host::api::ProcessOutput;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -18,6 +18,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub const TOOL_SERVER: &str = "buzz";
 const FINAL_TOOL: &str = "mcp__buzz__send";
 const STDERR_LIMIT: usize = 4_000;
+/// The longest line of output read. Tool results with images run to a
+/// few megabytes.
+const FRAME_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Answers the in-process server's JSON-RPC for the conversation a process
 /// serves. A call of `send` with `final: true` ends the turn when it
@@ -136,7 +139,7 @@ struct State {
     /// It has begun a turn, so its session loaded.
     began: bool,
     waiters: Vec<oneshot::Sender<Settled>>,
-    buffer: String,
+    buffer: Lines,
     stderr: String,
     last_error: Option<String>,
     alive: bool,
@@ -229,7 +232,7 @@ impl ClaudeProcess {
                 pending: 0,
                 began: false,
                 waiters: Vec::new(),
-                buffer: String::new(),
+                buffer: Lines::default(),
                 stderr: String::new(),
                 last_error: None,
                 alive: true,
@@ -414,23 +417,17 @@ impl ClaudeProcess {
     }
 
     fn read(&self, data: &str) {
-        let lines = {
-            let mut state = self.state();
-            state.buffer.push_str(data);
-            let mut lines = Vec::new();
-            while let Some(newline) = state.buffer.find('\n') {
-                let line = state.buffer[..newline].trim().to_string();
-                state.buffer.drain(..=newline);
-                if !line.is_empty() {
-                    lines.push(line);
-                }
-            }
-            lines
-        };
+        let (lines, oversized) = self.state().buffer.push(data, FRAME_LIMIT);
         for line in lines {
-            if let Ok(message) = serde_json::from_str::<Value>(&line) {
+            if let Ok(message) = serde_json::from_str::<Value>(line.trim()) {
                 self.handle(message);
             }
+        }
+        // Its output can't be followed any more, so it stops.
+        if oversized {
+            self.state().last_error = Some("Claude Code output frame is too large".into());
+            let claude = self.clone();
+            tokio::spawn(async move { claude.kill().await });
         }
     }
 

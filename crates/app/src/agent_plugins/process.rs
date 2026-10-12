@@ -273,6 +273,31 @@ pub async fn collect(
     (None, stdout, stderr)
 }
 
+/// A process's output split into lines (NDJSON), holding at most `limit`
+/// bytes of a line not yet ended.
+#[derive(Default)]
+pub struct Lines(String);
+
+impl Lines {
+    /// The lines `data` completes, each with its line break, and whether
+    /// a line ran past `limit`; that line is dropped.
+    pub fn push(&mut self, data: &str, limit: usize) -> (Vec<String>, bool) {
+        self.0.push_str(data);
+        let mut lines = Vec::new();
+        while let Some(newline) = self.0.find('\n') {
+            if newline > limit {
+                break;
+            }
+            lines.push(self.0.drain(..=newline).collect());
+        }
+        let oversized = self.0.find('\n').unwrap_or(self.0.len()) > limit;
+        if oversized {
+            self.0.clear();
+        }
+        (lines, oversized)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +318,17 @@ mod tests {
             failure("codex", RpcError::Failed("Could not start codex".into())),
             "Could not start codex"
         );
+    }
+
+    #[test]
+    fn splits_lines_and_drops_one_past_the_limit() {
+        let mut lines = Lines::default();
+        assert_eq!(
+            lines.push("{\"a\":1}\n{\"b\"", 16),
+            (vec!["{\"a\":1}\n".into()], false)
+        );
+        assert_eq!(lines.push(":2}\n", 16), (vec!["{\"b\":2}\n".into()], false));
+        assert_eq!(lines.push(&"x".repeat(17), 16), (vec![], true));
+        assert_eq!(lines.push("{}\n", 16), (vec!["{}\n".into()], false));
     }
 }
