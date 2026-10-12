@@ -300,20 +300,13 @@ pub fn audience_keys(
             "This channel has more than 100 recipients. Choose selected people instead.".into(),
         );
     }
-    if keys.iter().any(|key| !is_hex64(key)) {
+    if keys.iter().any(|key| !members::is_key(key)) {
         return Err("Destination membership contains an invalid identity.".into());
     }
     if keys.iter().any(|key| archived.contains(key)) {
         return Err("A destination member is archived. Choose selected people instead.".into());
     }
     Ok(keys)
-}
-
-fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Whether the viewer may still share the source, or post in the

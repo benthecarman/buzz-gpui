@@ -7,7 +7,9 @@
 //! delivery evidence stay in the outbox.
 
 use super::{identifier, parse_lineup};
+use crate::discovery::is_uuid;
 use crate::event::kinds;
+use crate::lifecycle::MAX_TTL;
 use crate::lifecycle::{NewChannel, canonical_name};
 use crate::outbox::Operation;
 use crate::store::{Partition, Store};
@@ -101,7 +103,7 @@ impl ChannelCreationInput {
             })
             || self
                 .ttl_seconds
-                .is_some_and(|ttl| ttl == 0 || ttl > 2_147_483_647);
+                .is_some_and(|ttl| ttl == 0 || ttl > MAX_TTL);
         if bad_details {
             return Err(
                 "Check the channel name, description, privacy and duration before creating it"
@@ -261,7 +263,7 @@ pub fn pending_creation(op: &Operation) -> Option<PendingCreation> {
         "private" => CreationVisibility::Private,
         _ => return None,
     };
-    if pair(3, "channel_type")? != "stream" || !channel_id(id) || canonical_name(name).is_empty() {
+    if pair(3, "channel_type")? != "stream" || !is_uuid(id) || canonical_name(name).is_empty() {
         return None;
     }
     let optional = &tags[4..];
@@ -287,7 +289,7 @@ pub fn pending_creation(op: &Operation) -> Option<PendingCreation> {
     let ttl_seconds = match value("ttl") {
         None => None,
         Some(ttl) => match ttl.parse::<u64>() {
-            Ok(ttl) if ttl > 0 && ttl <= 2_147_483_647 => Some(ttl),
+            Ok(ttl) if ttl > 0 && ttl <= MAX_TTL => Some(ttl),
             _ => return None,
         },
     };
@@ -302,14 +304,6 @@ pub fn pending_creation(op: &Operation) -> Option<PendingCreation> {
             setup: None,
         },
     })
-}
-
-fn channel_id(text: &str) -> bool {
-    uuid::Uuid::parse_str(text).is_ok()
-        && text.len() == 36
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'-')
 }
 
 /// A notice that a channel was created but its setup did not finish.

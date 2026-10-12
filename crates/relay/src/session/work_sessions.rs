@@ -11,9 +11,12 @@
 use super::actions::{Context, Ops, read};
 use super::delivery::{Wait, delivered as waiting};
 use super::{Session, SessionSnapshot};
-use crate::discovery::{ChannelSummary, ChannelType, SESSION_CHANNEL_DESCRIPTION, ScanOptions};
+use crate::discovery::{
+    ChannelSummary, ChannelType, SESSION_CHANNEL_DESCRIPTION, ScanOptions, is_uuid as uuid,
+};
 use crate::event::{Verified, kinds};
 use crate::lifecycle;
+use crate::members::is_key;
 use crate::messages::Draft;
 use crate::outbox::{Delivery, SendOptions};
 use crate::reader::{Priority, ReadOptions};
@@ -42,17 +45,6 @@ pub fn session_description(parent: Option<&str>) -> String {
         Some(parent) => format!("{SESSION_CHANNEL_DESCRIPTION}\nparent:{parent}"),
         None => SESSION_CHANNEL_DESCRIPTION.to_owned(),
     }
-}
-
-fn uuid(value: &str) -> bool {
-    crate::kit::me::uuid(value)
-}
-
-fn hex_key(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The create command of a session (`workSessions.create`).
@@ -359,7 +351,7 @@ impl Session {
         }) {
             return Err("Manage this session’s participants in its parent channel.".into());
         }
-        if !hex_key(pubkey) {
+        if !is_key(pubkey) {
             return Err("Choose a valid participant.".into());
         }
         if !rules.selectable.iter().any(|key| key == pubkey) {

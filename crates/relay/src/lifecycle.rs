@@ -13,6 +13,7 @@
 
 use crate::discovery::{Visibility, channel_visibility, is_uuid, session_metadata};
 use crate::event::{Verified, is_newer, kinds};
+use crate::members::is_key;
 use crate::messages::{Draft, EventTemplate};
 use crate::socket::Filter;
 use nostr::prelude::EventId;
@@ -32,7 +33,8 @@ pub const RUN_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub const MAX_NAME_CHARS: usize = 120;
 pub const MAX_ABOUT_CHARS: usize = 1000;
-const MAX_TTL: u64 = 2_147_483_647;
+/// The longest channel duration, in seconds: a positive i32.
+pub const MAX_TTL: u64 = 2_147_483_647;
 /// A new temporary channel cleans up after a week without activity
 /// (`DEFAULT_TEMPORARY_CHANNEL_TTL_SECONDS`).
 pub const DEFAULT_TEMPORARY_TTL: u64 = 7 * 24 * 60 * 60;
@@ -206,13 +208,6 @@ fn record<'a>(
     Ok(selected)
 }
 
-fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 /// A relay TTL must be an unambiguous positive i32.
 fn parse_ttl(value: Option<&str>) -> Result<Option<u64>, LifecycleError> {
     let Some(value) = value else {
@@ -269,7 +264,7 @@ impl ChannelState {
         let mut roles = BTreeMap::new();
         for entry in roster.tags_named("p") {
             let key = entry.get(1).map(String::as_str).unwrap_or_default();
-            if !(2..=4).contains(&entry.len()) || !is_hex64(key) || roles.contains_key(key) {
+            if !(2..=4).contains(&entry.len()) || !is_key(key) || roles.contains_key(key) {
                 return Err(error("Malformed channel membership state"));
             }
             roles.insert(
@@ -283,7 +278,7 @@ impl ChannelState {
             let key = entry.get(1).map(String::as_str).unwrap_or_default();
             let role = MemberRole::parse(entry.get(2).map(String::as_str));
             if entry.len() != 3
-                || !is_hex64(key)
+                || !is_key(key)
                 || !role.elevated()
                 || elevated.contains_key(key)
                 || roles.get(key) != Some(&role)

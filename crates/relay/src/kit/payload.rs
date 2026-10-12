@@ -5,6 +5,7 @@
 //! the same way, as `v1:` and their UTF-8 bytes.
 
 use super::{hex_key, identifier};
+use crate::discovery::is_uuid;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
@@ -61,22 +62,12 @@ impl TeamPayload {
     }
 }
 
-/// A lowercase UUID revision.
-pub fn revision(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(i, b)| match i {
-            8 | 13 | 18 | 23 => *b == b'-',
-            _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
-        })
-}
-
 /// `parseTeamManifest`.
 pub fn parse_team_manifest(raw: &Value) -> Result<TeamManifest, String> {
     let bytes = raw["bytes"].as_u64().unwrap_or(0);
     let valid = raw["version"] == 1
         && raw["owner"].as_str().is_some_and(hex_key)
-        && raw["revision"].as_str().is_some_and(revision)
+        && raw["revision"].as_str().is_some_and(is_uuid)
         && raw["digest"].as_str().is_some_and(hex_key)
         && (1..=TEAM_PAYLOAD_BYTES as u64).contains(&bytes)
         && raw["chunks"].as_u64() == Some(bytes.div_ceil(TEAM_CHUNK_BYTES as u64));
@@ -101,7 +92,7 @@ pub fn parse_team_payload(raw: &Value, community: &str) -> Result<TeamPayload, S
         && raw["community"].as_str() == Some(community)
         && raw["owner"].as_str().is_some_and(hex_key)
         && raw["teamId"].as_str().is_some_and(identifier)
-        && raw["revision"].as_str().is_some_and(revision)
+        && raw["revision"].as_str().is_some_and(is_uuid)
         && index.is_some_and(|index| index < TEAM_CHUNKS as u64)
         && raw["data"].is_string()
         && data.len() <= TEAM_CHUNK_BYTES.div_ceil(3) * 4

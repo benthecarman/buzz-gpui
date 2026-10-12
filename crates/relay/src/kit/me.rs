@@ -8,6 +8,7 @@
 //! [`super::catalog_filter`] and [`decode`]; these entries keep each
 //! record's raw JSON for the Me settings that edit it in place.
 
+use super::identifier;
 use crate::event::Verified;
 use crate::sidebar::{PersonalGroup, PersonalGroups};
 use buzz_desktop::relay::kit as native;
@@ -71,14 +72,6 @@ pub fn template<'a>(entries: &'a [KitEntry], id: &str) -> Option<&'a KitEntry> {
     entries
         .iter()
         .find(|entry| !entry.deleted() && entry.kind() == "template" && entry.id() == id)
-}
-
-fn identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// The `groups` value of a record (`parseKitRecord`).
@@ -145,13 +138,7 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
 }
 
 /// A lowercase hyphenated UUID, as channel ids are.
-pub fn uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, b)| match i {
-            8 | 13 | 18 | 23 => b == b'-',
-            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
-        })
-}
+pub use crate::discovery::is_uuid as uuid;
 
 /// The `groups` value of a record.
 pub fn groups_value(id: GroupsId, groups: &PersonalGroups) -> Value {

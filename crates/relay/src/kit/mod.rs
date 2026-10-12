@@ -12,6 +12,7 @@ pub mod me;
 pub mod payload;
 pub mod setup;
 
+use crate::discovery::is_uuid;
 use crate::event::{Verified, kinds};
 use crate::messages::Draft;
 use crate::socket::Filter;
@@ -264,9 +265,7 @@ fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-pub(crate) fn hex_key(text: &str) -> bool {
-    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
+pub(crate) use crate::members::is_key as hex_key;
 
 /// `^[a-zA-Z0-9_-]{1,128}$`.
 pub fn identifier(text: &str) -> bool {
@@ -314,15 +313,6 @@ fn keys(value: Option<&Value>, valid: fn(&str) -> bool, max: usize) -> Result<Ve
         out.push(key.to_owned());
     }
     Ok(out)
-}
-
-fn channel_uuid(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(i, b)| match i {
-            8 | 13 | 18 | 23 => *b == b'-',
-            _ => matches!(b, b'0'..=b'9' | b'a'..=b'f'),
-        })
 }
 
 /// `parseLineup`: the selections and Canvas of a template or draft.
@@ -435,7 +425,7 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
             let channels = match groups_id {
                 GroupsId::Me => Some(keys(
                     Some(v.get("channels").unwrap_or(&json!([]))),
-                    channel_uuid,
+                    is_uuid,
                     1000,
                 )?),
                 GroupsId::Personal => None,
