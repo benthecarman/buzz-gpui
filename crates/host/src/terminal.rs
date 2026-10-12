@@ -315,10 +315,7 @@ fn forget_owner(wakes: &Wakes, owner: &str) {
 async fn blocking<T: Send + 'static>(
     job: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, RpcError> {
-    tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|_| failed("Terminal operation failed"))?
-        .map_err(failed)
+    crate::blocking(job).await.map_err(failed)
 }
 
 fn failed(message: impl Into<String>) -> RpcError {

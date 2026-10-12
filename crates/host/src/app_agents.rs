@@ -11,6 +11,7 @@ mod hosting;
 mod pictures;
 
 use crate::api::{AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol};
+use crate::blocking;
 use crate::profile::authorization;
 use base64::Engine;
 use buzz_agent_controller::{
@@ -96,15 +97,6 @@ impl Holder for Peer<HostProtocol> {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Runs blocking file and credential work off the async runtime.
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| "Native credential operation failed".to_owned())?
 }
 
 fn summary(agent: AppAgent, picture: Picture) -> AppAgentSummary {

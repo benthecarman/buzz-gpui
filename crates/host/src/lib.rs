@@ -1166,6 +1166,15 @@ fn prepared_response(prepared: &NewAgent) -> Response {
     }
 }
 
+/// Runs blocking file, credential and PTY work off the async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| "The host could not finish the operation".to_owned())?
+}
+
 /// Converts through JSON field names, the controller's own contract.
 fn convert<T: serde::de::DeserializeOwned>(value: &impl serde::Serialize) -> Result<T, String> {
     let json = serde_json::to_value(value).map_err(|error| error.to_string())?;
