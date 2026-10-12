@@ -675,6 +675,8 @@ fn expand_tabs(text: &str) -> Cow<'_, str> {
 
 /// One `ch` of the 12px mono face (JetBrains Mono advances 0.6em).
 const CH: f32 = 0.75 * 0.6;
+/// Lines the in-message preview lays out; the dialog shows the rest.
+const PREVIEW_LINES: usize = 200;
 /// `.diff-gutter-col`: 7ch.
 const GUTTER: f32 = 7. * CH;
 
@@ -823,6 +825,7 @@ impl RenderOnce for DiffCard {
                         files.as_deref(),
                         file_path,
                         View::Unified,
+                        Some(PREVIEW_LINES),
                         &c,
                     )),
             )
@@ -878,6 +881,7 @@ impl RenderOnce for DiffCard {
                     files.as_deref(),
                     file_path,
                     view,
+                    None,
                     &c,
                 ));
             overlay::modal(
@@ -1014,13 +1018,16 @@ fn chain_scroll(handle: ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window,
     }
 }
 
-/// `DiffViewer`: the raw fallback, the empty state, or each file.
+/// `DiffViewer`: the raw fallback, the empty state, or each file. With a
+/// `limit`, only that many unified lines are laid out, so a large patch
+/// does not build every row each frame.
 fn viewer(
     id: &str,
     content: &str,
     files: Option<&[FileData]>,
     file_path: Option<&str>,
     view: View,
+    limit: Option<usize>,
     c: &Colors,
 ) -> AnyElement {
     let Some(files) = files else {
@@ -1032,12 +1039,29 @@ fn viewer(
             .child("No diff content")
             .into_any_element();
     }
+    let lines = |file: &FileData| file.hunks.iter().map(|hunk| hunk.changes.len()).sum();
+    let mut left = limit.unwrap_or(usize::MAX);
+    let shown: Vec<usize> = files
+        .iter()
+        .map(|file| {
+            let shown = left.min(lines(file));
+            left -= shown;
+            shown
+        })
+        .collect();
+    let total: usize = files.iter().map(lines).sum();
+    let hidden = total - shown.iter().sum::<usize>();
+    // Files past the limit are left out; one without lines still shows.
+    let visible = files
+        .iter()
+        .zip(&shown)
+        .take_while(|&(file, &shown)| shown > 0 || lines(file) == 0);
     div()
         .flex()
         .flex_col()
         .gap(rems(0.75))
         .text_mono()
-        .children(files.iter().enumerate().map(|(index, file)| {
+        .children(visible.enumerate().map(|(index, (file, &shown))| {
             let label = file_label(file, file_path);
             let kind = file.kind;
             let changes = file.hunks.iter().flat_map(|hunk| &hunk.changes);
@@ -1083,7 +1107,7 @@ fn viewer(
                         .into_any_element()
                 } else {
                     match view {
-                        View::Unified => unified(file, c).into_any_element(),
+                        View::Unified => unified(file, shown, c).into_any_element(),
                         View::Split => div()
                             .id(SharedString::from(format!("{id}-file-{index}")))
                             .overflow_x_scroll()
@@ -1093,6 +1117,12 @@ fn viewer(
                     }
                 })
         }))
+        .when(hidden > 0, |this| {
+            this.child(note(c).child(format!(
+                "{hidden} more {}. Expand the diff to see them all.",
+                if hidden == 1 { "line" } else { "lines" }
+            )))
+        })
         .into_any_element()
 }
 
@@ -1153,23 +1183,20 @@ fn line_row() -> Div {
     div().flex().w_full().min_h(rems(1.))
 }
 
-/// The unified table: old and new gutters, then the line.
-fn unified(file: &FileData, c: &Colors) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .children(
-            file.hunks
-                .iter()
-                .flat_map(|hunk| &hunk.changes)
-                .map(|change| {
-                    line_row()
-                        .child(gutter(change.old_line, change.kind, c))
-                        .child(gutter(change.new_line, change.kind, c))
-                        .child(code(change, c))
-                }),
-        )
+/// The unified table: old and new gutters, then the first `limit` lines.
+fn unified(file: &FileData, limit: usize, c: &Colors) -> Div {
+    div().flex().flex_col().w_full().children(
+        file.hunks
+            .iter()
+            .flat_map(|hunk| &hunk.changes)
+            .take(limit)
+            .map(|change| {
+                line_row()
+                    .child(gutter(change.old_line, change.kind, c))
+                    .child(gutter(change.new_line, change.kind, c))
+                    .child(code(change, c))
+            }),
+    )
 }
 
 /// The split table: old and new side by side. A new or deleted file has
