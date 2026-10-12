@@ -18,7 +18,6 @@ use crate::agent_plugins::owner_relay;
 use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
 };
-use crate::buzz_mcp::BuzzEvent;
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
 use config::Config;
@@ -233,12 +232,12 @@ impl AgentType for CodexType {
         let spawn = host.read(cx).spawner(PROCESS_OWNER);
         let wake = match delivery.trigger {
             Trigger::Mention { event } => Wake::Mention {
-                event: event_of(&event),
+                event: super::event_of(&event),
             },
             Trigger::Watch {
                 event, interest, ..
             } => Wake::Watch {
-                event: event_of(&event),
+                event: super::event_of(&event),
                 interest: interest.map(|interest| interest.instructions),
             },
             Trigger::Timer { .. } => Wake::Timer,
@@ -261,17 +260,5 @@ impl AgentType for CodexType {
 
     fn timeout(&self) -> Duration {
         HANDOVER
-    }
-}
-
-fn event_of(event: &crate::agents2::attention::EventData) -> BuzzEvent {
-    BuzzEvent {
-        id: event.id.clone(),
-        pubkey: event.pubkey.clone(),
-        created_at: event.created_at,
-        kind: u32::from(event.kind),
-        tags: event.tags.clone(),
-        content: event.content.clone(),
-        sig: String::new(),
     }
 }

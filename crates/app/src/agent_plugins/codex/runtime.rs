@@ -783,22 +783,8 @@ impl CodexRuntime {
 
     /// Replies to the request in its thread, as the agent.
     async fn publish(&self, request: &Request, content: &str) -> Result<(), String> {
-        let event = &request.event;
-        let root = root_of(event);
-        let mut tags = vec![vec![
-            "h".to_string(),
-            request.conversation.channel_id.clone(),
-        ]];
-        if root != event.id {
-            tags.push(vec!["e".into(), root, String::new(), "root".into()]);
-        }
-        tags.push(vec![
-            "e".into(),
-            event.id.clone(),
-            String::new(),
-            "reply".into(),
-        ]);
-        tags.push(vec!["p".into(), event.pubkey.clone()]);
+        let tags =
+            crate::agent_plugins::reply_tags(&request.conversation.channel_id, &request.event);
         request
             .agent
             .publish(Template {

@@ -451,18 +451,7 @@ impl ClaudeRuntime {
         event: &BuzzEvent,
         error: &str,
     ) -> Result<(), String> {
-        let root = thread_reference(event).map_or(event.id.clone(), |thread| thread.root_id);
-        let mut tags = vec![vec!["h".to_string(), channel.to_string()]];
-        if root != event.id {
-            tags.push(vec!["e".into(), root, String::new(), "root".into()]);
-        }
-        tags.push(vec![
-            "e".into(),
-            event.id.clone(),
-            String::new(),
-            "reply".into(),
-        ]);
-        tags.push(vec!["p".into(), event.pubkey.clone()]);
+        let tags = crate::agent_plugins::reply_tags(channel, event);
         let error: String = error.chars().take(500).collect();
         agent
             .publish(Template {
