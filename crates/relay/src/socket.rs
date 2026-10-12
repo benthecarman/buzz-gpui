@@ -6,8 +6,10 @@
 //! always asks, so a connection that never authenticates is a failed one.
 //! A refused or unsignable authentication is terminal until
 //! [`RelaySocket::reconnect`]; a dropped connection is retried after
-//! `500 ms · 2ⁿ`, at most [`SocketOptions::max_reconnects`] times in the
-//! socket's life, and then waits for `reconnect` too.
+//! `500 ms · 2ⁿ`, capped at [`SocketOptions::max_backoff`], for as long as
+//! it keeps dropping. An authenticated connection starts the backoff over.
+//! Unlike `live.ts`, whose budget lasts the page's life, a desktop session
+//! stays open for days and must not give up after a few network changes.
 //!
 //! Publications are correlated with their `OK`, never replayed: an event
 //! whose receipt was lost is reported as unconfirmed and the caller (the
@@ -231,8 +233,10 @@ pub struct SocketOptions {
     pub dead_after: Duration,
     /// The first reconnect delay; each later one doubles.
     pub min_backoff: Duration,
-    /// Automatic reconnects in the socket's life before it waits for
-    /// [`RelaySocket::reconnect`]. `None` retries forever.
+    /// The longest reconnect delay.
+    pub max_backoff: Duration,
+    /// Reconnects in a row without authenticating before the socket waits
+    /// for [`RelaySocket::reconnect`]. `None` retries forever.
     pub max_reconnects: Option<u32>,
     /// Re-send open subscriptions after a reconnect. When off, they are
     /// reported [`SubscriptionEvent::Lost`] so the owner can rebuild them.
@@ -249,7 +253,8 @@ impl Default for SocketOptions {
             ping_interval: Duration::from_secs(25),
             dead_after: Duration::from_secs(70),
             min_backoff: Duration::from_millis(500),
-            max_reconnects: Some(5),
+            max_backoff: Duration::from_secs(30),
+            max_reconnects: None,
             resubscribe: true,
             cooldown: Cooldown::default(),
         }
@@ -504,7 +509,8 @@ impl Actor {
                         let retry_in = self
                             .options
                             .min_backoff
-                            .saturating_mul(1 << self.attempts.min(16));
+                            .saturating_mul(1 << self.attempts.min(16))
+                            .min(self.options.max_backoff);
                         self.attempts += 1;
                         tracing::debug!(origin = %self.origin, %error, ?retry_in, "relay socket lost");
                         self.state
@@ -776,6 +782,7 @@ impl Actor {
     }
 
     fn authenticated(&mut self) -> Vec<String> {
+        self.attempts = 0;
         self.state.send_replace(SocketState::Ready);
         self.resubscribe_all()
     }

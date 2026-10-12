@@ -331,7 +331,7 @@ async fn a_refused_authentication_is_terminal_until_retried() {
 }
 
 #[tokio::test]
-async fn reconnects_back_off_and_stop_after_five() {
+async fn reconnects_back_off_and_stop_after_a_set_limit() {
     let mut relay = FakeRelay::start(Behaviour {
         drop_all: true,
         ..Default::default()
@@ -339,7 +339,14 @@ async fn reconnects_back_off_and_stop_after_five() {
     .await;
     let (identity, _) = viewer();
     let started = tokio::time::Instant::now();
-    let socket = socket(&relay, &identity);
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            max_reconnects: Some(5),
+            ..options()
+        },
+    );
     let mut waits = Vec::new();
     let mut state = socket.state();
     loop {
@@ -379,6 +386,57 @@ async fn reconnects_back_off_and_stop_after_five() {
         wait_state(&socket, |s| matches!(s, SocketState::Waiting { .. })).await,
         SocketState::Waiting { retry_in, .. } if retry_in == Duration::from_millis(20)
     ));
+}
+
+#[tokio::test]
+async fn reconnects_keep_going_with_a_capped_backoff() {
+    let relay = FakeRelay::start(Behaviour {
+        drop_all: true,
+        ..Default::default()
+    })
+    .await;
+    let (identity, _) = viewer();
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            max_backoff: Duration::from_millis(80),
+            ..options()
+        },
+    );
+    let mut waits = Vec::new();
+    let mut state = socket.state();
+    while waits.len() < 7 {
+        tokio::time::timeout(Duration::from_secs(10), state.changed())
+            .await
+            .expect("socket stalled")
+            .unwrap();
+        match state.borrow_and_update().clone() {
+            SocketState::Waiting { retry_in, .. } => waits.push(retry_in),
+            SocketState::Failed { error } => panic!("gave up: {error}"),
+            _ => {}
+        }
+    }
+    let expected: Vec<Duration> = [20, 40, 80, 80, 80, 80, 80]
+        .into_iter()
+        .map(Duration::from_millis)
+        .collect();
+    assert_eq!(waits, expected);
+}
+
+#[tokio::test]
+async fn an_authenticated_connection_starts_the_backoff_over() {
+    let relay = FakeRelay::start(Behaviour::default()).await;
+    let (identity, _) = viewer();
+    let socket = socket(&relay, &identity);
+    for _ in 0..3 {
+        wait_state(&socket, |s| matches!(s, SocketState::Ready)).await;
+        relay.kick.send(()).unwrap();
+        assert!(matches!(
+            wait_state(&socket, |s| matches!(s, SocketState::Waiting { .. })).await,
+            SocketState::Waiting { retry_in, .. } if retry_in == Duration::from_millis(20)
+        ));
+    }
 }
 
 #[tokio::test]
