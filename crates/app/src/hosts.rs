@@ -130,15 +130,6 @@ impl Hosts {
         });
     }
 
-    /// Stops this computer's agents and confirms it, before quitting.
-    /// Agents on remote hosts keep running.
-    pub fn shutdown_local(cx: &App) -> Result<(), String> {
-        match Self::embedded(cx) {
-            Some(host) => host.shutdown(),
-            None => Ok(()),
-        }
-    }
-
     /// The agent host inside this process, if it started.
     pub fn embedded(cx: &App) -> Option<Arc<AgentHost>> {
         cx.try_global::<Self>()?

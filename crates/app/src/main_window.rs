@@ -259,6 +259,31 @@ pub fn close(window: &mut Window, cx: &mut App) {
 /// confirmed the app keeps running, as buzz-app refuses the exit. They
 /// can take up to 30 seconds to stop, so that waits off the UI thread.
 pub fn quit(cx: &mut App) {
+    stop_agents_and_quit("Buzz couldn’t quit", || Ok(()), cx);
+}
+
+/// Quits as [`quit`] does, then starts `program`: the update just
+/// installed. The new copy waits for this process to exit, so it does
+/// not hand its launch to this one over the single-instance socket.
+pub fn restart(program: String, cx: &mut App) {
+    stop_agents_and_quit(
+        "Buzz couldn’t restart",
+        move || {
+            crate::updates::install::relaunch_after_exit(&program).inspect_err(|error| {
+                tracing::error!(%error, "restart for the update was refused");
+            })
+        },
+        cx,
+    );
+}
+
+/// Stops this computer's agents off the UI thread, runs `then`, and
+/// quits. If either fails the app keeps running and shows `title`.
+fn stop_agents_and_quit(
+    title: &'static str,
+    then: impl FnOnce() -> Result<(), String> + 'static,
+    cx: &mut App,
+) {
     // A second request while agents are stopping joins the first.
     static STOPPING: AtomicBool = AtomicBool::new(false);
     if STOPPING.swap(true, Ordering::SeqCst) {
@@ -269,43 +294,23 @@ pub fn quit(cx: &mut App) {
     cx.spawn(async move |cx| {
         let stopped = cx
             .background_spawn(async move { host.map_or(Ok(()), |host| host.shutdown()) })
-            .await;
-        cx.update(|cx| match stopped {
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "agent shutdown incomplete; app exit was refused");
+                format!("{error}. Your agents may still be running; try again.")
+            });
+        cx.update(|cx| match stopped.and_then(|()| then()) {
             Ok(()) => cx.quit(),
             Err(error) => {
                 STOPPING.store(false, Ordering::SeqCst);
-                tracing::error!(%error, "agent shutdown incomplete; app exit was refused");
                 crate::ui::toasts::show(
-                    crate::ui::toasts::Notice::error("quit", "Buzz couldn’t quit").description(
-                        format!("{error}. Your agents may still be running; try again."),
-                    ),
+                    crate::ui::toasts::Notice::error("quit", title).description(error),
                     cx,
                 );
             }
         });
     })
     .detach();
-}
-
-/// Quits as [`quit`] does, then starts `program`: the update just
-/// installed. The new copy waits for this process to exit, so it does
-/// not hand its launch to this one over the single-instance socket.
-pub fn restart(program: String, cx: &mut App) {
-    save_geometry(cx);
-    let result = crate::hosts::Hosts::shutdown_local(cx)
-        .map_err(|error| format!("{error}. Your agents may still be running; try again."))
-        .and_then(|()| crate::updates::install::relaunch_after_exit(&program));
-    match result {
-        Ok(()) => cx.quit(),
-        Err(error) => {
-            tracing::error!(%error, "restart for the update was refused");
-            crate::ui::toasts::show(
-                crate::ui::toasts::Notice::error("quit", "Buzz couldn’t restart")
-                    .description(error),
-                cx,
-            );
-        }
-    }
 }
 
 /// Closes the window and keeps running; the tray, a notification or
