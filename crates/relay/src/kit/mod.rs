@@ -14,7 +14,6 @@ pub mod setup;
 
 use crate::discovery::is_uuid;
 use crate::event::{Verified, kinds};
-use crate::messages::Draft;
 use crate::socket::Filter;
 use buzz_desktop::relay::kit as native;
 use buzz_identity::Identity;
@@ -582,6 +581,7 @@ pub fn parse_text_record(raw: &Value, community: &str) -> Result<TextRecord, Str
 
 /// A decoded private record: a recipe, a portable team chunk, or a team's
 /// text head.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrivateRecord {
     Kit(KitRecord),
@@ -590,6 +590,7 @@ pub enum PrivateRecord {
 }
 
 /// `parsePrivateRecord`.
+#[cfg(test)]
 pub fn parse_private_record(raw: &Value, community: &str) -> Result<PrivateRecord, String> {
     match raw
         .get("value")
@@ -652,9 +653,10 @@ pub fn open(identity: &Identity, event: &Verified, community: &str) -> Result<Va
 }
 
 /// The 30078 draft that saves `record`.
-pub fn draft(identity: &Identity, record: &KitRecord) -> Result<Draft, String> {
+#[cfg(test)]
+pub fn draft(identity: &Identity, record: &KitRecord) -> Result<crate::messages::Draft, String> {
     let raw = record.to_json();
-    Ok(Draft {
+    Ok(crate::messages::Draft {
         kind: kinds::APP_DATA,
         content: seal(identity, &raw, &record.community)?,
         tags: vec![
@@ -736,6 +738,7 @@ pub fn catalog_heads<'a>(events: &'a [Verified], community: &str) -> Vec<&'a Ver
 }
 
 /// Decodes one catalog head into an entry, checking its coordinate.
+#[cfg(test)]
 pub fn decode_entry(
     identity: &Identity,
     event: &Verified,
@@ -778,6 +781,7 @@ pub fn teams(entries: &[KitEntry]) -> Vec<&Team> {
 }
 
 /// The live personal (Messages) groups record (`personalGroups`).
+#[cfg(test)]
 pub fn personal_groups(entries: &[KitEntry]) -> Option<(&KitEntry, &Groups)> {
     entries.iter().find_map(|e| match &e.record.value {
         KitValue::Groups(groups) if !e.record.deleted && groups.id == GroupsId::Personal => {

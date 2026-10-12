@@ -235,12 +235,6 @@ pub fn prepare(
     ))
 }
 
-/// Order-insensitive equality for assignments; group and channel order
-/// is presentation and must match (`comparable`).
-pub fn comparable(a: &PersonalGroups, b: &PersonalGroups) -> bool {
-    a == b
-}
-
 /// Me placement after putting `id` in (or taking it out of) Me
 /// (`me-preferences.ts` `placed`).
 pub fn placed(
