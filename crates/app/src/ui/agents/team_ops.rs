@@ -662,20 +662,24 @@ fn alive(status: ProcessStatus) -> bool {
     )
 }
 
-async fn find_member(
+/// A fresh agent snapshot from each host, applied to its connection.
+async fn refresh(hosts: &[Entity<HostConnection>], cx: &mut AsyncApp) {
+    let tasks: Vec<_> = hosts
+        .iter()
+        .map(|host| host.update(cx, |host, cx| host.request(Request::Agents, cx)))
+        .collect();
+    futures::future::join_all(tasks).await;
+}
+
+/// The member as last refreshed.
+fn find_member(
     community: &Entity<Community>,
     pubkey: &str,
     cx: &mut AsyncApp,
-) -> Result<Option<(Entity<HostConnection>, Agent)>, String> {
-    let hosts = cx.update(|cx| cx.global::<Hosts>().hosts.clone());
-    // A fresh snapshot from every host, applied to its connection.
-    for host in &hosts {
-        let _ = request(host, Request::Agents, cx).await;
-    }
-    Ok(cx
-        .update(|cx| community_agents(community, cx))
+) -> Option<(Entity<HostConnection>, Agent)> {
+    cx.update(|cx| community_agents(community, cx))
         .into_iter()
-        .find(|(_, agent)| agent.pubkey == pubkey))
+        .find(|(_, agent)| agent.pubkey == pubkey)
 }
 
 fn agent_in(response: Response, id: &str) -> Option<Agent> {
@@ -697,20 +701,23 @@ pub async fn deploy_team(
 ) -> Result<(), String> {
     let session = cx.read_entity(&community, |community, _| community.session.clone());
     let mut failures = Vec::new();
+    let hosts = cx.update(|cx| cx.global::<Hosts>().hosts.clone());
+    refresh(&hosts, cx).await;
     for pubkey in &team.agents {
         let result: Result<(), String> = async {
-            let found = find_member(&community, pubkey, cx).await?;
-            if let Some((host, agent)) = &found
+            if let Some((host, agent)) = find_member(&community, pubkey, cx)
                 && agent.profile_pending
             {
                 request(
-                    host,
+                    &host,
                     Request::PublishProfile {
                         id: agent.id.clone(),
                     },
                     cx,
                 )
                 .await?;
+                // Only this host changed since the refresh.
+                refresh(std::slice::from_ref(&host), cx).await;
             }
             let member = cx.read_entity(&community, |community, _| {
                 community
@@ -723,7 +730,7 @@ pub async fn deploy_team(
                 session.add_member(&channel, pubkey).await?;
             }
             // Only agents managed here start; others just join.
-            if let Some((host, agent)) = find_member(&community, pubkey, cx).await?
+            if let Some((host, agent)) = find_member(&community, pubkey, cx)
                 && !alive(agent.status)
             {
                 let response = request(
