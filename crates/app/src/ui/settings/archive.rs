@@ -2,10 +2,10 @@
 //! `ArchiveSettings.tsx`), and the capture that fills the archive while a
 //! community is connected.
 
-use super::{Modal, SettingsPage, button, form_group, inline_header, preference_row, select_menu};
+use super::{Modal, SettingsPage, button, form_group, inline_header, preference_row};
 use crate::community::{AppState, Community, IdentityState, data_dir};
 use crate::runtime::Runtime;
-use crate::ui::overlay::{self, Align};
+use crate::ui::overlay::{self, Align, select_menu};
 use buzz_identity::Identity;
 use buzz_relay_client::archive::{self, Archive, ArchiveSettings, RETENTION_DAYS};
 use buzz_ui::{
@@ -408,7 +408,7 @@ impl SettingsPage {
             select,
             self.retention_menu,
             Align::Start,
-            rems(16.),
+            Some(rems(16.)),
             menu,
             dismiss,
             window,

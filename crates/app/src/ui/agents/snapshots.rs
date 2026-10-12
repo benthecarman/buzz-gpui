@@ -286,20 +286,20 @@ pub(super) fn inline_select(
             this.child(div().text_body().child(label))
         })
         .child(
-            div()
-                .relative()
-                .w(rems(14.))
-                .child(
-                    Select::new(id)
-                        .value(value)
-                        .open(open)
-                        .disabled(disabled)
-                        .surface(Surface::Floating)
-                        .on_click(toggle),
-                )
-                .when(open && !disabled, |this| {
-                    this.child(overlay::dropdown(window, Align::Start, menu, dismiss))
-                }),
+            overlay::select_menu(
+                Select::new(id)
+                    .value(value)
+                    .disabled(disabled)
+                    .surface(Surface::Floating)
+                    .on_click(toggle),
+                open && !disabled,
+                Align::Start,
+                None,
+                || menu.into_any_element(),
+                dismiss,
+                window,
+            )
+            .w(rems(14.)),
         )
 }
 

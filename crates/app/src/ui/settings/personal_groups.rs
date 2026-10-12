@@ -7,9 +7,9 @@
 //! visible ones into the draft.
 
 use super::cards::{self, CardPlacement, SettingsCard};
-use super::{button, empty_card, header, section, select_menu};
+use super::{button, empty_card, header, section};
 use crate::community::{AppState, Community};
-use crate::ui::overlay::{self, Dismiss};
+use crate::ui::overlay::{self, Dismiss, select_menu};
 use buzz_relay_client::SessionStatus;
 use buzz_relay_client::kit::me::{self as kit, GroupsId};
 use buzz_relay_client::session::{MeKitSnapshot, MeKitStatus};
@@ -423,7 +423,7 @@ impl GroupsDialog {
             trigger,
             open,
             overlay::Align::Start,
-            rems(20.),
+            Some(rems(20.)),
             menu,
             dismiss,
             window,

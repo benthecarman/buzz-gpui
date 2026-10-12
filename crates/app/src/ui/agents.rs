@@ -641,29 +641,25 @@ impl AgentsPage {
                     })),
             );
         }
+        let select = Select::new("agents-host-pick")
+            .when_some(shown.and_then(|ix| self.hosts.get(ix)), |this, host| {
+                this.value(host.read(cx).label.clone())
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_menu((!open).then_some(OpenMenu::HostPick), cx)
+            }));
         Some(
-            div()
-                .relative()
-                .w(rems(12.))
-                .child(
-                    Select::new("agents-host-pick")
-                        .when_some(shown.and_then(|ix| self.hosts.get(ix)), |this, host| {
-                            this.value(host.read(cx).label.clone())
-                        })
-                        .open(open)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_menu((!open).then_some(OpenMenu::HostPick), cx)
-                        })),
-                )
-                .when(open, |this| {
-                    this.child(overlay::dropdown(
-                        window,
-                        Align::End,
-                        div().min_w(rems(12.)).child(menu),
-                        Self::dismiss(cx),
-                    ))
-                })
-                .into_any_element(),
+            overlay::select_menu(
+                select,
+                open,
+                Align::End,
+                Some(rems(12.)),
+                || menu.into_any_element(),
+                Self::dismiss(cx),
+                window,
+            )
+            .w(rems(12.))
+            .into_any_element(),
         )
     }
 

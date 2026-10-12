@@ -616,26 +616,27 @@ impl CreateDialog {
                 cx.notify();
             });
         });
+        let select = Select::new("host-select")
+            .value(self.host.read(cx).label.clone())
+            .surface(Surface::Floating)
+            .disabled(self.phase.is_some() || self.saved.is_some())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.host_open = !this.host_open;
+                cx.notify();
+            }));
         field(
             "Host",
             Some("The machine that runs this agent.".into()),
-            div()
-                .relative()
-                .w_full()
-                .child(
-                    Select::new("host-select")
-                        .value(self.host.read(cx).label.clone())
-                        .open(self.host_open)
-                        .surface(Surface::Floating)
-                        .disabled(self.phase.is_some() || self.saved.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.host_open = !this.host_open;
-                            cx.notify();
-                        })),
-                )
-                .when(self.host_open, |this| {
-                    this.child(overlay::dropdown(window, Align::Start, menu, dismiss))
-                }),
+            overlay::select_menu(
+                select,
+                self.host_open,
+                Align::Start,
+                None,
+                || menu.into_any_element(),
+                dismiss,
+                window,
+            )
+            .w_full(),
             &c,
         )
     }

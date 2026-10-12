@@ -358,26 +358,27 @@ impl ImportDialog {
                 cx.notify();
             });
         });
+        let select = Select::new("import-source")
+            .value(source_label(self.source))
+            .surface(Surface::Floating)
+            .disabled(self.importing || (self.busy(cx) && !self.previewing))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.source_open = !this.source_open;
+                cx.notify();
+            }));
         field(
             label,
             None,
-            div()
-                .relative()
-                .w_full()
-                .child(
-                    Select::new("import-source")
-                        .value(source_label(self.source))
-                        .open(self.source_open)
-                        .surface(Surface::Floating)
-                        .disabled(self.importing || (self.busy(cx) && !self.previewing))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.source_open = !this.source_open;
-                            cx.notify();
-                        })),
-                )
-                .when(self.source_open, |this| {
-                    this.child(overlay::dropdown(window, Align::Start, menu, dismiss))
-                }),
+            overlay::select_menu(
+                select,
+                self.source_open,
+                Align::Start,
+                None,
+                || menu.into_any_element(),
+                dismiss,
+                window,
+            )
+            .w_full(),
             &c,
         )
     }

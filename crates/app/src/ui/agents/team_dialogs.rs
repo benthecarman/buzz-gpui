@@ -50,28 +50,24 @@ impl SelectField {
         cx: &App,
     ) -> Div {
         let c = cx.colors();
+        let select = Select::new(self.id)
+            .value(self.value)
+            .surface(Surface::Floating)
+            .disabled(self.disabled)
+            .on_click(toggle);
         field(
             self.label,
             self.description,
-            div()
-                .relative()
-                .w_full()
-                .child(
-                    Select::new(self.id)
-                        .value(self.value)
-                        .open(self.open)
-                        .surface(Surface::Floating)
-                        .disabled(self.disabled)
-                        .on_click(toggle),
-                )
-                .when(self.open, |this| {
-                    this.child(overlay::dropdown(
-                        window,
-                        Align::Start,
-                        div().min_w(rems(20.)).child(options),
-                        dismiss,
-                    ))
-                }),
+            overlay::select_menu(
+                select,
+                self.open,
+                Align::Start,
+                Some(rems(20.)),
+                || options.into_any_element(),
+                dismiss,
+                window,
+            )
+            .w_full(),
             c,
         )
     }

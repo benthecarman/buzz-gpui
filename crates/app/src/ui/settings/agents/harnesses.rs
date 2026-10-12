@@ -3,10 +3,10 @@
 //! Claude Code and Codex adapter installers, manual setup steps, and the
 //! "Add harness" catalog.
 
-use super::super::{button, form_group, inline_header, preference_row, select_menu};
+use super::super::{button, form_group, inline_header, preference_row};
 use crate::hosts::{HostConnection, Hosts, Install};
 use crate::ui::agents::harness::{self, status_label};
-use crate::ui::overlay;
+use crate::ui::overlay::{self, select_menu};
 use buzz_host::api::{Harness, HarnessKind, HarnessStatus, InstallReport};
 use buzz_host::harness::{HarnessPreset, harness_presets};
 use buzz_host_rpc::ConnectionState;
@@ -358,7 +358,7 @@ impl Harnesses {
                 select,
                 self.host_open,
                 overlay::Align::End,
-                rems(12.),
+                Some(rems(12.)),
                 || menu.into_any_element(),
                 dismiss,
                 window,

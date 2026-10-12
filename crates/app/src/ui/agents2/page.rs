@@ -794,32 +794,28 @@ impl NewAgent {
                 cx.notify();
             });
         });
+        let select = Select::new("agents2-host-select")
+            .placeholder("Choose where it runs")
+            .when_some(label, |this, label| this.value(label))
+            .surface(Surface::Floating)
+            .disabled(self.pending)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.host_open = !this.host_open;
+                cx.notify();
+            }));
         field(
             "Host",
             Some("The machine that keeps this agent's key.".into()),
-            div()
-                .relative()
-                .w_full()
-                .child(
-                    Select::new("agents2-host-select")
-                        .placeholder("Choose where it runs")
-                        .when_some(label, |this, label| this.value(label))
-                        .open(self.host_open)
-                        .surface(Surface::Floating)
-                        .disabled(self.pending)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.host_open = !this.host_open;
-                            cx.notify();
-                        })),
-                )
-                .when(self.host_open, |this| {
-                    this.child(overlay::dropdown(
-                        window,
-                        Align::Start,
-                        div().min_w(rems(16.)).child(menu),
-                        dismiss,
-                    ))
-                }),
+            overlay::select_menu(
+                select,
+                self.host_open,
+                Align::Start,
+                Some(rems(16.)),
+                || menu.into_any_element(),
+                dismiss,
+                window,
+            )
+            .w_full(),
             &c,
         )
     }

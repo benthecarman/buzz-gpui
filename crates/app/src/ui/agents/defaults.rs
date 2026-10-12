@@ -860,28 +860,24 @@ impl DefaultsCard {
         for item in items {
             options = options.child(item);
         }
-        div()
-            .relative()
-            .w_full()
-            .child(
-                Select::new(id)
-                    .value(value)
-                    .open(open)
-                    .surface(self.surface())
-                    .disabled(disabled)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open = (this.open != Some(menu)).then_some(menu);
-                        cx.notify();
-                    })),
-            )
-            .when(open, |this| {
-                this.child(overlay::dropdown(
-                    window,
-                    Align::Start,
-                    div().min_w(rems(20.)).child(options),
-                    dismiss,
-                ))
-            })
+        let select = Select::new(id)
+            .value(value)
+            .surface(self.surface())
+            .disabled(disabled)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open = (this.open != Some(menu)).then_some(menu);
+                cx.notify();
+            }));
+        overlay::select_menu(
+            select,
+            open,
+            Align::Start,
+            Some(rems(20.)),
+            || options.into_any_element(),
+            dismiss,
+            window,
+        )
+        .w_full()
     }
 
     fn surface(&self) -> Surface {

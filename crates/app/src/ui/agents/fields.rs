@@ -1256,29 +1256,25 @@ impl Fields {
             );
         }
         menu = menu.child(list);
-        div()
-            .relative()
-            .w_full()
-            .child(
-                Select::new(id)
-                    .value(value)
-                    .open(open)
-                    .surface(Surface::Floating)
-                    .disabled(disabled)
-                    .on_click(cx.listener(move |this: &mut T, _, _, cx| {
-                        let fields = this.fields();
-                        fields.open = (fields.open != Some(which)).then_some(which);
-                        cx.notify();
-                    })),
-            )
-            .when(open, |this| {
-                this.child(overlay::dropdown(
-                    window,
-                    Align::Start,
-                    div().min_w(rems(20.)).child(menu),
-                    Self::dismiss(cx),
-                ))
-            })
+        let select = Select::new(id)
+            .value(value)
+            .surface(Surface::Floating)
+            .disabled(disabled)
+            .on_click(cx.listener(move |this: &mut T, _, _, cx| {
+                let fields = this.fields();
+                fields.open = (fields.open != Some(which)).then_some(which);
+                cx.notify();
+            }));
+        overlay::select_menu(
+            select,
+            open,
+            Align::Start,
+            Some(rems(20.)),
+            || menu.into_any_element(),
+            Self::dismiss(cx),
+            window,
+        )
+        .w_full()
     }
 
     /// `AgentSettingsFields`.

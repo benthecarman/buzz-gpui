@@ -1,6 +1,6 @@
 //! Modal dialogs and dropdown menus drawn above the rest of the window.
 
-use buzz_ui::Scrim;
+use buzz_ui::{Scrim, Select};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -74,6 +74,30 @@ pub fn modal(
 pub enum Align {
     Start,
     End,
+}
+
+/// A select and, while `open`, its menu (`menu_width` wide at least)
+/// dropping down from it. `menu` is built only while it shows.
+pub fn select_menu(
+    select: Select,
+    open: bool,
+    align: Align,
+    menu_width: Option<Rems>,
+    menu: impl FnOnce() -> AnyElement,
+    dismiss: Dismiss,
+    window: &Window,
+) -> Div {
+    div()
+        .relative()
+        .child(select.open(open))
+        .when(open, |this| {
+            this.child(dropdown(
+                window,
+                align,
+                div().when_some(menu_width, Div::min_w).child(menu()),
+                dismiss,
+            ))
+        })
 }
 
 /// A menu at the pointer (a context menu). Any press outside it, left or
