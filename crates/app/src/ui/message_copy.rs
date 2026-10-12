@@ -2,9 +2,9 @@
 //! (`message-copy.ts`).
 
 use super::identity::Names;
+use super::markdown;
 use buzz_relay_client::Profiles;
 use buzz_relay_client::fold::{MessageRow, message_markdown};
-use markdown::mdast::Node;
 use nostr::nips::nip19::ToBech32;
 
 /// `messageCopyLink`: `buzz://message?channel&id`, with `thread` for a
@@ -26,134 +26,41 @@ pub fn link(row: &MessageRow) -> Option<String> {
     Some(url.to_string())
 }
 
-fn literal(node: &Node) -> bool {
-    matches!(
-        node,
-        Node::Code(_)
-            | Node::InlineCode(_)
-            | Node::Link(_)
-            | Node::LinkReference(_)
-            | Node::Image(_)
-            | Node::ImageReference(_)
-            | Node::Definition(_)
-            | Node::Html(_)
-    )
-}
-
-fn literal_ranges(node: &Node, out: &mut Vec<(usize, usize)>) {
-    if literal(node) {
-        if let Some(position) = node.position() {
-            out.push((position.start.offset, position.end.offset));
-        }
-        return;
-    }
-    for child in node.children().into_iter().flatten() {
-        literal_ranges(child, out);
-    }
-}
-
 /// `messageCopyText`: the body with bound mentions as `[@Name](nostr:npub…)`
 /// links (never inside code or other literal syntax), then each
 /// attachment's URL, blank lines between.
 pub fn text(row: &MessageRow, profiles: &Profiles, names: &Names) -> String {
     let mut content = row.content.clone();
-    if let Some(tree) = message_markdown(&content) {
-        let mut ranges = Vec::new();
-        literal_ranges(&tree, &mut ranges);
-        content = bind_mentions(row, profiles, names, &ranges);
+    if !row.edited
+        && let Some(tree) = message_markdown(&content)
+    {
+        let mut literals = Vec::new();
+        markdown::literal_ranges(&tree, true, &mut literals);
+        let labels = markdown::mention_labels(row, profiles, names);
+        content = markdown::bind_mentions(
+            &row.content,
+            &labels,
+            &literals,
+            &row.attachment_seams,
+            |label, key, out| {
+                out.push('[');
+                for c in label.chars() {
+                    if matches!(c, '\\' | '[' | ']') {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out.push_str("](nostr:");
+                out.push_str(&key.to_bech32().expect("keys encode"));
+                out.push(')');
+            },
+        );
     }
     std::iter::once(content.as_str())
         .chain(row.attachments.iter().map(|a| a.url.as_str()))
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-/// `profileMentionParts` over the raw body, rewritten as links.
-fn bind_mentions(
-    row: &MessageRow,
-    profiles: &Profiles,
-    names: &Names,
-    literals: &[(usize, usize)],
-) -> String {
-    let text = &row.content;
-    if row.edited {
-        return text.clone();
-    }
-    let mut labels: Vec<(String, Vec<String>)> = Vec::new();
-    let library: std::collections::HashMap<&str, &str> = names.agent_names().collect();
-    for key in row.mentions.iter().chain(&row.mention_references) {
-        let hex = key.to_hex();
-        let npub = key.to_bech32().expect("keys encode");
-        let target = format!("nostr:{npub}");
-        for name in [
-            profiles.get(&hex).map(|p| p.name.clone()),
-            library.get(hex.as_str()).map(|n| n.to_string()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if name.is_empty() || name.contains(['\r', '\n']) {
-                continue;
-            }
-            match labels.iter_mut().find(|(n, _)| *n == name) {
-                Some((_, targets)) => {
-                    if !targets.contains(&target) {
-                        targets.push(target.clone());
-                    }
-                }
-                None => labels.push((name, vec![target.clone()])),
-            }
-        }
-    }
-    if labels.is_empty() {
-        return text.clone();
-    }
-    labels.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
-    let seams = &row.attachment_seams;
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < text.len() {
-        let rest = &text[i..];
-        let previous = text[..i].chars().next_back();
-        let boundary =
-            !previous.is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '@' | '/' | '\\'));
-        if rest.starts_with('@')
-            && boundary
-            && let Some((name, targets)) = labels.iter().find(|(name, _)| {
-                let end = i + 1 + name.len();
-                rest[1..].starts_with(name.as_str())
-                    && !text[end..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                    && !seams.iter().any(|s| i < *s && *s < end)
-            })
-        {
-            let end = i + 1 + name.len();
-            let inside = literals.iter().any(|&(s, e)| i < e && end > s);
-            if targets.len() == 1 && !inside {
-                out.push('[');
-                for c in text[i..end].chars() {
-                    if matches!(c, '\\' | '[' | ']') {
-                        out.push('\\');
-                    }
-                    out.push(c);
-                }
-                out.push_str("](");
-                out.push_str(&targets[0]);
-                out.push(')');
-            } else {
-                out.push_str(&text[i..end]);
-            }
-            i = end;
-            continue;
-        }
-        let c = rest.chars().next().expect("not at the end");
-        out.push(c);
-        i += c.len_utf8();
-    }
-    out
 }
 
 #[cfg(test)]

@@ -32,6 +32,7 @@ use gpui_kit::base::text::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use markdown::mdast::{self, AlignKind, Node};
+use nostr::prelude::PublicKey;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -307,7 +308,7 @@ fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
     if let Some(document) = PREPARED.with_borrow(|cache| cache.get(&key).cloned()) {
         return document;
     }
-    let document = Arc::new(prepare(row, directory, &identities));
+    let document = Arc::new(prepare(row, directory));
     PREPARED.with_borrow_mut(|cache| {
         if cache.len() >= PREPARED_LIMIT {
             cache.clear();
@@ -343,7 +344,7 @@ fn literal(node: &Node) -> bool {
     )
 }
 
-fn literal_ranges(node: &Node, include_links: bool, out: &mut Vec<(usize, usize)>) {
+pub(super) fn literal_ranges(node: &Node, include_links: bool, out: &mut Vec<(usize, usize)>) {
     if literal(node) && (include_links || !matches!(node, Node::Link(_))) {
         if let Some(position) = node.position() {
             out.push((position.start.offset, position.end.offset));
@@ -355,7 +356,98 @@ fn literal_ranges(node: &Node, include_links: bool, out: &mut Vec<(usize, usize)
     }
 }
 
-fn prepare(row: &MessageRow, directory: &Directory, identities: &[String]) -> Prepared {
+/// A name a mention can bind, with the identities it names.
+pub(super) type MentionLabel = (String, Vec<PublicKey>);
+
+/// `profileMentionParts`' labels: the exact profile and agent names of the
+/// row's signed recipients, longest first. A name two of them share binds
+/// neither.
+pub(super) fn mention_labels(
+    row: &MessageRow,
+    profiles: &Profiles,
+    names: &Names,
+) -> Vec<MentionLabel> {
+    let library: HashMap<&str, &str> = names.agent_names().collect();
+    let mut labels: Vec<MentionLabel> = Vec::new();
+    for key in row.mentions.iter().chain(&row.mention_references) {
+        let hex = key.to_hex();
+        let candidates = [
+            profiles.get(&hex).map(|p| p.name.clone()),
+            library.get(hex.as_str()).map(|name| name.to_string()),
+        ];
+        for name in candidates.into_iter().flatten() {
+            if name.is_empty() || name.contains(['\r', '\n']) {
+                continue;
+            }
+            match labels.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, keys)) if !keys.contains(key) => keys.push(*key),
+                Some(_) => {}
+                None => labels.push((name, vec![*key])),
+            }
+        }
+    }
+    labels.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    labels
+}
+
+/// The bound name an `@` at byte `i` of `text` starts: not after a word,
+/// path or another `@`, ending at a word boundary, and not across an
+/// attachment seam (`spans_seam(start, end)`). Gives its end and keys.
+pub(super) fn mention_at<'a>(
+    text: &str,
+    i: usize,
+    labels: &'a [MentionLabel],
+    spans_seam: impl Fn(usize, usize) -> bool,
+) -> Option<(usize, &'a [PublicKey])> {
+    let rest = text[i..].strip_prefix('@')?;
+    let previous = text[..i].chars().next_back();
+    if previous.is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '@' | '/' | '\\')) {
+        return None;
+    }
+    labels.iter().find_map(|(name, keys)| {
+        let end = i + 1 + name.len();
+        (rest.starts_with(name.as_str())
+            && !text[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !spans_seam(i, end))
+        .then_some((end, keys.as_slice()))
+    })
+}
+
+/// The raw body with each mention bound to one identity written by
+/// `link(label, key, out)`, outside `literals` (code and other literal
+/// syntax) and never across a `seam`. Other text is kept as is.
+pub(super) fn bind_mentions(
+    text: &str,
+    labels: &[MentionLabel],
+    literals: &[(usize, usize)],
+    seams: &[usize],
+    link: impl Fn(&str, &PublicKey, &mut String),
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if let Some((end, keys)) = mention_at(text, i, labels, |start, end| {
+            seams.iter().any(|s| start < *s && *s < end)
+        }) {
+            let inside = literals.iter().any(|&(s, e)| i < e && end > s);
+            match keys {
+                [key] if !inside => link(&text[i..end], key, &mut out),
+                _ => out.push_str(&text[i..end]),
+            }
+            i = end;
+            continue;
+        }
+        let c = text[i..].chars().next().expect("in bounds");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
     let plain = |body| Prepared {
         body,
         spoilers: Arc::from([]),
@@ -385,31 +477,11 @@ fn prepare(row: &MessageRow, directory: &Directory, identities: &[String]) -> Pr
     };
     // `profileMentionParts`: exact known names of signed recipients, only
     // in an unedited body (link-repaired prose stays unbound, like edits).
-    let mut names: Vec<(String, Vec<String>)> = Vec::new();
-    let bind = !row.edited && content == row.content;
-    if bind {
-        let library: HashMap<&str, &str> = directory.names.agent_names().collect();
-        for key in identities {
-            let labels = [
-                directory.profiles.get(key).map(|p| p.name.clone()),
-                library.get(key.as_str()).map(|name| name.to_string()),
-            ];
-            for name in labels.into_iter().flatten() {
-                if name.is_empty() || name.contains(['\r', '\n']) {
-                    continue;
-                }
-                match names.iter_mut().find(|(n, _)| *n == name) {
-                    Some((_, keys)) => {
-                        if !keys.contains(key) {
-                            keys.push(key.clone())
-                        }
-                    }
-                    None => names.push((name, vec![key.clone()])),
-                }
-            }
-        }
-    }
-    names.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    let names = if !row.edited && content == row.content {
+        mention_labels(row, &directory.profiles, &directory.names)
+    } else {
+        Vec::new()
+    };
     let mut definitions = HashMap::new();
     let mut footnotes = HashMap::new();
     collect_definitions(&tree, &mut definitions, &mut footnotes);
@@ -506,7 +578,7 @@ enum Piece<'a> {
 struct Prep<'a> {
     content: &'a str,
     emoji: &'a [CustomEmoji],
-    names: Vec<(String, Vec<String>)>,
+    names: Vec<MentionLabel>,
     seams: &'a [usize],
     definitions: HashMap<String, String>,
     /// `(#label, channel id)`.
@@ -823,30 +895,19 @@ impl Prep<'_> {
         let mut i = 0;
         while i < value.len() {
             let rest = &value[i..];
-            let previous = value[..i].chars().next_back();
-            if rest.starts_with('@')
-                && !previous
-                    .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '@' | '/' | '\\'))
-                && let Some((name, keys)) = self.names.iter().find(|(name, _)| {
-                    rest[1..].starts_with(name.as_str())
-                        && !rest[1 + name.len()..]
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                        && !spans_seam(i, i + 1 + name.len())
-                })
-            {
-                let end = i + 1 + name.len();
+            if let Some((end, keys)) = mention_at(value, i, &self.names, spans_seam) {
                 // A legacy namesake qualifier names someone else.
                 let qualified = value[end..].strip_prefix(" (").is_some_and(|q| {
                     q.len() >= 65
                         && q.as_bytes()[..64].iter().all(u8::is_ascii_hexdigit)
                         && q.as_bytes()[64] == b')'
                 });
-                if keys.len() == 1 && !qualified {
+                if let [key] = keys
+                    && !qualified
+                {
                     link_md(
-                        &format!("@{name}"),
-                        &format!("buzz-mention:{}", keys[0]),
+                        &value[i..end],
+                        &format!("buzz-mention:{}", key.to_hex()),
                         out,
                     );
                 } else {
@@ -2227,7 +2288,7 @@ pub(super) mod tests {
 
     fn blocks(content: &str) -> Vec<Block> {
         let row = row(content);
-        match prepare(&row, &directory(), &[]).body {
+        match prepare(&row, &directory()).body {
             Document::Blocks(blocks) => blocks,
             other => panic!("not blocks: {other:?}"),
         }
@@ -2282,7 +2343,7 @@ pub(super) mod tests {
         let directory = Directory::new(profiles, Arc::from([]), media());
         let mut row = row("@Sam Rivera could you `@Sam Rivera` look, @Sam Riveras?");
         row.mentions = vec![sam];
-        let Document::Blocks(blocks) = prepare(&row, &directory, &identities(&row)).body else {
+        let Document::Blocks(blocks) = prepare(&row, &directory).body else {
             panic!("not blocks");
         };
         let target = format!("[\\@Sam Rivera](<buzz-mention:{}>)", sam.to_hex());
@@ -2294,7 +2355,7 @@ pub(super) mod tests {
         );
         // Edited bodies stay unbound.
         row.edited = true;
-        let Document::Blocks(blocks) = prepare(&row, &directory, &identities(&row)).body else {
+        let Document::Blocks(blocks) = prepare(&row, &directory).body else {
             panic!("not blocks");
         };
         assert!(!format!("{blocks:?}").contains("buzz-mention"));
@@ -2307,7 +2368,7 @@ pub(super) mod tests {
             shortcode: "party".into(),
             url: "https://x.test/p.png".into(),
         }];
-        let prepared = prepare(&row, &directory(), &[]);
+        let prepared = prepare(&row, &directory());
         assert_eq!(
             prepared.body,
             Document::Blocks(vec![Block::Paragraph(
@@ -2322,7 +2383,7 @@ pub(super) mod tests {
     #[test]
     fn spoilers_hold_formatting_across_siblings() {
         let row = row("a ||b *c* [d](https://x.test)|| e ||| f |||| g || h");
-        let prepared = prepare(&row, &directory(), &[]);
+        let prepared = prepare(&row, &directory());
         let Document::Blocks(blocks) = &prepared.body else {
             panic!("not blocks");
         };
@@ -2331,7 +2392,7 @@ pub(super) mod tests {
         assert!(text.contains("buzz-spoiler:0"));
         // An escaped mark is text.
         let row = super::tests::row("a \\|\\|b\\|\\| c");
-        assert!(prepare(&row, &directory(), &[]).spoilers.is_empty());
+        assert!(prepare(&row, &directory()).spoilers.is_empty());
     }
 
     #[test]
@@ -2354,7 +2415,7 @@ pub(super) mod tests {
         }]);
         let directory = Directory::new(Profiles::default(), channels, media());
         let row = row("see #design, not #designers or a#design");
-        let Document::Blocks(blocks) = prepare(&row, &directory, &[]).body else {
+        let Document::Blocks(blocks) = prepare(&row, &directory).body else {
             panic!("not blocks");
         };
         let text = format!("{blocks:?}");
@@ -2431,7 +2492,7 @@ pub(super) mod tests {
             url: "https://x.test/p.png".into(),
         }];
         assert_eq!(
-            prepare(&block, &directory(), &[]).body,
+            prepare(&block, &directory()).body,
             Document::Blocks(vec![Block::Paragraph(
                 "\\<div onclick\\=\\\"x\\(\\)\\\"\\>\\\n\\*\\*not bold\\*\\* \\:party\\:\\\n\\<\\/div\\>"
                     .into()
@@ -2450,7 +2511,7 @@ pub(super) mod tests {
         );
         assert!(blocks("<!-- buzz:wave:v1 -->").is_empty());
         // Inside a spoiler it stays inline text.
-        let prepared = prepare(&row("Before ||<harness>|| after"), &directory(), &[]);
+        let prepared = prepare(&row("Before ||<harness>|| after"), &directory());
         assert_eq!(
             prepared.body,
             Document::Blocks(vec![Block::Paragraph(
@@ -2500,7 +2561,7 @@ pub(super) mod tests {
     fn falls_back_to_plain_text_when_too_deep() {
         let body = "> ".repeat(200) + "deep";
         assert_eq!(
-            prepare(&row(&body), &directory(), &[]).body,
+            prepare(&row(&body), &directory()).body,
             Document::Plain(body)
         );
     }

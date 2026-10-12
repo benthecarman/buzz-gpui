@@ -3,8 +3,9 @@
 //! state the composer shows while the edit is delivered.
 
 use super::identity::Names;
+use super::markdown;
 use buzz_relay_client::Profiles;
-use buzz_relay_client::fold::MessageRow;
+use buzz_relay_client::fold::{MessageRow, message_markdown};
 use nostr::nips::nip19::ToBech32;
 
 pub const UNAVAILABLE: &str = "This message is no longer available to edit.";
@@ -71,67 +72,17 @@ pub fn edit_text(row: &MessageRow, profiles: &Profiles, names: &Names) -> String
     if row.edited {
         return text.to_string();
     }
-    let library: std::collections::HashMap<&str, &str> = names.agent_names().collect();
-    let mut labels: Vec<(String, Vec<String>)> = Vec::new();
-    for key in row.mentions.iter().chain(&row.mention_references) {
-        let hex = key.to_hex();
-        let npub = key.to_bech32().expect("keys encode");
-        let target = format!("nostr:{npub}");
-        for name in [
-            profiles.get(&hex).map(|p| p.name.clone()),
-            library.get(hex.as_str()).map(|n| n.to_string()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if name.is_empty() || name.contains(['\r', '\n']) {
-                continue;
-            }
-            match labels.iter_mut().find(|(n, _)| *n == name) {
-                Some((_, targets)) if !targets.contains(&target) => targets.push(target.clone()),
-                Some(_) => {}
-                None => labels.push((name, vec![target.clone()])),
-            }
-        }
-    }
-    if labels.is_empty() {
+    let Some(tree) = message_markdown(text) else {
         return text.to_string();
-    }
-    labels.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    let mut in_code = false;
-    while i < text.len() {
-        let rest = &text[i..];
-        if rest.starts_with('`') {
-            in_code = !in_code;
-        }
-        let previous = text[..i].chars().next_back();
-        if !in_code
-            && rest.starts_with('@')
-            && !previous.is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '@' | '/' | '\\'))
-            && let Some((name, targets)) = labels.iter().find(|(name, _)| {
-                rest[1..].starts_with(name.as_str())
-                    && !text[i + 1 + name.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-            })
-        {
-            let end = i + 1 + name.len();
-            if targets.len() == 1 {
-                out.push_str(&profile_link(&text[i..end], &targets[0]));
-            } else {
-                out.push_str(&text[i..end]);
-            }
-            i = end;
-            continue;
-        }
-        let c = rest.chars().next().expect("in bounds");
-        out.push(c);
-        i += c.len_utf8();
-    }
-    out
+    };
+    let mut literals = Vec::new();
+    markdown::literal_ranges(&tree, true, &mut literals);
+    let labels = markdown::mention_labels(row, profiles, names);
+    // The source keeps its attachment Markdown, so it has no seams.
+    markdown::bind_mentions(text, &labels, &literals, &[], |label, key, out| {
+        let npub = key.to_bech32().expect("keys encode");
+        out.push_str(&profile_link(label, &format!("nostr:{npub}")));
+    })
 }
 
 /// `(label, url)` of Markdown links and images whose destination is one
@@ -241,6 +192,14 @@ mod tests {
         assert_eq!(
             edit_text(&message, &profiles, &names),
             format!("hi [\\@Sam R\\.](nostr:{npub}) and `@Sam R.`")
+        );
+        // Code spans are found as rendering finds them, not by counting
+        // backticks.
+        let mut spans = row("``it`s`` for @Sam R.");
+        spans.mentions = vec![sam];
+        assert_eq!(
+            edit_text(&spans, &profiles, &names),
+            format!("``it`s`` for [\\@Sam R\\.](nostr:{npub})")
         );
         message.edited = true;
         assert_eq!(
