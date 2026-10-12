@@ -86,7 +86,7 @@ use crate::fold::{
 use crate::reader::{Events, ReadError, ReadErrorKind, ReadOptions};
 use crate::socket::Filter;
 use nostr::prelude::{EventId, PublicKey};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use window::is_hex64;
@@ -605,8 +605,7 @@ impl ThreadState {
             return false;
         }
         let before = self.current.clone();
-        let all = union(&self.remote, incoming);
-        if self.retain(all, true) {
+        if self.extend_remote(incoming) {
             self.publish();
         }
         !Arc::ptr_eq(&before, &self.current)
@@ -615,6 +614,15 @@ impl ThreadState {
     /// Replaces the outbox operations this view may show. Failed replies
     /// stay visible for retry; failed edits and reactions do not apply.
     pub fn set_local(&mut self, operations: &[(Verified, LocalDelivery)]) {
+        let unchanged = self.local.len() == operations.len()
+            && self
+                .local
+                .iter()
+                .zip(operations)
+                .all(|((old, was), (new, is))| old.id == new.id && was == is);
+        if unchanged {
+            return;
+        }
         self.local = operations.to_vec();
         self.publish();
     }
@@ -766,8 +774,7 @@ impl ThreadState {
             return self.end_run();
         };
         self.root_id = Some(thread_reference(&event).map_or(event.id, |r| r.root_id));
-        let all = union(&self.remote, [event.clone()]);
-        if !self.retain(all, true) {
+        if !self.extend_remote([event.clone()]) {
             return None;
         }
         self.run.as_mut()?.selected = Some(event);
@@ -792,16 +799,15 @@ impl ThreadState {
             .into_iter()
             .map(|event| (event.id, event))
             .collect();
-        let all = union(&self.remote, self.staged.values().cloned());
-        if !self.retain(all.clone(), false) {
+        if union_over_budget(&[&self.remote, &self.staged]) {
+            self.overflow();
             return None;
         }
         let selected = self.run.as_ref()?.target;
-        let mut overlays = overlays_of(&all, &selected);
+        let overlays = overlays_of(&[&self.remote, &self.staged], &selected);
         if overlays.is_empty() {
             return self.finish_target(admit);
         }
-        overlays.sort();
         self.issue(ReadStep::Tombstones, vec![tombstones_filter(&overlays)])
     }
 
@@ -813,8 +819,8 @@ impl ThreadState {
         for event in self.related(&events) {
             self.staged.insert(event.id, event);
         }
-        let all = union(&self.remote, self.staged.values().cloned());
-        if !self.retain(all, false) {
+        if union_over_budget(&[&self.remote, &self.staged]) {
+            self.overflow();
             return None;
         }
         self.finish_target(admit)
@@ -827,8 +833,7 @@ impl ThreadState {
         accepted.extend(self.staged.values().cloned());
         admit.extend(accepted.iter().cloned());
         let related = self.related(&accepted);
-        let all = union(&self.remote, related);
-        if !self.retain(all, true) {
+        if !self.extend_remote(related) {
             return None;
         }
         self.staged.clear();
@@ -860,8 +865,7 @@ impl ThreadState {
             return self.root_missing();
         }
         let related = self.related(&events);
-        let all = union(&self.remote, related);
-        if !self.retain(all, true) {
+        if !self.extend_remote(related) {
             return None;
         }
         self.run.as_mut()?.root = events;
@@ -954,8 +958,7 @@ impl ThreadState {
             run.fetched.insert(event.id, event);
         }
         if over_budget(run.fetched.values()) {
-            let fetched = std::mem::take(&mut run.fetched);
-            self.retain(fetched, true);
+            self.overflow();
             return None;
         }
         // Only signed bounds prove exhaustion. A short legacy page may be
@@ -975,8 +978,7 @@ impl ThreadState {
         let next_pages = run.next_pages;
         // A bounded response cannot retract observed evidence: keep known
         // edits, tombstones and live rows a later page omits.
-        let all = union(&self.remote, fetched.into_values());
-        if !self.retain(all, true) {
+        if !self.extend_remote(fetched.into_values()) {
             return None;
         }
         self.root_unavailable = false;
@@ -1057,30 +1059,40 @@ impl ThreadState {
 
     /// Commits `events` as the retained evidence (when `commit`), or clears
     /// the view when they are over budget. Nothing is silently evicted.
-    fn retain(&mut self, events: EventMap, commit: bool) -> bool {
-        if over_budget(events.values()) {
-            self.run = None;
-            self.selection = None;
-            self.again = false;
-            self.remote.clear();
-            self.staged.clear();
-            self.root_id = None;
-            self.cursor = None;
-            self.pages = 0;
-            if self.config.exact {
-                self.target_status = Some(TargetStatus::Error);
-            }
-            self.fields.status = ThreadStatus::Error;
-            self.fields.limited = true;
-            self.fields.can_load_more = false;
-            self.fields.error = Some(MEMORY_LIMIT.into());
-            self.publish();
+    /// Adds `extra` to the remote evidence in place. False, after
+    /// [`overflow`](Self::overflow), when the union is over budget.
+    fn extend_remote(&mut self, extra: impl IntoIterator<Item = Verified>) -> bool {
+        let extra: EventMap = extra
+            .into_iter()
+            .filter(|event| !self.remote.contains_key(&event.id))
+            .map(|event| (event.id, event))
+            .collect();
+        if union_over_budget(&[&self.remote, &extra]) {
+            self.overflow();
             return false;
         }
-        if commit {
-            self.remote = events;
-        }
+        self.remote.extend(extra);
         true
+    }
+
+    /// The evidence outgrew its budget: forget it and report the limit.
+    fn overflow(&mut self) {
+        self.run = None;
+        self.selection = None;
+        self.again = false;
+        self.remote.clear();
+        self.staged.clear();
+        self.root_id = None;
+        self.cursor = None;
+        self.pages = 0;
+        if self.config.exact {
+            self.target_status = Some(TargetStatus::Error);
+        }
+        self.fields.status = ThreadStatus::Error;
+        self.fields.limited = true;
+        self.fields.can_load_more = false;
+        self.fields.error = Some(MEMORY_LIMIT.into());
+        self.publish();
     }
 
     // ----- retarget -----
@@ -1156,19 +1168,19 @@ impl ThreadState {
     fn stage_selection(
         &mut self,
         events: impl IntoIterator<Item = Verified>,
-    ) -> ControlFlow<Retarget, EventMap> {
+    ) -> ControlFlow<Retarget> {
         let Some(selection) = self.selection.as_mut() else {
             return ControlFlow::Break(Retarget::Cancelled);
         };
         selection
             .staged
             .extend(events.into_iter().map(|event| (event.id, event)));
-        let staged = selection.staged.clone();
-        let all = union(&self.remote, self.staged.values().cloned());
-        if !self.retain(union(&all, staged.values().cloned()), false) {
+        let staged = &selection.staged;
+        if union_over_budget(&[&self.remote, &self.staged, staged]) {
+            self.overflow();
             return ControlFlow::Break(Retarget::Error);
         }
-        ControlFlow::Continue(union(&self.remote, staged.into_values()))
+        ControlFlow::Continue(())
     }
 
     fn on_selection_target(
@@ -1198,12 +1210,14 @@ impl ThreadState {
     ) -> ControlFlow<Retarget, ThreadRead> {
         let id = self.selection_id()?;
         let related = self.related_to(&events, Some(id));
-        let all = self.stage_selection(related)?;
-        let mut overlays = overlays_of(&all, &id);
+        self.stage_selection(related)?;
+        let Some(selection) = &self.selection else {
+            return ControlFlow::Break(Retarget::Cancelled);
+        };
+        let overlays = overlays_of(&[&self.remote, &selection.staged], &id);
         if overlays.is_empty() {
             return self.finish_selection(admit);
         }
-        overlays.sort();
         self.issue_selection(ReadStep::Tombstones, vec![tombstones_filter(&overlays)])
     }
 
@@ -1230,7 +1244,7 @@ impl ThreadState {
             .collect();
         admit.extend(accepted.iter().cloned());
         let related = self.related_to(&accepted, Some(id));
-        if !self.retain(union(&self.remote, related), true) {
+        if !self.extend_remote(related) {
             return ControlFlow::Break(Retarget::Error);
         }
         let previous = (
@@ -1477,30 +1491,40 @@ fn targets(event: &Verified) -> impl Iterator<Item = EventId> + '_ {
 }
 
 /// The overlays in `events` naming `id`.
-fn overlays_of(events: &EventMap, id: &EventId) -> Vec<EventId> {
-    events
-        .values()
+/// The overlays in `maps` that target `id`, sorted and distinct.
+fn overlays_of(maps: &[&EventMap], id: &EventId) -> Vec<EventId> {
+    let overlays: BTreeSet<EventId> = maps
+        .iter()
+        .flat_map(|map| map.values())
         .filter(|event| {
             AUX.contains(&event.kind_u16()) && targets(event).any(|target| target == *id)
         })
         .map(|event| event.id)
-        .collect()
+        .collect();
+    overlays.into_iter().collect()
 }
 
-fn union(base: &EventMap, extra: impl IntoIterator<Item = Verified>) -> EventMap {
-    let mut all = base.clone();
-    for event in extra {
-        all.insert(event.id, event);
-    }
-    all
+/// [`over_budget`] for the union of `maps`; earlier maps win duplicates.
+fn union_over_budget(maps: &[&EventMap]) -> bool {
+    over_budget(maps.iter().enumerate().flat_map(|(index, map)| {
+        map.values().filter(move |event| {
+            !maps[..index]
+                .iter()
+                .any(|seen| seen.contains_key(&event.id))
+        })
+    }))
 }
 
 /// Over [`MAX_EVENTS`] or over [`MAX_BYTES`] as one JSON array.
-fn over_budget<'a>(events: impl ExactSizeIterator<Item = &'a Verified>) -> bool {
-    let count = events.len();
-    if count > MAX_EVENTS {
-        return true;
+fn over_budget<'a>(events: impl Iterator<Item = &'a Verified>) -> bool {
+    let mut count = 0;
+    let mut bytes = 0;
+    for event in events {
+        count += 1;
+        if count > MAX_EVENTS {
+            return true;
+        }
+        bytes += event.byte_size();
     }
-    let bytes: usize = events.map(Verified::byte_size).sum::<usize>() + count.saturating_sub(1) + 2;
-    bytes > MAX_BYTES
+    bytes + count.saturating_sub(1) + 2 > MAX_BYTES
 }
