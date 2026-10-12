@@ -834,11 +834,21 @@ pub(crate) fn root_of(event: &BuzzEvent) -> String {
     chosen.map_or_else(|| event.id.clone(), |t| t[1].clone())
 }
 
-/// Messages oldest first, each showing its author's latest edit.
+/// Messages oldest first, each showing its author's latest edit. Edits
+/// by anyone else are left out before the newest is picked, so they can't
+/// hide the author's own.
 fn edited(events: Vec<BuzzEvent>) -> Vec<BuzzEvent> {
+    let authors: HashMap<&str, &str> = events
+        .iter()
+        .filter(|event| event.kind != 40003)
+        .map(|event| (event.id.as_str(), event.pubkey.as_str()))
+        .collect();
     let mut edits: HashMap<String, &BuzzEvent> = HashMap::new();
     for event in events.iter().filter(|event| event.kind == 40003) {
         if let Some(target) = tag(event, "e").filter(|target| !target.is_empty()) {
+            if authors.get(target.as_str()) != Some(&event.pubkey.as_str()) {
+                continue;
+            }
             let newer = edits
                 .get(&target)
                 .is_none_or(|last| last.created_at < event.created_at);
@@ -851,7 +861,7 @@ fn edited(events: Vec<BuzzEvent>) -> Vec<BuzzEvent> {
         .iter()
         .filter(|event| event.kind != 40003)
         .map(|event| match edits.get(&event.id) {
-            Some(edit) if edit.pubkey == event.pubkey => BuzzEvent {
+            Some(edit) => BuzzEvent {
                 content: edit.content.clone(),
                 ..event.clone()
             },

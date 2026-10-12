@@ -327,6 +327,28 @@ async fn reads_the_current_thread_with_each_messages_latest_edit() {
     );
 }
 
+#[test]
+fn a_later_edit_by_someone_else_does_not_hide_the_authors() {
+    let message = event(|event| event.created_at = 100);
+    let edit = |pubkey: String, at: u64, content: &str| {
+        let mut edit = message.clone();
+        edit.id = format!("{at:064}");
+        edit.pubkey = pubkey;
+        edit.kind = 40003;
+        edit.created_at = at;
+        edit.content = content.into();
+        edit.tags = tags(&[&["e", &message.id]]);
+        edit
+    };
+    let shown = edited(vec![
+        message.clone(),
+        edit(message.pubkey.clone(), 110, "mine"),
+        edit("e".repeat(64), 120, "forged"),
+    ]);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].content, "mine");
+}
+
 #[tokio::test]
 async fn takes_back_its_own_reaction() {
     let mut events = community();
