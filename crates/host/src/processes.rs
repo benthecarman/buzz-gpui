@@ -29,6 +29,10 @@ const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const READ_BYTES: usize = 64 * 1024;
 /// Output sent to the GUI in one ask, at most.
 const BATCH_BYTES: usize = 1024 * 1024;
+/// Reads queued for the GUI before the pipes stop being read, so a process
+/// that writes faster than the GUI takes it waits rather than piling up
+/// output here.
+const QUEUED_READS: usize = 32;
 /// How long a process asked to stop has before it is killed outright.
 const STOP_GRACE: Duration = Duration::from_secs(3);
 
@@ -252,7 +256,7 @@ impl Processes {
 
         // Both pipes feed one queue, so the GUI sees output in the order it
         // was read, then the exit.
-        let (output, queue) = mpsc::unbounded_channel();
+        let (output, queue) = mpsc::channel(QUEUED_READS);
         let (gone, listener_gone) = oneshot::channel::<()>();
         tokio::spawn(forward_to_peer(peer.clone(), handle, queue, gone));
         let readers = [
@@ -313,7 +317,8 @@ impl Processes {
                 let _ = reader.await;
             }
             state.registry().entries.remove(&id);
-            let _ = output.send(ProcessOutput::Exit(status.and_then(|status| status.code())));
+            let exit = ProcessOutput::Exit(status.and_then(|status| status.code()));
+            let _ = output.send(exit).await;
         });
         Ok(())
     }
@@ -373,7 +378,7 @@ impl Processes {
 async fn forward_to_peer(
     peer: Peer<HostProtocol>,
     handle: u64,
-    mut queue: mpsc::UnboundedReceiver<ProcessOutput>,
+    mut queue: mpsc::Receiver<ProcessOutput>,
     gone: oneshot::Sender<()>,
 ) {
     let mut exited = false;
@@ -409,7 +414,7 @@ async fn forward_to_peer(
 /// Reads one pipe as text into the queue.
 async fn read_pipe(
     mut pipe: impl AsyncRead + Unpin,
-    queue: mpsc::UnboundedSender<ProcessOutput>,
+    queue: mpsc::Sender<ProcessOutput>,
     wrap: fn(String) -> ProcessOutput,
 ) {
     let mut buffer = vec![0; READ_BYTES];
@@ -421,12 +426,14 @@ async fn read_pipe(
         };
         pending.extend_from_slice(&buffer[..read]);
         let data = take_text(&mut pending);
-        if !data.is_empty() && queue.send(wrap(data)).is_err() {
+        if !data.is_empty() && queue.send(wrap(data)).await.is_err() {
             break;
         }
     }
     if !pending.is_empty() {
-        let _ = queue.send(wrap(String::from_utf8_lossy(&pending).into_owned()));
+        let _ = queue
+            .send(wrap(String::from_utf8_lossy(&pending).into_owned()))
+            .await;
     }
 }
 
