@@ -9,6 +9,7 @@ use super::{
     watch_kit,
 };
 use crate::community::{AppState, Community};
+use crate::ui::keys::npub;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::EventId;
 use buzz_relay_client::kit::{AgentChoice, KitEntry, KitStatus, KitValue, Team, Template};
@@ -387,7 +388,7 @@ impl TemplateLibrary {
         let avatars: Vec<AnyElement> = members
             .iter()
             .map(|agent| {
-                let tip = (agent.name.clone(), super::npub(&agent.pubkey));
+                let tip = (agent.name.clone(), npub(&agent.pubkey));
                 div()
                     .id(SharedString::from(format!(
                         "avatar-{}-{}",

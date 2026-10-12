@@ -16,6 +16,7 @@ use super::recipients;
 use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use crate::ui::form_fields::{self, Bounded, OnDuration, TextKind};
+use crate::ui::keys::format_public_key;
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::settings::form::note as subtle;
 use buzz_relay_client::discovery::session_metadata;
@@ -62,12 +63,6 @@ enum Target {
     Channel,
     /// "Find people" / "Find people for session access".
     Session,
-}
-
-/// `formatPublicKey`: `npub…` and the last three characters.
-fn short_key(pubkey: &str) -> Option<String> {
-    let npub = npub(pubkey)?;
-    Some(format!("npub…{}", &npub[npub.len() - 3..]))
 }
 
 fn npub(pubkey: &str) -> Option<String> {
@@ -508,7 +503,7 @@ impl SessionShare {
                     .find(|person| person.pubkey == key)
                     .map(|person| person.name.clone())
             })
-            .or_else(|| short_key(key))
+            .or_else(|| format_public_key(key))
             .unwrap_or_else(|| "Member".into())
     }
 
@@ -1807,8 +1802,8 @@ mod tests {
         let (la, lb) = (&labels[&a], &labels[&b]);
         assert!(la.starts_with("npub…") && la.chars().count() == "npub…".chars().count() + 3);
         assert_ne!(la, lb);
-        assert_eq!(short_key(&a).as_deref(), Some(la.as_str()));
-        assert_eq!(short_key("nope"), None);
+        assert_eq!(format_public_key(&a).as_deref(), Some(la.as_str()));
+        assert_eq!(format_public_key("nope"), None);
     }
 
     #[test]

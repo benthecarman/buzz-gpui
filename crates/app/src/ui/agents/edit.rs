@@ -12,6 +12,7 @@ use super::inventory;
 use crate::community::AppState;
 use crate::hosts::HostConnection;
 use crate::hosts::control::{Lane, Status};
+use crate::ui::keys::npub;
 use buzz_host::api::{Agent, AgentAction, ProcessStatus, Request, Response};
 use buzz_relay_client::upload::{UploadFile, sniff_image};
 use buzz_ui::{
@@ -604,7 +605,7 @@ impl EditDialog {
                     .child(div().text_mono().child(value))
             };
             technical = technical
-                .child(detail("Public key (npub)", inventory::npub(&agent.pubkey)))
+                .child(detail("Public key (npub)", npub(&agent.pubkey)))
                 .child(detail("Relay", agent.relay_url.clone()))
                 .when(!agent.diagnostics.is_empty(), |this| {
                     this.child(

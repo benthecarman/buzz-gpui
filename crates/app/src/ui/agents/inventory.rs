@@ -6,6 +6,7 @@
 //! Hosts are an addition: a local setup remembers which host runs it.
 
 use super::relay::LibraryIdentity;
+use crate::ui::keys::npub;
 use buzz_host::api::{Agent, AgentsSnapshot, ImportSource};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,15 +22,6 @@ pub fn origin(url: &str) -> String {
 pub fn in_community(url: &str, community: &buzz_relay_client::RelayOrigin) -> bool {
     buzz_relay_client::RelayOrigin::parse(url)
         .is_ok_and(|origin| origin.websocket() == community.websocket())
-}
-
-/// `npub1…` for a hex key, or the key itself if it is not one.
-pub fn npub(pubkey: &str) -> String {
-    use nostr::nips::nip19::ToBech32;
-    nostr::prelude::PublicKey::from_hex(pubkey)
-        .ok()
-        .and_then(|key| key.to_bech32().ok())
-        .unwrap_or_else(|| pubkey.to_string())
 }
 
 /// One agent setup on one host. `host` indexes the page's hosts.

@@ -3,6 +3,7 @@
 //! by the agent's signed profile attestation, never by its metadata.
 
 use crate::community::Community;
+use crate::ui::keys::npub;
 use buzz_relay_client::kit::AgentChoice;
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Tooltip, TypeStyled, tokens::radius, tokens::space,
@@ -47,7 +48,7 @@ impl Owner {
 
 /// `formatPublicKey`.
 fn format_public_key(pubkey: &str) -> String {
-    let npub = super::npub(pubkey);
+    let npub = npub(pubkey);
     format!("npub…{}", &npub[npub.len().saturating_sub(3)..])
 }
 
@@ -103,7 +104,7 @@ pub fn managed_by(community: &Entity<Community>, agent: &str, cx: &mut App) -> D
                         .mt(space::S1)
                         .text_mono()
                         .text_color(c.text_subtle)
-                        .child(super::npub(&pubkey)),
+                        .child(npub(&pubkey)),
                 )
         }
         Owner::Checking => block.child(

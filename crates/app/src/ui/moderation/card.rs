@@ -5,6 +5,7 @@
 use super::invite::InviteDialog;
 use super::store::{self, Snapshot, Status};
 use crate::community::{AppState, Community};
+use crate::ui::keys::format_public_key;
 use crate::ui::modal::Dismissed;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::moderation::{Action, Change, Member, Role, allowed_actions, manages};
@@ -27,11 +28,6 @@ const ACCEPTED: &str = "Change accepted by the relay.";
 /// The npub of a hex key, for display only.
 fn npub(pubkey: &str) -> Option<String> {
     PublicKey::from_hex(pubkey).ok()?.to_bech32().ok()
-}
-
-/// `formatPublicKey`: `npub…` and the last three characters.
-pub(super) fn format_public_key(pubkey: &str) -> Option<String> {
-    npub(pubkey).map(|npub| format!("npub…{}", &npub[npub.len() - 3..]))
 }
 
 /// `publicKeyLabels`: distinct keys share the shortest unambiguous npub

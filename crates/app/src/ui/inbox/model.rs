@@ -2,9 +2,8 @@
 //! (`InboxPage.tsx`, `InboxFilters.tsx`, `dm-label.ts`,
 //! `relative-timestamp.ts`, `view-state.ts`).
 
+use crate::ui::keys::format_public_key;
 use buzz_relay_client::unread::InboxItem;
-use nostr::nips::nip19::ToBech32;
-use nostr::prelude::PublicKey;
 
 /// The "Show" choices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,12 +85,6 @@ pub fn matches_activity(item: &InboxItem, view: View, dm: bool) -> bool {
 
 pub fn has_unread(item: &InboxItem) -> bool {
     item.unread_count > 0 || item.manual
-}
-
-/// `formatPublicKey`: `npub…xyz`.
-pub fn format_public_key(pubkey: &str) -> Option<String> {
-    let npub = PublicKey::from_hex(pubkey).ok()?.to_bech32().ok()?;
-    Some(format!("npub…{}", &npub[npub.len() - 3..]))
 }
 
 /// One label for DM rows, details and drafts: the first three people,

@@ -5,6 +5,7 @@
 use super::dialog::TemplateDialog;
 use super::owner::IdentityPreview;
 use super::{Catalog, field, line, public_key_labels};
+use crate::ui::keys::npub;
 use buzz_relay_client::kit::{self, AgentChoice, KitValue};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Checkbox, Icon, IconName, Surface, TextArea, TextField,
@@ -34,14 +35,9 @@ pub(super) fn matches(choices: &[AgentChoice], search: &str) -> Vec<AgentChoice>
     choices
         .iter()
         .filter(|agent| {
-            format!(
-                "{} {} {}",
-                agent.name,
-                super::npub(&agent.pubkey),
-                agent.pubkey
-            )
-            .to_lowercase()
-            .contains(&needle)
+            format!("{} {} {}", agent.name, npub(&agent.pubkey), agent.pubkey)
+                .to_lowercase()
+                .contains(&needle)
         })
         .cloned()
         .collect()
@@ -119,11 +115,7 @@ impl TemplateDialog {
                         this.set_agents(agents, cx);
                     }
                 });
-                let preview = (
-                    self.community.clone(),
-                    agent.clone(),
-                    super::npub(&agent.pubkey),
-                );
+                let preview = (self.community.clone(), agent.clone(), npub(&agent.pubkey));
                 div()
                     .id(SharedString::from(format!("agent-{key}")))
                     .flex()

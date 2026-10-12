@@ -20,6 +20,7 @@ pub use save_as::SaveAsTemplate;
 
 use crate::community::{AppState, Community};
 use crate::hosts::Hosts;
+use crate::ui::keys::npub;
 use crate::ui::settings::cards::{self, CardPlacement, SettingsCard};
 use crate::ui::settings::form::{self, FieldStyle};
 use crate::ui::toasts;
@@ -27,7 +28,6 @@ use buzz_relay_client::kit::{AgentChoice, KitSnapshot, KitStatus};
 use buzz_relay_client::{ChannelType, RelayOrigin, RosterStatus};
 use buzz_ui::{ActiveTheme, Icon, IconName, ToastTone, TypeStyled, tokens::radius, tokens::space};
 use gpui_kit::*;
-use nostr::nips::nip19::ToBech32;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -449,14 +449,6 @@ pub(crate) fn watch_kit_with<V: 'static>(
 
 // ---------------------------------------------------------------------------
 // Shared pieces
-
-/// `formatPublicKey`: `npub…` and the last three characters.
-pub(crate) fn npub(pubkey: &str) -> String {
-    nostr::prelude::PublicKey::from_hex(pubkey)
-        .ok()
-        .and_then(|key| key.to_bech32().ok())
-        .unwrap_or_else(|| pubkey.to_owned())
-}
 
 /// `publicKeyLabels`: the shortest npub suffix, from three, that tells
 /// every key apart.

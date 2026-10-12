@@ -13,6 +13,7 @@ use super::{
 use crate::community::{AppState, IdentityState};
 use crate::hosts::HostConnection;
 use crate::hosts::control::Status;
+use crate::ui::keys::npub;
 use crate::ui::overlay::{self, Align};
 use buzz_host::api::{Agent, AgentAction, ImportSource, ProcessStatus};
 use buzz_relay_client::PresenceState;
@@ -456,7 +457,7 @@ impl AgentsPage {
                             .text_color(c.text_subtle)
                             .child(SelectableText::new(
                                 SharedString::from(format!("identity-npub-{pubkey}")),
-                                SharedString::from(inventory::npub(&pubkey)),
+                                SharedString::from(npub(&pubkey)),
                             )),
                     );
                 overlay::dropdown(window, Align::End, details, Self::dismiss(cx))
@@ -649,7 +650,7 @@ impl AgentsPage {
                     edit_item = edit_item.trailing(div().text_caption().child(format!(
                                 "{} · {}",
                                 setup.agent.relay_url,
-                                inventory::npub(&setup.agent.pubkey)
+                                npub(&setup.agent.pubkey)
                                     .chars()
                                     .take(16)
                                     .collect::<String>()
@@ -1369,7 +1370,7 @@ impl AgentsPage {
                 body =
                     body.children(clone_button(self, cx).map(|button| div().flex().child(button)));
             }
-            body = body.child(div().text_mono().child(inventory::npub(&row.pubkey)));
+            body = body.child(div().text_mono().child(npub(&row.pubkey)));
             details = details.child(body);
         }
         children.push(

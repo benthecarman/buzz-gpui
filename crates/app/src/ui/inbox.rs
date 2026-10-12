@@ -11,6 +11,7 @@ use super::identity::{self, AgentLibrary};
 use super::overlay::{self, Align, Dismiss};
 use super::pages::{self, Page, PageSpec};
 use crate::community::{AppState, Community};
+use crate::ui::keys::format_public_key;
 use buzz_relay_client::unread::{InboxItem, InboxStatus};
 use buzz_relay_client::{
     ChannelSummary, ChannelType, Freshness, InboxFeedStatus, InboxState, RosterStatus,
@@ -439,7 +440,7 @@ impl InboxPage {
         let c = *cx.colors();
         let ix = c.interaction(Surface::Panel);
         let display = item.workflow_owner_id.as_deref().unwrap_or(&item.author_id);
-        let fallback = model::format_public_key(display).unwrap_or_else(|| "Unknown sender".into());
+        let fallback = format_public_key(display).unwrap_or_else(|| "Unknown sender".into());
         let resolved = names.name(display, &fallback);
         let sender = match item.workflow_owner_id {
             Some(_) => format!("Workflow · owned by {resolved}"),
