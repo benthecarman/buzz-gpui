@@ -29,6 +29,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use nostr::nips::nip19::ToBech32;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -120,6 +121,7 @@ struct AgentChoice {
     picture: Option<String>,
 }
 
+#[derive(Clone)]
 struct Entry {
     key: String,
     leading: EntryLeading,
@@ -132,6 +134,7 @@ struct Entry {
     remember: bool,
 }
 
+#[derive(Clone)]
 enum EntryLeading {
     Icon(IconName),
     Person {
@@ -142,6 +145,7 @@ enum EntryLeading {
     },
 }
 
+#[derive(Clone)]
 struct Group {
     label: &'static str,
     entries: Vec<Entry>,
@@ -158,6 +162,7 @@ enum Retry {
     Messages,
 }
 
+#[derive(Clone)]
 struct Status {
     text: SharedString,
     retry: Option<(&'static str, Retry)>,
@@ -264,6 +269,9 @@ pub struct SearchDialog {
     public: Lookup<Result<PublicChannels, String>>,
     operator: Lookup<Result<PublicChannels, String>>,
     people: Lookup<Result<Vec<Person>, String>>,
+    /// The last [`Self::groups`], until the next [`Self::refresh`]: a
+    /// hover redraw does not plan the query again.
+    groups: RefCell<Option<(Vec<Group>, Vec<Status>)>>,
     on_open: OpenChannel,
     on_page: OpenPage,
     /// Where focus was before the palette opened.
@@ -326,6 +334,7 @@ impl SearchDialog {
             public: Lookup::default(),
             operator: Lookup::default(),
             people: Lookup::default(),
+            groups: RefCell::default(),
             on_open,
             on_page,
             return_focus,
@@ -506,6 +515,8 @@ impl SearchDialog {
 
     /// Starts the reads the query needs and drops those it no longer does.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        // Every change to what the groups read comes through here.
+        self.groups.get_mut().take();
         let plan = self.plan(cx);
         let Some(community) = self.community.clone().filter(|_| plan.is_some()) else {
             self.messages.wants(None);
@@ -850,6 +861,15 @@ impl SearchDialog {
     }
 
     fn groups(&self, cx: &App) -> (Vec<Group>, Vec<Status>) {
+        if let Some(groups) = &*self.groups.borrow() {
+            return groups.clone();
+        }
+        let groups = self.build_groups(cx);
+        *self.groups.borrow_mut() = Some(groups.clone());
+        groups
+    }
+
+    fn build_groups(&self, cx: &App) -> (Vec<Group>, Vec<Status>) {
         let (Some(plan), Some(community)) = (self.plan(cx), &self.community) else {
             return self.offline_groups(cx);
         };
