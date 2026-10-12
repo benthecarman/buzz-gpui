@@ -100,28 +100,30 @@ pub async fn read_team_texts(kit: &TeamKit, cx: &mut AsyncApp) -> Result<Vec<Tea
         .reload()
         .await
         .map_err(|_| "Teams can't be read right now".to_string())?;
-    let mut texts = Vec::with_capacity(view.entries.len());
-    for entry in &view.entries {
-        if entry.deleted {
-            texts.push(TeamText {
-                team: Team {
-                    agents: Vec::new(),
-                    ..entry.team.clone()
-                },
-                text: Some(String::new()),
-            });
-            continue;
+    let texts = view.entries.iter().map(|entry| {
+        let mut cx = cx.clone();
+        async move {
+            if entry.deleted {
+                return TeamText {
+                    team: Team {
+                        agents: Vec::new(),
+                        ..entry.team.clone()
+                    },
+                    text: Some(String::new()),
+                };
+            }
+            let text = resolve_team_text(kit, &entry.team, &mut cx)
+                .await
+                .ok()
+                .map(|(text, _)| text.trim().to_owned());
+            TeamText {
+                team: entry.team.clone(),
+                text,
+            }
         }
-        let text = resolve_team_text(kit, &entry.team, cx)
-            .await
-            .ok()
-            .map(|(text, _)| text.trim().to_owned());
-        texts.push(TeamText {
-            team: entry.team.clone(),
-            text,
-        });
-    }
-    Ok(texts)
+    });
+    // Each team is its own read; run them together, in list order.
+    Ok(futures::future::join_all(texts).await)
 }
 
 /// Refuses a save that would give one agent two different team texts

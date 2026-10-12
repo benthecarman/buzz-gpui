@@ -262,13 +262,17 @@ impl TeamEditor {
                 text: &text,
                 roster_changed,
             };
+            // A recheck holds until a phase writes: preparing text chunks
+            // leaves every head as it was.
+            let mut checked = false;
             let result: Result<(), String> = async {
                 if text_changed && run.manifest.is_none() {
                     check.recheck(&run, cx).await?;
+                    checked = true;
                     run.manifest = Some(kit.prepare_text(&draft.id, &text, &run.revision).await?);
                 }
                 if roster_changed && !run.team_done {
-                    if run.team.id().is_none() {
+                    if run.team.id().is_none() && !checked {
                         check.recheck(&run, cx).await?;
                     }
                     let head = kit
@@ -281,10 +285,11 @@ impl TeamEditor {
                         .await?;
                     run.team_head = Some(head);
                     run.team_done = true;
+                    checked = false;
                     let _ = this.update(cx, |this, _| this.saved_team = Some(draft.clone()));
                 }
                 if let Some(manifest) = run.manifest.clone().filter(|_| !run.text_done) {
-                    if run.text.id().is_none() {
+                    if run.text.id().is_none() && !checked {
                         check.recheck(&run, cx).await?;
                     }
                     let head = kit
