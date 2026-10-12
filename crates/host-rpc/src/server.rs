@@ -132,7 +132,7 @@ async fn run_connection<P: Protocol>(
             Err(_) => return reject::<P>(&mut wire, "handshake timed out").await,
         };
     if let Some(reason) = check_hello(&hello, options.token.as_deref()) {
-        tracing::warn!(%address, client = %hello.client, reason, "rejected host client");
+        tracing::warn!(%address, client = shown(&hello.client), reason, "rejected host client");
         return reject::<P>(&mut wire, reason).await;
     }
     // Subscribe before welcoming, so no event between the client's snapshot
@@ -146,7 +146,8 @@ async fn run_connection<P: Protocol>(
         }),
     )
     .await?;
-    tracing::info!(%address, client = %hello.client, "host client connected");
+    frame::handshaken(&mut wire);
+    tracing::info!(%address, client = shown(&hello.client), "host client connected");
 
     let (sink, mut stream) = wire.split();
     let (outgoing, queue) = mpsc::channel::<Frame<P>>(256);
@@ -237,6 +238,14 @@ fn check_hello(hello: &Hello, token: Option<&str>) -> Option<&'static str> {
     let offered = hello.token.as_deref().unwrap_or("");
     let matches: bool = offered.as_bytes().ct_eq(expected.as_bytes()).into();
     (!matches).then_some("invalid token")
+}
+
+/// The start of a client's name, for logs: the client chose it.
+fn shown(client: &str) -> &str {
+    client
+        .char_indices()
+        .nth(64)
+        .map_or(client, |(end, _)| &client[..end])
 }
 
 async fn reject<P: Protocol>(wire: &mut Wire, reason: &str) -> std::io::Result<()> {

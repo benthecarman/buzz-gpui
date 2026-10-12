@@ -12,6 +12,9 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub(crate) const MAX_FRAME: usize = 16 << 20;
+/// The limit until the handshake is done, so a peer that has not yet
+/// shown its token cannot make this side buffer a large frame.
+const HANDSHAKE_FRAME: usize = 64 << 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
@@ -75,13 +78,19 @@ pub(crate) enum Frame<P: Protocol> {
 
 pub(crate) type Wire = Framed<BoxConnection, LengthDelimitedCodec>;
 
+/// A connection that takes frames up to the handshake's limit, until
+/// [`handshaken`] raises it.
 pub(crate) fn wire(connection: BoxConnection) -> Wire {
     Framed::new(
         connection,
         LengthDelimitedCodec::builder()
-            .max_frame_length(MAX_FRAME)
+            .max_frame_length(HANDSHAKE_FRAME)
             .new_codec(),
     )
+}
+
+pub(crate) fn handshaken(wire: &mut Wire) {
+    wire.codec_mut().set_max_frame_length(MAX_FRAME);
 }
 
 pub(crate) fn encode<T: Message>(value: &T) -> io::Result<Bytes> {

@@ -252,6 +252,7 @@ async fn session<P: Protocol>(
         ));
     }
 
+    frame::handshaken(&mut wire);
     let (sink, mut stream) = wire.split();
     let (outgoing, queue) = mpsc::channel::<Frame<P>>(256);
     let pending: Pending<P::ClientResponse> = Arc::default();

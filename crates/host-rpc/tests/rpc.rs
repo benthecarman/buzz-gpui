@@ -208,6 +208,30 @@ async fn messages_too_large_fail_without_disconnecting() {
 }
 
 #[tokio::test]
+async fn large_frames_are_refused_before_the_handshake() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        Host::new(1),
+        ServerOptions {
+            token: Some("secret".into()),
+            ..Default::default()
+        },
+    ));
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    // A hello of 1 MiB, of which nothing is sent: the host closes at once
+    // instead of waiting for it.
+    stream.write_all(&(1u32 << 20).to_be_bytes()).await.unwrap();
+    let mut buffer = [0; 16];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buffer))
+        .await
+        .expect("the host waited for the frame");
+    assert!(matches!(read, Ok(0) | Err(_)));
+}
+
+#[tokio::test]
 async fn wrong_token_is_rejected_without_retry_loop() {
     let host = Host::new(64);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
