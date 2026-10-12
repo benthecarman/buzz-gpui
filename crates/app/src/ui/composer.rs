@@ -2968,14 +2968,9 @@ fn large_emoji(text: &str, entries: &[buzz_relay_client::CustomEmoji]) -> bool {
     if text.trim().is_empty() || (text.chars().any(char::is_alphabetic) && !text.contains(':')) {
         return false;
     }
-    let entries: Vec<buzz_relay_client::fold::CustomEmoji> = entries
-        .iter()
-        .map(|entry| buzz_relay_client::fold::CustomEmoji {
-            shortcode: entry.shortcode.clone(),
-            url: entry.url.clone(),
-        })
-        .collect();
-    crate::ui::markdown::is_emoji_only(text, &entries)
+    crate::ui::markdown::is_emoji_only_by(text, |code| {
+        entries.iter().any(|entry| entry.shortcode == code)
+    })
 }
 
 /// A spring with a little bounce (`type: "spring", bounce: 0.15`).

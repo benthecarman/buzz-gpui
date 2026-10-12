@@ -241,9 +241,9 @@ enum Document {
 }
 
 #[derive(Debug, PartialEq)]
-enum EmojiPart {
+enum EmojiPart<E = CustomEmoji> {
     Text(String),
-    Custom(CustomEmoji),
+    Custom(E),
 }
 
 #[derive(Debug, PartialEq)]
@@ -964,20 +964,23 @@ impl Prep<'_> {
     /// `:shortcode:` naming one of the row's own emoji: its index and the
     /// match length.
     fn custom_emoji(&self, rest: &str) -> Option<(usize, usize)> {
-        let body = &rest[1..];
-        let end = body.find(':')?;
-        let code = &body[..end];
-        let valid = (1..=64).contains(&code.len())
-            && code
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
-        if !valid {
-            return None;
-        }
-        let code = code.to_ascii_lowercase();
+        let (code, length) = shortcode_at(rest)?;
         let index = self.emoji.iter().position(|e| e.shortcode == code)?;
-        Some((index, end + 2))
+        Some((index, length))
     }
+}
+
+/// A `:shortcode:` opening `rest`: the code, lowercased, and the match
+/// length.
+fn shortcode_at(rest: &str) -> Option<(String, usize)> {
+    let body = rest.strip_prefix(':')?;
+    let end = body.find(':')?;
+    let code = &body[..end];
+    let valid = (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    valid.then(|| (code.to_ascii_lowercase(), end + 2))
 }
 
 fn url_encode(id: &str) -> String {
@@ -1356,12 +1359,23 @@ fn code_span(value: &str, out: &mut String) {
 /// Unicode pictographs, flags and keycaps, plus the row's own
 /// `:shortcodes:`, with whitespace between them and nothing else.
 pub(crate) fn is_emoji_only(content: &str, emoji: &[CustomEmoji]) -> bool {
-    let parts = emoji_parts(content.trim(), emoji);
+    emoji_only(&emoji_parts(content.trim(), emoji))
+}
+
+/// [`is_emoji_only`] against any catalog, by whether it `knows` a
+/// lowercase shortcode.
+pub(crate) fn is_emoji_only_by(content: &str, knows: impl Fn(&str) -> bool) -> bool {
+    emoji_only(&split_emoji(content.trim(), |code| {
+        knows(code).then_some(())
+    }))
+}
+
+fn emoji_only<E>(parts: &[EmojiPart<E>]) -> bool {
     if parts.is_empty() {
         return false;
     }
     let mut any = false;
-    for part in &parts {
+    for part in parts {
         match part {
             EmojiPart::Custom(_) => any = true,
             EmojiPart::Text(text) => {
@@ -1411,30 +1425,25 @@ fn is_pictographic(c: char) -> bool {
 }
 
 fn emoji_parts(content: &str, emoji: &[CustomEmoji]) -> Vec<EmojiPart> {
-    let prep = Prep {
-        content,
-        emoji,
-        names: Vec::new(),
-        seams: &[],
-        definitions: HashMap::new(),
-        channels: Vec::new(),
-        footnote_definitions: HashMap::new(),
-        footnote_order: Vec::new(),
-        spoilers: Vec::new(),
-        in_link: false,
-    };
+    split_emoji(content, |code| {
+        emoji.iter().find(|entry| entry.shortcode == code).cloned()
+    })
+}
+
+/// Text runs and the `:shortcodes:` `find` resolves.
+fn split_emoji<E>(content: &str, find: impl Fn(&str) -> Option<E>) -> Vec<EmojiPart<E>> {
     let mut parts = Vec::new();
     let mut text = String::new();
     let mut i = 0;
     while i < content.len() {
         let rest = &content[i..];
-        if rest.starts_with(':')
-            && let Some((index, length)) = prep.custom_emoji(rest)
+        if let Some((code, length)) = shortcode_at(rest)
+            && let Some(entry) = find(&code)
         {
             if !text.is_empty() {
                 parts.push(EmojiPart::Text(std::mem::take(&mut text)));
             }
-            parts.push(EmojiPart::Custom(emoji[index].clone()));
+            parts.push(EmojiPart::Custom(entry));
             i += length;
             continue;
         }
@@ -2552,6 +2561,8 @@ pub(super) mod tests {
         assert!(is_emoji_only("👍🏽 ❤️ 1️⃣ 🇺🇸 👨‍👩‍👧", &[]));
         assert!(is_emoji_only(" :party: 🎉", std::slice::from_ref(&party)));
         assert!(!is_emoji_only(":party:", &[]));
+        assert!(is_emoji_only_by(" :Party: 🎉", |code| code == "party"));
+        assert!(!is_emoji_only_by(":party: hi", |code| code == "party"));
         assert!(!is_emoji_only("🎉 yay", &[]));
         assert!(!is_emoji_only("1", &[]));
         assert!(!is_emoji_only("", &[]));
