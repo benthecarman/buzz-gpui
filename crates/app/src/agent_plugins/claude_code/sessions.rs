@@ -724,10 +724,20 @@ pub struct FileSessions {
     agent: String,
 }
 
-/// Agents of one app share the file; their writes take turns.
-static FILE_LOCK: Mutex<()> = Mutex::new(());
-
 type AllSessions = BTreeMap<String, BTreeMap<String, SavedSession>>;
+
+/// A sessions file, read once and then kept in memory: every message
+/// reads and saves its conversation's session.
+struct Loaded {
+    all: AllSessions,
+    /// Changed since the last write began.
+    dirty: bool,
+    /// A writer thread is running; it writes again while `dirty`.
+    writing: bool,
+}
+
+/// Agents of one app share each file.
+static FILES: Mutex<BTreeMap<PathBuf, Loaded>> = Mutex::new(BTreeMap::new());
 
 impl FileSessions {
     pub fn new(path: PathBuf, agent: &str) -> Self {
@@ -742,8 +752,8 @@ impl FileSessions {
         dirs::data_dir().map(|dir| dir.join("buzz-gpui").join("claude-code-sessions.json"))
     }
 
-    fn read_all(&self) -> AllSessions {
-        std::fs::read(&self.path)
+    fn read_all(path: &std::path::Path) -> AllSessions {
+        std::fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|value| {
@@ -773,18 +783,63 @@ impl FileSessions {
             .unwrap_or_default()
     }
 
+    /// This file's sessions, read from disk the first time.
+    fn with<T>(&self, use_them: impl FnOnce(&mut Loaded) -> T) -> T {
+        let mut files = FILES.lock().unwrap_or_else(PoisonError::into_inner);
+        let loaded = files.entry(self.path.clone()).or_insert_with(|| Loaded {
+            all: Self::read_all(&self.path),
+            dirty: false,
+            writing: false,
+        });
+        use_them(loaded)
+    }
+
     fn update(&self, change: impl FnOnce(&mut BTreeMap<String, SavedSession>)) {
-        let _turn = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut all = self.read_all();
-        let mut sessions = all.remove(&self.agent).unwrap_or_default();
-        change(&mut sessions);
-        let mut kept: Vec<(String, SavedSession)> = sessions.into_iter().collect();
-        kept.sort_by_key(|(_, saved)| std::cmp::Reverse(saved.at));
-        kept.truncate(SAVED_LIMIT);
-        all.insert(self.agent.clone(), kept.into_iter().collect());
-        let written = serde_json::to_vec(&all)
+        let start = self.with(|loaded| {
+            let sessions = loaded.all.entry(self.agent.clone()).or_default();
+            change(sessions);
+            if sessions.len() > SAVED_LIMIT {
+                let mut kept: Vec<(String, SavedSession)> =
+                    std::mem::take(sessions).into_iter().collect();
+                kept.sort_by_key(|(_, saved)| std::cmp::Reverse(saved.at));
+                kept.truncate(SAVED_LIMIT);
+                *sessions = kept.into_iter().collect();
+            }
+            loaded.dirty = true;
+            !std::mem::replace(&mut loaded.writing, true)
+        });
+        if start {
+            let path = self.path.clone();
+            let spawned = std::thread::Builder::new()
+                .name("claude-sessions".into())
+                .spawn(move || write_sessions(path));
+            if let Err(error) = spawned {
+                tracing::warn!(%error, "Claude Code sessions were not saved");
+                self.with(|loaded| loaded.writing = false);
+            }
+        }
+    }
+}
+
+/// Writes `path` until it holds the newest sessions, off the caller's
+/// thread.
+fn write_sessions(path: PathBuf) {
+    loop {
+        let bytes = {
+            let mut files = FILES.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(loaded) = files.get_mut(&path) else {
+                return;
+            };
+            if !loaded.dirty {
+                loaded.writing = false;
+                return;
+            }
+            loaded.dirty = false;
+            serde_json::to_vec(&loaded.all)
+        };
+        let written = bytes
             .map_err(std::io::Error::from)
-            .and_then(|bytes| crate::atomic_file::write(&self.path, &bytes));
+            .and_then(|bytes| crate::atomic_file::write(&path, &bytes));
         if let Err(error) = written {
             tracing::warn!(%error, "Claude Code sessions were not saved");
         }
@@ -793,8 +848,7 @@ impl FileSessions {
 
 impl SessionStore for FileSessions {
     fn get(&self, key: &str) -> Option<SavedSession> {
-        let _turn = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        self.read_all().remove(&self.agent)?.remove(key)
+        self.with(|loaded| loaded.all.get(&self.agent)?.get(key).cloned())
     }
     fn set(&self, key: &str, session: SavedSession) {
         self.update(|sessions| {

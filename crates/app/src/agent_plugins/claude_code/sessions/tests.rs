@@ -573,14 +573,30 @@ fn keeps_saved_sessions_per_agent_in_a_file() {
     one.delete("c/root");
     assert_eq!(one.get("c/root"), None);
     assert_eq!(two.get("c/root").unwrap().id, "s2");
-    std::fs::write(&path, "not json").unwrap();
-    assert_eq!(one.get("c/root"), None);
     // The newest 200 are kept.
     for index in 0..205 {
         one.set(&format!("c/{index}"), saved("s", 0, index));
     }
     assert_eq!(one.get("c/0"), None);
     assert!(one.get("c/204").is_some());
+    // Saved in the background, newest last.
+    let on_disk = || {
+        std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<AllSessions>(&bytes).ok())
+            .filter(|all| all.get("one").is_some_and(|one| one.contains_key("c/204")))
+    };
+    let start = std::time::Instant::now();
+    while on_disk().is_none() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let all = on_disk().expect("the sessions were saved");
+    assert_eq!(all["one"].len(), 200);
+    assert_eq!(all["two"]["c/root"].id, "s2");
+    // A file that does not parse holds no sessions.
+    let broken = dir.join("broken.json");
+    std::fs::write(&broken, "not json").unwrap();
+    assert_eq!(FileSessions::new(broken, "one").get("c/root"), None);
     let _ = std::fs::remove_dir_all(dir);
 }
 
