@@ -779,12 +779,8 @@ impl OperationsHost for WorkflowChannel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.detail_only {
-            // The detail editor shows only its own workflow; replace it.
-            self.select(Pending::Open(Selection::Definition(definition)), cx);
-        } else {
-            self.select(Pending::Open(Selection::Definition(definition)), cx);
-        }
+        // In detail-only mode this replaces the one workflow shown.
+        self.select(Pending::Open(Selection::Definition(definition)), cx);
     }
 
     fn dismissed(&mut self, event_id: &str, _: &mut Context<Self>) {
