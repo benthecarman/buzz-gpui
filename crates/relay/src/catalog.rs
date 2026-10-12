@@ -1079,6 +1079,8 @@ pub struct CatalogModel {
     pub verified: HashSet<String>,
     /// Confirmation failed or found another head; re-read on retry only.
     pub unconfirmed: HashSet<String>,
+    /// The last build's heads parsed, by event id: an id fixes its content.
+    parsed: HashMap<String, Option<Publication>>,
 }
 
 impl CatalogModel {
@@ -1228,13 +1230,20 @@ impl CatalogModel {
         let (heads, changes) = self.changes(ops);
         let mut agents = Vec::new();
         let mut teams = Vec::new();
+        let mut parsed = HashMap::with_capacity(heads.len());
         for head in heads.values() {
-            match parse_head(head) {
-                Some(Publication::Agent(p)) => agents.push(p),
-                Some(Publication::Team(p)) => teams.push(p),
+            let publication = self
+                .parsed
+                .remove(&head.id)
+                .unwrap_or_else(|| parse_head(head));
+            match &publication {
+                Some(Publication::Agent(p)) => agents.push(p.clone()),
+                Some(Publication::Team(p)) => teams.push(p.clone()),
                 None => {}
             }
+            parsed.insert(head.id.clone(), publication);
         }
+        self.parsed = parsed;
         agents.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
