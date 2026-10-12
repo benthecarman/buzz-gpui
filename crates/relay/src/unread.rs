@@ -855,6 +855,9 @@ pub struct Unread<F: ThreadFollowStore = MemoryThreadFollows> {
     /// The parsed signing authority, for attributed deletions, edits and
     /// workflow owners.
     fold: FoldOptions,
+    /// `fold` with a channel's 39001 admins, for the channels the session
+    /// knows them for; others fold with `fold`.
+    channel_folds: HashMap<String, FoldOptions>,
     follows: F,
     choices: Lru<bool>,
     channels: Vec<ChannelInfo>,
@@ -972,6 +975,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                     .and_then(|key| PublicKey::from_hex(key).ok()),
                 ..Default::default()
             },
+            channel_folds: HashMap::new(),
             follows,
             choices,
             channels: Vec::new(),
@@ -1030,6 +1034,30 @@ impl<F: ThreadFollowStore> Unread<F> {
 
     fn changed(&mut self) {
         self.stamp += 1;
+    }
+
+    /// The fold options for `channel`: with its admins, when known.
+    fn fold_for(&self, channel: &str) -> &FoldOptions {
+        self.channel_folds.get(channel).unwrap_or(&self.fold)
+    }
+
+    /// Sets a channel's admins from its relay-signed 39001, so their
+    /// moderator deletes remove messages here as in the open views. An
+    /// empty set keeps the reference rule (author deletes only).
+    pub fn set_channel_admins(&mut self, channel: &str, admins: &HashSet<PublicKey>) {
+        if self.fold_for(channel).channel_admins == *admins {
+            return;
+        }
+        if admins.is_empty() {
+            self.channel_folds.remove(channel);
+        } else {
+            let options = FoldOptions {
+                channel_admins: admins.clone(),
+                ..self.fold.clone()
+            };
+            self.channel_folds.insert(channel.to_owned(), options);
+        }
+        self.reindex();
     }
 
     fn channel(&self, id: &str) -> Option<&ChannelInfo> {
@@ -1141,12 +1169,8 @@ impl<F: ThreadFollowStore> Unread<F> {
             }
             for id in e_targets(event) {
                 if let Some(target) = self.events.get(id)
-                    && crate::fold::deletion_applies(
-                        event,
-                        target,
-                        target.channel().unwrap_or_default(),
-                        &self.fold,
-                    )
+                    && let channel = target.channel().unwrap_or_default()
+                    && crate::fold::deletion_applies(event, target, channel, self.fold_for(channel))
                 {
                     index.tombstones.insert(target.id_hex());
                 }
@@ -1738,7 +1762,7 @@ impl<F: ThreadFollowStore> Unread<F> {
         }
         let options = FoldOptions {
             include_replies: true,
-            ..self.fold.clone()
+            ..self.fold_for(channel_id).clone()
         };
         crate::fold::fold_messages(channel_id, &relay, &events, &options)
             .into_iter()
@@ -2193,6 +2217,7 @@ impl<F: ThreadFollowStore> Unread<F> {
             .collect();
         let allowed = |id: &str| channels.contains(id);
         self.channel_tokens.retain(|id, _| allowed(id));
+        self.channel_folds.retain(|id, _| allowed(id));
         self.lookups.retain(|_, lookup| allowed(&lookup.channel_id));
         self.lookup_events
             .retain(|_, event| event.channel().is_some_and(allowed));
@@ -3697,6 +3722,32 @@ mod tests {
         h.grant(&[("room", None)]);
         h.emit(std::slice::from_ref(&row));
         assert!(!h.attention("room", &row).viewing);
+    }
+
+    #[test]
+    fn channel_admin_moderator_deletes_hide_messages() {
+        let mut h = H::new();
+        h.grant(&[("room", None), ("other", None)]);
+        let row = h.alice("room", "spam", 11, vec![]);
+        let admin = Keys::generate();
+        let target = tags(&[&["e", &row.id_hex()]]);
+        let delete = h.by(
+            &admin,
+            kinds::MODERATOR_DELETE,
+            Some("room"),
+            "",
+            12,
+            target,
+        );
+        h.emit(&[row, delete]);
+        assert_eq!(h.room().observed_count, Some(1), "no admin set: parity");
+        let admins: HashSet<PublicKey> = [admin.public_key()].into();
+        h.unread.set_channel_admins("other", &admins);
+        assert_eq!(h.room().observed_count, Some(1), "an admin elsewhere");
+        h.unread.set_channel_admins("room", &admins);
+        assert_eq!(h.room().observed_count, Some(0));
+        h.unread.set_channel_admins("room", &HashSet::new());
+        assert_eq!(h.room().observed_count, Some(1));
     }
 
     #[test]
