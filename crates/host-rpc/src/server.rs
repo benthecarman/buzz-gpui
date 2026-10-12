@@ -160,7 +160,7 @@ async fn run_connection<P: Protocol>(
 
     // Everything spawned for this connection stops with it.
     let mut writer = tokio::task::JoinSet::new();
-    writer.spawn(link::write(sink, queue));
+    writer.spawn(link::write(sink, queue, peer.pending.clone()));
     let mut tasks = tokio::task::JoinSet::new();
     let idle = tokio::time::sleep(options.idle_timeout);
     tokio::pin!(idle);

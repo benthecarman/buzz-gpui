@@ -45,14 +45,51 @@ pub(crate) async fn request<P: Protocol, R>(
 }
 
 /// Writes queued frames until the queue closes or the connection fails.
-pub(crate) async fn write<P: Protocol>(
+/// A frame too large to send fails only itself, not the connection:
+/// `pending` holds this side's requests, to fail one of those.
+pub(crate) async fn write<P: Protocol, R>(
     mut sink: SplitSink<frame::Wire, Bytes>,
     mut queue: mpsc::Receiver<Frame<P>>,
+    pending: Pending<R>,
 ) -> io::Result<()> {
     while let Some(frame) = queue.recv().await {
-        sink.send(frame::encode(&frame)?).await?;
+        let bytes = match frame::encode(&frame) {
+            Ok(bytes) if bytes.len() <= frame::MAX_FRAME => bytes,
+            _ => match unsendable(frame, &pending).await {
+                Some(frame) => frame::encode(&frame)?,
+                None => continue,
+            },
+        };
+        sink.send(bytes).await?;
     }
     Ok(())
+}
+
+/// What to send instead of a frame that cannot be sent: an error for an
+/// answer, and a resync for an event. A request fails where it waits.
+async fn unsendable<P: Protocol, R>(frame: Frame<P>, pending: &Pending<R>) -> Option<Frame<P>> {
+    let error = || RpcError::Failed("The message is too large to send".into());
+    match frame {
+        Frame::ClientResponse { id, .. } => Some(Frame::ClientResponse {
+            id,
+            body: Err(error()),
+        }),
+        Frame::HostResponse { id, .. } => Some(Frame::HostResponse {
+            id,
+            body: Err(error()),
+        }),
+        Frame::ClientRequest { id, .. } | Frame::HostRequest { id, .. } => {
+            if let Some(sender) = pending.lock().await.remove(&id) {
+                let _ = sender.send(Err(error()));
+            }
+            None
+        }
+        Frame::Event { seq, .. } => {
+            tracing::warn!(seq, "event too large to send");
+            Some(Frame::Resync)
+        }
+        _ => None,
+    }
 }
 
 /// Decodes a frame. One from a newer peer that does not decode is answered

@@ -11,7 +11,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 /// cannot read with an error and skips an event it cannot read.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-const MAX_FRAME: usize = 16 << 20;
+pub(crate) const MAX_FRAME: usize = 16 << 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {

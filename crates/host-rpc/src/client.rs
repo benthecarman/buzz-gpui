@@ -265,7 +265,7 @@ async fn session<P: Protocol>(
     });
     let _ = shared.events.send(ClientEvent::Connected(welcome.host));
 
-    let mut writer = AbortOnDrop(tokio::spawn(link::write(sink, queue)));
+    let mut writer = AbortOnDrop(tokio::spawn(link::write(sink, queue, pending.clone())));
     let mut ping = tokio::time::interval(options.ping_interval);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut nonce = 0u64;

@@ -13,6 +13,8 @@ struct Test;
 enum Request {
     Echo(String),
     AskClient(String),
+    /// Answers with this many bytes.
+    Large(usize),
 }
 
 impl Protocol for Test {
@@ -65,6 +67,7 @@ impl HostHandler<Test> for Host {
             match request {
                 Request::Echo(text) => Ok(text),
                 Request::AskClient(text) => peer.request(text).await,
+                Request::Large(size) => Ok("x".repeat(size)),
             }
         })
     }
@@ -174,6 +177,34 @@ async fn memory_request_events_and_host_requests() {
             other => panic!("unexpected {other:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn messages_too_large_fail_without_disconnecting() {
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        Host::new(1),
+        ServerOptions::default(),
+    ));
+    let client = client(Arc::new(connector), None);
+    let mut events = client.events();
+    let mut state = client.state();
+    wait_for(&mut state, connected).await;
+    next_session_change(&mut events).await;
+
+    let large = 17 << 20;
+    let failed = Err(RpcError::Failed("The message is too large to send".into()));
+    assert_eq!(
+        client.request(Request::Echo("x".repeat(large))).await,
+        failed
+    );
+    assert_eq!(client.request(Request::Large(large)).await, failed);
+    assert_eq!(
+        client.request(Request::Echo("still".into())).await.unwrap(),
+        "still"
+    );
+    assert!(events.try_recv().is_err(), "the connection was replaced");
 }
 
 #[tokio::test]
