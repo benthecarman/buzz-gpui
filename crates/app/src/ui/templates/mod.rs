@@ -293,6 +293,16 @@ pub(crate) fn watch_kit<V: 'static>(
     community: &Entity<Community>,
     cx: &mut Context<V>,
 ) -> Task<()> {
+    watch_kit_with(community, cx, |_, cx| cx.notify())
+}
+
+/// Runs `changed` whenever the community's kit changes, and reads it once
+/// (`ensure`).
+pub(crate) fn watch_kit_with<V: 'static>(
+    community: &Entity<Community>,
+    cx: &mut Context<V>,
+    changed: impl Fn(&mut V, &mut Context<V>) + 'static,
+) -> Task<()> {
     let session = community.read(cx).session.clone();
     session.kit_ensure();
     let mut kit = session.kit();
@@ -300,14 +310,14 @@ pub(crate) fn watch_kit<V: 'static>(
     cx.spawn(async move |this, cx| {
         loop {
             // A read asked for before the relay answered waits for it.
-            let (open, changed) = futures::select_biased! {
+            let (open, kit_changed) = futures::select_biased! {
                 kit = futures::FutureExt::fuse(kit.changed()) => (kit.is_ok(), true),
                 live = futures::FutureExt::fuse(connection.changed()) => {
                     session.kit_ensure();
                     (live.is_ok(), false)
                 }
             };
-            if !open || (changed && this.update(cx, |_, cx| cx.notify()).is_err()) {
+            if !open || (kit_changed && this.update(cx, &changed).is_err()) {
                 break;
             }
         }

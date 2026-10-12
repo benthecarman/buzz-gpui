@@ -3,7 +3,7 @@
 //! resolved to the agents available now. Replacing a chosen setup asks
 //! first.
 
-use super::{Catalog, field, watch_kit};
+use super::{Catalog, field, watch_kit_with};
 use crate::community::Community;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::kit::setup::ChannelSetup;
@@ -71,19 +71,23 @@ impl TemplateEditor {
             problem: Some(AWAITING.into()),
             ..TemplateDraft::default()
         });
-        Self {
-            _kit: watch_kit(&community, cx),
-            _community: cx.observe(&community, |this: &mut Self, _, cx| {
-                this.apply_automatic(cx);
-                cx.notify()
-            }),
+        let changed = |this: &mut Self, cx: &mut Context<Self>| {
+            this.apply_automatic(cx);
+            cx.notify()
+        };
+        let mut this = Self {
+            _kit: watch_kit_with(&community, cx, changed),
+            _community: cx.observe(&community, move |this, _, cx| changed(this, cx)),
             community,
             draft,
             select_open: false,
             replacement: None,
             group,
             automatic,
-        }
+        };
+        // The catalog may already be ready.
+        this.apply_automatic(cx);
+        this
     }
 
     /// Applies the group default once the catalog is ready and, for a
