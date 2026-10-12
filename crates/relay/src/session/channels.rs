@@ -669,6 +669,7 @@ impl Actor {
         if purpose == PageFor::Prepare {
             self.channels.preparing = false;
         }
+        let stale = result.is_ok() && !current;
         let page = match result {
             Ok(read) if current => self.admit_page(&channel, sent.as_ref(), read),
             Ok(_) => Err(ReadError {
@@ -699,6 +700,18 @@ impl Actor {
                 }
             }
             Err(error) => self.page_failed(&channel, sent.is_some(), purpose, error),
+        }
+        // A head discarded only for being stale (an epoch or access bump
+        // since it was sent) is read again, or its window keeps loading.
+        if stale
+            && sent.is_none()
+            && let PageFor::Window(generation) = purpose
+            && self
+                .timelines
+                .get(&channel)
+                .is_some_and(|timeline| timeline.generation == generation)
+        {
+            self.load_head(&channel);
         }
         self.reading_loaded(&channel);
         self.publish();
