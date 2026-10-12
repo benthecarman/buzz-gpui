@@ -39,6 +39,9 @@ enum Open {
 /// `[channel]` is the whole channel, `[channel, root]` one thread.
 pub(super) type Conversation = Option<(String, Option<String>)>;
 
+/// Transcripts kept: the agent-wide one and the current scope's.
+const TRANSCRIPTS_CACHED: usize = 2;
+
 pub struct ActivityPanel {
     pub(super) community: Entity<Community>,
     pub(super) activity: Option<Entity<AgentActivity>>,
@@ -51,8 +54,9 @@ pub struct ActivityPanel {
     open: Option<Open>,
     scroll: ScrollHandle,
     focus: FocusHandle,
-    /// The transcript of the current scope, for the snapshot it came from.
-    cache: Option<(Arc<Snapshot>, Scope, Arc<Transcript>)>,
+    /// The last built transcripts, each for the snapshot and scope it came
+    /// from: a render builds the agent-wide one and the current scope's.
+    cache: Vec<(Arc<Snapshot>, Scope, Arc<Transcript>)>,
     /// The agent whose saved pages are shown.
     history_agent: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -84,7 +88,7 @@ impl ActivityPanel {
             open: None,
             scroll: ScrollHandle::new(),
             focus,
-            cache: None,
+            cache: Vec::new(),
             history_agent: None,
             _subscriptions: subscriptions,
         }
@@ -113,14 +117,16 @@ impl ActivityPanel {
     }
 
     pub(super) fn transcript(&mut self, snapshot: &Arc<Snapshot>, scope: Scope) -> Arc<Transcript> {
-        if let Some((cached, cached_scope, transcript)) = &self.cache
-            && Arc::ptr_eq(cached, snapshot)
-            && *cached_scope == scope
-        {
+        if let Some((_, _, transcript)) = self.cache.iter().find(|(cached, cached_scope, _)| {
+            Arc::ptr_eq(cached, snapshot) && *cached_scope == scope
+        }) {
             return transcript.clone();
         }
         let built = Arc::new(transcript(&snapshot.records, &scope));
-        self.cache = Some((snapshot.clone(), scope, built.clone()));
+        if self.cache.len() == TRANSCRIPTS_CACHED {
+            self.cache.remove(0);
+        }
+        self.cache.push((snapshot.clone(), scope, built.clone()));
         built
     }
 
