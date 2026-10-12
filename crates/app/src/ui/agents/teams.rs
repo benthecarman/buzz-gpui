@@ -3,7 +3,7 @@
 //! viewer's saved teams in the current community, and creating, editing,
 //! importing, sharing, exporting, deploying and deleting them.
 
-use super::catalog::{AddAgent, AddTeam, CatalogDialog, CatalogState, HasTeam, community_agents};
+use super::catalog::{AddAgent, AddTeam, CatalogDialog, CatalogState, HasTeam};
 use super::editor::Dismissed;
 use super::team_dialogs::{self, TeamDeployDialog, TeamImportDialog};
 use super::team_editor::TeamEditor;
@@ -477,35 +477,37 @@ fn short_key(pubkey: &str) -> String {
     }
 }
 
+/// A community agent's name and picture, by pubkey.
+type Faces<'a> = HashMap<&'a str, (&'a str, Option<&'a str>)>;
+
+/// The community's agents on every host, borrowed for one render.
+fn faces<'a>(community: &Entity<Community>, cx: &'a App) -> Faces<'a> {
+    let relay = community.read(cx).origin.websocket().to_string();
+    cx.global::<crate::hosts::Hosts>()
+        .hosts
+        .iter()
+        .flat_map(|host| host.read(cx).agents.agents.iter())
+        .filter(|agent| agent.relay_url.trim_end_matches('/') == relay)
+        .map(|agent| {
+            (
+                agent.pubkey.as_str(),
+                (agent.name.as_str(), agent.picture.as_deref()),
+            )
+        })
+        .collect()
+}
+
 impl TeamsSection {
     fn card(
         &self,
         index: usize,
         entry: &TeamEntry,
+        members: Vec<(String, Option<String>)>,
         disabled: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let c = *cx.colors();
-        let members: Vec<(String, Option<String>)> = {
-            let agents = self
-                .community
-                .as_ref()
-                .map(|community| community_agents(community, cx))
-                .unwrap_or_default();
-            entry
-                .team
-                .agents
-                .iter()
-                .map(|pubkey| {
-                    agents
-                        .iter()
-                        .find(|(_, agent)| agent.pubkey == *pubkey)
-                        .map(|(_, agent)| (agent.name.clone(), agent.picture.clone()))
-                        .unwrap_or_else(|| (short_key(pubkey), None))
-                })
-                .collect()
-        };
         let count = members.len();
         let mut stack = div()
             .relative()
@@ -552,38 +554,38 @@ impl TeamsSection {
             );
         }
         let open = self.menu.as_ref() == Some(&entry.team.id);
-        let menu_entry = entry.clone();
-        let deploy = entry.clone();
-        let share = entry.clone();
-        let edit = entry.clone();
-        let remove = entry.clone();
-        let menu =
-            Menu::new()
-                .size(MenuSize::Compact)
-                .child(MenuItem::new("deploy-team", "Deploy to channel").on_click(
-                    cx.listener(move |this, _, _, cx| this.open_deploy(deploy.clone(), cx)),
-                ))
-                .child(MenuItem::new("share-team", "Share").on_click(cx.listener(
-                    move |this, _, window, cx| this.open_share(share.clone(), window, cx),
-                )))
-                .child(
-                    MenuItem::new("edit-team", "Edit team").on_click(cx.listener(
-                        move |this, _, window, cx| this.open_editor(Some(edit.clone()), window, cx),
-                    )),
-                )
-                .child(
-                    MenuItem::new("delete-team", "Delete team…")
-                        .danger()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.menu = None;
-                            this.modal = Some(Modal::Delete {
-                                entry: Box::new(remove.clone()),
-                                busy: false,
-                                error: None,
-                            });
-                            cx.notify();
-                        })),
-                );
+        // One copy for the card's handlers, which copy it again on click.
+        let menu_entry = Rc::new(entry.clone());
+        let deploy = menu_entry.clone();
+        let share = menu_entry.clone();
+        let edit = menu_entry.clone();
+        let remove = menu_entry.clone();
+        let menu = Menu::new()
+            .size(MenuSize::Compact)
+            .child(MenuItem::new("deploy-team", "Deploy to channel").on_click(
+                cx.listener(move |this, _, _, cx| this.open_deploy((*deploy).clone(), cx)),
+            ))
+            .child(MenuItem::new("share-team", "Share").on_click(cx.listener(
+                move |this, _, window, cx| this.open_share((*share).clone(), window, cx),
+            )))
+            .child(
+                MenuItem::new("edit-team", "Edit team").on_click(cx.listener(
+                    move |this, _, window, cx| this.open_editor(Some((*edit).clone()), window, cx),
+                )),
+            )
+            .child(
+                MenuItem::new("delete-team", "Delete team…")
+                    .danger()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.modal = Some(Modal::Delete {
+                            entry: Box::new((*remove).clone()),
+                            busy: false,
+                            error: None,
+                        });
+                        cx.notify();
+                    })),
+            );
         let id = menu_entry.team.id.clone();
         div()
             .id(("team-card", index))
@@ -628,7 +630,7 @@ impl TeamsSection {
                     )
                     .when(!disabled, |this| {
                         this.on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_editor(Some(menu_entry.clone()), window, cx)
+                            this.open_editor(Some((*menu_entry).clone()), window, cx)
                         }))
                     }),
             )
@@ -727,7 +729,6 @@ impl Render for TeamsSection {
         let view = teams.read(cx).view.clone();
         let ready = view.status == TeamsStatus::Ready;
         let loading = view.status == TeamsStatus::Loading;
-        let entries: Vec<TeamEntry> = view.teams().cloned().collect();
         let width = self.width.clone();
         let section = cx.entity().downgrade();
         let measure = canvas(
@@ -787,7 +788,7 @@ impl Render for TeamsSection {
                                 })),
                         ),
                 );
-        let body = if entries.is_empty() {
+        let body = if view.teams().next().is_none() {
             ready.then(|| {
                 div()
                     .flex()
@@ -815,10 +816,35 @@ impl Render for TeamsSection {
                     .into_any_element()
             })
         } else {
-            let cards: Vec<AnyElement> = entries
-                .iter()
+            // Each card's members, from one pass over the hosts' agents.
+            let members: Vec<Vec<(String, Option<String>)>> = {
+                let faces = match &self.community {
+                    Some(community) => faces(community, cx),
+                    None => Faces::new(),
+                };
+                view.teams()
+                    .map(|entry| {
+                        entry
+                            .team
+                            .agents
+                            .iter()
+                            .map(|pubkey| match faces.get(pubkey.as_str()) {
+                                Some((name, picture)) => {
+                                    (name.to_string(), picture.map(str::to_string))
+                                }
+                                None => (short_key(pubkey), None),
+                            })
+                            .collect()
+                    })
+                    .collect()
+            };
+            let cards: Vec<AnyElement> = view
+                .teams()
+                .zip(members)
                 .enumerate()
-                .map(|(index, entry)| self.card(index, entry, !ready, window, cx))
+                .map(|(index, (entry, members))| {
+                    self.card(index, entry, members, !ready, window, cx)
+                })
                 .collect();
             Some(
                 div()
