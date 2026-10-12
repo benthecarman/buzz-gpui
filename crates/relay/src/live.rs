@@ -619,7 +619,7 @@ impl Live {
             .saturating_sub(usize::from(!self.observer_kinds.is_empty()))
             .saturating_sub(usize::from(!self.presence_authors.is_empty()));
         let admitted: HashSet<String> = ranked.into_iter().take(capacity).cloned().collect();
-        let mut remaining: Vec<String> = self.interests.clone();
+        let mut remaining: HashSet<String> = self.interests.iter().cloned().collect();
         let mut globals: Vec<RouteKey> = vec![RouteKey::Profiles, RouteKey::Membership];
         if !self.observer_kinds.is_empty() {
             globals.push(RouteKey::Observer);
@@ -652,7 +652,7 @@ impl Live {
                 let survivors: Vec<String> = ids
                     .iter()
                     .filter(|id| {
-                        remaining.contains(id)
+                        remaining.contains(*id)
                             && admitted.contains(*id)
                             && self.joined.contains(*id)
                     })
@@ -662,13 +662,17 @@ impl Live {
                     && !survivors.is_empty()
                     && (route.status == RouteStatus::Live || route.live_only)
                 {
-                    remaining.retain(|id| !survivors.contains(id));
+                    for id in &survivors {
+                        remaining.remove(id);
+                    }
                     self.replace(&key, Some(survivors));
                 } else {
                     self.remove_route(&key);
                 }
             } else {
-                remaining.retain(|id| !ids.contains(id));
+                for id in &ids {
+                    remaining.remove(id);
+                }
                 globals.retain(|global| *global != key);
             }
         }
@@ -676,6 +680,13 @@ impl Live {
             let live_only = key == RouteKey::Presence;
             self.add_route(key, Vec::new()).live_only = live_only;
         }
+        // In interest order.
+        let remaining: Vec<String> = self
+            .interests
+            .iter()
+            .filter(|id| remaining.contains(*id))
+            .cloned()
+            .collect();
         let mut batch = Vec::new();
         for id in remaining {
             if !admitted.contains(&id) {
