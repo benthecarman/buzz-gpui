@@ -285,6 +285,18 @@ fn codex_status(cli: bool, adapter: bool) -> &'static str {
 /// Editing suggestions and executable presence only; availability does not
 /// establish provider credentials or an ACP session.
 pub fn options(app_data: &Path) -> Vec<HarnessOption> {
+    detect(app_data).options
+}
+
+/// What one scan of the tools on this host found.
+pub struct Detected {
+    pub options: Vec<HarnessOption>,
+    pub claude: ClaudeSetup,
+    pub codex: CodexSetup,
+}
+
+/// [`options`], with Claude Code's and Codex's setup from the same scan.
+pub fn detect(app_data: &Path) -> Detected {
     let (pi, pi_status, pi_managed) = npm_choice(
         NpmTools {
             cli: installed("pi"),
@@ -373,7 +385,7 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
         ),
         label: "Claude Code".into(),
         available: claude.setup.status == "ready",
-        status: claude.setup.status,
+        status: claude.setup.status.clone(),
         install_supported: Some(claude.setup.install_supported),
         update_supported: Some(false),
         default_args: Vec::new(),
@@ -397,7 +409,11 @@ pub fn options(app_data: &Path) -> Vec<HarnessOption> {
         providers: Vec::new(),
         configuration_policy: integration_policy(HarnessIntegration::Codex),
     });
-    options
+    Detected {
+        options,
+        claude: claude.setup,
+        codex: codex.setup,
+    }
 }
 
 /// The harness kind a command runs, by its executable name. `None` for a

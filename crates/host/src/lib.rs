@@ -115,6 +115,9 @@ struct Owner {
     /// Refuses a start while old Buzz runs; replaced in tests.
     legacy_check: fn() -> Result<(), String>,
     last: Option<AgentsSnapshot>,
+    /// The last scan for harnesses and when it ran: scanning `PATH` on
+    /// every publish is too slow.
+    harnesses: Option<(std::time::Instant, harness::Detected)>,
     /// Each agent's status and when this host first saw it in it, Unix
     /// milliseconds (`Agent::status_since`).
     statuses: BTreeMap<String, (api::ProcessStatus, u64)>,
@@ -197,6 +200,7 @@ impl AgentHost {
             log_challenges: BTreeMap::new(),
             legacy_check: start::refuse_legacy,
             last: None,
+            harnesses: None,
             statuses: BTreeMap::new(),
             seq: 0,
             events: events.clone(),
@@ -384,17 +388,21 @@ impl AgentHost {
             Request::ImportCommit { token, ids } => self.import_commit(token, ids, asker).await,
             Request::Agents => {
                 Self::tools_path().await?;
-                self.run(|owner| owner.snapshot().map(Response::Agents))
-                    .await
+                self.run(|owner| {
+                    // Asked for, so as fresh as it can be.
+                    owner.harnesses = None;
+                    owner.snapshot().map(Response::Agents)
+                })
+                .await
             }
             Request::Harnesses => {
                 Self::tools_path().await?;
                 let app_data = self.state_dir.clone();
                 tokio::task::spawn_blocking(move || {
-                    let claude = harness::claude(&app_data).setup;
+                    let detected = harness::detect(&app_data);
                     harness::for_older_guis(harness::legacy(
-                        &harness::options(&app_data),
-                        Some(&claude),
+                        &detected.options,
+                        Some(&detected.claude),
                         None,
                     ))
                 })
@@ -864,6 +872,10 @@ impl AgentHost {
 /// How long [`AgentHost::shutdown`] waits for the agents to stop.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a scan for installed harnesses stands, so one installed
+/// outside Buzz shows up without a refresh.
+const HARNESS_RESCAN: Duration = Duration::from_secs(10);
+
 impl Drop for AgentHost {
     /// Stops every agent this host started, and any installer or sign-in.
     fn drop(&mut self) {
@@ -1055,9 +1067,10 @@ impl Owner {
         snapshot.create_available = Some(true);
         snapshot.avatar_editing_available = true;
         snapshot.local_inventory_actions = true;
-        snapshot.harness_options = Some(harness::options(&self.state_dir));
-        snapshot.claude_setup = Some(harness::claude(&self.state_dir).setup);
-        snapshot.codex_setup = Some(harness::codex(&self.state_dir).setup);
+        let harnesses = self.harnesses();
+        snapshot.harness_options = Some(harnesses.options.clone());
+        snapshot.claude_setup = Some(harnesses.claude.clone());
+        snapshot.codex_setup = Some(harnesses.codex.clone());
         snapshot.databricks_defaults = Some(api::DatabricksSettings {
             host: build.host.clone(),
             filter: build.filter.clone(),
@@ -1074,26 +1087,35 @@ impl Owner {
         Ok(snapshot)
     }
 
+    /// The harnesses found on this host, scanned again after
+    /// [`HARNESS_RESCAN`].
+    fn harnesses(&mut self) -> &harness::Detected {
+        let stale = self
+            .harnesses
+            .as_ref()
+            .is_none_or(|(scanned, _)| scanned.elapsed() >= HARNESS_RESCAN);
+        if stale {
+            let detected = harness::detect(&self.state_dir);
+            self.harnesses = Some((std::time::Instant::now(), detected));
+        }
+        &self.harnesses.as_ref().expect("scanned above").1
+    }
+
     /// Broadcasts the snapshot if it changed since the last broadcast.
     fn publish(&mut self) {
         let Ok(mut snapshot) = self.snapshot() else {
             return;
         };
-        let changed = self.last.as_ref().is_none_or(|last| {
-            AgentsSnapshot {
-                seq: 0,
-                ..last.clone()
-            } != AgentsSnapshot {
-                seq: 0,
-                ..snapshot.clone()
-            }
-        });
-        if changed {
-            self.seq += 1;
-            snapshot.seq = self.seq;
-            self.last = Some(snapshot.clone());
-            let _ = self.events.send((self.seq, HostEvent::Agents(snapshot)));
+        // Both carry the last broadcast's seq.
+        if self.last.as_ref() == Some(&snapshot) {
+            return;
         }
+        self.seq += 1;
+        snapshot.seq = self.seq;
+        let _ = self
+            .events
+            .send((self.seq, HostEvent::Agents(snapshot.clone())));
+        self.last = Some(snapshot);
     }
 }
 

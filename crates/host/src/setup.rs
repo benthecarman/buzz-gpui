@@ -9,8 +9,10 @@ impl AgentHost {
     /// Installs one harness. One install runs at a time; quitting the host
     /// kills the installer.
     pub(crate) async fn install(&self, target: HarnessKind) -> Result<InstallReport, String> {
-        let report = self.install_harness(target).await?;
-        crate::convert(&report).map_err(|_| "Invalid install report".into())
+        let report = self.install_harness(target).await;
+        // What is installed changed, or may have; publishes it now.
+        let _ = self.jobs.send(Box::new(|owner| owner.harnesses = None));
+        crate::convert(&report?).map_err(|_| "Invalid install report".into())
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
