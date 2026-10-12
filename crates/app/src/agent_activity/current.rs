@@ -3,12 +3,13 @@
 //! labels for the composer's working popover, the sidebar's working
 //! badge and "Working now" rows, and the profile's latest activity.
 
-use super::transcript_model::{ItemKind, Scope, ToolItem, transcript};
+use super::transcript_model::{ItemKind, Scope, ToolItem, TranscriptTurn, transcript};
 use super::turns::{TurnState, parse_time};
 use super::{Record, Snapshot, raw_records};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Where an agent works: `Some(None)` is the channel conversation,
 /// `Some(Some(root))` a thread, and `None` is genuinely unknown.
@@ -92,6 +93,61 @@ pub fn tool_label(tool: &ToolItem) -> String {
     }
 }
 
+/// Transcripts read for [`current_activity`]: (records, agent, channel).
+type Read = (
+    Weak<[Arc<Record>]>,
+    String,
+    String,
+    Arc<Vec<TranscriptTurn>>,
+);
+
+thread_local! {
+    static READ: RefCell<Vec<Read>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Most transcripts kept; views ask for a few channels at a time.
+const READ_LIMIT: usize = 32;
+
+/// `agent`'s turns in `channel` from the snapshot's live records, read
+/// once per set of records: views ask on every render, and the records
+/// can hold megabytes of JSON.
+fn live_turns(snapshot: &Snapshot, agent: &str, channel: &str) -> Arc<Vec<TranscriptTurn>> {
+    let records = Arc::downgrade(&snapshot.records);
+    let found = READ.with_borrow(|read| {
+        read.iter()
+            .find(|(seen, a, c, _)| seen.ptr_eq(&records) && a == agent && c == channel)
+            .map(|(_, _, _, turns)| turns.clone())
+    });
+    if let Some(turns) = found {
+        return turns;
+    }
+    let live: Vec<Arc<Record>> = snapshot
+        .records
+        .iter()
+        .filter(|r| !r.historical)
+        .cloned()
+        .collect();
+    let turns = Arc::new(
+        transcript(
+            &live,
+            &Scope {
+                agent: agent.to_string(),
+                channel: Some(channel.to_string()),
+                thread: None,
+            },
+        )
+        .turns,
+    );
+    READ.with_borrow_mut(|read| {
+        read.retain(|(seen, ..)| seen.strong_count() > 0);
+        if read.len() >= READ_LIMIT {
+            read.remove(0);
+        }
+        read.push((records, agent.into(), channel.into(), turns.clone()));
+    });
+    turns
+}
+
 /// A person typing: `(pubkey, channel, thread root)`.
 pub type TypingEntry = (String, String, Option<String>);
 
@@ -154,25 +210,11 @@ pub fn current_activity(
     let Some(snapshot) = listening else {
         return agents;
     };
-    let live: Vec<Arc<Record>> = snapshot
-        .records
-        .iter()
-        .filter(|r| !r.historical)
-        .cloned()
-        .collect();
     let mut seen: Vec<&str> = working.iter().map(|t| t.agent.as_str()).collect();
     seen.sort();
     seen.dedup();
     for agent in seen {
-        let turns = transcript(
-            &live,
-            &Scope {
-                agent: agent.to_string(),
-                channel: Some(channel.to_string()),
-                thread: None,
-            },
-        )
-        .turns;
+        let turns = live_turns(snapshot, agent, channel);
         let mut tools: Vec<ToolItem> = Vec::new();
         for evidence in working.iter().filter(|t| t.agent == agent) {
             let turn = turns.iter().find(|t| t.turn_id == evidence.turn_id);

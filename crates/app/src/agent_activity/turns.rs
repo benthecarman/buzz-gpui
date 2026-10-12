@@ -199,16 +199,21 @@ impl Turns {
     }
 
     /// Replaces typing evidence with who types now. A run keeps its start
-    /// while it continues.
+    /// while it continues, and its expiry until half of it has passed, so
+    /// asking again with nothing new leaves the snapshot as it was.
     pub fn typing(&mut self, entries: &[(String, String, Option<String>)], now: u64) {
         let mut next = Vec::new();
         for (agent, channel, root) in entries.iter().take(TURN_LIMIT) {
-            let started_at = self
+            let running = self
                 .typing
                 .iter()
                 .find(|t| t.agent == *agent && t.channel_id == *channel && t.thread_root == *root)
-                .filter(|t| now < t.expires_at)
-                .map_or(now, |t| t.started_at);
+                .filter(|t| now < t.expires_at);
+            if let Some(typing) = running.filter(|t| t.expires_at - now > TYPING_FRESH_MS / 2) {
+                next.push(typing.clone());
+                continue;
+            }
+            let started_at = running.map_or(now, |t| t.started_at);
             next.push(Typing {
                 agent: agent.clone(),
                 channel_id: channel.clone(),

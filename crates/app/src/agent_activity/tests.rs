@@ -186,6 +186,25 @@ fn typing_counts_only_for_agents_with_telemetry() {
 }
 
 #[test]
+fn typing_asked_again_soon_leaves_the_snapshot_alone() {
+    let mut activity = listening();
+    let entries = vec![(agent('a'), "c1".to_string(), None)];
+    activity.receive(frame('1', 'a', json!({"kind": "turn_liveness"})), NOW, &all);
+    activity.typing(&entries, NOW, &all);
+    let before = activity.snapshot().clone();
+    activity.typing(&entries, NOW + 1_000, &all);
+    assert_eq!(*activity.snapshot(), before);
+    // Past half its life, a continuing run is renewed.
+    let later = NOW + turns::TYPING_FRESH_MS / 2 + 1_000;
+    activity.typing(&entries, later, &all);
+    let typing = &activity.snapshot().typing[0];
+    assert_eq!(
+        (typing.started_at, typing.expires_at),
+        (NOW, later + turns::TYPING_FRESH_MS)
+    );
+}
+
+#[test]
 fn history_pages_replace_only_the_saved_window() {
     let mut activity = Activity::new(true, true);
     let read = activity.activate(NOW).unwrap();
