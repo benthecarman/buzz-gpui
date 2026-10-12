@@ -192,14 +192,13 @@ fn connected(host: &Entity<HostConnection>, cx: &App) -> bool {
 
 /// Writes every team's current text into its members' settings and
 /// clears it for agents no team with text lists (`deliverTeamTexts`).
-/// Runs after each team save or delete. Never restarts anyone.
+/// Runs after each team save or delete. Never restarts anyone. The error
+/// is unworded: each caller says what was saved or deleted.
 pub async fn deliver_team_texts(
     teams: &Entity<TeamsState>,
     cx: &mut AsyncApp,
 ) -> Result<(), String> {
-    queue_delivery(teams, cx)
-        .await
-        .map_err(|error| format!("Saved, but team members' instructions weren't updated: {error}"))
+    queue_delivery(teams, cx).await
 }
 
 /// Deliveries for one community run one at a time, each from its own

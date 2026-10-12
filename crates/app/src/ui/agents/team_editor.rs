@@ -303,7 +303,9 @@ impl TeamEditor {
                     };
                     let _ = this.update(cx, |this, _| this.saved = Some(saved));
                 }
-                deliver_team_texts(&teams, cx).await
+                deliver_team_texts(&teams, cx)
+                    .await
+                    .map_err(|error| format!("Saved; members' instructions not updated: {error}"))
             }
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -311,8 +313,6 @@ impl TeamEditor {
                 let message = result.err().map(|message| {
                     if run.team_done && run.manifest.is_some() && !run.text_done {
                         format!("Members and name saved; instructions not saved: {message}")
-                    } else if run.text_done || (run.team_done && run.manifest.is_none()) {
-                        format!("Saved; members' instructions not updated: {message}")
                     } else {
                         message
                     }
