@@ -1,8 +1,9 @@
 //! What the agent dialogs share: their events and save copy.
 
 use crate::hosts::HostConnection;
+use crate::hosts::control::{Failure, Lane};
 use buzz_host::api::{AgentEdit, Request, Response};
-use buzz_host_rpc::ConnectionState;
+use buzz_host_rpc::{ConnectionState, RpcError};
 use gpui_kit::{App, Entity, SharedString, Task};
 
 /// The dialog is done; the page closes it.
@@ -31,7 +32,8 @@ pub fn saved_message(restarted: u32, failures: u32) -> String {
 
 /// Creates an agent on `host` in `relay_url`: the host generates its key,
 /// `identity` attests it, and the host saves it, stopped. Retrying with the
-/// same `request_id` reuses the key. Resolves to the new agent's id.
+/// same `request_id` reuses the key, and skips the commit when an earlier
+/// try already saved it. Resolves to the new agent's id.
 pub fn create_agent(
     host: &Entity<HostConnection>,
     request_id: String,
@@ -39,7 +41,8 @@ pub fn create_agent(
     identity: std::sync::Arc<buzz_identity::Identity>,
     edit: AgentEdit,
     cx: &mut App,
-) -> Task<Result<String, String>> {
+) -> Task<Result<String, Failure>> {
+    let failure = |message: String, reason: Option<String>| Failure { message, reason };
     let prepare = host.update(cx, |host, cx| {
         host.request(
             Request::CreatePrepare {
@@ -51,27 +54,37 @@ pub fn create_agent(
         )
     });
     let host = host.downgrade();
-    cx.spawn(async move |cx| match prepare.await {
-        Ok(Response::Prepared { id, pubkey, .. }) => {
-            let auth = identity
-                .attest_agent(&pubkey)
-                .map_err(|error| error.to_string())?;
-            let commit = host
-                .update(cx, |host, cx| {
-                    host.request(
-                        Request::CreateCommit {
-                            request_id,
-                            edit,
-                            auth,
-                        },
-                        cx,
-                    )
-                })
-                .map_err(|_| "The host went away.".to_string())?;
-            commit.await.map(|_| id).map_err(|e| e.to_string())
-        }
-        Ok(_) => Err("The host sent an unexpected reply.".into()),
-        Err(error) => Err(error.to_string()),
+    cx.spawn(async move |cx| {
+        let (id, pubkey) = match prepare.await {
+            Ok(Response::Prepared {
+                id, saved: true, ..
+            }) => return Ok(id),
+            Ok(Response::Prepared { id, pubkey, .. }) => (id, pubkey),
+            Ok(_) => return Err(failure("The host sent an unexpected reply.".into(), None)),
+            Err(RpcError::Failed(reason)) => return Err(failure(reason.clone(), Some(reason))),
+            Err(error) => return Err(failure(error.to_string(), None)),
+        };
+        let auth = identity.attest_agent(&pubkey).map_err(|error| {
+            let error = error.to_string();
+            failure(error.clone(), Some(error))
+        })?;
+        let commit = host
+            .update(cx, |host, cx| {
+                host.write(
+                    Request::CreateCommit {
+                        request_id,
+                        edit,
+                        auth,
+                    },
+                    Lane {
+                        credential_write: true,
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            })
+            .map_err(|_| failure("The host went away.".into(), None))?;
+        commit.await.map(|_| id)
     })
 }
 

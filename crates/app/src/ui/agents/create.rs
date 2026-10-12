@@ -9,7 +9,7 @@
 
 use super::catalog::{CatalogPane, CatalogSeed, Choose, Created as CatalogCreated};
 use super::draft::{self, Draft, Seed};
-use super::editor::{Dismissed, connected};
+use super::editor::{Dismissed, connected, create_agent};
 use super::fields::{Fields, Owner};
 use super::form::field;
 use crate::community::{AppState, IdentityState};
@@ -375,52 +375,20 @@ impl CreateDialog {
         };
         self.phase = Some(Phase::Creating);
         cx.notify();
-        let host = self.host.clone();
-        let request_id = self.request_id.clone();
-        let prepare = host.update(cx, |host, cx| {
-            host.request(
-                Request::CreatePrepare {
-                    request_id: request_id.clone(),
-                    relay_url: self.destination.clone(),
-                    owner: identity.pubkey_hex(),
-                },
-                cx,
-            )
-        });
+        let create = create_agent(
+            &self.host,
+            self.request_id.clone(),
+            self.destination.clone(),
+            identity,
+            edit,
+            cx,
+        );
         cx.spawn(async move |this, cx| {
-            let result: Result<(String, Option<Response>), String> = match prepare.await {
-                Ok(Response::Prepared {
-                    id, saved: true, ..
-                }) => Ok((id, None)),
-                Ok(Response::Prepared { id, pubkey, .. }) => match identity.attest_agent(&pubkey) {
-                    Ok(auth) => {
-                        let commit = host.update(cx, |host, cx| {
-                            host.write(
-                                Request::CreateCommit {
-                                    request_id,
-                                    edit,
-                                    auth,
-                                },
-                                Lane {
-                                    credential_write: true,
-                                    ..Default::default()
-                                },
-                                cx,
-                            )
-                        });
-                        commit
-                            .await
-                            .map(|response| (id, Some(response)))
-                            .map_err(|failure| failure.reason.unwrap_or_default())
-                    }
-                    Err(error) => Err(error.to_string()),
-                },
-                Ok(_) => Err(String::new()),
-                Err(buzz_host_rpc::RpcError::Failed(reason)) => Err(reason),
-                Err(_) => Err(String::new()),
-            };
+            let result = create
+                .await
+                .map_err(|failure| failure.reason.unwrap_or_default());
             let _ = this.update(cx, |this, cx| match result {
-                Ok((id, _)) => match this.host.read(cx).agent(id.as_str()).cloned() {
+                Ok(id) => match this.host.read(cx).agent(id.as_str()).cloned() {
                     Some(agent) => {
                         cx.emit(Created(this.host.clone(), agent.id.clone()));
                         if let Some(created) = this.on_created.clone() {

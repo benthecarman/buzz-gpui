@@ -1159,6 +1159,7 @@ impl ImportDialog {
                 }
                 cx.update(|cx| create_agent(&host, request_id, relay_url, identity, edit, cx))
                     .await
+                    .map_err(|failure| failure.reason.unwrap_or(failure.message))
             }
             .await;
             let _ =
