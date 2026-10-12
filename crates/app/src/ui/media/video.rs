@@ -426,6 +426,8 @@ pub struct VideoPlayer {
     natural: Option<Size<f32>>,
     /// Frames replaced since the last draw, to free from the atlas.
     retired: Vec<Arc<RenderImage>>,
+    /// The window it draws in, whose atlas frees its frames when it goes.
+    window: Option<AnyWindowHandle>,
     /// A first frame decoded for the inline poster.
     captured: Option<ImageSource>,
     /// The player's bounds as last drawn.
@@ -457,6 +459,7 @@ pub struct VideoPlayer {
     /// Polls the pipeline and the gesture timers while there is something
     /// to follow; drawing restarts it.
     ticks: Option<Task<()>>,
+    _release: Subscription,
 }
 
 impl VideoPlayer {
@@ -484,6 +487,7 @@ impl VideoPlayer {
             frame: None,
             natural: None,
             retired: Vec::new(),
+            window: None,
             captured: None,
             bounds: Rc::default(),
             hover: None,
@@ -505,6 +509,7 @@ impl VideoPlayer {
             woke: Instant::now(),
             _task: None,
             ticks: None,
+            _release: cx.on_release(Self::release_frames),
         };
         if mode == Mode::Inline {
             player.activity = None;
@@ -893,6 +898,21 @@ impl VideoPlayer {
             });
         })
         .detach();
+    }
+
+    /// Frees the frames still held when the player goes; only drawing
+    /// freed them before, so the last one leaked.
+    fn release_frames(&mut self, cx: &mut App) {
+        let frames = self.take_frames();
+        if let Some(window) = self.window
+            && !frames.is_empty()
+        {
+            let _ = window.update(cx, |_, window, _| {
+                for image in frames {
+                    let _ = window.drop_image(image);
+                }
+            });
+        }
     }
 
     /// Every frame still held, for a closing viewer to free.
@@ -1412,6 +1432,7 @@ impl Render for VideoPlayer {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        self.window = Some(window.window_handle());
         self.wake(cx);
         match self.mode {
             Mode::Inline => self.inline(window, cx),
