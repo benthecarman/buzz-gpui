@@ -111,6 +111,9 @@ impl Config {
 
 /// How long a read of the agent's core memory is reused.
 const MEMORY_TTL: Duration = Duration::from_secs(5 * 60);
+/// How long a failed read stands before sessions try again: long enough
+/// that a relay that is down doesn't slow every start by the timeout.
+const FAILED_MEMORY_TTL: Duration = Duration::from_secs(30);
 const MEMORY_TIMEOUT: Duration = Duration::from_secs(5);
 const NAMES_TIMEOUT: Duration = Duration::from_secs(2);
 const CHAT: [u32; 2] = [9, 40002];
@@ -675,10 +678,14 @@ impl ClaudeRuntime {
     /// session: its text, `Some(None)` when it has none, or `None` when it
     /// could not be read.
     async fn memory(&self, pubkey: &str, state: &Arc<Mutex<EntryState>>) -> Option<Option<String>> {
-        if let Some((value, at)) = &locked(state).memory
-            && at.elapsed() < MEMORY_TTL
-        {
-            return value.clone();
+        if let Some((value, at)) = &locked(state).memory {
+            let ttl = match value {
+                Some(_) => MEMORY_TTL,
+                None => FAILED_MEMORY_TTL,
+            };
+            if at.elapsed() < ttl {
+                return value.clone();
+            }
         }
         let value = match self.memories(pubkey).await {
             Ok(memories) => Some(
