@@ -42,15 +42,34 @@ pub struct TeamsState {
     _watch: Task<()>,
 }
 
+/// Each community's teams, until the community is removed.
 #[derive(Default)]
 struct Kits(HashMap<EntityId, Entity<TeamsState>>);
 
 impl Global for Kits {}
 
+impl Kits {
+    /// Drops removed communities' teams, so they and their community are
+    /// freed once nothing else holds them.
+    fn prune(cx: &mut App) {
+        let live: Vec<EntityId> = cx
+            .global::<AppState>()
+            .communities
+            .iter()
+            .map(Entity::entity_id)
+            .collect();
+        cx.global_mut::<Kits>().0.retain(|id, _| live.contains(id));
+    }
+}
+
 impl TeamsState {
     pub fn of(community: &Entity<Community>, cx: &mut App) -> Entity<Self> {
+        if !cx.has_global::<Kits>() {
+            cx.set_global(Kits::default());
+            cx.observe_global::<AppState>(Kits::prune).detach();
+        }
         let id = community.entity_id();
-        if let Some(state) = cx.default_global::<Kits>().0.get(&id) {
+        if let Some(state) = cx.global::<Kits>().0.get(&id) {
             return state.clone();
         }
         let kit = community.read(cx).session.team_kit();
