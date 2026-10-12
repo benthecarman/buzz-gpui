@@ -490,3 +490,42 @@ fn invalid_visibility_lists_are_errors() {
     );
     assert_eq!(visibility_record(&[], &relay, &viewer), Ok(None));
 }
+
+#[test]
+fn reads_admin_keys_from_a_relay_signed_39001_only() {
+    let signer = Signer::new();
+    let relay = signer.relay_hex();
+    let viewer = signer.viewer_hex();
+    let admin = key(2);
+    let admins = signer.relay(
+        kinds::CHANNEL_ADMINS,
+        T0,
+        &[
+            &["d", CHANNEL],
+            &["p", &viewer, "owner"],
+            &["p", &admin, "admin"],
+        ],
+    );
+    let expected: HashSet<PublicKey> = [&viewer, &admin]
+        .into_iter()
+        .map(|key| PublicKey::from_hex(key).unwrap())
+        .collect();
+    assert_eq!(channel_admins(&admins, CHANNEL, &relay), Some(expected));
+    assert_eq!(channel_admins(&admins, "other", &relay), None);
+    let forged = signer.sign(
+        &signer.viewer,
+        kinds::CHANNEL_ADMINS,
+        T0,
+        "",
+        &[&["d", CHANNEL], &["p", &viewer, "owner"]],
+    );
+    assert_eq!(channel_admins(&forged, CHANNEL, &relay), None);
+    let member = signer.relay(
+        kinds::CHANNEL_ADMINS,
+        T0,
+        &[&["d", CHANNEL], &["p", &key(3), "member"]],
+    );
+    assert_eq!(channel_admins(&member, CHANNEL, &relay), None);
+    let dm = signer.relay(kinds::CHANNEL_ADMINS, T0, &[&["d", CHANNEL]]);
+    assert_eq!(channel_admins(&dm, CHANNEL, &relay), Some(HashSet::new()));
+}

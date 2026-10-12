@@ -16,9 +16,9 @@ use crate::event::{Verified, is_newer, kinds};
 use crate::members::is_key;
 use crate::messages::{Draft, EventTemplate};
 use crate::socket::{Filter, filter};
-use nostr::prelude::EventId;
+use nostr::prelude::{EventId, PublicKey};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 /// Confirmation polls after a lifecycle command (`channel-lifecycle.ts`).
@@ -155,17 +155,37 @@ pub fn state_filters(relay_author: &str, channel: &str) -> Vec<Filter> {
         kinds::CHANNEL_ADMINS,
         kinds::CHANNEL_MEMBERS,
     ]
-    .iter()
-    .map(|kind| {
-        filter(json!({
-            "kinds": [kind],
-            "consistency": "strong",
-            "authors": [relay_author],
-            "#d": [channel],
-            "limit": 1,
-        }))
-    })
+    .into_iter()
+    .map(|kind| state_filter(kind, relay_author, channel))
     .collect()
+}
+
+/// One record of [`state_filters`].
+pub fn state_filter(kind: u16, relay_author: &str, channel: &str) -> Filter {
+    filter(json!({
+        "kinds": [kind],
+        "consistency": "strong",
+        "authors": [relay_author],
+        "#d": [channel],
+        "limit": 1,
+    }))
+}
+
+/// The admin keys of a relay-signed 39001 on its own, for the fold's
+/// moderator deletes ([`crate::fold::FoldOptions::channel_admins`]).
+/// `None` when the event is not this channel's 39001 from the relay or an
+/// entry is malformed; the 39002 cross-check needs [`ChannelState`].
+pub fn channel_admins(
+    event: &Verified,
+    channel: &str,
+    relay_author: &str,
+) -> Option<HashSet<PublicKey>> {
+    let events = std::slice::from_ref(event);
+    let admins = record(events, kinds::CHANNEL_ADMINS, channel, relay_author).ok()??;
+    elevated_members(admins)?
+        .keys()
+        .map(|key| PublicKey::from_hex(key).ok())
+        .collect()
 }
 
 /// The single value of a tag that may appear at most once, with exactly
@@ -199,6 +219,20 @@ fn record<'a>(
         }
     }
     Ok(selected)
+}
+
+/// The 39001's entries: each exactly `["p", key, "owner"|"admin"]`, once.
+fn elevated_members(admins: &Verified) -> Option<BTreeMap<String, MemberRole>> {
+    let mut elevated = BTreeMap::new();
+    for entry in admins.tags_named("p") {
+        let key = entry.get(1).map(String::as_str).unwrap_or_default();
+        let role = MemberRole::parse(entry.get(2).map(String::as_str));
+        if entry.len() != 3 || !is_key(key) || !role.elevated() || elevated.contains_key(key) {
+            return None;
+        }
+        elevated.insert(key.to_owned(), role);
+    }
+    Some(elevated)
 }
 
 /// A relay TTL must be an unambiguous positive i32.
@@ -266,19 +300,12 @@ impl ChannelState {
             );
         }
         let inconsistent = || error("Member roles are inconsistent. Refresh members and roles.");
-        let mut elevated = BTreeMap::new();
-        for entry in admins.tags_named("p") {
-            let key = entry.get(1).map(String::as_str).unwrap_or_default();
-            let role = MemberRole::parse(entry.get(2).map(String::as_str));
-            if entry.len() != 3
-                || !is_key(key)
-                || !role.elevated()
-                || elevated.contains_key(key)
-                || roles.get(key) != Some(&role)
-            {
-                return Err(inconsistent());
-            }
-            elevated.insert(key.to_owned(), role);
+        let elevated = elevated_members(admins).ok_or_else(inconsistent)?;
+        if elevated
+            .iter()
+            .any(|(key, role)| roles.get(key) != Some(role))
+        {
+            return Err(inconsistent());
         }
         if roles
             .iter()
