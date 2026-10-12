@@ -4,7 +4,7 @@
 //! response naming where the next older page starts; the cursor is echoed
 //! back verbatim and must strictly advance.
 
-use crate::event::{Verified, kinds};
+use crate::event::{Verified, is_hex64, kinds};
 use crate::socket::Filter;
 use serde_json::{Value, json};
 
@@ -43,10 +43,7 @@ pub fn page_filter(channel: &str, cursor: Option<&Cursor>) -> Filter {
         filter["until"] = json!(cursor.created_at);
         filter["before_id"] = json!(cursor.id);
     }
-    match filter {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    }
+    crate::socket::filter(filter)
 }
 
 /// Validates the page's bound (`window.ts:89-142`) and splits it off.
@@ -95,9 +92,7 @@ pub fn parse_page(
             let id = next
                 .get("id")
                 .and_then(Value::as_str)
-                .filter(|id| {
-                    id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-                })
+                .filter(|id| is_hex64(id))
                 .ok_or(InvalidPage("cursor id"))?;
             Some(Cursor {
                 created_at,

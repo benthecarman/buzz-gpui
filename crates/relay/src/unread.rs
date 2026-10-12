@@ -19,14 +19,14 @@
 //! messages and thread replies, never mentions; see
 //! [`MessageAttention::muted_suppresses`].
 
-use crate::event::{Verified, kinds};
+use crate::event::{Verified, is_hex64, kinds};
 use crate::fold::{FoldOptions, has_tag};
 use crate::read_state::{
     MarkCoverage, MessageRead, ReadCapability, ReadLookup, ReadMutationResult, ReadState,
     ReadStateError, ReadStateJournal, ReadStateSync, ReadTarget, ReadUpdate, effective_frontier,
-    is_hex64, mark_message, override_active,
+    mark_message, override_active,
 };
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::prelude::{Event, PublicKey};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -144,13 +144,6 @@ pub(crate) fn preview_text(event: &Event) -> String {
 
 fn timestamp(event: &Event) -> Result<u32> {
     u32::try_from(event.created_at.as_secs()).map_err(|_| ReadStateError::InvalidFrontier.into())
-}
-
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
 }
 
 /// Sampled evidence reads: one per 128 channels, 500 rows each, with

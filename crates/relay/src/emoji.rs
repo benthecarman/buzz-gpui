@@ -10,7 +10,7 @@
 
 use crate::event::{Verified, is_newer, kinds, newest};
 use crate::messages::{CustomEmoji, EmojiCatalog, EventTemplate, normalize_shortcode};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::prelude::Event;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -77,19 +77,14 @@ impl EmojiSnapshot {
 
 /// The full catalog read (`emoji-directory.ts:111-150`).
 pub fn catalog_filter() -> Filter {
-    match json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": [EMOJI_SET], "limit": LIMIT}) {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
+    filter(json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": [EMOJI_SET], "limit": LIMIT}))
 }
 
 /// The viewer's own set, read fresh before changing it (§5k.3).
 pub fn own_set_filter(viewer: &str) -> Filter {
-    match json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": [EMOJI_SET], "authors": [viewer], "limit": 1})
-    {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
+    filter(
+        json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": [EMOJI_SET], "authors": [viewer], "limit": 1}),
+    )
 }
 
 /// The newest of `viewer`'s sets among `events`.

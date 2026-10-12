@@ -10,9 +10,9 @@ use super::{Actor, Message, Session};
 use crate::event::{Verified, kinds};
 use crate::read_state::{ReadCapability, ReadTarget};
 use crate::reader::{ReadError, ReadOptions};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use crate::unread::{InboxItem, InboxSnapshot, InboxStatus};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
@@ -105,16 +105,9 @@ pub(super) fn new() -> (Owner, watch::Receiver<Arc<InboxState>>) {
     )
 }
 
-fn object(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
-
 /// The addressed history read: 50 newest chat messages naming the viewer.
 pub fn mentions_filter(viewer: &str) -> Filter {
-    object(json!({"kinds": MENTION_KINDS, "#p": [viewer], "limit": 50}))
+    filter(json!({"kinds": MENTION_KINDS, "#p": [viewer], "limit": 50}))
 }
 
 fn overlay_filter(ids: &[String], kinds: &[u16], cursor: Option<(u64, String)>) -> Filter {
@@ -123,7 +116,7 @@ fn overlay_filter(ids: &[String], kinds: &[u16], cursor: Option<(u64, String)>) 
         filter["until"] = json!(until);
         filter["before_id"] = json!(before);
     }
-    object(filter)
+    crate::socket::filter(filter)
 }
 
 /// `older`: strictly past the cursor in (created_at desc, id asc) order.

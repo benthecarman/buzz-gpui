@@ -2,10 +2,10 @@
 //! the event a save publishes, and the statuses of watched people
 //! (`user-status.ts` `createUserStatuses`). I/O lives in the session.
 
-use crate::event::Verified;
+use crate::event::{Verified, is_hex64};
 use crate::messages::EventTemplate;
 use crate::socket::Filter;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -54,10 +54,9 @@ fn valid_text(text: &str, emoji: &str) -> bool {
 
 /// The read of one author's current status (`#d` `general`).
 pub fn filter(author: &str) -> Filter {
-    match json!({"kinds": [KIND], "#d": ["general"], "authors": [author], "limit": 1}) {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    }
+    crate::socket::filter(
+        json!({"kinds": [KIND], "#d": ["general"], "authors": [author], "limit": 1}),
+    )
 }
 
 /// The newest valid event's status, or `None` when there is none, it was
@@ -102,10 +101,9 @@ const RETRY_DELAYS_MS: [u64; 3] = [5_000, 15_000, 60_000];
 
 /// The read of several authors' current statuses.
 pub fn batch_filter(authors: &[String]) -> Filter {
-    match json!({"kinds": [KIND], "#d": ["general"], "authors": authors, "limit": authors.len()}) {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    }
+    crate::socket::filter(
+        json!({"kinds": [KIND], "#d": ["general"], "authors": authors, "limit": authors.len()}),
+    )
 }
 
 /// A status read the directory asked for. Its result goes back to
@@ -145,11 +143,7 @@ pub struct StatusDirectory {
 
 /// The keys a watch of `ids` counts: lowercase hex keys, once each.
 pub fn watch_keys(ids: &[String]) -> Vec<String> {
-    let mut keys: Vec<String> = ids
-        .iter()
-        .filter(|id| id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-        .cloned()
-        .collect();
+    let mut keys: Vec<String> = ids.iter().filter(|id| is_hex64(id)).cloned().collect();
     keys.sort();
     keys.dedup();
     keys

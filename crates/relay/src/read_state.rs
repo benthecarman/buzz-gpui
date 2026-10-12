@@ -22,8 +22,8 @@
 //! smaller publication can never reactivate a peer's register.
 
 use crate::discovery::is_uuid;
-use crate::event::{Verified, Verifier, kinds};
-use crate::socket::Filter;
+use crate::event::{Verified, Verifier, is_hex64, kinds};
+use crate::socket::{Filter, filter};
 use buzz_identity::{Identity, Purpose};
 use nostr::prelude::{Event, Keys};
 use serde::{Deserialize, Serialize};
@@ -131,13 +131,6 @@ pub fn is_context_id(value: &str) -> bool {
 /// A coordinate slot: 32 lowercase hex characters.
 pub fn is_slot(value: &str) -> bool {
     value.len() == 32
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-pub(crate) fn is_hex64(value: &str) -> bool {
-    value.len() == 64
         && value
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -585,13 +578,6 @@ pub fn sign_read_state(
 // ---------------------------------------------------------------------------
 // Filters and the NIP-11 snapshot capability (`read-state-snapshot.ts`)
 // ---------------------------------------------------------------------------
-
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
 
 /// Bounded marker discovery: up to 500 of our read-state coordinates.
 pub fn bounded_filter(viewer: &str) -> Filter {

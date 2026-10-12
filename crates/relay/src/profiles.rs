@@ -5,7 +5,7 @@
 
 use crate::budget::ByteLru;
 use crate::event::{Verified, is_newer, kinds};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -349,10 +349,7 @@ impl ProfileDirectory {
 }
 
 fn authors_filter(authors: &[String]) -> Filter {
-    match json!({"kinds": [kinds::PROFILE], "authors": authors, "limit": authors.len()}) {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    }
+    filter(json!({"kinds": [kinds::PROFILE], "authors": authors, "limit": authors.len()}))
 }
 
 #[cfg(test)]

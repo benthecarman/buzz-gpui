@@ -6,9 +6,8 @@
 //! the normalized request, so a bound can never be replayed for a different
 //! viewer, host, root, page size or cursor.
 
-use crate::event::{Verified, kinds};
-use crate::read_state::is_hex64;
-use crate::socket::Filter;
+use crate::event::{Verified, is_hex64, kinds};
+use crate::socket::{Filter, filter};
 use nostr::prelude::EventId;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -99,17 +98,10 @@ pub enum ThreadWindowError {
 /// Only such channels can use strict windows; others go straight to legacy.
 pub use crate::discovery::is_uuid as is_canonical_channel;
 
-fn object(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
-
 /// `{ids:[id], "#h":[channel], limit:1}`: the selected message or the root.
 /// Strict mode reads it alone; legacy mode batches it with the page.
 pub fn message_filter(channel: &str, id: &EventId) -> Filter {
-    object(json!({"ids": [id.to_hex()], "#h": [channel], "limit": 1}))
+    filter(json!({"ids": [id.to_hex()], "#h": [channel], "limit": 1}))
 }
 
 /// One strict `thread_window` page (§5c.3 step 3). Only the relay's
@@ -133,7 +125,7 @@ pub fn window_filter(
         filter["until"] = json!(cursor.created_at);
         filter["before_id"] = json!(cursor.id);
     }
-    let filter = object(filter);
+    let filter = crate::socket::filter(filter);
     debug_assert!(
         filter
             .keys()
@@ -157,13 +149,13 @@ pub fn legacy_filter(channel: &str, root: &EventId, cursor: Option<&ThreadCursor
         filter["thread_cursor"] = json!(cursor.created_at);
         filter["thread_cursor_id"] = json!(cursor.id);
     }
-    object(filter)
+    crate::socket::filter(filter)
 }
 
 /// Overlays of an exact target. ID reads do not expand overlays, and the
 /// overlays carry no `h` tag requirement.
 pub fn overlays_filter(target: &EventId) -> Filter {
-    object(json!({
+    filter(json!({
         "kinds": TARGET_OVERLAY_KINDS,
         "#e": [target.to_hex()],
         "limit": EVIDENCE_LIMIT,
@@ -173,7 +165,7 @@ pub fn overlays_filter(target: &EventId) -> Filter {
 /// Deletions of an exact target's overlays.
 pub fn tombstones_filter(overlays: &[EventId]) -> Filter {
     let ids: Vec<String> = overlays.iter().map(EventId::to_hex).collect();
-    object(json!({"kinds": TOMBSTONE_KINDS, "#e": ids, "limit": EVIDENCE_LIMIT}))
+    filter(json!({"kinds": TOMBSTONE_KINDS, "#e": ids, "limit": EVIDENCE_LIMIT}))
 }
 
 /// The relay authority a binding names (`thread-window.ts:17-29`, the same

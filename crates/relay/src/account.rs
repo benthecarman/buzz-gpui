@@ -6,7 +6,7 @@ use crate::event::{Verified, kinds, newest};
 use crate::http::HttpError;
 use crate::messages::EventTemplate;
 use crate::outbox::{PublishError, accept_publish};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::prelude::EventId;
 use serde_json::{Map, Value, json};
 
@@ -85,10 +85,7 @@ pub fn validate(edit: &ProfileEdit) -> Result<ProfileEdit, ProfileError> {
 
 /// The read of the viewer's own kind 0 (`ProfileButton.tsx:147`).
 pub fn own_profile_filter(viewer: &str) -> Filter {
-    match json!({"kinds": [kinds::PROFILE], "authors": [viewer], "limit": 5}) {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    }
+    filter(json!({"kinds": [kinds::PROFILE], "authors": [viewer], "limit": 5}))
 }
 
 /// The newest of the viewer's kind 0 events.

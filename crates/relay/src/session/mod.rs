@@ -72,7 +72,7 @@ pub use work_sessions::{AgentRules, Expected, create_draft, session_description,
 use crate::budget::ByteLru;
 use crate::discovery::{DiscoveryState, RosterScan, ScanOptions, ScanStage, membership_hint};
 use crate::emoji::{EmojiDirectory, EmojiSnapshot, catalog_filter};
-use crate::event::{Verified, Verifier, kinds};
+use crate::event::{Verified, Verifier, is_hex64, kinds};
 use crate::fold::{LocalDelivery, MessageClock, MessageRow};
 use crate::http::RelayHttp;
 use crate::live::{
@@ -2804,9 +2804,7 @@ fn relay_info(info: &serde_json::Value) -> Result<RelayInfo, String> {
     let authority = info
         .get("self")
         .and_then(serde_json::Value::as_str)
-        .filter(|key| {
-            key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .filter(|key| is_hex64(key))
         .ok_or("Relay did not advertise its identity")?;
     let text = |key: &str| {
         info.get(key)

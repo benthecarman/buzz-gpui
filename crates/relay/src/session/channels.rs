@@ -19,7 +19,7 @@ use super::unread::now_ms;
 use super::{Actor, CatchUpState, HeadCatchUp, Message};
 use crate::budget::ByteLru;
 use crate::discovery::DiscoveryState;
-use crate::event::{Verified, Verifier, kinds};
+use crate::event::{Verified, Verifier, is_hex64, kinds, newest_first};
 use crate::fold::{FoldOptions, fold_messages};
 use crate::reader::{Events, Priority, ReadError, ReadErrorKind, ReadOptions, Reader};
 use crate::socket::Filter;
@@ -227,12 +227,6 @@ fn after(event: &Verified, cursor: &Cursor) -> bool {
         || (event.created_at_secs() == cursor.created_at && event.id_hex() > cursor.id)
 }
 
-fn newest_first(a: &Verified, b: &Verified) -> std::cmp::Ordering {
-    b.created_at
-        .cmp(&a.created_at)
-        .then_with(|| a.id.cmp(&b.id))
-}
-
 fn cursor_of(event: &Verified) -> Cursor {
     Cursor {
         created_at: event.created_at_secs(),
@@ -256,8 +250,11 @@ async fn session_overlays(
     loop {
         let mut filter = json!({"kinds": kinds, "#e": ids, "limit": 500});
         paging(&mut filter, next.as_ref());
-        let mut page: Vec<Verified> = reader.read(vec![object(filter)], options).await?.to_vec();
-        page.sort_by(newest_first);
+        let mut page: Vec<Verified> = reader
+            .read(vec![crate::socket::filter(filter)], options)
+            .await?
+            .to_vec();
+        page.sort_by(|a, b| newest_first(a, b));
         let Some(last) = page.last().cloned() else {
             return Ok(found);
         };
@@ -298,7 +295,9 @@ pub(super) async fn read_session_window(
         "limit": PAGE_SIZE,
     });
     paging(&mut filter, sent);
-    let response = reader.read(vec![object(filter)], options).await?;
+    let response = reader
+        .read(vec![crate::socket::filter(filter)], options)
+        .await?;
     let mut seen = HashSet::new();
     let mut rows: Vec<Verified> = response
         .iter()
@@ -309,7 +308,7 @@ pub(super) async fn read_session_window(
         })
         .cloned()
         .collect();
-    rows.sort_by(newest_first);
+    rows.sort_by(|a, b| newest_first(a, b));
     if sent.is_some_and(|cursor| rows.iter().any(|event| !after(event, cursor))) {
         return Err(session_invalid(
             "Session history did not advance. Retry messages.",
@@ -348,13 +347,6 @@ pub(super) async fn read_session_window(
     })
 }
 
-fn object(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
-
 /// A channel's own head read (`isChannelHead`): what a catch-up replaces.
 pub(super) fn is_channel_head(filters: &[Filter], channel: &str) -> bool {
     filters.iter().any(|filter| {
@@ -388,10 +380,7 @@ pub(super) fn restore(
     let saved: Value = serde_json::from_str(&raw).ok()?;
     let author = saved.get("relayAuthor")?.as_str()?.to_string();
     let saved_at = saved.get("savedAt")?.as_u64()?;
-    let valid_author = author.len() == 64
-        && author
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let valid_author = is_hex64(&author);
     if !valid_author || saved_at > now || now - saved_at > MAX_SAVED_AGE_MS as u64 {
         return None;
     }

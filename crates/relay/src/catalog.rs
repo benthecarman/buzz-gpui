@@ -8,7 +8,7 @@
 //! the caller's explicit act. [`crate::session::CommunityCatalog`] drives
 //! this model against a session's reader and outbox.
 
-use crate::event::Verified;
+use crate::event::{Verified, is_hex64};
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Operation};
 use crate::reader::{Priority, ReadErrorKind, ReadOptions, Reader};
@@ -811,12 +811,9 @@ pub fn team_catalog_content(
 
 /// The agent catalog coordinate of an agent key.
 pub fn catalog_slug(pubkey: &str) -> Result<String, String> {
-    (pubkey.len() == 64
-        && pubkey
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-    .then(|| pubkey.to_owned())
-    .ok_or_else(|| "Invalid agent identity".into())
+    is_hex64(pubkey)
+        .then(|| pubkey.to_owned())
+        .ok_or_else(|| "Invalid agent identity".into())
 }
 
 /// The owner-to-self envelope the signer admits. Unsharing is a newer

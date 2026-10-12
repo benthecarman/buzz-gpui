@@ -3,6 +3,7 @@
 //! addressed to the viewer, decrypted and checked by the viewer's identity.
 
 use super::Session;
+use crate::event::is_hex64;
 use crate::http::HttpError;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -44,11 +45,7 @@ pub enum MemoryError {
 
 /// Whether `agent` can have memories for `viewer` (`memoryAgent`).
 pub fn memory_agent(agent: &str, viewer: &str) -> bool {
-    agent.len() == 64
-        && agent
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        && agent != viewer
+    is_hex64(agent) && agent != viewer
 }
 
 /// Validates the decoded listing before keeping its plaintext
@@ -72,10 +69,7 @@ pub fn memory_listing(value: &Value) -> Result<MemoryListing, MemoryError> {
         let body = entry["body"].as_str().ok_or_else(bad)?;
         let event_id = entry["eventId"].as_str().ok_or_else(bad)?;
         let created_at = entry["createdAt"].as_u64().ok_or_else(bad)?;
-        let hex = event_id.len() == 64
-            && event_id
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        let hex = is_hex64(event_id);
         if !memory_slug(slug) || !hex || !slugs.insert(slug.to_owned()) {
             return Err(bad());
         }

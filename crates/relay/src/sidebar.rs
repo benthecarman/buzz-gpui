@@ -21,7 +21,7 @@
 use crate::discovery::{ChannelSummary, ChannelType, is_uuid, locale_compare};
 use crate::event::{Verified, kinds};
 use crate::read_state::is_channel_key;
-use crate::socket::Filter;
+use crate::socket::{Filter, filter as object};
 use buzz_identity::{Identity, IdentityError, Purpose};
 use nostr::prelude::{SecretKey, UnsignedEvent};
 use serde_json::{Map, Value, json};
@@ -855,13 +855,6 @@ const LEGACY_DEVICE: &str = "0000000000000000";
 const FIXED_GROUPS: [&str; 4] = ["starred", "channels", "forums", "dms"];
 /// Plaintext budget of one record, and of retained register metadata.
 pub const PLAINTEXT_LIMIT: usize = 128 * 1024;
-
-fn object(value: Value) -> Map<String, Value> {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("built as an object"),
-    }
-}
 
 fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()

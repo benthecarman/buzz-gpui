@@ -12,7 +12,7 @@ use crate::kit::{self, TeamManifest, TextRecord};
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Outbox, SendOptions};
 use crate::reader::{ReadOptions, Reader};
-use crate::socket::Filter;
+use crate::socket::filter;
 use crate::teams::{
     KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, Team, TeamEntry, TeamHead, parse_team, record_tags,
     team_record,
@@ -173,13 +173,6 @@ impl Session {
                 view: watch::Sender::new(Arc::default()),
             }),
         }
-    }
-}
-
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
     }
 }
 

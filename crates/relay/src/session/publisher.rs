@@ -5,7 +5,7 @@
 //! about access changed while it was read.
 
 use super::{Actor, Message};
-use crate::event::{Verified, kinds};
+use crate::event::{Verified, first_tag, is_hex64, kinds};
 use crate::http::HttpError;
 use crate::outbox::{HttpPublisher, PublishError, Publisher};
 use crate::reader::{Priority, ReadError, ReadOptions, Reader};
@@ -97,12 +97,8 @@ impl SessionPublisher {
     /// channel roster still shows the viewer may write there
     /// (`session.ts` `preparePublish`, `refreshMembership`).
     async fn prepare_canvas(&self, event: &Event) -> Result<(), PublishError> {
-        let channel = event
-            .tags
-            .iter()
-            .find(|tag| tag.kind() == "h")
-            .and_then(|tag| tag.as_slice().get(1))
-            .cloned()
+        let channel = first_tag(event, "h")
+            .map(str::to_owned)
             .ok_or_else(|| PublishError::Rejected("Canvas has no channel".into()))?;
         if !self.can_participate(&channel).await? {
             return Err(PublishError::Rejected(CANVAS_ACCESS.into()));
@@ -181,12 +177,8 @@ impl Publisher for SessionPublisher {
         let event = event.clone();
         Box::pin(async move {
             let fence = this.check(event.clone()).await?;
-            let channel = event
-                .tags
-                .iter()
-                .find(|tag| tag.kind() == "h")
-                .and_then(|tag| tag.as_slice().get(1))
-                .cloned()
+            let channel = first_tag(&event, "h")
+                .map(str::to_owned)
                 .ok_or_else(|| PublishError::Rejected("A channel is required".into()))?;
             // An empty or failed read is unknown, never permission.
             let events = this
@@ -257,12 +249,7 @@ impl Actor {
         if recipients.is_empty() {
             return Ok(());
         }
-        let valid = |value: &String| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        };
+        let valid = |value: &String| is_hex64(value);
         if recipients.len() > 32
             || recipients
                 .iter()

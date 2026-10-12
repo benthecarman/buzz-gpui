@@ -5,10 +5,10 @@
 //!
 //! Roles here only shape the UI; the relay decides every privileged change.
 
-use crate::event::{Verified, kinds, newest};
+use crate::event::{Verified, is_hex64, kinds, newest};
 use crate::http::HttpError;
 use crate::messages::EventTemplate;
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::prelude::EventId;
 use serde_json::{Value, json};
 
@@ -68,19 +68,9 @@ pub fn manages(role: Option<Role>) -> bool {
     matches!(role, Some(Role::Owner | Role::Admin))
 }
 
-fn is_hex_key(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 /// The newest roster read, NIP-01 order (`readRoster`, `createCommunityMembership`).
 pub fn roster_filter(relay_author: &str) -> Filter {
-    match json!({"kinds": [MEMBERSHIP_KIND], "authors": [relay_author], "limit": 1}) {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
+    filter(json!({"kinds": [MEMBERSHIP_KIND], "authors": [relay_author], "limit": 1}))
 }
 
 /// Members from the relay-signed snapshot (`["member", pubkey, role]`
@@ -101,7 +91,7 @@ pub fn members_from_snapshot(
         if tag.first().map(String::as_str) != Some("member") {
             continue;
         }
-        let Some(pubkey) = tag.get(1).filter(|key| is_hex_key(key)) else {
+        let Some(pubkey) = tag.get(1).filter(|key| is_hex64(key)) else {
             continue;
         };
         if !seen.insert(pubkey) {
@@ -215,7 +205,7 @@ pub fn member_command(change: &Change, now: u64) -> Result<EventTemplate, String
         Change::Role { pubkey, role } => (ROLE_KIND, pubkey, Some(*role)),
         Change::Remove { pubkey } => (REMOVE_KIND, pubkey, None),
     };
-    if !is_hex_key(pubkey) {
+    if !is_hex64(pubkey) {
         return Err("Invalid member change".into());
     }
     let mut tags = vec![vec!["p".to_owned(), pubkey.clone()]];
@@ -251,7 +241,7 @@ const REASONS: &[&str] = &[
 pub fn admin_reason(reason: &str) -> Option<&str> {
     let member_not_found = reason
         .strip_prefix("invalid: member not found: ")
-        .is_some_and(is_hex_key);
+        .is_some_and(is_hex64);
     let bounds = ["ttl_secs", "max_uses"].iter().any(|field| {
         reason
             .strip_prefix(field)

@@ -12,7 +12,7 @@
 //! pages, the save draft and its signing shape. The session wires them to
 //! the reader and the outbox (`session/canvas.rs`).
 
-use crate::event::{Verified, kinds, newest_first};
+use crate::event::{Verified, is_hex64, kinds, newest_first};
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Operation};
 use crate::socket::{Filter, filter};
@@ -247,13 +247,7 @@ pub fn valid_tags(tags: &[Vec<String>]) -> bool {
             [name, value] => match name.as_str() {
                 "h" => uuid(value),
                 "client-id" => value.encode_utf16().count() <= 128,
-                "expected-revision" => {
-                    value == "none"
-                        || (value.len() == 64
-                            && value
-                                .bytes()
-                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-                }
+                "expected-revision" => value == "none" || is_hex64(value),
                 _ => false,
             },
             _ => false,

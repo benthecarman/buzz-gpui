@@ -14,7 +14,7 @@ pub mod setup;
 
 use crate::discovery::is_uuid;
 use crate::event::{Verified, kinds};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use buzz_desktop::relay::kit as native;
 use buzz_identity::Identity;
 use nostr::prelude::EventId;
@@ -664,13 +664,6 @@ pub fn draft(identity: &Identity, record: &KitRecord) -> Result<crate::messages:
             vec!["t".into(), record.tag().into()],
         ],
     })
-}
-
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
 }
 
 /// Every recipe of the viewer, across communities (`refresh`).
