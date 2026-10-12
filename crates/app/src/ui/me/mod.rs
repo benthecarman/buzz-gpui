@@ -31,7 +31,7 @@ use buzz_ui::{ActiveTheme, Button, Icon, IconName, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use new_session::NewSession;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// buzz-app's legacy Sessions page, which now opens Me.
@@ -114,6 +114,8 @@ pub struct MeModel {
     pub autofocus: bool,
     pub kit: Arc<MeKitSnapshot>,
     pub me: Arc<SidebarState>,
+    /// The conversations placed in Me, read from `kit` as it changes.
+    placed: HashSet<String>,
     /// Each Me conversation's tabs, by community and channel, apart from
     /// its tabs in Messages (`useChannelTabState(..., "me")`).
     tabs: HashMap<(String, String), TabState>,
@@ -141,6 +143,7 @@ impl MeModel {
                 autofocus: true,
                 kit: Arc::default(),
                 me: Arc::default(),
+                placed: HashSet::new(),
                 tabs: HashMap::new(),
                 _tasks: Vec::new(),
                 _community: None,
@@ -165,11 +168,13 @@ impl MeModel {
         self._community = None;
         self.kit = Arc::default();
         self.me = Arc::default();
+        self.placed.clear();
         if let Some(community) = current {
             let kit = community.read(cx).session.me_kit().clone();
             self._tasks
                 .push(mirror(kit.watch(), cx, |this: &mut Self, value| {
-                    this.kit = value
+                    this.placed = value.me_channels().into_iter().collect();
+                    this.kit = value;
                 }));
             self._tasks
                 .push(mirror(kit.watch_me(), cx, |this: &mut Self, value| {
@@ -223,13 +228,12 @@ impl MeModel {
         let Some(community) = &self.community else {
             return Vec::new();
         };
-        let placed = self.kit.me_channels();
         let mut list: Vec<ChannelSummary> = community
             .read(cx)
             .snapshot
             .channels
             .iter()
-            .filter(|channel| !channel.archived && placed.contains(&channel.id))
+            .filter(|channel| !channel.archived && self.placed.contains(&channel.id))
             .cloned()
             .collect();
         list.sort_by(|a, b| {
@@ -258,7 +262,7 @@ impl MeModel {
 
     /// Whether the conversation is placed in Me (`placement.has`).
     pub fn placed(&self, id: &str) -> bool {
-        self.kit.ready() && self.kit.me_channels().iter().any(|channel| channel == id)
+        self.kit.ready() && self.placed.contains(id)
     }
 }
 
