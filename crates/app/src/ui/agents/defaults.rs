@@ -406,6 +406,7 @@ impl DefaultsCard {
             cx.subscribe(&search_input, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&name_input, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&value_input, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.on_release(|this: &mut Self, cx| this.release_lookup(cx)),
         ];
         Self {
             host,
@@ -701,12 +702,17 @@ impl DefaultsCard {
     fn cancel_lookup(&mut self, cx: &mut Context<Self>) {
         self.lookup.generation += 1;
         self.lookup.busy = false;
+        self.release_lookup(cx);
+        self.lookup.status = Some("Cancelled. Retry when ready.".into());
+        cx.notify();
+    }
+
+    /// Cancels the lookup in flight, if any: the host runs one at a time.
+    fn release_lookup(&mut self, cx: &mut App) {
         if let Some(handle) = self.lookup.handle.take() {
             self.host
                 .update(cx, |host, cx| host.cancel_models(&handle, cx));
         }
-        self.lookup.status = Some("Cancelled. Retry when ready.".into());
-        cx.notify();
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -1548,6 +1554,7 @@ impl DefaultsCard {
             )
         );
         if key != self.lookup.key {
+            self.release_lookup(cx);
             self.lookup = Lookup {
                 key,
                 generation: self.lookup.generation + 1,
