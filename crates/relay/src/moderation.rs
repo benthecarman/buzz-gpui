@@ -95,6 +95,7 @@ pub fn members_from_snapshot(
         return Err("Member list is not signed by this community".into());
     }
     let mut members: Vec<Member> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for tag in event.tags.iter() {
         let tag = tag.as_slice();
         if tag.first().map(String::as_str) != Some("member") {
@@ -103,7 +104,7 @@ pub fn members_from_snapshot(
         let Some(pubkey) = tag.get(1).filter(|key| is_hex_key(key)) else {
             continue;
         };
-        if members.iter().any(|member| &member.pubkey == pubkey) {
+        if !seen.insert(pubkey) {
             continue;
         }
         let role = tag

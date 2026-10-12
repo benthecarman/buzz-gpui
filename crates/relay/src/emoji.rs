@@ -13,7 +13,7 @@ use crate::messages::{CustomEmoji, EmojiCatalog, EventTemplate, normalize_shortc
 use crate::socket::Filter;
 use nostr::prelude::Event;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// The `d` tag of every member's set.
@@ -188,6 +188,7 @@ pub fn suggest_shortcode(file_name: &str) -> Option<String> {
 /// first per code wins.
 pub fn set_entries(event: &Event) -> Vec<CustomEmoji> {
     let mut entries: Vec<CustomEmoji> = Vec::new();
+    let mut seen = HashSet::new();
     for tag in event.tags.iter().map(|tag| tag.as_slice()) {
         let [name, code, url, ..] = tag else {
             continue;
@@ -198,7 +199,7 @@ pub fn set_entries(event: &Event) -> Vec<CustomEmoji> {
         let Some(shortcode) = normalize_shortcode(code) else {
             continue;
         };
-        if !entries.iter().any(|entry| entry.shortcode == shortcode) {
+        if seen.insert(shortcode.clone()) {
             entries.push(CustomEmoji {
                 shortcode,
                 url: url.trim().to_owned(),
