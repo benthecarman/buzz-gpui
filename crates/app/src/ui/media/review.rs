@@ -432,6 +432,8 @@ pub struct Review {
     download_failed: Option<String>,
     /// Last pointer activity over the image stage; `None` once it left.
     activity: Option<Instant>,
+    /// Redraws when the toolbar goes idle, for the activity it was set at.
+    idle_timer: Option<(Instant, Task<()>)>,
     /// The stage's bounds as last drawn.
     stage: Rc<Cell<Bounds<Pixels>>>,
     community: Option<Entity<Community>>,
@@ -536,6 +538,7 @@ impl Review {
             },
             origin: origin.filter(|_| !reduce),
             drawn: None,
+            idle_timer: None,
             _subscriptions: subscriptions,
         };
         review.show(seconds, cx);
@@ -1330,15 +1333,17 @@ impl Review {
         let focused = window.last_input_was_keyboard() && self.focus.contains_focused(window, cx);
         let idle = self.activity.is_none_or(|at| at.elapsed() >= IDLE);
         let toolbar_hidden = idle && !copy_visible && !focused;
+        // One timer per activity, not one per draw.
         if let Some(at) = self.activity
             && at.elapsed() < IDLE
+            && self.idle_timer.as_ref().is_none_or(|(set, _)| *set != at)
         {
             let wait = IDLE - at.elapsed();
-            cx.spawn(async move |this, cx| {
+            let task = cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
+            });
+            self.idle_timer = Some((at, task));
         }
         let download_failed = self.download_failed.as_deref() == Some(self.selected.as_str());
         div()
