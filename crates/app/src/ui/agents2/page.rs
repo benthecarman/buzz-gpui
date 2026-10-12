@@ -264,8 +264,10 @@ impl Agents2Page {
         }
     }
 
-    fn tile(&self, agent: &Agent, active: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// One agent's tile, built while the service's agents are borrowed.
+    fn tile(agent: &Agent, active: bool, page: &WeakEntity<Self>, cx: &App) -> AnyElement {
         let c = *cx.colors();
+        let page = page.clone();
         let kind = type_of(&agent.agent_type, cx);
         let pubkey = agent.pubkey.clone();
         div()
@@ -325,14 +327,16 @@ impl Agents2Page {
                     .line_clamp(2)
                     .child(summary_of(agent, kind.as_ref())),
             )
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                window.focus(&this.grid, cx);
-                if event.click_count() >= 2 {
-                    this.build(pubkey.clone(), window, cx);
-                } else {
-                    this.browse((!active).then(|| pubkey.clone()), cx);
-                }
-            }))
+            .on_click(move |event: &ClickEvent, window, cx| {
+                let _ = page.update(cx, |this, cx| {
+                    window.focus(&this.grid, cx);
+                    if event.click_count() >= 2 {
+                        this.build(pubkey.clone(), window, cx);
+                    } else {
+                        this.browse((!active).then(|| pubkey.clone()), cx);
+                    }
+                });
+            })
             .into_any_element()
     }
 
@@ -474,16 +478,14 @@ impl Render for Agents2Page {
         let Some(service) = Agents2::global(cx) else {
             return div();
         };
-        let (status, agents) = {
-            let read = service.read(cx);
-            (read.status().clone(), read.agents().to_vec())
-        };
-        let find = |pubkey: Option<&String>| {
-            pubkey.and_then(|pubkey| agents.iter().find(|agent| &agent.pubkey == pubkey).cloned())
+        let status = service.read(cx).status().clone();
+        // Only the shown agent is copied; the grid borrows the rest.
+        let find = |pubkey: Option<&String>, cx: &App| {
+            pubkey.and_then(|pubkey| service.read(cx).find(pubkey).cloned())
         };
         // A deleted or out-of-scope agent's Build falls back to the grid.
         let building = match &self.frame {
-            Frame::Build { pubkey } => find(Some(pubkey)),
+            Frame::Build { pubkey } => find(Some(pubkey), cx),
             _ => None,
         };
         if building.is_none() && self.build.is_some() {
@@ -494,7 +496,7 @@ impl Render for Agents2Page {
             };
         }
         let (selected, creating) = match &self.frame {
-            Frame::Browse { selected, creating } => (find(selected.as_ref()), *creating),
+            Frame::Browse { selected, creating } => (find(selected.as_ref(), cx), *creating),
             Frame::Build { .. } => (None, false),
         };
         let has_types = !types(cx).is_empty();
@@ -546,16 +548,16 @@ impl Render for Agents2Page {
                         .as_ref()
                         .map(|agent| self.peek(agent, window, cx).into_any_element())
                 };
-                let inventory: AnyElement = if !agents.is_empty() {
-                    let index_selected = selected.as_ref().map(|a| a.pubkey.clone());
-                    let tiles: Vec<AnyElement> = agents
+                let inventory: AnyElement = if !service.read(cx).agents().is_empty() {
+                    let index_selected = selected.as_ref().map(|a| a.pubkey.as_str());
+                    let page = cx.entity().downgrade();
+                    let tiles: Vec<AnyElement> = service
+                        .read(cx)
+                        .agents()
                         .iter()
                         .map(|agent| {
-                            self.tile(
-                                agent,
-                                index_selected.as_deref() == Some(agent.pubkey.as_str()),
-                                cx,
-                            )
+                            let active = index_selected == Some(agent.pubkey.as_str());
+                            Self::tile(agent, active, &page, cx)
                         })
                         .collect();
                     let width = self.width.clone();
