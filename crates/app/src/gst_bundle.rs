@@ -18,7 +18,32 @@
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Initializes GStreamer once for the whole app, and says whether it can
+/// be used. The first call loads the plugin registry, which can take a
+/// moment, so [`warm_up`] makes it at launch, off the UI thread.
+pub fn init() -> Result<(), String> {
+    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
+    INIT.get_or_init(|| gst::init().map_err(|error| error.to_string()))
+        .clone()
+}
+
+/// Starts [`init`] on a thread of its own, so the first sound or video
+/// does not wait for it on the UI thread.
+pub fn warm_up() {
+    let spawned = std::thread::Builder::new()
+        .name("gstreamer-init".into())
+        .spawn(|| {
+            if let Err(error) = init() {
+                tracing::warn!(%error, "GStreamer is unavailable");
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not start GStreamer early");
+    }
+}
 
 /// Called first thing in `main`, before any other thread starts.
 pub fn use_bundled() {
@@ -121,7 +146,7 @@ const PLAY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// `--gst-check`: see the module docs. False on any failure.
 pub fn self_check(uris: &[String]) -> bool {
-    if let Err(error) = gst::init() {
+    if let Err(error) = init() {
         println!("FAIL GStreamer did not initialize: {error}");
         return false;
     }

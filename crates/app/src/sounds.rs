@@ -179,7 +179,7 @@ impl Player {
         let Some(bytes) = sound.bytes() else {
             return;
         };
-        if let Err(error) = gstreamer_ready() {
+        if let Err(error) = crate::gst_bundle::init() {
             tracing::warn!(%error, "GStreamer is unavailable; notification sounds are off");
             return;
         }
@@ -218,12 +218,6 @@ impl Player {
             }
         });
     }
-}
-
-fn gstreamer_ready() -> Result<(), String> {
-    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    INIT.get_or_init(|| gst::init().map_err(|error| error.to_string()))
-        .clone()
 }
 
 /// A `playbin` reading the whole file from memory.
@@ -286,7 +280,9 @@ mod tests {
     /// MP3 decoder is missing.
     #[test]
     fn bundled_sounds_decode() {
-        if gstreamer_ready().is_err() || gst::ElementFactory::find("mpegaudioparse").is_none() {
+        if crate::gst_bundle::init().is_err()
+            || gst::ElementFactory::find("mpegaudioparse").is_none()
+        {
             eprintln!("GStreamer MP3 support missing; skipping");
             return;
         }

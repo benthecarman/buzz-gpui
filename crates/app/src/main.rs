@@ -85,6 +85,7 @@ fn main() {
     };
     let primary = instance.is_some();
     deep_links::register_scheme();
+    gst_bundle::warm_up();
     let config = config::Config::load();
     let app = gpui_kit::application().with_assets(buzz_ui::Assets);
     // Launch Services opens the running app rather than a second copy, and
