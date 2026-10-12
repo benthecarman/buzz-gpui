@@ -962,6 +962,8 @@ impl ShareDialog {
         if self.reviewed_json != current {
             self.reviewed_json = current;
             self.reviewed = false;
+            // Files encoded from the old configuration are stale too.
+            self.encoded.clear();
         }
         let open = self.review_open;
         Some(
