@@ -29,6 +29,12 @@ impl Scope {
     }
 }
 
+/// `text` with `<` and `>` escaped, so untrusted text cannot close or open
+/// a section.
+pub fn escaped(text: &str) -> String {
+    text.replace('<', "\\u003c").replace('>', "\\u003e")
+}
+
 fn section(tag: &str, body: &str, attributes: &str) -> String {
     format!("<{tag}{attributes}>\n{}\n</{tag}>", body.trim())
 }
@@ -83,11 +89,12 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// Escaped: members name channels.
     fn label(&self) -> String {
-        match &self.name {
+        escaped(&match &self.name {
             Some(name) => format!("{name} (#{})", self.id),
             None => self.id.clone(),
-        }
+        })
     }
 }
 
@@ -123,11 +130,12 @@ pub fn iso_time(seconds: u64) -> String {
         .unwrap_or_default()
 }
 
+/// Escaped: names come from members' profiles.
 fn actor(pubkey: &str, name: &dyn Fn(&str) -> Option<String>) -> String {
-    match name(pubkey) {
+    escaped(&match name(pubkey) {
         Some(label) => format!("{label} ({pubkey})"),
         None => pubkey.to_string(),
-    }
+    })
 }
 
 /// One turn: routing context, unseen thread context, then the event.
@@ -212,7 +220,7 @@ pub fn turn_prompt(input: &TurnInput) -> String {
                     index + 1,
                     actor(&message.pubkey, input.name),
                     iso_time(message.created_at),
-                    message.content
+                    escaped(&message.content)
                 )
             })
             .collect::<Vec<_>>()
@@ -328,20 +336,20 @@ fn event_block(input: &TurnInput) -> String {
     if !mentions.is_empty() {
         parsed.push(format!("mentions=[{}]", mentions.join(", ")));
     }
-    let from = match name(&event.pubkey) {
+    let from = escaped(&match name(&event.pubkey) {
         Some(label) => format!("{label} (npub: {npub}, hex: {})", event.pubkey),
         None => format!("{npub} (hex: {})", event.pubkey),
-    };
+    });
     let mut lines = vec![
-        format!("Event ID: {}", event.id),
+        format!("Event ID: {}", escaped(&event.id)),
         format!("Channel: {}", channel.label()),
         format!("Kind: {}", event.kind),
         format!("From: {from}"),
         format!("Time: {}", iso_time(event.created_at)),
-        format!("Content: {}", event.content),
+        format!("Content: {}", escaped(&event.content)),
         format!(
             "Tags: {}",
-            serde_json::to_string(&event.tags).unwrap_or_default()
+            escaped(&serde_json::to_string(&event.tags).unwrap_or_default())
         ),
     ];
     if !parsed.is_empty() {

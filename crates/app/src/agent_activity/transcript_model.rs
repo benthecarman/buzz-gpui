@@ -203,13 +203,13 @@ fn prompt_message(sections: &[Section]) -> (String, Option<String>) {
             let from = block
                 .lines()
                 .find_map(|line| line.strip_prefix("From: "))
-                .map(str::to_string);
+                .map(unescaped);
             let Some(start) = block.find("\nContent: ") else {
                 continue;
             };
             let end = block.rfind("\nTags: ").filter(|end| *end > start);
             let content = &block[start + 10..end.unwrap_or(block.len())];
-            contents.push(content.trim().to_string());
+            contents.push(unescaped(content.trim()));
             if let Some(from) = from {
                 let name = strip_key_suffix(&from);
                 if !authors.contains(&name) {
@@ -220,6 +220,11 @@ fn prompt_message(sections: &[Section]) -> (String, Option<String>) {
     }
     let author = (!authors.is_empty()).then(|| authors.join(", "));
     (contents.join("\n\n"), author)
+}
+
+/// Undoes the prompt's escaping of `<` and `>` in untrusted text.
+fn unescaped(text: &str) -> String {
+    text.replace("\\u003c", "<").replace("\\u003e", ">")
 }
 
 /// Splits before each `\n--- Event N ` line.

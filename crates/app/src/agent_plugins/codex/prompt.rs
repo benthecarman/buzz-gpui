@@ -3,6 +3,7 @@
 //! request as quoted event data.
 
 use super::config::Config;
+use crate::agent_plugins::claude_code::prompt::escaped;
 use crate::agent_plugins::claude_code::runtime::thread_reference;
 use crate::buzz_mcp::BuzzEvent;
 use serde::Serialize;
@@ -18,10 +19,7 @@ pub struct Conversation {
 
 /// JSON with `<` and `>` escaped, so quoted data cannot close a section.
 pub fn quoted(value: &impl Serialize) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_default()
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
+    escaped(&serde_json::to_string(value).unwrap_or_default())
 }
 
 /// The thread an event belongs to: its root, or itself.
