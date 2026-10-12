@@ -155,9 +155,12 @@ impl Engine {
             playbin.set_property("video-sink", null_sink()?);
         }
         let bus = playbin.bus().ok_or("The player has no bus")?;
-        playbin
-            .set_state(gst::State::Paused)
-            .map_err(|_| "This media cannot be played".to_string())?;
+        if playbin.set_state(gst::State::Paused).is_err() {
+            // A failed change can leave it part way; it must reach Null
+            // before it is freed.
+            let _ = playbin.set_state(gst::State::Null);
+            return Err("This media cannot be played".into());
+        }
         Ok(Self {
             playbin,
             bus,
@@ -284,8 +287,27 @@ fn seek_target(seconds: f64, duration: Option<f64>) -> Option<gst::ClockTime> {
 }
 
 impl Drop for Engine {
+    /// A pipeline that never prerolled may never stop either: stopping
+    /// waits for its streaming threads. Stop it elsewhere so dropping a
+    /// player never blocks the UI.
     fn drop(&mut self) {
-        let _ = self.playbin.set_state(gst::State::Null);
+        stop_elsewhere(self.playbin.clone());
+    }
+}
+
+fn stop_elsewhere(pipeline: gst::Element) {
+    std::thread::spawn(move || {
+        let _ = pipeline.set_state(gst::State::Null);
+    });
+}
+
+/// A pipeline set to Null when it goes, so an early return cannot free
+/// one still running.
+pub(super) struct Stopping(pub gst::Element);
+
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        let _ = self.0.set_state(gst::State::Null);
     }
 }
 
@@ -315,10 +337,7 @@ pub fn probe_source(source: Source, kind: Kind) -> Result<Probe, String> {
     while !engine.ready {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            // A pipeline that never prerolled may never stop either:
-            // stopping waits for its streaming threads. Stop it elsewhere
-            // so the timeout still returns.
-            std::thread::spawn(move || drop(engine));
+            // Dropping stops it elsewhere, so the timeout still returns.
             return Err("Timed out decoding the video".into());
         }
         let wait = gst::ClockTime::from_mseconds(left.as_millis().min(200) as u64);

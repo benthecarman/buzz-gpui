@@ -143,9 +143,12 @@ impl Recorder {
                 .build(),
         );
         let bus = pipeline.bus().ok_or(NO_MICROPHONE)?;
-        pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|_| NO_MICROPHONE.to_string())?;
+        if pipeline.set_state(gst::State::Playing).is_err() {
+            // A failed change can leave it part way; it must reach Null
+            // before it is freed.
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(NO_MICROPHONE.into());
+        }
         Ok(Self {
             pipeline,
             bus,
@@ -335,7 +338,10 @@ fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
         hex(&avc_config())
     );
     let pipeline = gst::parse::launch(&description).map_err(|error| error.to_string())?;
+    // Every early return below stops it.
+    let pipeline = super::engine::Stopping(pipeline);
     let bin = pipeline
+        .0
         .downcast_ref::<gst::Bin>()
         .ok_or("pipeline is not a bin")?;
     let source = |name: &str| {
@@ -344,8 +350,9 @@ fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
             .ok_or_else(|| format!("no {name} source"))
     };
     let (audio, video) = (source("audio")?, source("video")?);
-    let bus = pipeline.bus().ok_or("no bus")?;
+    let bus = pipeline.0.bus().ok_or("no bus")?;
     pipeline
+        .0
         .set_state(gst::State::Playing)
         .map_err(|error| error.to_string())?;
 
@@ -392,7 +399,7 @@ fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
     audio.end_of_stream().map_err(|error| error.to_string())?;
 
     let deadline = Instant::now() + ENCODE_TIMEOUT;
-    let outcome = loop {
+    loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break Err("timed out".to_string());
@@ -406,9 +413,7 @@ fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
             gst::MessageView::Error(error) => break Err(error.error().to_string()),
             _ => {}
         }
-    };
-    let _ = pipeline.set_state(gst::State::Null);
-    outcome
+    }
 }
 
 #[cfg(test)]
