@@ -267,10 +267,13 @@ impl ImportDialog {
         cx.spawn(async move |this, cx| {
             let response = response.await;
             let _ = this.update(cx, |this, cx| {
+                // Always clear it: a stale result is dropped, but the
+                // import itself has finished.
+                this.importing = false;
+                cx.notify();
                 if this.generation != generation {
                     return;
                 }
-                this.importing = false;
                 match response {
                     Ok(_) if repair => {
                         this.repaired = Some(candidate.name.clone());
@@ -820,7 +823,9 @@ impl ImportDialog {
                             .child(field(
                                 "Destination community",
                                 None,
-                                TextField::new(&self.destination).surface(Surface::Floating),
+                                TextField::new(&self.destination)
+                                    .surface(Surface::Floating)
+                                    .disabled(busy || self.importing),
                                 &c,
                             ))
                             .child(
