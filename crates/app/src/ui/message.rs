@@ -1533,6 +1533,9 @@ fn reaction_count(key: SharedString, value: usize) -> AnyElement {
             std::cell::RefCell::new(HashMap::new());
     }
     let (from, version) = SHOWN.with_borrow_mut(|shown| {
+        if shown.len() > 4096 {
+            shown.clear();
+        }
         let entry = shown.entry(key.clone()).or_insert((value, value, 0));
         if entry.1 != value {
             *entry = (entry.1, value, entry.2 + 1);
@@ -1619,7 +1622,10 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElem
         let (names, mine) = reactor_names(group, &rows.viewer, rows.names());
         let people = names.len();
         let glyph = reaction_glyph(group, 14., rows, cx);
-        let key = SharedString::from(format!("reaction-{id}-{index}"));
+        // By the group, not its place: a count stays with its emoji when
+        // groups come and go.
+        let emoji = group.emoji.as_ref().map_or("", |emoji| emoji.url.as_str());
+        let key = SharedString::from(format!("reaction-{id}-{}-{emoji}", group.content));
         let mut pill = div()
             .id(key.clone())
             .flex()
