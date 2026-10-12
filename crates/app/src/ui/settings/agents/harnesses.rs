@@ -173,6 +173,59 @@ fn hint_text(hint: &str, c: &Colors) -> StyledText {
     StyledText::new(text).with_highlights(code.into_iter().map(|range| (range, style)))
 }
 
+/// A harness row and its first line: the mark and label, then the status
+/// and any install button.
+fn row_header(
+    mark: impl IntoElement,
+    label: impl Into<SharedString>,
+    status: &'static str,
+    install: Option<Button>,
+    c: &Colors,
+) -> Div {
+    div().flex().flex_col().py(rems(0.75)).text_body_sm().child(
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(rems(0.5))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(rems(0.75))
+                    .child(mark)
+                    .child(label.into()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(rems(0.5))
+                    .child(div().text_color(c.text_subtle).child(status))
+                    .children(install),
+            ),
+    )
+}
+
+/// Installs `kind` on `host`; spins while `install` runs, and is off while
+/// `blocked` (offline, or another install runs).
+fn install_button(
+    id: &'static str,
+    label: &'static str,
+    host: &Entity<HostConnection>,
+    kind: HarnessKind,
+    install: &Install,
+    blocked: bool,
+) -> Button {
+    let host = host.clone();
+    Button::new(id, label)
+        .size(ButtonSize::Sm)
+        .loading(install.installing)
+        .disabled(blocked || install.installing)
+        .on_click(move |_, _, cx| host.update(cx, |host, cx| host.install(kind, cx)))
+}
+
 /// What the last sign-in check was made for; another check runs when it
 /// changes.
 #[derive(Clone, Debug, PartialEq)]
@@ -599,43 +652,24 @@ impl Harnesses {
         );
         let status = harness.and_then(|harness| harness.status);
         let ready = status == Some(HarnessStatus::Ready);
-        let mut trailing = div()
-            .flex()
-            .items_center()
-            .gap(rems(0.5))
-            .child(div().text_color(c.text_subtle).child(status_label(status)));
-        if let Some(harness) = harness.filter(|h| h.kind == HarnessKind::Pi)
-            && (!ready || harness.update_supported)
-            && harness.install_supported
-            && !pi.report.as_ref().is_some_and(|report| report.ready)
-        {
-            let host = host.clone();
-            trailing = trailing.child(
-                Button::new("install-pi", if ready { "Update Pi" } else { "Install" })
-                    .size(ButtonSize::Sm)
-                    .loading(pi.installing)
-                    .disabled(!connected || other_installing || pi.installing)
-                    .on_click(move |_, _, cx| {
-                        host.update(cx, |host, cx| host.install(HarnessKind::Pi, cx))
-                    }),
-            );
-        }
-        let mut row = div().flex().flex_col().py(rems(0.75)).text_body_sm().child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap(rems(0.5))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(rems(0.75))
-                        .child(harness::mark(kind, 32.))
-                        .child(label.clone()),
-                )
-                .child(trailing),
+        let install = harness
+            .filter(|h| h.kind == HarnessKind::Pi)
+            .filter(|harness| {
+                (!ready || harness.update_supported)
+                    && harness.install_supported
+                    && !pi.report.as_ref().is_some_and(|report| report.ready)
+            })
+            .map(|_| {
+                let label = if ready { "Update Pi" } else { "Install" };
+                let blocked = !connected || other_installing;
+                install_button("install-pi", label, host, HarnessKind::Pi, &pi, blocked)
+            });
+        let mut row = row_header(
+            harness::mark(kind, 32.),
+            label,
+            status_label(status),
+            install,
+            &c,
         );
         if let Some(harness) = harness.filter(|h| !ready && preset(h.kind).is_some()) {
             row = row.child(self.preset_details(harness, cx));
@@ -651,6 +685,34 @@ impl Harnesses {
             }
         }
         row
+    }
+
+    /// The sign-in disclosure: the login command to run in a terminal.
+    fn sign_in_steps(
+        &self,
+        id: &'static str,
+        summary: &'static str,
+        owner: &'static str,
+        login: String,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.details(
+            id,
+            summary,
+            move || {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(0.75))
+                    .mt(rems(0.75))
+                    .child(format!(
+                        "Run this in your terminal and follow {owner}’s sign-in steps:"
+                    ))
+                    .child(code_block(login))
+                    .into_any_element()
+            },
+            cx,
+        )
     }
 
     /// buzz-app's `.piSetup` indent: 12px above, a rule on the left.
@@ -802,39 +864,23 @@ impl Harnesses {
             .is_some_and(|report| report.error.is_some())
             || install.error.is_some();
         let show_details = install.installing || failed || needs_guidance;
-        let mut trailing = div().flex().items_center().gap(rems(0.5)).child(
-            div()
-                .text_color(c.text_subtle)
-                .child(claude_label(setup.status, auth)),
-        );
-        if !tools_ready && setup.install_supported {
-            let host = host.clone();
-            trailing = trailing.child(
-                Button::new("install-claude", "Install")
-                    .size(ButtonSize::Sm)
-                    .loading(install.installing)
-                    .disabled(!connected || other_installing || install.installing)
-                    .on_click(move |_, _, cx| {
-                        host.update(cx, |host, cx| host.install(HarnessKind::Claude, cx))
-                    }),
-            );
-        }
-        let mut row = div().flex().flex_col().py(rems(0.75)).text_body_sm().child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap(rems(0.5))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(rems(0.75))
-                        .child(Brand::new(BrandMark::Claude).size(32.))
-                        .child("Claude Code"),
-                )
-                .child(trailing),
+        let blocked = !connected || other_installing;
+        let button = (!tools_ready && setup.install_supported).then(|| {
+            install_button(
+                "install-claude",
+                "Install",
+                host,
+                HarnessKind::Claude,
+                &install,
+                blocked,
+            )
+        });
+        let mut row = row_header(
+            Brand::new(BrandMark::Claude).size(32.),
+            "Claude Code",
+            claude_label(setup.status, auth),
+            button,
+            &c,
         );
         if !show_details {
             return row;
@@ -882,19 +928,11 @@ impl Harnesses {
             ));
         }
         if needs_guidance && let Some(login) = setup.login_command.clone() {
-            block = block.child(self.details(
+            block = block.child(self.sign_in_steps(
                 "claude-sign-in",
                 "Sign in to Claude Code",
-                || {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(rems(0.75))
-                        .mt(rems(0.75))
-                        .child("Run this in your terminal and follow Claude’s sign-in steps:")
-                        .child(code_block(login))
-                        .into_any_element()
-                },
+                "Claude",
+                login,
                 cx,
             ));
         }
@@ -919,39 +957,23 @@ impl Harnesses {
         let auth = self.codex.auth;
         let offer_install =
             codex.install_supported && codex.status == Some(HarnessStatus::AdapterNeeded);
-        let mut trailing = div().flex().items_center().gap(rems(0.5)).child(
-            div()
-                .text_color(c.text_subtle)
-                .child(codex_label(codex.status, auth)),
-        );
-        if offer_install {
-            let host = host.clone();
-            trailing = trailing.child(
-                Button::new("install-codex", "Install")
-                    .size(ButtonSize::Sm)
-                    .loading(install.installing)
-                    .disabled(!connected || other_installing || install.installing)
-                    .on_click(move |_, _, cx| {
-                        host.update(cx, |host, cx| host.install(HarnessKind::Codex, cx))
-                    }),
-            );
-        }
-        let mut row = div().flex().flex_col().py(rems(0.75)).text_body_sm().child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap(rems(0.5))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(rems(0.75))
-                        .child(harness::mark(HarnessKind::Codex, 32.))
-                        .child(codex.label.clone()),
-                )
-                .child(trailing),
+        let blocked = !connected || other_installing;
+        let button = offer_install.then(|| {
+            install_button(
+                "install-codex",
+                "Install",
+                host,
+                HarnessKind::Codex,
+                &install,
+                blocked,
+            )
+        });
+        let mut row = row_header(
+            harness::mark(HarnessKind::Codex, 32.),
+            codex.label.clone(),
+            codex_label(codex.status, auth),
+            button,
+            &c,
         );
         if install.installing {
             row = row.child(
@@ -992,19 +1014,11 @@ impl Harnesses {
             && matches!(auth, Auth::Known(Some(false) | None))
             && let Some(login) = codex.login_command.clone()
         {
-            row = row.child(Self::setup_block(&c).child(self.details(
+            row = row.child(Self::setup_block(&c).child(self.sign_in_steps(
                 "codex-sign-in",
                 "Sign in to Codex",
-                || {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(rems(0.75))
-                        .mt(rems(0.75))
-                        .child("Run this in your terminal and follow Codex’s sign-in steps:")
-                        .child(code_block(login))
-                        .into_any_element()
-                },
+                "Codex",
+                login,
                 cx,
             )));
         }
