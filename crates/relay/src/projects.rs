@@ -14,6 +14,7 @@
 use crate::event::{Verified, is_newer};
 use crate::reader::{ReadError, ReadErrorKind};
 use crate::socket::Filter;
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -36,6 +37,8 @@ const COMMENT: u16 = 1111;
 pub const GIT_READ_BYTES: usize = 4 * 1024 * 1024;
 /// Discovery and item lists are finite (`limit: 100`).
 const LIST_LIMIT: usize = 100;
+/// Member repositories read at once.
+const MEMBER_READS: usize = 6;
 /// Deletion and discussion reads (`limit: 500`); a full one is unavailable.
 const ACTIVITY_LIMIT: usize = 500;
 
@@ -848,10 +851,19 @@ impl<R: ProjectReads> Destinations<R> {
         } else {
             let mut members: Vec<&str> = values(&entity.event, "a");
             members.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            let coordinates = members
+                .iter()
+                .map(|address| repository_coordinate(address).ok_or(EntityFailure::Unavailable))
+                .collect::<Result<Vec<_>, _>>()?;
+            // A few at a time, in order: the relay lane runs six at once.
+            let mut reads = futures::stream::iter(coordinates)
+                .map(|(owner, dtag)| async move {
+                    self.coordinate(EntityKind::Repo, &owner, &dtag).await
+                })
+                .buffered(MEMBER_READS);
             for address in members {
-                let (owner, dtag) =
-                    repository_coordinate(address).ok_or(EntityFailure::Unavailable)?;
-                match self.coordinate(EntityKind::Repo, &owner, &dtag).await {
+                let read = reads.next().await.expect("one read per member");
+                match read {
                     Ok(repository) => repositories.push(repository),
                     Err(EntityFailure::NotFound | EntityFailure::Denied) => {
                         unavailable_repositories.push(address.to_string())
