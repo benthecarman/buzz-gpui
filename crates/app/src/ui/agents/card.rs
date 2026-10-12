@@ -252,11 +252,10 @@ impl AgentsPage {
         // An agent set up in the shown community opens its profile
         // (`onViewProfile`); otherwise the tile manages it.
         let view_profile = AppState::current(cx).is_some_and(|community| {
-            let community = community.read(cx).origin.http();
-            setups.iter().any(|setup| {
-                buzz_relay_client::RelayOrigin::parse(&setup.agent.relay_url)
-                    .is_ok_and(|origin| origin.http() == community)
-            })
+            let community = &community.read(cx).origin;
+            setups
+                .iter()
+                .any(|setup| inventory::in_community(&setup.agent.relay_url, community))
         });
         let manage_key = pubkey.clone();
         let manage = cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -438,11 +437,10 @@ impl AgentsPage {
             move |this, _, _, cx| this.set_menu(Some(OpenMenu::Card(pubkey.clone())), cx)
         }));
         let view_profile = AppState::current(cx).is_some_and(|community| {
-            let community = community.read(cx).origin.http();
-            setups.iter().any(|setup| {
-                buzz_relay_client::RelayOrigin::parse(&setup.agent.relay_url)
-                    .is_ok_and(|origin| origin.http() == community)
-            })
+            let community = &community.read(cx).origin;
+            setups
+                .iter()
+                .any(|setup| inventory::in_community(&setup.agent.relay_url, community))
         });
         // With nothing to act on, the button shows the identity's npub
         // instead (buzz-app's "{name} identity details" popover).

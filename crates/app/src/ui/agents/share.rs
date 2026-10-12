@@ -7,13 +7,14 @@
 //! [`open`]. A send journals its intent in the session's outbox, so one
 //! interrupted by a restart comes back as "Retry send".
 
+use super::editor::session_policy;
+use super::inventory::in_community;
 use super::snapshots::{
-    self, LEVELS, LayerDialog, WindowAction, alert, checked, inline_select, level_label, paragraph,
-    pre, read_memories, summary,
+    self, LEVELS, LayerDialog, WindowAction, alert, checked, inline_select, level_label, on_tokio,
+    paragraph, pre, read_memories, summary,
 };
 use crate::community::{AppState, Community};
 use crate::hosts::{HostConnection, Hosts};
-use crate::runtime::Runtime;
 use crate::snapshot::Kind;
 use crate::snapshot::manifest::{self, MemoryLevel, build_agent_snapshot};
 use crate::snapshot::png::{self, Format};
@@ -25,7 +26,7 @@ use buzz_host::api::Agent;
 use buzz_relay_client::{Delivery, Outbox, PeoplePage, Recovery, Session};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, Dialog, Icon, IconName, SearchField,
-    Surface, TypeStyled,
+    Surface, TextRole, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -88,14 +89,7 @@ pub(crate) fn open_agent(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(agent) = host
-        .read(cx)
-        .agents
-        .agents
-        .iter()
-        .find(|agent| agent.id == id)
-        .cloned()
-    else {
+    let Some(agent) = host.read(cx).agent(&id).cloned() else {
         return;
     };
     let Some(community) = AppState::current(cx) else {
@@ -103,27 +97,25 @@ pub(crate) fn open_agent(
         return;
     };
     host.update(cx, |host, cx| host.load_defaults(cx));
-    let community_url = community.read(cx).origin.websocket().to_string();
-    let same_community = buzz_relay_client::RelayOrigin::parse(&agent.relay_url)
-        .is_ok_and(|origin| origin.websocket() == community_url);
+    let same_community = in_community(&agent.relay_url, &community.read(cx).origin);
     let review = {
         let (host, id) = (host.clone(), id.clone());
         Rc::new(move |cx: &App| {
-            let agent = current(&host, &id, cx).ok_or("This agent no longer exists.")?;
+            let agent = host
+                .read(cx)
+                .agent(&id)
+                .cloned()
+                .ok_or("This agent no longer exists.")?;
             snapshots::review(&agent, &host, cx).map(|review| review.pretty())
         }) as Review
     };
     let encode: Encode = {
         let (host, id) = (host.clone(), id.clone());
         Rc::new(move |level, cx: &mut App| {
-            let Some(agent) = current(&host, &id, cx) else {
+            let Some(agent) = host.read(cx).agent(&id).cloned() else {
                 return Task::ready(Err("This agent no longer exists.".into()));
             };
-            let policy = host
-                .read(cx)
-                .defaults
-                .as_ref()
-                .and_then(|defaults| defaults.session_policy);
+            let policy = session_policy(&host, cx);
             if level != MemoryLevel::None && !same_community {
                 return Task::ready(Err(
                     "Memory reads require the source agent's community.".into()
@@ -162,26 +154,6 @@ pub(crate) fn open_agent(
         catalog,
     };
     open(community, source, window, cx);
-}
-
-/// Runs outbox work on tokio, where the outbox persists its journal.
-async fn tokio<T: Send + 'static>(
-    runtime: &tokio::runtime::Handle,
-    work: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
-) -> Result<T, String> {
-    runtime
-        .spawn(work)
-        .await
-        .unwrap_or_else(|_| Err("The request was cancelled.".into()))
-}
-
-fn current(host: &Entity<HostConnection>, id: &str, cx: &App) -> Option<Agent> {
-    host.read(cx)
-        .agents
-        .agents
-        .iter()
-        .find(|agent| agent.id == id)
-        .cloned()
 }
 
 /// Opens the share dialog for `source` in `community`.
@@ -327,7 +299,6 @@ impl ShareDialog {
     fn recover(&mut self, cx: &mut Context<Self>) {
         let session = self.session.clone();
         let key = self.recovery_key.clone();
-        let runtime = Runtime::handle(cx);
         self._watch = Some(cx.spawn(async move |this, cx| {
             let outbox = match session.outbox().await {
                 Some(outbox) => outbox,
@@ -341,16 +312,21 @@ impl ShareDialog {
             };
             // The outbox journals on tokio.
             let journal = outbox.clone();
-            let found = tokio(&runtime, async move {
-                journal.ready().await.map_err(|error| error.to_string())?;
-                let Some(saved) = share::recover(&journal.pending(), &key?)? else {
-                    return Ok(None);
-                };
-                let delivered = matches!(saved.delivery, Delivery::Accepted | Delivery::Seen);
-                let acknowledged = delivered && journal.acknowledge(&saved.event_id).await.is_ok();
-                Ok::<_, String>(Some((saved, delivered, acknowledged)))
-            })
-            .await;
+            let found = cx
+                .update(|cx| {
+                    on_tokio(cx, async move {
+                        journal.ready().await.map_err(|error| error.to_string())?;
+                        let Some(saved) = share::recover(&journal.pending(), &key?)? else {
+                            return Ok(None);
+                        };
+                        let delivered =
+                            matches!(saved.delivery, Delivery::Accepted | Delivery::Seen);
+                        let acknowledged =
+                            delivered && journal.acknowledge(&saved.event_id).await.is_ok();
+                        Ok::<_, String>(Some((saved, delivered, acknowledged)))
+                    })
+                })
+                .await;
             let restored: Result<(), String> = match found {
                 Ok(Some((saved, delivered, acknowledged))) if !acknowledged => {
                     let receipt = Receipt {
@@ -555,17 +531,19 @@ impl ShareDialog {
                 return self.fail_send(cx);
             }
             self.phase = Phase::Sending;
-            let runtime = Runtime::handle(cx);
             self.operation = Some(cx.spawn(async move |this, cx| {
-                let acknowledged = tokio(&runtime, async move {
-                    send::delivered(&outbox, &receipt).await?;
-                    outbox
-                        .acknowledge(&receipt.event_id)
-                        .await
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                .is_ok();
+                let acknowledged = cx
+                    .update(|cx| {
+                        on_tokio(cx, async move {
+                            send::delivered(&outbox, &receipt).await?;
+                            outbox
+                                .acknowledge(&receipt.event_id)
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .await
+                    .is_ok();
                 let _ = this.update(cx, |this, cx| {
                     if acknowledged {
                         this.finish(&name, cx);
@@ -594,7 +572,6 @@ impl ShareDialog {
         let pubkeys: Vec<String> = self.recipients.iter().map(|p| p.pubkey.clone()).collect();
         self.phase = Phase::Preparing;
         let encode = self.encode(level, cx);
-        let runtime = Runtime::handle(cx);
         self.operation = Some(cx.spawn(async move |this, cx| {
             let result: Result<Receipt, Option<Receipt>> = async {
                 let channel = session.open_dm(pubkeys).await.map_err(|_| None)?;
@@ -616,8 +593,10 @@ impl ShareDialog {
                 let event_id = {
                     let (outbox, origin, channel) =
                         (outbox.clone(), session.origin().clone(), channel.clone());
-                    tokio(&runtime, async move {
-                        send::queue(&outbox, &origin, &channel, attachment, recovery)
+                    cx.update(|cx| {
+                        on_tokio(cx, async move {
+                            send::queue(&outbox, &origin, &channel, attachment, recovery)
+                        })
                     })
                     .await
                     .map_err(|_| None)?
@@ -631,12 +610,14 @@ impl ShareDialog {
                     cx.notify();
                 });
                 let confirm = receipt.clone();
-                tokio(&runtime, async move {
-                    send::delivered(&outbox, &confirm).await?;
-                    outbox
-                        .acknowledge(&confirm.event_id)
-                        .await
-                        .map_err(|error| error.to_string())
+                cx.update(|cx| {
+                    on_tokio(cx, async move {
+                        send::delivered(&outbox, &confirm).await?;
+                        outbox
+                            .acknowledge(&confirm.event_id)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
                 })
                 .await
                 .map_err(|_| Some(receipt.clone()))?;
@@ -736,15 +717,17 @@ impl ShareDialog {
             return;
         }
         self.pending = true;
-        let runtime = Runtime::handle(cx);
         self.operation = Some(cx.spawn(async move |this, cx| {
-            let result = tokio(&runtime, async move {
-                outbox
-                    .dismiss(&receipt.event_id)
-                    .await
-                    .map_err(|error| error.to_string())
-            })
-            .await;
+            let result = cx
+                .update(|cx| {
+                    on_tokio(cx, async move {
+                        outbox
+                            .dismiss(&receipt.event_id)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = false;
                 this.operation = None;
@@ -983,11 +966,17 @@ impl ShareDialog {
                         .flex_col()
                         .gap(rems(0.5))
                         .child(
-                            summary("share-review", "Review portable configuration", open, &c)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.review_open = !this.review_open;
-                                    cx.notify();
-                                })),
+                            summary(
+                                "share-review",
+                                "Review portable configuration",
+                                open,
+                                TextRole::Body,
+                                &c,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.review_open = !this.review_open;
+                                cx.notify();
+                            })),
                         )
                         .when(open, |this| {
                             this.child(pre(

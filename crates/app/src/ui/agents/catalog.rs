@@ -7,7 +7,8 @@
 //! ordinary create form with a fresh identity, and a team through the
 //! shared team importer.
 
-use super::editor::Dismissed;
+use super::editor::{Dismissed, session_policy};
+use super::inventory::in_community;
 use crate::community::{AppState, Community};
 use crate::hosts::{HostConnection, Hosts};
 use crate::mirror::mirror;
@@ -139,13 +140,10 @@ impl CatalogState {
 
 /// Whether an agent with this id exists on any host.
 pub fn has_agent(id: &str, cx: &App) -> bool {
-    cx.global::<Hosts>().hosts.iter().any(|host| {
-        host.read(cx)
-            .agents
-            .agents
-            .iter()
-            .any(|agent| agent.id == id)
-    })
+    cx.global::<Hosts>()
+        .hosts
+        .iter()
+        .any(|host| host.read(cx).agent(id).is_some())
 }
 
 /// The community's agents on every host, with the host that runs each.
@@ -153,7 +151,7 @@ pub fn community_agents(
     community: &Entity<Community>,
     cx: &App,
 ) -> Vec<(Entity<HostConnection>, Agent)> {
-    let relay = community.read(cx).origin.websocket().to_string();
+    let relay = &community.read(cx).origin;
     cx.global::<Hosts>()
         .hosts
         .iter()
@@ -162,7 +160,7 @@ pub fn community_agents(
                 .agents
                 .agents
                 .iter()
-                .filter(|agent| agent.relay_url.trim_end_matches('/') == relay)
+                .filter(|agent| in_community(&agent.relay_url, relay))
                 .map(|agent| (host.clone(), agent.clone()))
                 .collect::<Vec<_>>()
         })
@@ -194,11 +192,7 @@ pub fn persona(agent: &Agent) -> PersonaSource {
 
 /// The boundary an inheriting agent on `host` runs with.
 pub fn default_policy(host: &Entity<HostConnection>, cx: &App) -> Option<SessionPolicy> {
-    host.read(cx)
-        .defaults
-        .as_ref()
-        .and_then(|defaults| defaults.session_policy)
-        .map(policy)
+    session_policy(host, cx).map(policy)
 }
 
 // ---------------------------------------------------------------------------
@@ -268,8 +262,7 @@ impl CatalogShareSwitch {
         cx: &mut App,
     ) -> Option<Entity<Self>> {
         let community = AppState::current(cx)?;
-        let relay = community.read(cx).origin.websocket().to_string();
-        if agent.relay_url.trim_end_matches('/') != relay {
+        if !in_community(&agent.relay_url, &community.read(cx).origin) {
             return None;
         }
         let d = catalog_slug(&agent.pubkey).ok()?;
@@ -277,13 +270,7 @@ impl CatalogShareSwitch {
         let id = agent.id.clone();
         let content: Content = Rc::new(move |cx: &mut App| {
             let host = host.clone();
-            let agent = host
-                .read(cx)
-                .agents
-                .agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .cloned();
+            let agent = host.read(cx).agent(&id).cloned();
             let default = default_policy(&host, cx);
             Task::ready(
                 agent

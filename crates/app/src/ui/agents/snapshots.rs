@@ -5,7 +5,8 @@
 //! attachments and links, so they draw in a layer of their own over the
 //! workspace rather than in one page's modal slot.
 
-use super::editor::{connected, create_agent};
+use super::editor::{connected, create_agent, session_policy};
+use super::inventory::in_community;
 use crate::community::{AppState, IdentityState};
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
@@ -21,7 +22,7 @@ use buzz_host::api::{Agent, MemoryRestore, Request, Response};
 use buzz_relay_client::RelayOrigin;
 use buzz_ui::{
     ActiveTheme, Button, Checkbox, Colors, Dialog, Icon, IconName, Menu, MenuItem, MenuSize,
-    Select, Surface, TypeStyled,
+    Select, Surface, TextRole, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -208,11 +209,12 @@ pub(super) fn pre(
         .child(text)
 }
 
-/// A `<details>` summary row.
+/// A `<details>` summary row, its label set in `role`.
 pub(super) fn summary(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     open: bool,
+    role: TextRole,
     c: &Colors,
 ) -> Stateful<Div> {
     div()
@@ -221,7 +223,7 @@ pub(super) fn summary(
         .items_center()
         .gap(rems(0.25))
         .cursor_pointer()
-        .text_body()
+        .text_role(role)
         .child(
             Icon::new(if open {
                 IconName::CaretDown
@@ -231,7 +233,7 @@ pub(super) fn summary(
             .size(14.)
             .color(c.text_subtle),
         )
-        .child(label)
+        .child(label.into())
 }
 
 /// "Memory is stored as **plaintext** in the snapshot. …"
@@ -328,21 +330,6 @@ pub(super) const LEVELS: [MemoryLevel; 3] = [
     MemoryLevel::Everything,
 ];
 
-fn find_agent(host: &Entity<HostConnection>, id: &str, cx: &App) -> Option<Agent> {
-    host.read(cx)
-        .agents
-        .agents
-        .iter()
-        .find(|agent| agent.id == id)
-        .cloned()
-}
-
-fn origin_of(url: &str) -> Option<String> {
-    RelayOrigin::parse(url)
-        .ok()
-        .map(|origin| origin.websocket().to_string())
-}
-
 /// The selected community: `(websocket URL, origin)`.
 fn destination(cx: &App) -> Option<(String, RelayOrigin)> {
     let community = AppState::current(cx)?;
@@ -380,12 +367,7 @@ pub(super) fn review(
     host: &Entity<HostConnection>,
     cx: &App,
 ) -> Result<AgentSnapshot, String> {
-    let defaults = host
-        .read(cx)
-        .defaults
-        .as_ref()
-        .and_then(|defaults| defaults.session_policy);
-    build_agent_snapshot(agent, MemoryLevel::None, &[], defaults)
+    build_agent_snapshot(agent, MemoryLevel::None, &[], session_policy(host, cx))
 }
 
 /// Reads an agent's memories as `level` includes them, in the agent's
@@ -461,8 +443,10 @@ pub(crate) fn open_export(host: Entity<HostConnection>, id: String, cx: &mut App
 impl ExportDialog {
     fn new(host: Entity<HostConnection>, id: String, cx: &mut Context<Self>) -> Self {
         host.update(cx, |host, cx| host.load_defaults(cx));
-        let name = find_agent(&host, &id, cx)
-            .map(|agent| agent.name)
+        let name = host
+            .read(cx)
+            .agent(&id)
+            .map(|agent| agent.name.clone())
             .unwrap_or_default();
         Self {
             _observe: cx.observe(&host, |_, _, cx| cx.notify()),
@@ -497,11 +481,11 @@ impl ExportDialog {
     }
 
     fn memory_allowed(agent: &Agent, cx: &App) -> bool {
-        destination(cx).is_some_and(|(url, _)| origin_of(&agent.relay_url).as_ref() == Some(&url))
+        destination(cx).is_some_and(|(_, origin)| in_community(&agent.relay_url, &origin))
     }
 
     fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(agent) = find_agent(&self.host, &self.id, cx) else {
+        let Some(agent) = self.host.read(cx).agent(&self.id).cloned() else {
             return;
         };
         let destination_url = destination(cx).map(|(url, _)| url).unwrap_or_default();
@@ -625,7 +609,7 @@ impl ExportDialog {
 impl Render for ExportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        let agent = find_agent(&self.host, &self.id, cx);
+        let agent = self.host.read(cx).agent(&self.id).cloned();
         if let Some(agent) = &agent {
             self.name = agent.name.clone();
         }
@@ -762,6 +746,7 @@ impl Render for ExportDialog {
                             "export-review",
                             "Review portable configuration",
                             details,
+                            TextRole::Body,
                             &c,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1207,7 +1192,7 @@ impl ImportDialog {
         let (Some(host), Some(identity)) = (self.host.clone(), identity(cx)) else {
             return;
         };
-        let Some(agent) = find_agent(&host, &id, cx) else {
+        let Some(agent) = host.read(cx).agent(&id).cloned() else {
             self.memory_retry = Some((id, entries.clone()));
             self.memory_error = Some(
                 format!(
@@ -1554,6 +1539,7 @@ impl ImportDialog {
                             "import-manifest",
                             "Full embedded manifest",
                             manifest_open,
+                            TextRole::Body,
                             &c,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {

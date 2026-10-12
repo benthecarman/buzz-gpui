@@ -16,6 +16,13 @@ pub fn origin(url: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Whether `url` names the community at `community`, however either is
+/// written.
+pub fn in_community(url: &str, community: &buzz_relay_client::RelayOrigin) -> bool {
+    buzz_relay_client::RelayOrigin::parse(url)
+        .is_ok_and(|origin| origin.websocket() == community.websocket())
+}
+
 /// `npub1…` for a hex key, or the key itself if it is not one.
 pub fn npub(pubkey: &str) -> String {
     use nostr::nips::nip19::ToBech32;
@@ -336,6 +343,15 @@ mod tests {
     const A: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
     const B: &str = "bb00000000000000000000000000000000000000000000000000000000000002";
     const HERE: &str = "https://here.example";
+
+    #[test]
+    fn community_matches_however_written() {
+        let here = buzz_relay_client::RelayOrigin::parse("wss://here.example").unwrap();
+        assert!(in_community("wss://here.example/", &here));
+        assert!(in_community(HERE, &here));
+        assert!(!in_community("wss://there.example", &here));
+        assert!(!in_community("not a url", &here));
+    }
 
     fn agent(id: &str, pubkey: &str, relay: &str, configured: bool) -> Agent {
         Agent {

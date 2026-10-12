@@ -2,7 +2,7 @@
 
 use crate::hosts::HostConnection;
 use crate::hosts::control::{Failure, Lane};
-use buzz_host::api::{AgentEdit, Request, Response};
+use buzz_host::api::{AgentEdit, Request, Response, SessionPolicy};
 use buzz_host_rpc::{ConnectionState, RpcError};
 use gpui_kit::{App, Entity, SharedString, Task};
 
@@ -86,6 +86,14 @@ pub fn create_agent(
             .map_err(|_| failure("The host went away.".into(), None))?;
         commit.await.map(|_| id)
     })
+}
+
+/// The session boundary an inheriting agent on `host` runs with.
+pub fn session_policy(host: &Entity<HostConnection>, cx: &App) -> Option<SessionPolicy> {
+    host.read(cx)
+        .defaults
+        .as_ref()
+        .and_then(|defaults| defaults.session_policy)
 }
 
 pub fn connected(host: &Entity<HostConnection>, cx: &App) -> bool {

@@ -16,8 +16,8 @@ use buzz_host::api::{
     CloneSettings, ImportCandidate, ImportPreview, ImportSource, Request, Response,
 };
 use buzz_ui::{
-    ActiveTheme, Button, Dialog, Icon, IconName, Menu, MenuItem, MenuSize, Select, Surface,
-    TextField, TypeStyled,
+    ActiveTheme, Button, Dialog, Menu, MenuItem, MenuSize, Select, Surface, TextField, TextRole,
+    TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -382,31 +382,16 @@ impl ImportDialog {
         )
     }
 
-    /// A `<details>`: a summary that toggles its body.
+    /// A `<details>` summary that toggles its body.
     fn details(
         id: impl Into<ElementId>,
-        summary: &str,
+        summary: &'static str,
         open: bool,
         c: &buzz_ui::Colors,
         on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Stateful<Div> {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(rems(0.25))
-            .cursor_pointer()
-            .text_body_sm()
+        super::snapshots::summary(id, summary, open, TextRole::BodySm, c)
             .text_color(c.text_subtle)
-            .child(
-                Icon::new(if open {
-                    IconName::CaretDown
-                } else {
-                    IconName::CaretRight
-                })
-                .size(14.),
-            )
-            .child(summary.to_string())
             .on_click(on_toggle)
     }
 
@@ -437,7 +422,6 @@ impl ImportDialog {
 
     fn render_single(
         &mut self,
-        pubkey: String,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -453,7 +437,6 @@ impl ImportDialog {
                 .filter(|list| list.is_empty())
                 .map(|_| "This agent is unavailable in this source or is already imported.".into())
         });
-        let _ = pubkey;
         let busy = self.busy(cx);
         let commit_available = self.commit_available(cx);
         let destination = self.destination(cx);
@@ -847,9 +830,9 @@ impl ImportDialog {
 impl Render for ImportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.mode {
-            Mode::Single { pubkey, name } => {
-                let (pubkey, name) = (pubkey.clone(), name.clone());
-                self.render_single(pubkey, name, window, cx)
+            Mode::Single { name, .. } => {
+                let name = name.clone();
+                self.render_single(name, window, cx)
             }
             Mode::List { .. } => self.render_list(window, cx),
         }

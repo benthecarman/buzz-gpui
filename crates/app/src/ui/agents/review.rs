@@ -315,7 +315,7 @@ fn dismiss(cx: &mut App) {
 fn matches(
     agent: &str,
     name: &str,
-    origin: &str,
+    origin: &buzz_relay_client::RelayOrigin,
     cx: &App,
 ) -> Vec<(Entity<HostConnection>, Agent)> {
     let target = name.trim().to_lowercase();
@@ -331,7 +331,7 @@ fn matches(
                     setup.configured
                         && setup.pubkey == agent
                         && setup.name.trim().to_lowercase() == target
-                        && super::inventory::origin(&setup.relay_url) == origin
+                        && super::inventory::in_community(&setup.relay_url, origin)
                 })
                 .map(|setup| (host.clone(), setup.clone()))
                 .collect::<Vec<_>>()
@@ -363,7 +363,7 @@ pub fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     };
     let request = pending.request.clone();
     let agent = pending.agent.clone();
-    let origin = community.read(cx).origin.http();
+    let origin = community.read(cx).origin.clone();
     let snapshot = community.read(cx).snapshot.clone();
     // Membership: the requester must be in the channel it names.
     let channel = snapshot
