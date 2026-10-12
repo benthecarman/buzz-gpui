@@ -50,6 +50,8 @@ pub struct CustomEmojiSettings {
     /// action replace the focused control.
     upload_focus: FocusHandle,
     focus_upload: bool,
+    /// The community the form is for; results for another are dropped.
+    community: Option<EntityId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -66,7 +68,12 @@ impl CustomEmojiSettings {
                 }
             }),
             cx.observe_global::<AppState>(|this, cx| {
+                let current = Self::community(cx).map(|c| c.entity_id());
+                if current == this.community {
+                    return;
+                }
                 // Another community: start over.
+                this.community = current;
                 this.chosen = None;
                 this.error = None;
                 if let Some(community) = Self::community(cx) {
@@ -87,6 +94,7 @@ impl CustomEmojiSettings {
             error: None,
             upload_focus: cx.focus_handle(),
             focus_upload: false,
+            community: Self::community(cx).map(|c| c.entity_id()),
             _subscriptions: subscriptions,
         }
     }
@@ -104,6 +112,7 @@ impl CustomEmojiSettings {
             return;
         };
         let session = community.read(cx).session.clone();
+        let owner = community.entity_id();
         // Development only: a headless session has no file dialog.
         let dev_file = std::env::var_os("BUZZ_DEV_PICK_FILE").map(std::path::PathBuf::from);
         let paths = dev_file.is_none().then(|| {
@@ -163,6 +172,9 @@ impl CustomEmojiSettings {
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.uploading = false;
+                if this.community != Some(owner) {
+                    return cx.notify();
+                }
                 match result {
                     Ok(chosen) => {
                         if this.name.read(cx).value().trim().is_empty()
@@ -210,11 +222,15 @@ impl CustomEmojiSettings {
         self.saving = true;
         self.error = None;
         let session = community.read(cx).session.clone();
+        let owner = community.entity_id();
         let url = chosen.url.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = session.add_emoji(&code, &url).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.saving = false;
+                if this.community != Some(owner) {
+                    return cx.notify();
+                }
                 match result {
                     Ok(()) => {
                         this.clear(window, cx);
