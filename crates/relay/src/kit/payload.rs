@@ -4,8 +4,9 @@
 //! index and a SHA-256 digest. A team's shared instructions are stored
 //! the same way, as `v1:` and their UTF-8 bytes.
 
-use super::{hex_key, identifier};
+use super::identifier;
 use crate::discovery::is_uuid;
+use crate::members::is_key;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
@@ -66,9 +67,9 @@ impl TeamPayload {
 pub fn parse_team_manifest(raw: &Value) -> Result<TeamManifest, String> {
     let bytes = raw["bytes"].as_u64().unwrap_or(0);
     let valid = raw["version"] == 1
-        && raw["owner"].as_str().is_some_and(hex_key)
+        && raw["owner"].as_str().is_some_and(is_key)
         && raw["revision"].as_str().is_some_and(is_uuid)
-        && raw["digest"].as_str().is_some_and(hex_key)
+        && raw["digest"].as_str().is_some_and(is_key)
         && (1..=TEAM_PAYLOAD_BYTES as u64).contains(&bytes)
         && raw["chunks"].as_u64() == Some(bytes.div_ceil(TEAM_CHUNK_BYTES as u64));
     if !valid {
@@ -90,7 +91,7 @@ pub fn parse_team_payload(raw: &Value, community: &str) -> Result<TeamPayload, S
     let data = raw["data"].as_str().unwrap_or_default();
     let valid = raw["version"] == 1
         && raw["community"].as_str() == Some(community)
-        && raw["owner"].as_str().is_some_and(hex_key)
+        && raw["owner"].as_str().is_some_and(is_key)
         && raw["teamId"].as_str().is_some_and(identifier)
         && raw["revision"].as_str().is_some_and(is_uuid)
         && index.is_some_and(|index| index < TEAM_CHUNKS as u64)

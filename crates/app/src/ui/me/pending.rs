@@ -88,7 +88,7 @@ fn hex_id(value: &str) -> bool {
 impl PendingStart {
     /// `readPending`'s checks: a session UUID, bounded text and hex ids.
     fn valid(&self) -> bool {
-        buzz_relay_client::kit::me::uuid(&self.id)
+        buzz_relay_client::discovery::is_uuid(&self.id)
             && self.text.len() <= 16_000
             && [
                 &self.creation_id,

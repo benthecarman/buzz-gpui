@@ -21,7 +21,7 @@ use super::work_sessions::delivered;
 use super::{Message, Session};
 use crate::canvas::{AWAITING, TOO_OLD};
 use crate::event::Verified;
-use crate::kit::me::{self as kit, KitEntry};
+use crate::kit::me::{self as kit, RawKitEntry};
 use crate::kit::{self as recipes, GroupsId};
 use crate::outbox::{Delivery, SendOptions};
 use crate::reader::ReadOptions;
@@ -61,7 +61,7 @@ pub enum MeKitStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeKitSnapshot {
     pub status: MeKitStatus,
-    pub entries: Arc<[KitEntry]>,
+    pub entries: Arc<[RawKitEntry]>,
 }
 
 impl Default for MeKitSnapshot {
@@ -189,13 +189,13 @@ impl MeKit {
         self.inner.typed.subscribe()
     }
 
-    fn set(&self, status: MeKitStatus, entries: Option<Arc<[KitEntry]>>) {
+    fn set(&self, status: MeKitStatus, entries: Option<Arc<[RawKitEntry]>>) {
         self.set_with(status, entries, false);
     }
 
     /// `waiting`: the status is the error of a read made before the relay
     /// answered.
-    fn set_with(&self, status: MeKitStatus, entries: Option<Arc<[KitEntry]>>, waiting: bool) {
+    fn set_with(&self, status: MeKitStatus, entries: Option<Arc<[RawKitEntry]>>, waiting: bool) {
         self.inner.snapshot.send_modify(|snapshot| {
             *snapshot = Arc::new(MeKitSnapshot {
                 status,
@@ -271,7 +271,7 @@ impl MeKit {
         self.refresh()
     }
 
-    async fn read_catalog(&self) -> Result<Vec<KitEntry>, Unread> {
+    async fn read_catalog(&self) -> Result<Vec<RawKitEntry>, Unread> {
         let ctx = self
             .ops()
             .with(|actor| {
@@ -288,7 +288,7 @@ impl MeKit {
         self.decode_catalog(&ctx).await.map_err(Unread::Failed)
     }
 
-    async fn decode_catalog(&self, ctx: &Context) -> Result<Vec<KitEntry>, String> {
+    async fn decode_catalog(&self, ctx: &Context) -> Result<Vec<RawKitEntry>, String> {
         let events = fresh(ctx, vec![recipes::catalog_filter(&ctx.viewer)]).await?;
         if events.len() >= recipes::CATALOG_LIMIT {
             return Err(
@@ -469,7 +469,7 @@ impl MeKit {
     }
 
     /// The Me record now: its value (empty without one) and entry.
-    async fn current(&self, fresh: bool) -> Result<(PersonalGroups, Option<KitEntry>), String> {
+    async fn current(&self, fresh: bool) -> Result<(PersonalGroups, Option<RawKitEntry>), String> {
         if fresh || !self.snapshot().ready() {
             self.refresh().await;
         }
@@ -483,7 +483,7 @@ impl MeKit {
         let entry = kit::groups_entry(&snapshot.entries, GroupsId::Me).cloned();
         let value = entry
             .as_ref()
-            .and_then(KitEntry::groups)
+            .and_then(RawKitEntry::groups)
             .unwrap_or_default();
         Ok((value, entry))
     }
@@ -492,7 +492,7 @@ impl MeKit {
     async fn save_me(
         &self,
         value: PersonalGroups,
-        entry: Option<&KitEntry>,
+        entry: Option<&RawKitEntry>,
     ) -> Result<SidebarGroups, String> {
         kit::admit(&value, entry, &self.inner.community)?;
         self.save(
@@ -779,7 +779,7 @@ impl MeKit {
                 .to_owned());
         }
         let entry = kit::groups_entry(&snapshot.entries, GroupsId::Personal);
-        let current = entry.and_then(KitEntry::groups);
+        let current = entry.and_then(RawKitEntry::groups);
         if current.is_some() != (source == GroupSource::Personal) {
             return Err(
                 "The active group source changed; refresh your sidebar before moving this channel"
@@ -841,7 +841,7 @@ impl MeKit {
                 .to_owned());
         }
         let entry = kit::groups_entry(&snapshot.entries, GroupsId::Personal);
-        let current = entry.and_then(KitEntry::groups);
+        let current = entry.and_then(RawKitEntry::groups);
         if current.is_some() != (source == GroupSource::Personal) {
             return Err("The active group source changed; refresh your sidebar before removing this section".into());
         }
@@ -890,7 +890,7 @@ impl MeKit {
         let entry = kit::groups_entry(&snapshot.entries, GroupsId::Personal).cloned();
         let current = entry
             .as_ref()
-            .and_then(KitEntry::groups)
+            .and_then(RawKitEntry::groups)
             .unwrap_or_default();
         let next = with_groups(&current, groups);
         self.save(

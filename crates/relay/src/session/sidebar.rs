@@ -15,7 +15,7 @@ use crate::ChannelType;
 use crate::event::Verified;
 use crate::http::RelayHttp;
 use crate::kit::GroupsId;
-use crate::kit::me::{self, KitEntry};
+use crate::kit::me::{self, RawKitEntry};
 use crate::read_state::ReadTarget;
 use crate::reader::{Priority, ReadOptions, Reader};
 use crate::sidebar::{
@@ -51,7 +51,7 @@ pub(super) struct SidebarPrefs {
     probing: bool,
     state: Arc<SidebarState>,
     /// The Me placement parsed from these catalog entries.
-    me_channels: Option<(Arc<[KitEntry]>, Vec<String>)>,
+    me_channels: Option<(Arc<[RawKitEntry]>, Vec<String>)>,
 }
 
 impl SidebarPrefs {

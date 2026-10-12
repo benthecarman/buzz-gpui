@@ -14,6 +14,7 @@ pub mod setup;
 
 use crate::discovery::is_uuid;
 use crate::event::{Verified, kinds};
+use crate::members::is_key;
 use crate::socket::{Filter, filter};
 use buzz_desktop::relay::kit as native;
 use buzz_identity::Identity;
@@ -264,8 +265,6 @@ fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-pub(crate) use crate::members::is_key as hex_key;
-
 /// `^[a-zA-Z0-9_-]{1,128}$`.
 pub fn identifier(text: &str) -> bool {
     !text.is_empty()
@@ -323,7 +322,7 @@ pub fn parse_lineup(value: &Value) -> Result<Lineup, String> {
     }
     Ok(Lineup {
         team_ids: keys(v.get("teamIds"), identifier, 100)?,
-        agents: keys(v.get("agents"), hex_key, 200)?,
+        agents: keys(v.get("agents"), is_key, 200)?,
         canvas,
     })
 }
@@ -358,11 +357,7 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
             KitValue::Team(Team {
                 id: id(v.get("id"))?,
                 name: text(v.get("name"), if version == 2 { 256 } else { 120 }, true)?,
-                agents: keys(
-                    v.get("agents"),
-                    hex_key,
-                    if version == 2 { 32 } else { 200 },
-                )?,
+                agents: keys(v.get("agents"), is_key, if version == 2 { 32 } else { 200 })?,
                 portable,
             })
         }
@@ -538,10 +533,7 @@ pub fn parse_text_record(raw: &Value, community: &str) -> Result<TextRecord, Str
         .and_then(Value::as_object)
         .ok_or(INVALID_TEXT)?;
     let deleted = r.get("deleted").and_then(Value::as_bool);
-    let owner = v
-        .get("owner")
-        .and_then(Value::as_str)
-        .filter(|o| hex_key(o));
+    let owner = v.get("owner").and_then(Value::as_str).filter(|o| is_key(o));
     let (Some(deleted), Some(owner)) = (deleted, owner) else {
         return Err(INVALID_TEXT.into());
     };

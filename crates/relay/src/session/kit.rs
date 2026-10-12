@@ -454,7 +454,7 @@ async fn start(
         if !setup.canvas.is_empty() && crate::canvas::too_large(&setup.canvas) {
             return Err("Canvas writing is unavailable".into());
         }
-        if setup.agents.iter().any(|key| !kit::hex_key(key)) {
+        if setup.agents.iter().any(|key| !crate::members::is_key(key)) {
             return Err("Agent membership is unavailable".into());
         }
         if !setup.group_id.is_empty() && setup.group_source.as_deref() != Some("legacy") {

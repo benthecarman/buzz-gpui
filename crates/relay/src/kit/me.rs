@@ -9,6 +9,7 @@
 //! record's raw JSON for the Me settings that edit it in place.
 
 use super::identifier;
+use crate::discovery::is_uuid;
 use crate::event::Verified;
 use crate::sidebar::{PersonalGroup, PersonalGroups};
 use buzz_desktop::relay::kit as native;
@@ -33,9 +34,6 @@ pub struct RawKitEntry {
     pub event_id: String,
     pub created_at: u64,
 }
-
-/// The old name, kept for callers not yet moved to [`RawKitEntry`].
-pub use self::RawKitEntry as KitEntry;
 
 impl RawKitEntry {
     pub fn kind(&self) -> &str {
@@ -110,7 +108,7 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
     let mut assignments = BTreeMap::new();
     for (channel, group) in raw {
         let group = group.as_str().unwrap_or_default();
-        if raw.len() > 1000 || !uuid(channel) || !groups.iter().any(|g| g.id == group) {
+        if raw.len() > 1000 || !is_uuid(channel) || !groups.iter().any(|g| g.id == group) {
             return Err("Invalid personal group placement".into());
         }
         assignments.insert(channel.clone(), group.to_owned());
@@ -121,7 +119,7 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
             let mut channels: Vec<String> = Vec::with_capacity(list.len());
             for id in list {
                 match id.as_str() {
-                    Some(id) if uuid(id) && !channels.iter().any(|c| c == id) => {
+                    Some(id) if is_uuid(id) && !channels.iter().any(|c| c == id) => {
                         channels.push(id.into())
                     }
                     _ => return Err("Invalid channel recipe selection".into()),
@@ -140,9 +138,6 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
         channels,
     })
 }
-
-/// A lowercase hyphenated UUID, as channel ids are.
-pub use crate::discovery::is_uuid as uuid;
 
 /// The `groups` value of a record.
 pub fn groups_value(id: GroupsId, groups: &PersonalGroups) -> Value {
