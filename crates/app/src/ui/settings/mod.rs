@@ -29,8 +29,8 @@ pub use agents::{followup_draft, remember_mentioned_agents};
 pub use archive::capture as capture_agent_activity;
 pub use archive::opened as agent_archive;
 use buzz_ui::{
-    ActiveTheme, Button, ButtonShape, Icon, IconName, NavigationItem, Toast, ToastTone, TypeStyled,
-    tokens::radius,
+    ActiveTheme, Button, ButtonShape, Icon, IconName, NavigationItem, Select, Toast, ToastTone,
+    TypeStyled, tokens::radius,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -715,6 +715,30 @@ fn note(text: impl Into<SharedString>, cx: &App) -> Div {
         .text_body()
         .text_color(c.text_subtle)
         .child(text.into())
+}
+
+/// A select and, while `open`, its menu (`menu_width` wide at least)
+/// dropping down from it.
+fn select_menu(
+    select: Select,
+    open: bool,
+    align: overlay::Align,
+    menu_width: Rems,
+    menu: impl FnOnce() -> AnyElement,
+    dismiss: overlay::Dismiss,
+    window: &Window,
+) -> Div {
+    div()
+        .relative()
+        .child(select.open(open))
+        .when(open, |this| {
+            this.child(overlay::dropdown(
+                window,
+                align,
+                div().min_w(menu_width).child(menu()),
+                dismiss,
+            ))
+        })
 }
 
 /// A bordered, centered card: a large icon, a title over a line of text,

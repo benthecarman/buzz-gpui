@@ -2,7 +2,7 @@
 //! `ArchiveSettings.tsx`), and the capture that fills the archive while a
 //! community is connected.
 
-use super::{Modal, SettingsPage, button, form_group, inline_header, preference_row};
+use super::{Modal, SettingsPage, button, form_group, inline_header, preference_row, select_menu};
 use crate::community::{AppState, Community, IdentityState, data_dir};
 use crate::runtime::Runtime;
 use crate::ui::overlay::{self, Align};
@@ -353,19 +353,8 @@ impl SettingsPage {
             cx,
         );
         // "Activity retention": a field select, shorter values confirmed.
-        let open = self.retention_menu;
-        let mut retention = div().relative().w_full().child(
-            Select::new("archive-retention")
-                .value(days(settings.observer_days))
-                .open(open)
-                .surface(Surface::Floating)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.retention_menu = !this.retention_menu;
-                    cx.notify();
-                })),
-        );
-        if open {
-            let current = settings.clone();
+        let current = settings.clone();
+        let menu = || {
             let items = RETENTION_DAYS.map(|choice| {
                 let current = current.clone();
                 MenuItem::new(
@@ -389,30 +378,42 @@ impl SettingsPage {
                     cx.notify();
                 }))
             });
-            let page = cx.entity().downgrade();
-            retention = retention.child(overlay::dropdown(
-                window,
-                Align::Start,
-                div().min_w(rems(16.)).child(
-                    Menu::new()
-                        .child(
-                            div()
-                                .px(rems(0.75))
-                                .py(rems(0.375))
-                                .text_caption()
-                                .text_color(c.text_subtle)
-                                .child("Maximum age"),
-                        )
-                        .children(items),
-                ),
-                Rc::new(move |_, cx| {
-                    let _ = page.update(cx, |this, cx| {
-                        this.retention_menu = false;
-                        cx.notify();
-                    });
-                }),
-            ));
-        }
+            Menu::new()
+                .child(
+                    div()
+                        .px(rems(0.75))
+                        .py(rems(0.375))
+                        .text_caption()
+                        .text_color(c.text_subtle)
+                        .child("Maximum age"),
+                )
+                .children(items)
+                .into_any_element()
+        };
+        let page = cx.entity().downgrade();
+        let dismiss: overlay::Dismiss = Rc::new(move |_, cx| {
+            let _ = page.update(cx, |this, cx| {
+                this.retention_menu = false;
+                cx.notify();
+            });
+        });
+        let select = Select::new("archive-retention")
+            .value(days(settings.observer_days))
+            .surface(Surface::Floating)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.retention_menu = !this.retention_menu;
+                cx.notify();
+            }));
+        let retention = select_menu(
+            select,
+            self.retention_menu,
+            Align::Start,
+            rems(16.),
+            menu,
+            dismiss,
+            window,
+        )
+        .w_full();
         let mib = settings.bytes as f64 / 1024. / 1024.;
         vec![
             div()

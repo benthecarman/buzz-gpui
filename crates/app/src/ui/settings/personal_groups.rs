@@ -7,7 +7,7 @@
 //! visible ones into the draft.
 
 use super::cards::{self, CardPlacement, SettingsCard};
-use super::{button, empty_card, header, section};
+use super::{button, empty_card, header, section, select_menu};
 use crate::community::{AppState, Community};
 use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::SessionStatus;
@@ -382,10 +382,9 @@ impl GroupsDialog {
             .unwrap_or_default();
         let open = self.default_menu.as_deref() == Some(group.id.as_str());
         let id = group.id.clone();
-        let mut select = div().relative().w_full().child(
+        let trigger =
             buzz_ui::Select::new(SharedString::from(format!("group-default-{}", group.id)))
                 .value(label)
-                .open(open)
                 .surface(Surface::Floating)
                 .disabled(self.busy)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -394,9 +393,8 @@ impl GroupsDialog {
                         false => Some(id.clone()),
                     };
                     cx.notify();
-                })),
-        );
-        if open {
+                }));
+        let menu = || {
             let items = options.into_iter().map(|(template, label)| {
                 let (group, checked) = (group.id.clone(), template == value);
                 buzz_ui::MenuItem::new(
@@ -412,22 +410,25 @@ impl GroupsDialog {
                     cx.notify();
                 }))
             });
-            let weak = cx.entity().downgrade();
-            let dismiss: Dismiss = Rc::new(move |_, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.default_menu = None;
-                    cx.notify();
-                });
+            buzz_ui::Menu::new().children(items).into_any_element()
+        };
+        let weak = cx.entity().downgrade();
+        let dismiss: Dismiss = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.default_menu = None;
+                cx.notify();
             });
-            select = select.child(overlay::dropdown(
-                window,
-                overlay::Align::Start,
-                div()
-                    .min_w(rems(20.))
-                    .child(buzz_ui::Menu::new().children(items)),
-                dismiss,
-            ));
-        }
+        });
+        let select = select_menu(
+            trigger,
+            open,
+            overlay::Align::Start,
+            rems(20.),
+            menu,
+            dismiss,
+            window,
+        )
+        .w_full();
         div()
             .flex()
             .flex_col()

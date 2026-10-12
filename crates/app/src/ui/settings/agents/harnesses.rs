@@ -3,7 +3,7 @@
 //! Claude Code and Codex adapter installers, manual setup steps, and the
 //! "Add harness" catalog.
 
-use super::super::{button, form_group, inline_header, preference_row};
+use super::super::{button, form_group, inline_header, preference_row, select_menu};
 use crate::hosts::{HostConnection, Hosts, Install};
 use crate::ui::agents::harness::{self, status_label};
 use crate::ui::overlay;
@@ -345,30 +345,26 @@ impl Harnesses {
                 cx.notify();
             });
         });
+        let select = Select::new("harness-host")
+            .when_some(self.host.as_ref(), |this, host| {
+                this.value(host.read(cx).label.clone())
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.host_open = !this.host_open;
+                cx.notify();
+            }));
         Some(
-            div()
-                .relative()
-                .w(rems(12.))
-                .child(
-                    Select::new("harness-host")
-                        .when_some(self.host.as_ref(), |this, host| {
-                            this.value(host.read(cx).label.clone())
-                        })
-                        .open(self.host_open)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.host_open = !this.host_open;
-                            cx.notify();
-                        })),
-                )
-                .when(self.host_open, |this| {
-                    this.child(overlay::dropdown(
-                        window,
-                        overlay::Align::End,
-                        div().min_w(rems(12.)).child(menu),
-                        dismiss,
-                    ))
-                })
-                .into_any_element(),
+            select_menu(
+                select,
+                self.host_open,
+                overlay::Align::End,
+                rems(12.),
+                || menu.into_any_element(),
+                dismiss,
+                window,
+            )
+            .w(rems(12.))
+            .into_any_element(),
         )
     }
 
