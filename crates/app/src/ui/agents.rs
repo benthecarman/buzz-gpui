@@ -223,8 +223,9 @@ pub struct AgentsPage {
     was_all_archived: bool,
     /// Hosts whose team repair accordion is open.
     repair_open: HashSet<EntityId>,
-    /// Each host's repair list, once opened.
-    repairs: HashMap<EntityId, Entity<import::ImportDialog>>,
+    /// Each host's repair list, once opened, and the subscription to its
+    /// Clone requests. sync_hosts replaces `_observers`, so it lives here.
+    repairs: HashMap<EntityId, (Entity<import::ImportDialog>, Subscription)>,
     /// The content column width, measured after layout, for the tile grid.
     width: Rc<Cell<Pixels>>,
     toast: Option<PageToast>,

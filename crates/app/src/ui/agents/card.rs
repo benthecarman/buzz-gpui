@@ -1478,7 +1478,7 @@ impl AgentsPage {
                         let host = toggle_host.clone();
                         let dialog =
                             cx.new(|cx| ImportDialog::repair(host, destination, window, cx));
-                        this._observers.push(cx.subscribe_in(
+                        let cloned = cx.subscribe_in(
                             &dialog,
                             window,
                             |this, _, super::import::Cloned(settings), window, cx| {
@@ -1493,8 +1493,8 @@ impl AgentsPage {
                                     cx,
                                 );
                             },
-                        ));
-                        this.repairs.insert(host_id, dialog);
+                        );
+                        this.repairs.insert(host_id, (dialog, cloned));
                     }
                 }
                 cx.notify();
@@ -1504,7 +1504,7 @@ impl AgentsPage {
             .flex_col()
             .child(header)
             .when(open, |this| {
-                this.children(self.repairs.get(&host_id).cloned())
+                this.children(self.repairs.get(&host_id).map(|(dialog, _)| dialog.clone()))
             })
             .into_any_element()
     }
