@@ -30,22 +30,36 @@ impl Format {
     }
 }
 
-fn crc(bytes: &[u8]) -> u32 {
-    let mut value = 0xffff_ffffu32;
-    for &byte in bytes {
-        value ^= u32::from(byte);
-        for _ in 0..8 {
+/// The CRC-32 of each byte value (RFC 2083, 15).
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut n = 0;
+    while n < 256 {
+        let mut value = n as u32;
+        let mut bit = 0;
+        while bit < 8 {
             value = (value >> 1) ^ if value & 1 != 0 { 0xedb8_8320 } else { 0 };
+            bit += 1;
         }
+        table[n] = value;
+        n += 1;
     }
-    value ^ 0xffff_ffff
+    table
+};
+
+/// A chunk's CRC-32, over its type and data.
+pub fn crc(bytes: &[u8]) -> u32 {
+    !bytes.iter().fold(!0u32, |value, &byte| {
+        CRC_TABLE[((value ^ u32::from(byte)) & 0xff) as usize] ^ (value >> 8)
+    })
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+/// One whole chunk: length, type, data and CRC.
+pub fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 12);
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
     out.extend_from_slice(kind);
@@ -62,34 +76,46 @@ pub struct Chunk<'a> {
     pub raw: &'a [u8],
 }
 
+impl Chunk<'_> {
+    /// Whether the stored CRC matches the type and data.
+    pub fn crc_ok(&self) -> bool {
+        u32_at(self.raw, self.raw.len() - 4) == Some(crc(&self.raw[4..self.raw.len() - 4]))
+    }
+}
+
+/// Every chunk after the signature as framed, without checking CRCs or
+/// `IEND`. `None` when a chunk runs past the end.
+pub fn framed(bytes: &[u8]) -> Option<Vec<Chunk<'_>>> {
+    let mut out = Vec::new();
+    let mut at = MAGIC.len();
+    while at < bytes.len() {
+        let length = u32_at(bytes, at)? as usize;
+        let end = at.checked_add(12)?.checked_add(length)?;
+        if end > bytes.len() {
+            return None;
+        }
+        out.push(Chunk {
+            kind: bytes[at + 4..at + 8].try_into().ok()?,
+            payload: &bytes[at + 8..at + 8 + length],
+            raw: &bytes[at..end],
+        });
+        at = end;
+    }
+    Some(out)
+}
+
 /// The chunks through `IEND`, CRCs checked. `None` for anything malformed.
 pub fn chunks(bytes: &[u8]) -> Option<Vec<Chunk<'_>>> {
     if !bytes.starts_with(&MAGIC) {
         return None;
     }
-    let mut out = Vec::new();
-    let mut at = 8;
-    while at + 12 <= bytes.len() {
-        let length = u32_at(bytes, at)? as usize;
-        let end = at.checked_add(12)?.checked_add(length)?;
-        if length > MAX_PNG_BYTES || end > bytes.len() {
-            return None;
-        }
-        if u32_at(bytes, at + 8 + length)? != crc(&bytes[at + 4..at + 8 + length]) {
-            return None;
-        }
-        let kind: [u8; 4] = bytes[at + 4..at + 8].try_into().ok()?;
-        out.push(Chunk {
-            kind,
-            payload: &bytes[at + 8..at + 8 + length],
-            raw: &bytes[at..end],
-        });
-        at = end;
-        if &kind == b"IEND" {
-            return (at == bytes.len()).then_some(out);
-        }
-    }
-    None
+    let out = framed(bytes)?;
+    let end = out.iter().position(|c| &c.kind == b"IEND")?;
+    let valid = end + 1 == out.len()
+        && out
+            .iter()
+            .all(|c| c.payload.len() <= MAX_PNG_BYTES && c.crc_ok());
+    valid.then_some(out)
 }
 
 fn lenient_base64() -> GeneralPurpose {
@@ -327,6 +353,13 @@ pub fn kind_of(bytes: &[u8]) -> Result<super::Kind, String> {
 mod tests {
     use super::*;
     use crate::snapshot::manifest::{MemoryEntry, MemoryLevel};
+
+    #[test]
+    fn crc_matches_the_standard_check_values() {
+        assert_eq!(crc(b"123456789"), 0xcbf4_3926);
+        assert_eq!(crc(b"IEND"), 0xae42_6082);
+        assert_eq!(crc(b""), 0);
+    }
 
     fn snapshot() -> AgentSnapshot {
         let json = br#"{"format":"buzz-agent-snapshot","version":1,
