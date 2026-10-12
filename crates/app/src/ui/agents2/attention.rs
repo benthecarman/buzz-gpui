@@ -4,7 +4,7 @@
 //! the Interest they serve; raw JSON covers what the forms leave out (tags,
 //! classifiers). Validation is the spec's, at save.
 
-use super::{compact, field, problem};
+use super::{compact, problem};
 use crate::agents2::attention::{
     self as format, AttentionObject, AttentionValue, ChannelChoice, EventWatch, TimerState,
     TimerWatch, UNITS, attention_of, compile_filter, describe_watch, interest_title, parse_slug,
@@ -12,6 +12,7 @@ use crate::agents2::attention::{
 };
 use crate::agents2::store::SkippedObject;
 use crate::agents2::{Agent, AgentChange, Agents2};
+use crate::ui::agents::form::field;
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::time;
 use buzz_ui::{

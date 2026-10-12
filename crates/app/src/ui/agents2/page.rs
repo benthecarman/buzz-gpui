@@ -11,9 +11,10 @@
 //! grid.
 
 use super::attention::summary as attention_summary;
-use super::{AgentDelete, AgentTabs, Removed, empty_state, field, problem};
+use super::{AgentDelete, AgentTabs, Removed, empty_state, problem};
 use crate::agents2::{Agent, AgentChange, Agents2, RegisteredType, Status, type_of, types};
 use crate::hosts::HostConnection;
+use crate::ui::agents::form::field;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
@@ -1114,26 +1115,9 @@ impl Build {
             return cx.notify();
         };
         let session = community.read(cx).session.clone();
-        // Development only: a headless session has no file dialog.
-        let dev_file = std::env::var_os("BUZZ_DEV_PICK_FILE").map(std::path::PathBuf::from);
-        let paths = dev_file.is_none().then(|| {
-            cx.prompt_for_paths(PathPromptOptions {
-                files: true,
-                directories: false,
-                multiple: false,
-                prompt: Some("Choose a picture".into()),
-            })
-        });
+        let path = crate::ui::agents::choose_picture(cx);
         cx.spawn_in(window, async move |this, cx| {
-            let paths = match (dev_file, paths) {
-                (Some(path), _) => vec![path],
-                (None, Some(paths)) => match paths.await {
-                    Ok(Ok(Some(paths))) => paths,
-                    _ => return,
-                },
-                (None, None) => return,
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Some(path) = path.await else {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
@@ -1141,25 +1125,12 @@ impl Build {
                 this.picture_error = None;
                 cx.notify();
             });
-            let file = cx
-                .background_executor()
-                .spawn(async move { crate::ui::agents::read_picture(&path) })
-                .await;
-            let uploaded = match file {
-                Ok(file) => buzz_relay_client::upload::upload(session.media(), file)
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|blob| {
-                        if !blob.mime.starts_with("image/") {
-                            Err("The server did not return an image.".to_string())
-                        } else if buzz_relay_client::account::picture_error(&blob.url).is_some() {
-                            Err("The server returned a picture link that can’t be used.".into())
-                        } else {
-                            Ok(blob.url)
-                        }
-                    }),
-                Err(error) => Err(error),
-            };
+            let uploaded = crate::ui::agents::upload_agent_picture(
+                path,
+                session.media(),
+                cx.background_executor(),
+            )
+            .await;
             let saved = match uploaded {
                 Ok(url) => match this.update(cx, |this, cx| this.save_picture(url, cx)) {
                     Ok(task) => task.await,

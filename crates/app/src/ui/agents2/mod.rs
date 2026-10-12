@@ -72,25 +72,6 @@ pub(crate) fn empty_state(
         )
 }
 
-/// A `Field`: label, control, then the description.
-pub(crate) fn field(
-    label: impl Into<SharedString>,
-    description: Option<SharedString>,
-    control: impl IntoElement,
-    c: &Colors,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(rems(0.5))
-        .min_w_0()
-        .child(div().text_label_sm().child(label.into()))
-        .child(control)
-        .children(
-            description.map(|text| div().text_body_sm().text_color(c.text_subtle).child(text)),
-        )
-}
-
 /// An error under a form or row (`role="alert"`).
 pub(crate) fn problem(error: Option<&SharedString>, c: &Colors) -> Option<Div> {
     error.map(|error| {

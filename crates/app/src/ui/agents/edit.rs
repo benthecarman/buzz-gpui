@@ -20,6 +20,7 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::path::PathBuf;
 
 pub struct EditDialog {
     host: Entity<HostConnection>,
@@ -50,8 +51,52 @@ impl Owner for EditDialog {
     }
 }
 
+/// Asks for one picture file; `None` once the dialog is cancelled.
+pub(crate) fn choose_picture(cx: &mut App) -> impl Future<Output = Option<PathBuf>> + use<> {
+    // Development only: a headless session has no file dialog.
+    let dev_file = std::env::var_os("BUZZ_DEV_PICK_FILE").map(PathBuf::from);
+    let paths = dev_file.is_none().then(|| {
+        cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a picture".into()),
+        })
+    });
+    async move {
+        match (dev_file, paths) {
+            (Some(path), _) => Some(path),
+            (None, Some(paths)) => match paths.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            },
+            (None, None) => None,
+        }
+    }
+}
+
+/// Reads the picture at `path` off the UI thread and uploads it to
+/// `media`, for the URL an agent's profile can show.
+pub(crate) async fn upload_agent_picture(
+    path: PathBuf,
+    media: &buzz_relay_client::Media,
+    executor: &BackgroundExecutor,
+) -> Result<String, String> {
+    let file = executor.spawn(async move { read_picture(&path) }).await?;
+    let blob = buzz_relay_client::upload::upload(media, file)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !blob.mime.starts_with("image/") {
+        Err("The server did not return an avatar image.".into())
+    } else if buzz_relay_client::account::picture_error(&blob.url).is_some() {
+        Err("The server returned a picture link that can’t be used.".into())
+    } else {
+        Ok(blob.url)
+    }
+}
+
 /// Reads a chosen picture, as Settings → Profile does.
-pub(crate) fn read_picture(path: &std::path::Path) -> Result<UploadFile, String> {
+fn read_picture(path: &std::path::Path) -> Result<UploadFile, String> {
     let size = std::fs::metadata(path)
         .map_err(|error| format!("Couldn’t read that file: {error}"))?
         .len();
@@ -312,40 +357,17 @@ impl EditDialog {
             return cx.notify();
         };
         let session = community.read(cx).session.clone();
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose a picture".into()),
-        });
+        let path = choose_picture(cx);
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Some(path) = path.await else {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
                 this.uploading = true;
                 cx.notify();
             });
-            let file = cx
-                .background_executor()
-                .spawn(async move { read_picture(&path) })
-                .await;
-            let result = match file {
-                Ok(file) => buzz_relay_client::upload::upload(session.media(), file)
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|blob| {
-                        if blob.mime.starts_with("image/") {
-                            Ok(blob.url)
-                        } else {
-                            Err("The server did not return an avatar image.".to_string())
-                        }
-                    }),
-                Err(error) => Err(error),
-            };
+            let result =
+                upload_agent_picture(path, session.media(), cx.background_executor()).await;
             let _ = this.update(cx, |this, cx| {
                 this.uploading = false;
                 match result {

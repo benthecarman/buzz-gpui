@@ -17,7 +17,7 @@ mod draft;
 mod edit;
 mod editor;
 mod fields;
-mod form;
+pub(crate) mod form;
 pub(crate) mod harness;
 mod host_dialog;
 mod import;
@@ -36,7 +36,7 @@ mod teams;
 pub(crate) mod wake;
 
 pub(crate) use create::OpenHarnesses;
-pub(crate) use edit::{EditDialog, read_picture};
+pub(crate) use edit::{EditDialog, choose_picture, upload_agent_picture};
 pub(crate) use editor::Dismissed as EditorDismissed;
 
 /// Hooks agent snapshots, teams and the catalog into chat at startup, so
