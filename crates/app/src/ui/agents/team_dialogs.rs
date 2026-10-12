@@ -761,6 +761,7 @@ impl Render for TeamDeployDialog {
             .footer(
                 Button::new("cancel-deploy", "Cancel")
                     .outline()
+                    .disabled(self.busy)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Dismissed))),
             )
             .footer(
