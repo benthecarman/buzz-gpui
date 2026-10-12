@@ -285,10 +285,10 @@ impl Render for LegacySessions {
 /// Me's main column (`SessionsPage`).
 pub struct MePage {
     model: Entity<MeModel>,
-    /// The new-conversation view, by draft key.
-    new: Option<(String, Entity<NewSession>)>,
-    /// The open conversation, by id and visit.
-    work: Option<(String, u64, Entity<SessionWork>)>,
+    /// The new-conversation view, by community and draft key.
+    new: Option<(EntityId, String, Entity<NewSession>)>,
+    /// The open conversation, by community, id and visit.
+    work: Option<(EntityId, String, u64, Entity<SessionWork>)>,
     _model: Subscription,
 }
 
@@ -453,11 +453,14 @@ impl Render for MePage {
                         .cloned();
                     match channel {
                         Some(channel) => {
+                            let scope = community.entity_id();
                             let current = self
                                 .work
                                 .as_ref()
-                                .filter(|(open, at, _)| *open == channel.id && *at == visit)
-                                .map(|(_, _, view)| view.clone());
+                                .filter(|(owner, open, at, _)| {
+                                    *owner == scope && *open == channel.id && *at == visit
+                                })
+                                .map(|(_, _, _, view)| view.clone());
                             let view = current.unwrap_or_else(|| {
                                 let view = cx.new(|cx| {
                                     SessionWork::new(
@@ -468,7 +471,7 @@ impl Render for MePage {
                                         cx,
                                     )
                                 });
-                                self.work = Some((channel.id.clone(), visit, view.clone()));
+                                self.work = Some((scope, channel.id.clone(), visit, view.clone()));
                                 view
                             });
                             view.into_any_element()
@@ -483,11 +486,12 @@ impl Render for MePage {
                 (_, pending) => {
                     self.work = None;
                     let key = pending.unwrap_or_else(|| pending::draft_key(selection.section()));
+                    let scope = community.entity_id();
                     let current = self
                         .new
                         .as_ref()
-                        .filter(|(open, _)| *open == key)
-                        .map(|(_, view)| view.clone());
+                        .filter(|(owner, open, _)| *owner == scope && *open == key)
+                        .map(|(_, _, view)| view.clone());
                     let view = current.unwrap_or_else(|| {
                         let section = pending::section_of(&key);
                         let view = cx.new(|cx| {
@@ -500,7 +504,7 @@ impl Render for MePage {
                                 cx,
                             )
                         });
-                        self.new = Some((key, view.clone()));
+                        self.new = Some((scope, key, view.clone()));
                         view
                     });
                     view.into_any_element()
