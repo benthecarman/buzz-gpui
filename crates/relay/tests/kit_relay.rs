@@ -6,8 +6,9 @@
 
 use buzz_identity::Identity;
 use buzz_relay_client::kit::setup::{ChannelCreationInput, ChannelSetup};
-use buzz_relay_client::kit::{KitStatus, KitValue, Team, Template};
+use buzz_relay_client::kit::{KitStatus, KitValue, Template};
 use buzz_relay_client::lifecycle::{self, Action, NewChannel};
+use buzz_relay_client::teams::Team;
 use buzz_relay_client::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -188,23 +189,29 @@ async fn saves_and_loads_a_portable_team() {
         "members": [{"name": "Bob", "prompt": "x".repeat(3_000),
             "memory": {"level": "all", "entries": ["secret"]}}]
     });
-    let id = carol
-        .kit_save_portable(team.clone(), snapshot.clone(), None, uuid())
+    let teams = carol.team_kit();
+    teams
+        .save_portable(team.clone(), snapshot.clone(), None, uuid())
         .await
         .unwrap();
+    carol.kit_refresh().await.unwrap();
     let saved = entry(&carol, &team.id).expect("the team is listed");
     assert_eq!(saved.record.version, 2);
     let KitValue::Team(saved_team) = saved.record.value.clone() else {
         panic!("a team")
     };
     assert_eq!(saved_team.portable.as_ref().unwrap().chunks, 1);
-    let loaded = carol.kit_load_team(saved_team.clone()).await.unwrap();
+    let portable = Team {
+        portable: saved_team.portable.clone(),
+        ..team
+    };
+    let loaded = teams.load_team(&portable).await.unwrap();
     assert_eq!(loaded["team"]["instructions"], "Be brief.");
     assert_eq!(loaded["members"][0]["memory"]["entries"], json!([]));
 
     next_second().await;
     carol
-        .kit_save(KitValue::Team(saved_team), Some(id), true)
+        .kit_save(KitValue::Team(saved_team), Some(saved.event_id), true)
         .await
         .unwrap();
 }
