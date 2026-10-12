@@ -7,6 +7,7 @@
 //! save fails with the same message as in buzz-app.
 
 use buzz_relay_client::kit::me::{CANVAS_BYTES, RECORD_BYTES, RawKitEntry as KitEntry};
+use buzz_relay_client::members::is_key;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -223,7 +224,7 @@ impl Lineup {
         }
         Ok(Self {
             team_ids: keys(raw.get("teamIds"), 100, identifier)?,
-            agents: keys(raw.get("agents"), 200, hex_key)?,
+            agents: keys(raw.get("agents"), 200, is_key)?,
             canvas: canvas.to_owned(),
         })
     }
@@ -238,13 +239,6 @@ fn identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-fn hex_key(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn keys(value: Option<&Value>, max: usize, valid: fn(&str) -> bool) -> Result<Vec<String>, String> {

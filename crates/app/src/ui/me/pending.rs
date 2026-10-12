@@ -9,6 +9,7 @@
 //! view-state entry.
 
 use crate::community::{AppState, Community};
+use buzz_relay_client::members::is_key;
 use gpui_kit::{App, Entity};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -78,13 +79,6 @@ pub struct PendingStart {
     pub placement_done: bool,
 }
 
-fn hex_id(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 impl PendingStart {
     /// `readPending`'s checks: a session UUID, bounded text and hex ids.
     fn valid(&self) -> bool {
@@ -97,7 +91,7 @@ impl PendingStart {
                 &self.agent,
             ]
             .iter()
-            .all(|id| id.as_deref().is_none_or(hex_id))
+            .all(|id| id.as_deref().is_none_or(is_key))
     }
 }
 

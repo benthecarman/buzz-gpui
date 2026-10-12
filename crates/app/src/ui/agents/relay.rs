@@ -9,6 +9,7 @@
 //! session.
 
 use buzz_identity::{Identity, Purpose};
+use buzz_relay_client::members::is_key;
 use buzz_relay_client::outbox::accept_publish;
 use buzz_relay_client::profiles::Profile;
 use buzz_relay_client::{RelayHttp, RelayOrigin, Verifier};
@@ -22,13 +23,6 @@ const INVENTORY_KINDS: [u16; 2] = [30175, 30177];
 const PAGE: usize = 200;
 const MAX_EVENTS: usize = 10_000;
 const MAX_ARCHIVE_BYTES: usize = 2 * 1024 * 1024;
-
-fn hex_key(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
 
 fn filter(value: Value) -> buzz_relay_client::Filter {
     match value {
@@ -209,7 +203,7 @@ pub async fn read_library(http: &RelayHttp, owner: &str) -> Result<Library, Stri
                 });
             // Catalog shares are addressed by agent pubkey; the identity row
             // is the agent.
-            if !valid || hex_key(id) {
+            if !valid || is_key(id) {
                 continue;
             }
             library.definitions.push(Definition {
@@ -218,7 +212,7 @@ pub async fn read_library(http: &RelayHttp, owner: &str) -> Result<Library, Stri
                 avatar: avatar_source(body.get("avatar_url")),
             });
         } else {
-            if !hex_key(id) {
+            if !is_key(id) {
                 continue;
             }
             library.identities.push(LibraryIdentity {
@@ -418,7 +412,7 @@ pub async fn read_archives(
         .map(|tag| tag.as_slice())
         .filter(|tag| tag.first().map(String::as_str) == Some("p"))
         .filter_map(|tag| tag.get(1))
-        .filter(|key| hex_key(key))
+        .filter(|key| is_key(key))
         .cloned()
         .collect();
     Ok(ArchiveSnapshot {
@@ -442,7 +436,7 @@ pub async fn consent(
     viewer: &str,
     target: &str,
 ) -> Result<Option<Consent>, String> {
-    if !hex_key(target) {
+    if !is_key(target) {
         return Ok(None);
     }
     if target == viewer {

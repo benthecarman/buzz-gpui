@@ -359,12 +359,6 @@ pub fn render(item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
     render_in(Layout::Timeline, item, rows, cx)
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
 fn presence_badge(state: Option<&PresenceState>) -> Option<Presence> {
     state.map(|state| match state {
         PresenceState::Online => Presence::Online,
@@ -1854,7 +1848,7 @@ fn delivery_notice(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<A
     if delivery.status == Delivery::Seen {
         return None;
     }
-    let now = now_ms();
+    let now = crate::agent_activity::observer::now_ms();
     let due = row.created_at * 1000 + DELIVERY_GRACE_MS;
     let Some(text) = delivery_feedback(row, now) else {
         if now < due {
