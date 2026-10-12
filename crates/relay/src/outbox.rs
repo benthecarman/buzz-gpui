@@ -1242,6 +1242,8 @@ impl Inner {
             Action::Dismiss(id) => {
                 state.completed.delete(&id);
                 state.remove_pending(&id);
+                // A dismissed send is never delivered: drop its work.
+                state.delivery_work.remove(&id);
                 self.notify(&mut state);
             }
             // Recovery is released only after its removal is durable,

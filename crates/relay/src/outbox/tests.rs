@@ -1866,3 +1866,28 @@ async fn send_observers_see_fresh_sends_and_run_after_delivery() {
     h.send("after");
     assert_eq!(seen.lock().unwrap().len(), 3);
 }
+
+#[tokio::test(start_paused = true)]
+async fn dismissed_sends_drop_their_delivery_work() {
+    let h = Harness::new(Mode::Hold);
+    h.outbox.ready().await.unwrap();
+    let waiting: Arc<Mutex<Vec<usize>>> = Arc::default();
+    let log = waiting.clone();
+    let _observation = h.outbox.observe_send(Arc::new(move |_: &UnsignedEvent| {
+        let log = log.clone();
+        Some(Box::new(move |pending: &[UnsignedEvent]| {
+            log.lock().unwrap().push(pending.len());
+        }) as DeliveryWork)
+    }));
+    let rejected = h.send("rejected");
+    flush().await;
+    h.relay.take().reject("blocked: not allowed");
+    flush().await;
+    h.outbox.dismiss(&rejected).await.unwrap();
+    h.send("next");
+    flush().await;
+    h.relay.take().accept();
+    flush().await;
+    // The dismissed send no longer counts as waiting.
+    assert_eq!(*waiting.lock().unwrap(), [0]);
+}
