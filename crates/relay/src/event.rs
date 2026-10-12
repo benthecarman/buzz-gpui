@@ -2,6 +2,7 @@
 //! then shared cheaply.
 
 use nostr::prelude::{Event, EventId};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
@@ -267,7 +268,7 @@ impl Verifier {
     /// Strict structural checks on the raw JSON, then ID and signature.
     pub fn verify_json(&self, value: &Value) -> Result<Verified, InvalidEvent> {
         check_shape(value)?;
-        let event: Event = serde_json::from_value(value.clone()).map_err(|_| InvalidEvent)?;
+        let event = Event::deserialize(value).map_err(|_| InvalidEvent)?;
         self.verify(event)
     }
 
