@@ -8,7 +8,6 @@ use buzz_ui::{
     Surface, Tab, TabVariant, Tabs, TypeStyled,
     tokens::{radius, space},
 };
-use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -353,26 +352,6 @@ impl Confirm {
     }
 }
 
-/// Calls `apply` with the text whenever the user edits a single-line input.
-pub fn on_input<V: 'static>(
-    state: &Entity<InputState>,
-    window: &mut Window,
-    cx: &mut Context<V>,
-    apply: impl Fn(&mut V, String, &mut Window, &mut Context<V>) + 'static,
-) -> Subscription {
-    cx.subscribe_in(
-        state,
-        window,
-        move |this, state, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::Change) {
-                let value = state.read(cx).value().to_string();
-                apply(this, value, window, cx);
-                cx.notify();
-            }
-        },
-    )
-}
-
 /// A `<details>` summary: a caret and its label, toggling what follows.
 pub fn disclosure(
     id: impl Into<ElementId>,
@@ -398,24 +377,4 @@ pub fn disclosure(
         )
         .child(label.into())
         .on_click(on_click)
-}
-
-/// Calls `apply` with the text whenever the user edits a text area.
-pub fn on_textarea<V: 'static>(
-    state: &Entity<TextareaState>,
-    window: &mut Window,
-    cx: &mut Context<V>,
-    apply: impl Fn(&mut V, String, &mut Window, &mut Context<V>) + 'static,
-) -> Subscription {
-    cx.subscribe_in(
-        state,
-        window,
-        move |this, state, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::Change) {
-                let value = state.read(cx).value().to_string();
-                apply(this, value, window, cx);
-                cx.notify();
-            }
-        },
-    )
 }

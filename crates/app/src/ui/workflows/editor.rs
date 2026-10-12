@@ -27,6 +27,8 @@ use buzz_ui::{
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::any::Any;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -120,7 +122,8 @@ enum Slot {
 /// value while it is not focused.
 #[derive(Default)]
 struct Inputs {
-    slots: HashMap<String, (Slot, Subscription)>,
+    /// Each with its current `Apply`, type-erased, and change subscription.
+    slots: HashMap<String, (Slot, Rc<dyn Any>, Subscription)>,
     used: HashSet<String>,
 }
 
@@ -313,6 +316,105 @@ fn select<V: EditorHost>(this: &mut V, selection: Option<Selection>, cx: &mut Co
 // ---------------------------------------------------------------------------
 // Inputs
 
+/// What an input's change runs; replaced on every render.
+type Apply<V> = Rc<dyn Fn(&mut V, String, &mut Window, &mut Context<V>)>;
+
+/// The single- and multi-line input states, as `input` uses them.
+trait TextState: EventEmitter<InputEvent> + Sized + 'static {
+    fn of(slot: &Slot) -> Option<Entity<Self>>;
+    fn slot(state: Entity<Self>) -> Slot;
+    fn text(&self) -> SharedString;
+    fn focused(&self, window: &Window, cx: &App) -> bool;
+    fn replace(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>);
+}
+
+macro_rules! text_state {
+    ($state:ty, $variant:ident) => {
+        impl TextState for $state {
+            fn of(slot: &Slot) -> Option<Entity<Self>> {
+                match slot {
+                    Slot::$variant(state) => Some(state.clone()),
+                    _ => None,
+                }
+            }
+            fn slot(state: Entity<Self>) -> Slot {
+                Slot::$variant(state)
+            }
+            fn text(&self) -> SharedString {
+                self.value()
+            }
+            fn focused(&self, window: &Window, cx: &App) -> bool {
+                self.focus_handle(cx).contains_focused(window, cx)
+            }
+            fn replace(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
+                self.set_value(value, window, cx);
+            }
+        }
+    };
+}
+
+text_state!(InputState, Line);
+text_state!(TextareaState, Area);
+
+/// The input for `key`, following `value` while unfocused. `apply` is
+/// swapped in on every render, so it never acts on what an earlier
+/// render captured (a row index, the schedule, `disabled`).
+fn input<V: EditorHost, S: TextState>(
+    this: &mut V,
+    key: String,
+    value: &str,
+    window: &mut Window,
+    cx: &mut Context<V>,
+    new: impl FnOnce(String, &mut Window, &mut Context<S>) -> S,
+    apply: impl Fn(&mut V, String, &mut Window, &mut Context<V>) + 'static,
+) -> Entity<S> {
+    let apply: Apply<V> = Rc::new(apply);
+    let existing = this.editor_ref().and_then(|editor| {
+        let (slot, current, _) = editor.inputs.slots.get(&key)?;
+        Some((S::of(slot)?, current.clone()))
+    });
+    let current = existing
+        .as_ref()
+        .and_then(|(_, current)| current.clone().downcast::<RefCell<Apply<V>>>().ok());
+    let state = match existing.zip(current) {
+        Some(((state, _), current)) => {
+            *current.borrow_mut() = apply;
+            if !state.read(cx).focused(window, cx) && state.read(cx).text() != value {
+                let value = value.to_string();
+                state.update(cx, |state, cx| state.replace(value, window, cx));
+            }
+            state
+        }
+        None => {
+            let initial = value.to_string();
+            let state = cx.new(|cx| new(initial, window, cx));
+            let current = Rc::new(RefCell::new(apply));
+            let subscription = cx.subscribe_in(&state, window, {
+                let current = current.clone();
+                move |this, state, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let value = state.read(cx).text().to_string();
+                        let apply = current.borrow().clone();
+                        apply(this, value, window, cx);
+                        cx.notify();
+                    }
+                }
+            });
+            if let Some(editor) = this.editor() {
+                editor
+                    .inputs
+                    .slots
+                    .insert(key.clone(), (S::slot(state.clone()), current, subscription));
+            }
+            state
+        }
+    };
+    if let Some(editor) = this.editor() {
+        editor.inputs.used.insert(key);
+    }
+    state
+}
+
 /// A single-line input for `key`, following `value` while unfocused.
 fn line<V: EditorHost>(
     this: &mut V,
@@ -323,42 +425,12 @@ fn line<V: EditorHost>(
     cx: &mut Context<V>,
     apply: impl Fn(&mut V, String, &mut Window, &mut Context<V>) + 'static,
 ) -> Entity<InputState> {
-    let existing = this
-        .editor_ref()
-        .and_then(|editor| match editor.inputs.slots.get(&key) {
-            Some((Slot::Line(state), _)) => Some(state.clone()),
-            _ => None,
-        });
-    let state = match existing {
-        Some(state) => {
-            let focused = state.read(cx).focus_handle(cx).contains_focused(window, cx);
-            if !focused && state.read(cx).value() != value {
-                let value = value.to_string();
-                state.update(cx, |state, cx| state.set_value(value, window, cx));
-            }
-            state
-        }
-        None => {
-            let initial = value.to_string();
-            let state = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .default_value(initial)
-            });
-            let subscription = controls::on_input(&state, window, cx, apply);
-            if let Some(editor) = this.editor() {
-                editor
-                    .inputs
-                    .slots
-                    .insert(key.clone(), (Slot::Line(state.clone()), subscription));
-            }
-            state
-        }
+    let new = move |initial: String, window: &mut Window, cx: &mut Context<InputState>| {
+        InputState::new(window, cx)
+            .placeholder(placeholder)
+            .default_value(initial)
     };
-    if let Some(editor) = this.editor() {
-        editor.inputs.used.insert(key);
-    }
-    state
+    input(this, key, value, window, cx, new, apply)
 }
 
 /// A multi-line input for `key`, following `value` while unfocused.
@@ -370,38 +442,10 @@ fn area<V: EditorHost>(
     cx: &mut Context<V>,
     apply: impl Fn(&mut V, String, &mut Window, &mut Context<V>) + 'static,
 ) -> Entity<TextareaState> {
-    let existing = this
-        .editor_ref()
-        .and_then(|editor| match editor.inputs.slots.get(&key) {
-            Some((Slot::Area(state), _)) => Some(state.clone()),
-            _ => None,
-        });
-    let state = match existing {
-        Some(state) => {
-            let focused = state.read(cx).focus_handle(cx).contains_focused(window, cx);
-            if !focused && state.read(cx).value() != value {
-                let value = value.to_string();
-                state.update(cx, |state, cx| state.set_value(value, window, cx));
-            }
-            state
-        }
-        None => {
-            let initial = value.to_string();
-            let state = cx.new(|cx| TextareaState::new(window, cx).default_value(initial));
-            let subscription = controls::on_textarea(&state, window, cx, apply);
-            if let Some(editor) = this.editor() {
-                editor
-                    .inputs
-                    .slots
-                    .insert(key.clone(), (Slot::Area(state.clone()), subscription));
-            }
-            state
-        }
+    let new = |initial: String, window: &mut Window, cx: &mut Context<TextareaState>| {
+        TextareaState::new(window, cx).default_value(initial)
     };
-    if let Some(editor) = this.editor() {
-        editor.inputs.used.insert(key);
-    }
-    state
+    input(this, key, value, window, cx, new, apply)
 }
 
 fn text_field(state: &Entity<InputState>, invalid: bool, disabled: bool) -> TextField {
@@ -2420,7 +2464,7 @@ fn cron_input<V: EditorHost>(
 fn focus_cron<V: EditorHost>(this: &mut V, index: usize, window: &mut Window, cx: &mut Context<V>) {
     let state = this.editor_ref().and_then(|editor| {
         match editor.inputs.slots.get(&format!("cron:{index}")) {
-            Some((Slot::Line(state), _)) => Some(state.clone()),
+            Some((Slot::Line(state), ..)) => Some(state.clone()),
             _ => None,
         }
     });
@@ -2451,7 +2495,7 @@ fn cron_typed<V: EditorHost>(
                 editor.cron_error = Some(error);
                 fields[index] = typed.chars().filter(|c| !c.is_whitespace()).collect();
                 let state = match editor.inputs.slots.get(&format!("cron:{index}")) {
-                    Some((Slot::Line(state), _)) => Some(state.clone()),
+                    Some((Slot::Line(state), ..)) => Some(state.clone()),
                     _ => None,
                 };
                 editor.cron_fields = fields;
@@ -2473,7 +2517,7 @@ fn cron_typed<V: EditorHost>(
     // Keep each box showing its field, without the typed space.
     let states: Vec<(usize, Entity<InputState>)> = (0..5)
         .filter_map(|i| match editor.inputs.slots.get(&format!("cron:{i}")) {
-            Some((Slot::Line(state), _)) => Some((i, state.clone())),
+            Some((Slot::Line(state), ..)) => Some((i, state.clone())),
             _ => None,
         })
         .collect();
