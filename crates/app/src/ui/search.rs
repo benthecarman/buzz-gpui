@@ -1351,7 +1351,9 @@ fn author_display(display: &str, unfinished: bool) -> String {
     }
     let is_author = |range: &std::ops::Range<usize>| {
         let token = &display[range.clone()];
-        token.len() >= 5 && token[..5].eq_ignore_ascii_case("from:")
+        token
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("from:"))
     };
     let found = if unfinished {
         tokens
@@ -1858,6 +1860,9 @@ mod tests {
         );
         assert_eq!(author_display("FROM:@bob", false), "");
         assert_eq!(author_display("no author", false), "no author");
+        // Tokens whose fifth byte falls inside a character.
+        assert_eq!(author_display("from:alex 日本語", false), "日本語");
+        assert_eq!(author_display("日本 from:al", true), "日本 ");
     }
 
     #[test]
