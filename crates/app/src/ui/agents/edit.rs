@@ -1,8 +1,7 @@
 //! The Edit agent dialog (ui.md §5a.8): buzz-app's `AgentEditor`.
 //!
 //! Also opened with a requested draft when an agent asks for changes to
-//! itself (`AgentUpdateReview`); then writes wait until the request's
-//! channel membership is confirmed.
+//! itself (`AgentUpdateReview`).
 
 use super::create::OpenHarnesses;
 use super::draft::{self, Draft};
@@ -31,10 +30,6 @@ pub struct EditDialog {
     uploading: bool,
     /// A save is in flight; closing leaves it to finish on the host.
     saving: bool,
-    /// Writes wait (an unconfirmed agent request).
-    paused: bool,
-    /// Shown above the settings, such as an unconfirmed request's state.
-    banner: Option<(SharedString, bool)>,
     runtime_open: bool,
     technical_open: bool,
     _subscription: Subscription,
@@ -113,8 +108,6 @@ impl EditDialog {
             notice: notice.map(Into::into),
             uploading: false,
             saving: false,
-            paused: false,
-            banner: None,
             runtime_open: false,
             technical_open: false,
             _subscription: subscription,
@@ -139,11 +132,7 @@ impl EditDialog {
 
     fn blocked(&self, cx: &App) -> bool {
         let host = self.host.read(cx);
-        self.paused
-            || self.saving
-            || host.control.busy
-            || self.uploading
-            || host.status() != Status::Ready
+        self.saving || host.control.busy || self.uploading || host.status() != Status::Ready
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -153,9 +142,6 @@ impl EditDialog {
     }
 
     fn act(&mut self, action: AgentAction, cx: &mut Context<Self>) {
-        if self.paused {
-            return;
-        }
         self.notice = None;
         let owner = match &cx.global::<AppState>().identity {
             crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
@@ -286,9 +272,6 @@ impl EditDialog {
     }
 
     fn retry_profile(&mut self, cx: &mut Context<Self>) {
-        if self.paused {
-            return;
-        }
         self.notice = None;
         let id = self.agent.id.clone();
         let publish = self.host.update(cx, |host, cx| {
@@ -442,9 +425,8 @@ impl EditDialog {
         let busy = host.control.busy;
         let runtime_available = host.agents.runtime_available;
         let avatar_editing = host.agents.avatar_editing_available;
-        let launch_blocked =
-            self.paused || host.launch_block(&agent).is_some() || self.fields.dirty;
-        let can_stop = !self.paused && host.can_stop(&agent.id);
+        let launch_blocked = host.launch_block(&agent).is_some() || self.fields.dirty;
+        let can_stop = host.can_stop(&agent.id);
         let blocked = self.blocked(cx);
         let can_close = self.can_close(cx);
         let dirty = self.fields.dirty;
@@ -494,7 +476,7 @@ impl EditDialog {
                             .size(ButtonSize::Sm)
                             .surface(Surface::Floating)
                             .loading(self.uploading)
-                            .disabled(self.paused || busy)
+                            .disabled(busy)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.upload_picture(window, cx)),
                             ),
@@ -504,7 +486,7 @@ impl EditDialog {
                                 Button::new("remove-picture", "Remove")
                                     .size(ButtonSize::Sm)
                                     .surface(Surface::Floating)
-                                    .disabled(self.paused || busy || self.uploading)
+                                    .disabled(busy || self.uploading)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.fields.draft.picture = Some(String::new());
                                         this.fields.dirty = true;
@@ -658,17 +640,9 @@ impl EditDialog {
         }
         let danger = |text: SharedString| div().text_color(c.text_danger).child(text);
         let mut body = div().flex().flex_col().gap(rems(2.));
-        if let Some((banner, alert)) = self.banner.clone() {
-            body = body.child(
-                div()
-                    .text_body_sm()
-                    .text_color(if alert { c.text_danger } else { c.text_subtle })
-                    .child(banner),
-            );
-        }
         body = body
             .child(identity)
-            .child(self.fields.render(self.paused || busy, dirty, window, cx))
+            .child(self.fields.render(busy, dirty, window, cx))
             .child(
                 div()
                     .flex()
@@ -692,7 +666,7 @@ impl EditDialog {
                 div().flex().child(
                     Button::new("retry-profile-publication", "Retry profile publication")
                         .surface(Surface::Floating)
-                        .disabled(self.paused || busy || status != Status::Ready)
+                        .disabled(busy || status != Status::Ready)
                         .on_click(cx.listener(|this, _, _, cx| this.retry_profile(cx))),
                 ),
             );
