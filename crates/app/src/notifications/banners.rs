@@ -11,19 +11,17 @@
 //! the banner is clicked or dismissed.
 
 use super::Key;
+use super::shown;
 use crate::ui::navigation::{Arrival, Request, Target};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use zbus::zvariant::Value;
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
-/// Clicks are remembered for this many recent banners; some services keep
-/// banners until they are dismissed.
-const REMEMBERED: usize = 64;
 
 pub struct Banner {
     pub title: String,
@@ -88,44 +86,24 @@ impl Banners {
 /// activation tokens of the ones being clicked.
 #[derive(Default)]
 struct Shown {
-    targets: HashMap<u32, Target>,
-    order: VecDeque<u32>,
+    banners: shown::Shown<u32>,
     tokens: HashMap<u32, String>,
-    keys: HashMap<u32, Key>,
 }
 
 impl Shown {
     fn insert(&mut self, id: u32, target: Target, key: Option<Key>) {
-        if self.order.len() >= REMEMBERED
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.targets.remove(&oldest);
+        if let Some(oldest) = self.banners.insert(id, target, key) {
             self.tokens.remove(&oldest);
-            self.keys.remove(&oldest);
-        }
-        self.order.push_back(id);
-        self.targets.insert(id, target);
-        if let Some(key) = key {
-            self.keys.insert(id, key);
         }
     }
 
     /// The ids of the banners about `key`'s message, forgotten for closing.
     fn withdraw(&mut self, key: &Key) -> Vec<u32> {
-        let ids: Vec<u32> = self
-            .keys
-            .iter()
-            .filter(|(_, shown)| *shown == key)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in &ids {
-            self.keys.remove(id);
-        }
-        ids
+        self.banners.withdraw(key)
     }
 
     fn token(&mut self, id: u32, token: String) {
-        if self.targets.contains_key(&id) {
+        if self.banners.targets.contains_key(&id) {
             self.tokens.insert(id, token);
         }
     }
@@ -135,11 +113,11 @@ impl Shown {
     /// banner still routes a second click.
     fn invoked(&mut self, id: u32, action: &str) -> Option<Arrival> {
         let token = self.tokens.remove(&id);
-        self.keys.remove(&id);
+        self.banners.keys.remove(&id);
         if action != "default" {
             return None;
         }
-        let target = self.targets.get(&id)?.clone();
+        let target = self.banners.targets.get(&id)?.clone();
         Some(Arrival {
             request: Request::Open(target),
             activation_token: token,
@@ -147,10 +125,8 @@ impl Shown {
     }
 
     fn closed(&mut self, id: u32) {
-        self.targets.remove(&id);
+        self.banners.forget(&id);
         self.tokens.remove(&id);
-        self.keys.remove(&id);
-        self.order.retain(|shown| *shown != id);
     }
 }
 
@@ -392,10 +368,10 @@ mod tests {
     #[test]
     fn forgets_the_oldest_banners() {
         let mut shown = Shown::default();
-        for id in 0..(REMEMBERED as u32 + 1) {
+        for id in 0..(shown::REMEMBERED as u32 + 1) {
             shown.insert(id, target("general"), None);
         }
         assert!(shown.invoked(0, "default").is_none());
-        assert!(shown.invoked(REMEMBERED as u32, "default").is_some());
+        assert!(shown.invoked(shown::REMEMBERED as u32, "default").is_some());
     }
 }

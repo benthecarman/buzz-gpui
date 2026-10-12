@@ -13,56 +13,28 @@ use super::Key;
 use crate::ui::navigation::{Arrival, Request, Target};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::{App, Global, SharedString, SystemNotification};
-use std::collections::{HashMap, VecDeque};
-
-/// Clicks are remembered for this many recent banners; notification
-/// centers keep them until they are dismissed.
-const REMEMBERED: usize = 64;
 
 /// Banners shown and not yet clicked, and the messages they are about.
 #[derive(Default)]
-struct Shown {
-    targets: HashMap<SharedString, Target>,
-    order: VecDeque<SharedString>,
-    keys: HashMap<SharedString, Key>,
-}
+struct Shown(super::shown::Shown<SharedString>);
 
 impl Global for Shown {}
 
 impl Shown {
     fn insert(&mut self, tag: SharedString, target: Target, key: Option<Key>) {
-        if self.order.len() >= REMEMBERED
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.targets.remove(&oldest);
-            self.keys.remove(&oldest);
-        }
-        self.order.push_back(tag.clone());
-        if let Some(key) = key {
-            self.keys.insert(tag.clone(), key);
-        }
-        self.targets.insert(tag, target);
+        self.0.insert(tag, target, key);
     }
 
     fn clicked(&mut self, tag: &SharedString) -> Option<Target> {
-        self.order.retain(|shown| shown != tag);
-        self.keys.remove(tag);
-        self.targets.remove(tag)
+        self.0.forget(tag)
     }
 
     /// The tags of the banners about `key`'s message, forgotten.
     fn withdraw(&mut self, key: &Key) -> Vec<SharedString> {
-        let tags: Vec<SharedString> = self
-            .keys
-            .iter()
-            .filter(|(_, shown)| *shown == key)
-            .map(|(tag, _)| tag.clone())
-            .collect();
+        let tags = self.0.withdraw(key);
         for tag in &tags {
-            self.keys.remove(tag);
-            self.targets.remove(tag);
+            self.0.forget(tag);
         }
-        self.order.retain(|shown| !tags.contains(shown));
         tags
     }
 }
@@ -124,6 +96,7 @@ pub fn withdraw(key: &Key, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::shown::REMEMBERED;
     use super::*;
     use crate::ui::navigation::Place;
 

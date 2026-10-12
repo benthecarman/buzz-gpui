@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod banners;
 pub mod categories;
+mod shown;
 #[cfg(any(target_os = "macos", windows))]
 mod system;
 mod withdraw;
