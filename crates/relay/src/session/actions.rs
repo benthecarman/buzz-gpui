@@ -8,6 +8,7 @@
 //! epoch. Writes that confirm by polling use [`lifecycle::CONFIRM_DELAYS`]
 //! within [`lifecycle::RUN_TIMEOUT`].
 
+use super::util::{CLOSED, NOT_CONNECTED, now, post_event, sign};
 use super::{Actor, Message, Session};
 use crate::discovery::{ChannelSummary, ResolutionStart, metadata_name, open_metadata};
 use crate::dm;
@@ -23,16 +24,14 @@ use crate::outbox::{Delivery, Outbox, PublishError, SendOptions, accept_publish}
 use crate::reader::{ReadOptions, Reader};
 use crate::search::{self, Author, SearchHit, SearchRequest};
 use crate::socket::Filter;
-use buzz_identity::{Identity, Purpose};
+use buzz_identity::Identity;
 use nostr::prelude::{Event, EventId};
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-const CLOSED: &str = "The session has closed";
-const NOT_CONNECTED: &str = "Not connected to the relay yet";
 const UNCONFIRMED: &str = "This may have taken effect, but it is not confirmed yet. Refresh and check before trying again.";
 const DETAILS_ACCESS: &str = "Channel access changed. Reopen channel settings.";
 const LIFECYCLE_ACCESS: &str = "Channel access unavailable; refresh membership";
@@ -124,12 +123,6 @@ pub(super) struct Context {
 #[derive(Clone)]
 pub(super) struct Ops {
     pub(super) commands: mpsc::UnboundedSender<Message>,
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 impl Session {
@@ -245,13 +238,8 @@ impl Session {
             let ctx = ops.context().await?;
             // Published directly within 10 seconds (§5d.10).
             let publish = async {
-                let (event, result) = post(&ctx, template).await?;
-                match accept_publish(result, &event.id) {
-                    Ok(_) => Ok(()),
-                    Err(PublishError::Rejected(message) | PublishError::Uncertain(message)) => {
-                        Err(message)
-                    }
-                }
+                let event = sign(&ctx.identity, template)?;
+                super::util::publish(&ctx.http, &event).await
             };
             tokio::time::timeout(std::time::Duration::from_secs(10), publish)
                 .await
@@ -639,40 +627,19 @@ async fn post(
     ctx: &Context,
     template: EventTemplate,
 ) -> Result<(Event, Result<Vec<u8>, crate::http::HttpError>), String> {
-    let event = sign_command(ctx, template)?;
-    let result = send_command(ctx, &event).await;
+    let event = sign(&ctx.identity, template)?;
+    let result = post_event(&ctx.http, &event).await;
     Ok((event, result))
-}
-
-async fn send_command(ctx: &Context, event: &Event) -> Result<Vec<u8>, crate::http::HttpError> {
-    let body = serde_json::to_string(event).expect("events serialize");
-    ctx.http.post("/events", body).await
 }
 
 /// Publishes a signed command. A refusal is final; an uncertain outcome
 /// lets the caller try to confirm it anyway.
 async fn publish_signed(ctx: &Context, event: &Event) -> Result<bool, String> {
-    match accept_publish(send_command(ctx, event).await, &event.id) {
+    match accept_publish(post_event(&ctx.http, event).await, &event.id) {
         Ok(_) => Ok(true),
         Err(PublishError::Rejected(message)) => Err(message),
         Err(PublishError::Uncertain(_)) => Ok(false),
     }
-}
-
-fn sign_command(ctx: &Context, template: EventTemplate) -> Result<Event, String> {
-    let unsigned = ctx
-        .identity
-        .template(
-            Purpose::Content,
-            template.kind,
-            template.created_at,
-            template.tags,
-            template.content,
-        )
-        .map_err(|error| error.to_string())?;
-    ctx.identity
-        .sign(Purpose::Content, unsigned)
-        .map_err(|error| error.to_string())
 }
 
 /// Evaluates `$check` (an `Option`) at each confirmation delay until it
@@ -698,13 +665,7 @@ impl Ops {
         &self,
         f: impl FnOnce(&mut Actor) -> R + Send + 'static,
     ) -> Result<R, String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(f(actor));
-            })))
-            .map_err(|_| CLOSED.to_owned())?;
-        answer.await.map_err(|_| CLOSED.to_owned())
+        super::util::with(&self.commands, f).await
     }
 
     pub(super) async fn context(&self) -> Result<Context, String> {
@@ -890,7 +851,7 @@ impl Ops {
             return self.adopt(ctx.epoch, events).await;
         }
         let template = lifecycle::template(action, channel, now()).map_err(|e| e.to_string())?;
-        let event = sign_command(&ctx, template)?;
+        let event = sign(&ctx.identity, template)?;
         // Authorized again after signing, as the reference does.
         if let Some(events) = self.authorize_lifecycle(&ctx, action, channel).await? {
             return self.adopt(ctx.epoch, events).await;
@@ -960,7 +921,7 @@ impl Ops {
         let details = self.authorize_details(&ctx, channel, version).await?;
         let template = lifecycle::edit_details(channel, &draft, &details.draft, now())
             .map_err(|error| error.to_string())?;
-        let event = sign_command(&ctx, template)?;
+        let event = sign(&ctx.identity, template)?;
         self.authorize_details(&ctx, channel, version).await?;
         published.store(true, Ordering::SeqCst);
         if let Err(error) = publish_signed(&ctx, &event).await {
@@ -1257,22 +1218,33 @@ impl Ops {
 }
 
 impl Actor {
+    /// The relay has not answered yet: [`Self::context`] fails with
+    /// `NOT_CONNECTED`, not because only a saved snapshot shows.
+    pub(super) fn awaiting_relay(&self) -> bool {
+        match &self.relay {
+            None => !self.cached,
+            Some(_) => self.outbox.is_none(),
+        }
+    }
+
     pub(super) fn context(&self) -> Result<Context, String> {
-        // A saved snapshot reads nothing (`cachedOnly`).
-        let unavailable = if self.cached {
-            super::channels::RECONNECT_TO_UPDATE
-        } else {
-            NOT_CONNECTED
+        let (Some(relay), Some(outbox)) = (&self.relay, &self.outbox) else {
+            // A saved snapshot reads nothing (`cachedOnly`).
+            return Err(if self.awaiting_relay() {
+                NOT_CONNECTED
+            } else {
+                super::channels::RECONNECT_TO_UPDATE
+            }
+            .into());
         };
-        let relay = self.relay.as_ref().ok_or(unavailable)?.authority.clone();
         Ok(Context {
             reader: self.reader.clone(),
             http: self.http.clone(),
             identity: self.identity.clone(),
             viewer: self.identity.pubkey_hex(),
-            relay,
+            relay: relay.authority.clone(),
             epoch: self.epoch,
-            outbox: self.outbox.clone().ok_or(NOT_CONNECTED)?,
+            outbox: outbox.clone(),
         })
     }
 

@@ -2,9 +2,9 @@
 //! live arrivals on the membership route, recovery after a reconnect, and
 //! create, snooze, complete and cancel through a direct publish.
 
+use super::util::{CLOSED, now, publish, with};
 use super::{Actor, Message, Session};
 use crate::event::{Verified, kinds};
-use crate::outbox::{PublishError, accept_publish};
 use crate::reader::ReadOptions;
 use crate::reminders::{
     RawReminder, Reminder, ReminderEdit, ReminderStore, ReminderTarget, RemindersState,
@@ -13,9 +13,7 @@ use crate::reminders::{
 use buzz_identity::{DecodedReminder, Identity};
 use nostr::prelude::Event;
 use std::sync::Arc;
-use tokio::sync::{oneshot, watch};
-
-const CLOSED: &str = "The session has closed";
+use tokio::sync::watch;
 
 /// The actor's side.
 pub(super) struct Owner {
@@ -45,12 +43,6 @@ pub(super) fn new() -> (Owner, Arc<Shared>) {
             writes: tokio::sync::Mutex::new(()),
         }),
     )
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 fn raw(event: &Event) -> RawReminder {
@@ -263,16 +255,11 @@ struct Writer {
 
 impl Writer {
     async fn head(&self, id: String) -> Result<Reminder, String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(actor.reminders.store.get(&id).cloned());
-            })))
-            .map_err(|_| CLOSED.to_owned())?;
-        answer
-            .await
-            .map_err(|_| CLOSED.to_owned())?
-            .ok_or_else(|| "Reminder not found".to_owned())
+        with(&self.commands, move |actor| {
+            actor.reminders.store.get(&id).cloned()
+        })
+        .await?
+        .ok_or_else(|| "Reminder not found".to_owned())
     }
 
     /// Seals, publishes and shows one reminder record.
@@ -281,25 +268,16 @@ impl Writer {
             .identity
             .seal_reminder(intent, now())
             .map_err(|error| error.to_string())?;
-        let body = serde_json::to_string(&event).expect("events serialize");
-        accept_publish(self.http.post("/events", body).await, &event.id).map_err(|error| {
-            match error {
-                PublishError::Rejected(message) | PublishError::Uncertain(message) => message,
-            }
-        })?;
+        publish(&self.http, &event).await?;
         let viewer = self.viewer.clone();
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                if let Ok((raw, decoded)) =
-                    decode(&actor.identity, &viewer, std::slice::from_ref(&event))
-                    && actor.reminders.store.received(&raw, &decoded)
-                {
-                    actor.reminders_publish();
-                }
-                let _ = reply.send(());
-            })))
-            .map_err(|_| CLOSED.to_owned())?;
-        answer.await.map_err(|_| CLOSED.to_owned())
+        with(&self.commands, move |actor| {
+            if let Ok((raw, decoded)) =
+                decode(&actor.identity, &viewer, std::slice::from_ref(&event))
+                && actor.reminders.store.received(&raw, &decoded)
+            {
+                actor.reminders_publish();
+            }
+        })
+        .await
     }
 }

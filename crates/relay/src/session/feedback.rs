@@ -12,7 +12,6 @@ use buzz_identity::{Identity, Purpose};
 use nostr::prelude::EventId;
 use tokio::sync::{oneshot, watch};
 
-const CLOSED: &str = "The session has closed";
 const UNAVAILABLE: &str = "Connect to a Buzz deployment to send or retry feedback.";
 
 /// The feedback event waiting in the outbox.
@@ -66,15 +65,8 @@ fn supported(identity: &Identity) -> bool {
 impl Session {
     /// The outbox, once the session has connected.
     async fn feedback_outbox(&self) -> Result<Outbox, String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(actor.outbox.clone());
-            })))
-            .map_err(|_| CLOSED.to_owned())?;
-        answer
-            .await
-            .map_err(|_| CLOSED.to_owned())?
+        super::util::with(&self.commands, |actor| actor.outbox.clone())
+            .await?
             .ok_or_else(|| UNAVAILABLE.to_owned())
     }
 

@@ -8,11 +8,11 @@ use super::{Actor, Message};
 use crate::event::{Verified, kinds};
 use crate::http::HttpError;
 use crate::outbox::{HttpPublisher, PublishError, Publisher};
-use crate::reader::{Priority, ReadOptions, Reader};
+use crate::reader::{Priority, ReadError, ReadOptions, Reader};
 use futures::future::BoxFuture;
 use nostr::prelude::{Event, EventId};
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 const CHANGED: &str = "Channel membership changed during mention verification; retry";
 const UNVERIFIED: &str = "Could not verify current channel membership; refresh and retry";
@@ -38,15 +38,28 @@ impl SessionPublisher {
         &self,
         f: impl FnOnce(&mut Actor) -> R + Send + 'static,
     ) -> Result<R, PublishError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(f(actor));
-            })))
-            .map_err(|_| PublishError::Rejected("The session has closed".into()))?;
-        answer
+        super::util::with(&self.commands, f)
             .await
-            .map_err(|_| PublishError::Rejected("The session has closed".into()))
+            .map_err(PublishError::Rejected)
+    }
+
+    /// A fresh, strong read of `channel`'s relay-signed roster.
+    async fn read_roster(&self, channel: &str) -> Result<crate::Events, ReadError> {
+        let filter = json!({
+            "kinds": [kinds::CHANNEL_MEMBERS],
+            "consistency": "strong",
+            "authors": [self.relay],
+            "#d": [channel],
+            "limit": 1,
+        });
+        let serde_json::Value::Object(filter) = filter else {
+            unreachable!("filters are objects")
+        };
+        let options = ReadOptions {
+            priority: Priority::Foreground,
+            fresh: true,
+        };
+        self.reader.read(vec![filter], options).await
     }
 
     /// Checks the mention against the session's roster and returns the
@@ -94,23 +107,8 @@ impl SessionPublisher {
         if !self.can_participate(&channel).await? {
             return Err(PublishError::Rejected(CANVAS_ACCESS.into()));
         }
-        let filter = json!({
-            "kinds": [kinds::CHANNEL_MEMBERS],
-            "consistency": "strong",
-            "authors": [self.relay],
-            "#d": [channel],
-            "limit": 1,
-        });
-        let serde_json::Value::Object(filter) = filter else {
-            unreachable!("filters are objects")
-        };
-        let options = ReadOptions {
-            priority: Priority::Foreground,
-            fresh: true,
-        };
         let events = self
-            .reader
-            .read(vec![filter], options)
+            .read_roster(&channel)
             .await
             .map_err(|_| PublishError::Rejected(CANVAS_MEMBERSHIP.into()))?;
         let roster = events
@@ -190,25 +188,9 @@ impl Publisher for SessionPublisher {
                 .and_then(|tag| tag.as_slice().get(1))
                 .cloned()
                 .ok_or_else(|| PublishError::Rejected("A channel is required".into()))?;
-            let filter = json!({
-                "kinds": [kinds::CHANNEL_MEMBERS],
-                "consistency": "strong",
-                "authors": [this.relay],
-                "#d": [channel],
-                "limit": 1,
-            });
-            let filter = match filter {
-                serde_json::Value::Object(map) => map,
-                _ => unreachable!("filters are objects"),
-            };
-            let options = ReadOptions {
-                priority: Priority::Foreground,
-                fresh: true,
-            };
             // An empty or failed read is unknown, never permission.
             let events = this
-                .reader
-                .read(vec![filter], options)
+                .read_roster(&channel)
                 .await
                 .map_err(|_| PublishError::Rejected(UNVERIFIED.into()))?;
             let roster = match &events[..] {

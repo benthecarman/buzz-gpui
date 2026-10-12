@@ -7,6 +7,7 @@
 //! the outbox and reported as [`CanvasError::Conflict`]; any uncertain
 //! outcome stays in the outbox and blocks the next save in that channel.
 
+use super::util::{CLOSED, now, with};
 use super::{Message, Session};
 use crate::canvas::{
     self, ACCESS_CHANGED, AWAITING, CanvasError, HistoryCursor, HistoryPage, OTHER_SELECTED,
@@ -21,9 +22,7 @@ use nostr::prelude::EventId;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
 
-const CLOSED: &str = "The session has closed";
 /// How long a save waits for its outbox delivery (`delivered`).
 const DELIVERY_WAIT: Duration = Duration::from_secs(15);
 const STILL_WAITING: &str =
@@ -33,12 +32,6 @@ const NOT_CONFIRMED: &str = "The operation could not be confirmed.";
 const REPLAY_SECS: u64 = 15 * 60;
 /// Bounds a whole save: reads, delivery and readback.
 const SAVE_TIMEOUT: Duration = Duration::from_secs(60);
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
 
 /// What a Canvas call needs from the actor.
 struct Access {
@@ -85,19 +78,15 @@ impl Canvas {
     /// channel, as the actor knows it now.
     async fn access(&self, channel: &str) -> Result<Access, CanvasError> {
         let channel = channel.to_owned();
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(Access {
-                    outbox: actor.outbox.clone(),
-                    writable: actor
-                        .discovery
-                        .as_ref()
-                        .is_some_and(|discovery| discovery.can_participate(&channel)),
-                });
-            })))
-            .map_err(|_| CanvasError::from(CLOSED))?;
-        answer.await.map_err(|_| CanvasError::from(CLOSED))
+        with(&self.commands, move |actor| Access {
+            outbox: actor.outbox.clone(),
+            writable: actor
+                .discovery
+                .as_ref()
+                .is_some_and(|discovery| discovery.can_participate(&channel)),
+        })
+        .await
+        .map_err(CanvasError::from)
     }
 
     async fn writable(&self, channel: &str) -> Result<bool, CanvasError> {
@@ -334,18 +323,10 @@ impl Session {
     /// (`canvas.available`): the session has connected and this identity
     /// signs Canvas saves. Each call still checks channel access.
     pub async fn canvas_available(&self) -> bool {
-        let canvas = self.canvas();
-        let (reply, answer) = oneshot::channel();
-        if self
-            .commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(actor.outbox.is_some());
-            })))
-            .is_err()
-        {
-            return false;
-        }
-        answer.await.unwrap_or(false) && supported(&canvas.identity)
+        with(&self.commands, |actor| actor.outbox.is_some())
+            .await
+            .unwrap_or(false)
+            && supported(&self.direct.identity)
     }
 
     /// The channel's current Canvas, `None` when it has none. Editors and

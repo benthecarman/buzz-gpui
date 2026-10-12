@@ -2,17 +2,17 @@
 //! community. Each is one signed request with its receipt
 //! checked, run on the session's runtime so any executor can await it.
 
+use super::util::{self, now, post_event, sign};
 use super::{Message, Session};
 use crate::account::{self, LeaveOutcome, ProfileEdit};
 use crate::emoji;
 use crate::event::{Verified, Verifier};
 use crate::http::RelayHttp;
-use crate::messages::EventTemplate;
 use crate::outbox::{PublishError, accept_publish};
 use crate::reader::{ReadOptions, Reader};
 use crate::user_status::{self, StatusInput, UserStatus};
-use buzz_identity::{Identity, Purpose};
-use nostr::prelude::{Event, EventId};
+use buzz_identity::Identity;
+use nostr::prelude::EventId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,35 +35,6 @@ pub(super) struct Direct {
     pub emoji: tokio::sync::Mutex<()>,
     /// One channel lifecycle action at a time.
     pub lifecycle: tokio::sync::Mutex<()>,
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-fn sign(identity: &Identity, template: EventTemplate) -> Result<Event, String> {
-    let unsigned = identity
-        .template(
-            Purpose::Content,
-            template.kind,
-            template.created_at,
-            template.tags,
-            template.content,
-        )
-        .map_err(|error| error.to_string())?;
-    identity
-        .sign(Purpose::Content, unsigned)
-        .map_err(|error| error.to_string())
-}
-
-async fn post(http: &RelayHttp, event: &Event) -> Result<Vec<u8>, crate::http::HttpError> {
-    http.post(
-        "/events",
-        serde_json::to_string(event).expect("events serialize"),
-    )
-    .await
 }
 
 /// Puts the viewer's previous profile back when dropped while armed
@@ -140,7 +111,7 @@ impl Session {
                     actor.publish();
                 }
             })));
-            match accept_publish(post(&http, &event).await, &event.id) {
+            match accept_publish(post_event(&http, &event).await, &event.id) {
                 Ok(_) => {
                     revert.previous = None;
                     Ok(())
@@ -258,7 +229,7 @@ impl Session {
                 .map_err(|error| error.to_string())?;
             // Only a signer that may sign statuses can save one.
             let event = sign(&identity, template).map_err(|_| STATUS_UNAVAILABLE.to_string())?;
-            accept_publish(post(&http, &event).await, &event.id)
+            accept_publish(post_event(&http, &event).await, &event.id)
                 .map_err(|error| error.to_string())?;
             // Shown in the session's statuses at once, as live traffic
             // would.
@@ -332,9 +303,7 @@ impl Session {
             let verified = Verifier::default()
                 .verify(event.clone())
                 .map_err(|error| error.to_string())?;
-            accept_publish(post(&http, &event).await, &event.id).map_err(|error| match error {
-                PublishError::Rejected(message) | PublishError::Uncertain(message) => message,
-            })?;
+            util::publish(&http, &event).await?;
             let _ = commands.send(Message::With(Box::new(move |actor| {
                 if actor.emoji.accept(&[verified]) {
                     actor.publish();
@@ -365,7 +334,7 @@ impl Session {
         let identity = self.direct.identity.clone();
         self.run(async move {
             let event = sign(&identity, account::leave_template(now()))?;
-            account::leave_outcome(post(&http, &event).await, &event.id)
+            account::leave_outcome(post_event(&http, &event).await, &event.id)
         })
         .await
     }

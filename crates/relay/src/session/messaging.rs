@@ -4,15 +4,12 @@
 //! retry its operations. Reports and "Send to channel" go through the
 //! session's write checks (`Session::report`, `Session::send_to_channel`).
 
-use super::{Actor, Message, Session};
+use super::util::NOT_CONNECTED;
+use super::{Actor, Session};
 use crate::event::Verified;
 use crate::messages;
 use crate::outbox::Outbox;
 use nostr::prelude::EventId;
-use tokio::sync::oneshot;
-
-const CLOSED: &str = "The session has closed";
-const NOT_CONNECTED: &str = "Not connected to the relay yet";
 
 impl Actor {
     /// A message shown in `channel`'s timeline or in an open thread.
@@ -35,13 +32,7 @@ impl Session {
         &self,
         work: impl FnOnce(&mut Actor) -> R + Send + 'static,
     ) -> Result<R, String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(work(actor));
-            })))
-            .map_err(|_| CLOSED.to_string())?;
-        answer.await.map_err(|_| CLOSED.to_string())
+        super::util::with(&self.commands, work).await
     }
 
     /// The session's outbox, once connected. A reconnect replaces it, so

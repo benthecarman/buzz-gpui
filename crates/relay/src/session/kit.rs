@@ -10,7 +10,8 @@
 //! confirmed (admission), and finishes its setup on its own afterwards
 //! (completion), leaving a notice when setup could not finish.
 
-use super::{Actor, Message, Session};
+use super::util::{CLOSED, NOT_CONNECTED, now, with};
+use super::{Actor, Session};
 use crate::canvas::{AWAITING, TOO_OLD};
 use crate::event::{Verified, kinds};
 use crate::kit::setup::{
@@ -30,8 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
 
-const CLOSED: &str = "The session has closed";
-const NOT_CONNECTED: &str = "Not connected to the relay yet";
 const UNCONFIRMED: &str = "This may have taken effect, but it is not confirmed yet. Refresh and check before trying again.";
 /// An unconfirmed save older than this is never replayed.
 const REPLAY_SECS: u64 = 15 * 60;
@@ -110,25 +109,6 @@ struct Kit {
     store: Store,
     partition: Partition,
     epoch: u64,
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-async fn with<R: Send + 'static>(
-    commands: &tokio::sync::mpsc::UnboundedSender<Message>,
-    f: impl FnOnce(&mut Actor) -> R + Send + 'static,
-) -> Result<R, String> {
-    let (reply, answer) = oneshot::channel();
-    commands
-        .send(Message::With(Box::new(move |actor| {
-            let _ = reply.send(f(actor));
-        })))
-        .map_err(|_| CLOSED.to_owned())?;
-    answer.await.map_err(|_| CLOSED.to_owned())
 }
 
 impl Actor {

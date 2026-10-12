@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{mpsc, oneshot, watch};
 
-const CLOSED: &str = "The session has closed";
+use super::util::CLOSED;
 const NOT_WRITABLE: &str = "This community cannot update catalog sharing.";
 
 /// A cheap handle; clones share one catalog. Keep one per session: each

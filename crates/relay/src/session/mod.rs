@@ -44,6 +44,7 @@ mod teams;
 mod threads;
 mod timeline;
 mod unread;
+mod util;
 mod work_sessions;
 mod workflows;
 

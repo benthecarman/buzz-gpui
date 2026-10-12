@@ -16,6 +16,7 @@
 use super::actions::{Context, Ops};
 use super::canvas::Canvas;
 use super::kit::{KitSnapshot, KitStatus};
+use super::util::now;
 use super::work_sessions::delivered;
 use super::{Message, Session};
 use crate::canvas::{AWAITING, TOO_OLD};
@@ -127,12 +128,6 @@ struct Inner {
     mutations: tokio::sync::Mutex<()>,
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
 fn ids_filter(id: &str) -> Filter {
     let mut filter = Filter::new();
     filter.insert("ids".into(), json!([id]));
@@ -195,13 +190,23 @@ impl MeKit {
     }
 
     fn set(&self, status: MeKitStatus, entries: Option<Arc<[KitEntry]>>) {
+        self.set_with(status, entries, false);
+    }
+
+    /// `waiting`: the status is the error of a read made before the relay
+    /// answered.
+    fn set_with(&self, status: MeKitStatus, entries: Option<Arc<[KitEntry]>>, waiting: bool) {
         self.inner.snapshot.send_modify(|snapshot| {
             *snapshot = Arc::new(MeKitSnapshot {
                 status,
                 entries: entries.unwrap_or_else(|| snapshot.entries.clone()),
             });
         });
-        let typed = typed(&self.inner.snapshot.borrow(), &self.inner.community);
+        let typed = typed(
+            &self.inner.snapshot.borrow(),
+            &self.inner.community,
+            waiting,
+        );
         self.inner.typed.send_replace(Arc::new(typed));
         // Me placement takes conversations out of the Messages sidebar.
         let _ = self
@@ -239,7 +244,8 @@ impl MeKit {
             *kit.inner.refreshing.lock().expect("kit lock") = None;
             match result {
                 Ok(entries) => kit.set(MeKitStatus::Ready, Some(entries.into())),
-                Err(error) => kit.set(MeKitStatus::Error(error), None),
+                Err(Unread::Waiting(error)) => kit.set_with(MeKitStatus::Error(error), None, true),
+                Err(Unread::Failed(error)) => kit.set(MeKitStatus::Error(error), None),
             }
         }
         .boxed()
@@ -265,9 +271,25 @@ impl MeKit {
         self.refresh()
     }
 
-    async fn read_catalog(&self) -> Result<Vec<KitEntry>, String> {
-        let ctx = self.context().await?;
-        let events = fresh(&ctx, vec![recipes::catalog_filter(&ctx.viewer)]).await?;
+    async fn read_catalog(&self) -> Result<Vec<KitEntry>, Unread> {
+        let ctx = self
+            .ops()
+            .with(|actor| {
+                actor.context().map_err(|error| {
+                    if actor.awaiting_relay() {
+                        Unread::Waiting(error)
+                    } else {
+                        Unread::Failed(error)
+                    }
+                })
+            })
+            .await
+            .map_err(Unread::Failed)??;
+        self.decode_catalog(&ctx).await.map_err(Unread::Failed)
+    }
+
+    async fn decode_catalog(&self, ctx: &Context) -> Result<Vec<KitEntry>, String> {
+        let events = fresh(ctx, vec![recipes::catalog_filter(&ctx.viewer)]).await?;
         if events.len() >= recipes::CATALOG_LIMIT {
             return Err(
                 "Recipe catalog reached its read limit; no partial catalog will be used".into(),
@@ -950,16 +972,23 @@ fn removal_error(message: &str) -> String {
     }
 }
 
+/// Why a catalog read gave nothing.
+enum Unread {
+    /// The relay has not answered yet, so there is nothing to read.
+    Waiting(String),
+    Failed(String),
+}
+
 /// The typed view of a catalog snapshot (`channelKit.snapshot`). Before
-/// the relay answers there is nothing to read yet, so that error leaves
-/// the catalog idle for the next `kit_ensure`.
-fn typed(snapshot: &MeKitSnapshot, community: &str) -> KitSnapshot {
+/// the relay answers (`waiting`) there is nothing to read yet, so that
+/// error leaves the catalog idle for the next `kit_ensure`.
+fn typed(snapshot: &MeKitSnapshot, community: &str, waiting: bool) -> KitSnapshot {
     let (status, error) = match &snapshot.status {
         MeKitStatus::Idle => (KitStatus::Idle, None),
         MeKitStatus::Loading => (KitStatus::Loading, None),
         MeKitStatus::Ready => (KitStatus::Ready, None),
         MeKitStatus::Unavailable => (KitStatus::Unavailable, None),
-        MeKitStatus::Error(error) if error == NOT_CONNECTED => (KitStatus::Idle, None),
+        MeKitStatus::Error(_) if waiting => (KitStatus::Idle, None),
         MeKitStatus::Error(error) => (KitStatus::Error, Some(error.clone())),
     };
     let entries = snapshot
@@ -987,8 +1016,6 @@ fn typed(snapshot: &MeKitSnapshot, community: &str) -> KitSnapshot {
         },
     }
 }
-
-const NOT_CONNECTED: &str = "Not connected to the relay yet";
 
 async fn fresh(ctx: &Context, filters: Vec<Filter>) -> Result<Vec<Verified>, String> {
     ctx.reader

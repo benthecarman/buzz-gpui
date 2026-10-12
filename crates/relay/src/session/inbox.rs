@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 
-const CLOSED: &str = "The session has closed";
+use super::util::CLOSED;
 /// Addressed chat kinds the history reads.
 const MENTION_KINDS: [u16; 2] = [kinds::CHAT, kinds::AGENT_MESSAGE];
 const OVERLAY_PAGE: u64 = 500;
@@ -442,13 +442,7 @@ impl Session {
     }
 
     async fn inbox_mark(&self, item: InboxItem, unread: bool) -> Result<(), String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Message::With(Box::new(move |actor| {
-                let _ = reply.send(actor.inbox_mark(&item, unread));
-            })))
-            .map_err(|_| CLOSED.to_owned())?;
-        answer.await.map_err(|_| CLOSED.to_owned())?
+        super::util::with(&self.commands, move |actor| actor.inbox_mark(&item, unread)).await?
     }
 }
 

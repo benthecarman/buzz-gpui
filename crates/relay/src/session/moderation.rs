@@ -3,15 +3,9 @@
 //! Each is one request run on the session's runtime; the relay decides.
 
 use super::Session;
+use super::util::{now, post_event, sign};
 use crate::moderation::{self, Change, Invite, Member};
 use crate::reader::ReadOptions;
-use buzz_identity::Purpose;
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
 
 impl Session {
     /// The relay's signing key, once it has identified itself.
@@ -53,20 +47,8 @@ impl Session {
         let identity = self.direct.identity.clone();
         self.run(async move {
             let template = moderation::member_command(&change, now())?;
-            let unsigned = identity
-                .template(
-                    Purpose::Content,
-                    template.kind,
-                    template.created_at,
-                    template.tags,
-                    template.content,
-                )
-                .map_err(|error| error.to_string())?;
-            let event = identity
-                .sign(Purpose::Content, unsigned)
-                .map_err(|error| error.to_string())?;
-            let body = serde_json::to_string(&event).expect("events serialize");
-            moderation::member_outcome(http.post("/events", body).await, &event.id)
+            let event = sign(&identity, template)?;
+            moderation::member_outcome(post_event(&http, &event).await, &event.id)
         })
         .await
     }

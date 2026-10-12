@@ -9,11 +9,11 @@
 //! store's tickets. The sidebar sees everything in
 //! [`SessionSnapshot::sidebar`](super::SessionSnapshot::sidebar).
 
+use super::util::CLOSED;
 use super::{Actor, Message, Session};
 use crate::ChannelType;
 use crate::event::Verified;
 use crate::http::RelayHttp;
-use crate::outbox::{PublishError, accept_publish};
 use crate::read_state::ReadTarget;
 use crate::reader::{Priority, ReadOptions, Reader};
 use crate::sidebar::{
@@ -37,7 +37,6 @@ use tokio::sync::{mpsc, oneshot};
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// View state key of the preferences shown before the first read.
 const STARTUP_KEY: &str = "sidebar-preferences-startup";
-const CLOSED: &str = "The session has closed";
 
 pub(super) struct SidebarPrefs {
     store: PreferencesStore,
@@ -161,12 +160,7 @@ impl Writer {
                 .identity
                 .sign(Purpose::AppData, unsigned)
                 .map_err(|e| e.to_string())?;
-            let body = serde_json::to_string(&event).expect("events serialize");
-            accept_publish(self.http.post("/events", body).await, &event.id).map_err(|error| {
-                match error {
-                    PublishError::Rejected(message) | PublishError::Uncertain(message) => message,
-                }
-            })?;
+            super::util::publish(&self.http, &event).await?;
             let readback = self.head(&write).await?;
             if !write.confirms(&readback).map_err(|e| e.to_string())? {
                 return Err(write.conflict().to_string());
