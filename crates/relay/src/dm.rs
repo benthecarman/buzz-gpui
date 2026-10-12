@@ -74,12 +74,8 @@ pub fn people_filter(query: &str, page: usize) -> Result<(Filter, usize), String
     let limit = if browsing && page == 1 { 15 } else { 30 };
     let relay_page = if browsing && page > 1 { page - 1 } else { page };
     let mut f = filter(json!({"kinds": [kinds::PROFILE], "limit": limit, "page": relay_page}));
-    if value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        f.insert("authors".into(), json!([value]));
+    if let Some(key) = crate::members::exact_key(value) {
+        f.insert("authors".into(), json!([key]));
     } else if !browsing {
         f.insert("search".into(), json!(value));
         f.insert("search_mode".into(), json!("prefix"));
@@ -119,6 +115,8 @@ mod tests {
         assert_eq!(search["search_mode"], json!("prefix"));
         let (exact, _) = people_filter(&key(3), 1).unwrap();
         assert_eq!(exact["authors"], json!([key(3)]));
+        let (upper, _) = people_filter(&key(3).to_uppercase(), 1).unwrap();
+        assert_eq!(upper["authors"], json!([key(3)]));
         assert!(people_filter(&"x".repeat(101), 1).is_err());
     }
 

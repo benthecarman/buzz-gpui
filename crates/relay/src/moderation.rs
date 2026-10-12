@@ -9,7 +9,7 @@ use crate::event::{Verified, is_newer, kinds};
 use crate::http::HttpError;
 use crate::messages::EventTemplate;
 use crate::socket::Filter;
-use nostr::prelude::{EventId, FromBech32, PublicKey};
+use nostr::prelude::EventId;
 use serde_json::{Value, json};
 
 pub const MEMBERSHIP_KIND: u16 = kinds::COMMUNITY_ROSTER;
@@ -366,13 +366,8 @@ pub fn invite_outcome(result: Result<Vec<u8>, HttpError>) -> Result<Invite, Stri
 
 /// An exact public identity: an npub or 64 hex characters, lowercased.
 pub fn parse_public_key(input: &str) -> Result<String, String> {
-    let value = input.trim();
-    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Ok(value.to_ascii_lowercase());
-    }
-    PublicKey::from_bech32(value)
-        .map(|key| key.to_hex())
-        .map_err(|_| "Enter an npub or 64-character hex public key.".into())
+    crate::members::exact_key(input)
+        .ok_or_else(|| "Enter an npub or 64-character hex public key.".into())
 }
 
 #[cfg(test)]
