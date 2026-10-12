@@ -1,7 +1,7 @@
 //! Layout shared by the agent dialogs (ui.md §5a.7, §5a.8) and the agent
 //! defaults dialog (§5a.11).
 
-use buzz_ui::{Colors, Menu, MenuSize, TypeStyled};
+use buzz_ui::{Colors, Icon, IconName, Menu, MenuSize, TypeStyled, tokens::radius};
 use gpui_kit::*;
 
 /// `Field`: label, control, then the description (§6.3).
@@ -20,6 +20,37 @@ pub fn field(
         .child(control)
         .children(
             description.map(|text| div().text_body_sm().text_color(c.text_subtle).child(text)),
+        )
+}
+
+/// An accordion header (`Accordion variant="form"`): the title, then a
+/// caret that points up while `open`. The caller adds the click.
+pub fn accordion_header(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    open: bool,
+    c: &Colors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_between()
+        .py(rems(0.5))
+        .px(rems(0.5))
+        .mx(rems(-0.5))
+        .rounded(radius::CONTROL)
+        .cursor_pointer()
+        .hover(|this| this.bg(c.affordance_subtle_hover))
+        .child(div().text_label().child(title.into()))
+        .child(
+            Icon::new(if open {
+                IconName::CaretUp
+            } else {
+                IconName::CaretDown
+            })
+            .size(16.)
+            .color(c.text_subtle),
         )
 }
 

@@ -1445,60 +1445,35 @@ impl AgentsPage {
         let host_id = host.entity_id();
         let open = self.repair_open.contains(&host_id);
         let toggle_host = host.clone();
-        let header = div()
-            .id(SharedString::from(format!("repair-{host_id}")))
-            .flex()
-            .items_center()
-            .justify_between()
-            .py(rems(0.5))
-            .px(rems(0.5))
-            .mx(rems(-0.5))
-            .rounded(radius::CONTROL)
-            .cursor_pointer()
-            .hover(|this| this.bg(c.affordance_subtle_hover))
-            .child(
-                div()
-                    .text_label()
-                    .child("Repair team import from another installation"),
-            )
-            .child(
-                Icon::new(if open {
-                    IconName::CaretUp
-                } else {
-                    IconName::CaretDown
-                })
-                .size(16.)
-                .color(c.text_subtle),
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if !this.repair_open.remove(&host_id) {
-                    this.repair_open.insert(host_id);
-                    if !this.repairs.contains_key(&host_id) {
-                        let destination = this.discovery.read(cx).destination();
-                        let host = toggle_host.clone();
-                        let dialog =
-                            cx.new(|cx| ImportDialog::repair(host, destination, window, cx));
-                        let cloned = cx.subscribe_in(
-                            &dialog,
-                            window,
-                            |this, _, super::import::Cloned(settings), window, cx| {
-                                let seed = super::draft::Seed {
-                                    name: settings.name.clone(),
-                                    system_prompt: settings.system_prompt.clone(),
-                                };
-                                this.create_dialog(
-                                    None,
-                                    super::create::Kind::Clone(seed),
-                                    window,
-                                    cx,
-                                );
-                            },
-                        );
-                        this.repairs.insert(host_id, (dialog, cloned));
-                    }
+        let header = super::form::accordion_header(
+            SharedString::from(format!("repair-{host_id}")),
+            "Repair team import from another installation",
+            open,
+            &c,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if !this.repair_open.remove(&host_id) {
+                this.repair_open.insert(host_id);
+                if !this.repairs.contains_key(&host_id) {
+                    let destination = this.discovery.read(cx).destination();
+                    let host = toggle_host.clone();
+                    let dialog = cx.new(|cx| ImportDialog::repair(host, destination, window, cx));
+                    let cloned = cx.subscribe_in(
+                        &dialog,
+                        window,
+                        |this, _, super::import::Cloned(settings), window, cx| {
+                            let seed = super::draft::Seed {
+                                name: settings.name.clone(),
+                                system_prompt: settings.system_prompt.clone(),
+                            };
+                            this.create_dialog(None, super::create::Kind::Clone(seed), window, cx);
+                        },
+                    );
+                    this.repairs.insert(host_id, (dialog, cloned));
                 }
-                cx.notify();
-            }));
+            }
+            cx.notify();
+        }));
         div()
             .flex()
             .flex_col()

@@ -7,6 +7,7 @@ use super::create::OpenHarnesses;
 use super::draft::{self, Draft};
 use super::editor::{Dismissed, Saved, saved_message};
 use super::fields::{Fields, Owner};
+use super::form::accordion_header;
 use super::inventory;
 use crate::community::AppState;
 use crate::hosts::HostConnection;
@@ -14,8 +15,7 @@ use crate::hosts::control::{Lane, Status};
 use buzz_host::api::{Agent, AgentAction, ProcessStatus, Request, Response};
 use buzz_relay_client::upload::{UploadFile, sniff_image};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, Dialog, DialogSize, Icon, IconName,
-    Surface, TypeStyled, tokens::radius,
+    ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, Dialog, DialogSize, Surface, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -371,31 +371,10 @@ impl EditDialog {
         toggle: fn(&mut Self),
     ) -> Stateful<Div> {
         let c = *cx.colors();
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_between()
-            .py(rems(0.5))
-            .px(rems(0.5))
-            .mx(rems(-0.5))
-            .rounded(radius::CONTROL)
-            .cursor_pointer()
-            .hover(|this| this.bg(c.affordance_subtle_hover))
-            .child(div().text_label().child(title))
-            .child(
-                Icon::new(if open {
-                    IconName::CaretUp
-                } else {
-                    IconName::CaretDown
-                })
-                .size(16.)
-                .color(c.text_subtle),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                toggle(this);
-                cx.notify();
-            }))
+        accordion_header(id, title, open, &c).on_click(cx.listener(move |this, _, _, cx| {
+            toggle(this);
+            cx.notify();
+        }))
     }
 }
 

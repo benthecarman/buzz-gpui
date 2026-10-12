@@ -8,7 +8,7 @@
 //! saved keys, never values.
 
 use super::draft::{self, ApiKey, Draft};
-use super::form::{field, legend};
+use super::form::{accordion_header, field, legend};
 use crate::hosts::HostConnection;
 use crate::hosts::models::Lookup;
 use crate::ui::overlay::{self, Align, Dismiss};
@@ -19,7 +19,6 @@ use buzz_host::api::{
 use buzz_ui::{
     ActiveTheme, Button, ButtonSize, ButtonVariant, Colors, Icon, IconButton, IconButtonSize,
     IconName, Menu, MenuItem, MenuSize, Select, Spinner, Surface, TextArea, TextField, TypeStyled,
-    tokens::radius,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
@@ -1207,31 +1206,10 @@ fn accordion<T: Owner>(
     cx: &mut Context<T>,
     toggle: impl Fn(&mut Fields) + 'static,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_between()
-        .py(rems(0.5))
-        .px(rems(0.5))
-        .mx(rems(-0.5))
-        .rounded(radius::CONTROL)
-        .cursor_pointer()
-        .hover(|this| this.bg(c.affordance_subtle_hover))
-        .child(div().text_label().child(title))
-        .child(
-            Icon::new(if open {
-                IconName::CaretUp
-            } else {
-                IconName::CaretDown
-            })
-            .size(16.)
-            .color(c.text_subtle),
-        )
-        .on_click(cx.listener(move |this: &mut T, _, _, cx| {
-            toggle(this.fields());
-            cx.notify();
-        }))
+    accordion_header(id, title, open, c).on_click(cx.listener(move |this: &mut T, _, _, cx| {
+        toggle(this.fields());
+        cx.notify();
+    }))
 }
 
 impl Fields {
