@@ -10,6 +10,7 @@ publish.workspace = true
 anyhow.workspace = true
 buzz-host = { path = "../host" }
 buzz-host-rpc = { path = "../host-rpc" }
+buzz-keychain = { path = "../keychain" }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 getrandom = "0.3"

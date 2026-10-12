@@ -6,6 +6,9 @@
 //! where buzz-credential-store's `read_human` finds the human key.
 
 pub use buzz_credential_store::Error;
+pub use files::{private_dir, write_private};
+
+mod files;
 
 #[cfg(not(target_os = "macos"))]
 pub use buzz_credential_store::{add, delete, read};

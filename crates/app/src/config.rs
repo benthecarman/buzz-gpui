@@ -86,18 +86,10 @@ fn save_hosts_to(path: &Path, hosts: &[RemoteHost]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("Could not save settings: {error}"))?;
     // Write a sibling and rename it, so a crash never leaves half a file.
     let partial = path.with_extension("toml.partial");
-    write_private(&partial, &text).map_err(|error| format!("Could not save settings: {error}"))?;
+    // The file can hold host tokens, so only the owner may read it.
+    buzz_keychain::write_private(&partial, text.as_bytes())
+        .map_err(|error| format!("Could not save settings: {error}"))?;
     std::fs::rename(&partial, path).map_err(|error| format!("Could not save settings: {error}"))
-}
-
-/// The file can hold host tokens, so only the owner may read it.
-fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(text.as_bytes())
 }
 
 fn with_hosts(text: &str, hosts: &[RemoteHost]) -> Result<String, String> {

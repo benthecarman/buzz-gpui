@@ -67,7 +67,8 @@ fn main() -> Result<()> {
         Some(dir) => dir.clone(),
         None => dirs::data_dir().context("no data directory")?.join("buzzd"),
     };
-    private_dir(&state_dir)?;
+    buzz_keychain::private_dir(&state_dir)
+        .with_context(|| format!("could not create {}", state_dir.display()))?;
     let token = token(&state_dir)?;
     match cli.command.unwrap_or(Command::Run) {
         Command::Token => {
@@ -196,6 +197,11 @@ fn host_id(state_dir: &Path) -> Result<String> {
     }
 }
 
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    buzz_keychain::write_private(path, contents.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))
+}
+
 /// Resolves on SIGTERM, which service managers send to stop the daemon.
 /// Windows has no such signal; there it resolves on Ctrl+Break, on the
 /// console closing, and on logoff or shutdown.
@@ -222,31 +228,6 @@ fn terminated() -> Result<impl std::future::Future<Output = ()>> {
             }
         })
     }
-}
-
-fn write_private(path: &Path, contents: &str) -> Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("could not write {}", path.display()))?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()?;
-    Ok(())
-}
-
-fn private_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("could not create {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]

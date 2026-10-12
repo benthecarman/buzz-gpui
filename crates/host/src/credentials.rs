@@ -68,7 +68,7 @@ pub struct FileCredentials {
 
 impl FileCredentials {
     pub fn new(directory: PathBuf) -> std::io::Result<Self> {
-        private_directory(&directory)?;
+        buzz_keychain::private_dir(&directory)?;
         Ok(Self { directory })
     }
 
@@ -149,16 +149,6 @@ fn account(id: &str, pubkey: &str) -> Result<String, String> {
 fn parse(bytes: &[u8], pubkey: &str) -> Result<Secret, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "Saved agent key is corrupt")?;
     Secret::parse(text.trim(), pubkey)
-}
-
-fn private_directory(path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
