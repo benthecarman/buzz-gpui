@@ -355,6 +355,12 @@ impl ClientHandler<HostProtocol> for Answers {
         let agent_pubkey = match ask {
             HostAsk::AttestAgent { agent_pubkey } => agent_pubkey,
             HostAsk::OpenUrl { url } => {
+                // A host may only open web pages here, not files or apps.
+                if !web_page(&url) {
+                    return Box::pin(async {
+                        Err(RpcError::Failed("The host may open only web pages".into()))
+                    });
+                }
                 let browser = self.browser.clone();
                 let client = self.client.get().cloned();
                 let remote = self.remote;
@@ -397,6 +403,10 @@ impl ClientHandler<HostProtocol> for Answers {
         };
         Box::pin(async move { answer })
     }
+}
+
+fn web_page(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 impl HostConnection {
@@ -811,5 +821,22 @@ impl HostConnection {
     /// runs). Run them on the I/O runtime.
     pub fn client(&self) -> Arc<HostClient<HostProtocol>> {
         self.client.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hosts_open_only_web_pages() {
+        assert!(super::web_page("https://claude.ai/oauth?code=1"));
+        assert!(super::web_page("http://localhost:4242/callback"));
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ssh://x",
+            "/tmp/x",
+        ] {
+            assert!(!super::web_page(url), "{url}");
+        }
     }
 }
