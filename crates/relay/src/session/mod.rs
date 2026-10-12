@@ -489,6 +489,8 @@ impl Session {
             media: media.clone(),
             emoji_generation: 0,
             access_revision: 0,
+            channels_cache: None,
+            workflows_revision: None,
             known_channels: std::collections::HashSet::new(),
             send_observers: Vec::new(),
             activity: activity::Activity::default(),
@@ -1192,6 +1194,12 @@ struct Actor {
     live_view: Arc<LiveView>,
     /// The discovery access revision last acted on.
     access_revision: u64,
+    /// The channels last published and the discovery revision they came
+    /// from: rebuilding and sorting every summary is the cost of a publish.
+    channels_cache: Option<(u64, Arc<[ChannelSummary]>)>,
+    /// The discovery revision workflow access was last set from, `None`
+    /// inside when there was no discovery.
+    workflows_revision: Option<Option<u64>>,
     /// Channels readable at the last access check.
     known_channels: std::collections::HashSet<String>,
     /// Channel activity for the "recent" sidebar order.
@@ -2277,11 +2285,64 @@ impl Actor {
 
     /// Whether the published channel previews still match.
     fn channels_preview_current(&self) -> bool {
-        let current = self.snapshot.borrow();
-        current
-            .channels
+        self.channels_cache.as_ref().is_none_or(|(_, channels)| {
+            channels
+                .iter()
+                .all(|channel| channel.preview == self.preview(&channel.id))
+        })
+    }
+
+    /// The sidebar channels with their previews and activity. Summaries
+    /// are rebuilt only when the discovery revision moved, and the last
+    /// list is reused when nothing on it changed.
+    fn published_channels(&mut self) -> Arc<[ChannelSummary]> {
+        let Some(discovery) = &self.discovery else {
+            self.channels_cache = None;
+            return Arc::new([]);
+        };
+        let revision = discovery.revision();
+        let (base, cached) = match &self.channels_cache {
+            Some((cached, channels)) if *cached == revision => (channels.clone(), true),
+            _ => (Arc::from(discovery.channels()), false),
+        };
+        let extras: Vec<_> = base
             .iter()
-            .all(|channel| channel.preview == self.preview(&channel.id))
+            .map(|channel| {
+                (
+                    self.preview(&channel.id),
+                    self.activity.values.last(&channel.id),
+                )
+            })
+            .collect();
+        let current = cached
+            && base.iter().zip(&extras).all(|(channel, (preview, at))| {
+                channel.preview == *preview && channel.last_activity_at == *at
+            });
+        let channels = if current {
+            base
+        } else {
+            base.iter()
+                .zip(extras)
+                .map(|(channel, (preview, at))| ChannelSummary {
+                    preview,
+                    last_activity_at: at,
+                    ..channel.clone()
+                })
+                .collect()
+        };
+        debug_assert!(
+            channels
+                .iter()
+                .map(|channel| ChannelSummary {
+                    preview: None,
+                    last_activity_at: None,
+                    ..channel.clone()
+                })
+                .eq(discovery.channels()),
+            "the channel cache missed a discovery revision"
+        );
+        self.channels_cache = Some((revision, channels.clone()));
+        channels
     }
 
     // ----- timelines -----
@@ -2718,23 +2779,7 @@ impl Actor {
     // ----- output -----
 
     fn publish(&mut self) {
-        let channels: Arc<[ChannelSummary]> = self
-            .discovery
-            .as_ref()
-            .map(|discovery| {
-                Arc::<[ChannelSummary]>::from(
-                    discovery
-                        .channels()
-                        .into_iter()
-                        .map(|mut channel| {
-                            channel.preview = self.preview(&channel.id);
-                            channel.last_activity_at = self.activity.values.last(&channel.id);
-                            channel
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .unwrap_or_else(|| Arc::new([]));
+        let channels = self.published_channels();
         let unread = self.unread_counts();
         self.workflows_access();
         self.sidebar_check_heads();

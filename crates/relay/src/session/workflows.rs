@@ -2,6 +2,7 @@
 //! it may read and command, from the roster.
 
 use super::{Actor, Session};
+use crate::discovery::DiscoveryState;
 use crate::workflows::Workflows;
 
 impl Session {
@@ -13,8 +14,14 @@ impl Session {
 
 impl Actor {
     /// Hands the capability the channels the viewer may participate in
-    /// (`channels.canParticipate`).
+    /// (`channels.canParticipate`). Only a new discovery revision can
+    /// change them.
     pub(super) fn workflows_access(&mut self) {
+        let revision = self.discovery.as_ref().map(DiscoveryState::revision);
+        if self.workflows_revision == Some(revision) {
+            return;
+        }
+        self.workflows_revision = Some(revision);
         let Some(discovery) = &self.discovery else {
             self.workflows.set_access(Default::default());
             return;
