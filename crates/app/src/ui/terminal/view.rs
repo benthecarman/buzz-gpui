@@ -48,6 +48,9 @@ pub struct TerminalView {
     has_focus: bool,
     /// A drag selecting text, from the cell it started in.
     selecting: bool,
+    /// Scrolled lines not acted on yet, so slow trackpad scrolling adds
+    /// up instead of rounding to nothing on every event.
+    scroll_rest: f32,
     splash: Option<Splash>,
     _blink: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -98,6 +101,7 @@ impl TerminalView {
             blink_on: true,
             has_focus: false,
             selecting: false,
+            scroll_rest: 0.,
             splash: None,
             _blink: blink,
             _subscriptions: vec![focus_in, focus_out, output, release],
@@ -282,7 +286,7 @@ impl TerminalView {
             ScrollDelta::Lines(delta) => delta.y,
             ScrollDelta::Pixels(delta) => f32::from(delta.y) / height,
         };
-        let steps = lines.round() as i32;
+        let steps = whole_lines(&mut self.scroll_rest, lines);
         if steps == 0 {
             return;
         }
@@ -308,6 +312,18 @@ impl TerminalView {
         }
         cx.notify();
     }
+}
+
+/// Adds `lines` to the fraction left over from earlier events and takes
+/// out the whole lines. Turning back drops what was left.
+fn whole_lines(rest: &mut f32, lines: f32) -> i32 {
+    if *rest * lines < 0. {
+        *rest = 0.;
+    }
+    let total = *rest + lines;
+    let steps = total.trunc();
+    *rest = total - steps;
+    steps as i32
 }
 
 /// Fits the grid to the space it has (`FitAddon`).
@@ -686,4 +702,22 @@ fn paint_text(
         .text_system()
         .shape_line(text.to_string().into(), font_size, &[run], None);
     let _ = shaped.paint(origin, line_height, TextAlign::Left, None, window, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn small_scrolls_add_up_to_lines() {
+        let mut rest = 0.;
+        assert_eq!(whole_lines(&mut rest, 0.4), 0);
+        assert_eq!(whole_lines(&mut rest, 0.4), 0);
+        assert_eq!(whole_lines(&mut rest, 0.4), 1);
+        assert_eq!(whole_lines(&mut rest, 3.), 3);
+        // Turning back starts over.
+        assert_eq!(whole_lines(&mut rest, -0.9), 0);
+        assert_eq!(whole_lines(&mut rest, -0.2), -1);
+    }
 }
