@@ -55,7 +55,7 @@ struct Group {
 pub struct MeSidebar {
     model: Entity<MeModel>,
     collapsed: Vec<String>,
-    /// The community `collapsed` was read for.
+    /// The community `collapsed`, the menus and the delete state are for.
     collapsed_for: Option<EntityId>,
     menu: Option<RowMenu>,
     /// The group whose header menu is open.
@@ -87,12 +87,17 @@ impl MeSidebar {
         self.model.read(cx).community.clone()
     }
 
-    /// Reads the collapsed groups when the community changes.
+    /// Reads the collapsed groups when the community changes, and drops
+    /// the menus and delete state of the one before.
     fn load_collapsed(&mut self, community: &Entity<Community>, cx: &App) {
         if self.collapsed_for == Some(community.entity_id()) {
             return;
         }
         self.collapsed_for = Some(community.entity_id());
+        self.menu = None;
+        self.section_menu = None;
+        self.deleting = None;
+        self.delete_error = None;
         self.collapsed = cx
             .global::<AppState>()
             .store
@@ -170,10 +175,14 @@ impl MeSidebar {
         };
         self.deleting = Some(id.clone());
         self.delete_error = None;
+        let owner = Some(community.entity_id());
         let kit = community.read(cx).session.me_kit().clone();
         cx.spawn(async move |this, cx| {
             let result = kit.me_remove_section(&id).await;
             let _ = this.update(cx, |this, cx| {
+                if this.collapsed_for != owner {
+                    return;
+                }
                 this.deleting = None;
                 if let Err(error) = result {
                     this.delete_error = Some(if error.is_empty() {
