@@ -62,15 +62,16 @@ fn main() {
     // Linux, the registered command on Windows). macOS sends links as
     // events instead (`on_open_urls` below).
     let link = deep_links::from_args(std::env::args().skip(1));
+    let socket = single_instance::socket_path(&community::data_dir());
     let instance = {
-        let path = single_instance::socket_path(&community::data_dir());
+        let path = &socket;
         let handoff = single_instance::Handoff {
             link: link.clone().unwrap_or_default(),
             // What the launcher gave us to come to the front with; the
             // running instance uses it instead.
             activation_token: std::env::var("XDG_ACTIVATION_TOKEN").ok(),
         };
-        match single_instance::claim(&path, &handoff) {
+        match single_instance::claim(path, &handoff) {
             Ok(single_instance::Claim::Forwarded) => {
                 tracing::info!("handed off to the running Buzz");
                 return;
@@ -82,6 +83,7 @@ fn main() {
             }
         }
     };
+    let primary = instance.is_some();
     deep_links::register_scheme();
     let config = config::Config::load();
     let app = gpui_kit::application().with_assets(buzz_ui::Assets);
@@ -168,4 +170,9 @@ fn main() {
         updates::init(cx);
         main_window::open(cx);
     });
+    // A clean exit (where the platform returns from `run`) leaves no stale
+    // socket for the next launch to clear.
+    if primary {
+        single_instance::release(&socket);
+    }
 }

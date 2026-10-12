@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
-pub use unix::{Listener, claim, serve};
+pub use unix::{Listener, claim, release, serve};
 #[cfg(windows)]
-pub use windows::{Listener, claim, serve};
+pub use windows::{Listener, claim, release, serve};
 
 /// Longest message accepted: a URL as long as the link parser takes.
 const MAX_MESSAGE: u64 = 32_768;
@@ -101,11 +101,36 @@ fn read_message(reader: impl Read) -> io::Result<Handoff> {
 #[cfg(unix)]
 mod unix {
     use super::{Claim, Handoff, TIMEOUT, message, read_message};
+    use std::fs::{File, OpenOptions};
     use std::io::{self, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
 
     pub type Listener = UnixListener;
+
+    /// Held while a launch claims the socket or the running instance
+    /// removes it, so two launches never both find it stale and both bind.
+    struct ClaimLock(File);
+
+    impl ClaimLock {
+        fn take(path: &Path) -> io::Result<Self> {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path.with_extension("lock"))?;
+            file.lock()?;
+            Ok(Self(file))
+        }
+    }
+
+    /// Lets go explicitly: a process spawned meanwhile holds a copy of the
+    /// descriptor until it execs.
+    impl Drop for ClaimLock {
+        fn drop(&mut self) {
+            let _ = self.0.unlock();
+        }
+    }
 
     /// Becomes the running instance, or hands `handoff` to the one that is.
     pub fn claim(path: &Path, handoff: &Handoff) -> io::Result<Claim> {
@@ -113,6 +138,7 @@ mod unix {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let _lock = ClaimLock::take(path)?;
         for _ in 0..2 {
             match UnixListener::bind(path) {
                 Ok(listener) => return Ok(Claim::Primary(listener)),
@@ -131,6 +157,16 @@ mod unix {
             }
         }
         Err(io::Error::other("the instance socket stayed in use"))
+    }
+
+    /// Removes the running instance's socket as it exits.
+    pub fn release(path: &Path) {
+        match ClaimLock::take(path) {
+            Ok(_lock) => {
+                let _ = std::fs::remove_file(path);
+            }
+            Err(error) => tracing::warn!(%error, "could not remove the instance socket"),
+        }
     }
 
     /// Passes each handoff from later launches to `deliver`, on a thread of
@@ -217,6 +253,9 @@ mod windows {
         }
         Err(io::Error::other("the instance pipe stayed in use"))
     }
+
+    /// The pipe goes with the process; nothing to remove.
+    pub fn release(_: &Path) {}
 
     async fn forward(name: &str, message: &str) -> io::Result<()> {
         let until = Instant::now() + TIMEOUT;
@@ -377,6 +416,25 @@ mod tests {
             claim(&path, &Handoff::default()).unwrap(),
             Claim::Primary(_)
         ));
+    }
+
+    #[test]
+    fn launches_racing_over_a_stale_socket_get_one_primary() {
+        let path = scratch("race");
+        drop(UnixDatagram::bind(&path).unwrap());
+        let claims: Vec<Claim> = std::thread::scope(|scope| {
+            let launches: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| claim(&path, &Handoff::default()).unwrap()))
+                .collect();
+            launches.into_iter().map(|l| l.join().unwrap()).collect()
+        });
+        let primaries = claims
+            .iter()
+            .filter(|claim| matches!(claim, Claim::Primary(_)))
+            .count();
+        assert_eq!(primaries, 1);
+        release(&path);
+        assert!(!path.exists());
     }
 
     #[test]
