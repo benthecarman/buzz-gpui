@@ -12,7 +12,7 @@ use buzz_relay_client::{EventId, Media, ThreadSnapshot};
 use buzz_ui::{ActiveTheme, Button, Icon, IconName, Tooltip, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,11 +37,31 @@ pub struct RowMedia {
     pub inline_time: bool,
 }
 
+/// Threads and files the maps below remember at most.
+const REMEMBERED: usize = 64;
+
 thread_local! {
-    /// Each thread's latest time chip seek: `(seconds, request)`.
+    /// Each thread's latest time chip seek: `(seconds, request)`. Request
+    /// numbers count across threads, so forgetting one cannot reuse them.
     static THREAD_SEEKS: RefCell<HashMap<EventId, (f64, u64)>> = RefCell::default();
+    static NEXT_SEEK: Cell<u64> = const { Cell::new(0) };
     /// Files whose last download failed, for the card's alert.
     static FAILED_DOWNLOADS: RefCell<HashSet<String>> = RefCell::default();
+}
+
+/// Records a thread's seek, forgetting the oldest beyond [`REMEMBERED`].
+fn remember_seek(seeks: &mut HashMap<EventId, (f64, u64)>, root: EventId, seconds: f64) {
+    let request = NEXT_SEEK.with(|next| {
+        next.set(next.get() + 1);
+        next.get()
+    });
+    seeks.insert(root, (seconds, request));
+    if seeks.len() > REMEMBERED
+        && let Some(oldest) = seeks.iter().min_by_key(|(_, (_, request))| *request)
+    {
+        let oldest = *oldest.0;
+        seeks.remove(&oldest);
+    }
 }
 
 /// The thread panel's media handling (`ThreadPanel`): with exactly one
@@ -93,10 +113,7 @@ pub fn thread_media(snapshot: &ThreadSnapshot, media: &Media) -> RowMedia {
                 }
                 return;
             }
-            THREAD_SEEKS.with_borrow_mut(|seeks| {
-                let request = seeks.get(&root.id).map_or(1, |(_, request)| request + 1);
-                seeks.insert(root.id, (seconds, request));
-            });
+            THREAD_SEEKS.with_borrow_mut(|seeks| remember_seek(seeks, root.id, seconds));
             cx.refresh_windows();
         }) as OnTime
     });
@@ -575,7 +592,13 @@ fn file_tile(
             let (url, name, media) = (url.clone(), download_name.clone(), media.clone());
             cx.spawn(async move |cx| {
                 if super::save(&media, &url, name.as_deref()).await.is_err() {
-                    FAILED_DOWNLOADS.with_borrow_mut(|failed| failed.insert(url));
+                    FAILED_DOWNLOADS.with_borrow_mut(|failed| {
+                        // An alert forgotten early only hides; start over.
+                        if failed.len() >= REMEMBERED {
+                            failed.clear();
+                        }
+                        failed.insert(url)
+                    });
                     cx.update(|cx| cx.refresh_windows());
                 }
             })
@@ -629,6 +652,20 @@ fn mime_label(mime: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn thread_seeks_forget_the_oldest_and_never_reuse_requests() {
+        let mut seeks = HashMap::new();
+        let id = |byte: u8| EventId::from_byte_array([byte; 32]);
+        for byte in 0..=REMEMBERED as u8 {
+            remember_seek(&mut seeks, id(byte), 1.);
+        }
+        assert_eq!(seeks.len(), REMEMBERED);
+        assert!(!seeks.contains_key(&id(0)));
+        let last = seeks[&id(REMEMBERED as u8)].1;
+        remember_seek(&mut seeks, id(0), 2.);
+        assert!(seeks[&id(0)].1 > last);
+    }
 
     #[test]
     fn formats_file_sizes_like_the_reference() {

@@ -128,10 +128,15 @@ fn contained(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
     )
 }
 
+/// Thumbnails remembered at most; the least recently painted go first.
+const MAX_TILES: usize = 512;
+
+type Tiles = HashMap<(WindowId, String), (Bounds<Pixels>, Instant)>;
+
 thread_local! {
-    /// Where each thumbnail was last painted, so the picture can fly from
-    /// and back to it.
-    static TILES: RefCell<HashMap<String, (Bounds<Pixels>, Instant)>> = RefCell::default();
+    /// Where each thumbnail was last painted, by window, so the picture
+    /// can fly from and back to it.
+    static TILES: RefCell<Tiles> = RefCell::default();
 }
 
 /// Records where a thumbnail of `url` is painted. Fills its `relative`
@@ -139,10 +144,9 @@ thread_local! {
 pub fn track_tile(url: &str) -> impl IntoElement + use<> {
     let url = url.to_string();
     canvas(
-        move |bounds, _, _| {
-            TILES.with_borrow_mut(|tiles| {
-                tiles.insert(url, (bounds, Instant::now()));
-            })
+        move |bounds, window, _| {
+            let key = (window.window_handle().window_id(), url);
+            TILES.with_borrow_mut(|tiles| remember_tile(tiles, key, bounds, Instant::now()))
         },
         |_, _, _, _| {},
     )
@@ -151,18 +155,36 @@ pub fn track_tile(url: &str) -> impl IntoElement + use<> {
     .size_full()
 }
 
-/// Where the thumbnail of `url` was last painted. An idle window does not
-/// repaint, so this is where it still is when nothing moved since.
-fn tile(url: &str) -> Option<Bounds<Pixels>> {
-    TILES.with_borrow(|tiles| tiles.get(url).map(|(bounds, _)| *bounds))
+fn remember_tile(tiles: &mut Tiles, key: (WindowId, String), bounds: Bounds<Pixels>, at: Instant) {
+    tiles.insert(key, (bounds, at));
+    if tiles.len() > MAX_TILES {
+        // Keep the newer half.
+        let mut times: Vec<Instant> = tiles.values().map(|(_, at)| *at).collect();
+        times.sort_unstable();
+        let cut = times[times.len() - MAX_TILES / 2];
+        tiles.retain(|_, (_, at)| *at >= cut);
+    }
+}
+
+fn tile_key(url: &str, window: &Window) -> (WindowId, String) {
+    (window.window_handle().window_id(), url.to_string())
+}
+
+/// Where the thumbnail of `url` was last painted in `window`. An idle
+/// window does not repaint, so this is where it still is when nothing
+/// moved since.
+fn tile(url: &str, window: &Window) -> Option<Bounds<Pixels>> {
+    let key = tile_key(url, window);
+    TILES.with_borrow(|tiles| tiles.get(&key).map(|(bounds, _)| *bounds))
 }
 
 /// The thumbnail of `url` if it was painted since `since`: still on
 /// screen while the viewer animates (each frame repaints the window).
-fn tile_since(url: &str, since: Instant) -> Option<Bounds<Pixels>> {
+fn tile_since(url: &str, since: Instant, window: &Window) -> Option<Bounds<Pixels>> {
+    let key = tile_key(url, window);
     TILES.with_borrow(|tiles| {
         tiles
-            .get(url)
+            .get(&key)
             .filter(|(_, at)| *at >= since)
             .map(|(bounds, _)| *bounds)
     })
@@ -221,7 +243,7 @@ pub fn open_review(
     let restore = window.focused(cx);
     let community = AppState::current(cx);
     let had_comments = row.reply_count > 0 || row.thread_root_id.is_some_and(|root| root != row.id);
-    let origin = tile(url).map(|bounds| Origin {
+    let origin = tile(url, window).map(|bounds| Origin {
         url: url.to_string(),
         bounds,
     });
@@ -889,7 +911,7 @@ impl Review {
             .origin
             .as_ref()
             .filter(|origin| self.request == 0 && self.selected == origin.url && self.zoom == 1.)
-            .and_then(|origin| tile(&origin.url))
+            .and_then(|origin| tile(&origin.url, window))
             .filter(|bounds| {
                 bounds.size.width > px(0.)
                     && bounds.right() > px(0.)
@@ -1745,7 +1767,7 @@ impl Render for Review {
             && started.elapsed() > Duration::from_millis(50)
             && let Some(origin) = &self.origin
         {
-            *to = tile_since(&origin.url, *started);
+            *to = tile_since(&origin.url, *started, window);
         }
         let (scrim, chrome, flight): (f32, f32, Option<(Bounds<Pixels>, f32)>) = match &self.motion
         {
@@ -2110,6 +2132,25 @@ impl Render for LocalPreview {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn tiles_keep_the_newest_half_once_full() {
+        let mut tiles = Tiles::default();
+        let start = Instant::now();
+        let window = WindowId::from(1);
+        for index in 0..=MAX_TILES {
+            let at = start + Duration::from_millis(index as u64);
+            remember_tile(
+                &mut tiles,
+                (window, index.to_string()),
+                Bounds::default(),
+                at,
+            );
+        }
+        assert_eq!(tiles.len(), MAX_TILES / 2);
+        assert!(tiles.contains_key(&(window, MAX_TILES.to_string())));
+        assert!(!tiles.contains_key(&(window, "0".to_string())));
+    }
 
     #[test]
     fn eases_like_the_reference_curve() {
