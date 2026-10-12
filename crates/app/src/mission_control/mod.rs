@@ -55,7 +55,7 @@ pub fn init(cx: &mut App) {
 struct Seen {
     /// Held, so a new snapshot can never reuse its address.
     snapshot: Arc<crate::agent_activity::Snapshot>,
-    lives: HashMap<String, Live>,
+    evidence: HashMap<String, model::Evidence>,
 }
 
 pub struct Fleet {
@@ -126,8 +126,9 @@ impl Fleet {
         self.observed = ids;
     }
 
-    /// Each community's live evidence per agent, recomputed only for
-    /// communities whose activity changed.
+    /// Each community's live evidence per agent, read from transcripts
+    /// again only for communities whose activity changed; the time windows
+    /// apply on every rebuild.
     fn lives(&mut self, now: u64, cx: &App) -> HashMap<String, Live> {
         let attached = observer::all(cx);
         self.communities
@@ -145,25 +146,25 @@ impl Fleet {
             let mut agents: Vec<&str> = snapshot.turns.iter().map(|t| t.agent.as_str()).collect();
             agents.sort();
             agents.dedup();
-            let lives = agents
+            let evidence = agents
                 .into_iter()
                 .filter_map(|agent| {
                     Some((
                         agent.to_string(),
-                        model::live_in(&snapshot, &origin, agent, now)?,
+                        model::evidence_in(&snapshot, &origin, agent)?,
                     ))
                 })
                 .collect();
             self.communities
-                .insert(community.entity_id(), Seen { snapshot, lives });
+                .insert(community.entity_id(), Seen { snapshot, evidence });
         }
         let mut by_agent: HashMap<String, Vec<Live>> = HashMap::new();
         for seen in self.communities.values() {
-            for (agent, live) in &seen.lives {
+            for (agent, evidence) in &seen.evidence {
                 by_agent
                     .entry(agent.clone())
                     .or_default()
-                    .push(live.clone());
+                    .push(evidence.at(now));
             }
         }
         by_agent

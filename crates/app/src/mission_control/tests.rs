@@ -55,6 +55,27 @@ fn snapshot(events: Vec<Value>, state: TurnState, evidence: u64) -> Snapshot {
     }
 }
 
+fn live_in(snapshot: &Snapshot, origin: &str, agent: &str, now: u64) -> Option<Live> {
+    evidence_in(snapshot, origin, agent).map(|evidence| evidence.at(now))
+}
+
+#[test]
+fn cached_evidence_still_ages_out_of_the_time_windows() {
+    let snap = snapshot(
+        vec![event("turn_started", T0, json!({}))],
+        TurnState::Working,
+        t0() + 25_000,
+    );
+    let evidence = evidence_in(&snap, "o", &agent_key()).unwrap();
+    let soon = evidence.at(t0() + 30_000);
+    assert!(soon.turn.is_some());
+    assert_eq!(soon.recent_turns, 1);
+    let abandoned = evidence.at(t0() + 25_000 + ABANDONED_MS);
+    assert!(abandoned.turn.is_none());
+    assert_eq!(abandoned.recent_turns, 1);
+    assert_eq!(evidence.at(t0() + USAGE_WINDOW_MS).recent_turns, 0);
+}
+
 fn running(since: u64) -> (Agent, Option<u64>) {
     (
         Agent {

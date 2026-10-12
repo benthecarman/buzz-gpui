@@ -114,8 +114,44 @@ fn turn_label(turn: &TranscriptTurn) -> (String, bool, bool) {
     (label, waiting, !tools.is_empty())
 }
 
+/// What one community's transcripts say about an agent, whatever the
+/// time: [`Evidence::at`] applies the time windows, so a cached one still
+/// ages.
+#[derive(Clone, Debug)]
+pub struct Evidence {
+    /// The newest turn not seen to end.
+    open: Option<OpenTurn>,
+    starts: Vec<u64>,
+    last_seen: u64,
+    place: Option<(String, String)>,
+    failed_turn: Option<(u64, String)>,
+    listening: bool,
+}
+
+impl Evidence {
+    /// The evidence as of `now`.
+    pub fn at(&self, now: u64) -> Live {
+        Live {
+            // Older open turns are older still, so none of them counts.
+            turn: self
+                .open
+                .clone()
+                .filter(|turn| now.saturating_sub(turn.evidence_at) < ABANDONED_MS),
+            last_seen: Some(self.last_seen),
+            place: self.place.clone(),
+            failed_turn: self.failed_turn.clone(),
+            recent_turns: self
+                .starts
+                .iter()
+                .filter(|start| now.saturating_sub(**start) < USAGE_WINDOW_MS)
+                .count(),
+            listening: self.listening,
+        }
+    }
+}
+
 /// One community's evidence about `agent`, or `None` without any.
-pub fn live_in(snapshot: &Snapshot, origin: &str, agent: &str, now: u64) -> Option<Live> {
+pub fn evidence_in(snapshot: &Snapshot, origin: &str, agent: &str) -> Option<Evidence> {
     let turns: Vec<_> = snapshot.turns.iter().filter(|t| t.agent == agent).collect();
     if turns.is_empty() {
         return None;
@@ -133,7 +169,6 @@ pub fn live_in(snapshot: &Snapshot, origin: &str, agent: &str, now: u64) -> Opti
         .iter()
         .filter(|t| {
             t.state != TurnState::Ended
-                && now.saturating_sub(t.timestamp) < ABANDONED_MS
                 && !transcript
                     .turns
                     .iter()
@@ -166,20 +201,19 @@ pub fn live_in(snapshot: &Snapshot, origin: &str, agent: &str, now: u64) -> Opti
         .iter()
         .max_by_key(|turn| turn.started_at)
         .and_then(|turn| Some((turn.ended_at?, turn.error.clone()?)));
-    let recent_turns = transcript
-        .turns
-        .iter()
-        .filter(|turn| now.saturating_sub(turn.started_at) < USAGE_WINDOW_MS)
-        .count();
-    Some(Live {
-        turn: open,
-        last_seen: Some(newest.timestamp),
+    Some(Evidence {
+        open,
+        starts: transcript
+            .turns
+            .iter()
+            .map(|turn| turn.started_at)
+            .collect(),
+        last_seen: newest.timestamp,
         place: newest
             .channel_id
             .clone()
             .map(|channel| (origin.to_string(), channel)),
         failed_turn,
-        recent_turns,
         listening: snapshot.status == FeedStatus::Listening,
     })
 }
