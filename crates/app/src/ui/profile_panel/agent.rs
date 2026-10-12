@@ -1372,7 +1372,7 @@ pub struct HarnessLog {
     agent: Agent,
     community: String,
     name: SharedString,
-    result: Option<Result<String, ()>>,
+    result: Option<Result<SharedString, ()>>,
     pending: bool,
     _poll: Task<()>,
 }
@@ -1462,7 +1462,7 @@ impl HarnessLog {
                     })
                 });
                 match read.await {
-                    Ok(Response::Log(content)) => Ok(content),
+                    Ok(Response::Log(content)) => Ok(content.into()),
                     _ => Err(()),
                 }
             }
@@ -1491,11 +1491,10 @@ impl HarnessLog {
 impl Render for HarnessLog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        let content = match &self.result {
-            Some(Ok(content)) => Some(content.clone()),
+        let copy = match &self.result {
+            Some(Ok(content)) if !content.is_empty() => Some(content.clone()),
             _ => None,
         };
-        let copy = content.clone().filter(|content| !content.is_empty());
         let body: AnyElement = match &self.result {
             None => div()
                 .flex()
@@ -1520,7 +1519,7 @@ impl Render for HarnessLog {
                 .text_mono()
                 .whitespace_normal()
                 .child(if content.trim().is_empty() {
-                    "No log output yet.".to_string()
+                    "No log output yet.".into()
                 } else {
                     content.clone()
                 })
@@ -1566,7 +1565,7 @@ impl Render for HarnessLog {
                             .on_click(move |_, _, cx| {
                                 if let Some(content) = &copy {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
-                                        content.clone(),
+                                        content.to_string(),
                                     ));
                                 }
                             }),
