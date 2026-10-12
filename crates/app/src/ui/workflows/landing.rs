@@ -4,9 +4,9 @@
 
 use super::controls::{self, Confirm};
 use super::model::activation;
-use super::model::card::{CardIcon, presentation};
+use super::model::card::{CardIcon, Presentation, presentation};
 use super::model::editor::{confirmed_deletion, operation_locked};
-use super::model::yaml as document;
+use super::model::yaml::{self as document, DocumentFields};
 use crate::mirror::mirror;
 use crate::runtime::Runtime;
 use crate::ui::overlay::{self, Align, Dismiss};
@@ -24,7 +24,7 @@ use buzz_ui::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -67,7 +67,26 @@ pub struct LandingView {
     toasts: HashMap<String, String>,
     width: Rc<Cell<Pixels>>,
     confirm_focus: FocusHandle,
+    /// Each shown card's parsed YAML, by revision.
+    parsed: HashMap<String, Rc<CardParse>>,
     _watch: Vec<Task<()>>,
+}
+
+/// What a card shows of its definition's YAML, parsed once per revision.
+struct CardParse {
+    fields: DocumentFields,
+    card: Presentation,
+    warning: Option<activation::Warning>,
+}
+
+impl CardParse {
+    fn new(yaml: &str) -> Self {
+        Self {
+            fields: document::read_fields(yaml),
+            card: presentation(yaml),
+            warning: activation::warning(yaml),
+        }
+    }
 }
 
 /// `.workflow-card-grid` columns: 2 from 42rem, 3 from 63rem.
@@ -150,6 +169,7 @@ impl LandingView {
             toasts: HashMap::new(),
             width: Rc::new(Cell::new(px(0.))),
             confirm_focus: cx.focus_handle(),
+            parsed: HashMap::new(),
         };
         this.set_channels(channels);
         this
@@ -268,6 +288,7 @@ impl LandingView {
         &self,
         definition: &WorkflowDefinition,
         channel: &ChannelSummary,
+        parsed: &CardParse,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -278,8 +299,7 @@ impl LandingView {
                 && op.outcome != Outcome::Rejected
                 && definition.names(&op.workflow)
         });
-        let fields = document::read_fields(&definition.yaml);
-        let card = presentation(&definition.yaml);
+        let (fields, card) = (&parsed.fields, &parsed.card);
         let enabled = fields.is_enabled();
         let readonly = definition.owner != self.viewer;
         let locked = operation_locked(&self.operations, definition);
@@ -302,7 +322,7 @@ impl LandingView {
         } else {
             None
         };
-        let warning = activation::warning(&definition.yaml);
+        let warning = &parsed.warning;
         let name = fields
             .name
             .clone()
@@ -537,7 +557,7 @@ impl LandingView {
                     .text_body_lg()
                     .font_weight(FontWeight::MEDIUM)
                     .line_clamp(4)
-                    .child(card.description),
+                    .child(card.description.clone()),
             )
             .child(
                 div()
@@ -935,6 +955,7 @@ impl Render for LandingView {
                 .into_any_element(),
         );
         let channels = self.channels.clone();
+        let mut shown = HashSet::new();
         for channel in &channels {
             let Some(snapshot) = snapshot.snapshots.get(&channel.id) else {
                 continue;
@@ -969,7 +990,13 @@ impl Render for LandingView {
                 );
             }
             for definition in &snapshot.data.items {
-                cells.push(self.card(definition, channel, window, cx));
+                let parsed = self
+                    .parsed
+                    .entry(definition.revision.clone())
+                    .or_insert_with(|| Rc::new(CardParse::new(&definition.yaml)))
+                    .clone();
+                shown.insert(definition.revision.clone());
+                cells.push(self.card(definition, channel, &parsed, window, cx));
             }
             if snapshot.data.partial {
                 cells.push(
@@ -990,6 +1017,7 @@ impl Render for LandingView {
                 );
             }
         }
+        self.parsed.retain(|revision, _| shown.contains(revision));
         let columns = columns(self.width.get(), window.rem_size());
         let width = self.width.clone();
         let entity = cx.entity().downgrade();

@@ -150,6 +150,8 @@ pub struct Editor {
     name_input: Option<(Entity<InputState>, Subscription)>,
     yaml_readonly: Option<bool>,
     risk: bool,
+    /// The draft YAML as last parsed; renders reuse it until it changes.
+    parsed: RefCell<Option<Rc<Parsed>>>,
     pub focus: FocusHandle,
     confirm_focus: FocusHandle,
 }
@@ -184,6 +186,7 @@ impl Editor {
             name_input: None,
             yaml_readonly: None,
             risk: false,
+            parsed: RefCell::default(),
             focus: cx.focus_handle(),
             confirm_focus: cx.focus_handle(),
         }
@@ -458,12 +461,41 @@ fn text_field(state: &Entity<InputState>, invalid: bool, disabled: bool) -> Text
 // ---------------------------------------------------------------------------
 // Rendering
 
+/// What the draft YAML alone decides.
+struct Parsed {
+    yaml: String,
+    fields: DocumentFields,
+    form: Result<WorkflowForm, String>,
+    issue: Option<Issue>,
+    warning: Option<activation::Warning>,
+}
+
+impl Parsed {
+    /// `editor`'s last parse when `yaml` is unchanged, else a new one.
+    fn of(editor: &Editor, yaml: String) -> Rc<Self> {
+        let mut cached = editor.parsed.borrow_mut();
+        if let Some(parsed) = cached.as_ref().filter(|parsed| parsed.yaml == yaml) {
+            return parsed.clone();
+        }
+        let parsed = Rc::new(Self {
+            fields: document::read_fields(&yaml),
+            form: yaml_to_form(&yaml),
+            issue: draft_issue(&yaml),
+            warning: activation::warning(&yaml),
+            yaml,
+        });
+        *cached = Some(parsed.clone());
+        parsed
+    }
+}
+
 struct Derived {
     yaml: String,
     fields: DocumentFields,
     parsed: Result<WorkflowForm, String>,
     form: Option<WorkflowForm>,
     issue: Option<Issue>,
+    warning: Option<activation::Warning>,
     condition_error: Option<&'static str>,
     header_error: Option<&'static str>,
     error: Option<SharedString>,
@@ -472,13 +504,14 @@ struct Derived {
 fn derive<V: EditorHost>(this: &V) -> Option<Derived> {
     let editor = this.editor_ref()?;
     let yaml = this.draft_yaml();
-    let fields = document::read_fields(&yaml);
-    let parsed = yaml_to_form(&yaml);
     let form = match (&editor.form_draft, editor.form_yaml == yaml) {
         (Some(draft), true) => Some(draft.clone()),
-        _ => parsed.clone().ok(),
+        _ => None,
     };
-    let issue = draft_issue(&yaml);
+    let cached = Parsed::of(editor, yaml);
+    let parsed = cached.form.clone();
+    let form = form.or_else(|| parsed.clone().ok());
+    let issue = cached.issue.clone();
     let condition_error = form
         .as_ref()
         .and_then(|form| form.trigger.condition_rows.as_ref())
@@ -500,11 +533,12 @@ fn derive<V: EditorHost>(this: &V) -> Option<Derived> {
         .or(condition_error.map(SharedString::from))
         .or(header_error.map(SharedString::from));
     Some(Derived {
-        yaml,
-        fields,
+        yaml: cached.yaml.clone(),
+        fields: cached.fields.clone(),
         parsed,
         form,
         issue,
+        warning: cached.warning.clone(),
         condition_error,
         header_error,
         error,
@@ -562,7 +596,7 @@ pub fn render<V: EditorHost>(
     } else {
         None
     };
-    let warning = activation::warning(&d.yaml);
+    let warning = d.warning.clone();
     let steps_empty = d.form.as_ref().is_none_or(|form| form.steps.is_empty());
     let title = if props.create {
         "Create workflow"
@@ -1004,10 +1038,7 @@ pub fn render<V: EditorHost>(
                         let was_enabled = initial
                             .as_deref()
                             .is_some_and(|yaml| document::read_fields(yaml).is_enabled());
-                        if d.fields.is_enabled()
-                            && !was_enabled
-                            && activation::warning(&d.yaml).is_some()
-                        {
+                        if d.fields.is_enabled() && !was_enabled && d.warning.is_some() {
                             if let Some(editor) = this.editor() {
                                 editor.activating = true;
                             }
