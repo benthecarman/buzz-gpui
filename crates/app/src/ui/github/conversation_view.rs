@@ -30,6 +30,12 @@ struct OpenMenu {
     at: Option<Point<Pixels>>,
 }
 
+/// The conversation's events, grouped for the timeline.
+struct Timeline {
+    items: Vec<Item>,
+    has_events: bool,
+}
+
 /// A message's body, read once.
 struct Prepared {
     source: String,
@@ -54,6 +60,8 @@ pub struct ConversationView {
     history: HashSet<String>,
     menu: Option<OpenMenu>,
     prepared: HashMap<String, Rc<Prepared>>,
+    /// The grouped timeline, built once per page that arrives.
+    timeline: Option<Rc<Timeline>>,
     /// The timeline's width as last drawn.
     width: Rc<Cell<f32>>,
 }
@@ -96,6 +104,7 @@ impl ConversationView {
             history: HashSet::new(),
             menu: None,
             prepared: HashMap::new(),
+            timeline: None,
             width: Rc::new(Cell::new(0.)),
         };
         view.fetch(Source::Discussion, 1, cx);
@@ -118,6 +127,7 @@ impl ConversationView {
             let result = load.await;
             let _ = this.update(cx, |this, cx| {
                 this.state(source).finish(result);
+                this.timeline = None;
                 cx.notify();
             });
         });
@@ -788,11 +798,22 @@ fn event_icon(kind: Kind, state: Option<&str>, c: &Colors) -> impl IntoElement {
 impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        let events = conversation::events(
-            &self.discussion.entries,
-            &self.reviews.entries,
-            Some(&self.details),
-        );
+        let timeline = match &self.timeline {
+            Some(timeline) => timeline.clone(),
+            None => {
+                let events = conversation::events(
+                    &self.discussion.entries,
+                    &self.reviews.entries,
+                    Some(&self.details),
+                );
+                let timeline = Rc::new(Timeline {
+                    items: conversation::group(&events),
+                    has_events: !events.is_empty(),
+                });
+                self.timeline = Some(timeline.clone());
+                timeline
+            }
+        };
         let description = Entry::description(&self.details);
         let mut rows = vec![self.message(
             "description",
@@ -804,14 +825,14 @@ impl Render for ConversationView {
             window,
             cx,
         )];
-        for item in conversation::group(&events) {
+        for item in &timeline.items {
             rows.push(match item {
-                Item::Event(event) => self.event(&event, window, cx),
+                Item::Event(event) => self.event(event, window, cx),
                 Item::History {
                     key,
                     events,
                     after_merge,
-                } => self.history_run(&key, &events, after_merge, window, cx),
+                } => self.history_run(key, events, *after_merge, window, cx),
             });
         }
         let incomplete = self.discussion.incomplete() || self.reviews.incomplete();
@@ -828,7 +849,7 @@ impl Render for ConversationView {
         )
         .absolute()
         .inset_0();
-        let has_events = !events.is_empty();
+        let has_events = timeline.has_events;
         div()
             .flex()
             .flex_col()
