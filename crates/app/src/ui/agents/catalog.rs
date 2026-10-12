@@ -26,6 +26,7 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -43,7 +44,15 @@ pub struct CatalogState {
     pub view: Arc<CatalogView>,
     pub community: WeakEntity<Community>,
     partition: Partition,
+    /// The stored Added hints, read once.
+    added: RefCell<Option<HashMap<String, String>>>,
     _watch: Task<()>,
+}
+
+/// A catalog entry's coordinate, as [`Publication::coordinate`] builds it,
+/// without an owned publication.
+fn coordinate(kind: CatalogKind, owner: &str, d: &str) -> String {
+    format!("{}:{owner}:{d}", kind.kind())
 }
 
 #[derive(Default)]
@@ -67,6 +76,7 @@ impl CatalogState {
             catalog,
             community: weak,
             partition,
+            added: RefCell::new(None),
         });
         cx.global_mut::<Catalogs>().0.insert(id, state.clone());
         state
@@ -83,20 +93,25 @@ impl CatalogState {
 
     /// The local copy each catalog coordinate produced for this viewer in
     /// this community. Only a hint: a copy is independent of its entry.
-    pub fn added(&self, cx: &App) -> HashMap<String, String> {
-        cx.global::<AppState>()
-            .store
-            .view_state(&self.partition, ADDED)
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
+    fn added<R>(&self, cx: &App, f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
+        let mut added = self.added.borrow_mut();
+        let added = added.get_or_insert_with(|| {
+            cx.global::<AppState>()
+                .store
+                .view_state(&self.partition, ADDED)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default()
+        });
+        f(added)
     }
 
     pub fn remember(&self, publication: &Publication, copy: &str, cx: &App) {
-        let mut added = self.added(cx);
-        added.insert(publication.coordinate(), copy.to_owned());
-        let json = serde_json::to_string(&added).expect("maps serialize");
+        let json = self.added(cx, |added| {
+            added.insert(publication.coordinate(), copy.to_owned());
+            serde_json::to_string(added).expect("maps serialize")
+        });
         // The copy exists either way; only the Added hint is lost.
         let _ = cx
             .global::<AppState>()
@@ -111,11 +126,30 @@ impl CatalogState {
         has_copy: impl Fn(&str) -> bool,
         cx: &App,
     ) -> bool {
-        publication.owner() == self.viewer()
-            || self
-                .added(cx)
-                .get(&publication.coordinate())
-                .is_some_and(|copy| has_copy(copy))
+        self.already_added_at(
+            publication.kind(),
+            publication.owner(),
+            publication.d(),
+            has_copy,
+            cx,
+        )
+    }
+
+    fn already_added_at(
+        &self,
+        kind: CatalogKind,
+        owner: &str,
+        d: &str,
+        has_copy: impl Fn(&str) -> bool,
+        cx: &App,
+    ) -> bool {
+        if owner == self.viewer() {
+            return true;
+        }
+        // `has_copy` may read this state again, so the hints are let go
+        // first.
+        let copy = self.added(cx, |added| added.get(&coordinate(kind, owner, d)).cloned());
+        copy.is_some_and(|copy| has_copy(&copy))
     }
 
     /// "You", the owner's profile name, or "Community member".
@@ -846,12 +880,23 @@ impl CatalogDialog {
     }
 
     fn current(&self, view: &CatalogView) -> Option<Publication> {
-        let mut entries = view.publications();
-        let first = view.publications().next();
-        match &self.selected {
-            Some(key) => entries.find(|entry| entry.coordinate() == *key).or(first),
-            None => first,
-        }
+        let agent = |key: &str| {
+            view.agents
+                .iter()
+                .find(|entry| coordinate(CatalogKind::Agent, &entry.owner, &entry.d) == key)
+        };
+        let team = |key: &str| {
+            view.teams
+                .iter()
+                .find(|entry| coordinate(CatalogKind::Team, &entry.owner, &entry.d) == key)
+        };
+        let selected = self.selected.as_deref().and_then(|key| {
+            agent(key)
+                .cloned()
+                .map(Publication::Agent)
+                .or_else(|| team(key).cloned().map(Publication::Team))
+        });
+        selected.or_else(|| view.publications().next())
     }
 
     fn is_added(&self, publication: &Publication, cx: &App) -> bool {
@@ -1028,9 +1073,10 @@ impl CatalogDialog {
         if !view.agents.is_empty() {
             sidebar = sidebar.child(section("Agents"));
         }
+        let current_key = current.coordinate();
         for (index, entry) in view.agents.iter().enumerate() {
-            let key = Publication::Agent(entry.clone()).coordinate();
-            let selected = current.coordinate() == key;
+            let key = coordinate(CatalogKind::Agent, &entry.owner, &entry.d);
+            let selected = current_key == key;
             sidebar = sidebar.child(
                 NavigationItem::new(("catalog-agent", index), entry.agent.display_name.clone())
                     .leading(avatar(
@@ -1051,8 +1097,8 @@ impl CatalogDialog {
             sidebar = sidebar.child(section("Teams"));
         }
         for (index, entry) in view.teams.iter().enumerate() {
-            let key = Publication::Team(entry.clone()).coordinate();
-            let selected = current.coordinate() == key;
+            let key = coordinate(CatalogKind::Team, &entry.owner, &entry.d);
+            let selected = current_key == key;
             sidebar = sidebar.child(
                 NavigationItem::new(("catalog-team", index), entry.name.clone())
                     .trailing(
@@ -1147,20 +1193,25 @@ impl CatalogPane {
     }
 
     pub fn publication(&self, cx: &App) -> Option<AgentPublication> {
+        self.selected_entry(self.state.read(cx)).cloned()
+    }
+
+    fn selected_entry<'a>(&self, state: &'a CatalogState) -> Option<&'a AgentPublication> {
         let key = self.selected.as_ref()?;
-        self.state
-            .read(cx)
+        state
             .view
             .agents
             .iter()
             .find(|entry| format!("{}:{}", entry.owner, entry.d) == *key)
-            .cloned()
     }
 
     pub fn already_added(&self, cx: &App) -> bool {
-        self.publication(cx).is_some_and(|entry| {
-            self.state.read(cx).already_added(
-                &Publication::Agent(entry),
+        let state = self.state.read(cx);
+        self.selected_entry(state).is_some_and(|entry| {
+            state.already_added_at(
+                CatalogKind::Agent,
+                &entry.owner,
+                &entry.d,
                 |id| has_agent(id, cx),
                 cx,
             )
@@ -1245,5 +1296,28 @@ impl CatalogPane {
                 &alias,
             )))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CatalogKind, Publication, TeamPublication, coordinate};
+
+    #[test]
+    fn coordinate_matches_the_publication() {
+        let team = TeamPublication {
+            event_id: String::new(),
+            owner: "owner".into(),
+            d: "slug".into(),
+            created_at: 0,
+            name: String::new(),
+            description: None,
+            instructions: None,
+            members: Vec::new(),
+        };
+        assert_eq!(
+            coordinate(CatalogKind::Team, &team.owner, &team.d),
+            Publication::Team(team).coordinate()
+        );
     }
 }
