@@ -256,6 +256,9 @@ pub struct Screen {
     pub received_output: bool,
     /// The splash has shown, or its first chance passed.
     pub splash_consumed: bool,
+    /// Counts the changes [`Screen::frame`] could show, so a view redraws
+    /// a cached frame until the next one.
+    revision: u64,
 }
 
 impl Screen {
@@ -275,6 +278,7 @@ impl Screen {
             events,
             received_output: false,
             splash_consumed: false,
+            revision: 0,
         }
     }
 
@@ -283,6 +287,7 @@ impl Screen {
     pub fn feed(&mut self, bytes: &[u8], theme: &Theme, cell: (u16, u16)) -> Effects {
         if !bytes.is_empty() {
             self.received_output = true;
+            self.revision += 1;
         }
         self.parser.advance(&mut self.term, bytes);
         let events = std::mem::take(&mut *self.events.0.lock().unwrap_or_else(|p| p.into_inner()));
@@ -335,6 +340,7 @@ impl Screen {
             return false;
         }
         self.term.resize(Size { columns, lines });
+        self.revision += 1;
         true
     }
 
@@ -368,20 +374,29 @@ impl Screen {
 
     pub fn set_focused(&mut self, focused: bool) {
         self.term.is_focused = focused;
+        self.revision += 1;
+    }
+
+    /// Changes whenever the frame may have.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Scrolls history by `lines` (positive is up).
     pub fn scroll(&mut self, lines: i32) {
         self.term.scroll_display(Scroll::Delta(lines));
+        self.revision += 1;
     }
 
     pub fn scroll_page(&mut self, up: bool) {
         self.term
             .scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
+        self.revision += 1;
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
+        self.revision += 1;
     }
 
     fn point(&self, column: usize, line: usize) -> Point {
@@ -403,17 +418,20 @@ impl Screen {
         };
         let point = self.point(column, line);
         self.term.selection = Some(Selection::new(ty, point, side));
+        self.revision += 1;
     }
 
     pub fn select_update(&mut self, column: usize, line: usize, side: Side) {
         let point = self.point(column, line);
         if let Some(selection) = self.term.selection.as_mut() {
             selection.update(point, side);
+            self.revision += 1;
         }
     }
 
     pub fn clear_selection(&mut self) {
         self.term.selection = None;
+        self.revision += 1;
     }
 
     pub fn selection_text(&self) -> Option<String> {

@@ -48,6 +48,9 @@ pub struct TerminalView {
     has_focus: bool,
     /// A drag selecting text, from the cell it started in.
     selecting: bool,
+    /// The last frame built, with the screen revision and theme it shows,
+    /// so a cursor blink repaints without rebuilding every cell.
+    frame: Option<(u64, Theme, Rc<Frame>)>,
     /// Scrolled lines not acted on yet, so slow trackpad scrolling adds
     /// up instead of rounding to nothing on every event.
     scroll_rest: f32,
@@ -101,6 +104,7 @@ impl TerminalView {
             blink_on: true,
             has_focus: false,
             selecting: false,
+            frame: None,
             scroll_rest: 0.,
             splash: None,
             _blink: blink,
@@ -384,7 +388,20 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = *cx.colors();
         let theme = Theme::from_colors(&colors);
-        let frame = self.screen.read(cx).frame(&theme);
+        let screen = self.screen.read(cx);
+        let revision = screen.revision();
+        let frame = match &self.frame {
+            Some((cached, cached_theme, frame))
+                if *cached == revision && *cached_theme == theme =>
+            {
+                frame.clone()
+            }
+            _ => {
+                let frame = Rc::new(screen.frame(&theme));
+                self.frame = Some((revision, theme, frame.clone()));
+                frame
+            }
+        };
         // `text-mono`: 12px JetBrains Mono, in rows of 1.5 lines.
         let font_size = rems(0.75).to_pixels(window.rem_size());
         let font_id = window.text_system().resolve_font(&mono(false, false));
