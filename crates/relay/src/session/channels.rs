@@ -1335,7 +1335,7 @@ impl Actor {
             .collect();
         let (store, partition) = (self.store.clone(), self.partition());
         let (channel, head) = (channel.to_string(), head.clone());
-        self.runtime.spawn_blocking(move || {
+        self.disk.write(move || {
             let saved = store.save_head(
                 &partition,
                 &channel,
@@ -1354,14 +1354,14 @@ impl Actor {
     fn remove_saved_head(&self, channel: &str) {
         let (store, partition, channel) =
             (self.store.clone(), self.partition(), channel.to_string());
-        self.runtime.spawn_blocking(move || {
+        self.disk.write(move || {
             let _ = store.remove_head(&partition, &channel);
         });
     }
 
     pub(super) fn retain_saved_heads(&self, channels: HashSet<String>) {
         let (store, partition) = (self.store.clone(), self.partition());
-        self.runtime.spawn_blocking(move || {
+        self.disk.write(move || {
             let _ = store.retain_heads(&partition, &channels);
         });
     }
@@ -1409,7 +1409,7 @@ impl Actor {
         self.channels.startup_dirty = false;
         let (store, partition, commands) =
             (self.store.clone(), self.partition(), self.commands.clone());
-        self.runtime.spawn_blocking(move || {
+        self.disk.write(move || {
             if let Err(error) = store.save_startup_discovery(&partition, &record, now_ms() as i64) {
                 tracing::debug!(%error, "could not save the roster");
             }
@@ -1573,7 +1573,7 @@ impl Actor {
 
     /// Forgets everything cached in memory and on disk (`clearCache`);
     /// open windows load again.
-    pub(super) fn clear_cache(&mut self) -> tokio::task::JoinHandle<()> {
+    pub(super) fn clear_cache(&mut self) -> tokio::sync::oneshot::Receiver<()> {
         self.epoch += 1;
         self.workflows.clear();
         self.channels.catchups.clear();
@@ -1615,11 +1615,12 @@ impl Actor {
         self.update_interests();
         self.publish();
         let (store, partition) = (self.store.clone(), self.partition());
-        self.runtime.spawn_blocking(move || {
+        self.disk.write(move || {
             if let Err(error) = store.clear_cache(&partition) {
                 tracing::warn!(%error, "could not clear the device cache");
             }
-        })
+        });
+        self.disk.flushed()
     }
 }
 

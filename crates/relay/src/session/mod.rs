@@ -20,6 +20,7 @@ mod canvas;
 mod catalog;
 mod channels;
 mod delivery;
+mod disk;
 mod feedback;
 mod gifs;
 mod inbox;
@@ -491,6 +492,7 @@ impl Session {
             send_observers: Vec::new(),
             activity: activity::Activity::default(),
             store,
+            disk: disk::Disk::new(runtime),
             clock: Arc::new(MessageClock::new()),
             outbox: None,
             outbox_changes: None,
@@ -1146,6 +1148,8 @@ struct Actor {
     recent: ByteLru<Verified>,
     media: Media,
     store: Store,
+    /// The actor's store writes, in order.
+    disk: disk::Disk,
     /// Shared by the outbox and every timeline, so sends sort after what
     /// is shown.
     clock: Arc<MessageClock>,
@@ -1266,6 +1270,8 @@ impl Actor {
                 if let Some(outbox) = &self.outbox {
                     outbox.dispose();
                 }
+                // Nothing may write the store once disposed.
+                let _ = self.disk.flushed().await;
                 let _ = reply.send(());
                 return;
             }

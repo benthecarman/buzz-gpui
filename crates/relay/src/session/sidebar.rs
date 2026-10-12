@@ -601,13 +601,13 @@ impl Actor {
     }
 
     fn save_sidebar_startup(&self, data: &SidebarPreferences) {
-        let value = json!({"savedAt": now_ms(), "data": startup_json(data)});
-        if let Err(error) =
-            self.store
-                .set_view_state(&self.partition(), STARTUP_KEY, Some(&value.to_string()))
-        {
-            tracing::warn!(%error, "could not save the sidebar preferences");
-        }
+        let value = json!({"savedAt": now_ms(), "data": startup_json(data)}).to_string();
+        let (store, partition) = (self.store.clone(), self.partition());
+        self.disk.write(move || {
+            if let Err(error) = store.set_view_state(&partition, STARTUP_KEY, Some(&value)) {
+                tracing::warn!(%error, "could not save the sidebar preferences");
+            }
+        });
     }
 
     fn sidebar_move(
@@ -662,14 +662,18 @@ impl Actor {
             })
     }
 
-    fn sidebar_hidden_changed(&mut self) {
+    fn save_hidden_dms(&self) {
         let json = self.sidebar.hidden.to_json().to_string();
-        if let Err(error) =
-            self.store
-                .set_view_state(&self.partition(), HIDDEN_DMS_VIEW_KEY, Some(&json))
-        {
-            tracing::warn!(%error, "could not save the hidden conversations");
-        }
+        let (store, partition) = (self.store.clone(), self.partition());
+        self.disk.write(move || {
+            if let Err(error) = store.set_view_state(&partition, HIDDEN_DMS_VIEW_KEY, Some(&json)) {
+                tracing::warn!(%error, "could not save the hidden conversations");
+            }
+        });
+    }
+
+    fn sidebar_hidden_changed(&mut self) {
+        self.save_hidden_dms();
         self.sidebar_probe();
         self.publish();
     }
@@ -780,12 +784,7 @@ impl Actor {
                                     .hidden
                                     .apply_probe(&id, generation, &ids, latest);
                                 if outcome != crate::sidebar::ProbeOutcome::Unchanged {
-                                    let json = actor.sidebar.hidden.to_json().to_string();
-                                    let _ = actor.store.set_view_state(
-                                        &actor.partition(),
-                                        HIDDEN_DMS_VIEW_KEY,
-                                        Some(&json),
-                                    );
+                                    actor.save_hidden_dms();
                                     actor.publish();
                                 }
                             })));
