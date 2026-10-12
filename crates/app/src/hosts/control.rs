@@ -96,6 +96,19 @@ impl HostConnection {
         }
     }
 
+    /// Why [`Self::write`] would refuse a write in `lane` now.
+    pub(super) fn refusal(&self, lane: &Lane) -> Option<&'static str> {
+        if lane.recovery_stop {
+            None
+        } else if self.control.busy {
+            Some("Another agent operation is in progress.")
+        } else if self.status() != Status::Ready {
+            Some("Refresh local agents before trying again.")
+        } else {
+            None
+        }
+    }
+
     /// Sends a write through the one-at-a-time lane.
     pub fn write(
         &mut self,
@@ -103,17 +116,11 @@ impl HostConnection {
         lane: Lane,
         cx: &mut Context<Self>,
     ) -> Task<Result<Response, Failure>> {
-        let refuse = |message: &str| {
-            Task::ready(Err(Failure {
+        if let Some(message) = self.refusal(&lane) {
+            return Task::ready(Err(Failure {
                 message: message.into(),
                 reason: None,
-            }))
-        };
-        if self.control.busy && !lane.recovery_stop {
-            return refuse("Another agent operation is in progress.");
-        }
-        if self.status() != Status::Ready && !lane.recovery_stop {
-            return refuse("Refresh local agents before trying again.");
+            }));
         }
         let control = &mut self.control;
         control.generation += 1;

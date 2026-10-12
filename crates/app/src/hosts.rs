@@ -795,20 +795,23 @@ impl HostConnection {
         identity: Arc<Identity>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Response, control::Failure>> {
+        let lane = control::Lane {
+            credential_write: true,
+            ..Default::default()
+        };
+        // A refused import must leave the one running its signing slot.
+        let armed = self.refusal(&lane).is_none();
         let slot = self.signing.clone();
-        *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
-            Some(Signing { identity, pubkeys });
-        let response = self.write(
-            Request::ImportCommit { token, ids },
-            control::Lane {
-                credential_write: true,
-                ..Default::default()
-            },
-            cx,
-        );
+        if armed {
+            *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
+                Some(Signing { identity, pubkeys });
+        }
+        let response = self.write(Request::ImportCommit { token, ids }, lane, cx);
         cx.spawn(async move |_, _| {
             let response = response.await;
-            *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+            if armed {
+                *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+            }
             response
         })
     }
