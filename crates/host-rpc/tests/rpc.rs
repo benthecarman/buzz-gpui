@@ -367,6 +367,28 @@ async fn reconnects_after_host_restart() {
 }
 
 #[tokio::test]
+async fn a_host_that_drops_after_welcome_is_backed_off() {
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve::<Test, _>(
+        listener,
+        Host::new(1),
+        // Drops every client right after welcoming it.
+        ServerOptions {
+            idle_timeout: Duration::from_millis(1),
+            ..Default::default()
+        },
+    ));
+    let client = client(Arc::new(connector), None);
+    let mut state = client.state();
+    let max = options(None).max_backoff;
+    wait_for(
+        &mut state,
+        |state| matches!(state, ConnectionState::Disconnected { retry_in, .. } if *retry_in == max),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn silent_host_is_detected() {
     // A proxy that forwards the handshake to a real host, then stops
     // forwarding while keeping both sockets open.

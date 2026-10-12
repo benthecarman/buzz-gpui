@@ -176,7 +176,15 @@ async fn run<P: Protocol>(
         shared
             .state
             .send_replace(ConnectionState::Connecting { attempt });
-        let end = session(&shared, connector.as_ref(), handler.clone(), &mut attempt).await;
+        let mut welcomed = None;
+        let end = session(&shared, connector.as_ref(), handler.clone(), &mut welcomed).await;
+        // Only a session that stayed up starts the backoff over, so a host
+        // that welcomes and then drops is not retried at full speed.
+        if welcomed
+            .is_some_and(|at: tokio::time::Instant| at.elapsed() >= shared.options.dead_after)
+        {
+            attempt = 1;
+        }
         if let Some(link) = shared.link.lock().await.take() {
             for (_, sender) in link.pending.lock().await.drain() {
                 let _ = sender.send(Err(RpcError::Disconnected));
@@ -220,7 +228,7 @@ async fn session<P: Protocol>(
     shared: &Arc<Shared<P>>,
     connector: &dyn Connector,
     handler: Arc<dyn ClientHandler<P>>,
-    attempt: &mut u32,
+    welcomed: &mut Option<tokio::time::Instant>,
 ) -> SessionEnd {
     let options = &shared.options;
     let connection = match tokio::time::timeout(options.dead_after, connector.connect()).await {
@@ -260,7 +268,7 @@ async fn session<P: Protocol>(
         outgoing: outgoing.clone(),
         pending: pending.clone(),
     });
-    *attempt = 1;
+    *welcomed = Some(tokio::time::Instant::now());
     shared.state.send_replace(ConnectionState::Connected {
         host: welcome.host.clone(),
     });
