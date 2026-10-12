@@ -421,8 +421,7 @@ impl Actor {
     pub(super) fn can_read_remote(&self, channel: &str) -> bool {
         self.relay.is_some()
             && self.discovery.as_ref().is_some_and(|discovery| {
-                discovery.can_access(channel)
-                    && !discovery.get(channel).is_some_and(|summary| summary.cached)
+                discovery.can_access(channel) && !discovery.is_cached(channel)
             })
     }
 

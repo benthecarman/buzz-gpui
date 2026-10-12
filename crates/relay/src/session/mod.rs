@@ -1931,9 +1931,7 @@ impl Actor {
                 .filter(|t| t.viewers > 0 && Some(&t.id) != self.selected.as_ref())
                 .map(|t| t.id.clone()),
         );
-        let readable = |id: &String| {
-            discovery.can_access(id) && !discovery.get(id).is_some_and(|summary| summary.cached)
-        };
+        let readable = |id: &String| discovery.can_access(id) && !discovery.is_cached(id);
         let interests: Vec<String> = joined
             .iter()
             .cloned()

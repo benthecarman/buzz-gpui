@@ -261,6 +261,14 @@ pub struct DiscoveryState {
 }
 
 impl DiscoveryState {
+    /// `get(id).is_some_and(|summary| summary.cached)`, without building
+    /// the summary.
+    pub fn is_cached(&self, id: &str) -> bool {
+        self.cached.contains(id) && self.preview(id).is_some()
+    }
+}
+
+impl DiscoveryState {
     /// `relay_author` is the community's NIP-11 `self` (§8.2).
     pub fn new(viewer: impl Into<String>, relay_author: impl Into<String>) -> Self {
         Self::with_capacity(viewer, relay_author, DISCOVERY_CAPACITY)
