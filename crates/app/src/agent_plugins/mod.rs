@@ -4,6 +4,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod owner_relay;
 pub mod process;
+mod tabs;
 
 use crate::agents2::attention::EventData;
 use crate::buzz_mcp::BuzzEvent;

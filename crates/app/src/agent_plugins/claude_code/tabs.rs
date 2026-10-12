@@ -5,17 +5,16 @@
 use super::runtime::{ClaudeRuntime, Config};
 use super::sessions::SessionView;
 use super::setup::{ClaudeSetup, ClaudeStatus, SetupState, Step};
+use crate::agent_plugins::tabs::{Picking, choice, description_text, field, options, saved_config};
 use crate::agents2::{AgentView, Agents2};
 use crate::runtime::Runtime;
-use crate::ui::overlay::{self, Align};
 use buzz_ui::{
-    ActiveTheme, Button, Colors, Menu, MenuItem, Select, Surface, TextArea, TextField, TypeStyled,
+    ActiveTheme, Button, Colors, Surface, TextArea, TextField, TypeStyled,
     tokens::{font, space},
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::rc::Rc;
 
 const MODELS: [(&str, &str); 4] = [
     ("", "Claude Code default"),
@@ -28,31 +27,6 @@ const SCOPES: [(&str, &str); 2] = [
     ("channel", "One session per channel"),
 ];
 const RESPOND_TO: [(&str, &str); 2] = [("owner", "Only you"), ("anyone", "Anyone who mentions it")];
-
-/// `buzz-field`: label, control, then the description.
-fn field(
-    label: &'static str,
-    control: impl IntoElement,
-    description: Option<SharedString>,
-    c: &Colors,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(space::S2)
-        .min_w_0()
-        .child(div().text_label_sm().child(label))
-        .child(control)
-        .children(description.map(|text| description_text(text, c)))
-}
-
-/// `buzz-field-description`.
-fn description_text(text: impl Into<SharedString>, c: &Colors) -> Div {
-    div()
-        .text_body_sm()
-        .text_color(c.text_subtle)
-        .child(text.into())
-}
 
 /// The line that says where Claude Code stands.
 pub fn status_line(state: &SetupState) -> String {
@@ -333,7 +307,7 @@ impl Render for ClaudeTab {
 
 /// Which select is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Picker {
+pub enum Picker {
     Model,
     Scope,
     RespondTo,
@@ -344,6 +318,8 @@ pub struct SettingsTab {
     view: AgentView,
     /// The choices made with selects; the text fields hold the rest.
     draft: Config,
+    /// The saved settings the draft started from.
+    saved: Config,
     workspace: Entity<InputState>,
     instructions: Entity<TextareaState>,
     open: Option<Picker>,
@@ -373,13 +349,19 @@ impl SettingsTab {
                 }
             }),
         ];
-        // The saved settings can change elsewhere; Save compares with them.
+        // Saved settings that change, here or elsewhere, replace the draft.
         if let Some(agents) = Agents2::global(cx) {
-            subscriptions.push(cx.observe(&agents, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.observe_in(&agents, window, |this, _, window, cx| {
+                let saved = this.saved(cx);
+                if saved != this.saved {
+                    this.reset(saved, window, cx);
+                }
+            }));
         }
         Self {
             view,
-            draft: saved,
+            draft: saved.clone(),
+            saved,
             workspace,
             instructions,
             open: None,
@@ -390,15 +372,19 @@ impl SettingsTab {
     }
 
     fn saved(&self, cx: &App) -> Config {
-        let config = Agents2::global(cx)
-            .and_then(|agents| {
-                agents
-                    .read(cx)
-                    .find(&self.view.agent.pubkey)
-                    .map(|agent| agent.config.clone())
-            })
-            .unwrap_or_else(|| self.view.agent.config.clone());
-        Config::read(&config)
+        Config::read(&saved_config(&self.view, cx))
+    }
+
+    fn reset(&mut self, saved: Config, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |state, cx| {
+            state.set_value(saved.workspace.clone(), window, cx)
+        });
+        self.instructions.update(cx, |state, cx| {
+            state.set_value(saved.instructions.clone(), window, cx)
+        });
+        self.draft = saved.clone();
+        self.saved = saved;
+        cx.notify();
     }
 
     fn current(&self, cx: &App) -> Config {
@@ -430,61 +416,21 @@ impl SettingsTab {
         .detach();
         cx.notify();
     }
+}
 
-    fn choice(
-        &self,
-        picker: Picker,
-        id: &'static str,
-        value: &str,
-        options: &'static [(&'static str, &'static str)],
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let open = self.open == Some(picker);
-        let label = options
-            .iter()
-            .find(|(option, _)| *option == value)
-            .map_or(options[0].1, |(_, label)| label);
-        let mut select = div().relative().w_full().child(
-            Select::new(id)
-                .value(label)
-                .open(open)
-                .surface(Surface::Floating)
-                .disabled(self.saving)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open = (this.open != Some(picker)).then_some(picker);
-                    cx.notify();
-                })),
-        );
-        if open {
-            let items = options.iter().map(|(option, label)| {
-                MenuItem::new(SharedString::from(format!("{id}-{option}")), *label)
-                    .checked(*option == value)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open = None;
-                        let option = (*option).to_string();
-                        match picker {
-                            Picker::Model => this.draft.model = option,
-                            Picker::Scope => this.draft.scope = option,
-                            Picker::RespondTo => this.draft.respond_to = option,
-                        }
-                        cx.notify();
-                    }))
-            });
-            let page = cx.entity().downgrade();
-            select = select.child(overlay::dropdown(
-                window,
-                Align::Start,
-                div().min_w(rems(16.)).child(Menu::new().children(items)),
-                Rc::new(move |_, cx| {
-                    let _ = page.update(cx, |this, cx| {
-                        this.open = None;
-                        cx.notify();
-                    });
-                }),
-            ));
+impl Picking for SettingsTab {
+    type Picker = Picker;
+
+    fn open(&mut self) -> &mut Option<Picker> {
+        &mut self.open
+    }
+
+    fn pick(&mut self, picker: Picker, value: String, _: &mut Context<Self>) {
+        match picker {
+            Picker::Model => self.draft.model = value,
+            Picker::Scope => self.draft.scope = value,
+            Picker::RespondTo => self.draft.respond_to = value,
         }
-        select
     }
 }
 
@@ -520,11 +466,13 @@ impl Render for SettingsTab {
             .gap(space::S4)
             .child(field(
                 "Model",
-                self.choice(
+                choice(
+                    self.open,
                     Picker::Model,
                     "claude-code-model",
                     &model,
-                    &MODELS,
+                    options(&MODELS),
+                    self.saving,
                     window,
                     cx,
                 ),
@@ -541,11 +489,13 @@ impl Render for SettingsTab {
             ))
             .child(field(
                 "Sessions",
-                self.choice(
+                choice(
+                    self.open,
                     Picker::Scope,
                     "claude-code-scope",
                     scope,
-                    &SCOPES,
+                    options(&SCOPES),
+                    self.saving,
                     window,
                     cx,
                 ),
@@ -554,11 +504,13 @@ impl Render for SettingsTab {
             ))
             .child(field(
                 "Answers",
-                self.choice(
+                choice(
+                    self.open,
                     Picker::RespondTo,
                     "claude-code-respond-to",
                     respond_to,
-                    &RESPOND_TO,
+                    options(&RESPOND_TO),
+                    self.saving,
                     window,
                     cx,
                 ),

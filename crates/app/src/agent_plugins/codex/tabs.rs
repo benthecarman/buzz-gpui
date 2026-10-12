@@ -7,19 +7,17 @@ use super::config::{Config, DEFAULT_WORKSPACE, Model, effort_name, valid_workspa
 use super::rpc::{AppServer, list_models};
 use super::runtime::{CodexRuntime, SessionView};
 use crate::agent_plugins::process::Spawner;
+use crate::agent_plugins::tabs::{Options, Picking, choice, description_text, field, saved_config};
 use crate::agents2::{AgentView, Agents2};
 use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
-use crate::ui::overlay::{self, Align};
 use buzz_ui::{
-    ActiveTheme, Button, Colors, Menu, MenuItem, Select, Surface, TextArea, TextField, TypeStyled,
-    tokens::space,
+    ActiveTheme, Button, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{Value, json};
-use std::rc::Rc;
 
 /// What `account/read` says when nobody is signed in.
 pub const SIGN_IN: &str =
@@ -179,31 +177,6 @@ impl Drop for CatalogCheck {
     }
 }
 
-/// `buzz-field`: label, control, then the description.
-fn field(
-    label: &'static str,
-    control: impl IntoElement,
-    description: Option<SharedString>,
-    c: &Colors,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(space::S2)
-        .min_w_0()
-        .child(div().text_label_sm().child(label))
-        .child(control)
-        .children(description.map(|text| description_text(text, c)))
-}
-
-/// `buzz-field-description`.
-fn description_text(text: impl Into<SharedString>, c: &Colors) -> Div {
-    div()
-        .text_body_sm()
-        .text_color(c.text_subtle)
-        .child(text.into())
-}
-
 /// The line that says where Codex stands.
 pub fn status_line(check: &CatalogCheck) -> String {
     if check.checking {
@@ -333,14 +306,11 @@ impl Render for CodexTab {
 
 /// Which select is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Picker {
+pub enum Picker {
     Model,
     Effort,
     Scope,
 }
-
-/// The choices a select offers: its value and label.
-type Options = Vec<(String, String)>;
 
 /// The Model select: Codex's default, a saved model Codex no longer
 /// offers, then every model.
@@ -478,15 +448,7 @@ impl SettingsTab {
     }
 
     fn saved(&self, cx: &App) -> Config {
-        let config = Agents2::global(cx)
-            .and_then(|agents| {
-                agents
-                    .read(cx)
-                    .find(&self.view.agent.pubkey)
-                    .map(|agent| agent.config.clone())
-            })
-            .unwrap_or_else(|| self.view.agent.config.clone());
-        Config::read(&config)
+        Config::read(&saved_config(&self.view, cx))
     }
 
     fn reset(&mut self, saved: Config, window: &mut Window, cx: &mut Context<Self>) {
@@ -532,9 +494,16 @@ impl SettingsTab {
         .detach();
         cx.notify();
     }
+}
+
+impl Picking for SettingsTab {
+    type Picker = Picker;
+
+    fn open(&mut self) -> &mut Option<Picker> {
+        &mut self.open
+    }
 
     fn pick(&mut self, picker: Picker, value: String, cx: &mut Context<Self>) {
-        self.open = None;
         match picker {
             Picker::Model => {
                 let effort = self
@@ -551,60 +520,6 @@ impl SettingsTab {
             Picker::Effort => self.draft.effort = value,
             Picker::Scope => self.draft.scope = value,
         }
-        cx.notify();
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn choice(
-        &self,
-        picker: Picker,
-        id: &'static str,
-        value: &str,
-        options: Options,
-        disabled: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let open = self.open == Some(picker) && !disabled;
-        let label = options
-            .iter()
-            .find(|(option, _)| option == value)
-            .or(options.first())
-            .map(|(_, label)| label.clone())
-            .unwrap_or_default();
-        let mut select = div().relative().w_full().child(
-            Select::new(id)
-                .value(label)
-                .open(open)
-                .surface(Surface::Floating)
-                .disabled(disabled)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open = (this.open != Some(picker)).then_some(picker);
-                    cx.notify();
-                })),
-        );
-        if open {
-            let items = options.into_iter().map(|(option, label)| {
-                MenuItem::new(SharedString::from(format!("{id}-{option}")), label)
-                    .checked(option == value)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.pick(picker, option.clone(), cx)),
-                    )
-            });
-            let page = cx.entity().downgrade();
-            select = select.child(overlay::dropdown(
-                window,
-                Align::Start,
-                div().min_w(rems(16.)).child(Menu::new().children(items)),
-                Rc::new(move |_, cx| {
-                    let _ = page.update(cx, |this, cx| {
-                        this.open = None;
-                        cx.notify();
-                    });
-                }),
-            ));
-        }
-        select
     }
 }
 
@@ -658,7 +573,8 @@ impl Render for SettingsTab {
             })
             .child(field(
                 "Model",
-                self.choice(
+                choice(
+                    self.open,
                     Picker::Model,
                     "codex-model",
                     &self.draft.model,
@@ -676,7 +592,8 @@ impl Render for SettingsTab {
             ))
             .child(field(
                 "Thinking",
-                self.choice(
+                choice(
+                    self.open,
                     Picker::Effort,
                     "codex-effort",
                     &self.draft.effort,
@@ -701,7 +618,8 @@ impl Render for SettingsTab {
             ))
             .child(field(
                 "Sessions",
-                self.choice(
+                choice(
+                    self.open,
                     Picker::Scope,
                     "codex-scope",
                     scope,
