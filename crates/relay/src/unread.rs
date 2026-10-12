@@ -2717,10 +2717,11 @@ impl<F: ThreadFollowStore> Unread<F> {
                 .push(entry.event.id_hex());
         }
         let mut ids = vec![message_id.to_owned()];
+        let mut seen: HashSet<&str> = HashSet::from([message_id]);
         let mut stack = vec![message_id.to_owned()];
         while let Some(parent) = stack.pop() {
             for id in children.get(&parent).into_iter().flatten() {
-                if !ids.contains(id) {
+                if seen.insert(id) {
                     ids.push(id.clone());
                     stack.push(id.clone());
                 }
@@ -2792,9 +2793,10 @@ impl<F: ThreadFollowStore> Unread<F> {
         let index = self.index.as_ref().expect("indexed");
         let mut cut = clicked_at;
         let mut keys = vec![channel_id.to_owned(), message_force_key(channel_id)];
+        let mut seen: HashSet<String> = keys.iter().cloned().collect();
         let mut has_rows = false;
         let mut add = |key: String| {
-            if !keys.contains(&key) {
+            if seen.insert(key.clone()) {
                 keys.push(key);
             }
         };
