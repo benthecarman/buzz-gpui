@@ -1141,7 +1141,15 @@ impl ReadJournal {
 
     /// Validates every invariant (`readJournal`) and drops `homes` entries
     /// that no kept mark names.
-    pub fn checked(mut self, viewer: &str) -> Result<Self> {
+    pub fn checked(self, viewer: &str) -> Result<Self> {
+        self.checked_over(viewer, None)
+    }
+
+    /// [`checked`](Self::checked) for a save over `previous`, which was
+    /// checked already: an unchanged state is not round-tripped through
+    /// the blob parser and an unchanged pending event is not verified
+    /// again.
+    fn checked_over(mut self, viewer: &str, previous: Option<&Self>) -> Result<Self> {
         let corrupt = ReadStateError::CorruptJournal;
         if self.version != 1
             || !is_slot(&self.slot)
@@ -1150,20 +1158,26 @@ impl ReadJournal {
         {
             return Err(corrupt("Invalid saved read state"));
         }
-        let mut contexts = Map::new();
-        for (key, value) in &self.state.frontiers {
-            contexts.insert(escape_context(key), json!(value));
+        let state_checked = previous.is_some_and(|previous| {
+            previous.client_id == self.client_id && previous.state == self.state
+        });
+        if !state_checked {
+            let mut contexts = Map::new();
+            for (key, value) in &self.state.frontiers {
+                contexts.insert(escape_context(key), json!(value));
+            }
+            for (key, value) in &self.state.overrides {
+                contexts.insert(format!("ov_s:{key}"), json!(value.set));
+                contexts.insert(format!("ov_c:{key}"), json!(value.clear));
+                contexts.insert(format!("ov_b:{key}"), json!(value.baseline));
+            }
+            let blob = json!({ "v": 1, "client_id": self.client_id, "contexts": contexts });
+            if parse_blob(&blob)?.state != self.state {
+                return Err(corrupt("Invalid saved read entries"));
+            }
         }
-        for (key, value) in &self.state.overrides {
-            contexts.insert(format!("ov_s:{key}"), json!(value.set));
-            contexts.insert(format!("ov_c:{key}"), json!(value.clear));
-            contexts.insert(format!("ov_b:{key}"), json!(value.baseline));
-        }
-        let parsed =
-            parse_blob(&json!({ "v": 1, "client_id": self.client_id, "contexts": contexts }))?;
         let in_revision = |value: &u64| *value > 0 && *value <= self.revision;
-        if parsed.state != self.state
-            || self.local_unread.len() > LOCAL_UNREAD_KEYS
+        if self.local_unread.len() > LOCAL_UNREAD_KEYS
             || !self.local_unread.values().all(in_revision)
         {
             return Err(corrupt("Invalid saved read entries"));
@@ -1205,10 +1219,13 @@ impl ReadJournal {
                 return Err(corrupt("Invalid saved read operation"));
             }
             let event = &pending.event;
+            let verified = previous
+                .and_then(|previous| previous.pending.as_ref())
+                .is_some_and(|previous| previous.event.id == event.id);
             if event.pubkey.to_hex() != viewer
                 || read_coordinate(event) != Some(self.coordinate().as_str())
                 || event.created_at.as_secs() > u64::from(self.last_created_at)
-                || event.verify().is_err()
+                || (!verified && event.verify().is_err())
             {
                 return Err(corrupt("Saved read operation identity mismatch"));
             }
@@ -1672,7 +1689,7 @@ impl<J: ReadStateJournal> ReadStateSync<J> {
 
     fn save(&mut self, change: impl FnOnce(&ReadJournal) -> Result<ReadJournal>) -> Result<()> {
         let current = self.journal.as_ref().ok_or(ReadStateError::Unavailable)?;
-        let next = change(current)?.checked(&self.viewer)?;
+        let next = change(current)?.checked_over(&self.viewer, Some(current))?;
         if Some(&next) == self.journal.as_ref() {
             return Ok(());
         }
