@@ -229,8 +229,14 @@ impl<T: Clone + Send + Sync + 'static> Inner<T> {
             let _ = done.send(());
         });
         state.running = Some((generation, task.abort_handle()));
+        let weak = Arc::downgrade(self);
         let pending = async move {
-            let _ = finished.await;
+            // A read that died without finishing must not stay pending.
+            if finished.await.is_err()
+                && let Some(this) = weak.upgrade()
+            {
+                this.finish(generation, Err("Workflow read stopped".into()));
+            }
         }
         .boxed()
         .shared();
@@ -345,5 +351,53 @@ impl<T: Clone + Send + Sync + 'static> WorkflowView<T> {
     /// The channels this view reads.
     pub fn channels(&self) -> &[String] {
         &self.inner.config.channels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Open;
+
+    impl Owner for Open {
+        fn closed(&self) -> bool {
+            false
+        }
+        fn can_access(&self, _: &str) -> bool {
+            true
+        }
+        fn release(&self, _: u64) {}
+    }
+
+    #[tokio::test]
+    async fn a_read_that_dies_does_not_stay_pending() {
+        let owner: Arc<dyn Owner> = Arc::new(Open);
+        let first = AtomicBool::new(false);
+        let (view, _handle) = WorkflowView::new(Config {
+            id: 1,
+            channels: Vec::new(),
+            available: true,
+            deadline: false,
+            empty: 0u32,
+            load: Box::new(move || {
+                let die = !first.swap(true, Ordering::SeqCst);
+                async move {
+                    assert!(!die, "the read dies");
+                    Ok(7)
+                }
+                .boxed()
+            }),
+            accept: None,
+            cached: None,
+            needs_fresh: None,
+            runtime: tokio::runtime::Handle::current(),
+            owner: Arc::downgrade(&owner),
+        });
+        view.refresh(false).await;
+        assert_eq!(view.snapshot().status, ViewStatus::Error);
+        view.refresh(false).await;
+        assert_eq!(*view.snapshot(), ViewSnapshot::new(ViewStatus::Ready, 7));
     }
 }
