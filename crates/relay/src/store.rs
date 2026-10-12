@@ -821,8 +821,9 @@ mod tests {
 }
 
 /// The outbox journal for one partition (spec §6.5, §7.5). Every commit
-/// replaces the partition's rows with the whole journal in one
-/// transaction, so a crash leaves either the old journal or the new one.
+/// makes the partition's rows match the whole journal in one transaction,
+/// writing only the rows that changed, so a crash leaves either the old
+/// journal or the new one.
 #[derive(Clone)]
 pub struct SqliteJournal {
     store: Store,
@@ -919,51 +920,134 @@ impl SqliteJournal {
     }
 
     fn commit_blocking(&self, operations: &[crate::outbox::Operation]) -> Result<(), StoreError> {
+        use std::collections::{HashMap, HashSet};
+        /// The parts of a row that change after its first write; the
+        /// template is fixed by the event id.
+        #[derive(PartialEq)]
+        struct Saved {
+            seq: i64,
+            signed: bool,
+            delivery: String,
+            error: Option<String>,
+            recovery_key: Option<String>,
+            recovery_value: Option<String>,
+            acknowledged: bool,
+            guarded: bool,
+            confirmed: bool,
+        }
         self.store.with(|c| {
             let tx = c.transaction()?;
-            tx.execute(
-                "DELETE FROM outbox_ops WHERE origin = ?1 AND viewer = ?2",
-                params![self.partition.origin, self.partition.viewer],
-            )?;
+            let saved: HashMap<String, Saved> = {
+                let mut query = tx.prepare(
+                    "SELECT event_id, enqueued_seq, signed_json IS NOT NULL, delivery, error,
+                       recovery_key, recovery_value, acknowledged, guarded, confirmed
+                     FROM outbox_ops WHERE origin = ?1 AND viewer = ?2",
+                )?;
+                query
+                    .query_map(
+                        params![self.partition.origin, self.partition.viewer],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                Saved {
+                                    seq: row.get(1)?,
+                                    signed: row.get(2)?,
+                                    delivery: row.get(3)?,
+                                    error: row.get(4)?,
+                                    recovery_key: row.get(5)?,
+                                    recovery_value: row.get(6)?,
+                                    acknowledged: row.get(7)?,
+                                    guarded: row.get(8)?,
+                                    confirmed: row.get(9)?,
+                                },
+                            ))
+                        },
+                    )?
+                    .collect::<Result<_, _>>()?
+            };
+            let ids: HashSet<String> = operations.iter().map(|op| op.id().to_hex()).collect();
             {
-                let mut insert = tx.prepare(
+                let mut delete = tx.prepare(
+                    "DELETE FROM outbox_ops WHERE origin = ?1 AND viewer = ?2 AND event_id = ?3",
+                )?;
+                for id in saved.keys().filter(|id| !ids.contains(*id)) {
+                    delete.execute(params![self.partition.origin, self.partition.viewer, id])?;
+                }
+            }
+            // Only rows that changed are written. A row keeps its sequence
+            // while the journal order allows, so removals and appends do
+            // not renumber the rest.
+            let mut changed = Vec::new();
+            let mut last: Option<i64> = None;
+            for op in operations {
+                let id = op.id().to_hex();
+                let previous = saved.get(&id);
+                let seq = match previous.map(|row| row.seq) {
+                    Some(seq) if last.is_none_or(|last| seq > last) => seq,
+                    _ => last.map_or(0, |last| last + 1),
+                };
+                last = Some(seq);
+                let row = Saved {
+                    seq,
+                    signed: op.signed.is_some(),
+                    delivery: serde_json::to_value(op.delivery)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                    error: op.error.clone(),
+                    recovery_key: op.recovery.as_ref().map(|r| r.key.clone()),
+                    recovery_value: op.recovery.as_ref().map(|r| r.value.clone()),
+                    acknowledged: op.acknowledged,
+                    guarded: op.guarded,
+                    confirmed: matches!(op.delivery, crate::outbox::Delivery::Seen)
+                        && op.recovery.is_none(),
+                };
+                if previous != Some(&row) {
+                    changed.push((op, id, row));
+                }
+            }
+            // Rows giving up a recovery key go first, so the unique index
+            // never sees the key twice.
+            changed.sort_by_key(|(_, _, row)| row.recovery_key.is_some() && !row.confirmed);
+            {
+                let mut upsert = tx.prepare(
                     "INSERT INTO outbox_ops (origin, viewer, event_id, kind, created_at, channel_id,
                        template_json, signed_json, delivery, error, recovery_key, recovery_value,
                        acknowledged, guarded, confirmed, enqueued_seq, bytes, updated_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                     ON CONFLICT (origin, viewer, event_id) DO UPDATE SET
+                       kind = excluded.kind, created_at = excluded.created_at,
+                       channel_id = excluded.channel_id, template_json = excluded.template_json,
+                       signed_json = excluded.signed_json, delivery = excluded.delivery,
+                       error = excluded.error, recovery_key = excluded.recovery_key,
+                       recovery_value = excluded.recovery_value,
+                       acknowledged = excluded.acknowledged, guarded = excluded.guarded,
+                       confirmed = excluded.confirmed, enqueued_seq = excluded.enqueued_seq,
+                       bytes = excluded.bytes, updated_ms = excluded.updated_ms",
                 )?;
                 let now = now_ms();
-                for (seq, op) in operations.iter().enumerate() {
+                for (op, id, row) in changed {
                     let template = serde_json::to_string(&op.event)
                         .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-                    let signed = op
-                        .signed
-                        .as_ref()
-                        .map(|event| event.as_json());
-                    let delivery = serde_json::to_value(op.delivery)
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_string))
-                        .unwrap_or_default();
+                    let signed = op.signed.as_ref().map(|event| event.as_json());
                     let bytes = template.len() + signed.as_ref().map_or(0, String::len);
-                    let confirmed = matches!(op.delivery, crate::outbox::Delivery::Seen)
-                        && op.recovery.is_none();
-                    insert.execute(params![
+                    upsert.execute(params![
                         self.partition.origin,
                         self.partition.viewer,
-                        op.id().to_hex(),
+                        id,
                         i64::from(op.kind()),
                         op.created_at() as i64,
                         op.channel(),
                         template,
                         signed,
-                        delivery,
-                        op.error,
-                        op.recovery.as_ref().map(|r| r.key.as_str()),
-                        op.recovery.as_ref().map(|r| r.value.as_str()),
-                        op.acknowledged,
-                        op.guarded,
-                        confirmed,
-                        seq as i64,
+                        row.delivery,
+                        row.error,
+                        row.recovery_key,
+                        row.recovery_value,
+                        row.acknowledged,
+                        row.guarded,
+                        row.confirmed,
+                        row.seq,
                         bytes as i64,
                         now,
                     ])?;
@@ -1045,6 +1129,60 @@ mod journal_tests {
             },
         );
         assert!(other.load().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn commits_write_only_changed_rows_and_keep_order() {
+        let store = Store::in_memory().unwrap();
+        let partition = Partition {
+            origin: "https://a.example".into(),
+            viewer: "ab".repeat(32),
+        };
+        let journal = SqliteJournal::new(store.clone(), partition);
+        let identity = Identity::ephemeral();
+        let key = Recovery {
+            key: "draft:general".into(),
+            value: "{}".into(),
+        };
+        let mut one = operation(&identity, "one", Delivery::Accepted, true);
+        one.recovery = Some(key.clone());
+        let two = operation(&identity, "two", Delivery::Sending, false);
+        let three = operation(&identity, "three", Delivery::Sending, false);
+        journal
+            .commit(vec![one.clone(), two.clone(), three.clone()])
+            .await
+            .unwrap();
+        store
+            .with(|c| Ok(c.execute("UPDATE outbox_ops SET updated_ms = 0", [])?))
+            .unwrap();
+
+        // The first leaves and hands its recovery key to a new last one.
+        let mut four = operation(&identity, "four", Delivery::Sending, false);
+        four.recovery = Some(key);
+        let mut sent = three.clone();
+        sent.delivery = Delivery::Accepted;
+        journal
+            .commit(vec![two.clone(), sent, four.clone()])
+            .await
+            .unwrap();
+        let ids: Vec<_> = journal
+            .load()
+            .await
+            .unwrap()
+            .iter()
+            .map(|op| op.id())
+            .collect();
+        assert_eq!(ids, [two.id(), three.id(), four.id()]);
+        let untouched: Vec<String> = store
+            .with(|c| {
+                let mut query =
+                    c.prepare("SELECT event_id FROM outbox_ops WHERE updated_ms = 0")?;
+                Ok(query
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(untouched, [two.id().to_hex()]);
     }
 }
 
