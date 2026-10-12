@@ -4,7 +4,6 @@
 
 use super::config::Config;
 use crate::agent_plugins::claude_code::prompt::escaped;
-use crate::agent_plugins::claude_code::runtime::thread_reference;
 use crate::buzz_mcp::BuzzEvent;
 use serde::Serialize;
 
@@ -22,10 +21,7 @@ pub fn quoted(value: &impl Serialize) -> String {
     escaped(&serde_json::to_string(value).unwrap_or_default())
 }
 
-/// The thread an event belongs to: its root, or itself.
-pub fn root_of(event: &BuzzEvent) -> String {
-    thread_reference(event).map_or_else(|| event.id.clone(), |thread| thread.root_id)
-}
+pub(crate) use crate::buzz_mcp::tools::root_of;
 
 /// The Buzz guidance; with `settings`, the agent's custom instructions too.
 pub fn developer_instructions(name: &str, pubkey: &str, settings: Option<&Config>) -> String {

@@ -817,21 +817,11 @@ struct Attached {
     links: String,
 }
 
-/// The root of the thread `event` is in, by its NIP-10 markers.
+/// The root of the thread `event` is in, by its NIP-10 markers (the last
+/// of each, as the relay reads them), or `event` itself.
 pub(crate) fn root_of(event: &BuzzEvent) -> String {
-    let tags: Vec<&Vec<String>> = event
-        .tags
-        .iter()
-        .filter(|t| t.len() >= 4 && t[0] == "e" && hex(&t[1]))
-        .collect();
-    let root = tags.iter().find(|t| t[3] == "root");
-    let reply = tags.iter().find(|t| t[3] == "reply");
-    let chosen = if root.is_some() && reply.is_some() {
-        root
-    } else {
-        reply
-    };
-    chosen.map_or_else(|| event.id.clone(), |t| t[1].clone())
+    crate::agent_plugins::claude_code::runtime::thread_reference(event)
+        .map_or_else(|| event.id.clone(), |thread| thread.root_id)
 }
 
 /// Messages oldest first, each showing its author's latest edit. Edits

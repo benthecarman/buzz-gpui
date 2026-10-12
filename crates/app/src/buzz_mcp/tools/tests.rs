@@ -305,6 +305,21 @@ async fn posts_at_the_channels_top_level_when_given_a_channel() {
     );
 }
 
+#[test]
+fn the_last_root_marker_names_the_thread_as_the_relay_reads_it() {
+    let (first, last, reply) = ("1".repeat(64), "2".repeat(64), "3".repeat(64));
+    let message = event(|event| {
+        event.tags = tags(&[
+            &["e", &first, "", "root"],
+            &["e", &last, "", "root"],
+            &["e", &reply, "", "reply"],
+        ]);
+    });
+    assert_eq!(root_of(&message), last);
+    let lone_root = event(|event| event.tags = tags(&[&["e", &first, "", "root"]]));
+    assert_eq!(root_of(&lone_root), lone_root.id);
+}
+
 #[tokio::test]
 async fn reads_the_current_thread_with_each_messages_latest_edit() {
     let mut events = community();
