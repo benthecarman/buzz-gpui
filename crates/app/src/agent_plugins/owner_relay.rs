@@ -8,12 +8,12 @@ use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use buzz_identity::Identity;
 use buzz_relay_client::session::SessionSnapshot;
-use buzz_relay_client::{ChannelType, RelayHttp};
+use buzz_relay_client::{ChannelType, RelayHttp, Session};
 use futures::future::BoxFuture;
 use gpui_kit::{App, Entity, EntityId};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 /// A channel as the owner's session sees it.
 #[derive(Clone, Debug, Default)]
@@ -181,6 +181,17 @@ impl OwnerRelay for AppRelay {
 /// A community as its owner reads it, and its scope, `<origin>:<viewer>`.
 pub type Scoped = (String, Arc<dyn OwnerRelay>);
 
+/// A community's reader, kept while its owner and session stay the same:
+/// each is asked for on every agent change, and each builds an HTTP
+/// client.
+struct Cached {
+    identity: Weak<Identity>,
+    session: Weak<Session>,
+    scoped: Scoped,
+}
+
+static CACHE: Mutex<Option<HashMap<EntityId, Cached>>> = Mutex::new(None);
+
 /// A community, read as its owner, and its relay partition (buzz-app's
 /// relay `scope`, `<origin>:<viewer>`). `None` until the owner is signed
 /// in.
@@ -188,15 +199,33 @@ pub fn of(community: &Entity<Community>, cx: &App) -> Option<Scoped> {
     let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
         return None;
     };
+    let id = community.entity_id();
     let community = community.read(cx);
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    let cache = cache.get_or_insert_default();
+    if let Some(cached) = cache.get(&id)
+        && cached.identity.ptr_eq(&Arc::downgrade(identity))
+        && cached.session.ptr_eq(&Arc::downgrade(&community.session))
+    {
+        return Some(cached.scoped.clone());
+    }
     let partition = community.partition();
     let _runtime = Runtime::handle(cx).enter();
-    let relay = Arc::new(AppRelay {
+    let relay: Arc<dyn OwnerRelay> = Arc::new(AppRelay {
         http: RelayHttp::new(community.origin.clone(), identity.clone()),
         identity: identity.clone(),
         snapshot: Some(community.session.snapshot()),
     });
-    Some((format!("{}:{}", partition.origin, partition.viewer), relay))
+    let scoped = (format!("{}:{}", partition.origin, partition.viewer), relay);
+    cache.insert(
+        id,
+        Cached {
+            identity: Arc::downgrade(identity),
+            session: Arc::downgrade(&community.session),
+            scoped: scoped.clone(),
+        },
+    );
+    Some(scoped)
 }
 
 /// The owner's connection to each running agent's own community, which
@@ -204,7 +233,7 @@ pub fn of(community: &Entity<Community>, cx: &App) -> Option<Scoped> {
 /// `agents2.relay(pubkey)`. Agents of one community share it.
 pub fn running(agents: &Agents2, cx: &App) -> HashMap<String, Scoped> {
     let mut communities: HashMap<EntityId, Option<Scoped>> = HashMap::new();
-    agents
+    let relays = agents
         .running()
         .iter()
         .filter_map(|agent| {
@@ -215,5 +244,14 @@ pub fn running(agents: &Agents2, cx: &App) -> HashMap<String, Scoped> {
                 .clone()?;
             Some((agent.pubkey.clone(), relay))
         })
-        .collect()
+        .collect();
+    // Communities no running agent uses any more let go of their readers.
+    if let Some(cache) = CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+    {
+        cache.retain(|id, _| communities.contains_key(id));
+    }
+    relays
 }
