@@ -79,9 +79,14 @@ pub fn record_tag(raw: &Value) -> &'static str {
 }
 
 /// The `d` coordinate and `t` tag a record is stored under, after
-/// validating it for `community`.
+/// validating it for `community`. A recipe record must also pass
+/// `parseKitRecord`, which counts text in UTF-16 units where the native
+/// boundary counts characters.
 pub fn record_tags(raw: &Value, community: &str) -> Result<Vec<Vec<String>>, String> {
     let coordinate = kit::coordinate(raw, community)?;
+    if [KIT_TAG, MANIFEST_TAG, ME_KIT_TAG].contains(&record_tag(raw)) {
+        crate::kit::parse_kit_record(raw, community)?;
+    }
     Ok(vec![
         vec!["d".into(), coordinate],
         vec!["t".into(), record_tag(raw).into()],
@@ -171,5 +176,18 @@ mod tests {
             portable: parse_team(&raw).unwrap().0.portable,
         };
         assert!(record_tags(&team_record(&empty, COMMUNITY, false), COMMUNITY).is_err());
+        // 61 characters, 122 UTF-16 units: over the reader's 120.
+        let wide = Team {
+            name: "\u{1F600}".repeat(61),
+            agents: vec![owner()],
+            portable: None,
+            ..empty
+        };
+        let wide = team_record(&wide, COMMUNITY, false);
+        assert!(
+            kit::coordinate(&wide, COMMUNITY).is_ok(),
+            "native counts chars"
+        );
+        assert!(record_tags(&wide, COMMUNITY).is_err());
     }
 }

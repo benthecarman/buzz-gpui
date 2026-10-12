@@ -94,7 +94,7 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
         let id = raw["id"].as_str().filter(|id| identifier(id));
         let name = raw["name"]
             .as_str()
-            .filter(|name| name.chars().count() <= 120 && !name.trim().is_empty());
+            .filter(|name| name.encode_utf16().count() <= 120 && !name.trim().is_empty());
         let default = raw["defaultTemplateId"]
             .as_str()
             .filter(|id| id.is_empty() || identifier(id));
@@ -234,6 +234,11 @@ pub fn prepare(
             },
         );
     }
+    // Read back with `parseKitRecord`, which counts text in UTF-16 units
+    // where the native boundary counts characters.
+    if [KIT_TAG, MANIFEST_TAG, ME_KIT_TAG].contains(&tag(record)) {
+        super::parse_kit_record(record, community)?;
+    }
     let content = super::seal(identity, record, community)?;
     Ok((
         content,
@@ -350,6 +355,20 @@ mod tests {
             placed(&value, CHANNEL, true, Some("gone")).unwrap_err(),
             REMOVED_SECTION
         );
+    }
+
+    #[test]
+    fn names_count_utf16_units_as_the_reader_does() {
+        // 61 characters, 122 UTF-16 units.
+        let name = "\u{1F600}".repeat(61);
+        let value = groups_value(GroupsId::Me, &me(&[("g1", &name)], &[]));
+        assert!(parse_groups(&value).is_err());
+        let record = record(COMMUNITY, value, false);
+        assert!(
+            coordinate(&record, COMMUNITY).is_ok(),
+            "native counts chars"
+        );
+        assert!(prepare(&Identity::ephemeral(), &record, COMMUNITY).is_err());
     }
 
     #[test]
