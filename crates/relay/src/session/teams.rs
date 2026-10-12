@@ -20,13 +20,15 @@ use crate::teams::{
 use buzz_identity::Identity;
 use nostr::prelude::EventId;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
 const CLOSED: &str = "The session has closed";
 const READ_LIMIT: usize = 500;
+/// Chunk coordinates read in one filter.
+const CHUNK_BATCH: usize = 100;
 /// The outbox gives up on a delivery after this; the save stays queued.
 const DELIVERY_WAIT: Duration = Duration::from_secs(30);
 
@@ -327,6 +329,35 @@ impl Inner {
         Ok(kit::selected_head(&events).cloned())
     }
 
+    /// The head of each coordinate in `ds`, read fresh and strong, a
+    /// batch of coordinates per filter.
+    async fn read_coordinates(&self, ds: &[String]) -> Result<HashMap<String, Verified>, String> {
+        let mut heads: HashMap<String, Verified> = HashMap::new();
+        for batch in ds.chunks(CHUNK_BATCH) {
+            let events = self
+                .fresh(json!({
+                    "kinds": [30078],
+                    "authors": [self.viewer],
+                    "#d": batch,
+                    "limit": batch.len() * 2,
+                    "consistency": "strong",
+                }))
+                .await?;
+            for event in events {
+                let Some(d) = event.tag("d").filter(|d| batch.iter().any(|b| b == d)) else {
+                    continue;
+                };
+                if heads
+                    .get(d)
+                    .is_none_or(|head| crate::event::is_newer(&event, head))
+                {
+                    heads.insert(d.to_owned(), event);
+                }
+            }
+        }
+        Ok(heads)
+    }
+
     /// Waits until the relay holds exactly `id`.
     async fn confirm(&self, outbox: &Outbox, id: EventId) -> Result<(), String> {
         let exact = json!({ "ids": [id.to_hex()], "limit": 1, "consistency": "strong" });
@@ -520,11 +551,13 @@ impl Inner {
         team: &str,
         manifest: &TeamManifest,
     ) -> Result<Vec<TeamPayload>, String> {
-        let mut payloads = Vec::with_capacity(manifest.chunks as usize);
-        for d in payload::chunk_coordinates(manifest, &self.community, team) {
-            let event = self
-                .read_coordinate(&d, true)
-                .await?
+        let coordinates = payload::chunk_coordinates(manifest, &self.community, team);
+        let mut heads = self.read_coordinates(&coordinates).await?;
+        let mut payloads = Vec::with_capacity(coordinates.len());
+        // In index order, whatever order the relay answered in.
+        for d in coordinates {
+            let event = heads
+                .remove(&d)
                 .ok_or("Portable team payload is unavailable")?;
             let raw = kit::open(&self.identity, &event, &self.community)?;
             let chunk = payload::parse_payload_record(&raw, &self.community)?;
@@ -540,11 +573,12 @@ impl Inner {
     /// a revision with different bytes.
     async fn write_chunks(&self, payloads: &[TeamPayload]) -> Result<(), String> {
         let outbox = self.outbox().await?;
-        for chunk in payloads {
+        let coordinates: Vec<String> = payloads.iter().map(TeamPayload::coordinate).collect();
+        let saved = self.read_coordinates(&coordinates).await?;
+        for (chunk, d) in payloads.iter().zip(coordinates) {
             let record = chunk.record();
-            let d = chunk.coordinate();
-            if let Some(existing) = self.read_coordinate(&d, true).await? {
-                let raw = kit::open(&self.identity, &existing, &self.community)?;
+            if let Some(existing) = saved.get(&d) {
+                let raw = kit::open(&self.identity, existing, &self.community)?;
                 if payload::parse_payload_record(&raw, &self.community)? != *chunk {
                     return Err("Portable team revision already has different content".into());
                 }
