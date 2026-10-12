@@ -23,11 +23,12 @@ use crate::hosts::Hosts;
 use crate::ui::settings::cards::{self, CardPlacement, SettingsCard};
 use crate::ui::toasts;
 use buzz_relay_client::kit::{AgentChoice, KitSnapshot, KitStatus};
-use buzz_relay_client::{ChannelType, RelayOrigin};
+use buzz_relay_client::{ChannelType, RelayOrigin, RosterStatus};
 use buzz_ui::{ActiveTheme, Icon, IconName, ToastTone, TypeStyled, tokens::radius, tokens::space};
 use gpui_kit::*;
 use nostr::nips::nip19::ToBech32;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// The template provider's contribution key (`channelTemplates.register`);
@@ -178,7 +179,7 @@ pub(crate) struct Catalog {
 
 impl Catalog {
     pub fn read(community: &Entity<Community>, cx: &App) -> Self {
-        let (agents, agents_ready, agents_complete) = agent_choices(community, cx);
+        let (agents, agents_ready, agents_complete) = AgentChoices::read(community, cx);
         Self {
             kit: community.read(cx).session.kit().borrow().clone(),
             agents,
@@ -207,12 +208,115 @@ impl Catalog {
     }
 }
 
+/// [`agent_choices`] of one community, worked out again only when the
+/// channels, profiles, roster or hosts change. The views that show a
+/// [`Catalog`] hold it through [`watch_kit_with`].
+pub(crate) struct AgentChoices {
+    community: WeakEntity<Community>,
+    value: (Vec<AgentChoice>, bool, bool),
+    /// The snapshot parts `value` was worked out from, by identity.
+    seen: Option<(usize, usize, RosterStatus)>,
+    _hosts: Vec<Subscription>,
+    _subscriptions: [Subscription; 2],
+}
+
+/// The live [`AgentChoices`] by community.
+#[derive(Default)]
+struct ChoicesHub(HashMap<EntityId, WeakEntity<AgentChoices>>);
+
+impl Global for ChoicesHub {}
+
+impl AgentChoices {
+    /// The community's choices, shared by every view holding them.
+    fn of(community: &Entity<Community>, cx: &mut App) -> Entity<Self> {
+        let id = community.entity_id();
+        let hub = &mut cx.default_global::<ChoicesHub>().0;
+        if let Some(found) = hub.get(&id).and_then(WeakEntity::upgrade) {
+            return found;
+        }
+        hub.retain(|_, choices| choices.upgrade().is_some());
+        let choices = cx.new(|cx| {
+            let subscriptions = [
+                cx.observe(community, |this: &mut Self, community, cx| {
+                    this.refresh(&community, false, cx)
+                }),
+                cx.observe_global::<Hosts>(|this, cx| {
+                    this.watch_hosts(cx);
+                    if let Some(community) = this.community.upgrade() {
+                        this.refresh(&community, true, cx);
+                    }
+                }),
+            ];
+            let mut this = Self {
+                community: community.downgrade(),
+                value: Default::default(),
+                seen: None,
+                _hosts: Vec::new(),
+                _subscriptions: subscriptions,
+            };
+            this.watch_hosts(cx);
+            this.refresh(community, true, cx);
+            this
+        });
+        cx.default_global::<ChoicesHub>()
+            .0
+            .insert(id, choices.downgrade());
+        choices
+    }
+
+    /// The choices, from a live [`AgentChoices`] when a view holds one.
+    fn read(community: &Entity<Community>, cx: &App) -> (Vec<AgentChoice>, bool, bool) {
+        let live = cx
+            .try_global::<ChoicesHub>()
+            .and_then(|hub| hub.0.get(&community.entity_id()))
+            .and_then(WeakEntity::upgrade);
+        match live {
+            Some(choices) => choices.read(cx).value.clone(),
+            None => agent_choices(community, cx),
+        }
+    }
+
+    fn watch_hosts(&mut self, cx: &mut Context<Self>) {
+        let hosts = cx
+            .try_global::<Hosts>()
+            .map(|hosts| hosts.hosts.clone())
+            .unwrap_or_default();
+        self._hosts = hosts
+            .iter()
+            .map(|host| {
+                cx.observe(host, |this, _, cx| {
+                    if let Some(community) = this.community.upgrade() {
+                        this.refresh(&community, true, cx);
+                    }
+                })
+            })
+            .collect();
+    }
+
+    /// Works the choices out again, unless (without `force`) the snapshot
+    /// parts they read are the same.
+    fn refresh(&mut self, community: &Entity<Community>, force: bool, cx: &mut Context<Self>) {
+        let snapshot = &community.read(cx).snapshot;
+        let seen = (
+            Arc::as_ptr(&snapshot.channels) as *const () as usize,
+            Arc::as_ptr(&snapshot.profiles) as usize,
+            snapshot.roster.clone(),
+        );
+        if !force && self.seen.as_ref() == Some(&seen) {
+            return;
+        }
+        self.seen = Some(seen);
+        let value = agent_choices(community, cx);
+        if value != self.value {
+            self.value = value;
+            cx.notify();
+        }
+    }
+}
+
 /// `templateAgentChoices`: the viewer's agents for this community, those
 /// its hosts manage and relay-only ones it owns in its channels.
-pub(crate) fn agent_choices(
-    community: &Entity<Community>,
-    cx: &App,
-) -> (Vec<AgentChoice>, bool, bool) {
+fn agent_choices(community: &Entity<Community>, cx: &App) -> (Vec<AgentChoice>, bool, bool) {
     let community = community.read(cx);
     let snapshot = &community.snapshot;
     let viewer = community.session.viewer().to_owned();
@@ -287,27 +391,40 @@ pub(crate) fn agent_choices(
     (choices, ready, complete)
 }
 
-/// Re-renders `view` whenever the community's kit changes, and reads it
-/// once (`ensure`).
+/// What [`watch_kit`] keeps running: the kit watch and the agent choices.
+pub(crate) struct KitWatch {
+    _task: Task<()>,
+    _choices: Entity<AgentChoices>,
+    _subscription: Subscription,
+}
+
+/// Re-renders `view` whenever the community's kit or agent choices
+/// change, and reads the kit once (`ensure`).
 pub(crate) fn watch_kit<V: 'static>(
     community: &Entity<Community>,
     cx: &mut Context<V>,
-) -> Task<()> {
+) -> KitWatch {
     watch_kit_with(community, cx, |_, cx| cx.notify())
 }
 
-/// Runs `changed` whenever the community's kit changes, and reads it once
-/// (`ensure`).
+/// Runs `changed` whenever the community's kit or agent choices change,
+/// and reads the kit once (`ensure`).
 pub(crate) fn watch_kit_with<V: 'static>(
     community: &Entity<Community>,
     cx: &mut Context<V>,
     changed: impl Fn(&mut V, &mut Context<V>) + 'static,
-) -> Task<()> {
+) -> KitWatch {
+    let changed = Rc::new(changed);
+    let choices = AgentChoices::of(community, cx);
+    let subscription = cx.observe(&choices, {
+        let changed = changed.clone();
+        move |this, _, cx| changed(this, cx)
+    });
     let session = community.read(cx).session.clone();
     session.kit_ensure();
     let mut kit = session.kit();
     let mut connection = session.snapshot();
-    cx.spawn(async move |this, cx| {
+    let task = cx.spawn(async move |this, cx| {
         loop {
             // A read asked for before the relay answered waits for it.
             let (open, kit_changed) = futures::select_biased! {
@@ -317,11 +434,16 @@ pub(crate) fn watch_kit_with<V: 'static>(
                     (live.is_ok(), false)
                 }
             };
-            if !open || (kit_changed && this.update(cx, &changed).is_err()) {
+            if !open || (kit_changed && this.update(cx, |this, cx| changed(this, cx)).is_err()) {
                 break;
             }
         }
-    })
+    });
+    KitWatch {
+        _task: task,
+        _choices: choices,
+        _subscription: subscription,
+    }
 }
 
 // ---------------------------------------------------------------------------

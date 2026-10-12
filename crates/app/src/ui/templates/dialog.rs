@@ -3,7 +3,7 @@
 //! A team's instructions live in their own record and are edited from
 //! the Agents page (`agents/team_editor.rs`).
 
-use super::{Catalog, field, line, watch_kit};
+use super::{Catalog, KitWatch, field, line, watch_kit};
 use crate::community::Community;
 use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::EventId;
@@ -32,7 +32,7 @@ pub struct TemplateDialog {
     pub(super) canvas_open: bool,
     busy: bool,
     error: Option<SharedString>,
-    _kit: Task<()>,
+    _kit: KitWatch,
     _subscriptions: Vec<Subscription>,
 }
 

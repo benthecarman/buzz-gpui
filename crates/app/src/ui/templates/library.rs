@@ -5,7 +5,8 @@
 
 use super::dialog::{Closed, TemplateDialog};
 use super::{
-    Catalog, current, empty_state, header, inline_header, line, public_key_labels, watch_kit,
+    Catalog, KitWatch, current, empty_state, header, inline_header, line, public_key_labels,
+    watch_kit,
 };
 use crate::community::{AppState, Community};
 use crate::ui::overlay::{self, Align, Dismiss};
@@ -75,7 +76,7 @@ pub struct TemplateLibrary {
     deleting: Option<Deleting>,
     /// The item whose actions menu is open.
     menu: Option<String>,
-    _kit: Option<Task<()>>,
+    _kit: Option<KitWatch>,
     _app: Subscription,
     _hosts: Option<Subscription>,
 }

@@ -3,7 +3,7 @@
 //! the editor opens with.
 
 use super::dialog::{Closed, TemplateDialog};
-use super::{Catalog, line, watch_kit};
+use super::{Catalog, KitWatch, line, watch_kit};
 use crate::community::Community;
 use buzz_relay_client::kit::{KitStatus, KitValue, Template};
 use buzz_ui::{Button, tokens::space};
@@ -19,7 +19,7 @@ pub struct SaveAsTemplate {
     busy: bool,
     error: Option<SharedString>,
     dialog: Option<(Entity<TemplateDialog>, Subscription)>,
-    _kit: Task<()>,
+    _kit: KitWatch,
 }
 
 impl SaveAsTemplate {

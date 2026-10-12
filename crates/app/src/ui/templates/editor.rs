@@ -3,7 +3,7 @@
 //! resolved to the agents available now. Replacing a chosen setup asks
 //! first.
 
-use super::{Catalog, field, watch_kit_with};
+use super::{Catalog, KitWatch, field, watch_kit_with};
 use crate::community::Community;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::kit::setup::ChannelSetup;
@@ -48,7 +48,7 @@ pub struct TemplateEditor {
     group: Option<GroupDefault>,
     /// The group default still to apply once the catalog can resolve it.
     automatic: String,
-    _kit: Task<()>,
+    _kit: KitWatch,
     _community: Subscription,
 }
 
