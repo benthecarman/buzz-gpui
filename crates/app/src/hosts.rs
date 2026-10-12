@@ -79,6 +79,9 @@ pub struct HostConnection {
     pub control: control::Control,
     /// A snapshot arrived since this connection was made.
     received: bool,
+    /// Counts sessions with the host. A snapshot asked for in an earlier
+    /// one is not applied: its sequence numbers are another process's.
+    session: u64,
     signing: SigningSlot,
     client: Arc<HostClient<HostProtocol>>,
     /// Where output of processes started on this host goes.
@@ -448,6 +451,7 @@ impl HostConnection {
                 defaults: None,
                 control: Default::default(),
                 received: false,
+                session: 0,
                 signing,
                 client,
                 processes,
@@ -503,7 +507,14 @@ impl HostConnection {
                 let refresh = this.update(cx, |this, cx| {
                     let refresh = match update {
                         Update::Event(event) => match *event {
-                            ClientEvent::Connected(_) | ClientEvent::Resync => true,
+                            // A restarted host numbers its snapshots from
+                            // 0 again.
+                            ClientEvent::Connected(_) => {
+                                this.session += 1;
+                                this.agents.seq = 0;
+                                true
+                            }
+                            ClientEvent::Resync => true,
                             ClientEvent::Event {
                                 body: HostEvent::Agents(snapshot),
                                 ..
@@ -739,6 +750,7 @@ impl HostConnection {
         cx: &mut Context<Self>,
     ) -> Task<Result<Response, RpcError>> {
         let client = self.client.clone();
+        let session = self.session;
         let response =
             Runtime::handle(cx).spawn(async move { client.request_within(request, timeout).await });
         cx.spawn(async move |this, cx| {
@@ -748,8 +760,10 @@ impl HostConnection {
             if let Ok(Response::Agents(snapshot)) = &response {
                 let snapshot = snapshot.clone();
                 let _ = this.update(cx, |this, cx| {
-                    this.apply(snapshot);
-                    cx.notify();
+                    if this.session == session {
+                        this.apply(snapshot);
+                        cx.notify();
+                    }
                 });
             }
             response
