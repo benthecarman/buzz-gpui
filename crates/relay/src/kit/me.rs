@@ -24,16 +24,20 @@ pub use native::{KIT_TAG, MANIFEST_TAG, ME_KIT_TAG, PAYLOAD_TAG};
 /// `removedSectionMessage` (`sessions/workspace.ts`).
 pub const REMOVED_SECTION: &str = "The section was removed. Continue without a section to retry.";
 
-/// One decoded record, as the relay's head of its coordinate.
+/// One decoded record, as the relay's head of its coordinate, with its
+/// raw JSON; [`super::KitEntry`] is the parsed form.
 #[derive(Clone, Debug, PartialEq)]
-pub struct KitEntry {
+pub struct RawKitEntry {
     /// `{version, community, deleted, value}`, validated.
     pub record: Value,
     pub event_id: String,
     pub created_at: u64,
 }
 
-impl KitEntry {
+/// The old name, kept for callers not yet moved to [`RawKitEntry`].
+pub use self::RawKitEntry as KitEntry;
+
+impl RawKitEntry {
     pub fn kind(&self) -> &str {
         self.record["value"]["type"].as_str().unwrap_or_default()
     }
@@ -56,19 +60,19 @@ impl KitEntry {
 
 /// The `groups` record with this id, deleted or not (`meGroups`,
 /// `personalGroups`).
-pub fn groups_entry(entries: &[KitEntry], id: GroupsId) -> Option<&KitEntry> {
+pub fn groups_entry(entries: &[RawKitEntry], id: GroupsId) -> Option<&RawKitEntry> {
     entries
         .iter()
         .find(|entry| entry.kind() == "groups" && entry.id() == id.as_str())
 }
 
 /// The live groups of that record, if any.
-pub fn groups(entries: &[KitEntry], id: GroupsId) -> Option<PersonalGroups> {
-    groups_entry(entries, id).and_then(KitEntry::groups)
+pub fn groups(entries: &[RawKitEntry], id: GroupsId) -> Option<PersonalGroups> {
+    groups_entry(entries, id).and_then(RawKitEntry::groups)
 }
 
 /// A live template by id (`templateEntry`).
-pub fn template<'a>(entries: &'a [KitEntry], id: &str) -> Option<&'a KitEntry> {
+pub fn template<'a>(entries: &'a [RawKitEntry], id: &str) -> Option<&'a RawKitEntry> {
     entries
         .iter()
         .find(|entry| !entry.deleted() && entry.kind() == "template" && entry.id() == id)
@@ -192,12 +196,16 @@ pub fn tag(record: &Value) -> &'static str {
 
 /// Opens one catalog head (`relay_kit_decode`) with the kit cipher, and
 /// checks a groups record's value as `parseKitRecord` does.
-pub fn decode(identity: &Identity, event: &Verified, community: &str) -> Result<KitEntry, String> {
+pub fn decode(
+    identity: &Identity,
+    event: &Verified,
+    community: &str,
+) -> Result<RawKitEntry, String> {
     let raw = super::open(identity, event, community)?;
     if raw["value"]["type"] == "groups" {
         parse_groups(&raw["value"])?;
     }
-    Ok(KitEntry {
+    Ok(RawKitEntry {
         record: raw,
         event_id: event.id_hex(),
         created_at: event.created_at_secs(),
@@ -267,7 +275,7 @@ pub fn placed(
 /// envelope; with none, one placement always fits.
 pub fn admit(
     value: &PersonalGroups,
-    entry: Option<&KitEntry>,
+    entry: Option<&RawKitEntry>,
     community: &str,
 ) -> Result<(), String> {
     if entry.is_some() && !fits(&record(community, groups_value(GroupsId::Me, value), false)) {
@@ -385,7 +393,7 @@ mod tests {
             .collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
         let value = me(&[], &refs);
-        let entry = KitEntry {
+        let entry = RawKitEntry {
             record: json!({}),
             event_id: String::new(),
             created_at: 0,
