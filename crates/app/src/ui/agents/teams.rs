@@ -8,9 +8,9 @@ use super::editor::Dismissed;
 use super::team_dialogs::{self, TeamDeployDialog, TeamImportDialog};
 use super::team_editor::TeamEditor;
 use super::team_file;
-use super::team_ops::{self, ImportOptions};
+use super::team_ops;
 use super::team_text::deliver_team_texts;
-use crate::community::{AppState, Community, IdentityState};
+use crate::community::{AppState, Community};
 use crate::mirror::mirror;
 use crate::ui::overlay::{self, Align, Dismiss};
 use buzz_relay_client::catalog::{
@@ -100,20 +100,11 @@ pub fn adopt_catalog_team(
     listed: TeamPublication,
     cx: &mut App,
 ) -> Task<Result<String, String>> {
-    let Some(host) = team_ops::import_host(cx) else {
-        return Task::ready(Err("Agent creation is unavailable.".into()));
+    let context = match team_ops::import_context(&teams, false, false, cx) {
+        Ok(context) => context,
+        Err(error) => return Task::ready(Err(error)),
     };
-    let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
-        return Task::ready(Err("Set up your identity first.".into()));
-    };
-    let identity = identity.clone();
     let catalog = catalog.read(cx).catalog.clone();
-    let (kit, community) = {
-        let teams = teams.read(cx);
-        (teams.kit.clone(), teams.community.clone())
-    };
-    let destination = community.read(cx).origin.websocket().to_string();
-    let owner = identity.pubkey_hex();
     cx.spawn(async move |cx| {
         let team = catalog.current_team(&listed).await?;
         let publication = Publication::Team(team.clone());
@@ -122,21 +113,7 @@ pub fn adopt_catalog_team(
         }
         let snapshot = serde_json::from_value(catalog_team_snapshot(&team))
             .map_err(|error| error.to_string())?;
-        let imported = team_ops::import_team(
-            host,
-            kit,
-            community,
-            identity,
-            snapshot,
-            ImportOptions {
-                destination,
-                owner,
-                keep_allowlist: false,
-                restore_memory: false,
-            },
-            cx,
-        )
-        .await?;
+        let imported = team_ops::import_team(context, snapshot, cx).await?;
         Ok(imported.id)
     })
 }

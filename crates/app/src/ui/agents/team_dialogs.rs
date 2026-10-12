@@ -13,10 +13,10 @@ use super::share;
 use super::snapshot_preview;
 use super::snapshots::{self, LayerDialog};
 use super::team_file::{self, Format};
-use super::team_ops::{self, ImportOptions, MemoryLevel};
+use super::team_ops::{self, MemoryLevel};
 use super::team_text::team_export_meta;
 use super::teams::TeamsState;
-use crate::community::{AppState, IdentityState};
+use crate::community::AppState;
 use crate::snapshot::Kind;
 use crate::snapshot::manifest::MemoryLevel as SnapshotLevel;
 use crate::snapshot::share::EncodedSnapshot;
@@ -169,40 +169,28 @@ impl TeamImportDialog {
         if self.busy {
             return;
         }
-        let Some(host) = team_ops::import_host(cx) else {
-            self.error = Some("Agent creation is unavailable.".into());
-            cx.notify();
-            return;
+        let context = match team_ops::import_context(&self.teams, self.keep, self.restore, cx) {
+            Ok(context) => context,
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
         };
-        let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
-            self.error = Some("Set up your identity first.".into());
-            cx.notify();
-            return;
-        };
-        let identity = identity.clone();
         self.started = true;
         self.busy = true;
         self.error = None;
         cx.notify();
-        let teams = self.teams.read(cx);
-        let (kit, community) = (teams.kit.clone(), teams.community.clone());
-        let options = ImportOptions {
-            destination: community.read(cx).origin.websocket().to_string(),
-            owner: identity.pubkey_hex(),
-            keep_allowlist: self.keep,
-            restore_memory: self.restore,
-        };
         cx.spawn(async move |this, cx| {
-            let result =
-                team_ops::import_team(host, kit, community, identity, snapshot, options, cx)
-                    .await
-                    .and_then(|imported| {
-                        if imported.memory_failures.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(imported.memory_failures.join("\n"))
-                        }
-                    });
+            let result = team_ops::import_team(context, snapshot, cx)
+                .await
+                .and_then(|imported| {
+                    if imported.memory_failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(imported.memory_failures.join("\n"))
+                    }
+                });
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {

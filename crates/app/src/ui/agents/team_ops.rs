@@ -8,7 +8,8 @@
 
 use super::catalog::community_agents;
 use super::team_text::team_export_meta;
-use crate::community::{AppState, Community};
+use super::teams::TeamsState;
+use crate::community::{AppState, Community, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
 use crate::runtime::Runtime;
 use buzz_host::api::{
@@ -21,7 +22,7 @@ use buzz_identity::Identity;
 use buzz_relay_client::Partition;
 use buzz_relay_client::session::{Resume, TeamKit};
 use buzz_relay_client::teams::Team;
-use gpui_kit::{AppContext, AsyncApp, Entity};
+use gpui_kit::{App, AppContext, AsyncApp, Entity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -297,6 +298,44 @@ pub struct ImportOptions {
     pub restore_memory: bool,
 }
 
+/// Everything a team import needs besides the snapshot.
+pub struct ImportContext {
+    pub host: Entity<HostConnection>,
+    pub kit: TeamKit,
+    pub community: Entity<Community>,
+    pub identity: Arc<Identity>,
+    pub options: ImportOptions,
+}
+
+/// Sets up an import into `teams`' community by the current identity,
+/// or says why it can't run.
+pub fn import_context(
+    teams: &Entity<TeamsState>,
+    keep_allowlist: bool,
+    restore_memory: bool,
+    cx: &App,
+) -> Result<ImportContext, String> {
+    let host = import_host(cx).ok_or("Agent creation is unavailable.")?;
+    let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
+        return Err("Set up your identity first.".into());
+    };
+    let teams = teams.read(cx);
+    let community = teams.community.clone();
+    let options = ImportOptions {
+        destination: community.read(cx).origin.websocket().to_string(),
+        owner: identity.pubkey_hex(),
+        keep_allowlist,
+        restore_memory,
+    };
+    Ok(ImportContext {
+        host,
+        kit: teams.kit.clone(),
+        community,
+        identity: identity.clone(),
+        options,
+    })
+}
+
 pub struct Imported {
     /// The new team's ID.
     pub id: String,
@@ -393,14 +432,17 @@ async fn restore_member_memory(
 /// memories if asked. An interrupted import resumes from its saved receipt
 /// without new keys.
 pub async fn import_team(
-    host: Entity<HostConnection>,
-    kit: TeamKit,
-    community: Entity<Community>,
-    identity: Arc<Identity>,
+    context: ImportContext,
     snapshot: TeamSnapshot,
-    options: ImportOptions,
     cx: &mut AsyncApp,
 ) -> Result<Imported, String> {
+    let ImportContext {
+        host,
+        kit,
+        community,
+        identity,
+        options,
+    } = context;
     let content = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
     let validated = preview(&host, content, cx).await?;
     let canonical = serde_json::to_string(&validated).map_err(|e| e.to_string())?;
