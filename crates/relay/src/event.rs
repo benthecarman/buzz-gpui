@@ -57,7 +57,8 @@ pub mod kinds {
     pub const FORUM_POST: u16 = 45001;
     pub const FORUM_COMMENT: u16 = 45003;
 
-    /// Everything the live `#h` subscription asks for (`live.ts:200-203`).
+    /// Everything the live `#h` subscription asks for (`live.ts:200-203`),
+    /// plus the 39001, whose admins' moderator deletes the fold applies.
     pub const CHANNEL_KINDS: &[u16] = &[
         CHAT,
         AGENT_MESSAGE,
@@ -71,6 +72,7 @@ pub mod kinds {
         MODERATOR_DELETE,
         REACTION,
         CHANNEL_METADATA,
+        CHANNEL_ADMINS,
         CHANNEL_MEMBERS,
         THREAD_SUMMARY,
         TYPING,

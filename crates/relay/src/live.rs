@@ -992,7 +992,7 @@ impl Live {
             [one] => Some((*one).clone()),
             [] if matches!(
                 event.kind_u16(),
-                kinds::CHANNEL_METADATA | kinds::CHANNEL_MEMBERS
+                kinds::CHANNEL_METADATA | kinds::CHANNEL_ADMINS | kinds::CHANNEL_MEMBERS
             ) =>
             {
                 event.tag("d").map(str::to_string)
