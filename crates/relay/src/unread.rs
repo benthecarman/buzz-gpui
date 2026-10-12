@@ -433,8 +433,9 @@ pub enum Manual {
 pub struct LatestMessage {
     pub id: String,
     pub created_at: u64,
-    /// The message's text, as a channel's last-message preview
-    /// (`messagePreview`).
+    /// The text of the newest message the channel's timeline shows (a
+    /// top-level or broadcast one), edits applied, as a channel's
+    /// last-message preview (`messagePreview`). Empty when there is none.
     pub preview: String,
 }
 
@@ -1481,16 +1482,23 @@ impl<F: ThreadFollowStore> Unread<F> {
         let dm = self.is_dm(channel_id);
         let (mut count, mut attention, mut mentions) = (0, 0, 0);
         let mut latest: Option<&Verified> = None;
+        let mut shown: Option<&Verified> = None;
         let mut wants = Vec::new();
+        let newer = |event: &Verified, than: Option<&Verified>| {
+            than.is_none_or(|than| {
+                event.created_at > than.created_at
+                    || (event.created_at == than.created_at && event.id < than.id)
+            })
+        };
         for entry in index.channel(channel_id) {
             let event = &entry.event;
-            if matches!(target, ReadTarget::Channel { .. })
-                && latest.is_none_or(|latest| {
-                    event.created_at > latest.created_at
-                        || (event.created_at == latest.created_at && event.id < latest.id)
-                })
-            {
-                latest = Some(event);
+            if matches!(target, ReadTarget::Channel { .. }) {
+                if newer(event, latest) {
+                    latest = Some(event);
+                }
+                if (entry.parent_id.is_none() || entry.broadcast) && newer(event, shown) {
+                    shown = Some(event);
+                }
             }
             let in_target = match target {
                 ReadTarget::Channel { .. } => true,
@@ -1534,7 +1542,7 @@ impl<F: ThreadFollowStore> Unread<F> {
             latest_message: latest.map(|event| LatestMessage {
                 id: event.id_hex(),
                 created_at: event.created_at_secs(),
-                preview: latest_preview(event),
+                preview: shown.map_or_else(String::new, |shown| self.shown_preview(shown)),
             }),
             observed_count: evidence.then_some(count),
             attention_count: evidence.then_some(attention),
@@ -1549,6 +1557,17 @@ impl<F: ThreadFollowStore> Unread<F> {
             error: self.error.clone(),
         };
         (snapshot, wants)
+    }
+
+    /// A timeline message's preview, edits applied.
+    fn shown_preview(&self, event: &Verified) -> String {
+        if event.kind_u16() == kinds::DIFF {
+            return latest_preview(event);
+        }
+        let channel = channel_of(event).unwrap_or_default();
+        self.folded_previews(channel, std::iter::once(event))
+            .remove(&event.id)
+            .unwrap_or_else(|| latest_preview(event))
     }
 
     /// The unread state of a target. Unchanged values keep their `Arc`.
@@ -1705,8 +1724,12 @@ impl<F: ThreadFollowStore> Unread<F> {
         attention
     }
 
-    /// Every retained message's folded text, replies included.
-    fn folded_previews(&self, channel_id: &str) -> HashMap<nostr::prelude::EventId, String> {
+    /// The folded text of `messages` in `channel_id`, replies included.
+    fn folded_previews<'a>(
+        &self,
+        channel_id: &str,
+        messages: impl Iterator<Item = &'a Verified>,
+    ) -> HashMap<nostr::prelude::EventId, String> {
         // Evidence holds no relay-signed summaries or system rows, the only
         // events the relay key decides; without any key, previews stay raw.
         let Some(relay) = self
@@ -1717,13 +1740,10 @@ impl<F: ThreadFollowStore> Unread<F> {
         else {
             return HashMap::new();
         };
-        // The channel's messages and their overlays, including overlays of
-        // overlays (a deletion of an edit).
+        // The messages and their overlays, including overlays of overlays
+        // (a deletion of an edit).
         let index = self.index.as_ref().expect("indexed");
-        let mut events: Vec<Verified> = index
-            .channel(channel_id)
-            .map(|entry| entry.event.clone())
-            .collect();
+        let mut events: Vec<Verified> = messages.cloned().collect();
         let mut seen = HashSet::new();
         let mut next = 0;
         while next < events.len() {
@@ -1781,7 +1801,10 @@ impl<F: ThreadFollowStore> Unread<F> {
                 continue;
             }
             let event = &entry.event;
-            let presented = presented.get_or_insert_with(|| self.folded_previews(channel_id));
+            let presented = presented.get_or_insert_with(|| {
+                let messages = index.channel(channel_id).map(|entry| &entry.event);
+                self.folded_previews(channel_id, messages)
+            });
             let item = ThreadActivityItem {
                 channel_id: channel_id.to_owned(),
                 root_id: root.clone(),
@@ -3525,6 +3548,31 @@ mod tests {
         h.emit(&[root, reply, edit]);
         let activity = h.unread.activity("room", &h.reads);
         assert_eq!(activity.items.as_ref().unwrap()[0].preview, "final words");
+    }
+
+    #[test]
+    fn channel_previews_show_the_edited_timeline_message() {
+        let mut h = H::new();
+        h.grant(&[("room", Some("stream"))]);
+        let top = h.alice("room", "first draft", 10, vec![]);
+        let edit = h.by(
+            &h.alice.clone(),
+            kinds::EDIT,
+            Some("room"),
+            "final words",
+            11,
+            tags(&[&["e", &top.id_hex()]]),
+        );
+        let reply = h.alice(
+            "room",
+            "in a thread",
+            12,
+            reply_tags(&top.id_hex(), &top.id_hex()),
+        );
+        h.emit(&[top, edit, reply.clone()]);
+        let latest = h.room().latest_message.clone().unwrap();
+        assert_eq!(latest.id, reply.id_hex(), "replies are still evidence");
+        assert_eq!(latest.preview, "final words");
     }
 
     #[test]
