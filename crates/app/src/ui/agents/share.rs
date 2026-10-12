@@ -22,7 +22,7 @@ use crate::snapshot::send::{self, Phase, Receipt};
 use crate::snapshot::share::{self, EncodedSnapshot, Recipient};
 use crate::ui::notice;
 use crate::ui::overlay::{self, Dismiss};
-use buzz_host::api::Agent;
+use buzz_host::api::{Agent, SessionPolicy};
 use buzz_relay_client::{Delivery, Outbox, PeoplePage, Recovery, Session};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, Dialog, Icon, IconName, SearchField,
@@ -31,6 +31,7 @@ use buzz_ui::{
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -100,13 +101,25 @@ pub(crate) fn open_agent(
     let same_community = in_community(&agent.relay_url, &community.read(cx).origin);
     let review = {
         let (host, id) = (host.clone(), id.clone());
+        // Built again only when the agent or the host's policy changes.
+        type Built = (Agent, Option<SessionPolicy>, Result<String, String>);
+        let built: RefCell<Option<Built>> = RefCell::new(None);
         Rc::new(move |cx: &App| {
             let agent = host
                 .read(cx)
                 .agent(&id)
-                .cloned()
                 .ok_or("This agent no longer exists.")?;
-            snapshots::review(&agent, &host, cx).map(|review| review.pretty())
+            let policy = session_policy(&host, cx);
+            let mut built = built.borrow_mut();
+            if let Some((_, _, review)) = built
+                .as_ref()
+                .filter(|(last, last_policy, _)| last == agent && *last_policy == policy)
+            {
+                return review.clone();
+            }
+            let review = snapshots::review(agent, &host, cx).map(|review| review.pretty());
+            *built = Some((agent.clone(), policy, review.clone()));
+            review
         }) as Review
     };
     let encode: Encode = {

@@ -423,10 +423,21 @@ pub struct ExportDialog {
     confirmed: Option<(String, MemoryLevel)>,
     /// The review key last rendered; a change resets the approvals.
     current: Option<String>,
+    /// The review as last built; a host change or another community
+    /// builds it again.
+    built: Option<ExportReview>,
     changed_during_export: bool,
     pending: bool,
     error: Option<SharedString>,
     _observe: Subscription,
+}
+
+/// The export review for one state of the host and community.
+struct ExportReview {
+    destination: String,
+    agent: Option<Agent>,
+    review: Result<AgentSnapshot, String>,
+    key: Option<String>,
 }
 
 impl LayerDialog for ExportDialog {
@@ -449,7 +460,10 @@ impl ExportDialog {
             .map(|agent| agent.name.clone())
             .unwrap_or_default();
         Self {
-            _observe: cx.observe(&host, |_, _, cx| cx.notify()),
+            _observe: cx.observe(&host, |this, _, cx| {
+                this.built = None;
+                cx.notify();
+            }),
             host,
             id,
             name,
@@ -460,6 +474,7 @@ impl ExportDialog {
             reviewed: None,
             confirmed: None,
             current: None,
+            built: None,
             changed_during_export: false,
             pending: false,
             error: None,
@@ -609,19 +624,57 @@ impl ExportDialog {
 impl Render for ExportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        let agent = self.host.read(cx).agent(&self.id).cloned();
-        if let Some(agent) = &agent {
-            self.name = agent.name.clone();
-        }
         let destination_url = destination(cx).map(|(url, _)| url).unwrap_or_default();
-        let review = agent
+        if self
+            .built
             .as_ref()
-            .ok_or_else(|| "This agent no longer exists.".to_string())
-            .and_then(|agent| review(agent, &self.host, cx));
-        let key = match (&agent, &review) {
-            (Some(agent), Ok(review)) => Some(Self::review_key(agent, review, &destination_url)),
-            _ => None,
-        };
+            .is_none_or(|built| built.destination != destination_url)
+        {
+            let agent = self.host.read(cx).agent(&self.id).cloned();
+            let review = agent
+                .as_ref()
+                .ok_or_else(|| "This agent no longer exists.".to_string())
+                .and_then(|agent| review(agent, &self.host, cx));
+            let key = match (&agent, &review) {
+                (Some(agent), Ok(review)) => {
+                    Some(Self::review_key(agent, review, &destination_url))
+                }
+                _ => None,
+            };
+            self.built = Some(ExportReview {
+                destination: destination_url,
+                agent,
+                review,
+                key,
+            });
+        }
+        let built = self.built.as_ref().expect("built above");
+        let (agent, review) = (&built.agent, &built.review);
+        let key = built.key.clone();
+        let name = agent.as_ref().map(|agent| agent.name.clone());
+        let details = self.details;
+        let review_error = review.as_ref().err().cloned();
+        let review_json = details.then(|| {
+            review
+                .as_ref()
+                .map(AgentSnapshot::pretty)
+                .unwrap_or_else(|_| "null".into())
+        });
+        let artwork_source = agent
+            .as_ref()
+            .and_then(|agent| agent.picture.clone())
+            .filter(|p| !p.is_empty())
+            .filter(|_| {
+                review
+                    .as_ref()
+                    .map_or(true, |review| review.profile.avatar_url.is_none())
+            });
+        let memory_allowed = agent
+            .as_ref()
+            .is_some_and(|agent| Self::memory_allowed(agent, cx));
+        if let Some(name) = name {
+            self.name = name;
+        }
         if self.current != key {
             self.current = key.clone();
             self.changed_during_export = true;
@@ -634,10 +687,7 @@ impl Render for ExportDialog {
                 .as_ref()
                 .is_some_and(|key| self.confirmed == Some((key.clone(), self.level)));
         let pending = self.pending;
-        let memory_disabled = pending
-            || !agent
-                .as_ref()
-                .is_some_and(|agent| Self::memory_allowed(agent, cx));
+        let memory_disabled = pending || !memory_allowed;
         let level = self.level;
         let format = self.format;
         let entity = cx.entity().downgrade();
@@ -708,20 +758,6 @@ impl Render for ExportDialog {
             Self::dismiss(cx),
             window,
         );
-        let review_json = review
-            .as_ref()
-            .map(AgentSnapshot::pretty)
-            .unwrap_or_else(|_| "null".into());
-        let artwork_source = agent
-            .as_ref()
-            .and_then(|agent| agent.picture.clone())
-            .filter(|p| !p.is_empty())
-            .filter(|_| {
-                review
-                    .as_ref()
-                    .map_or(true, |review| review.profile.avatar_url.is_none())
-            });
-        let details = self.details;
         let review_key = key.clone();
         let confirm_key = key.clone();
         let body = div()
@@ -754,7 +790,7 @@ impl Render for ExportDialog {
                             cx.notify();
                         })),
                     )
-                    .when(details, |this| {
+                    .when_some(review_json, |this, review_json| {
                         this.child(pre("export-review-json", review_json, 12., &c))
                             .children(
                                 artwork_source
@@ -795,7 +831,7 @@ impl Render for ExportDialog {
                             })),
                     )
             })
-            .children(review.as_ref().err().map(|error| alert(error.clone(), &c)))
+            .children(review_error.clone().map(|error| alert(error, &c)))
             .children(self.error.clone().map(|error| alert(error, &c)));
         Dialog::new("export-agent", format!("Export {}", self.name))
             .when(!pending, |this| {
@@ -814,7 +850,7 @@ impl Render for ExportDialog {
                     .loading(pending)
                     .disabled(
                         pending
-                            || review.is_err()
+                            || review_error.is_some()
                             || !reviewed
                             || (level != MemoryLevel::None && !confirmed),
                     )
@@ -835,6 +871,8 @@ pub struct ImportDialog {
     host_open: bool,
     received: bool,
     snapshot: Option<AgentSnapshot>,
+    /// What this host can't apply from `snapshot`.
+    limitations: Vec<String>,
     artwork: Option<Vec<u8>>,
     restore_memory: bool,
     /// Whether the chosen host can restore memory; `None` while asking,
@@ -905,6 +943,7 @@ impl ImportDialog {
             host_open: false,
             received: received.is_some(),
             snapshot: None,
+            limitations: Vec::new(),
             artwork: None,
             restore_memory: false,
             restore_supported: None,
@@ -1004,6 +1043,7 @@ impl ImportDialog {
             let _ = this.update(cx, |this, cx| {
                 match parsed {
                     Ok((snapshot, artwork)) => {
+                        this.limitations = snapshot_limitations(&snapshot, false);
                         this.snapshot = Some(snapshot);
                         this.artwork = artwork;
                     }
@@ -1073,13 +1113,6 @@ impl ImportDialog {
         .detach();
     }
 
-    fn unsupported(&self) -> Vec<String> {
-        self.snapshot
-            .as_ref()
-            .map(|snapshot| snapshot_limitations(snapshot, false))
-            .unwrap_or_default()
-    }
-
     fn can_import(&self, cx: &App) -> Result<(), String> {
         let snapshot = self.snapshot.as_ref().ok_or("")?;
         let host = self.host.as_ref().ok_or("Choose a host.")?;
@@ -1092,7 +1125,7 @@ impl ImportDialog {
         }
         identity(cx).ok_or("Set up your identity first.")?;
         if self.created.is_some()
-            || !self.unsupported().is_empty()
+            || !self.limitations.is_empty()
             || (self.restore_memory
                 && !snapshot.memory.entries.is_empty()
                 && !self.supports_restore())
@@ -1426,7 +1459,7 @@ impl ImportDialog {
         let c = *cx.colors();
         let d = &snapshot.definition;
         let entries = snapshot.memory.entries.len();
-        let unsupported = self.unsupported();
+        let unsupported = &self.limitations;
         let supported = self.supports_restore();
         let manifest_open = self.manifest_open;
         div()
@@ -1645,8 +1678,8 @@ impl Render for ImportDialog {
         let host_select = self.host_select(window, cx);
         let preview = self
             .snapshot
-            .clone()
-            .map(|snapshot| self.preview(&snapshot, cx));
+            .as_ref()
+            .map(|snapshot| self.preview(snapshot, cx));
         let location_error = match &blocked {
             Err(error) if !error.is_empty() && self.snapshot.is_some() => Some(error.clone()),
             _ => None,
