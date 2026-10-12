@@ -55,7 +55,7 @@ pub struct Workspace {
     /// Each channel's tab pane, per community, kept across visits.
     tab_states: HashMap<(EntityId, String), TabState>,
     /// The open channel's tab views, made on this visit.
-    tab_views: HashMap<String, board::TabView>,
+    tab_views: HashMap<String, crate::ui::channel_tab_views::TabView>,
     tab_strip: ScrollHandle,
     /// A channel panel a header launcher opened, for this visit.
     drawer: Option<board::Drawer>,

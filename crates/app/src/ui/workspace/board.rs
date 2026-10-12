@@ -6,13 +6,13 @@
 use super::Workspace;
 use super::layout::Split;
 use crate::community::Community;
-use crate::ui::channel::{ChannelPage, Launcher, OpenThread, PaneToggle};
+use crate::ui::channel::{Launcher, PaneToggle};
 use crate::ui::channel_menu::MenuPanel;
 use crate::ui::channel_panels::{self, ChannelPanel};
 use crate::ui::channel_settings::{self as settings_panel, ChannelRemoved, ChannelSettingsPanel};
-use crate::ui::channel_tab_picker::{ChannelTabPicker, ChooseChannel, ChooseTool, Tool};
+use crate::ui::channel_tab_picker::{ChannelTabPicker, Tool};
+use crate::ui::channel_tab_views::{self, TabHost, TabView, tab_icon, usable};
 use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabState, ThreadTarget};
-use crate::ui::message::channel_icon;
 use crate::ui::pages::Page;
 use crate::ui::panels::{self, Close, Dock, TabItem};
 use crate::ui::thread::{self, ThreadPanel};
@@ -20,7 +20,7 @@ use buzz_relay_client::{ChannelSummary, ChannelType, Retarget};
 use buzz_ui::{ActiveTheme, IconName, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use nostr::prelude::EventId;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -31,16 +31,54 @@ pub(super) struct Drawer {
     view: AnyView,
 }
 
-/// A tab's view, made when the tab first shows on this visit.
-pub(super) enum TabView {
-    Settings {
-        panel: Entity<ChannelSettingsPanel>,
-        _subscription: Subscription,
-    },
-    Picker(Entity<ChannelTabPicker>),
-    Conversation(Entity<ChannelPage>),
-    Thread(Entity<ThreadPanel>),
-    Panel(AnyView),
+impl TabHost for Workspace {
+    fn community(&self) -> Option<Entity<Community>> {
+        self.community.clone()
+    }
+
+    fn channel_id(&self, cx: &App) -> Option<String> {
+        self.tab_key(cx).map(|(_, channel)| channel)
+    }
+
+    fn tab_views(&mut self) -> &mut HashMap<String, TabView> {
+        &mut self.tab_views
+    }
+
+    fn tabs(&self, cx: &App) -> TabState {
+        Workspace::tabs(self, cx)
+    }
+
+    fn update_tabs(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut TabState)) {
+        Workspace::update_tabs(self, cx, f);
+    }
+
+    fn close_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        Workspace::close_tab(self, id, window, cx)
+    }
+
+    fn focus_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        Workspace::focus_tab(self, id, window, cx)
+    }
+
+    fn tools(&self, cx: &App) -> Vec<Tool> {
+        Workspace::tools(self, cx)
+    }
+
+    fn panel_view(
+        &self,
+        panel: &ChannelPanel,
+        channel: String,
+        target: String,
+        close: channel_panels::Close,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyView> {
+        Workspace::panel_view(self, panel, channel, target, close, window, cx)
+    }
+
+    fn close_drawer(&mut self) {
+        self.drawer = None;
+    }
 }
 
 impl Workspace {
@@ -405,22 +443,6 @@ impl Workspace {
         Some(panel)
     }
 
-    /// Opens a thread of another conversation as its own tab.
-    fn open_conversation_thread(
-        &mut self,
-        channel: String,
-        message: EventId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = format!("thread:{channel}:{}", message.to_hex());
-        self.tab_views.remove(&id);
-        self.update_tabs(cx, |state| {
-            state.open_conversation_thread(&channel, message, message)
-        });
-        self.focus_tab(&id, window, cx);
-    }
-
     /// The current channel's summary.
     fn current_summary(&self, cx: &App) -> Option<ChannelSummary> {
         Some(self.channel.as_ref()?.read(cx).channel().clone())
@@ -517,135 +539,7 @@ impl Workspace {
                 },
             );
         }
-        for tab in &state.tabs {
-            if self.tab_views.contains_key(&tab.id) {
-                continue;
-            }
-            let view = match &tab.kind {
-                TabKind::New => {
-                    let picker_id = tab.id.clone();
-                    let weak = cx.entity().downgrade();
-                    let choose: ChooseChannel = Rc::new(move |channel, window, cx| {
-                        let picker = picker_id.clone();
-                        let _ = weak.update(cx, |this, cx| {
-                            this.choose_conversation(&picker, &channel, window, cx)
-                        });
-                    });
-                    let picker_id = tab.id.clone();
-                    let weak = cx.entity().downgrade();
-                    let choose_tool: ChooseTool = Rc::new(move |key, _, cx| {
-                        let picker = picker_id.clone();
-                        let _ = weak.update(cx, |this, cx| {
-                            let channel = this.tab_key(cx).map(|(_, c)| c).unwrap_or_default();
-                            this.tab_views.remove(&picker);
-                            // A tool has one place on screen at a time.
-                            this.drawer = None;
-                            this.update_tabs(cx, |state| {
-                                state.choose_tool(&picker, PanelTab::tool(key, &channel))
-                            });
-                        });
-                    });
-                    let tools = self.tools(cx);
-                    let current = current_id.clone();
-                    let community = community.clone();
-                    TabView::Picker(cx.new(|cx| {
-                        ChannelTabPicker::new(
-                            community,
-                            current,
-                            tools,
-                            choose,
-                            choose_tool,
-                            window,
-                            cx,
-                        )
-                    }))
-                }
-                TabKind::Conversation { channel } => {
-                    let Some(summary) = usable(&community, channel, cx) else {
-                        continue;
-                    };
-                    let weak = cx.entity().downgrade();
-                    let channel_id = channel.clone();
-                    let open_thread: OpenThread = Arc::new(move |row, _, window, cx| {
-                        let channel = channel_id.clone();
-                        let _ = weak.update(cx, |this, cx| {
-                            this.open_conversation_thread(channel, row.id, window, cx)
-                        });
-                    });
-                    let community = community.clone();
-                    let page = cx.new(|cx| {
-                        let mut page =
-                            ChannelPage::new(community, summary, open_thread, window, cx);
-                        page.secondary = true;
-                        page
-                    });
-                    TabView::Conversation(page)
-                }
-                TabKind::Thread { channel, message } => {
-                    if usable(&community, channel, cx).is_none() {
-                        continue;
-                    }
-                    let id = tab.id.clone();
-                    let weak = cx.entity().downgrade();
-                    let on_close: thread::OnClose = Arc::new(move |window, cx| {
-                        let id = id.clone();
-                        let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
-                    });
-                    let (community, channel, message) =
-                        (community.clone(), channel.clone(), *message);
-                    TabView::Thread(cx.new(|cx| {
-                        ThreadPanel::new(community, channel, message, on_close, window, cx)
-                    }))
-                }
-            };
-            self.tab_views.insert(tab.id.clone(), view);
-        }
-        for opening in &state.panels {
-            let id = opening.id();
-            if self.tab_views.contains_key(&id) {
-                continue;
-            }
-            let Some(panel) = channel_panels::get(opening.panel, cx) else {
-                continue;
-            };
-            let weak = cx.entity().downgrade();
-            let close_id = id.clone();
-            let close: channel_panels::Close = Rc::new(move |window, cx| {
-                let id = close_id.clone();
-                let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
-            });
-            if let Some(view) = self.panel_view(
-                &panel,
-                opening.channel.clone(),
-                opening.target.clone(),
-                close,
-                window,
-                cx,
-            ) {
-                self.tab_views.insert(id, TabView::Panel(view));
-            }
-        }
-    }
-
-    fn choose_conversation(
-        &mut self,
-        picker: &str,
-        channel: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Membership is checked again when chosen, not just when listed.
-        let Some(community) = self.community.clone() else {
-            return;
-        };
-        if usable(&community, channel, cx).is_none()
-            || self.tab_key(cx).is_some_and(|(_, c)| c == channel)
-        {
-            return;
-        }
-        self.tab_views.remove(picker);
-        self.update_tabs(cx, |state| state.choose_conversation(picker, channel));
-        self.focus_tab(&format!("conversation:{channel}"), window, cx);
+        channel_tab_views::ensure_views(self, window, cx);
     }
 
     /// The pane's tabs as the tab strip shows them.
@@ -971,34 +865,5 @@ impl Workspace {
         });
         self.focus_tab(&id, window, cx);
         true
-    }
-}
-
-/// The conversation `id` when a tab may show it: joined, writable, not
-/// archived, and for sessions only when the viewer is a member.
-fn usable(community: &Entity<Community>, id: &str, cx: &App) -> Option<ChannelSummary> {
-    let community = community.read(cx);
-    let viewer = community.session.viewer().to_string();
-    community
-        .snapshot
-        .channels
-        .iter()
-        .find(|channel| channel.id == id)
-        .filter(|channel| {
-            !channel.read_only
-                && !channel.archived
-                && !channel.cached
-                && (channel.channel_type != Some(ChannelType::Session)
-                    || channel.members.contains(&viewer))
-        })
-        .cloned()
-}
-
-/// A conversation tab's icon: the speech bubble for DMs, else the
-/// channel's hash or lock.
-fn tab_icon(channel: &ChannelSummary) -> IconName {
-    match channel.channel_type {
-        Some(ChannelType::Dm) => IconName::ChatCircle,
-        _ => channel_icon(channel),
     }
 }

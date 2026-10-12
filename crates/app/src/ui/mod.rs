@@ -16,6 +16,7 @@ pub mod channel_panels;
 mod channel_settings;
 mod channel_states;
 mod channel_tab_picker;
+mod channel_tab_views;
 mod channel_tabs;
 pub mod channel_usage;
 mod composer;
