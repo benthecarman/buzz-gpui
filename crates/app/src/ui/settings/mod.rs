@@ -11,6 +11,7 @@ pub mod cards;
 mod communities;
 pub(crate) use communities::left_text;
 mod emoji;
+pub(crate) mod form;
 mod notifications;
 pub mod pairing;
 pub mod personal_groups;
@@ -683,7 +684,7 @@ fn preference_row(
         )
 }
 
-/// A `Field`: label, control, then the description.
+/// A `Field`: label, control, then the description and the error.
 fn field(
     label: &'static str,
     control: impl IntoElement,
@@ -691,18 +692,14 @@ fn field(
     error: Option<SharedString>,
     cx: &App,
 ) -> Div {
-    let c = cx.colors();
-    div()
-        .flex()
-        .flex_col()
-        .gap(rems(0.5))
-        .min_w_0()
-        .child(div().text_label_sm().child(label))
-        .child(control)
-        .children(
-            description.map(|text| div().text_caption().text_color(c.text_subtle).child(text)),
-        )
-        .children(error.map(|text| div().text_caption().text_color(c.text_danger).child(text)))
+    form::field(
+        label,
+        description,
+        error,
+        control,
+        form::FieldStyle::default(),
+        cx,
+    )
 }
 
 /// Settings buttons use 12px corners instead of pills.

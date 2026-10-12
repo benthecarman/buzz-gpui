@@ -21,6 +21,7 @@ pub use save_as::SaveAsTemplate;
 use crate::community::{AppState, Community};
 use crate::hosts::Hosts;
 use crate::ui::settings::cards::{self, CardPlacement, SettingsCard};
+use crate::ui::settings::form::{self, FieldStyle};
 use crate::ui::toasts;
 use buzz_relay_client::kit::{AgentChoice, KitSnapshot, KitStatus};
 use buzz_relay_client::{ChannelType, RelayOrigin, RosterStatus};
@@ -594,27 +595,15 @@ pub(crate) fn field(
     control: impl IntoElement,
     cx: &App,
 ) -> Div {
-    let c = cx.colors();
-    div()
-        .flex()
-        .flex_col()
-        .gap(space::S2)
-        .min_w_0()
-        .child(div().text_label_sm().child(label.into()))
-        .children(
-            description.map(|text| div().text_caption().text_color(c.text_subtle).child(text)),
-        )
-        .child(control)
+    let style = FieldStyle {
+        description_first: true,
+        ..FieldStyle::default()
+    };
+    form::field(label, description.map(Into::into), None, control, style, cx)
 }
 
 /// A status or alert line.
-pub(crate) fn line(text: impl Into<SharedString>, danger: bool, cx: &App) -> Div {
-    let c = cx.colors();
-    div()
-        .text_body_sm()
-        .text_color(if danger { c.text_danger } else { c.text_subtle })
-        .child(text.into())
-}
+pub(crate) use crate::ui::settings::form::line;
 
 /// The selected community, if any.
 pub(crate) fn current(cx: &App) -> Option<Entity<Community>> {

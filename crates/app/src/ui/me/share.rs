@@ -17,6 +17,7 @@ use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use crate::ui::form_fields::{self, Bounded, OnDuration, TextKind};
 use crate::ui::overlay::{self, Align, Dismiss};
+use crate::ui::settings::form::note as subtle;
 use buzz_relay_client::discovery::session_metadata;
 use buzz_relay_client::lifecycle::{
     AttemptStatus, ChannelDetails, DEFAULT_TEMPORARY_TTL, DetailsDraft, DraftErrors,
@@ -1042,13 +1043,6 @@ impl SessionShare {
 
 // ---------------------------------------------------------------------------
 // Rendering
-
-fn subtle(text: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .text_body_sm()
-        .text_color(cx.colors().text_subtle)
-        .child(text.into())
-}
 
 /// `.selection`: a users glyph and a line of subtle text.
 fn selection(id: &'static str, text: String, cx: &App) -> Stateful<Div> {

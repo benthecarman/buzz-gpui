@@ -3,6 +3,7 @@
 //! (`ConfirmAction.tsx`).
 
 use crate::ui::overlay::{self, Align, Dismiss};
+use crate::ui::settings::form::{self, FieldStyle};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Button, Icon, IconName, Menu, MenuItem, MenuSize, Scrim, Select,
     Surface, Tab, TabVariant, Tabs, TypeStyled,
@@ -25,40 +26,16 @@ pub fn field(
     control: impl IntoElement,
     cx: &App,
 ) -> Div {
-    let c = cx.colors();
-    div()
-        .flex()
-        .flex_col()
-        .gap(space::S2)
-        .min_w_0()
-        .child(
-            div()
-                .text_label_sm()
-                .text_color(c.text_standard)
-                .child(label.into()),
-        )
-        .child(control)
-        .map(|this| match (error, description) {
-            (Some(error), _) => {
-                this.child(div().text_body_sm().text_color(c.text_danger).child(error))
-            }
-            (None, Some(description)) => this.child(
-                div()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child(description),
-            ),
-            (None, None) => this,
-        })
+    let style = FieldStyle {
+        body: true,
+        error_replaces: true,
+        ..FieldStyle::default()
+    };
+    form::field(label, description, error, control, style, cx)
 }
 
 /// A secondary paragraph (`text-body-sm text-secondary`).
-pub fn note(text: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .text_body_sm()
-        .text_color(cx.colors().text_subtle)
-        .child(text.into())
-}
+pub(crate) use crate::ui::settings::form::note;
 
 /// An inline error (`text-danger`).
 pub fn danger(text: impl Into<SharedString>, cx: &App) -> Div {
