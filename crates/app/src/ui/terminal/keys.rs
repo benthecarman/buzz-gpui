@@ -143,14 +143,15 @@ fn character(key: &str, key_char: Option<&str>, control: bool, alt: bool) -> Opt
 }
 
 /// Pasted text: newlines as Enter, wrapped in bracketed-paste markers when
-/// the shell asked for them, with any markers inside removed so a paste
-/// cannot end the bracket early.
+/// the shell asked for them. Inside the bracket every ESC is dropped, so
+/// no marker survives and a paste cannot end the bracket early: removing
+/// only the markers would let `ESC[2ESC[201~01~` rebuild one.
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if !bracketed {
         return normalized.into_bytes();
     }
-    let inner = normalized.replace("\x1b[200~", "").replace("\x1b[201~", "");
+    let inner = normalized.replace('\x1b', "");
     format!("\x1b[200~{inner}\x1b[201~").into_bytes()
 }
 
@@ -261,6 +262,14 @@ mod tests {
     #[test]
     fn pastes_are_bracketed_when_asked() {
         assert_eq!(paste("a\nb", false), b"a\rb".to_vec());
-        assert_eq!(paste("x\x1b[201~y", true), b"\x1b[200~xy\x1b[201~".to_vec());
+        assert_eq!(
+            paste("x\x1b[201~y", true),
+            b"\x1b[200~x[201~y\x1b[201~".to_vec()
+        );
+        // Removing the marker in one pass would rebuild it from the halves.
+        assert_eq!(
+            paste("\x1b[2\x1b[201~01~", true),
+            b"\x1b[200~[2[201~01~\x1b[201~".to_vec()
+        );
     }
 }
