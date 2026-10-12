@@ -782,14 +782,9 @@ impl FileSessions {
         kept.sort_by_key(|(_, saved)| std::cmp::Reverse(saved.at));
         kept.truncate(SAVED_LIMIT);
         all.insert(self.agent.clone(), kept.into_iter().collect());
-        let written = (|| {
-            if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let temporary = self.path.with_extension("json.tmp");
-            std::fs::write(&temporary, serde_json::to_vec(&all)?)?;
-            std::fs::rename(&temporary, &self.path)
-        })();
+        let written = serde_json::to_vec(&all)
+            .map_err(std::io::Error::from)
+            .and_then(|bytes| crate::atomic_file::write(&self.path, &bytes));
         if let Err(error) = written {
             tracing::warn!(%error, "Claude Code sessions were not saved");
         }

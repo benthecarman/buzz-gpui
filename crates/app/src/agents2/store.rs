@@ -69,13 +69,8 @@ impl Storage for FileStorage {
     }
 
     fn write(&self, text: &str) -> Result<(), String> {
-        let fail = |_| "Agent settings could not be saved".to_string();
-        if let Some(parent) = self.0.parent() {
-            std::fs::create_dir_all(parent).map_err(fail)?;
-        }
-        let temp = self.0.with_extension("tmp");
-        std::fs::write(&temp, text).map_err(fail)?;
-        std::fs::rename(&temp, &self.0).map_err(fail)
+        crate::atomic_file::write(&self.0, text.as_bytes())
+            .map_err(|_| "Agent settings could not be saved".to_string())
     }
 }
 

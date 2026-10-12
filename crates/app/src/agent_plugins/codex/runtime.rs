@@ -121,15 +121,8 @@ impl Storage for FileStorage {
         let _turn = locked(&FILE_LOCK);
         let mut all = self.read_all();
         all.insert(key.into(), value);
-        let written = (|| {
-            if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let temporary = self.path.with_extension("json.tmp");
-            std::fs::write(&temporary, serde_json::to_vec(&all)?)?;
-            std::fs::rename(&temporary, &self.path)
-        })();
-        written.map_err(|error| error.to_string())
+        let bytes = serde_json::to_vec(&all).map_err(|error| error.to_string())?;
+        crate::atomic_file::write(&self.path, &bytes).map_err(|error| error.to_string())
     }
 }
 
