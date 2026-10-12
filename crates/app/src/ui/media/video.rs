@@ -5,6 +5,7 @@
 //! on the picture and the controls in a bar below it.
 
 use super::engine::{self, Engine, Event, Kind, Source};
+use super::preview::{Unavailable, attachment_unavailable};
 use super::{Lazy, Remote, render_image, tabular};
 use crate::community::AppState;
 use buzz_relay_client::fold::Attachment;
@@ -246,7 +247,8 @@ pub fn video_preview(
         });
         // A failed probe means the file cannot play either.
         if failed || (probe_failed && attachment.preview_url.is_none()) {
-            return unavailable("Video unavailable", &c).into_any_element();
+            return attachment_unavailable("Video unavailable", Unavailable::Note, &c)
+                .into_any_element();
         }
         let ratio = natural
             .filter(|s| s.width > 0. && s.height > 0.)
@@ -275,23 +277,6 @@ pub fn video_preview(
             )
             .into_any_element()
     })
-}
-
-/// `.attachmentUnavailable`: a quiet bordered note in place of the media.
-pub(super) fn unavailable(text: &'static str, c: &buzz_ui::Colors) -> Div {
-    div().flex().child(
-        div()
-            .mt(px(8.))
-            .px(px(12.))
-            .py(px(8.))
-            .border_1()
-            .border_color(c.border_standard)
-            .rounded(px(12.))
-            .bg(c.affordance_subtle)
-            .text_body_sm()
-            .text_color(c.text_standard)
-            .child(text),
-    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

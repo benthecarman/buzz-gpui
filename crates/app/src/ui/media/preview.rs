@@ -5,7 +5,7 @@
 
 use super::{Lazy, Remote, decoded};
 use buzz_relay_client::Media;
-use buzz_ui::{ActiveTheme, TypeStyled};
+use buzz_ui::{ActiveTheme, Icon, IconName, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -36,20 +36,48 @@ pub fn image_status(url: &str, media: &Media, window: &mut Window, cx: &mut App)
     }
 }
 
-/// `.attachmentUnavailable`: a bordered note in place of the media.
-pub fn attachment_unavailable(text: &'static str, cx: &App) -> Div {
-    let c = cx.colors();
-    div()
-        .mt(px(8.))
-        .px(px(12.))
-        .py(px(8.))
-        .border_1()
-        .border_color(c.border_standard)
-        .rounded(px(12.))
-        .bg(c.affordance_subtle)
-        .text_body_sm()
-        .text_color(c.text_standard)
-        .child(text)
+/// How an [`attachment_unavailable`] note looks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Unavailable {
+    /// `.attachmentUnavailable`.
+    Note,
+    /// `.audioUnavailable`: warning colours and an icon.
+    Warning,
+}
+
+/// A bordered note in place of the media, as wide as its text.
+pub fn attachment_unavailable(text: &'static str, tone: Unavailable, c: &buzz_ui::Colors) -> Div {
+    let warning = tone == Unavailable::Warning;
+    div().flex().mt(px(8.)).child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_1()
+            .border_color(if warning {
+                c.border_warning
+            } else {
+                c.border_standard
+            })
+            .rounded(px(12.))
+            .bg(if warning {
+                c.affordance_warning
+            } else {
+                c.affordance_subtle
+            })
+            .text_body_sm()
+            .text_color(if warning {
+                c.text_warning
+            } else {
+                c.text_standard
+            })
+            .when(warning, |d| {
+                d.child(Icon::new(IconName::WarningCircle).size(16.))
+            })
+            .child(text),
+    )
 }
 
 /// The preview's width for an image of `ratio` (width / height) in a
@@ -73,7 +101,8 @@ pub fn image_preview(
         let image = decoded(&remote, window, cx);
         let image = match image {
             Some(Err(_)) => {
-                return attachment_unavailable("Image unavailable", cx).into_any_element();
+                return attachment_unavailable("Image unavailable", Unavailable::Note, &c)
+                    .into_any_element();
             }
             Some(Ok(image)) => Some(image),
             None => None,

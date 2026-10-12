@@ -9,6 +9,7 @@
 use super::Lazy;
 use super::controls::hover_time;
 use super::engine::{Engine, Event, Kind, Source};
+use super::preview::{Unavailable, attachment_unavailable};
 use super::seek::{OnHover, OnSeek, seek_area, seek_area_hover};
 use super::video::finite_duration;
 use super::{media_time, tabular, video_time};
@@ -491,7 +492,8 @@ pub fn audio_attachment(
     let url = attachment.url.clone();
     let state = status(&url, attachment.duration, cx);
     if state.failed {
-        return unavailable("Audio unavailable", &c).into_any_element();
+        return attachment_unavailable("Audio unavailable", Unavailable::Warning, &c)
+            .into_any_element();
     }
     let hover = cx
         .try_global::<AudioGlobal>()
@@ -902,26 +904,6 @@ pub(super) fn track_line(progress: f32, rest: Hsla, played: Hsla) -> impl IntoEl
                 .rounded_full()
                 .bg(played),
         )
-}
-
-/// `.attachmentUnavailable.audioUnavailable`.
-fn unavailable(text: &'static str, c: &buzz_ui::Colors) -> Div {
-    div().flex().mt(px(8.)).child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .px(px(12.))
-            .py(px(8.))
-            .border_1()
-            .border_color(c.border_warning)
-            .rounded(px(12.))
-            .bg(c.affordance_warning)
-            .text_body_sm()
-            .text_color(c.text_warning)
-            .child(Icon::new(IconName::WarningCircle).size(16.))
-            .child(text),
-    )
 }
 
 /// Bar heights in pixels (`waveformPeaks` then `voiceNoteBarHeight`). The
