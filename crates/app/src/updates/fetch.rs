@@ -154,6 +154,8 @@ pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("buzz-gpui/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(10))
+        // Redirects too, as `allowed_url` asks of the first URL.
+        .https_only(!cfg!(debug_assertions))
         .connect_timeout(Duration::from_secs(15))
         .build()
         .expect("build the update client")

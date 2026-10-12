@@ -23,6 +23,8 @@ impl Http {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
+            // Redirects too, not just the first URL.
+            .https_only(true)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()
