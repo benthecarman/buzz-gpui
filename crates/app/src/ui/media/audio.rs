@@ -65,9 +65,12 @@ struct Track {
     /// The view whose row started it, which pauses it when it goes away.
     owner: Option<EntityId>,
     engine: Option<Engine>,
+    /// The pipeline prerolled, so a paused clip has nothing left to read.
+    ready: bool,
     playing: bool,
     ended: bool,
     position: f64,
+    /// Loads the clip, then follows it while it plays.
     _task: Task<()>,
 }
 
@@ -260,6 +263,10 @@ impl Audio {
                         track.ended = false;
                     }
                     track.playing = engine.play();
+                    if track.playing {
+                        // Following stopped with the pause.
+                        track._task = Self::follow(url.clone(), cx);
+                    }
                 }
             }
             None => self.start(url, voice, media, true, 0., owner, cx),
@@ -345,12 +352,10 @@ impl Audio {
             if !matches!(loaded, Ok(true)) {
                 return;
             }
-            loop {
-                cx.background_executor().timer(TICK).await;
-                if !matches!(this.update(cx, |this, cx| this.tick(&url, cx)), Ok(true)) {
-                    break;
-                }
-            }
+            let Ok(follow) = this.update(cx, |_, cx| Self::follow(url, cx)) else {
+                return;
+            };
+            follow.await;
         });
         // Dropping the previous track stops it.
         self.track = Some(Track {
@@ -358,6 +363,7 @@ impl Audio {
             voice,
             owner,
             engine: None,
+            ready: false,
             playing: play,
             ended: false,
             position,
@@ -399,7 +405,20 @@ impl Audio {
         }
     }
 
-    /// Follows the clip; `false` once it is no longer the current one.
+    /// Ticks until the clip stops playing, or is no longer current.
+    fn follow(url: String, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TICK).await;
+                if !matches!(this.update(cx, |this, cx| this.tick(&url, cx)), Ok(true)) {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// Follows the clip; `false` once it is no longer the current one, or
+    /// is paused, ended or failed with nothing more to read.
     fn tick(&mut self, url: &str, cx: &mut Context<Self>) -> bool {
         let Some(track) = self.track.as_mut().filter(|track| track.url == url) else {
             return false;
@@ -411,7 +430,7 @@ impl Audio {
         let known = self.corrected.get(url).or(self.durations.get(url)).copied();
         for event in engine.poll() {
             match event {
-                Event::Ready => {}
+                Event::Ready => track.ready = true,
                 Event::Ended => {
                     track.playing = false;
                     engine.pause();
@@ -454,7 +473,7 @@ impl Audio {
         if before != (track.playing, track.position) {
             cx.notify();
         }
-        true
+        track.playing || !track.ready
     }
 }
 

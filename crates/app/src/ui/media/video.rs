@@ -21,8 +21,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Frame polling while a player is loaded.
+/// Frame polling while a player is loaded and busy.
 const TICK: Duration = Duration::from_millis(16);
+/// A paused player keeps polling this long after it was last drawn or
+/// touched, for the frame a seek decodes.
+const SETTLE: Duration = Duration::from_secs(1);
 /// Speeds the menu offers, fastest first (`speeds`).
 pub(super) const SPEEDS: [f64; 8] = [2., 1.75, 1.5, 1.25, 1., 0.75, 0.5, 0.25];
 /// The device preference holding the chosen speed (`speedKey`).
@@ -447,7 +450,13 @@ pub struct VideoPlayer {
     pub(super) controls_fade: Fade,
     center_fade: Fade,
     expand_fade: Fade,
+    /// When the player was last drawn or touched.
+    woke: Instant,
+    /// Loads the pipeline.
     _task: Option<Task<()>>,
+    /// Polls the pipeline and the gesture timers while there is something
+    /// to follow; drawing restarts it.
+    ticks: Option<Task<()>>,
 }
 
 impl VideoPlayer {
@@ -493,7 +502,9 @@ impl VideoPlayer {
             controls_fade: Fade::new(mode == Mode::Review),
             center_fade: Fade::new(true),
             expand_fade: Fade::new(false),
+            woke: Instant::now(),
             _task: None,
+            ticks: None,
         };
         if mode == Mode::Inline {
             player.activity = None;
@@ -529,15 +540,47 @@ impl VideoPlayer {
                 }
                 Err(error) => Err(error),
             };
-            if !matches!(
-                this.update(cx, |this, cx| this.loaded(engine, cx)),
-                Ok(true)
-            ) {
-                return;
-            }
+            let _ = this.update(cx, |this, cx| {
+                if this.loaded(engine, cx) {
+                    this.wake(cx);
+                }
+            });
+        }));
+    }
+
+    /// Something to poll for: playback, loading, a pending gesture, the
+    /// controls about to hide, or a recent draw that may have sought.
+    fn busy(&self) -> bool {
+        self.engine.is_some()
+            && (self.playing
+                || self.state != State::Ready
+                || self.click.as_ref().is_some_and(|click| !click.committed)
+                || self.hold.is_some()
+                || self.feedback.is_some()
+                || self
+                    .activity
+                    .is_some_and(|at| at.elapsed() < IDLE + TICK * 2)
+                || self.woke.elapsed() < SETTLE)
+    }
+
+    /// Starts polling again if it stopped and there is something to poll.
+    fn wake(&mut self, cx: &mut Context<Self>) {
+        self.woke = Instant::now();
+        if self.ticks.is_some() || !self.busy() {
+            return;
+        }
+        self.ticks = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(TICK).await;
-                if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                let busy = this.update(cx, |this, cx| {
+                    this.tick(cx);
+                    let busy = this.busy();
+                    if !busy {
+                        this.ticks = None;
+                    }
+                    busy
+                });
+                if !matches!(busy, Ok(true)) {
                     break;
                 }
             }
@@ -811,6 +854,7 @@ impl VideoPlayer {
     pub(super) fn active(&mut self, cx: &mut Context<Self>) {
         let was_idle = self.idle();
         self.activity = Some(Instant::now());
+        self.wake(cx);
         if was_idle {
             cx.notify();
         }
@@ -888,6 +932,7 @@ impl VideoPlayer {
                 held: None,
             });
         }
+        self.wake(cx);
     }
 
     fn end_hold(&mut self, cx: &mut Context<Self>) {
@@ -1367,6 +1412,7 @@ impl Render for VideoPlayer {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        self.wake(cx);
         match self.mode {
             Mode::Inline => self.inline(window, cx),
             Mode::Review => self.review(window, cx),
