@@ -63,12 +63,16 @@ pub struct Discovery {
     /// Bumped by Refresh agents, to ask for archive consent again.
     pub attempt: u64,
     pub runs: BTreeMap<String, ArchiveRun>,
-    /// Who the viewer may archive, as last asked.
-    pub consent: BTreeMap<String, bool>,
+    /// Who the viewer may archive: the attempt last asked in, and the
+    /// last answer.
+    consent: HashMap<String, (u64, bool)>,
     pub removals: BTreeMap<String, Removal>,
     /// Removed in this view; hidden for as long as it lives.
     pub removed: BTreeSet<String>,
     generation: u64,
+    /// Bumped when the viewer or community changes, so archive and remove
+    /// results for the old one are dropped.
+    scope_generation: u64,
     _tasks: Vec<Task<()>>,
 }
 
@@ -88,10 +92,11 @@ impl Discovery {
             known_profiles: BTreeMap::new(),
             attempt: 0,
             runs: BTreeMap::new(),
-            consent: BTreeMap::new(),
+            consent: HashMap::new(),
             removals: BTreeMap::new(),
             removed: BTreeSet::new(),
             generation: 0,
+            scope_generation: 0,
             _tasks: Vec::new(),
         };
         this.sync(&[], cx);
@@ -147,9 +152,11 @@ impl Discovery {
             self.known_profiles.clear();
         }
         if community_changed || viewer_changed {
+            self.scope_generation += 1;
             self.runs.clear();
             self.consent.clear();
             self.removals.clear();
+            self.removed.clear();
             self.last_archived.clear();
             self.archives = ArchiveSnapshot::default();
         }
@@ -367,11 +374,16 @@ impl Discovery {
 
     /// Asks whether the viewer may archive `pubkey` here, once per attempt.
     pub fn ask_consent(&mut self, pubkey: &str, cx: &mut Context<Self>) {
-        let key = format!("{}:{pubkey}", self.attempt);
-        if self.consent.contains_key(&key) {
+        let attempt = self.attempt;
+        if self
+            .consent
+            .get(pubkey)
+            .is_some_and(|(asked, _)| *asked == attempt)
+        {
             return;
         }
-        self.consent.insert(key.clone(), self.may_archive(pubkey));
+        let allowed = self.may_archive(pubkey);
+        self.consent.insert(pubkey.to_string(), (attempt, allowed));
         let (Some(scope), Some(identity)) = (self.scope.clone(), self.identity.clone()) else {
             return;
         };
@@ -380,13 +392,21 @@ impl Discovery {
         };
         let http = relay::lane(&destination, identity);
         let target = pubkey.to_string();
+        let target_key = target.clone();
         let read = Runtime::handle(cx)
             .spawn(async move { relay::consent(&http, &authority, &scope.viewer, &target).await });
         cx.spawn(async move |this, cx| {
             let allowed = matches!(read.await, Ok(Ok(Some(_))));
             let _ = this.update(cx, |this, cx| {
-                this.consent.insert(key, allowed);
-                cx.notify();
+                // A newer attempt, or a cleared scope, owns the entry now.
+                if let Some(entry) = this
+                    .consent
+                    .get_mut(&target_key)
+                    .filter(|(asked, _)| *asked == attempt)
+                {
+                    entry.1 = allowed;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -395,9 +415,7 @@ impl Discovery {
     /// The last answer about archiving `pubkey`, kept until a new one.
     pub fn may_archive(&self, pubkey: &str) -> bool {
         self.consent
-            .iter()
-            .rev()
-            .find(|(key, _)| key.ends_with(&format!(":{pubkey}")))
+            .get(pubkey)
             .is_some_and(|(_, allowed)| *allowed)
     }
 
@@ -437,6 +455,7 @@ impl Discovery {
         let target = pubkey.to_string();
         let last = self.archives.head.clone();
         let generation = self.generation;
+        let scope_generation = self.scope_generation;
         let request = Runtime::handle(cx).spawn(async move {
             relay::request_archive(&http, &identity, &authority, &target, archive, last).await
         });
@@ -444,6 +463,9 @@ impl Discovery {
         cx.spawn(async move |this, cx| {
             let result = request.await.unwrap_or_else(|_| Err("cancelled".into()));
             let confirmed = this.update(cx, |this, cx| {
+                if this.scope_generation != scope_generation {
+                    return false;
+                }
                 let confirmed = match result {
                     Ok(snapshot) => {
                         if this.generation == generation {
@@ -502,6 +524,7 @@ impl Discovery {
         let target = pubkey.to_string();
         let archived = self.archives.archived.contains(pubkey);
         let last = self.archives.head.clone();
+        let scope_generation = self.scope_generation;
         let request = Runtime::handle(cx).spawn(async move {
             relay::remove_relay_agent(&http, &identity, &authority, &target, archived, last).await
         });
@@ -511,6 +534,9 @@ impl Discovery {
                 .await
                 .unwrap_or_else(|_| Err("Failed to remove agent.".into()));
             let _ = this.update(cx, |this, cx| {
+                if this.scope_generation != scope_generation {
+                    return;
+                }
                 match result {
                     Ok(()) => {
                         this.removals.remove(&target);
