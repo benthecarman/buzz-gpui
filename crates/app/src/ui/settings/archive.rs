@@ -27,11 +27,39 @@ fn open(cx: &mut App) -> Result<Arc<Archive>, String> {
     if let Some(archive) = &cx.default_global::<ArchiveHost>().0 {
         return Ok(archive.clone());
     }
-    let archive = Arc::new(Archive::open(
-        data_dir().join("archive").join("events.sqlite3"),
-    )?);
+    let archive = Arc::new(Archive::open(archive_path())?);
     cx.global_mut::<ArchiveHost>().0 = Some(archive.clone());
     Ok(archive)
+}
+
+fn archive_path() -> std::path::PathBuf {
+    data_dir().join("archive").join("events.sqlite3")
+}
+
+/// Keeps one archive: another open may have won while `archive` opened.
+fn keep(archive: Arc<Archive>, cx: &mut App) -> Arc<Archive> {
+    match opened(cx) {
+        Some(kept) => kept,
+        None => {
+            cx.default_global::<ArchiveHost>().0 = Some(archive.clone());
+            archive
+        }
+    }
+}
+
+/// The archive file and the settings for one community, as last read.
+type Read = Result<(String, ArchiveSettings), String>;
+
+/// The archive settings the card shows. Reading them writes to disk (the
+/// archive seeds and prunes), so it runs off the UI thread when the card
+/// shows, the community changes, and after a save or clear.
+pub(super) struct Loaded {
+    community: EntityId,
+    /// The last read; `None` until the first finishes.
+    read: Option<Read>,
+    /// The card showed again since the read; read once more.
+    pub(super) stale: bool,
+    _task: Task<()>,
 }
 
 /// The archive, if it opened; capture opens it when a community connects.
@@ -81,9 +109,7 @@ pub fn capture(community: &Entity<Community>, identity: Arc<Identity>, cx: &mut 
     let read = cx.background_spawn(async move {
         let archive = match existing {
             Some(archive) => archive,
-            None => Arc::new(Archive::open(
-                data_dir().join("archive").join("events.sqlite3"),
-            )?),
+            None => Arc::new(Archive::open(archive_path())?),
         };
         let settings = archive.settings(&viewer, &key)?;
         Ok::<_, String>((archive, settings, viewer, key))
@@ -103,13 +129,7 @@ pub fn capture(community: &Entity<Community>, identity: Arc<Identity>, cx: &mut 
                 }
             };
             // Another open (Settings) may have won; one archive is kept.
-            let archive = match opened(cx) {
-                Some(kept) => kept,
-                None => {
-                    cx.default_global::<ArchiveHost>().0 = Some(archive.clone());
-                    archive
-                }
-            };
+            let archive = keep(archive, cx);
             let mut frames = session.observe(settings.kinds());
             if settings.kinds().is_empty() {
                 return;
@@ -155,6 +175,46 @@ fn days(days: u32) -> String {
 }
 
 impl SettingsPage {
+    /// Reads `community`'s archive settings again, showing the last read
+    /// for it meanwhile.
+    fn archive_load(&mut self, community: &Entity<Community>, cx: &mut Context<Self>) {
+        let id = community.entity_id();
+        let (viewer, key) = partition(community, cx);
+        let existing = opened(cx);
+        let read = cx.background_spawn(async move {
+            let archive = match existing {
+                Some(archive) => archive,
+                None => Arc::new(Archive::open(archive_path())?),
+            };
+            let settings = archive.settings(&viewer, &key)?;
+            Ok::<_, String>((archive, settings))
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let read = read.await;
+            let _ = this.update(cx, |this, cx| {
+                let read = read.map(|(archive, settings)| {
+                    let archive = keep(archive, cx);
+                    (archive.path().to_string_lossy().into_owned(), settings)
+                });
+                if let Some(loaded) = &mut this.archive {
+                    loaded.read = Some(read);
+                }
+                cx.notify();
+            });
+        });
+        let previous = self
+            .archive
+            .take()
+            .filter(|loaded| loaded.community == id)
+            .and_then(|loaded| loaded.read);
+        self.archive = Some(Loaded {
+            community: id,
+            read: previous,
+            stale: false,
+            _task: task,
+        });
+    }
+
     /// The card (`ArchiveCard`) with its content for the selected community.
     pub(super) fn archive_section(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         let c = *cx.colors();
@@ -180,12 +240,14 @@ impl SettingsPage {
                     cx,
                 ));
         };
-        let (viewer, key) = partition(&community, cx);
-        let loaded = open(cx).and_then(|archive| {
-            archive
-                .settings(&viewer, &key)
-                .map(|settings| (archive.path().to_string_lossy().into_owned(), settings))
-        });
+        let current = self
+            .archive
+            .as_ref()
+            .filter(|loaded| loaded.community == community.entity_id() && !loaded.stale);
+        if current.is_none() {
+            self.archive_load(&community, cx);
+        }
+        let loaded = self.archive.as_ref().and_then(|loaded| loaded.read.clone());
         let mut body = vec![text(
             "Saved in this app’s local SQLite archive on this device. Records are partitioned \
              by account and community. Capture runs while this community is connected, even \
@@ -193,10 +255,11 @@ impl SettingsPage {
                 .into(),
         )];
         match loaded {
-            Ok((path, settings)) => {
+            None => body.push(text("Loading archive settings…".into())),
+            Some(Ok((path, settings))) => {
                 body.extend(self.archive_controls(&path, &settings, window, cx));
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 body.push(
                     div()
                         .text_body_sm()
@@ -211,6 +274,7 @@ impl SettingsPage {
                         .size(ButtonSize::Sm)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.archive_error = None;
+                            this.archive = None;
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -420,6 +484,7 @@ impl SettingsPage {
         self.archive_error = saved
             .err()
             .map(|_| "Could not save archive settings. Reload settings and retry.".into());
+        self.archive_load(&community, cx);
         recapture(&community, cx);
         cx.notify();
     }
@@ -433,6 +498,7 @@ impl SettingsPage {
         self.archive_error = cleared
             .err()
             .map(|_| "Could not clear the archive. Saved records may remain; retry.".into());
+        self.archive_load(&community, cx);
         // Clearing moves the revision; capture follows it.
         recapture(&community, cx);
         self.modal = None;

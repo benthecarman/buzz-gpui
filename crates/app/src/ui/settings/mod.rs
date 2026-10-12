@@ -173,6 +173,8 @@ pub struct SettingsPage {
     retention_menu: bool,
     /// The last archive save or clear failed.
     archive_error: Option<SharedString>,
+    /// The archive settings the card shows, read off the UI thread.
+    archive: Option<archive::Loaded>,
     /// Made on first visit; keeps the row being rebound and its notice.
     shortcuts: Option<Entity<shortcuts::ShortcutSettings>>,
     /// The open plugin card's view and the community it was made for.
@@ -200,6 +202,7 @@ impl SettingsPage {
             sound_menu: None,
             retention_menu: false,
             archive_error: None,
+            archive: None,
             shortcuts: None,
             card: None,
             _card_checks: (
@@ -220,6 +223,10 @@ impl SettingsPage {
         if section != self.section {
             self.quiet(cx);
             self.section = section;
+            // The archive card reads its settings again when it shows.
+            if let Some(archive) = &mut self.archive {
+                archive.stale = true;
+            }
             cx.emit(SectionChanged);
         }
         cx.notify();
