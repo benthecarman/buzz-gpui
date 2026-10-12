@@ -317,9 +317,13 @@ impl TeamEditor {
                         message
                     }
                 });
-                // An edit during the save started a new attempt.
+                // An edit during the save started a new attempt, from the
+                // team head as it was then: give it the head this save
+                // wrote, so its retry doesn't conflict with this save.
                 if this.attempt.serial == run.serial {
                     this.attempt = run;
+                } else {
+                    this.attempt.team_head = run.team_head;
                 }
                 match message {
                     None => cx.emit(Dismissed),
