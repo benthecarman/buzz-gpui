@@ -270,20 +270,21 @@ pub fn encode_mp4(samples: &[i16]) -> Result<Vec<u8>, String> {
     if samples.is_empty() {
         return Err(NOT_PREPARED.into());
     }
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "buzz-voice-{}-{}.mp4",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let result = encode_to(samples, &path);
-    let bytes = result
-        .and_then(|()| std::fs::read(&path).map_err(|error| error.to_string()))
+    // filesink opens its path by name and follows links, so the file goes
+    // in a fresh directory only this user can enter, not the shared one.
+    let bytes = tempfile::Builder::new()
+        .prefix("buzz-voice-")
+        .tempdir()
+        .map_err(|error| error.to_string())
+        .and_then(|dir| {
+            let path = dir.path().join("voice.mp4");
+            encode_to(samples, &path)?;
+            std::fs::read(&path).map_err(|error| error.to_string())
+        })
         .map(|mut mp4| {
             blank_user_data(&mut mp4, 0, None);
             mp4
         });
-    let _ = std::fs::remove_file(&path);
     bytes.map_err(|error| {
         tracing::warn!(%error, "voice note encoding failed");
         NOT_PREPARED.to_string()
