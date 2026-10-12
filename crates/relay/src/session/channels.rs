@@ -77,6 +77,7 @@ impl Head {
 }
 
 /// A channel's newest live events while it has no window.
+#[derive(Default)]
 struct Tail {
     /// Newest first.
     events: Vec<Verified>,
@@ -84,6 +85,26 @@ struct Tail {
 }
 
 impl Tail {
+    /// Puts `event` in order, keeping the newest [`TAIL_EVENTS`]. Returns
+    /// whether the tail changed.
+    fn insert(&mut self, event: &Verified) -> bool {
+        let at = self.events.binary_search_by(|probe| {
+            event
+                .created_at
+                .cmp(&probe.created_at)
+                .then_with(|| probe.id.cmp(&event.id))
+        });
+        match at {
+            Err(at) if at < TAIL_EVENTS => {
+                self.events.insert(at, event.clone());
+                self.events.truncate(TAIL_EVENTS);
+                true
+            }
+            // Already kept, or older than everything kept.
+            _ => false,
+        }
+    }
+
     fn bytes(&self) -> usize {
         self.events.iter().map(Verified::byte_size).sum::<usize>()
             + self.preview.as_ref().map_or(0, String::len)
@@ -1132,42 +1153,32 @@ impl Actor {
             if !accessible {
                 continue;
             }
-            let mut merged: HashMap<EventId, Verified> = self
-                .channels
-                .tails
-                .peek(&channel)
-                .map(|tail| tail.events.iter().map(|e| (e.id, e.clone())).collect())
-                .unwrap_or_default();
+            let existing = self.channels.tails.remove(&channel);
+            let fresh = existing.is_none();
+            let mut tail = existing.unwrap_or_default();
+            let mut changed = false;
             for event in events.iter().filter(|event| event.has_tag("h", &channel)) {
-                merged.insert(event.id, event.clone());
+                changed |= tail.insert(event);
             }
-            let mut retained: Vec<Verified> = merged.into_values().collect();
-            retained.sort_by(|a, b| {
-                b.created_at
-                    .cmp(&a.created_at)
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            retained.truncate(TAIL_EVENTS);
-            let preview = match self.timelines.get(&channel) {
-                Some(timeline) => timeline.preview(),
-                None => {
-                    let mut all: HashMap<EventId, Verified> = self
-                        .channels
-                        .heads
-                        .peek(&channel)
-                        .map(|head| head.events.iter().map(|e| (e.id, e.clone())).collect())
-                        .unwrap_or_default();
-                    all.extend(retained.iter().map(|e| (e.id, e.clone())));
-                    let all: Vec<Verified> = all.into_values().collect();
+            match self.timelines.get(&channel) {
+                Some(timeline) => tail.preview = timeline.preview(),
+                // Fold for the preview only when the tail moved.
+                None if changed || fresh => {
+                    let mut seen = HashSet::new();
+                    let head = self.channels.heads.peek(&channel);
+                    let all: Vec<Verified> = tail
+                        .events
+                        .iter()
+                        .chain(head.iter().flat_map(|head| head.events.iter()))
+                        .filter(|event| seen.insert(event.id))
+                        .cloned()
+                        .collect();
                     let rows =
                         fold_messages(&channel, &relay, &all, &self.fold_options(&channel, relay));
-                    message_preview(&rows)
+                    tail.preview = message_preview(&rows);
                 }
-            };
-            let tail = Tail {
-                events: retained,
-                preview,
-            };
+                None => {}
+            }
             let bytes = tail.bytes();
             self.channels.tails.set(channel, tail, bytes);
         }
@@ -1678,6 +1689,29 @@ mod tests {
             };
             Box::pin(async move { Ok(events) })
         }
+    }
+
+    #[test]
+    fn tails_keep_the_newest_in_order() {
+        let signer = Signer::new();
+        let event = |at: u64| signer.sign(&signer.viewer, kinds::CHAT, at, "x", &[&["h", CHANNEL]]);
+        let mut tail = Tail::default();
+        for at in 0..TAIL_EVENTS as u64 + 10 {
+            assert!(tail.insert(&event(T0 + at)), "newer than everything kept");
+        }
+        assert_eq!(tail.events.len(), TAIL_EVENTS);
+        let newest = event(T0 + 1_000);
+        assert!(tail.insert(&newest));
+        assert!(!tail.insert(&newest), "already kept");
+        assert_eq!(tail.events.len(), TAIL_EVENTS);
+        assert_eq!(tail.events[0].id, newest.id);
+        assert!(!tail.insert(&event(T0)), "older than everything kept");
+        assert!(
+            tail.events
+                .windows(2)
+                .all(|pair| pair[0].created_at > pair[1].created_at
+                    || (pair[0].created_at == pair[1].created_at && pair[0].id < pair[1].id))
+        );
     }
 
     #[tokio::test]
