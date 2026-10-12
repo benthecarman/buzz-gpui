@@ -1292,6 +1292,33 @@ fn ignores_duplicate_and_unrelated_live_traffic() {
 }
 
 #[test]
+fn an_admin_moderator_delete_hides_a_reply_once_the_admins_are_known() {
+    let (fx, root) = legacy();
+    let reply = fx.nested(&root, &root.id_hex(), "spam", 10);
+    let mut state = fx.state(root.id, false, Some(&root));
+    let read = state.refresh().unwrap();
+    step(&mut state, read, &[root.clone(), reply.clone()]);
+    let admin = Keys::generate();
+    let delete = |keys: &Keys| {
+        let target = reply.id_hex();
+        let h = ["h", fx.channel.as_str()];
+        signed(
+            keys,
+            kinds::MODERATOR_DELETE,
+            "",
+            11,
+            &[&h, &["e", &target]],
+        )
+    };
+    // A stranger's 9005 never applies; an admin's waits for the 39001.
+    state.receive(&[delete(&Keys::generate()), delete(&admin)]);
+    assert_eq!(reply_ids(&state.snapshot()), [reply.id]);
+    assert!(state.set_admins(&[admin.public_key()].into()));
+    assert!(reply_ids(&state.snapshot()).is_empty());
+    assert!(!state.set_admins(&[admin.public_key()].into()));
+}
+
+#[test]
 fn follows_nested_replies_and_their_overlays_but_not_bare_references() {
     let (fx, root) = legacy();
     let r = root.id_hex();

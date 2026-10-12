@@ -428,6 +428,7 @@ impl Actor {
             seen: None,
             counts: Arc::new(UnreadCounts::default()),
         });
+        self.admins_to_unread();
         self.refresh_reads(Priority::Foreground);
         self.update_reading();
     }

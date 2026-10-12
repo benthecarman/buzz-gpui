@@ -9,6 +9,7 @@ use crate::threads::{
     Retarget, ThreadConfig, ThreadRead, ThreadSnapshot, ThreadState, thread_authority,
 };
 use nostr::prelude::{EventId, PublicKey};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -106,6 +107,15 @@ impl OpenThread {
 }
 
 impl Actor {
+    /// A channel's admins changed: its open threads refold their rows.
+    pub(super) fn threads_set_admins(&mut self, channel: &str, admins: &HashSet<PublicKey>) {
+        for thread in self.threads.values_mut() {
+            if thread.channel == channel && thread.state.set_admins(admins) {
+                thread.publish();
+            }
+        }
+    }
+
     /// An event an open thread view retains, as visibility evidence.
     pub(super) fn thread_event(&self, id: &EventId) -> Option<Verified> {
         self.threads.values().find_map(|thread| {
@@ -178,6 +188,7 @@ impl Actor {
             authority_host: thread_authority(self.origin.websocket()).ok(),
         };
         let mut state = ThreadState::new(config, self.clock.clone(), seed.as_ref());
+        state.set_admins(&self.channel_admins(&channel));
         let retained: Vec<Verified> = self
             .timelines
             .get(&channel)

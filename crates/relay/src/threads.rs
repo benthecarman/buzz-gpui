@@ -610,6 +610,25 @@ impl ThreadState {
         !Arc::ptr_eq(&before, &self.current)
     }
 
+    /// The channel's admins from its 39001, whose moderator deletes apply.
+    /// Returns whether this call changed the snapshot.
+    pub fn set_admins(&mut self, admins: &HashSet<PublicKey>) -> bool {
+        if self.projection.options().channel_admins == *admins {
+            return false;
+        }
+        let options = FoldOptions {
+            channel_admins: admins.clone(),
+            ..self.projection.options().clone()
+        };
+        let (_, refolded) = self.projection.set_options(options);
+        if !refolded {
+            return false;
+        }
+        let before = self.current.clone();
+        self.publish();
+        !Arc::ptr_eq(&before, &self.current)
+    }
+
     /// Replaces the outbox operations this view may show. Failed replies
     /// stay visible for retry; failed edits and reactions do not apply.
     pub fn set_local(&mut self, operations: &[(Verified, LocalDelivery)]) {

@@ -161,6 +161,8 @@ pub(super) struct RestoredHead {
 pub(super) struct Channels {
     heads: ByteLru<Head>,
     tails: ByteLru<Tail>,
+    /// Channel admins from relay-signed 39001s (see `admins.rs`).
+    pub admins: ByteLru<super::admins::ChannelAdmins>,
     /// One speculative head read at a time.
     preparing: bool,
     catchups: HashMap<String, Catchup>,
@@ -189,6 +191,7 @@ impl Default for Channels {
         Self {
             heads: ByteLru::new(MAX_HEADS, MAX_HEAD_BYTES),
             tails: ByteLru::new(MAX_TAILS, MAX_TAIL_BYTES),
+            admins: super::admins::cache(),
             preparing: false,
             catchups: HashMap::new(),
             queue: VecDeque::new(),
@@ -441,7 +444,7 @@ impl Actor {
             .is_some_and(|discovery| discovery.is_session(channel))
     }
 
-    fn access_version(&self, channel: &str) -> u64 {
+    pub(super) fn access_version(&self, channel: &str) -> u64 {
         self.channels.access.get(channel).copied().unwrap_or(0)
     }
 
@@ -462,7 +465,7 @@ impl Actor {
         FoldOptions {
             signing_authority: Some(relay),
             include_replies: self.is_session(channel),
-            ..Default::default()
+            channel_admins: self.channel_admins(channel),
         }
     }
 
@@ -486,6 +489,7 @@ impl Actor {
             }
             let local = self.local_operations();
             timeline.set_local(&local);
+            timeline.set_admins(&self.channel_admins(channel));
             self.timelines.insert(channel.to_string(), timeline);
         }
         self.timelines.get_mut(channel)
@@ -508,6 +512,7 @@ impl Actor {
         if !self.can_read_remote(channel) {
             return;
         }
+        self.read_admins(channel);
         if self.demand_channel(channel) {
             return;
         }
@@ -1232,6 +1237,7 @@ impl Actor {
     pub(super) fn deny_cached(&mut self, channel: &str) {
         self.channels.heads.remove(channel);
         self.channels.tails.remove(channel);
+        self.channels.admins.remove(channel);
         self.remove_saved_head(channel);
     }
 
@@ -1281,6 +1287,11 @@ impl Actor {
                 self.channels
                     .tails
                     .update(&key, |tail| tail.events = visible);
+            }
+        }
+        for key in self.channels.admins.keys() {
+            if !accessible(&self.discovery, &key) {
+                self.channels.admins.remove(&key);
             }
         }
         let ids: Vec<String> = self.timelines.keys().cloned().collect();

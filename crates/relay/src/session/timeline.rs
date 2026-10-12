@@ -100,6 +100,9 @@ pub(super) struct Timeline {
     pub status: WindowStatus,
     /// A head read for this window is in flight.
     pub loading_head: bool,
+    /// The channel's 39001 was read for this window since it opened or
+    /// its access last changed.
+    pub admins_read: bool,
     pub loading_older: bool,
     pub history_limited: bool,
     pub stale: bool,
@@ -142,6 +145,7 @@ impl Timeline {
             at_head: true,
             status: WindowStatus::Idle,
             loading_head: false,
+            admins_read: false,
             loading_older: false,
             history_limited: false,
             stale: false,
@@ -167,6 +171,18 @@ impl Timeline {
     pub fn set_session(&mut self, session: bool) {
         let options = FoldOptions {
             include_replies: session,
+            ..self.projection.options().clone()
+        };
+        self.projection.set_options(options);
+    }
+
+    /// The channel's admins from its 39001, whose moderator deletes apply.
+    pub fn set_admins(&mut self, admins: &HashSet<PublicKey>) {
+        if self.projection.options().channel_admins == *admins {
+            return;
+        }
+        let options = FoldOptions {
+            channel_admins: admins.clone(),
             ..self.projection.options().clone()
         };
         self.projection.set_options(options);
@@ -256,6 +272,7 @@ impl Timeline {
         self.events.clear();
         self.traffic.clear();
         self.loading_head = false;
+        self.admins_read = false;
         self.loading_older = false;
         self.status = WindowStatus::Error;
         self.error = Some(error);
@@ -265,6 +282,7 @@ impl Timeline {
     pub fn purge(&mut self, visible: impl Fn(&[Verified]) -> Vec<Verified>, generation: u64) {
         self.generation = generation;
         self.loading_head = false;
+        self.admins_read = false;
         self.loading_older = false;
         let all: Vec<Verified> = self
             .events
@@ -691,6 +709,38 @@ mod tests {
         assert!(!kept.contains(&reaction.id), "with its overlay");
         assert!(kept.contains(&local.id), "local sends stay");
         assert_eq!(kept.len(), MAX_ROWS + 1);
+    }
+
+    #[test]
+    fn a_live_moderator_delete_hides_its_target_only_when_signed_by_an_admin() {
+        let signer = Signer::new();
+        let admin = nostr::prelude::Keys::generate();
+        let stranger = nostr::prelude::Keys::generate();
+        let mut timeline = window(&signer);
+        timeline.set_admins(&[admin.public_key()].into());
+        let kept = message(&signer, T0, "kept");
+        let removed = message(&signer, T0 + 1, "removed");
+        timeline.apply_head(&head(vec![kept.clone(), removed.clone()], false));
+        timeline.publish();
+        let delete = |keys: &nostr::prelude::Keys, target: &Verified| {
+            let target = target.id_hex();
+            signer.sign(
+                keys,
+                kinds::MODERATOR_DELETE,
+                T0 + 2,
+                "",
+                &[&["h", CHANNEL], &["e", &target]],
+            )
+        };
+        let live = [delete(&stranger, &kept), delete(&admin, &removed)];
+        assert!(timeline.accept(&live, &HashSet::new()));
+        timeline.publish();
+        let ids: Vec<EventId> = timeline.current.rows.iter().map(|row| row.id).collect();
+        assert_eq!(ids, [kept.id]);
+        // Without the admin set the reference rule (author only) holds.
+        timeline.set_admins(&HashSet::new());
+        timeline.publish();
+        assert_eq!(timeline.current.rows.len(), 2);
     }
 
     #[test]

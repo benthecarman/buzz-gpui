@@ -16,6 +16,7 @@
 mod account;
 mod actions;
 mod activity;
+mod admins;
 mod canvas;
 mod catalog;
 mod channels;
@@ -2193,8 +2194,8 @@ impl Actor {
 
     /// Every verified event goes through here, in the reference order:
     /// discovery, membership hints, then only what is visible to read
-    /// state, unread, outbox echo, profiles, emoji, channel tails and
-    /// windows, and threads. Returns the visible events.
+    /// state, unread, outbox echo, profiles, emoji, channel admins, channel
+    /// tails and windows, and threads. Returns the visible events.
     fn accept(&mut self, events: &[Verified]) -> Vec<Verified> {
         let mut publish = false;
         if let Some(discovery) = &mut self.discovery {
@@ -2264,6 +2265,7 @@ impl Actor {
         publish |= self.profiles.accept(&visible);
         publish |= self.emoji.accept(&visible);
         publish |= self.statuses.accept(&visible, unread::now_ms());
+        publish |= self.admins_accept(&visible);
         self.accept_tails(&visible);
         let local = self.local_ids();
         let mut people = Vec::new();
