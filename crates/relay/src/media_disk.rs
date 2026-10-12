@@ -5,7 +5,9 @@
 //! name and renamed so a reader never sees half a body. Relay media is
 //! content-addressed, so it never goes stale; other hosts' images are
 //! shown from here and refreshed once they are older than
-//! [`PUBLIC_FRESH`]. The folder is trimmed to [`BUDGET`], oldest first.
+//! [`PUBLIC_FRESH`]. The folder is trimmed to [`BUDGET`], least recently
+//! used first: a file's modified time is its fetch, its access time its
+//! last read.
 //! It lives in the app's cache folder, which signing out erases.
 
 use sha2::{Digest, Sha256};
@@ -23,6 +25,8 @@ pub const PUBLIC_FRESH: Duration = Duration::from_secs(3600);
 const BUDGET: u64 = 512 * 1024 * 1024;
 /// Writes between trims.
 const TRIM_EVERY: u64 = 256;
+/// A read marks a file used at most this often.
+const TOUCH_EVERY: Duration = Duration::from_secs(600);
 
 static DISK: OnceLock<Disk> = OnceLock::new();
 
@@ -69,12 +73,23 @@ impl Disk {
     pub(crate) fn read(&self, url: &str) -> Option<Cached> {
         let path = self.path(url);
         let bytes = fs::read(&path).ok()?;
-        let fetched = fs::metadata(&path).and_then(|meta| meta.modified()).ok()?;
+        let meta = fs::metadata(&path).ok()?;
+        let fetched = meta.modified().ok()?;
+        let now = SystemTime::now();
+        if meta
+            .accessed()
+            .ok()
+            .is_none_or(|used| now.duration_since(used).unwrap_or_default() >= TOUCH_EVERY)
+        {
+            // Mount options may not update it; set it explicitly.
+            let _ = fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_times(fs::FileTimes::new().set_accessed(now)));
+        }
         Some(Cached {
             bytes,
-            age: SystemTime::now()
-                .duration_since(fetched)
-                .unwrap_or_default(),
+            age: now.duration_since(fetched).unwrap_or_default(),
         })
     }
 
@@ -90,7 +105,8 @@ impl Disk {
         }
     }
 
-    /// Deletes the oldest files until the folder fits the budget.
+    /// Deletes the least recently used files until the folder fits the
+    /// budget.
     pub(crate) fn trim(&self) {
         self.trim_to(BUDGET);
     }
@@ -105,14 +121,15 @@ impl Disk {
                     continue;
                 }
                 let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let used = meta.accessed().map_or(modified, |at| at.max(modified));
                 total += meta.len();
-                files.push((modified, meta.len(), file.path()));
+                files.push((used, meta.len(), file.path()));
             }
         }
         if total <= budget {
             return;
         }
-        files.sort_by_key(|(modified, _, _)| *modified);
+        files.sort_by_key(|(used, _, _)| *used);
         let target = budget / 4 * 3;
         for (_, len, path) in files {
             if total <= target {
@@ -178,23 +195,45 @@ mod tests {
         );
     }
 
-    #[test]
-    fn trims_the_oldest_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let disk = Disk::new(dir.path().into());
-        for (n, age) in [(0, 300), (1, 200), (2, 100)] {
+    /// Writes three files fetched and last used 3, 2 and 1 hours ago.
+    fn aged(disk: &Disk) {
+        for (n, hours) in [(0, 3), (1, 2), (2, 1)] {
             let url = format!("https://example.com/{n}");
             disk.write(&url, &[0; 100]);
             let file = fs::File::options()
                 .write(true)
                 .open(disk.path(&url))
                 .unwrap();
-            file.set_modified(SystemTime::now() - Duration::from_secs(age))
+            let at = SystemTime::now() - Duration::from_secs(hours * 3600);
+            file.set_times(fs::FileTimes::new().set_modified(at).set_accessed(at))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn trims_the_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Disk::new(dir.path().into());
+        aged(&disk);
         disk.trim_to(250);
-        assert!(disk.read("https://example.com/0").is_none());
-        assert!(disk.read("https://example.com/1").is_none());
-        assert!(disk.read("https://example.com/2").is_some());
+        assert!(!disk.path("https://example.com/0").exists());
+        assert!(!disk.path("https://example.com/1").exists());
+        assert!(disk.path("https://example.com/2").exists());
+    }
+
+    #[test]
+    fn a_read_keeps_a_file_longer() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Disk::new(dir.path().into());
+        aged(&disk);
+        let cached = disk.read("https://example.com/0").unwrap();
+        assert!(
+            cached.age >= Duration::from_secs(3 * 3600),
+            "still its fetch age"
+        );
+        disk.trim_to(250);
+        assert!(disk.path("https://example.com/0").exists());
+        assert!(!disk.path("https://example.com/1").exists());
+        assert!(!disk.path("https://example.com/2").exists());
     }
 }
