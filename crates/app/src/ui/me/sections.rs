@@ -13,14 +13,17 @@ use crate::ui::sidebar::menus::channel_link;
 use crate::ui::toasts::{self, Notice};
 use buzz_relay_client::sidebar::NewSection;
 use buzz_relay_client::sidebar_store::PreferencesStatus;
-use buzz_relay_client::{ChannelSummary, RosterStatus, SessionStatus};
+use buzz_relay_client::{ChannelSummary, RosterStatus, SessionSnapshot, SessionStatus};
 use buzz_ui::{
     ActiveTheme, Button, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem, Surface,
     ToastTone, TypeStyled, tokens::radius,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Collapsed groups, saved per community (`me:collapsed-sections`).
@@ -46,10 +49,22 @@ enum Sub {
 }
 
 /// One group of rows: a Me group, or Conversations (empty id).
-struct Group {
+struct Group<'a> {
     id: String,
     name: String,
-    rows: Vec<ChannelSummary>,
+    rows: Vec<&'a ChannelSummary>,
+}
+
+/// Where the list showed at the last paint: its visible bounds and its
+/// scroll offset.
+type Painted = (Bounds<Pixels>, Pixels);
+
+/// What every row of a render shares, read once for all of them.
+struct Shared<'a> {
+    community: &'a Entity<Community>,
+    snapshot: &'a SessionSnapshot,
+    own: &'a Arc<HashSet<String>>,
+    selected: Option<&'a str>,
 }
 
 pub struct MeSidebar {
@@ -63,6 +78,14 @@ pub struct MeSidebar {
     dialog: Option<dialogs::Dialog>,
     deleting: Option<String>,
     delete_error: Option<SharedString>,
+    scroll: ScrollHandle,
+    /// Row bounds as they are painted.
+    bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// Row bounds from the last paint, taken at the start of a render to
+    /// pick the rows drawn in full ([`Self::row_shown`]).
+    painted: HashMap<String, Bounds<Pixels>>,
+    /// The list's visible bounds and scroll offset at the last paint.
+    viewport: Rc<Cell<Option<Painted>>>,
     _model: Subscription,
 }
 
@@ -79,6 +102,10 @@ impl MeSidebar {
             dialog: None,
             deleting: None,
             delete_error: None,
+            scroll: ScrollHandle::new(),
+            bounds: Rc::default(),
+            painted: HashMap::new(),
+            viewport: Rc::default(),
             _model: subscription,
         }
     }
@@ -205,11 +232,11 @@ impl MeSidebar {
     }
 
     /// The groups and their rows (`sections` in `SessionSections`).
-    fn groups(&self, conversations: &[ChannelSummary], cx: &App) -> Vec<Group> {
+    fn groups<'a>(&self, conversations: &'a [ChannelSummary], cx: &App) -> Vec<Group<'a>> {
         let me = &self.model.read(cx).me;
         let data = me.data.as_ref();
-        let sections = data.map(|d| d.sections.clone()).unwrap_or_default();
-        let assigned = |id: &str| data.and_then(|d| d.assignments.get(id).cloned());
+        let sections = data.map(|d| d.sections.as_slice()).unwrap_or_default();
+        let assigned = |id: &str| data.and_then(|d| d.assignments.get(id));
         let mut groups: Vec<Group> = sections
             .iter()
             .map(|section| Group {
@@ -217,19 +244,17 @@ impl MeSidebar {
                 name: section.name.clone(),
                 rows: conversations
                     .iter()
-                    .filter(|c| assigned(&c.id).as_deref() == Some(section.id.as_str()))
-                    .cloned()
+                    .filter(|c| assigned(&c.id) == Some(&section.id))
                     .collect(),
             })
             .collect();
-        let ids: Vec<&String> = sections.iter().map(|s| &s.id).collect();
+        let ids: HashSet<&String> = sections.iter().map(|s| &s.id).collect();
         groups.push(Group {
             id: String::new(),
             name: "Conversations".into(),
             rows: conversations
                 .iter()
-                .filter(|c| assigned(&c.id).is_none_or(|section| !ids.contains(&&section)))
-                .cloned()
+                .filter(|c| assigned(&c.id).is_none_or(|section| !ids.contains(section)))
                 .collect(),
         });
         // Me hides an empty Conversations group.
@@ -274,7 +299,7 @@ impl MeSidebar {
     fn group(
         &mut self,
         group: &Group,
-        selected: Option<&str>,
+        shared: &Shared,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -419,7 +444,10 @@ impl MeSidebar {
             let mut rows: Vec<AnyElement> = group
                 .rows
                 .iter()
-                .map(|row| self.row(row, &group.id, selected, window, cx))
+                .map(|row| match self.row_shown(&row.id, shared.selected) {
+                    true => self.row(row, &group.id, shared, window, cx),
+                    false => self.row_placeholder(&row.id),
+                })
                 .collect();
             if rows.is_empty() && !group.id.is_empty() {
                 rows.push(list_message("No sessions in this section.", cx).into_any_element());
@@ -470,48 +498,105 @@ impl MeSidebar {
             .into_any_element()
     }
 
+    /// Whether a row is drawn in full. Rows more than a list height away
+    /// from the visible part stand in as [`Self::row_placeholder`]s of the
+    /// same height, as in the Messages sidebar. The selected row, the one
+    /// with its menu open, and rows not painted yet are always drawn.
+    fn row_shown(&self, id: &str, selected: Option<&str>) -> bool {
+        let (Some(row), Some((viewport, painted_at))) = (self.painted.get(id), self.viewport.get())
+        else {
+            return true;
+        };
+        if selected == Some(id) || self.menu.as_ref().is_some_and(|menu| menu.id == id) {
+            return true;
+        }
+        // Where the row is now: scrolling since the paint moved it.
+        let top = row.top() + (self.scroll.offset().y - painted_at);
+        let margin = viewport.size.height;
+        top + row.size.height >= viewport.top() - margin && top <= viewport.bottom() + margin
+    }
+
+    /// Records a row's bounds as painted.
+    fn bounds_probe(&self, id: &str) -> impl IntoElement + use<> {
+        let (bounds, id) = (self.bounds.clone(), id.to_owned());
+        canvas(
+            move |row, window, _| {
+                // A placeholder that comes into view (a jump the scroll
+                // offset did not foresee) asks for the next frame, which
+                // draws it in full.
+                if row.intersects(&window.content_mask().bounds) {
+                    window.request_animation_frame();
+                }
+                bounds.borrow_mut().insert(id, row);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// A row far outside the view: its height and bounds, without its
+    /// content.
+    fn row_placeholder(&self, id: &str) -> AnyElement {
+        let height: DefiniteLength = self
+            .painted
+            .get(id)
+            .map_or(rems(2.5).into(), |row| row.size.height.into());
+        div()
+            .id(SharedString::from(format!("me-row-{id}")))
+            .relative()
+            .flex_none()
+            .h(height)
+            .mb(px(2.))
+            .child(self.bounds_probe(id))
+            .into_any_element()
+    }
+
+    /// Records the list's visible bounds and scroll offset as painted, for
+    /// [`Self::row_shown`].
+    fn viewport_probe(&self) -> impl IntoElement + use<> {
+        let (viewport, scroll) = (self.viewport.clone(), self.scroll.clone());
+        canvas(
+            move |bounds, _, _| viewport.set(Some((bounds, scroll.offset().y))),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
     fn row(
         &mut self,
         channel: &ChannelSummary,
         section: &str,
-        selected: Option<&str>,
+        shared: &Shared,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let c = *cx.colors();
         let ix = c.interaction(Surface::Navigation);
         let id = channel.id.clone();
-        let is_selected = selected == Some(id.as_str());
+        let is_selected = shared.selected == Some(id.as_str());
         let menu_open = self
             .menu
             .as_ref()
             .is_some_and(|menu| menu.id == id && menu.at.is_none());
         let group: SharedString = format!("me-row-{id}").into();
-        let unread = self
-            .community(cx)
-            .map(|community| community.read(cx).snapshot.unread.channel(&id))
-            .unwrap_or_default();
-        let bold = !is_selected && unread.bold;
-        let community = self.community(cx);
-        let working = community.as_ref().map(|community| {
-            let snapshot = community.read(cx).snapshot.clone();
-            let own = crate::ui::sidebar::own_agents(cx);
-            let agents = crate::ui::agent_activity::with_observed(
-                crate::ui::sidebar::working_agents(&snapshot, &id, &own),
-                community,
-                &id,
-                cx,
-            );
-            let badge = crate::ui::sidebar::working_badge(
-                &id,
-                &agents,
-                &snapshot.profiles,
-                &channel.name,
-                false,
-                cx,
-            );
-            (snapshot, own, agents, badge)
-        });
+        let (community, snapshot) = (shared.community, shared.snapshot);
+        let bold = !is_selected && snapshot.unread.channel(&id).bold;
+        let agents = crate::ui::agent_activity::with_observed(
+            crate::ui::sidebar::working_agents(snapshot, &id, shared.own),
+            community,
+            &id,
+            cx,
+        );
+        let badge = crate::ui::sidebar::working_badge(
+            &id,
+            &agents,
+            &snapshot.profiles,
+            &channel.name,
+            false,
+            cx,
+        );
         let open = id.clone();
         let (menu_id, menu_title, menu_section) =
             (id.clone(), channel.name.clone(), section.to_owned());
@@ -539,6 +624,7 @@ impl MeSidebar {
                 this.hover(move |s| s.bg(ix.row_hover))
                     .when(menu_open, |this| this.bg(ix.row_hover))
             })
+            .child(self.bounds_probe(&id))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -623,9 +709,6 @@ impl MeSidebar {
                             .children(dropdown),
                     ),
             );
-        let Some((snapshot, own, agents, badge)) = working else {
-            return row.into_any_element();
-        };
         // Working takes the actions button's slot, as in Messages, and
         // gives way to the button on hover.
         let row = match badge {
@@ -645,15 +728,18 @@ impl MeSidebar {
             ),
             None => row,
         };
-        let community = community.expect("working needs a community");
         let media = community.read(cx).session.media().clone();
         crate::ui::channel_activity::ActivityRow::new(&id, row)
             .activity(
                 snapshot.unread.activity.get(&id).cloned(),
                 agents,
-                std::sync::Arc::new(own),
+                shared.own.clone(),
             )
-            .directory(snapshot.profiles.clone(), Some(media), Some(community))
+            .directory(
+                snapshot.profiles.clone(),
+                Some(media),
+                Some(community.clone()),
+            )
             .opens(self.opens())
             .into_any_element()
     }
@@ -1065,6 +1151,7 @@ impl Render for MeSidebar {
             .flex_col()
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .px(rems(0.5))
             .text_color(c.text_standard);
         let Some(community) = community.filter(|_| ready) else {
@@ -1078,6 +1165,7 @@ impl Render for MeSidebar {
                 .into_any_element();
         };
         self.load_collapsed(&community, cx);
+        self.painted = std::mem::take(&mut *self.bounds.borrow_mut());
         let model = self.model.read(cx);
         let selection = model.selection(cx);
         let selected = selection.session().map(str::to_owned);
@@ -1118,9 +1206,16 @@ impl Render for MeSidebar {
         if let Some(error) = &self.delete_error {
             content = content.child(list_message(error.clone(), cx).text_color(c.text_danger));
         }
+        let own = Arc::new(crate::ui::sidebar::own_agents(cx));
+        let shared = Shared {
+            community: &community,
+            snapshot: &snapshot,
+            own: &own,
+            selected: selected.as_deref(),
+        };
         let groups = self.groups(&conversations, cx);
         for group in &groups {
-            content = content.child(self.group(group, selected.as_deref(), window, cx));
+            content = content.child(self.group(group, &shared, window, cx));
         }
         content = content.children(self.moves(&conversations, cx));
         match &snapshot.roster {
@@ -1179,8 +1274,10 @@ impl Render for MeSidebar {
         let context = self.context_menu(window, cx);
         div()
             .id("me-sidebar")
+            .relative()
             .size_full()
             .child(content)
+            .child(self.viewport_probe())
             .children(context)
             .children(dialog)
             .into_any_element()
