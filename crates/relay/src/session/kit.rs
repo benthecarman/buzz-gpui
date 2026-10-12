@@ -10,30 +10,25 @@
 //! confirmed (admission), and finishes its setup on its own afterwards
 //! (completion), leaving a notice when setup could not finish.
 
-use super::util::{CLOSED, NOT_CONNECTED, now, with};
+use super::util::{CLOSED, NOT_CONNECTED, with};
 use super::{Actor, Session};
-use crate::canvas::{AWAITING, TOO_OLD};
-use crate::event::{Verified, kinds};
+use crate::event::Verified;
 use crate::kit::setup::{
     ChannelCreationInput, PendingCreation, Progress, Receipts, SETUP_NOT_CONTINUED, SetupNotice,
     TEMPLATE_NOT_CONTINUED, pending_creation,
 };
-use crate::kit::{self, KitEntry, KitRecord, KitValue, Team, payload};
+use crate::kit::{self, KitEntry, KitRecord, KitValue};
 use crate::lifecycle::{self, Action, CONFIRM_DELAYS};
 use crate::outbox::{Delivery, Outbox, SendOptions};
 use crate::reader::{ReadOptions, Reader};
 use crate::socket::Filter;
 use crate::store::{Partition, Store};
-use buzz_identity::Identity;
 use nostr::prelude::EventId;
-use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
 
 const UNCONFIRMED: &str = "This may have taken effect, but it is not confirmed yet. Refresh and check before trying again.";
-/// An unconfirmed save older than this is never replayed.
-const REPLAY_SECS: u64 = 15 * 60;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KitStatus {
@@ -101,9 +96,7 @@ impl KitShared {
 #[derive(Clone)]
 struct Kit {
     reader: Reader,
-    identity: Arc<Identity>,
     viewer: String,
-    community: String,
     relay: String,
     outbox: Outbox,
     store: Store,
@@ -120,8 +113,6 @@ impl Actor {
         let viewer = self.identity.pubkey_hex();
         Ok(Kit {
             reader: self.reader.clone(),
-            identity: self.identity.clone(),
-            community: self.origin.http(),
             partition: Partition::new(&self.origin, &viewer),
             viewer,
             relay,
@@ -145,43 +136,6 @@ impl Kit {
             .await
             .map(|events| events.to_vec())
             .map_err(|error| error.message)
-    }
-
-    async fn head(&self, coordinate: &str, strong: bool) -> Result<Option<Verified>, String> {
-        let events = self
-            .read(vec![kit::record_filter(&self.viewer, coordinate, strong)])
-            .await?;
-        Ok(kit::selected_head(&events).cloned())
-    }
-
-    async fn exists(&self, id: &EventId) -> Result<bool, String> {
-        Ok(self
-            .read(vec![kit::id_filter(id)])
-            .await?
-            .iter()
-            .any(|event| event.id == *id))
-    }
-
-    /// `confirm`: read back exactly; replay only a recent unconfirmed
-    /// save, never a refused one.
-    async fn confirm(&self, id: EventId) -> Result<(), String> {
-        if self.exists(&id).await? {
-            return Ok(());
-        }
-        let Some(op) = self.outbox.get(&id) else {
-            return Err(TOO_OLD.into());
-        };
-        if now().saturating_sub(op.created_at()) >= REPLAY_SECS {
-            return Err(TOO_OLD.into());
-        }
-        if matches!(op.delivery, Delivery::Unknown) {
-            self.outbox.retry(&id, None).map_err(|e| e.to_string())?;
-        }
-        delivered(&self.outbox, id).await?;
-        if !self.exists(&id).await? {
-            return Err(AWAITING.into());
-        }
-        Ok(())
     }
 }
 
@@ -248,97 +202,6 @@ impl Session {
         deleted: bool,
     ) -> Result<EventId, String> {
         save(&self.me_kit, &self.origin.http(), value, expected, deleted).await
-    }
-
-    /// The portable definition of a version 2 team (`loadTeam`): its
-    /// chunks, exact revision reads only, checked against the manifest.
-    pub async fn kit_load_team(&self, team: Team) -> Result<Value, String> {
-        let commands = self.commands.clone();
-        self.runtime
-            .spawn(async move {
-                let ctx = with(&commands, |actor| actor.kit_context()).await??;
-                load_team(&ctx, &team).await
-            })
-            .await
-            .unwrap_or_else(|_| Err(CLOSED.into()))
-    }
-
-    /// Saves a team with its portable definition (`savePortable`): every
-    /// chunk confirmed and read back before the manifest replaces the old
-    /// one. `revision` stays the same across retries of one edit.
-    pub async fn kit_save_portable(
-        &self,
-        team: Team,
-        snapshot: Value,
-        expected: Option<EventId>,
-        revision: String,
-    ) -> Result<EventId, String> {
-        let (commands, kit) = (self.commands.clone(), self.me_kit.clone());
-        self.runtime
-            .spawn(async move {
-                let ctx = with(&commands, |actor| actor.kit_context()).await??;
-                let members = snapshot["members"].as_array().map_or(0, Vec::len);
-                if team.agents.is_empty()
-                    || team.agents.len() != members
-                    || snapshot["team"]["name"].as_str() != Some(team.name.as_str())
-                {
-                    return Err("Portable team members do not match their definitions".into());
-                }
-                let (manifest, payloads) = payload::encode_team_payload(
-                    &snapshot,
-                    &ctx.community,
-                    &ctx.viewer,
-                    &team.id,
-                    &revision,
-                )?;
-                ctx.outbox.ready().await.map_err(|e| e.to_string())?;
-                for chunk in &payloads {
-                    let record = chunk.record();
-                    let coordinate = chunk.coordinate();
-                    if let Some(existing) = ctx.head(&coordinate, true).await? {
-                        let raw = kit::open(&ctx.identity, &existing, &ctx.community)?;
-                        if payload::parse_payload_record(&raw, &ctx.community)? != *chunk {
-                            return Err(
-                                "Portable team revision already has different content".into()
-                            );
-                        }
-                        continue;
-                    }
-                    let pending = ctx
-                        .outbox
-                        .visible()
-                        .iter()
-                        .find(|op| op.kind() == kinds::APP_DATA && op.tag("d") == Some(&coordinate))
-                        .map(|op| op.id());
-                    let id = match pending {
-                        Some(id) => id,
-                        None => ctx
-                            .outbox
-                            .send(
-                                crate::messages::Draft {
-                                    kind: kinds::APP_DATA,
-                                    content: kit::seal(&ctx.identity, &record, &ctx.community)?,
-                                    tags: vec![
-                                        vec!["d".into(), coordinate.clone()],
-                                        vec!["t".into(), kit::PAYLOAD_TAG.into()],
-                                    ],
-                                },
-                                SendOptions::default(),
-                            )
-                            .map_err(|e| e.to_string())?,
-                    };
-                    ctx.confirm(id).await?;
-                }
-                let team = Team {
-                    portable: Some(manifest),
-                    ..team
-                };
-                // The whole payload must load before the manifest moves.
-                load_team(&ctx, &team).await?;
-                save(&kit, &ctx.community, KitValue::Team(team), expected, false).await
-            })
-            .await
-            .unwrap_or_else(|_| Err(CLOSED.into()))
     }
 
     /// The selected Canvas of a channel, if any (`canvas.read`, not
@@ -494,30 +357,6 @@ async fn save(
         )
         .await?;
     EventId::from_hex(&id).map_err(|error| error.to_string())
-}
-
-async fn load_team(ctx: &Kit, team: &Team) -> Result<Value, String> {
-    let manifest = team
-        .portable
-        .as_ref()
-        .ok_or("This team has no portable definition")?;
-    if manifest.owner != ctx.viewer {
-        return Err("Portable team belongs to another viewer".into());
-    }
-    let mut payloads = Vec::with_capacity(manifest.chunks as usize);
-    for coordinate in payload::chunk_coordinates(manifest, &ctx.community, &team.id) {
-        let event = ctx
-            .head(&coordinate, true)
-            .await?
-            .ok_or("Portable team payload is unavailable")?;
-        let raw = kit::open(&ctx.identity, &event, &ctx.community)?;
-        let chunk = payload::parse_payload_record(&raw, &ctx.community)?;
-        if chunk.coordinate() != coordinate || event.tag("d") != Some(coordinate.as_str()) {
-            return Err("Portable team payload coordinate mismatch".into());
-        }
-        payloads.push(chunk);
-    }
-    payload::decode_team_payload(manifest, &payloads, &ctx.community, &ctx.viewer, &team.id)
 }
 
 /// Seeds a new channel's starting Canvas through the outbox with
