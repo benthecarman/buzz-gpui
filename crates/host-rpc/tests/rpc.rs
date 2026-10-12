@@ -232,6 +232,40 @@ async fn large_frames_are_refused_before_the_handshake() {
 }
 
 #[tokio::test]
+async fn a_failed_accept_does_not_stop_the_host() {
+    struct Flaky(transport::MemoryListener, bool);
+    impl transport::Listener for Flaky {
+        fn accept(&mut self) -> BoxFuture<'_, std::io::Result<(transport::BoxConnection, String)>> {
+            if std::mem::replace(&mut self.1, false) {
+                // As when the host is out of file descriptors.
+                return Box::pin(async { Err(std::io::Error::other("too many open files")) });
+            }
+            self.0.accept()
+        }
+        fn describe(&self) -> String {
+            self.0.describe()
+        }
+    }
+    let (connector, listener) = transport::memory();
+    let server = tokio::spawn(serve::<Test, _>(
+        Flaky(listener, true),
+        Host::new(1),
+        ServerOptions::default(),
+    ));
+    let client = client(Arc::new(connector), None);
+    let mut state = client.state();
+    wait_for(&mut state, connected).await;
+    assert_eq!(
+        client.request(Request::Echo("up".into())).await.unwrap(),
+        "up"
+    );
+    // The listener closing for good still ends it.
+    drop(client);
+    let ended = tokio::time::timeout(Duration::from_secs(5), server).await;
+    assert!(ended.expect("the host kept serving").unwrap().is_err());
+}
+
+#[tokio::test]
 async fn wrong_token_is_rejected_without_retry_loop() {
     let host = Host::new(64);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

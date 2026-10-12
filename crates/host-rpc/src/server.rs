@@ -10,6 +10,10 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc};
 
+/// How long to wait after a failed accept, so a listener out of file
+/// descriptors does not spin.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+
 /// Events the host broadcasts, tagged with a sequence number that increases
 /// for the lifetime of the host process.
 pub type EventSource<P> = broadcast::Receiver<(u64, <P as Protocol>::Event)>;
@@ -90,9 +94,9 @@ impl<P: Protocol> Peer<P> {
     }
 }
 
-/// Accepts connections until the listener fails. Each connection runs on its
-/// own task, so one slow or broken client never blocks another. Dropping the
-/// returned future closes every connection it accepted.
+/// Accepts connections until the listener closes. Each connection runs on
+/// its own task, so one slow or broken client never blocks another. Dropping
+/// the returned future closes every connection it accepted.
 pub async fn serve<P: Protocol, L: Listener>(
     mut listener: L,
     handler: Arc<dyn HostHandler<P>>,
@@ -102,7 +106,19 @@ pub async fn serve<P: Protocol, L: Listener>(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (connection, address) = accepted?;
+                let (connection, address) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                        return Err(error);
+                    }
+                    // One connection failing, or no file descriptors
+                    // left for now, must not stop the host.
+                    Err(error) => {
+                        tracing::warn!(%error, "could not accept a host connection");
+                        tokio::time::sleep(ACCEPT_PAUSE).await;
+                        continue;
+                    }
+                };
                 let handler = handler.clone();
                 let options = options.clone();
                 connections.spawn(async move {

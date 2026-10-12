@@ -24,7 +24,9 @@ pub trait Connector: Send + Sync + 'static {
     fn describe(&self) -> String;
 }
 
-/// Server side: yields accepted connections.
+/// Server side: yields accepted connections. An error of kind
+/// [`io::ErrorKind::BrokenPipe`] means the listener has closed for good;
+/// any other fails only that accept.
 pub trait Listener: Send + 'static {
     fn accept(&mut self) -> BoxFuture<'_, io::Result<(BoxConnection, String)>>;
     fn describe(&self) -> String;
@@ -68,7 +70,8 @@ impl Listener for TcpListener {
     fn accept(&mut self) -> BoxFuture<'_, io::Result<(BoxConnection, String)>> {
         Box::pin(async move {
             let (stream, peer) = self.inner.accept().await?;
-            stream.set_nodelay(true)?;
+            // Only latency: a socket the peer already reset fails on read.
+            let _ = stream.set_nodelay(true);
             Ok((Box::new(stream) as BoxConnection, peer.to_string()))
         })
     }
