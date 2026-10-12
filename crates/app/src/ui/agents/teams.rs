@@ -205,7 +205,11 @@ impl TeamsSection {
             subscriptions.push(cx.observe(&host, |_, _, cx| cx.notify()));
         }
         self.community = current;
+        // Everything open belongs to the old community.
         self.modal = None;
+        self._modal.clear();
+        self.menu = None;
+        self.preview_error = None;
         self._subscriptions = subscriptions;
         cx.notify();
     }
