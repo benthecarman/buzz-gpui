@@ -21,19 +21,13 @@ use gstreamer_video::prelude::*;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Bytes pushed per `need-data` request at most.
 const CHUNK: usize = 256 * 1024;
 /// How long a poster frame may take to decode.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-
-pub(super) fn init() -> Result<(), String> {
-    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    INIT.get_or_init(|| gst::init().map_err(|error| error.to_string()))
-        .clone()
-}
 
 /// What a pipeline plays.
 #[derive(Clone)]
@@ -102,7 +96,7 @@ impl Engine {
     /// A paused pipeline over `source`. Errors (a missing decoder, a
     /// corrupt file, a failed read) arrive later as [`Event::Failed`].
     pub fn new(source: impl Into<Source>, kind: Kind) -> Result<Self, String> {
-        init()?;
+        crate::gst_bundle::init()?;
         let source = source.into();
         let uri = match &source {
             Source::Bytes(_) => "appsrc://",

@@ -127,11 +127,10 @@ pub fn preload() -> impl IntoElement {
 pub fn plop() {
     use gstreamer as gst;
     use gstreamer::prelude::*;
-    static PLAYER: OnceLock<Option<std::sync::Mutex<Option<gst::Element>>>> = OnceLock::new();
-    let Some(slot) = PLAYER.get_or_init(|| gst::init().ok().map(|()| std::sync::Mutex::new(None)))
-    else {
+    static PLAYER: std::sync::Mutex<Option<gst::Element>> = std::sync::Mutex::new(None);
+    if crate::gst_bundle::init().is_err() {
         return;
-    };
+    }
     let path = std::env::temp_dir().join("buzz-gpui-plop.m4a");
     if !path.exists() && std::fs::write(&path, PLOP).is_err() {
         return;
@@ -148,7 +147,7 @@ pub fn plop() {
     };
     // Video is never wanted; a missing audio device stays silent.
     playbin.set_property_from_str("flags", "audio+soft-volume");
-    if let Ok(mut current) = slot.lock()
+    if let Ok(mut current) = PLAYER.lock()
         && let Some(previous) = current.replace(playbin.clone())
     {
         let _ = previous.set_state(gst::State::Null);

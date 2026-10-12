@@ -108,7 +108,7 @@ fn source() -> String {
 impl Recorder {
     pub fn start() -> Result<Self, String> {
         // No GStreamer, or no audio source plugin, means no recorder here.
-        super::engine::init().map_err(|_| UNAVAILABLE.to_string())?;
+        crate::gst_bundle::init().map_err(|_| UNAVAILABLE.to_string())?;
         let description = format!(
             "{} ! audioconvert ! audioresample ! \
              audio/x-raw,format=S16LE,rate={SAMPLE_RATE},channels=1,layout=interleaved ! \
@@ -326,7 +326,7 @@ fn blank_user_data(mp4: &mut [u8], start: usize, end: Option<usize>) {
 }
 
 fn encode_to(samples: &[i16], path: &std::path::Path) -> Result<(), String> {
-    super::engine::init()?;
+    crate::gst_bundle::init()?;
     let location = path.to_str().ok_or("temporary path")?;
     let description = format!(
         "appsrc name=audio format=time \
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn encodes_the_mp4_the_relay_accepts() {
-        super::super::engine::init().unwrap();
+        crate::gst_bundle::init().unwrap();
         if gst::ElementFactory::find("avenc_aac").is_none() {
             // A system without gst-libav, or a stale registry cache that
             // blacklisted it (`GST_REGISTRY` points elsewhere).
@@ -503,7 +503,7 @@ mod tests {
             eprintln!("BUZZ_TEST_RELAY not set; skipping");
             return;
         };
-        super::super::engine::init().unwrap();
+        crate::gst_bundle::init().unwrap();
         if gst::ElementFactory::find("avenc_aac").is_none() {
             eprintln!("avenc_aac is unavailable; skipping");
             return;
