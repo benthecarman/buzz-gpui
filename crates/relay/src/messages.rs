@@ -434,15 +434,16 @@ fn unique_keys(
     pubkeys: &[String],
     error: &'static str,
 ) -> Result<Vec<Tag>, MessageError> {
-    if pubkeys.len() > 32 || pubkeys.iter().any(|key| !hex64(key)) {
-        return Err(Invalid(error));
-    }
+    // Count after removing repeats: a forwarded message may repeat a key.
     let mut seen = HashSet::new();
-    Ok(pubkeys
+    let unique: Vec<&String> = pubkeys
         .iter()
         .filter(|key| seen.insert(key.as_str()))
-        .map(|key| tag(&[name, key]))
-        .collect())
+        .collect();
+    if unique.len() > 32 || unique.iter().any(|key| !hex64(key)) {
+        return Err(Invalid(error));
+    }
+    Ok(unique.into_iter().map(|key| tag(&[name, key])).collect())
 }
 
 fn recipient_tags(pubkeys: &[String]) -> Result<Vec<Tag>, MessageError> {
@@ -978,6 +979,14 @@ mod tests {
     use nostr::prelude::{EventBuilder, FinalizeEvent, Keys, Kind, Tag as NostrTag, Timestamp};
 
     const CHANNEL: &str = "3f0c2a8e-6b1d-4c1e-9a55-0d4f6c2b9e11";
+
+    #[test]
+    fn key_limits_count_unique_keys() {
+        let repeated = vec!["a".repeat(64); 40];
+        assert_eq!(reference_tags(&repeated).unwrap().len(), 1);
+        let many: Vec<String> = (0..33).map(|n| format!("{n:064x}")).collect();
+        assert!(reference_tags(&many).is_err());
+    }
 
     fn origin() -> RelayOrigin {
         RelayOrigin::parse("https://relay.example").unwrap()
