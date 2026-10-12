@@ -506,18 +506,7 @@ impl Session {
             .spawn(async move {
                 let ctx = ops.context().await?;
                 let Some(previous) = ctx.outbox.get(&id) else {
-                    let events =
-                        read(&ctx, vec![dm::sent_filter(&id, &ctx.viewer, &channel)]).await?;
-                    return if events.iter().any(|event| {
-                        event.id == id
-                            && event.kind_u16() == kinds::CHAT
-                            && event.pubkey_hex() == ctx.viewer
-                            && event.has_tag("h", &channel)
-                    }) {
-                        Ok(())
-                    } else {
-                        Err("The earlier send could not be confirmed. Reconnect and retry.".into())
-                    };
+                    return dm_on_relay(&ctx, &id, &channel).await;
                 };
                 if previous.kind() != kinds::CHAT
                     || !previous
@@ -546,6 +535,9 @@ impl Session {
                                 "The message could not be confirmed. Retry to continue.".into()
                             }));
                         }
+                        // Dismissed or retired while we waited: only the
+                        // relay can still say whether it landed.
+                        None => return dm_on_relay(&ctx, &id, &channel).await,
                         _ => {}
                     }
                     changes.changed().await.map_err(|_| CLOSED.to_owned())?;
@@ -604,6 +596,22 @@ impl Session {
     pub async fn search_messages(&self, search: MessageSearch) -> Result<SearchOutcome, String> {
         let ops = self.ops();
         self.run(async move { ops.search(search).await }).await
+    }
+}
+
+/// Whether the viewer's chat message `id` reached `channel`, by an exact
+/// relay read, for a send the outbox no longer holds.
+async fn dm_on_relay(ctx: &Context, id: &EventId, channel: &str) -> Result<(), String> {
+    let events = read(ctx, vec![dm::sent_filter(id, &ctx.viewer, channel)]).await?;
+    if events.iter().any(|event| {
+        event.id == *id
+            && event.kind_u16() == kinds::CHAT
+            && event.pubkey_hex() == ctx.viewer
+            && event.has_tag("h", channel)
+    }) {
+        Ok(())
+    } else {
+        Err("The earlier send could not be confirmed. Reconnect and retry.".into())
     }
 }
 
