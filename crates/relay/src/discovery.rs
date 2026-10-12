@@ -22,6 +22,7 @@ use nostr::prelude::{Event, EventId};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{self, AtomicU64};
 
 /// Relay page size for roster and metadata reads (`store.ts:80`).
 pub const DISCOVERY_LIMIT: usize = 500;
@@ -224,6 +225,14 @@ pub struct Applied {
     pub access_changed: bool,
 }
 
+/// Source of [`DiscoveryState::revision`]. One counter for every state, so
+/// a state that replaces another never repeats a revision it handed out.
+static REVISIONS: AtomicU64 = AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    REVISIONS.fetch_add(1, atomic::Ordering::Relaxed)
+}
+
 /// NIP-29 discovery state for one viewer in one community
 /// (`discovery.ts:24-296`, plus the bookkeeping of `store.ts`
 /// `applyDiscovery`).
@@ -238,6 +247,8 @@ pub struct DiscoveryState {
     cached: HashSet<String>,
     /// Channels whose current metadata came from disk and must be re-read.
     pending_metadata: HashSet<String>,
+    /// Changes with anything the state holds; see [`Self::revision`].
+    revision: u64,
     access_revision: u64,
     overflow_revision: u64,
     rosters: BTreeMap<String, Verified>,
@@ -272,6 +283,7 @@ impl DiscoveryState {
             complete: false,
             cached: HashSet::new(),
             pending_metadata: HashSet::new(),
+            revision: next_revision(),
             access_revision: 0,
             overflow_revision: 0,
             rosters: BTreeMap::new(),
@@ -289,6 +301,17 @@ impl DiscoveryState {
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Changes whenever anything the state holds changes: summaries,
+    /// [`Self::channels`], access or participation. Unique across states,
+    /// so it keys caches of what was derived from it.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn touch(&mut self) {
+        self.revision = next_revision();
     }
 
     /// Bumped whenever some channel stops being accessible.
@@ -342,8 +365,12 @@ impl DiscoveryState {
             && (replaces || previous.as_ref().is_some_and(|p| p.id == event.id))
             && self.cached.remove(id);
         if !replaces {
+            if confirmed {
+                self.touch();
+            }
             return confirmed;
         }
+        self.touch();
         let id = id.to_owned();
         let accessible = self.can_access(&id);
         if is_roster {
@@ -409,10 +436,13 @@ impl DiscoveryState {
                 && let Some(id) = channel_id(event)
                 && self.metadata.get(id).is_some_and(|m| m.id == event.id)
             {
-                if cached {
-                    self.pending_metadata.insert(id.to_owned());
+                let pending = if cached {
+                    self.pending_metadata.insert(id.to_owned())
                 } else {
-                    self.pending_metadata.remove(id);
+                    self.pending_metadata.remove(id)
+                };
+                if pending {
+                    self.touch();
                 }
             }
         }
@@ -445,6 +475,7 @@ impl DiscoveryState {
             self.deny_all();
             return;
         }
+        self.touch();
         self.access_revision += 1;
         self.suspended.remove(id);
         self.denied.insert(id.to_owned());
@@ -458,6 +489,7 @@ impl DiscoveryState {
             return false;
         }
         self.suspended.insert(id.to_owned());
+        self.touch();
         self.access_revision += 1;
         true
     }
@@ -469,7 +501,11 @@ impl DiscoveryState {
     }
 
     pub fn resume(&mut self, id: &str) -> bool {
-        self.suspended.remove(id)
+        let resumed = self.suspended.remove(id);
+        if resumed {
+            self.touch();
+        }
+        resumed
     }
 
     /// The current roster version of every retained channel.
@@ -503,6 +539,7 @@ impl DiscoveryState {
             }
         }
         if changed {
+            self.touch();
             self.access_revision += 1;
         }
         changed
@@ -511,6 +548,7 @@ impl DiscoveryState {
     /// The roster list itself was refused (401/403): nothing retained is
     /// accessible any more.
     pub fn deny_all(&mut self) {
+        self.touch();
         self.access_revision += 1;
         self.complete = true;
         let ids: Vec<String> = self
@@ -529,6 +567,7 @@ impl DiscoveryState {
             return;
         }
         self.complete = true;
+        self.touch();
         self.access_revision += 1;
     }
 
@@ -676,6 +715,10 @@ impl DiscoveryState {
     /// confirmed. A fresh identical signed roster can grant it again.
     pub fn clear_cached(&mut self) {
         let mut cached: Vec<String> = self.cached.drain().collect();
+        if cached.is_empty() {
+            return;
+        }
+        self.touch();
         cached.sort();
         for id in cached {
             self.deny(&id);
@@ -776,7 +819,7 @@ impl DiscoveryState {
                 (event.kind_u16() == kinds::CHANNEL_METADATA && from_relay(event, id))
                     || member_roster(event, id)
             }) {
-                resolution.resumed |= self.suspended.remove(id);
+                resolution.resumed |= self.resume(id);
             }
         }
         let ordered: Vec<Verified> = events
@@ -1647,6 +1690,145 @@ mod tests {
         assert!(state.authorized("kept"));
         assert!(!state.authorized("omitted"));
         assert!(state.authorized("renewed"));
+    }
+
+    /// Every mutation that changes what the session derives from the state
+    /// moves the revision, and a no-op leaves it alone.
+    #[test]
+    fn revision_follows_every_visible_change() {
+        let f = Fixture::new();
+        let viewer = f.viewer_hex();
+        let ids = ["a", "b", "pub", "unknown"];
+        let observe = |state: &DiscoveryState| {
+            let per_id: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    (
+                        state.get(id),
+                        state.can_access(id),
+                        state.can_participate(id),
+                        state.authorized(id),
+                    )
+                })
+                .collect();
+            format!("{:?}{per_id:?}", state.channels())
+        };
+        let mut state = f.state();
+        let disk = f.member("a");
+        type Step<'a> = (&'a str, bool, Box<dyn Fn(&mut DiscoveryState) + 'a>);
+        let steps: Vec<Step> = vec![
+            (
+                "restore",
+                true,
+                Box::new(|s| {
+                    s.apply(std::slice::from_ref(&disk), None, None, true);
+                }),
+            ),
+            (
+                "confirm",
+                true,
+                Box::new(|s| {
+                    s.accept(&disk, false);
+                }),
+            ),
+            (
+                "join",
+                true,
+                Box::new(|s| {
+                    s.accept(&f.member("b"), false);
+                }),
+            ),
+            (
+                "rename",
+                true,
+                Box::new(|s| {
+                    s.accept(&f.named("b", "Beta"), false);
+                }),
+            ),
+            (
+                "stale rename",
+                false,
+                Box::new(|s| {
+                    s.accept(&f.metadata("b", T0 - 1, &[&["name", "Old"]]), false);
+                }),
+            ),
+            (
+                "roster",
+                true,
+                Box::new(|s| {
+                    s.accept(
+                        &f.roster("b", &[viewer.clone(), f.relay_hex()], T0 + 1),
+                        false,
+                    );
+                }),
+            ),
+            (
+                "preview",
+                true,
+                Box::new(|s| {
+                    s.accept(&f.metadata("pub", T0, &[&["public"]]), false);
+                }),
+            ),
+            (
+                "suspend",
+                true,
+                Box::new(|s| {
+                    s.suspend("pub");
+                }),
+            ),
+            (
+                "resume",
+                true,
+                Box::new(|s| {
+                    s.resume("pub");
+                }),
+            ),
+            ("deny", true, Box::new(|s| s.deny("a"))),
+            ("deny again", false, Box::new(|s| s.deny("a"))),
+            (
+                "leave",
+                true,
+                Box::new(|s| {
+                    s.accept(&f.roster("b", &[], T0 + 2), false);
+                }),
+            ),
+            (
+                "regrant",
+                true,
+                Box::new(|s| {
+                    s.accept(&f.roster("b", std::slice::from_ref(&viewer), T0 + 3), false);
+                }),
+            ),
+            ("deny all", true, Box::new(|s| s.deny_all())),
+        ];
+        for (name, changes, step) in &steps {
+            let (before, revision) = (observe(&state), state.revision());
+            step(&mut state);
+            assert_eq!(state.revision() != revision, *changes, "{name}");
+            assert!(observe(&state) == before || *changes, "{name}");
+        }
+
+        let mut state = f.state();
+        let revision = state.revision();
+        state.retain(&HashSet::new(), &RosterVersions::new());
+        assert_ne!(state.revision(), revision, "retain");
+        let revision = state.revision();
+        state.restrict_to_known();
+        assert_eq!(state.revision(), revision, "restrict when complete");
+        let mut state = f.state();
+        let revision = state.revision();
+        state.restrict_to_known();
+        assert_ne!(state.revision(), revision, "restrict");
+        let mut state = f.state();
+        state.apply(&[f.member("c")], None, None, true);
+        let revision = state.revision();
+        state.clear_cached();
+        assert_ne!(state.revision(), revision, "clear cached");
+        let revision = state.revision();
+        state.clear_cached();
+        assert_eq!(state.revision(), revision, "clear nothing");
+        // A replacement state never repeats a revision.
+        assert_ne!(f.state().revision(), f.state().revision());
     }
 
     #[test]
