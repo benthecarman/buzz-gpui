@@ -9,11 +9,16 @@ use crate::socket::Filter;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Authors per read.
 pub const CHUNK: usize = 500;
 /// Profiles retained per session.
 pub const CAPACITY: usize = 1024;
+/// How long an author whose read found no profile is not asked again.
+const ABSENT_FOR: Duration = Duration::from_secs(120);
+/// Authors remembered as having no profile.
+const ABSENT_CAPACITY: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Profile {
@@ -179,6 +184,9 @@ pub struct ProfileDirectory {
     events: ByteLru<Verified>,
     snapshot: Profiles,
     in_flight: HashSet<String>,
+    /// Authors a read found no profile for, and until when they are not
+    /// asked again. A failed read counts too, which backs it off.
+    absent: HashMap<String, Instant>,
 }
 
 impl Default for ProfileDirectory {
@@ -187,6 +195,7 @@ impl Default for ProfileDirectory {
             events: ByteLru::new(CAPACITY, MAX_BYTES),
             snapshot: Profiles::default(),
             in_flight: HashSet::new(),
+            absent: HashMap::new(),
         }
     }
 }
@@ -201,17 +210,21 @@ impl ProfileDirectory {
         self.events.peek(pubkey)
     }
 
-    /// Filters for the ids not already known or being fetched, in chunks of
-    /// 500 authors. The ids are marked in flight until
-    /// [`Self::finished`].
+    /// Filters for the ids not already known, being fetched or recently
+    /// found absent, in chunks of 500 authors. The ids are marked in
+    /// flight until [`Self::finished`].
     pub fn ensure<'a>(
         &mut self,
         ids: impl IntoIterator<Item = &'a str>,
     ) -> Vec<(Vec<String>, Filter)> {
+        let now = Instant::now();
         let mut missing: Vec<String> = ids
             .into_iter()
             .filter(|id| {
-                is_hex(id, 64) && !self.events.contains(id) && !self.in_flight.contains(*id)
+                is_hex(id, 64)
+                    && !self.events.contains(id)
+                    && !self.in_flight.contains(*id)
+                    && self.absent.get(*id).is_none_or(|until| *until <= now)
             })
             .map(str::to_string)
             .collect();
@@ -227,6 +240,7 @@ impl ProfileDirectory {
     /// Re-reads every known id, e.g. after a reconnect. Current profiles
     /// stay until something newer arrives.
     pub fn refresh(&mut self) -> Vec<(Vec<String>, Filter)> {
+        self.absent.clear();
         let mut known: Vec<String> = self.events.keys();
         known.sort();
         self.in_flight.extend(known.iter().cloned());
@@ -236,9 +250,18 @@ impl ProfileDirectory {
             .collect()
     }
 
+    /// Ends a read of `ids`. Its events must be given to [`Self::accept`]
+    /// next; until then every id without a profile counts as absent.
     pub fn finished(&mut self, ids: &[String]) {
+        let now = Instant::now();
+        if self.absent.len() + ids.len() > ABSENT_CAPACITY {
+            self.absent.retain(|_, until| *until > now);
+        }
         for id in ids {
             self.in_flight.remove(id);
+            if !self.events.contains(id) && self.absent.len() < ABSENT_CAPACITY {
+                self.absent.insert(id.clone(), now + ABSENT_FOR);
+            }
         }
     }
 
@@ -247,6 +270,7 @@ impl ProfileDirectory {
         let mut changed: Vec<String> = Vec::new();
         for event in events.iter().filter(|e| e.kind_u16() == kinds::PROFILE) {
             let pubkey = event.pubkey_hex();
+            self.absent.remove(&pubkey);
             let newer = self
                 .events
                 .peek(&pubkey)
@@ -319,6 +343,7 @@ impl ProfileDirectory {
     pub fn clear(&mut self) {
         self.events.clear();
         self.in_flight.clear();
+        self.absent.clear();
         self.snapshot = Profiles::default();
     }
 }
@@ -506,6 +531,16 @@ mod tests {
         assert_eq!(reads[0].0, vec![other.clone()]);
         assert!(directory.ensure([other.as_str()]).is_empty());
         directory.finished(std::slice::from_ref(&other));
+        // A read that found nothing is not repeated until a refresh.
+        assert!(directory.ensure([other.as_str()]).is_empty());
+        directory.refresh();
         assert_eq!(directory.ensure([other.as_str()]).len(), 1);
+        directory.finished(std::slice::from_ref(&other));
+        let late = Keys::generate();
+        let late_id = late.public_key().to_hex();
+        assert_eq!(directory.ensure([late_id.as_str()]).len(), 1);
+        directory.finished(std::slice::from_ref(&late_id));
+        directory.accept(&[profile(&late, r#"{"name":"l"}"#, 1, vec![])]);
+        assert!(!directory.absent.contains_key(&late_id));
     }
 }
