@@ -82,10 +82,13 @@ impl TerminalView {
         let focus_in = cx.on_focus(&focus, window, |this, _, cx| this.focused(true, cx));
         let focus_out = cx.on_blur(&focus, window, |this, _, cx| this.focused(false, cx));
         let output = cx.observe(&screen, |_, _, cx| cx.notify());
-        // Leaving the page uses up a splash that has not shown yet.
+        // Leaving the page uses up a splash that has not shown yet, and
+        // the screen no longer counts as focused (no blur comes).
         let release = cx.on_release(|this, cx| {
-            this.screen
-                .update(cx, |screen, _| screen.splash_consumed = true);
+            this.screen.update(cx, |screen, _| {
+                screen.splash_consumed = true;
+                screen.set_focused(false);
+            });
         });
         Self {
             screen,

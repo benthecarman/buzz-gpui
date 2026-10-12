@@ -203,7 +203,8 @@ pub struct Effects {
     /// The emulator's replies to the shell (status reports, colour
     /// queries), which belong to the PTY whoever is looking.
     pub replies: Vec<String>,
-    /// OSC 52 text for the clipboard.
+    /// OSC 52 text for the clipboard, only while the screen has focus:
+    /// a session in the background must not fill the clipboard unseen.
     pub clipboard: Option<String>,
 }
 
@@ -301,7 +302,9 @@ impl Screen {
                         cell_height: cell.1,
                     }));
                 }
-                Event::ClipboardStore(_, text) => effects.clipboard = Some(text),
+                Event::ClipboardStore(_, text) if self.term.is_focused => {
+                    effects.clipboard = Some(text);
+                }
                 _ => {}
             }
         }
@@ -569,6 +572,19 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    #[test]
+    fn only_a_focused_screen_copies_to_the_clipboard() {
+        let mut screen = Screen::new(20, 3);
+        let theme = theme();
+        let store = b"\x1b]52;c;aGk=\x07";
+        assert_eq!(screen.feed(store, &theme, (7, 18)).clipboard, None);
+        screen.set_focused(true);
+        assert_eq!(
+            screen.feed(store, &theme, (7, 18)).clipboard.as_deref(),
+            Some("hi")
+        );
     }
 
     #[test]
