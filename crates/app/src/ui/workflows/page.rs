@@ -49,7 +49,7 @@ pub struct WorkflowCommunity {
     run: bool,
     filter_open: bool,
     landing: Entity<LandingView>,
-    channel: Option<(String, Entity<WorkflowChannel>)>,
+    channel: Option<(String, Entity<WorkflowChannel>, Subscription)>,
     secrets: Entity<SecretsView>,
     create: Option<Editor>,
     picker: Option<Picker>,
@@ -179,19 +179,17 @@ impl WorkflowCommunity {
                     cx,
                 )
             });
-            self._subscriptions
-                .push(
-                    cx.subscribe(&view, |this, _, event: &ChannelEvent, cx| match event {
-                        ChannelEvent::Close => this.open_channel(None, Opened::Browse, false, cx),
-                        ChannelEvent::Delete(definition) => this.delete(definition.clone(), cx),
-                        ChannelEvent::SaveReadback { channel, revision } => {
-                            let (channel, revision) = (channel.clone(), revision.clone());
-                            this.landing
-                                .update(cx, |landing, _| landing.readback(&channel, &revision));
-                        }
-                    }),
-                );
-            self.channel = Some((key, view));
+            let subscription =
+                cx.subscribe(&view, |this, _, event: &ChannelEvent, cx| match event {
+                    ChannelEvent::Close => this.open_channel(None, Opened::Browse, false, cx),
+                    ChannelEvent::Delete(definition) => this.delete(definition.clone(), cx),
+                    ChannelEvent::SaveReadback { channel, revision } => {
+                        let (channel, revision) = (channel.clone(), revision.clone());
+                        this.landing
+                            .update(cx, |landing, _| landing.readback(&channel, &revision));
+                    }
+                });
+            self.channel = Some((key, view, subscription));
         }
         cx.notify();
     }
@@ -587,7 +585,7 @@ impl Render for WorkflowCommunity {
         if !self.channels.is_empty() && !browsing {
             content = content.child(self.landing.clone());
         }
-        if let Some((_, view)) = &self.channel {
+        if let Some((_, view, _)) = &self.channel {
             content = content.child(view.clone());
         }
         let create = if self.create.is_some() {

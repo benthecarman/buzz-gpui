@@ -46,9 +46,11 @@ const NAME_LIMIT: usize = 120;
 pub struct PersonalGroupsSettings {
     community: Option<Entity<Community>>,
     kit: Arc<MeKitSnapshot>,
-    dialog: Option<Entity<GroupsDialog>>,
+    /// The open dialog and its close subscription.
+    dialog: Option<(Entity<GroupsDialog>, Subscription)>,
     _tasks: Vec<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    _community: Option<Subscription>,
+    _app: Subscription,
 }
 
 impl PersonalGroupsSettings {
@@ -58,9 +60,8 @@ impl PersonalGroupsSettings {
             kit: Arc::default(),
             dialog: None,
             _tasks: Vec::new(),
-            _subscriptions: vec![
-                cx.observe_global_in::<AppState>(window, |this, _, cx| this.follow(cx)),
-            ],
+            _community: None,
+            _app: cx.observe_global_in::<AppState>(window, |this, _, cx| this.follow(cx)),
         };
         this.follow(cx);
         this
@@ -75,6 +76,7 @@ impl PersonalGroupsSettings {
         self.community = current.clone();
         self.dialog = None;
         self._tasks.clear();
+        self._community = None;
         if let Some(community) = current {
             let kit = community.read(cx).session.me_kit().clone();
             kit.ensure();
@@ -83,9 +85,7 @@ impl PersonalGroupsSettings {
                 cx,
                 |this: &mut Self, value| this.kit = value,
             ));
-            self._subscriptions.truncate(1);
-            self._subscriptions
-                .push(cx.observe(&community, |_, _, cx| cx.notify()));
+            self._community = Some(cx.observe(&community, |_, _, cx| cx.notify()));
         }
         cx.notify();
     }
@@ -96,12 +96,11 @@ impl PersonalGroupsSettings {
         };
         let legacy = community.read(cx).snapshot.sidebar.data.clone();
         let dialog = cx.new(|cx| GroupsDialog::new(community, legacy, window, cx));
-        self._subscriptions
-            .push(cx.subscribe(&dialog, |this, _, _: &Closed, cx| {
-                this.dialog = None;
-                cx.notify();
-            }));
-        self.dialog = Some(dialog);
+        let subscription = cx.subscribe(&dialog, |this, _, _: &Closed, cx| {
+            this.dialog = None;
+            cx.notify();
+        });
+        self.dialog = Some((dialog, subscription));
         cx.notify();
     }
 }
@@ -207,7 +206,7 @@ impl Render for PersonalGroupsSettings {
             card.into_any_element(),
         ];
         children.extend(status);
-        if let Some(dialog) = &self.dialog {
+        if let Some((dialog, _)) = &self.dialog {
             let weak = dialog.downgrade();
             let close: Dismiss = Rc::new(move |_, cx| {
                 let _ = weak.update(cx, |dialog, cx| dialog.close(cx));
