@@ -159,6 +159,35 @@ fn sign_out_without_wipe_removes_only_the_key_and_marker() {
     assert_eq!(listing(dir.path()), before);
 }
 
+thread_local! {
+    static FORGOTTEN: Cell<usize> = const { Cell::new(0) };
+}
+
+fn forget_hosts() -> Result<(), String> {
+    FORGOTTEN.with(|count| count.set(count.get() + 1));
+    Ok(())
+}
+
+#[test]
+fn only_an_erase_forgets_remote_hosts_and_a_failure_keeps_the_marker() {
+    for wipe in [false, true] {
+        let (_dir, mut paths) = fixture();
+        paths.forget_hosts = forget_hosts;
+        FORGOTTEN.with(|count| count.set(0));
+        mark(&paths, wipe, false);
+        assert_eq!(finish_pending(&paths, no_agents, || Ok(())), Ok(()));
+        assert_eq!(FORGOTTEN.with(Cell::get), usize::from(wipe));
+    }
+    let (_dir, mut paths) = fixture();
+    paths.forget_hosts = || Err("keyring locked".into());
+    mark(&paths, true, false);
+    assert_eq!(
+        finish_pending(&paths, no_agents, || Ok(())),
+        Err(FAILED.to_owned())
+    );
+    assert!(paths.marker.exists());
+}
+
 #[test]
 fn wipe_keeps_agents_unless_they_are_removed_too() {
     for remove_agents in [false, true] {

@@ -827,6 +827,23 @@ impl HostConnection {
     }
 }
 
+/// For an erase: deletes every remote host's token from the keyring and
+/// removes the hosts from the config file, which can hold tokens too. No
+/// keyring means no token was saved in it.
+pub fn forget_remote_hosts() -> Result<(), String> {
+    let remotes = Config::load().hosts;
+    for remote in &remotes {
+        match buzz_keychain::delete(HOST_TOKEN_SERVICE, &remote.address) {
+            Ok(()) | Err(buzz_keychain::Error::Absent | buzz_keychain::Error::Unavailable) => {}
+            Err(error) => return Err(format!("delete the token for {}: {error:?}", remote.name)),
+        }
+    }
+    if remotes.is_empty() {
+        return Ok(());
+    }
+    crate::config::save_hosts(&[])
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

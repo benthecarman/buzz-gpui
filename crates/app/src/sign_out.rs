@@ -106,6 +106,9 @@ pub(crate) struct Paths {
     app_data: PathBuf,
     /// Other app-owned folders: local data and caches.
     others: Vec<PathBuf>,
+    /// An erase's last step: forgets remote hosts and their tokens, which
+    /// live outside these folders.
+    forget_hosts: fn() -> Result<(), String>,
 }
 
 /// One marker per app and key store.
@@ -130,13 +133,16 @@ fn finished(path: &Path) -> std::io::Result<u64> {
 impl Paths {
     pub(crate) fn resolve() -> Option<Self> {
         let data = dirs::data_dir()?;
-        Some(Self::under(
-            &data,
-            vec![
-                dirs::data_local_dir()?.join(IDENTIFIER),
-                dirs::cache_dir()?.join(IDENTIFIER),
-            ],
-        ))
+        Some(Self {
+            forget_hosts: crate::hosts::forget_remote_hosts,
+            ..Self::under(
+                &data,
+                vec![
+                    dirs::data_local_dir()?.join(IDENTIFIER),
+                    dirs::cache_dir()?.join(IDENTIFIER),
+                ],
+            )
+        })
     }
 
     fn under(data: &Path, mut others: Vec<PathBuf>) -> Self {
@@ -152,6 +158,7 @@ impl Paths {
             ownership: app_data.join("host").join("agent-ownership"),
             app_data,
             others,
+            forget_hosts: || Ok(()),
         }
     }
 
@@ -652,6 +659,9 @@ fn finish(
         remove_trash(path, kept)
             .and_then(|()| clear(path, kept))
             .map_err(|error| format!("delete erased {}: {error}", path.display()))?;
+    }
+    if choices.wipe {
+        (paths.forget_hosts)().map_err(|error| format!("forget remote hosts: {error}"))?;
     }
     // Recorded before the marker goes; a resumed attempt records it again.
     OpenOptions::new()
