@@ -50,6 +50,8 @@ pub struct Directory {
     pub names: Arc<Names>,
     /// For lookups a body starts: channels behind links, missing profiles.
     pub session: Option<Arc<Session>>,
+    /// The agent names and channels, hashed once for each body's cache key.
+    fingerprint: u64,
 }
 
 impl Directory {
@@ -58,6 +60,7 @@ impl Directory {
     pub fn new(profiles: Profiles, channels: Arc<[ChannelSummary]>, media: Media) -> Self {
         let names = identity::names(&profiles, &AgentLibrary::default(), "", None, None);
         Self {
+            fingerprint: fingerprint(&names, &channels),
             profiles,
             channels,
             media,
@@ -77,9 +80,11 @@ impl Directory {
             Some(&community.origin),
             members,
         );
+        let channels = community.snapshot.channels.clone();
         Self {
+            fingerprint: fingerprint(&names, &channels),
             profiles,
-            channels: community.snapshot.channels.clone(),
+            channels,
             media: community.session.media().clone(),
             names,
             session: Some(community.session.clone()),
@@ -295,15 +300,7 @@ fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
             .map(|p| &p.name)
             .hash(&mut hasher);
     }
-    let mut agents: Vec<(&str, &str)> = directory.names.agent_names().collect();
-    agents.sort();
-    agents.hash(&mut hasher);
-    for channel in directory.channels.iter() {
-        channel.id.hash(&mut hasher);
-        channel.name.hash(&mut hasher);
-        channel.archived.hash(&mut hasher);
-        channel.private.hash(&mut hasher);
-    }
+    directory.fingerprint.hash(&mut hasher);
     let key = hasher.finish();
     if let Some(document) = PREPARED.with_borrow(|cache| cache.get(&key).cloned()) {
         return document;
@@ -316,6 +313,22 @@ fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
         cache.insert(key, document.clone());
     });
     document
+}
+
+/// What a body reads from the directory besides its own recipients'
+/// profiles: agent names and channel links.
+fn fingerprint(names: &Names, channels: &[ChannelSummary]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let mut agents: Vec<(&str, &str)> = names.agent_names().collect();
+    agents.sort();
+    agents.hash(&mut hasher);
+    for channel in channels {
+        channel.id.hash(&mut hasher);
+        channel.name.hash(&mut hasher);
+        channel.archived.hash(&mut hasher);
+        channel.private.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn identities(row: &MessageRow) -> Vec<String> {
