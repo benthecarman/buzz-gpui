@@ -24,7 +24,7 @@ use super::pages::{self, Navigation, Page, PageSpec, Placement};
 use crate::community::{AppState, Community};
 use crate::mirror::mirror;
 use board::SessionWork;
-use buzz_relay_client::session::MeKitSnapshot;
+use buzz_relay_client::session::{MeKit, MeKitSnapshot};
 use buzz_relay_client::sidebar_store::SidebarState;
 use buzz_relay_client::{ChannelSummary, RosterStatus, SessionStatus};
 use buzz_ui::{ActiveTheme, Button, Icon, IconName, TypeStyled};
@@ -388,18 +388,12 @@ impl MePage {
         };
         let snapshot = community.read(cx).snapshot.clone();
         let session = community.read(cx).session.clone();
-        if !model.kit.ready() {
-            let error = model.kit.error().map(str::to_owned);
+        if let Some((text, retry)) =
+            placement_retry("me-retry-placement", &model.kit, session.me_kit())
+        {
             return centered()
-                .child(subtle(
-                    error.unwrap_or_else(|| "Loading Me placement…".into()),
-                    cx,
-                ))
-                .child(
-                    Button::new("me-retry-placement", "Retry Me").on_click(move |_, _, _| {
-                        drop(session.me_kit().refresh());
-                    }),
-                )
+                .child(subtle(text, cx))
+                .child(retry)
                 .into_any_element();
         }
         if snapshot.roster == RosterStatus::Loading {
@@ -429,6 +423,25 @@ impl MePage {
             )
             .into_any_element()
     }
+}
+
+/// While Me's placement is not read: what to say (the error, or that it
+/// is loading) and a "Retry Me" button that reads it again.
+fn placement_retry(
+    id: &'static str,
+    kit: &MeKitSnapshot,
+    me_kit: &MeKit,
+) -> Option<(String, Button)> {
+    if kit.ready() {
+        return None;
+    }
+    let text = kit
+        .error()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "Loading Me placement…".into());
+    let me_kit = me_kit.clone();
+    let retry = Button::new(id, "Retry Me").on_click(move |_, _, _| drop(me_kit.refresh()));
+    Some((text, retry))
 }
 
 /// A centered column of status text (`.empty`).

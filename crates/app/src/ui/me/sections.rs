@@ -1244,8 +1244,7 @@ impl Render for MeSidebar {
             }
             RosterStatus::Ready => {}
         }
-        if !kit.ready() {
-            let retry = session.me_kit().clone();
+        if let Some((text, retry)) = super::placement_retry("me-retry-me", &kit, session.me_kit()) {
             content = content.child(
                 div()
                     .flex()
@@ -1255,16 +1254,8 @@ impl Render for MeSidebar {
                     .mx(rems(0.5))
                     .my(rems(0.5))
                     .text_body()
-                    .child(
-                        kit.error()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| "Loading Me placement…".into()),
-                    )
-                    .child(
-                        Button::new("me-retry-me", "Retry Me").on_click(move |_, _, _| {
-                            drop(retry.refresh());
-                        }),
-                    ),
+                    .child(text)
+                    .child(retry),
             );
         }
         if conversations.is_empty() && snapshot.roster == RosterStatus::Ready && kit.ready() {

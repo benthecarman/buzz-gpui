@@ -707,21 +707,10 @@ impl SessionWork {
         let c = *cx.colors();
         let model = self.model.read(cx);
         let session = self.community.read(cx).session.clone();
-        if !model.kit.ready() {
-            let text = model
-                .kit
-                .error()
-                .map(str::to_owned)
-                .unwrap_or_else(|| "Loading Me placement…".into());
-            return Some(
-                notice(text, cx)
-                    .child(
-                        Button::new("me-work-retry", "Retry Me").on_click(move |_, _, _| {
-                            drop(session.me_kit().refresh());
-                        }),
-                    )
-                    .into_any_element(),
-            );
+        if let Some((text, retry)) =
+            super::placement_retry("me-work-retry", &model.kit, session.me_kit())
+        {
+            return Some(notice(text, cx).child(retry).into_any_element());
         }
         if !model.placed(&self.channel.id) {
             let id = self.channel.id.clone();
