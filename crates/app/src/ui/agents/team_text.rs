@@ -7,13 +7,14 @@
 //! agent; a running member shows Restart required instead.
 
 use super::catalog::community_agents;
+use super::editor::connected;
 use super::team_ops::{import_host, preview};
 use super::teams::TeamsState;
 use crate::community::{AppState, Community};
 use crate::hosts::control::Status;
 use crate::hosts::{HostConnection, Hosts};
 use buzz_host::api::{Agent, Request, Response, TeamCatalogEntry, TeamMeta};
-use buzz_host_rpc::{ConnectionState, RpcError};
+use buzz_host_rpc::RpcError;
 use buzz_relay_client::session::{RosterStatus, Session, TeamKit, TeamsStatus};
 use buzz_relay_client::teams::Team;
 use gpui_kit::*;
@@ -186,10 +187,6 @@ fn delivery_conflict(texts: &[TeamText], agents: &[Agent]) -> Option<String> {
         }
     }
     None
-}
-
-fn connected(host: &Entity<HostConnection>, cx: &App) -> bool {
-    matches!(host.read(cx).state, ConnectionState::Connected { .. })
 }
 
 /// Writes every team's current text into its members' settings and
