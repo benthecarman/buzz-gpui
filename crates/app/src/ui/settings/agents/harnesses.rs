@@ -177,6 +177,7 @@ fn hint_text(hint: &str, c: &Colors) -> StyledText {
 /// changes.
 #[derive(Clone, Debug, PartialEq)]
 struct AuthKey {
+    shown: u64,
     report: Option<InstallReport>,
     checks: u64,
 }
@@ -204,6 +205,9 @@ pub struct Harnesses {
     checking: bool,
     /// Check again presses, which also check sign-ins again.
     checks: u64,
+    /// Bumped each time another host shows, so work started for the one
+    /// before is dropped.
+    shown: u64,
     claude: SignIn,
     codex: SignIn,
     catalog_open: bool,
@@ -226,6 +230,7 @@ impl Harnesses {
             host_open: false,
             checking: false,
             checks: 0,
+            shown: 0,
             claude: SignIn::default(),
             codex: SignIn::default(),
             catalog_open: false,
@@ -256,7 +261,9 @@ impl Harnesses {
 
     /// Shows `host`'s harnesses, or none, checked afresh.
     pub fn show(&mut self, host: Option<Entity<HostConnection>>, cx: &mut Context<Self>) {
+        let shown = self.shown + 1;
         *self = Self::new(host, cx);
+        self.shown = shown;
         cx.notify();
     }
 
@@ -317,10 +324,14 @@ impl Harnesses {
             return;
         };
         self.checking = true;
+        let shown = self.shown;
         let refresh = host.update(cx, |host, cx| host.refresh(cx));
         cx.spawn(async move |this, cx| {
             refresh.await;
             let _ = this.update(cx, |this, cx| {
+                if this.shown != shown {
+                    return;
+                }
                 this.checking = false;
                 this.checks += 1;
                 cx.notify();
@@ -357,6 +368,7 @@ impl Harnesses {
             return;
         }
         let key = AuthKey {
+            shown: self.shown,
             report: install.report.clone(),
             checks: self.checks,
         };
