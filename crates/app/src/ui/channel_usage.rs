@@ -425,7 +425,7 @@ impl ChannelUsage {
             Some(profile) if !profile.name_is_fallback && !profile.name.is_empty() => {
                 profile.name.clone()
             }
-            _ => short_npub(agent).unwrap_or_else(|| "Agent".into()),
+            _ => super::keys::format_public_key(agent).unwrap_or_else(|| "Agent".into()),
         }
     }
 
@@ -562,13 +562,6 @@ impl ChannelUsage {
         });
         div().relative().min_w_0().child(trigger).children(menu)
     }
-}
-
-/// `formatPublicKey`: "npub…" and the last three characters.
-fn short_npub(pubkey: &str) -> Option<String> {
-    use nostr::prelude::{PublicKey, ToBech32};
-    let npub = PublicKey::from_hex(pubkey).ok()?.to_bech32().ok()?;
-    Some(format!("npub…{}", &npub[npub.len() - 3..]))
 }
 
 /// `.details h2, .details h3`: label-sized, body weight.
@@ -1162,7 +1155,5 @@ mod tests {
         assert_eq!(turn_label(&unnumbered), "—");
         assert_eq!(total(Some(row)), "Input 10 / Output —");
         assert_eq!(total(None), "—");
-        assert_eq!(short_npub("nope"), None);
-        assert!(short_npub(&key(1)).unwrap().starts_with("npub…"));
     }
 }

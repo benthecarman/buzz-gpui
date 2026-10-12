@@ -13,6 +13,7 @@ mod agent;
 pub use agent::parse_instance_target;
 
 use super::channel_panels::{self, ChannelPanel, Opening};
+use super::keys::npub;
 use super::media;
 use super::message::channel_icon;
 use crate::community::Community;
@@ -1509,14 +1510,6 @@ pub fn presence_label(state: PresenceState) -> &'static str {
         PresenceState::Away => "Away",
         PresenceState::Offline => "Offline",
     }
-}
-
-/// The full `npub1…`, or the key itself if it is not one.
-fn npub(pubkey: &str) -> String {
-    PublicKey::from_hex(pubkey)
-        .ok()
-        .and_then(|key| key.to_bech32().ok())
-        .unwrap_or_else(|| pubkey.to_string())
 }
 
 /// `formatPublicKey`: `npub1abcd…wxyz`.

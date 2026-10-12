@@ -3,6 +3,7 @@
 
 use super::emoji_picker::{self, EmojiPicker, QuickReaction};
 use super::identity::Names;
+use super::keys::npub;
 use super::markdown::{self, Directory};
 use super::outbox_ops::{Ops, SharedOps};
 use super::{media, membership, navigation, renderers, time};
@@ -16,7 +17,6 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use nostr::nips::nip19::ToBech32;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -652,13 +652,6 @@ fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App)
     )
     .children(renderers::markers(row, cx))
     .into_any_element()
-}
-
-fn npub(hex: &str) -> String {
-    nostr::prelude::PublicKey::from_hex(hex)
-        .ok()
-        .and_then(|key| key.to_bech32().ok())
-        .unwrap_or_else(|| hex.to_string())
 }
 
 /// The workflow info button and its popover (`WorkflowByline.tsx`).

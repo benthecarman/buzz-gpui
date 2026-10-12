@@ -5,11 +5,10 @@
 //!
 //! Names are display only; they never select recipients or grant control.
 
+use super::keys::npub;
 use crate::hosts::Hosts;
 use buzz_relay_client::{Profiles, RelayOrigin};
 use gpui_kit::App;
-use nostr::nips::nip19::ToBech32;
-use nostr::prelude::PublicKey;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -204,13 +203,6 @@ pub fn resolve(
 /// byte-order mark, which Rust's `trim` keeps.
 fn js_trim(text: &str) -> &str {
     text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
-}
-
-fn npub(hex: &str) -> String {
-    PublicKey::from_hex(hex)
-        .ok()
-        .and_then(|key| key.to_bech32().ok())
-        .unwrap_or_else(|| hex.to_string())
 }
 
 /// The viewer's agents, as every connected host lists them.
