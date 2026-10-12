@@ -406,6 +406,9 @@ fn open_channel(origin: String, channel: String, window: &mut Window, cx: &mut A
     });
 }
 
+/// How long the activity waits for the agent's channel to show.
+const ACTIVITY_WAIT: Duration = Duration::from_secs(10);
+
 /// Opens the channel the agent last worked in, then its activity beside
 /// it, once the conversation shows.
 fn open_activity(
@@ -415,20 +418,31 @@ fn open_activity(
     window: &mut Window,
     cx: &mut App,
 ) {
-    open_channel(origin, channel.clone(), window, cx);
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(Duration::from_millis(300))
-            .await;
-        cx.update(|cx| {
-            for window in cx.windows() {
-                let _ = window.update(cx, |_, window, cx| {
-                    crate::ui::agent_activity::open(&agent, Some(&channel), None, window, cx)
-                });
+    let _ = window;
+    let url = crate::agent_activity::target(&agent, Some(&channel), None);
+    navigation::with_workspace(cx, move |workspace, window, cx| {
+        workspace.navigate(Target::channel(Some(origin), channel), window, cx);
+        // Navigating closes the old conversation, so a panel link opens
+        // only once the new one shows, which can take a fetch.
+        if workspace.open_panel_link(&url, window, cx) {
+            return;
+        }
+        let opened = Rc::new(std::cell::Cell::new(false));
+        let watch = cx.observe_in(&cx.entity(), window, {
+            let opened = opened.clone();
+            move |workspace, _, window, cx| {
+                if !opened.get() && workspace.open_panel_link(&url, window, cx) {
+                    opened.set(true);
+                }
             }
         });
-    })
-    .detach();
+        // Gives up when the channel never shows.
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(ACTIVITY_WAIT).await;
+            drop(watch);
+        })
+        .detach();
+    });
 }
 
 /// A direct message with the agent in the selected community.
