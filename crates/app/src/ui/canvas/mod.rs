@@ -2,8 +2,8 @@
 //! Markdown, opened from Channel actions → "View canvas".
 //!
 //! The draft and the revision it started from are saved locally under
-//! `canvas-draft-v1:<channel>` on every edit, so closing the dialog or the
-//! app keeps them. Saves name that base revision; when the saved Canvas
+//! `canvas-draft-v1:<channel>` once typing pauses, and when the dialog
+//! closes, so closing the dialog or the app keeps them. Saves name that base revision; when the saved Canvas
 //! moved on, the draft is kept and only an explicit "Discard and reload"
 //! replaces it. The History tab ([`history`]) lists saved revisions and
 //! restores one as a new revision.
@@ -14,13 +14,15 @@ use super::modal::{Dismissed, error};
 use super::overlay::{self, Dismiss};
 use crate::community::{AppState, Community};
 use buzz_relay_client::canvas::{CanvasError, Revision};
-use buzz_relay_client::{EventId, Partition};
+use buzz_relay_client::{EventId, Partition, Store};
 use buzz_ui::{ActiveTheme, Button, Dialog, Surface, Tab, TabVariant, Tabs, TextArea, TypeStyled};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::*;
 use history::History;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 const INTRO: &str = "Shared Markdown for this channel. Saves and restores check the loaded revision on supporting relays.";
 const STALE: &str = "Canvas changed since this draft began. Your draft is kept. Copy any edits you want to keep before reloading the saved Canvas.";
@@ -47,6 +49,100 @@ fn parse_draft(json: &str) -> Option<SavedDraft> {
         _ => return None,
     };
     Some(SavedDraft { content, base })
+}
+
+/// How long typing may pause before a draft is written.
+const DRAFT_DELAY: Duration = Duration::from_millis(300);
+
+struct PendingDraft<T> {
+    store: Store,
+    partition: Partition,
+    key: String,
+    draft: Option<T>,
+}
+
+impl<T: Serialize> PendingDraft<T> {
+    fn write(self) {
+        let json = self
+            .draft
+            .map(|draft| serde_json::to_string(&draft).expect("drafts serialize"));
+        let written = self
+            .store
+            .set_view_state(&self.partition, &self.key, json.as_deref());
+        if let Err(error) = written {
+            tracing::warn!(%error, key = %self.key, "could not save a draft");
+        }
+    }
+}
+
+/// Writes a locally saved draft once typing pauses instead of on every
+/// keystroke. What is still pending is written on [`flush`] and when the
+/// writer drops, so closing keeps the last edit.
+///
+/// [`flush`]: DraftWriter::flush
+pub(crate) struct DraftWriter<T: Serialize + 'static> {
+    pending: Rc<RefCell<Option<PendingDraft<T>>>>,
+    _timer: Option<Task<()>>,
+}
+
+impl<T: Serialize + 'static> Default for DraftWriter<T> {
+    fn default() -> Self {
+        Self {
+            pending: Rc::default(),
+            _timer: None,
+        }
+    }
+}
+
+impl<T: Serialize + 'static> DraftWriter<T> {
+    /// Saves `draft` under `key` (`None` removes it): soon when `later`,
+    /// otherwise now. Either replaces a write still pending.
+    pub(crate) fn save(
+        &mut self,
+        partition: Partition,
+        key: String,
+        draft: Option<T>,
+        later: bool,
+        cx: &App,
+    ) {
+        let draft = PendingDraft {
+            store: cx.global::<AppState>().store.clone(),
+            partition,
+            key,
+            draft,
+        };
+        if !later {
+            self.pending.borrow_mut().take();
+            self._timer = None;
+            draft.write();
+            return;
+        }
+        *self.pending.borrow_mut() = Some(draft);
+        let pending = self.pending.clone();
+        let executor = cx.background_executor().clone();
+        self._timer = Some(cx.spawn(async move |_| {
+            executor.timer(DRAFT_DELAY).await;
+            let draft = pending.borrow_mut().take();
+            if let Some(draft) = draft {
+                draft.write();
+            }
+        }));
+    }
+
+    /// Writes what is pending now.
+    pub(crate) fn flush(&mut self) {
+        self._timer = None;
+        let draft = self.pending.borrow_mut().take();
+        if let Some(draft) = draft {
+            draft.write();
+        }
+    }
+}
+
+impl<T: Serialize + 'static> Drop for DraftWriter<T> {
+    fn drop(&mut self) {
+        self.flush();
+    }
 }
 
 /// `String(error)` of a JavaScript `Error`, as buzz-app shows read
@@ -105,6 +201,7 @@ pub struct CanvasDialog {
     confirm_reload: bool,
     /// Bumped by each load, save and restore; older results are dropped.
     operation: u64,
+    drafts: DraftWriter<SavedDraft>,
     history: Option<Entity<History>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -142,7 +239,7 @@ impl CanvasDialog {
                     content: this.state.draft.clone(),
                     base: this.state.base.clone(),
                 };
-                this.write_draft(Some(&saved), cx);
+                this.write_draft(Some(saved), true, cx);
                 cx.notify();
             }
         });
@@ -162,6 +259,7 @@ impl CanvasDialog {
             error: None,
             confirm_reload: false,
             operation: 0,
+            drafts: DraftWriter::default(),
             history: None,
             _subscriptions: vec![subscription],
         };
@@ -182,16 +280,11 @@ impl CanvasDialog {
         self.community.read(cx).partition()
     }
 
-    fn write_draft(&self, draft: Option<&SavedDraft>, cx: &App) {
-        let json = draft.map(|draft| serde_json::to_string(draft).expect("drafts serialize"));
-        let saved = cx.global::<AppState>().store.set_view_state(
-            &self.partition(cx),
-            &draft_key(&self.channel),
-            json.as_deref(),
-        );
-        if let Err(error) = saved {
-            tracing::warn!(%error, "could not save the Canvas draft");
-        }
+    /// Saves `draft` locally, or removes it; once typing pauses when
+    /// `later`.
+    fn write_draft(&mut self, draft: Option<SavedDraft>, later: bool, cx: &App) {
+        let (partition, key) = (self.partition(cx), draft_key(&self.channel));
+        self.drafts.save(partition, key, draft, later, cx);
     }
 
     fn set_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
@@ -208,10 +301,11 @@ impl CanvasDialog {
             editor.set_value(content.clone(), window, cx)
         });
         self.write_draft(
-            Some(&SavedDraft {
+            Some(SavedDraft {
                 content,
                 base: self.state.base.clone(),
             }),
+            false,
             cx,
         );
     }
@@ -276,7 +370,7 @@ impl CanvasDialog {
                     Ok(saved) => {
                         this.state.base = Some(saved.id.to_hex());
                         this.state.head = Some(saved);
-                        this.write_draft(None, cx);
+                        this.write_draft(None, false, cx);
                         this.set_busy(false, cx);
                         cx.emit(Dismissed);
                         return;

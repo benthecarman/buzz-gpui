@@ -3,16 +3,17 @@
 //! section of the channel Canvas.
 //!
 //! The draft, the text it started from, its base revision and the new
-//! todo text are saved locally under `todos-draft-v1:<channel>`, so a
-//! closed panel or app keeps unsaved edits. Every edit saves at once,
-//! naming the base revision; when the Canvas moved on, the draft is kept
+//! todo text are saved locally under `todos-draft-v1:<channel>` once
+//! typing pauses, and when the panel closes, so a closed panel or app
+//! keeps unsaved edits. Every edit saves at once, naming the base
+//! revision; when the Canvas moved on, the draft is kept
 //! until an explicit Refresh. Nothing reads or writes in the background.
 
 pub mod model;
 
 use crate::community::{AppState, Community};
 use crate::ui::agent_activity::public_key_labels;
-use crate::ui::canvas::js_error;
+use crate::ui::canvas::{DraftWriter, js_error};
 use crate::ui::channel_panels::{self, ChannelPanel, Close, Launcher, Opening, Placement};
 use crate::ui::markdown::Directory;
 use crate::ui::overlay::{self, Align, Dismiss};
@@ -151,6 +152,7 @@ pub struct TodosPanel {
     about: bool,
     /// The people whose profiles were last asked for.
     people: Vec<String>,
+    drafts: DraftWriter<Draft>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -200,6 +202,7 @@ impl TodosPanel {
             menu: None,
             about: false,
             people: Vec::new(),
+            drafts: DraftWriter::default(),
             _subscriptions: subscriptions,
         };
         this.follow_session(window, cx);
@@ -229,6 +232,7 @@ impl TodosPanel {
     }
 
     fn mount(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drafts.flush();
         let saved = cx
             .global::<AppState>()
             .store
@@ -274,19 +278,13 @@ impl TodosPanel {
         });
     }
 
-    /// Replaces the draft and saves it locally while it holds anything
-    /// unsaved.
+    /// Replaces the draft and saves it locally, once typing pauses, while
+    /// it holds anything unsaved.
     fn update(&mut self, next: Draft, cx: &mut Context<Self>) {
         let keep = next.dirty() || !next.input.is_empty();
-        let json = keep.then(|| serde_json::to_string(&next).expect("drafts serialize"));
-        let written = cx.global::<AppState>().store.set_view_state(
-            &self.partition(cx),
-            &draft_key(&self.channel),
-            json.as_deref(),
-        );
-        if let Err(error) = written {
-            tracing::warn!(%error, "could not save the todos draft");
-        }
+        let (partition, key) = (self.partition(cx), draft_key(&self.channel));
+        self.drafts
+            .save(partition, key, keep.then(|| next.clone()), true, cx);
         self.draft = next;
         cx.notify();
     }
