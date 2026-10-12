@@ -161,12 +161,13 @@ impl SettingsPage {
                 harnesses::Harnesses::new(host, cx)
             })
         };
-        // A picked host that was since removed falls back to this computer.
-        let picked = harnesses
-            .read(cx)
-            .host()
-            .filter(|host| hosts.contains(host))
-            .or(local);
+        // A picked host that was since removed falls back to this computer,
+        // and Harnesses lets go of it.
+        let shown = harnesses.read(cx).host();
+        if shown.as_ref().is_some_and(|host| !hosts.contains(host)) {
+            harnesses.update(cx, |harnesses, cx| harnesses.show(local.clone(), cx));
+        }
+        let picked = harnesses.read(cx).host().or(local);
         let defaults = picked.map(|host| {
             let card = window.use_keyed_state(
                 (

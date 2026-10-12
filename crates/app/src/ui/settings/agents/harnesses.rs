@@ -251,7 +251,12 @@ impl Harnesses {
         if self.host.as_ref() == Some(&host) {
             return cx.notify();
         }
-        *self = Self::new(Some(host), cx);
+        self.show(Some(host), cx);
+    }
+
+    /// Shows `host`'s harnesses, or none, checked afresh.
+    pub fn show(&mut self, host: Option<Entity<HostConnection>>, cx: &mut Context<Self>) {
+        *self = Self::new(host, cx);
         cx.notify();
     }
 
