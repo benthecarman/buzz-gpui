@@ -11,9 +11,9 @@
 //! A valid address is never authorization: every read goes through the
 //! viewer's verified session reads, and the relay decides what they see.
 
-use crate::event::{Verified, is_newer};
+use crate::event::{Verified, is_newer, newest};
 use crate::reader::{ReadError, ReadErrorKind};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -494,14 +494,6 @@ pub fn item_title(event: &Verified) -> String {
         .unwrap_or_else(|| event.content.split('\n').next().unwrap_or("").to_string())
 }
 
-/// `newer`: the later `created_at` wins, then the lower id.
-fn newer(current: Option<Verified>, candidate: &Verified) -> Option<Verified> {
-    match current {
-        Some(current) if !is_newer(candidate, &current) => Some(current),
-        _ => Some(candidate.clone()),
-    }
-}
-
 fn metadata_dtag(dtag: &str) -> bool {
     !dtag.is_empty() && dtag.len() <= 1024
 }
@@ -651,13 +643,6 @@ pub trait ProjectReads: Send + Sync {
     ) -> impl Future<Output = Result<Vec<Verified>, ReadError>> + Send;
 }
 
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
-
 /// `projectDestinations`.
 pub struct Destinations<R> {
     read: R,
@@ -732,17 +717,13 @@ impl<R: ProjectReads> Destinations<R> {
                 "kinds": [event_kind], "authors": [owner], "#d": [dtag], "limit": 1
             })])
             .await?;
-        let head = events
-            .iter()
-            .filter(|e| {
-                e.kind.as_u16() == event_kind
-                    && e.pubkey.to_hex() == owner
-                    && values(e, "d").len() == 1
-                    && value(e, "d") == Some(dtag)
-            })
-            .fold(None, newer);
+        let head = newest(events.iter().filter(|e| {
+            e.kind.as_u16() == event_kind
+                && e.pubkey.to_hex() == owner
+                && values(e, "d").len() == 1
+                && value(e, "d") == Some(dtag)
+        }));
         let entity = head
-            .as_ref()
             .and_then(entity_from_event)
             .ok_or(EntityFailure::NotFound)?;
         self.surviving(vec![entity])
@@ -984,48 +965,42 @@ impl<R: ProjectReads> Destinations<R> {
                 .filter(|key| entity_hex(key))
                 .cloned(),
         );
-        let update = activity
-            .iter()
-            .filter(|e| {
-                e.kind.as_u16() == PULL_REQUEST_UPDATE
-                    && single_value(e, "E") == Some(id)
-                    && single_value(e, "P") == Some(author.as_str())
-                    && single_value(e, "a") == Some(entity.address.as_str())
-                    && single_value(e, "c").is_some_and(git_hash)
-                    && e.tags.iter().any(|t| {
-                        let t = t.as_slice();
-                        t.first().is_some_and(|n| n == "clone")
-                            && t[1..].iter().any(|url| !url.trim().is_empty())
-                    })
-                    && e.pubkey.to_hex() == author
-            })
-            .fold(None, newer);
-        let commit = single_value(update.as_ref().unwrap_or(&item), "c");
+        let update = newest(activity.iter().filter(|e| {
+            e.kind.as_u16() == PULL_REQUEST_UPDATE
+                && single_value(e, "E") == Some(id)
+                && single_value(e, "P") == Some(author.as_str())
+                && single_value(e, "a") == Some(entity.address.as_str())
+                && single_value(e, "c").is_some_and(git_hash)
+                && e.tags.iter().any(|t| {
+                    let t = t.as_slice();
+                    t.first().is_some_and(|n| n == "clone")
+                        && t[1..].iter().any(|url| !url.trim().is_empty())
+                })
+                && e.pubkey.to_hex() == author
+        }));
+        let commit = single_value(update.unwrap_or(&item), "c");
         if pr && let Some(commit) = commit.filter(|c| git_hash(c)) {
             result.commit = Some(commit.to_ascii_lowercase());
         }
-        let status = activity
-            .iter()
-            .filter(|e| {
-                let roots: Vec<&[String]> = e
-                    .tags
+        let status = newest(activity.iter().filter(|e| {
+            let roots: Vec<&[String]> = e
+                .tags
+                .iter()
+                .map(|t| t.as_slice())
+                .filter(|t| {
+                    t.first().is_some_and(|n| n == "e") && t.get(3).is_some_and(|m| m == "root")
+                })
+                .collect();
+            (STATUS_OPEN..=STATUS_DRAFT).contains(&e.kind.as_u16())
+                && roots.len() == 1
+                && roots[0].get(1).is_some_and(|r| r == id)
+                && e.tags
                     .iter()
                     .map(|t| t.as_slice())
-                    .filter(|t| {
-                        t.first().is_some_and(|n| n == "e") && t.get(3).is_some_and(|m| m == "root")
-                    })
-                    .collect();
-                (STATUS_OPEN..=STATUS_DRAFT).contains(&e.kind.as_u16())
-                    && roots.len() == 1
-                    && roots[0].get(1).is_some_and(|r| r == id)
-                    && e.tags
-                        .iter()
-                        .map(|t| t.as_slice())
-                        .filter(|t| t.first().is_some_and(|n| n == "a"))
-                        .all(|t| t.get(1).is_some_and(|a| *a == entity.address))
-                    && status_authors.contains(&e.pubkey.to_hex())
-            })
-            .fold(None, newer);
+                    .filter(|t| t.first().is_some_and(|n| n == "a"))
+                    .all(|t| t.get(1).is_some_and(|a| *a == entity.address))
+                && status_authors.contains(&e.pubkey.to_hex())
+        }));
         result.status = Some(match status.map(|s| s.kind.as_u16()) {
             Some(STATUS_APPLIED) if pr => "Merged",
             Some(STATUS_APPLIED) => "Done",

@@ -14,7 +14,7 @@
 //! Both are synchronous and take the wall clock in milliseconds; the session
 //! runs the reads and publications they ask for.
 
-use crate::event::{Verified, Verifier, kinds};
+use crate::event::{Verified, Verifier, is_hex64, kinds};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
@@ -86,13 +86,6 @@ pub(crate) fn random_below(bound: u64) -> u64 {
 /// The renewal and refresh interval: 60–65 s.
 fn minute() -> u64 {
     60_000 + random_below(5_000)
-}
-
-fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A snapshot read the directory wants run.

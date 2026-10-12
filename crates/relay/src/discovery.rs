@@ -16,8 +16,8 @@
 //! Ported from `src/features/relay/discovery.ts`, the discovery parts of
 //! `store.ts` (1015-1411) and `membership.ts`.
 
-use crate::event::{Verified, is_newer, kinds};
-use crate::socket::Filter;
+use crate::event::{Verified, first_tag as tag, is_hex64, is_newer, kinds};
+use crate::socket::{Filter, filter};
 use nostr::prelude::{Event, EventId};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
@@ -103,15 +103,6 @@ pub struct ChannelSummary {
 /// Which version of each channel's roster a pass started from, by event id.
 pub type RosterVersions = HashMap<String, EventId>;
 
-fn tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
-    event
-        .tags
-        .iter()
-        .find(|tag| tag.kind() == name)
-        .and_then(|tag| tag.as_slice().get(1))
-        .map(String::as_str)
-}
-
 /// The `d` tag, as discovery uses it: present and non-empty.
 fn channel_id(event: &Event) -> Option<&str> {
     tag(event, "d").filter(|id| !id.is_empty())
@@ -127,13 +118,6 @@ fn has_tag(event: &Event, name: &str, value: &str) -> bool {
 
 fn has_tag_named(event: &Event, name: &str) -> bool {
     event.tags.iter().any(|tag| tag.kind() == name)
-}
-
-fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Lowercase hyphenated UUID, the shape of channel ids.
@@ -854,13 +838,6 @@ pub struct Resolution {
     /// Signed metadata arrived but retention is full ("Channel metadata
     /// capacity unavailable"). Processing stopped at that channel.
     pub metadata_capacity_exhausted: bool,
-}
-
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
 }
 
 fn strong(filter: &mut Filter, strong: bool) {

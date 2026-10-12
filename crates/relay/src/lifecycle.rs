@@ -15,7 +15,7 @@ use crate::discovery::{Visibility, channel_visibility, is_uuid, session_metadata
 use crate::event::{Verified, is_newer, kinds};
 use crate::members::is_key;
 use crate::messages::{Draft, EventTemplate};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::prelude::EventId;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -65,13 +65,6 @@ pub enum ActionError {
 
 fn error(message: impl Into<String>) -> LifecycleError {
     LifecycleError(message.into())
-}
-
-fn filter(value: serde_json::Value) -> Filter {
-    match value {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
 }
 
 fn channel_id(value: &str) -> Result<&str, LifecycleError> {

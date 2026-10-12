@@ -28,6 +28,7 @@ use crate::fold::MessageClock;
 use crate::http::{HttpError, RelayHttp};
 use crate::messages::Draft;
 use crate::reader::{Priority, ReadOptions, Reader};
+use crate::socket::filter;
 use buzz_identity::{Identity, IdentityError, Purpose};
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -354,13 +355,6 @@ pub struct HttpPublisher {
 impl HttpPublisher {
     pub fn new(http: RelayHttp, reader: Reader) -> Self {
         Self { http, reader }
-    }
-}
-
-fn filter(value: Value) -> crate::socket::Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
     }
 }
 

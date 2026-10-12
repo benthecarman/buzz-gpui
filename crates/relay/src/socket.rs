@@ -67,6 +67,14 @@ fn tls() -> Option<tokio_tungstenite::Connector> {
 /// `thread_window`, ...), so filters are plain JSON objects.
 pub type Filter = serde_json::Map<String, Value>;
 
+/// A filter from a `json!` object.
+pub(crate) fn filter(value: Value) -> Filter {
+    match value {
+        Value::Object(map) => map,
+        _ => unreachable!("filters are objects"),
+    }
+}
+
 /// Inbound text frames larger than this are dropped unread (`live.ts`).
 pub const MAX_FRAME: usize = 1024 * 1024;
 /// Publications waiting for a receipt, sent or not.

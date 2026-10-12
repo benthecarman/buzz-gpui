@@ -7,11 +7,11 @@
 //! `administration-protocol.ts` and `channel-members/search.ts`.
 
 use crate::discovery::{ChannelSummary, ChannelType, Visibility};
-use crate::event::{Verified, kinds};
+use crate::event::{Verified, is_hex64, kinds};
 use crate::lifecycle::{ChannelState, LifecycleError, MemberRole};
 use crate::messages::{Draft, EventTemplate};
 use crate::profiles::Profile;
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::nips::nip19::FromBech32;
 use nostr::prelude::PublicKey;
 use serde_json::json;
@@ -21,20 +21,6 @@ use std::collections::HashMap;
 /// Member search page size (`MEMBER_SEARCH_PAGE_SIZE`).
 pub const SEARCH_PAGE: usize = 30;
 const MAX_QUERY: usize = 256;
-
-fn filter(value: serde_json::Value) -> Filter {
-    match value {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
-
-fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
 
 // ---------------------------------------------------------------------------
 // Adding members (§5g.2)

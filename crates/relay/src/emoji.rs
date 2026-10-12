@@ -8,7 +8,7 @@
 //! author removed. A catalog over budget shows an error and no entries
 //! until the next full read.
 
-use crate::event::{Verified, is_newer, kinds};
+use crate::event::{Verified, is_newer, kinds, newest};
 use crate::messages::{CustomEmoji, EmojiCatalog, EventTemplate, normalize_shortcode};
 use crate::socket::Filter;
 use nostr::prelude::Event;
@@ -94,13 +94,11 @@ pub fn own_set_filter(viewer: &str) -> Filter {
 
 /// The newest of `viewer`'s sets among `events`.
 pub fn own_set<'a>(events: &'a [Verified], viewer: &str) -> Option<&'a Verified> {
-    events
-        .iter()
-        .filter(|event| is_set(event) && event.pubkey_hex() == viewer)
-        .fold(None, |best: Option<&Verified>, event| match best {
-            Some(current) if !is_newer(event, current) => Some(current),
-            _ => Some(event),
-        })
+    newest(
+        events
+            .iter()
+            .filter(|event| is_set(event) && event.pubkey_hex() == viewer),
+    )
 }
 
 pub const INVALID_NAME: &str = "Invalid emoji name. Use letters, numbers, hyphen, or underscore.";

@@ -13,14 +13,15 @@
 //! socket has authenticated, and a shared quota cooldown gates every
 //! dispatch.
 
-use crate::event::{Verified, Verifier, kinds};
+use crate::event::{Verified, Verifier, is_hex64, kinds};
 use crate::origin::RelayOrigin;
 use crate::socket::{
-    Cooldown, Filter, RelaySocket, SocketOptions, SocketState, SubscriptionEvent, quota_hint,
+    Cooldown, Filter, RelaySocket, SocketOptions, SocketState, SubscriptionEvent, filter,
+    quota_hint,
 };
 use buzz_identity::Identity;
 use futures::StreamExt;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -783,7 +784,7 @@ impl Live {
         };
         let since = route.metrics_since.unwrap_or(route.since);
         let channel = |ids: Vec<&String>| {
-            object(json!({
+            filter(json!({
                 "kinds": kinds::CHANNEL_KINDS,
                 "#h": ids,
                 "since": since,
@@ -793,35 +794,35 @@ impl Live {
         let replay = self.options.replay_limit;
         match &route.key {
             RouteKey::Profiles => vec![
-                object(
+                filter(
                     json!({"kinds": [kinds::PROFILE, kinds::AGENT_METADATA, kinds::MANAGED_AGENT], "since": since, "limit": limit}),
                 ),
-                object(
+                filter(
                     json!({"kinds": [kinds::USER_STATUS], "#d": ["general"], "since": route.since, "limit": replay}),
                 ),
-                object(
+                filter(
                     json!({"kinds": [kinds::CUSTOM_EMOJI], "#d": ["buzz:custom-emoji"], "since": route.since, "limit": replay}),
                 ),
             ],
             RouteKey::Membership => vec![
-                object(
+                filter(
                     json!({"kinds": [kinds::MEMBER_ADDED, kinds::MEMBER_REMOVED], "#p": [self.viewer], "since": since, "limit": limit}),
                 ),
-                object(
+                filter(
                     json!({"kinds": [kinds::APP_DATA], "authors": [self.viewer], "#t": ["read-state"], "since": route.since, "limit": replay}),
                 ),
-                object(
+                filter(
                     json!({"kinds": [kinds::REMINDERS], "authors": [self.viewer], "since": route.since, "limit": replay}),
                 ),
             ],
-            RouteKey::Presence => vec![object(json!({
+            RouteKey::Presence => vec![filter(json!({
                 "kinds": [kinds::PRESENCE],
                 "authors": self.presence_authors,
                 "since": since,
                 "limit": limit,
             }))],
             // Without a limit: the archive only takes fresh envelopes.
-            RouteKey::Observer => vec![object(json!({
+            RouteKey::Observer => vec![filter(json!({
                 "kinds": self.observer_kinds,
                 "#p": [self.viewer],
                 "since": since,
@@ -1203,20 +1204,6 @@ fn live_channels(mut ids: Vec<String>) -> Result<Vec<String>, String> {
     ids.sort();
     ids.dedup();
     Ok(ids)
-}
-
-fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-fn object(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
 }
 
 fn now_secs() -> u64 {

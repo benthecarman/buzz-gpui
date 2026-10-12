@@ -5,7 +5,7 @@
 //!
 //! Roles here only shape the UI; the relay decides every privileged change.
 
-use crate::event::{Verified, is_newer, kinds};
+use crate::event::{Verified, kinds, newest};
 use crate::http::HttpError;
 use crate::messages::EventTemplate;
 use crate::socket::Filter;
@@ -122,13 +122,7 @@ pub fn members_from_snapshot(
 /// The member list from a roster read: `None` when the community publishes
 /// none, so it has no roles to derive.
 pub fn roster(events: &[Verified], relay_author: &str) -> Result<Option<Vec<Member>>, String> {
-    let latest = events
-        .iter()
-        .fold(None::<&Verified>, |best, event| match best {
-            Some(best) if !is_newer(event, best) => Some(best),
-            _ => Some(event),
-        });
-    latest
+    newest(events)
         .map(|event| members_from_snapshot(event, relay_author))
         .transpose()
 }

@@ -182,11 +182,7 @@ impl Verified {
 
     /// First value of the first tag with this name.
     pub fn tag(&self, name: &str) -> Option<&str> {
-        self.tags
-            .iter()
-            .find(|tag| tag.kind() == name)
-            .and_then(|tag| tag.as_slice().get(1))
-            .map(String::as_str)
+        first_tag(self, name)
     }
 
     /// All tags with this name, as slices including the name.
@@ -233,6 +229,42 @@ impl Verified {
 pub fn is_newer(candidate: &Event, current: &Event) -> bool {
     candidate.created_at > current.created_at
         || (candidate.created_at == current.created_at && candidate.id < current.id)
+}
+
+/// [`is_newer`] as a sort order: newest first.
+pub(crate) fn newest_first(a: &Event, b: &Event) -> std::cmp::Ordering {
+    b.created_at
+        .cmp(&a.created_at)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// The newest of `events` by [`is_newer`]; the first on a tie.
+pub(crate) fn newest<'a, T>(events: impl IntoIterator<Item = &'a T>) -> Option<&'a T>
+where
+    T: Deref<Target = Event> + 'a,
+{
+    events.into_iter().fold(None, |best, event| match best {
+        Some(best) if !is_newer(event, best) => Some(best),
+        _ => Some(event),
+    })
+}
+
+/// First value of the first tag named `name`.
+pub(crate) fn first_tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.kind() == name)
+        .and_then(|tag| tag.as_slice().get(1))
+        .map(String::as_str)
+}
+
+/// 64 lowercase hex digits: the shape of event ids and pubkeys.
+pub(crate) fn is_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Checks events and remembers recent proofs, so an event seen on both the

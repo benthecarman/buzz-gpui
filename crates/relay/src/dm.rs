@@ -9,7 +9,7 @@
 use crate::discovery::{ChannelSummary, ChannelType};
 use crate::event::{Verified, kinds};
 use crate::members::Person;
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -17,13 +17,6 @@ pub use crate::messages::{open_dm, parse_open_dm_receipt, valid_dm_participants}
 
 /// Longest people-picker query.
 pub const MAX_QUERY: usize = 100;
-
-fn filter(value: serde_json::Value) -> Filter {
-    match value {
-        serde_json::Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
 
 /// Only signed discovery admits the returned channel: a strong read of its
 /// metadata and roster. A receipt is never membership.

@@ -6,7 +6,7 @@
 use super::protocol::{self, CommandView};
 use super::types::*;
 use super::view::{self, Config, Handle, Owner, ViewSnapshot, WorkflowView};
-use crate::event::Verified;
+use crate::event::{Verified, newest_first};
 use crate::http::RelayHttp;
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Operation, Outbox, SendOptions};
@@ -968,11 +968,7 @@ async fn load_definitions(
                 .filter(|event| seen.insert(event.id))
                 .collect()
         };
-        page.sort_by(|a, b| {
-            b.created_at_secs()
-                .cmp(&a.created_at_secs())
-                .then_with(|| a.id_hex().cmp(&b.id_hex()))
-        });
+        page.sort_by(|a, b| newest_first(a, b));
         for event in &page {
             if let Some((until, before_id)) = &cursor
                 && (event.created_at_secs() > *until

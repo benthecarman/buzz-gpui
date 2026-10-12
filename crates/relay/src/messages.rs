@@ -14,7 +14,7 @@
 //! channel", "every recipient is a current member" (`validateMentions`) and
 //! "the emoji catalog is ready" (passed in as [`EmojiCatalog`]).
 
-use crate::event::kinds;
+use crate::event::{first_tag, is_hex64, kinds};
 use crate::fold::{message_author, thread_reference};
 use crate::origin::RelayOrigin;
 use crate::outbox::Delivery;
@@ -70,25 +70,8 @@ pub enum MessageError {
 
 use MessageError::Invalid;
 
-fn hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 fn tag(items: &[&str]) -> Tag {
     items.iter().map(|item| (*item).to_owned()).collect()
-}
-
-fn first_tag<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
-    event
-        .tags
-        .iter()
-        .map(|tag| tag.as_slice())
-        .find(|tag| tag.first().map(String::as_str) == Some(name))
-        .and_then(|tag| tag.get(1))
-        .map(String::as_str)
 }
 
 fn tags_of<'a>(event: &'a Event) -> impl Iterator<Item = &'a [String]> + 'a {
@@ -317,7 +300,7 @@ pub(crate) fn validate_upload(
         LazyLock::new(|| Regex::new(r"(?i)^[a-z0-9.+-]+/[a-z0-9.+-]+$").expect("mime pattern"));
     let mime = item.mime.to_ascii_lowercase();
     if !MIME.is_match(&item.mime)
-        || !hex64(&item.sha256)
+        || !is_hex64(&item.sha256)
         || item.size < 1
         || item.size > media_byte_limit(&mime)
     {
@@ -457,7 +440,7 @@ fn unique_keys(
         .iter()
         .filter(|key| seen.insert(key.as_str()))
         .collect();
-    if unique.len() > 32 || unique.iter().any(|key| !hex64(key)) {
+    if unique.len() > 32 || unique.iter().any(|key| !is_hex64(key)) {
         return Err(Invalid(error));
     }
     Ok(unique.into_iter().map(|key| tag(&[name, key])).collect())
@@ -518,10 +501,10 @@ pub fn reply(input: &Compose<'_>, root_id: &str, parent_id: &str) -> Result<Draf
     if input.channel_id.is_empty() {
         return Err(Invalid("A channel is required"));
     }
-    if !hex64(root_id) {
+    if !is_hex64(root_id) {
         return Err(Invalid("A valid thread root is required"));
     }
-    if !hex64(parent_id) {
+    if !is_hex64(parent_id) {
         return Err(Invalid("A valid reply parent is required"));
     }
     let mut thread = Vec::new();
@@ -913,7 +896,7 @@ pub fn valid_dm_participants(pubkeys: &[String], viewer: &str) -> bool {
     let distinct: HashSet<&str> = pubkeys.iter().map(String::as_str).collect();
     (1..=8).contains(&pubkeys.len())
         && distinct.len() == pubkeys.len()
-        && pubkeys.iter().all(|key| hex64(key) && key != viewer)
+        && pubkeys.iter().all(|key| is_hex64(key) && key != viewer)
 }
 
 /// The 41010 open-DM command. The random `client` tag gives every request

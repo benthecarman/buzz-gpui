@@ -2,7 +2,7 @@
 //! publishes (`docs/port/relay.md` §5f.5) and the NIP-43 leave request
 //! (§1.8). Pure builders and response mapping; I/O lives in the session.
 
-use crate::event::{Verified, is_newer, kinds};
+use crate::event::{Verified, kinds, newest};
 use crate::http::HttpError;
 use crate::messages::EventTemplate;
 use crate::outbox::{PublishError, accept_publish};
@@ -93,13 +93,11 @@ pub fn own_profile_filter(viewer: &str) -> Filter {
 
 /// The newest of the viewer's kind 0 events.
 pub fn newest_profile<'a>(events: &'a [Verified], viewer: &str) -> Option<&'a Verified> {
-    events
-        .iter()
-        .filter(|event| event.kind_u16() == kinds::PROFILE && event.pubkey_hex() == viewer)
-        .fold(None, |best: Option<&Verified>, event| match best {
-            Some(current) if !is_newer(event, current) => Some(current),
-            _ => Some(event),
-        })
+    newest(
+        events
+            .iter()
+            .filter(|event| event.kind_u16() == kinds::PROFILE && event.pubkey_hex() == viewer),
+    )
 }
 
 /// The editor's fields in a kind 0's content (`inspectProfile`): the

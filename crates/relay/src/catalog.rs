@@ -12,7 +12,7 @@ use crate::event::Verified;
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Operation};
 use crate::reader::{Priority, ReadErrorKind, ReadOptions, Reader};
-use crate::socket::Filter;
+use crate::socket::filter;
 use nostr::prelude::{Event, UnsignedEvent};
 use regex::Regex;
 use serde::Serialize;
@@ -891,13 +891,6 @@ pub fn catalog_team_snapshot(team: &TeamPublication) -> Value {
 
 // ---------------------------------------------------------------------------
 // Reads
-
-fn filter(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
 
 /// Every catalog event readable on the relay, newest first, page by page.
 /// More than 5,000 refuses the read rather than showing a partial catalog.

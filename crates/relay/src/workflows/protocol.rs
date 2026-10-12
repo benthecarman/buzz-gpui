@@ -7,7 +7,7 @@
 use super::types::{
     RunCursor, RunPage, RunStatus, WorkflowDefinition, WorkflowReference, WorkflowRun,
 };
-use crate::event::Verified;
+use crate::event::{Verified, is_hex64};
 use serde_json::Value;
 
 pub const DEFINITION: u16 = 30620;
@@ -30,14 +30,6 @@ pub fn is_uuid(value: &str) -> bool {
             8 | 13 | 18 | 23 => *byte == b'-',
             _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
         })
-}
-
-/// 64 lowercase hex digits.
-pub fn is_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub fn validate_reference(reference: &WorkflowReference) -> Result<(), String> {

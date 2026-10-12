@@ -12,13 +12,12 @@
 //! pages, the save draft and its signing shape. The session wires them to
 //! the reader and the outbox (`session/canvas.rs`).
 
-use crate::event::{Verified, kinds};
+use crate::event::{Verified, kinds, newest_first};
 use crate::messages::Draft;
 use crate::outbox::{Delivery, Operation};
-use crate::socket::Filter;
+use crate::socket::{Filter, filter};
 use nostr::prelude::{Event, EventId};
-use serde_json::{Value, json};
-use std::cmp::Ordering;
+use serde_json::json;
 
 /// Largest Canvas, in UTF-8 bytes (`model.ts` `CANVAS_BYTES`).
 pub const CANVAS_BYTES: usize = 24 * 1024;
@@ -115,17 +114,10 @@ pub fn too_large(content: &str) -> bool {
     content.len() > CANVAS_BYTES
 }
 
-fn object(value: Value) -> Filter {
-    match value {
-        Value::Object(map) => map,
-        _ => unreachable!("filters are objects"),
-    }
-}
-
 /// The current Canvas. Editors and save preconditions read it strongly;
 /// a display-only read may use a replica.
 pub fn head_filter(channel: &str, strong: bool) -> Filter {
-    let mut filter = object(json!({"kinds": [kinds::CANVAS], "#h": [channel], "limit": 1}));
+    let mut filter = filter(json!({"kinds": [kinds::CANVAS], "#h": [channel], "limit": 1}));
     if strong {
         filter.insert("consistency".into(), json!("strong"));
     }
@@ -135,7 +127,7 @@ pub fn head_filter(channel: &str, strong: bool) -> Filter {
 /// One history page. The first is strong so a just-saved revision shows;
 /// older pages may come from a replica.
 pub fn history_filter(channel: &str, cursor: Option<&HistoryCursor>) -> Filter {
-    let mut filter = object(json!({
+    let mut filter = filter(json!({
         "kinds": [kinds::CANVAS],
         "#h": [channel],
         "limit": HISTORY_PAGE,
@@ -150,13 +142,6 @@ pub fn history_filter(channel: &str, cursor: Option<&HistoryCursor>) -> Filter {
         }
     }
     filter
-}
-
-/// `created_at DESC, id ASC`: the relay's order and the head rule.
-fn order(a: &Event, b: &Event) -> Ordering {
-    b.created_at
-        .cmp(&a.created_at)
-        .then_with(|| a.id.as_bytes().cmp(b.id.as_bytes()))
 }
 
 fn in_channel(event: &Event, channel: &str) -> bool {
@@ -174,7 +159,7 @@ pub fn selected_head(channel: &str, events: &[Verified]) -> Option<Revision> {
         .iter()
         .map(|event| event.event())
         .filter(|event| in_channel(event, channel))
-        .min_by(|a, b| order(a, b))
+        .min_by(|a, b| newest_first(a, b))
         .map(Revision::from_event)
 }
 
@@ -198,7 +183,8 @@ pub fn history_page(
         return Err(INVALID_HISTORY.into());
     }
     let mut events: Vec<&Event> = rows.iter().map(|event| event.event()).collect();
-    events.sort_by(|a, b| order(a, b));
+    // `created_at DESC, id ASC`: the relay's order and the head rule.
+    events.sort_by(|a, b| newest_first(a, b));
     events.dedup_by_key(|event| event.id);
     let revisions: Vec<Revision> = events.into_iter().map(Revision::from_event).collect();
     let next = (rows.len() >= HISTORY_PAGE)
@@ -301,6 +287,7 @@ pub fn is_unresolved(operation: &Operation, channel: &str) -> bool {
 mod tests {
     use super::*;
     use crate::testing::{CHANNEL, Signer, T0};
+    use serde_json::Value;
 
     const OTHER: &str = "00000000-0000-4000-8000-000000000002";
 
