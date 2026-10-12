@@ -237,7 +237,9 @@ impl Engine {
             self.pending_seek = Some(seconds);
             return;
         }
-        let at = gst::ClockTime::from_seconds_f64(seconds.max(0.));
+        let Some(at) = seek_target(seconds, self.duration()) else {
+            return;
+        };
         let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
         let _ = self.playbin.seek(
             self.rate,
@@ -272,6 +274,13 @@ impl Engine {
     pub fn take_frame(&self) -> Option<Frame> {
         self.frame.as_ref()?.lock().ok()?.take()
     }
+}
+
+/// Where a seek to `seconds` lands: inside the clip when its length is
+/// known, and `None` for a time no clock can hold (a typed `[9999999:00]`).
+fn seek_target(seconds: f64, duration: Option<f64>) -> Option<gst::ClockTime> {
+    let seconds = duration.map_or(seconds, |duration| seconds.min(duration));
+    gst::ClockTime::try_from_seconds_f64(seconds.max(0.)).ok()
 }
 
 impl Drop for Engine {
@@ -452,6 +461,16 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../relay/tests/fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn seeks_stay_inside_the_clip_and_the_clock() {
+        assert_eq!(seek_target(-3., None), Some(gst::ClockTime::ZERO));
+        assert_eq!(
+            seek_target(36e9, Some(90.)),
+            Some(gst::ClockTime::from_seconds(90))
+        );
+        assert_eq!(seek_target(1e300, None), None);
     }
 
     #[test]

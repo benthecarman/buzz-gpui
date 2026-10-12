@@ -71,8 +71,8 @@ struct Clock {
     seconds: f64,
 }
 
-/// `[h+:]m{1,2}:ss`, plus `.f{1,3}` when `fraction` is allowed. Minutes
-/// under an hour mark and seconds stay below 60.
+/// `[h{1,2}:]m{1,2}:ss`, plus `.f{1,3}` when `fraction` is allowed.
+/// Minutes under an hour mark and seconds stay below 60.
 fn clock(text: &str, fraction: bool) -> Option<Clock> {
     let digits = |from: usize| text[from..].bytes().take_while(u8::is_ascii_digit).count();
     let mut groups = vec![(0, digits(0))];
@@ -89,7 +89,10 @@ fn clock(text: &str, fraction: bool) -> Option<Clock> {
         [m, s] => (None, *m, *s),
         _ => return None,
     };
-    if hours.is_some_and(|(_, len)| len == 0) || !(1..=2).contains(&minutes.1) || seconds.1 != 2 {
+    if hours.is_some_and(|(_, len)| !(1..=2).contains(&len))
+        || !(1..=2).contains(&minutes.1)
+        || seconds.1 != 2
+    {
         return None;
     }
     let mut len = seconds.0 + 2;
@@ -244,6 +247,12 @@ mod tests {
         assert_eq!(reply("[1:23][ref]"), None);
         assert_eq!(reply("[1:75] x"), None);
         assert_eq!(reply("[1:70:00] x"), None);
+        // An hour field longer than any clip is not a time.
+        assert_eq!(reply("[9999999:00:00] x"), None);
+        assert_eq!(
+            reply("[99:00:00] x"),
+            Some((356400., "99:00:00".into(), "x".into()))
+        );
         // Seventy minutes is fine without an hour field.
         assert_eq!(
             reply("[70:00] x"),
