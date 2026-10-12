@@ -1399,7 +1399,7 @@ impl Actor {
                 result,
             } => self.page_read(channel, sent, purpose, (epoch, access), result),
             Message::Profiles { ids, result } => {
-                self.profiles.finished(&ids);
+                self.profiles.finished(&ids, result.is_ok());
                 if let Ok(events) = result {
                     let wanted: std::collections::HashSet<&String> = ids.iter().collect();
                     let events: Vec<Verified> = events

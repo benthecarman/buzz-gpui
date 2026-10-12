@@ -185,7 +185,7 @@ pub struct ProfileDirectory {
     snapshot: Profiles,
     in_flight: HashSet<String>,
     /// Authors a read found no profile for, and until when they are not
-    /// asked again. A failed read counts too, which backs it off.
+    /// asked again. A failed read proves nothing, so it marks no one.
     absent: HashMap<String, Instant>,
 }
 
@@ -250,9 +250,16 @@ impl ProfileDirectory {
             .collect()
     }
 
-    /// Ends a read of `ids`. Its events must be given to [`Self::accept`]
-    /// next; until then every id without a profile counts as absent.
-    pub fn finished(&mut self, ids: &[String]) {
+    /// Ends a read of `ids`. After a successful read its events must be
+    /// given to [`Self::accept`] next; until then every id without a
+    /// profile counts as absent. A failed read only clears the ids.
+    pub fn finished(&mut self, ids: &[String], succeeded: bool) {
+        if !succeeded {
+            for id in ids {
+                self.in_flight.remove(id);
+            }
+            return;
+        }
         let now = Instant::now();
         if self.absent.len() + ids.len() > ABSENT_CAPACITY {
             self.absent.retain(|_, until| *until > now);
@@ -527,16 +534,19 @@ mod tests {
         assert_eq!(reads.len(), 1);
         assert_eq!(reads[0].0, vec![other.clone()]);
         assert!(directory.ensure([other.as_str()]).is_empty());
-        directory.finished(std::slice::from_ref(&other));
+        directory.finished(std::slice::from_ref(&other), false);
+        // A failed read proves nothing, so the id is asked again.
+        assert_eq!(directory.ensure([other.as_str()]).len(), 1);
+        directory.finished(std::slice::from_ref(&other), true);
         // A read that found nothing is not repeated until a refresh.
         assert!(directory.ensure([other.as_str()]).is_empty());
         directory.refresh();
         assert_eq!(directory.ensure([other.as_str()]).len(), 1);
-        directory.finished(std::slice::from_ref(&other));
+        directory.finished(std::slice::from_ref(&other), true);
         let late = Keys::generate();
         let late_id = late.public_key().to_hex();
         assert_eq!(directory.ensure([late_id.as_str()]).len(), 1);
-        directory.finished(std::slice::from_ref(&late_id));
+        directory.finished(std::slice::from_ref(&late_id), true);
         directory.accept(&[profile(&late, r#"{"name":"l"}"#, 1, vec![])]);
         assert!(!directory.absent.contains_key(&late_id));
     }
