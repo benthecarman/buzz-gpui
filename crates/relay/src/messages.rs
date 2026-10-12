@@ -95,6 +95,23 @@ fn tags_of<'a>(event: &'a Event) -> impl Iterator<Item = &'a [String]> + 'a {
     event.tags.iter().map(|tag| tag.as_slice())
 }
 
+/// Whether `source`, where attachments are read from, is `original` or
+/// the author's edit of it that stays in `channel_id`.
+fn is_version_of(author: &Author<'_>, source: &Event, original: &Event, channel_id: &str) -> bool {
+    let original_id = original.id.to_hex();
+    source.id == original.id
+        || (source.kind.as_u16() == kinds::EDIT
+            && author.owns(source)
+            && tags_of(source).any(|tag| {
+                tag.first().map(String::as_str) == Some("e")
+                    && tag.get(1).map(String::as_str) == Some(original_id.as_str())
+            })
+            && !tags_of(source).any(|tag| {
+                tag.first().map(String::as_str) == Some("h")
+                    && tag.get(1).map(String::as_str) != Some(channel_id)
+            }))
+}
+
 /// `content.trim()`, refusing empty text (`messages.ts:51-55`).
 fn text(content: &str) -> Result<String, MessageError> {
     let value = content.trim();
@@ -610,18 +627,7 @@ pub fn sent_from_thread(
         ));
     }
     let source = row.attachment_source;
-    let source_ok = author.owns(source)
-        && (source.id == original.id
-            || (source.kind.as_u16() == kinds::EDIT
-                && tags_of(source).any(|tag| {
-                    tag.first().map(String::as_str) == Some("e")
-                        && tag.get(1).map(String::as_str) == Some(original.id.to_hex().as_str())
-                })
-                && !tags_of(source).any(|tag| {
-                    tag.first().map(String::as_str) == Some("h")
-                        && tag.get(1).map(String::as_str) != Some(channel_id)
-                })));
-    if !source_ok {
+    if !(author.owns(source) && is_version_of(author, source, original, channel_id)) {
         return Err(Invalid("Reload the message attachments before sending"));
     }
     let label = row
@@ -685,18 +691,9 @@ pub fn edit(
     let channel_id = first_tag(original, "h").ok_or(Invalid("Message has no channel"))?;
     let message_id = original.id.to_hex();
     let source = attachment_source;
-    let source_ok = source.id == original.id
-        || (source.kind.as_u16() == kinds::EDIT
-            && author.owns(source)
-            && tags_of(source).any(|tag| {
-                tag.first().map(String::as_str) == Some("e")
-                    && tag.get(1).map(String::as_str) == Some(message_id.as_str())
-            })
-            && !tags_of(source).any(|tag| {
-                tag.first().map(String::as_str) == Some("h")
-                    && tag.get(1).map(String::as_str) != Some(channel_id)
-            })
-            && tags_of(source).any(|tag| tag.first().map(String::as_str) == Some("imeta")));
+    let source_ok = is_version_of(author, source, original, channel_id)
+        && (source.id == original.id
+            || tags_of(source).any(|tag| tag.first().map(String::as_str) == Some("imeta")));
     if !source_ok {
         return Err(Invalid(
             "Reload the message before editing its attachments.",
