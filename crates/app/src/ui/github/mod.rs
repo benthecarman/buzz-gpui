@@ -111,37 +111,3 @@ fn copy_link(url: &str, title: &'static str, cx: &mut App) {
         cx,
     );
 }
-
-/// A menu at the pointer (a context menu), dismissed by any press
-/// outside it.
-fn context_menu(
-    window: &Window,
-    at: Point<Pixels>,
-    content: impl IntoElement,
-    dismiss: crate::ui::overlay::Dismiss,
-) -> impl IntoElement {
-    let size = window.viewport_size();
-    div()
-        .child(
-            deferred(
-                anchored().position(point(px(0.), px(0.))).child(
-                    div()
-                        .id("context-menu-backdrop")
-                        .occlude()
-                        .w(size.width)
-                        .h(size.height)
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx)),
-                ),
-            )
-            .with_priority(3),
-        )
-        .child(
-            deferred(
-                anchored()
-                    .position(at)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(div().id("context-menu").occlude().child(content)),
-            )
-            .with_priority(4),
-        )
-}

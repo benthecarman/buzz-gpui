@@ -76,6 +76,33 @@ pub enum Align {
     End,
 }
 
+/// A menu at the pointer (a context menu). Any press outside it, left or
+/// right, calls `on_dismiss` and does not reach what is under it.
+pub fn context_menu(
+    window: &Window,
+    at: Point<Pixels>,
+    content: impl IntoElement,
+    on_dismiss: Dismiss,
+) -> impl IntoElement {
+    let right = on_dismiss.clone();
+    let backdrop = layer("context-menu-backdrop", window, Some(on_dismiss))
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| right(window, cx));
+    div()
+        .child(
+            deferred(anchored().position(point(px(0.), px(0.))).child(backdrop))
+                .with_priority(MENU_LAYER),
+        )
+        .child(
+            deferred(
+                anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(div().id("context-menu").occlude().child(content)),
+            )
+            .with_priority(MENU_LAYER + 1),
+        )
+}
+
 /// A menu hanging 4px below the trigger it follows in a `relative`
 /// parent. Any press outside it calls `on_dismiss`; the press does not
 /// reach what is under it, so the trigger cannot reopen the menu.

@@ -8,9 +8,9 @@ use super::client::GitHub;
 use super::conversation::{self, Entry, Event, EventKind, Item, Source, SourceState};
 use super::data::Details;
 use super::preview::{self, Preview};
-use super::{context_menu, copy_link, inline_link, local_time, relative_time};
+use super::{copy_link, inline_link, local_time, relative_time};
 use crate::ui::media;
-use crate::ui::overlay::Dismiss;
+use crate::ui::overlay::{Dismiss, context_menu};
 use buzz_relay_client::Media;
 use buzz_ui::{
     ActiveTheme, Avatar, Button, ButtonSize, ButtonVariant, Colors, Icon, IconButton,

@@ -590,52 +590,21 @@ impl InboxPage {
             .find(|item| item.id == id)?
             .clone();
         let unread = model::has_unread(&item);
-        let size = window.viewport_size();
         let disabled = self.pending || unread || !self.state.can_read;
-        let backdrop = deferred(
-            anchored().position(point(px(0.), px(0.))).child(
-                div()
-                    .id("inbox-menu-backdrop")
-                    .occlude()
-                    .w(size.width)
-                    .h(size.height)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.menu = None;
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _, _, cx| {
-                            this.menu = None;
-                            cx.notify();
-                        }),
-                    ),
-            ),
-        )
-        .with_priority(3);
-        let popup = deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(at)
-                .snap_to_window_with_margin(px(8.))
-                .child(
-                    div().id("inbox-menu").occlude().child(
-                        Menu::new().size(buzz_ui::MenuSize::Compact).child(
-                            MenuItem::new("inbox-mark-unread", "Mark unread")
-                                .size(buzz_ui::MenuSize::Compact)
-                                .disabled(disabled)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.mutate(item.clone(), true, cx)
-                                })),
-                        ),
-                    ),
-                ),
-        )
-        .with_priority(4);
-        Some(div().child(backdrop).child(popup).into_any_element())
+        let content = Menu::new().size(buzz_ui::MenuSize::Compact).child(
+            MenuItem::new("inbox-mark-unread", "Mark unread")
+                .size(buzz_ui::MenuSize::Compact)
+                .disabled(disabled)
+                .on_click(cx.listener(move |this, _, _, cx| this.mutate(item.clone(), true, cx))),
+        );
+        let page = cx.entity().downgrade();
+        let dismiss: Dismiss = Rc::new(move |_, cx| {
+            let _ = page.update(cx, |this, cx| {
+                this.menu = None;
+                cx.notify();
+            });
+        });
+        Some(overlay::context_menu(window, at, content, dismiss).into_any_element())
     }
 
     fn notice(children: Vec<AnyElement>) -> Div {

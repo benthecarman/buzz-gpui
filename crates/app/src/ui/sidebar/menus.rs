@@ -6,7 +6,7 @@
 
 use super::{ChannelSidebar, RowMenu, SidebarProps, hidden_dms, labelled, sections};
 use crate::community::Community;
-use crate::ui::overlay::Dismiss;
+use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::lifecycle::Action;
 use buzz_relay_client::read_state::ReadCapability;
 use buzz_relay_client::sidebar::{NewSection, SidebarSection, SortMode};
@@ -18,6 +18,7 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::rc::Rc;
 
 /// Closes the menu a row action came from (the header's).
 pub type Close = Dismiss;
@@ -32,9 +33,6 @@ fn listen<E: 'static>(
 ) -> Listener<E> {
     Box::new(cx.listener(f))
 }
-
-/// Menus paint above dialogs (`overlay.rs`).
-const MENU_LAYER: usize = 3;
 
 /// `buzz://channel/<id>`, the id encoded like `encodeURIComponent`. The
 /// link carries no community: it opens in the recipient's selected one.
@@ -764,43 +762,17 @@ impl ChannelSidebar {
             self.row_actions(&channel, &section, None, snapshot, cx)
         };
         let submenu = move_open.then(|| self.move_submenu(&channel, &section, snapshot, cx));
-        let size = window.viewport_size();
-        let backdrop = deferred(
-            anchored().position(point(px(0.), px(0.))).child(
-                div()
-                    .id("row-menu-backdrop")
-                    .occlude()
-                    .w(size.width)
-                    .h(size.height)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.close_menus(cx)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _, _, cx| this.close_menus(cx)),
-                    ),
-            ),
-        )
-        .with_priority(MENU_LAYER);
-        let popup = deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(at)
-                .snap_to_window_with_margin(px(8.))
-                .child(
-                    div()
-                        .id("row-menu")
-                        .occlude()
-                        .flex()
-                        .items_start()
-                        .gap(px(4.))
-                        .when(!surface, |this| this.child(Menu::new().children(actions)))
-                        .children(submenu),
-                ),
-        )
-        .with_priority(MENU_LAYER + 1);
-        Some(div().child(backdrop).child(popup).into_any_element())
+        let content = div()
+            .flex()
+            .items_start()
+            .gap(px(4.))
+            .when(!surface, |this| this.child(Menu::new().children(actions)))
+            .children(submenu);
+        let weak = cx.entity().downgrade();
+        let dismiss: Dismiss = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_menus(cx));
+        });
+        Some(overlay::context_menu(window, at, content, dismiss).into_any_element())
     }
 
     pub(super) fn open_create_section(

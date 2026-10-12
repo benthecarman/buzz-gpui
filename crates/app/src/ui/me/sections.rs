@@ -28,8 +28,6 @@ use std::time::Duration;
 
 /// Collapsed groups, saved per community (`me:collapsed-sections`).
 const COLLAPSED: &str = "me:collapsed-sections";
-/// Menus paint above dialogs (`overlay.rs`).
-const MENU_LAYER: usize = 3;
 
 /// A row's open actions menu: from its button, or at the pointer.
 struct RowMenu {
@@ -994,34 +992,11 @@ impl MeSidebar {
     fn context_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let at = self.menu.as_ref()?.at?;
         let content = self.row_menu_content(cx);
-        let size = window.viewport_size();
-        let backdrop = deferred(
-            anchored().position(point(px(0.), px(0.))).child(
-                div()
-                    .id("me-menu-backdrop")
-                    .occlude()
-                    .w(size.width)
-                    .h(size.height)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.close_menus(cx)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _, _, cx| this.close_menus(cx)),
-                    ),
-            ),
-        )
-        .with_priority(MENU_LAYER);
-        let popup = deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(at)
-                .snap_to_window_with_margin(px(8.))
-                .child(div().id("me-context-menu").occlude().child(content)),
-        )
-        .with_priority(MENU_LAYER + 1);
-        Some(div().child(backdrop).child(popup).into_any_element())
+        let weak = cx.entity().downgrade();
+        let dismiss: Dismiss = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_menus(cx));
+        });
+        Some(overlay::context_menu(window, at, content, dismiss).into_any_element())
     }
 
     /// Saving and failed moves (`moves` in `SessionSections`).
