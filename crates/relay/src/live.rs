@@ -161,6 +161,9 @@ pub struct LiveSnapshot {
     pub status: LiveConnection,
     pub routes: Vec<LiveRoute>,
     pub error: Option<String>,
+    /// While [`LiveConnection::Retrying`]: the wait before the next attempt,
+    /// which grows the longer the connection stays lost.
+    pub retry_in: Option<Duration>,
 }
 
 impl Default for LiveSnapshot {
@@ -169,6 +172,7 @@ impl Default for LiveSnapshot {
             status: LiveConnection::Connecting,
             routes: Vec::new(),
             error: None,
+            retry_in: None,
         }
     }
 }
@@ -254,6 +258,7 @@ pub struct Live {
     connected: bool,
     connection: LiveConnection,
     connection_error: Option<String>,
+    retry_in: Option<Duration>,
     /// Invalid input from the session, shown until the next valid update.
     input_error: Option<String>,
     routes: BTreeMap<RouteKey, Route>,
@@ -296,6 +301,7 @@ impl Live {
             connected: false,
             connection: LiveConnection::Connecting,
             connection_error: None,
+            retry_in: None,
             input_error: None,
             routes: BTreeMap::new(),
             wires: HashMap::new(),
@@ -376,6 +382,7 @@ impl Live {
                 .input_error
                 .clone()
                 .or_else(|| self.connection_error.clone()),
+            retry_in: self.retry_in,
         }
     }
 
@@ -563,6 +570,7 @@ impl Live {
     fn connection_changed(&mut self, state: SocketState) {
         let was_connected = self.connected;
         self.connected = state == SocketState::Ready;
+        self.retry_in = None;
         match state {
             SocketState::Ready => {
                 self.connection = LiveConnection::Connected;
@@ -572,9 +580,10 @@ impl Live {
                 self.connection = LiveConnection::Connecting;
                 self.connection_error = None;
             }
-            SocketState::Waiting { error, .. } => {
+            SocketState::Waiting { error, retry_in } => {
                 self.connection = LiveConnection::Retrying;
                 self.connection_error = Some(error);
+                self.retry_in = Some(retry_in);
             }
             SocketState::Failed { error } => {
                 self.connection = LiveConnection::Error;

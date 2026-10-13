@@ -179,10 +179,15 @@ pub struct LiveView {
     pub heads: Vec<HeadCatchUp>,
 }
 
+/// The reconnect wait from which a lost live connection is shown: with the
+/// socket's 500 ms backoff, after three quick attempts have failed.
+const LOUD_RETRY: Duration = Duration::from_secs(4);
+
 impl LiveView {
     /// The first error worth showing for `channel` (`LiveStatus.tsx`):
     /// the connection, the roster, the channel's catch-up, then its route
-    /// or a global route. Quiet while quota recovery runs by itself.
+    /// or a global route. Quiet while quota recovery runs by itself, and
+    /// for the first quick reconnects after a drop.
     pub fn issue(&self, channel: Option<&str>) -> Option<String> {
         let route = channel.and_then(|id| {
             self.live
@@ -215,17 +220,19 @@ impl LiveView {
             RosterRefresh::Error(error) => Some(error.clone()),
             _ => None,
         };
-        let error = self
-            .live
-            .error
-            .clone()
+        // The first few reconnects after a drop (sleep, a network change)
+        // usually succeed within seconds; only a longer outage is shown.
+        let quiet_retry = self.live.status == LiveConnection::Retrying
+            && self.live.retry_in.is_some_and(|wait| wait < LOUD_RETRY);
+        let error = (!quiet_retry)
+            .then(|| self.live.error.clone())
+            .flatten()
             .or(roster_error)
             .or_else(|| head.and_then(|head| head.error.clone()))
             .or_else(|| actionable.iter().find_map(|route| route.error.clone()));
-        let issue = matches!(
-            self.live.status,
-            LiveConnection::Retrying | LiveConnection::Error
-        ) || error.is_some()
+        let issue = (self.live.status == LiveConnection::Retrying && !quiet_retry)
+            || self.live.status == LiveConnection::Error
+            || error.is_some()
             || actionable.iter().any(|route| {
                 matches!(
                     route.status,

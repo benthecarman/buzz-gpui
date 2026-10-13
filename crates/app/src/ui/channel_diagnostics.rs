@@ -379,6 +379,7 @@ mod tests {
                 status,
                 routes,
                 error: None,
+                retry_in: None,
             },
             roster: RosterRefresh::Verified,
             heads: Vec::new(),
@@ -435,6 +436,21 @@ mod tests {
         assert_eq!(
             rejection.as_deref(),
             Some("Live reconnect attempts exhausted; retry available")
+        );
+    }
+
+    #[test]
+    fn a_quick_reconnect_stays_quiet_and_a_long_one_shows() {
+        let mut quick = view(LiveConnection::Retrying, Vec::new());
+        quick.live.error = Some("Live connection interrupted".into());
+        quick.live.retry_in = Some(std::time::Duration::from_secs(1));
+        assert_eq!(quick.issue(Some("c")), None);
+        assert_eq!(live_lines(&quick, Some("c")).0, "Live updates: connecting");
+        let mut long = quick.clone();
+        long.live.retry_in = Some(std::time::Duration::from_secs(8));
+        assert_eq!(
+            long.issue(Some("c")).as_deref(),
+            Some("Live connection interrupted")
         );
     }
 
