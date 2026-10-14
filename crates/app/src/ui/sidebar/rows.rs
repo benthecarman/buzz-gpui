@@ -52,15 +52,7 @@ pub(super) fn typing_label(names: &[String]) -> String {
 
 /// The viewer's own agents, from every connected host.
 pub(crate) fn own_agents(cx: &App) -> HashSet<String> {
-    cx.try_global::<crate::hosts::Hosts>()
-        .map(|hosts| {
-            hosts
-                .hosts
-                .iter()
-                .flat_map(|host| host.read(cx).agents.agents.iter().map(|a| a.pubkey.clone()))
-                .collect()
-        })
-        .unwrap_or_default()
+    crate::ui::identity::AgentLibrary::from_hosts(cx).keys()
 }
 
 /// Agents working in a channel: the viewer's own agents typing at its top

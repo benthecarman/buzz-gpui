@@ -7,7 +7,6 @@ use super::agent_activity::row::AgentActivityRow;
 use super::identity::Names;
 use super::{media, navigation};
 use crate::agent_activity::current::{CurrentActivity, Root};
-use crate::hosts::Hosts;
 use buzz_relay_client::{EventId, Media, Profiles};
 use buzz_ui::tokens::shadow;
 use buzz_ui::{ActiveTheme, Avatar, AvatarSize, Popover, PopoverPadding, PopoverWidth, TypeStyled};
@@ -49,15 +48,7 @@ pub fn label(names: &[SharedString]) -> String {
 
 /// The viewer's own agents, on every host (`agentChoices`).
 pub fn owned_agents(cx: &App) -> HashSet<String> {
-    let Some(hosts) = cx.try_global::<Hosts>() else {
-        return HashSet::new();
-    };
-    hosts
-        .hosts
-        .iter()
-        .flat_map(|host| host.read(cx).agents.agents.iter())
-        .map(|agent| agent.pubkey.clone())
-        .collect()
+    super::identity::AgentLibrary::from_hosts(cx).keys()
 }
 
 /// Who is active in a conversation.

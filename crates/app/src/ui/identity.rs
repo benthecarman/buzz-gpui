@@ -6,7 +6,6 @@
 //! Names are display only; they never select recipients or grant control.
 
 use super::keys::npub;
-use crate::hosts::Hosts;
 use buzz_relay_client::{Profiles, RelayOrigin};
 use gpui_kit::App;
 use std::cell::RefCell;
@@ -205,7 +204,8 @@ fn js_trim(text: &str) -> &str {
     text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
-/// The viewer's agents, as every connected host lists them.
+/// The viewer's agents, as the hosts holding their keys list them
+/// (`LocalAgents`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentLibrary {
     /// `(pubkey, name, relay url)` in host order.
@@ -213,23 +213,32 @@ pub struct AgentLibrary {
 }
 
 impl AgentLibrary {
+    /// The signed-in viewer's Agents in every community. Names never grant
+    /// control.
     pub fn from_hosts(cx: &App) -> Self {
-        let Some(hosts) = cx.try_global::<Hosts>() else {
+        let Some(service) = crate::agents2::Agents2::global(cx) else {
             return Self::default();
         };
-        let agents = hosts
-            .hosts
-            .iter()
-            .flat_map(|host| host.read(cx).agents.agents.iter())
-            .map(|agent| {
-                (
-                    agent.pubkey.to_ascii_lowercase(),
-                    agent.name.clone(),
-                    agent.relay_url.clone(),
-                )
-            })
+        let viewer = match &cx.global::<crate::community::AppState>().identity {
+            crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+            _ => None,
+        };
+        let agents = service
+            .read(cx)
+            .local()
+            .into_iter()
+            .filter(|agent| viewer.as_ref().is_none_or(|viewer| agent.owner == *viewer))
+            .map(|agent| (agent.pubkey.to_ascii_lowercase(), agent.name, agent.relay))
             .collect();
         Self { agents }
+    }
+
+    /// Their keys.
+    pub fn keys(&self) -> std::collections::HashSet<String> {
+        self.agents
+            .iter()
+            .map(|(pubkey, _, _)| pubkey.clone())
+            .collect()
     }
 }
 

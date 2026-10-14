@@ -12,7 +12,6 @@ use super::pages::{self, Page};
 use super::search_kit::{self, Highlight, SearchUsage, match_name, match_rank, search_order};
 use super::sidebar::channel_label;
 use crate::community::Community;
-use crate::hosts::Hosts;
 use buzz_relay_client::members::{Person, match_tier};
 use buzz_relay_client::search::{self, Day, ParsedSearch};
 use buzz_relay_client::{
@@ -389,26 +388,20 @@ impl SearchDialog {
 
     /// The viewer's agents in this community, from every agent host.
     fn agents(&self, cx: &App) -> Vec<AgentChoice> {
-        let (Some(community), Some(hosts)) = (&self.community, cx.try_global::<Hosts>()) else {
+        let Some(community) = &self.community else {
             return Vec::new();
         };
         let origin = &community.read(cx).origin;
-        let mut agents: Vec<AgentChoice> = Vec::new();
-        for host in &hosts.hosts {
-            for agent in &host.read(cx).agents.agents {
-                if agent.configured
-                    && RelayOrigin::parse(&agent.relay_url).is_ok_and(|o| o == *origin)
-                    && !agents.iter().any(|a| a.pubkey == agent.pubkey)
-                {
-                    agents.push(AgentChoice {
-                        pubkey: agent.pubkey.clone(),
-                        name: agent.name.clone(),
-                        picture: agent.picture.clone(),
-                    });
-                }
-            }
-        }
-        agents
+        crate::ui::identity::AgentLibrary::from_hosts(cx)
+            .agents
+            .into_iter()
+            .filter(|(_, _, relay)| RelayOrigin::parse(relay).is_ok_and(|o| o == *origin))
+            .map(|(pubkey, name, _)| AgentChoice {
+                pubkey,
+                name,
+                picture: None,
+            })
+            .collect()
     }
 
     /// Works out the relay reads the query needs (`SearchResults.tsx`,

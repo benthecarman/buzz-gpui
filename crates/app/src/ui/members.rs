@@ -70,11 +70,7 @@ fn is_agent(key: &str, role: MemberRole, profiles: &Profiles, known: &HashSet<St
 
 /// The viewer's library agents, by key.
 fn known_agents(cx: &App) -> HashSet<String> {
-    super::identity::AgentLibrary::from_hosts(cx)
-        .agents
-        .into_iter()
-        .map(|(pubkey, _, _)| pubkey)
-        .collect()
+    super::identity::AgentLibrary::from_hosts(cx).keys()
 }
 
 /// The role a row announces (`roleLabel`): an agent's bot role reads as

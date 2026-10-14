@@ -217,6 +217,17 @@ struct Runner {
     failed: Option<(u64, String)>,
 }
 
+/// One saved identity as the rest of the app knows the viewer's agents
+/// (`LocalAgent`): for names, mentions and typing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalAgent {
+    pub pubkey: String,
+    pub name: String,
+    /// The canonical `wss://` community origin it was created for.
+    pub relay: String,
+    pub owner: String,
+}
+
 /// What a runner is doing, for Mission control.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunState {
@@ -647,6 +658,27 @@ impl Agents2 {
     /// The selected community, while it is bound.
     fn selected(&self, cx: &App) -> Option<&Bound> {
         self.bound.get(&selected_origin(cx)?)
+    }
+
+    /// Every saved identity on every host, in every community, deleted ones
+    /// left out (`local()`).
+    pub fn local(&self) -> Vec<LocalAgent> {
+        let mut agents: Vec<LocalAgent> = Vec::new();
+        for saved in self.saved().filter(|saved| !saved.summary.deleted) {
+            if agents
+                .iter()
+                .any(|agent| agent.pubkey == saved.summary.pubkey)
+            {
+                continue;
+            }
+            agents.push(LocalAgent {
+                pubkey: saved.summary.pubkey,
+                name: saved.summary.name,
+                relay: saved.summary.relay,
+                owner: saved.summary.owner,
+            });
+        }
+        agents
     }
 
     /// What a running agent's runner is doing, for Mission control.
