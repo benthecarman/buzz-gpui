@@ -494,7 +494,8 @@ impl ChannelUsage {
             .py(rems(0.375))
             .rounded(radius::CAPSULE)
             .border_1()
-            .border_color(ix.border)
+            // The value and caret identify it; its boundary stays quiet.
+            .border_color(c.border_standard)
             .text_label_sm()
             .text_color(c.text_standard)
             .cursor_pointer()

@@ -276,6 +276,8 @@ pub struct Button {
     disabled: bool,
     loading: bool,
     full_width: bool,
+    /// A compact select's trigger: the outline at `border-standard`.
+    quiet: bool,
     tooltip: Option<SharedString>,
     on_click: Option<ClickHandler>,
     focus: Option<FocusHandle>,
@@ -296,6 +298,7 @@ impl Button {
             disabled: false,
             loading: false,
             full_width: false,
+            quiet: false,
             tooltip: None,
             on_click: None,
             focus: None,
@@ -324,6 +327,14 @@ impl Button {
     }
 
     pub fn outline(self) -> Self {
+        self.variant(ButtonVariant::Outline)
+    }
+
+    /// A compact select's trigger (`Select variant="compact"`): an outline
+    /// whose boundary stays quiet at `border-standard`; the value and caret
+    /// identify it.
+    pub fn compact_select(mut self) -> Self {
+        self.quiet = true;
         self.variant(ButtonVariant::Outline)
     }
 
@@ -396,7 +407,12 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let c = cx.colors();
-        let f = Fills::resolve(self.variant, self.surface, self.selected, self.disabled, c);
+        let mut f = Fills::resolve(self.variant, self.surface, self.selected, self.disabled, c);
+        if self.quiet && f.stroke.is_some() {
+            f.stroke = Some(c.border_standard);
+            f.shadow.pop();
+            f.shadow.push(inset_stroke(c.border_standard));
+        }
         let icon_size = self.size.icon();
         let interactive = !self.disabled && !self.loading;
         let focus_ring = c.border_focus;

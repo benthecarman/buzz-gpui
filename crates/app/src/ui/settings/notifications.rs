@@ -240,7 +240,7 @@ impl SettingsPage {
                 current.name()
             },
         )
-        .outline()
+        .compact_select()
         .size(ButtonSize::Sm)
         .shape(ButtonShape::Control)
         .icon_end(IconName::CaretDown)

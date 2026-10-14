@@ -849,7 +849,7 @@ impl MembersDialog {
             .flex_none()
             .child(
                 Button::new("member-filter", label(self.filter))
-                    .outline()
+                    .compact_select()
                     .size(ButtonSize::Sm)
                     .surface(Surface::Floating)
                     .icon_end(if self.filter_open {
