@@ -1,10 +1,10 @@
 //! Draft attachments and background sends (`attachment-draft.ts`,
 //! `background-upload.ts`).
 //!
-//! Files wait in a draft, queued, until Send. Send hands them to a
-//! background job of the community's queue and clears the composer at
-//! once; the job uploads them in order, then the composer's host publishes
-//! the message. A job that fails or is cancelled hands its files and the
+//! Files start uploading, one at a time, as soon as they are added. Send
+//! hands them, with the upload still running, to a background job of the
+//! community's queue and clears the composer at once; the job waits for
+//! them in order, then the composer's host publishes the message. A job that fails or is cancelled hands its files and the
 //! sent text back to the draft. Drafts and jobs outlive their composer, so
 //! files survive navigation (not a restart), as in buzz-app's tab.
 
@@ -13,8 +13,11 @@ use buzz_relay_client::upload::{self, MAX_UPLOAD, Source, Stage, Upload, UploadE
 use buzz_relay_client::{Attachment, Media};
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
+use futures::future::Shared;
 use gpui_kit::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// At most this many files per message.
@@ -91,16 +94,105 @@ pub struct Recovered {
     pub error: Option<SharedString>,
 }
 
+/// What a draft file previews as (`draftAttachmentMedia`): the relay's
+/// type once uploaded, else the file's type or name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preview {
+    Image,
+    Video,
+    Audio,
+    File,
+}
+
+impl DraftFile {
+    /// The type the relay or the file gives.
+    pub fn kind(&self) -> &str {
+        self.uploaded
+            .as_ref()
+            .map_or(self.mime.as_str(), |a| a.mime.as_str())
+    }
+
+    pub fn preview(&self) -> Preview {
+        let kind = self.kind();
+        let lower = self.name.to_ascii_lowercase();
+        let named = |extensions: &[&str]| {
+            self.uploaded.is_none() && extensions.iter().any(|ext| lower.ends_with(ext))
+        };
+        if matches!(
+            kind,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) || named(&[".png", ".jpg", ".jpeg", ".gif", ".webp"])
+        {
+            Preview::Image
+        } else if kind.starts_with("video/") || named(&[".mp4", ".mov", ".webm", ".m4v"]) {
+            Preview::Video
+        } else if kind.starts_with("audio/") || self.voice.is_some() {
+            Preview::Audio
+        } else {
+            Preview::File
+        }
+    }
+}
+
 /// The files of one draft (`AttachmentDraft`).
+///
+/// Files upload eagerly, one at a time, from the moment they are added,
+/// and stay previewable meanwhile. Send moves the draft's files with
+/// their running upload to a background send without restarting it.
 pub struct AttachmentDraft {
     media: Media,
     pub items: Vec<DraftFile>,
-    /// Uploads running, file ID to upload ID.
-    active: HashMap<String, String>,
+    /// Uploads running, by file ID.
+    active: HashMap<String, Running>,
+    /// No eager upload starts: nobody shows the draft, or its composer is
+    /// disabled.
+    paused: bool,
     /// Composers showing this draft.
     viewers: usize,
     /// Text a failed send handed back, until a composer takes it.
     pub recovered: Option<Recovered>,
+}
+
+/// The draft a running upload reports to. Send points it at the
+/// background draft that took the upload over.
+type Owner = Rc<RefCell<WeakEntity<AttachmentDraft>>>;
+
+/// One running upload.
+struct Running {
+    upload: String,
+    owner: Owner,
+    /// Its outcome, for a send that waits on it.
+    result: Shared<oneshot::Receiver<Result<Attachment, UploadError>>>,
+}
+
+/// What [`AttachmentDraft::pump`] starts next: the first queued file,
+/// unless the draft is paused or an upload already runs.
+fn next_queued(items: &[DraftFile], paused: bool, running: bool) -> Option<String> {
+    if paused || running {
+        return None;
+    }
+    items
+        .iter()
+        .find(|item| item.status == Status::Queued)
+        .map(|item| item.id.clone())
+}
+
+/// Stops unfinished files (`cancelActive`): they wait queued for the
+/// draft to resume, or, when a retry is required, fail with "Upload
+/// paused".
+fn freeze(items: &mut [DraftFile], retry_required: bool) {
+    for item in items {
+        if item.status == Status::Queued || item.status.busy() {
+            if retry_required {
+                item.status = Status::Error;
+                item.error = Some("Upload paused. Retry to continue.".into());
+            } else {
+                item.status = Status::Queued;
+                item.error = None;
+            }
+            item.transfer = None;
+        }
+    }
 }
 
 impl AttachmentDraft {
@@ -109,6 +201,7 @@ impl AttachmentDraft {
             media,
             items: Vec::new(),
             active: HashMap::new(),
+            paused: false,
             viewers: 0,
             recovered: None,
         }
@@ -118,11 +211,15 @@ impl AttachmentDraft {
         self.items.iter().map(|item| item.size).sum()
     }
 
-    /// Preparing, uploading or failed files block Send (`blocked`).
+    /// The community's media, for files already on the relay.
+    pub fn media(&self) -> &Media {
+        &self.media
+    }
+
+    /// Only a failed file blocks Send; unfinished uploads go on in the
+    /// background send.
     pub fn blocked(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.status.busy() || item.status == Status::Error)
+        self.items.iter().any(|item| item.status == Status::Error)
     }
 
     fn replace(&mut self, id: &str, cx: &mut Context<Self>, change: impl FnOnce(&mut DraftFile)) {
@@ -133,7 +230,7 @@ impl AttachmentDraft {
     }
 
     /// Adds files after the checks of `add`; `retained` counts every other
-    /// draft and send of the community.
+    /// draft and send of the community. They start uploading at once.
     fn add(
         &mut self,
         files: Vec<NewFile>,
@@ -168,6 +265,8 @@ impl AttachmentDraft {
             transfer: None,
         }));
         cx.notify();
+        self.paused = false;
+        self.pump(cx);
         Ok(())
     }
 
@@ -183,55 +282,99 @@ impl AttachmentDraft {
 
     /// Removes a file, stopping its upload.
     pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(upload) = self.active.remove(id) {
-            upload::cancel(&upload);
+        if let Some(running) = self.active.remove(id) {
+            upload::cancel(&running.upload);
         }
         self.items.retain(|item| item.id != id);
         cx.notify();
+        self.pump(cx);
     }
 
-    /// Queues a failed file again; the next send uploads it from scratch.
+    /// Queues a failed file again, which uploads from scratch. Only an
+    /// explicit retry clears a real failure.
     pub fn retry(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self
+            .items
+            .iter()
+            .any(|item| item.id == id && item.status == Status::Error)
+        {
+            return;
+        }
         self.replace(id, cx, |item| {
-            if item.status == Status::Error {
-                item.status = Status::Queued;
-                item.error = None;
-                item.transfer = None;
-            }
+            item.status = Status::Queued;
+            item.error = None;
+            item.transfer = None;
         });
+        self.paused = false;
+        self.pump(cx);
     }
 
-    /// Stops every running upload; those files wait for a retry
-    /// ("Upload paused").
+    /// Pauses eager uploads (no composer shows the draft, or its composer
+    /// is disabled): unfinished files wait queued and resume later without
+    /// a retry.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
-        for (_, upload) in self.active.drain() {
-            upload::cancel(&upload);
+        self.cancel_active(false, cx);
+    }
+
+    /// Resumes eager uploads.
+    pub fn resume(&mut self, cx: &mut Context<Self>) {
+        self.paused = false;
+        self.pump(cx);
+    }
+
+    /// Stops every running upload. With `retry_required`, unfinished files
+    /// fail with "Upload paused" until a retry; otherwise they wait queued.
+    fn cancel_active(&mut self, retry_required: bool, cx: &mut Context<Self>) {
+        self.paused = true;
+        for (_, running) in self.active.drain() {
+            upload::cancel(&running.upload);
         }
-        for item in &mut self.items {
-            if item.status.busy() {
-                item.status = Status::Error;
-                item.error = Some("Upload paused. Retry to continue.".into());
-                item.transfer = None;
-            }
-        }
+        freeze(&mut self.items, retry_required);
         cx.notify();
     }
 
     /// Drops every file, stopping their uploads.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        for (_, upload) in self.active.drain() {
-            upload::cancel(&upload);
-        }
+        self.cancel_active(true, cx);
         self.items.clear();
         cx.notify();
     }
 
-    /// Uploads the files in order (`prepareForSend`), stopping at the first
-    /// failure, which stays on its file.
+    /// Starts the next queued file, one at a time.
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = next_queued(&self.items, self.paused, !self.active.is_empty()) {
+            self.start_one(&id, cx);
+        }
+    }
+
+    /// Hands the files, with the upload still running, to `target`, an
+    /// empty draft (`transferAttachmentDraft`). This draft is left empty
+    /// and paused.
+    fn transfer(&mut self, target: &Entity<Self>, cx: &mut Context<Self>) {
+        self.paused = true;
+        let items = std::mem::take(&mut self.items);
+        let active = std::mem::take(&mut self.active);
+        cx.notify();
+        target.update(cx, |target, cx| {
+            let weak = cx.weak_entity();
+            for running in active.values() {
+                *running.owner.borrow_mut() = weak.clone();
+            }
+            target.paused = false;
+            target.items = items;
+            target.active = active;
+            cx.notify();
+        });
+    }
+
+    /// Uploads the files in order (`prepareForSend`), waiting on uploads
+    /// already running. The first failure stops the rest: unfinished files
+    /// fail with "Upload paused" so the draft they return to retries them.
     fn prepare_for_send(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<Attachment>, UploadError>> {
+        self.paused = false;
         let order: Vec<String> = self.items.iter().map(|item| item.id.clone()).collect();
         cx.spawn(async move |this, cx| {
             let mut uploaded = Vec::new();
@@ -239,17 +382,26 @@ impl AttachmentDraft {
                 let started = this
                     .update(cx, |this, cx| this.start_one(&id, cx))
                     .map_err(|_| UploadError::Cancelled)?;
-                let attachment = match started {
-                    Start::Done(attachment) => attachment,
-                    Start::Missing => return Err(UploadError::Cancelled),
-                    Start::Running(task) => task.await?,
+                let result = match started {
+                    Start::Done(attachment) => Ok(attachment),
+                    Start::Missing => Err(UploadError::Cancelled),
+                    Start::Failed => Err(UploadError::Failed),
+                    Start::Running(result) => result.await.unwrap_or(Err(UploadError::Cancelled)),
                 };
-                uploaded.push(attachment);
+                match result {
+                    Ok(attachment) => uploaded.push(attachment),
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| this.cancel_active(true, cx));
+                        return Err(error);
+                    }
+                }
             }
             Ok(uploaded)
         })
     }
 
+    /// The file's upload: done, already running, or started now. A failed
+    /// file waits for an explicit retry.
     fn start_one(&mut self, id: &str, cx: &mut Context<Self>) -> Start {
         let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
             return Start::Missing;
@@ -257,19 +409,41 @@ impl AttachmentDraft {
         if let Some(attachment) = &item.uploaded {
             return Start::Done(attachment.clone());
         }
+        if item.status == Status::Error {
+            return Start::Failed;
+        }
+        if let Some(running) = self.active.get(id) {
+            return Start::Running(running.result.clone());
+        }
         let job = Upload::new(item.name.clone(), item.mime.clone(), item.source.clone());
         item.status = Status::Preparing;
         item.error = None;
         item.transfer = None;
         let voice = item.voice.as_ref().map(|voice| voice.duration);
-        self.active.insert(id.to_string(), job.id.clone());
+        let owner: Owner = Rc::new(RefCell::new(cx.weak_entity()));
+        let (done, result) = oneshot::channel();
+        let result = futures::FutureExt::shared(result);
+        self.active.insert(
+            id.to_string(),
+            Running {
+                upload: job.id.clone(),
+                owner: owner.clone(),
+                result: result.clone(),
+            },
+        );
         cx.notify();
         let (report, mut stages) = mpsc::unbounded();
         let media = self.media.clone();
-        let file = id.to_string();
-        cx.spawn(async move |this, cx| {
+        let (file, upload_id) = (id.to_string(), job.id.clone());
+        let reporter = owner.clone();
+        cx.spawn(async move |_, cx| {
             while let Some(stage) = stages.next().await {
-                let _ = this.update(cx, |this, cx| {
+                let owner = reporter.borrow().clone();
+                let _ = owner.update(cx, |this, cx| {
+                    // A removed, paused or replaced upload reports nothing.
+                    if this.active.get(&file).is_none_or(|r| r.upload != upload_id) {
+                        return;
+                    }
                     this.replace(&file, cx, |item| match stage {
                         Stage::Preparing => item.status = Status::Preparing,
                         Stage::Uploading => item.status = Status::Uploading,
@@ -283,51 +457,74 @@ impl AttachmentDraft {
             }
         })
         .detach();
-        let file = id.to_string();
-        let upload_id = job.id.clone();
-        Start::Running(cx.spawn(async move |this, cx| {
+        let (file, upload_id) = (id.to_string(), job.id.clone());
+        cx.spawn(async move |_, cx| {
             let result = upload::send(&media, job, move |stage| {
                 let _ = report.unbounded_send(stage);
             })
             .await;
-            this.update(cx, |this, cx| {
-                // A removed or paused file's result is no longer wanted.
-                let current = this.active.get(&file) == Some(&upload_id);
+            let owner = owner.borrow().clone();
+            let settled = owner
+                .update(cx, |this, cx| {
+                    this.settle_upload(&file, &upload_id, result, voice, cx)
+                })
+                .unwrap_or(Err(UploadError::Cancelled));
+            let _ = done.send(settled);
+        })
+        .detach();
+        Start::Running(result)
+    }
+
+    /// Records how an upload ended, then starts the next queued file.
+    fn settle_upload(
+        &mut self,
+        file: &str,
+        upload_id: &str,
+        result: Result<Attachment, UploadError>,
+        voice: Option<f64>,
+        cx: &mut Context<Self>,
+    ) -> Result<Attachment, UploadError> {
+        // A removed or paused file's result is no longer wanted.
+        let current = self
+            .active
+            .get(file)
+            .is_some_and(|running| running.upload == upload_id);
+        if current {
+            self.active.remove(file);
+        }
+        let settled = match result {
+            Ok(mut attachment) if current => {
+                attachment.voice_duration = voice;
+                self.replace(file, cx, |item| {
+                    item.status = Status::Ready;
+                    item.uploaded = Some(attachment.clone());
+                    item.transfer = None;
+                });
+                Ok(attachment)
+            }
+            Ok(_) => Err(UploadError::Cancelled),
+            Err(error) => {
                 if current {
-                    this.active.remove(&file);
+                    self.replace(file, cx, |item| {
+                        item.status = Status::Error;
+                        item.error = Some(error.to_string().into());
+                        item.transfer = None;
+                    });
                 }
-                match result {
-                    Ok(mut attachment) if current => {
-                        attachment.voice_duration = voice;
-                        this.replace(&file, cx, |item| {
-                            item.status = Status::Ready;
-                            item.uploaded = Some(attachment.clone());
-                            item.transfer = None;
-                        });
-                        Ok(attachment)
-                    }
-                    Ok(_) => Err(UploadError::Cancelled),
-                    Err(error) => {
-                        if current {
-                            this.replace(&file, cx, |item| {
-                                item.status = Status::Error;
-                                item.error = Some(error.to_string().into());
-                                item.transfer = None;
-                            });
-                        }
-                        Err(error)
-                    }
-                }
-            })
-            .unwrap_or(Err(UploadError::Cancelled))
-        }))
+                Err(error)
+            }
+        };
+        self.pump(cx);
+        settled
     }
 }
 
 enum Start {
     Done(Attachment),
     Missing,
-    Running(Task<Result<Attachment, UploadError>>),
+    /// The file failed; only a retry uploads it again.
+    Failed,
+    Running(Shared<oneshot::Receiver<Result<Attachment, UploadError>>>),
 }
 
 /// The drafts and send queues of every community, keyed by its partition.
@@ -359,13 +556,18 @@ pub fn draft(community: &Entity<Community>, key: &str, cx: &mut App) -> Entity<A
     draft
 }
 
-/// A composer started showing `draft`.
+/// A composer started showing `draft`; the first one resumes its uploads.
 pub fn view(draft: &Entity<AttachmentDraft>, cx: &mut App) {
-    draft.update(cx, |draft, _| draft.viewers += 1);
+    draft.update(cx, |draft, cx| {
+        draft.viewers += 1;
+        if draft.viewers == 1 {
+            draft.resume(cx);
+        }
+    });
 }
 
-/// A composer stopped showing `draft`. With nobody left, uploads pause and
-/// an empty draft is forgotten.
+/// A composer stopped showing `draft`. With nobody left, uploads pause
+/// (their files wait queued for a return) and an empty draft is forgotten.
 pub fn leave(
     community: &Entity<Community>,
     key: &str,
@@ -586,13 +788,13 @@ impl Queue {
         cx.notify();
     }
 
-    /// Takes `files` from a draft after Send and uploads them in order.
-    /// `draft` is the text as sent and `followup` what the composer was
-    /// left with, for handing back.
+    /// Takes the files of `source` after Send, with their upload still
+    /// running, and waits for them in order. `draft` is the text as sent
+    /// and `followup` what the composer was left with, for handing back.
     pub fn start(
         &mut self,
         owner: String,
-        files: Vec<DraftFile>,
+        source: &Entity<AttachmentDraft>,
         draft: String,
         followup: String,
         cx: &mut Context<Self>,
@@ -600,7 +802,18 @@ impl Queue {
         let community = self.community.upgrade()?;
         let id = format!("background:{}", uuid::Uuid::new_v4());
         let store = self::draft(&community, &id, cx);
-        store.update(cx, |store, cx| store.adopt(files, cx));
+        if source
+            .read(cx)
+            .items
+            .iter()
+            .all(|item| item.uploaded.is_some())
+        {
+            let files = source.read(cx).items.clone();
+            store.update(cx, |store, cx| store.adopt(files, cx));
+            source.update(cx, |source, cx| source.clear(cx));
+        } else {
+            source.update(cx, |source, cx| source.transfer(&store, cx));
+        }
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         let (ready, uploaded) = oneshot::channel();
         let prepared = store.update(cx, |store, cx| store.prepare_for_send(cx));
@@ -634,12 +847,7 @@ impl Queue {
         };
         job.cancelled = true;
         let store = job.store.clone();
-        store.update(cx, |store, cx| {
-            for (_, upload) in store.active.drain() {
-                upload::cancel(&upload);
-            }
-            cx.notify();
-        });
+        store.update(cx, |store, cx| store.cancel_active(true, cx));
     }
 
     fn uploaded(
@@ -884,5 +1092,97 @@ mod tests {
         assert_eq!(Status::Ready.label(), "Ready");
         assert_eq!(Status::Error.label(), "Upload failed");
         assert!(!Status::Queued.busy() && Status::Uploading.busy());
+    }
+
+    fn file(id: &str, name: &str, mime: &str, status: Status) -> DraftFile {
+        DraftFile {
+            id: id.into(),
+            name: name.into(),
+            mime: mime.into(),
+            size: 1,
+            source: Source::Bytes(Arc::from(vec![0u8])),
+            voice: None,
+            status,
+            uploaded: None,
+            error: None,
+            transfer: None,
+        }
+    }
+
+    #[test]
+    fn eager_uploads_start_one_queued_file_at_a_time() {
+        let items = vec![
+            file("a", "a.png", "image/png", Status::Ready),
+            file("b", "b.png", "image/png", Status::Error),
+            file("c", "c.png", "image/png", Status::Queued),
+            file("d", "d.png", "image/png", Status::Queued),
+        ];
+        // A failed file waits for Retry; the first queued one starts.
+        assert_eq!(next_queued(&items, false, false).as_deref(), Some("c"));
+        // Not while another runs, nor while paused.
+        assert_eq!(next_queued(&items, false, true), None);
+        assert_eq!(next_queued(&items, true, false), None);
+    }
+
+    #[test]
+    fn pausing_requeues_unfinished_files_and_a_failed_send_requires_retry() {
+        let fresh = || {
+            vec![
+                file("a", "a.png", "image/png", Status::Ready),
+                file("b", "b.png", "image/png", Status::Uploading),
+                file("c", "c.png", "image/png", Status::Queued),
+                file("d", "d.png", "image/png", Status::Error),
+            ]
+        };
+        let mut paused = fresh();
+        paused[1].transfer = Some((1, 2));
+        freeze(&mut paused, false);
+        let statuses: Vec<Status> = paused.iter().map(|f| f.status).collect();
+        assert_eq!(
+            statuses,
+            [Status::Ready, Status::Queued, Status::Queued, Status::Error]
+        );
+        assert!(paused[1].transfer.is_none() && paused[1].error.is_none());
+        let mut frozen = fresh();
+        freeze(&mut frozen, true);
+        let statuses: Vec<Status> = frozen.iter().map(|f| f.status).collect();
+        assert_eq!(
+            statuses,
+            [Status::Ready, Status::Error, Status::Error, Status::Error]
+        );
+        assert_eq!(
+            frozen[2].error.as_deref(),
+            Some("Upload paused. Retry to continue.")
+        );
+    }
+
+    #[test]
+    fn previews_follow_the_relay_type_once_uploaded() {
+        assert_eq!(
+            file("a", "a.PNG", "", Status::Queued).preview(),
+            Preview::Image
+        );
+        assert_eq!(
+            file("a", "clip.mov", "", Status::Queued).preview(),
+            Preview::Video
+        );
+        assert_eq!(
+            file("a", "a.wav", "audio/wav", Status::Queued).preview(),
+            Preview::Audio
+        );
+        assert_eq!(
+            file("a", "notes.txt", "text/plain", Status::Queued).preview(),
+            Preview::File
+        );
+        let mut uploaded = file("a", "a.png", "image/png", Status::Ready);
+        uploaded.uploaded = Some(Attachment {
+            name: "a.png".into(),
+            url: "https://example.com/a".into(),
+            mime: "application/octet-stream".into(),
+            size: 1,
+            sha256: String::new(),
+            voice_duration: None,
+        });
+        assert_eq!(uploaded.preview(), Preview::File);
     }
 }

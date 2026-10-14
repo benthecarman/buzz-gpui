@@ -1189,7 +1189,8 @@ impl Render for ChannelPage {
             .update(cx, |actions, cx| actions.status(cx));
 
         // The whole pane takes dropped files for the composer.
-        super::composer::drop_zone(div(), &self.composer)
+        super::composer::drop_zone(div(), &self.composer, cx)
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -1217,6 +1218,7 @@ impl Render for ChannelPage {
             .children(status)
             .child(composer)
             .children(overlays)
+            .children(super::composer::pane_drop_overlay(&self.composer, cx))
     }
 }
 

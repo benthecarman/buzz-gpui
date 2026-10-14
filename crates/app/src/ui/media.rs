@@ -11,6 +11,7 @@ pub(crate) mod attachments;
 mod audio;
 mod comments;
 mod controls;
+mod draft_viewer;
 mod engine;
 mod preview;
 pub mod recorder;
@@ -25,8 +26,9 @@ pub use audio::{audio_attachment, forget_local, pause_audio, set_local, voice_dr
 pub use engine::probe_file;
 pub use review::{dismiss_review, review_overlay};
 // The composer opens its draft attachments here.
+pub use draft_viewer::tile_key as draft_tile_key;
 pub use preview::{ImageStatus, Open, image_preview, image_status};
-pub use review::open_local_preview;
+pub use review::{draft_tile_hidden, open_draft_preview, track_tile};
 pub use review::{open_media, open_media_at};
 pub use timecode::body as text;
 pub use video::{OpenReview, video_preview};

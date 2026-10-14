@@ -7,22 +7,24 @@
 //! workspace draws it above everything through [`review_overlay`]. The
 //! same overlay holds a composer draft's preview dialog.
 
+use super::super::composer::attachments::AttachmentDraft;
 use super::comments::{self, Comments, ThreadState};
-use super::video::{Chrome, Clip, IDLE, Marker, Mode, SKIP_SECONDS, VideoPlayer, finite_duration};
+use super::draft_viewer::DraftViewer;
+use super::video::{Chrome, Clip, IDLE, Marker, Mode, SKIP_SECONDS, VideoPlayer};
 use super::{Remote, decoded, natural_size};
 use crate::community::{AppState, Community};
 use buzz_relay_client::fold::{Attachment, AttachmentKind, MessageRow};
 use buzz_relay_client::{EventId, Media};
 use buzz_ui::{
-    ActiveTheme, Appearance, Button, ButtonSize, ButtonVariant, Dialog, IconButton, IconButtonSize,
-    IconName, PanelHeader, Scrim, Spinner, ThemeScope, TypeStyled,
+    ActiveTheme, Appearance, Button, ButtonSize, ButtonVariant, IconButton, IconButtonSize,
+    IconName, PanelHeader, Spinner, ThemeScope, TypeStyled,
 };
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,7 +47,7 @@ const SHEET_WIDTH: f32 = 820.;
 /// The comments sidebar's width (`minmax(0, 24rem)`).
 const COMMENTS_WIDTH: f32 = 384.;
 /// The shared-element flight (`SNAPPY`), and the chrome's fades.
-const FLIGHT: Duration = Duration::from_millis(240);
+pub(super) const FLIGHT: Duration = Duration::from_millis(240);
 const CHROME_IN: Duration = Duration::from_millis(160);
 const CHROME_DELAY: Duration = Duration::from_millis(80);
 const CHROME_OUT: Duration = Duration::from_millis(100);
@@ -61,7 +63,7 @@ const COPY_FAILED: Duration = Duration::from_secs(6);
 const REACTIONS: [&str; 6] = ["😂", "😍", "😮", "🙌", "👍", "👎"];
 
 /// `cubic-bezier(x1, y1, x2, y2)` at time `t`.
-fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+pub(super) fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     if t <= 0. || t >= 1. {
         return t.clamp(0., 1.);
     }
@@ -81,7 +83,7 @@ fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 }
 
 /// The viewer's motion curve, `cubic-bezier(0.19, 1, 0.22, 1)`.
-fn snappy(t: f32) -> f32 {
+pub(super) fn snappy(t: f32) -> f32 {
     bezier(0.19, 1., 0.22, 1., t)
 }
 
@@ -98,12 +100,12 @@ fn slow_motion() -> u32 {
     })
 }
 
-fn progress(since: Instant, delay: Duration, duration: Duration) -> f32 {
+pub(super) fn progress(since: Instant, delay: Duration, duration: Duration) -> f32 {
     let elapsed = (since.elapsed() / slow_motion()).saturating_sub(delay);
     (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
 }
 
-fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
+pub(super) fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
     let mix = |x: Pixels, y: Pixels| x + (y - x) * t;
     Bounds::new(
         point(mix(a.origin.x, b.origin.x), mix(a.origin.y, b.origin.y)),
@@ -115,7 +117,7 @@ fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
 }
 
 /// `aspect` fitted inside `bounds`, centred.
-fn contained(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
+pub(super) fn contained(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let width = w.min(h * aspect);
     let height = width / aspect;
@@ -173,14 +175,14 @@ fn tile_key(url: &str, window: &Window) -> (WindowId, String) {
 /// Where the thumbnail of `url` was last painted in `window`. An idle
 /// window does not repaint, so this is where it still is when nothing
 /// moved since.
-fn tile(url: &str, window: &Window) -> Option<Bounds<Pixels>> {
+pub(super) fn tile(url: &str, window: &Window) -> Option<Bounds<Pixels>> {
     let key = tile_key(url, window);
     TILES.with_borrow(|tiles| tiles.get(&key).map(|(bounds, _)| *bounds))
 }
 
 /// The thumbnail of `url` if it was painted since `since`: still on
 /// screen while the viewer animates (each frame repaints the window).
-fn tile_since(url: &str, since: Instant, window: &Window) -> Option<Bounds<Pixels>> {
+pub(super) fn tile_since(url: &str, since: Instant, window: &Window) -> Option<Bounds<Pixels>> {
     let key = tile_key(url, window);
     TILES.with_borrow(|tiles| {
         tiles
@@ -202,7 +204,7 @@ pub fn tile_hidden(url: &str, cx: &App) -> bool {
 
 struct Host {
     review: Option<Entity<Review>>,
-    preview: Option<Entity<LocalPreview>>,
+    preview: Option<Entity<DraftViewer>>,
     /// Focus to give back on close.
     restore: Option<FocusHandle>,
 }
@@ -269,16 +271,16 @@ pub fn open_review(
     });
 }
 
-/// Opens a composer draft (`path`) in a preview dialog titled `name`: the
-/// image, or the video with player controls (`ComposerAttachments`).
-pub fn open_local_preview(path: &Path, mime: &str, name: &str, window: &mut Window, cx: &mut App) {
+/// Opens the composer draft's file `selected` in the fullscreen draft
+/// viewer (`ComposerAttachmentViewer`).
+pub fn open_draft_preview(
+    draft: Entity<AttachmentDraft>,
+    selected: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let restore = window.focused(cx);
-    let (path, name, image) = (
-        path.to_path_buf(),
-        name.to_string(),
-        mime.starts_with("image/"),
-    );
-    let preview = cx.new(|cx| LocalPreview::new(path, name, image, cx));
+    let preview = cx.new(|cx| DraftViewer::new(draft, selected, window, cx));
     let focus = preview.read(cx).focus.clone();
     focus.focus(window, cx);
     host(cx).update(cx, |host, cx| {
@@ -286,6 +288,13 @@ pub fn open_local_preview(path: &Path, mime: &str, name: &str, window: &mut Wind
         host.restore = restore;
         cx.notify();
     });
+}
+
+/// Whether the draft tile of `id` hides because its picture is in flight.
+pub fn draft_tile_hidden(id: &str, cx: &App) -> bool {
+    cx.try_global::<HostGlobal>()
+        .and_then(|host| host.0.read(cx).preview.clone())
+        .is_some_and(|preview| preview.read(cx).flying(id))
 }
 
 /// Opens one attachment from outside the timeline (a GitHub body) in the
@@ -336,7 +345,11 @@ pub fn review_overlay(cx: &mut App) -> Option<impl IntoElement + use<>> {
                         ThemeScope::new(Appearance::Dark, move |_, _| review.clone())
                     }),
                 )
-                .children(preview),
+                .children(
+                    preview.map(|preview| {
+                        ThemeScope::new(Appearance::Dark, move |_, _| preview.clone())
+                    }),
+                ),
         )
         .with_priority(2),
     )
@@ -359,15 +372,13 @@ fn close(window: &mut Window, cx: &mut App) {
     }
 }
 
-fn close_preview(window: &mut Window, cx: &mut App) {
+pub(super) fn close_preview(window: &mut Window, cx: &mut App) {
     let (preview, restore) = host(cx).update(cx, |host, cx| {
         cx.notify();
         (host.preview.take(), host.restore.take())
     });
-    if let Some(video) = preview.and_then(|preview| preview.read(cx).video.clone()) {
-        for image in video.update(cx, |video, _| video.take_frames()) {
-            let _ = window.drop_image(image);
-        }
+    if let Some(preview) = preview {
+        preview.update(cx, |preview, cx| preview.release(window, cx));
     }
     if let Some(focus) = restore {
         focus.focus(window, cx);
@@ -2001,37 +2012,8 @@ impl Render for Review {
     }
 }
 
-/// A composer draft's preview (`ComposerAttachments` `Dialog`): the file
-/// name as the title, then the image fitted, or the video with controls.
-pub struct LocalPreview {
-    focus: FocusHandle,
-    name: SharedString,
-    path: PathBuf,
-    video: Option<Entity<VideoPlayer>>,
-    _observe: Option<Subscription>,
-}
-
-impl LocalPreview {
-    fn new(path: PathBuf, name: String, image: bool, cx: &mut Context<Self>) -> Self {
-        let video = (!image).then(|| {
-            let clip = Clip::Local(path.clone());
-            cx.new(|cx| VideoPlayer::new(clip, Mode::Review, 0., cx))
-        });
-        let observe = video
-            .as_ref()
-            .map(|video| cx.observe(video, |_, _, cx| cx.notify()));
-        Self {
-            focus: cx.focus_handle(),
-            name: name.into(),
-            path,
-            video,
-            _observe: observe,
-        }
-    }
-}
-
 /// A local image, decoded once per path.
-enum LocalImage {}
+pub(super) enum LocalImage {}
 
 impl Asset for LocalImage {
     type Source = PathBuf;
@@ -2044,87 +2026,6 @@ impl Asset for LocalImage {
             let format = super::image_format(&bytes).ok_or("Not a supported image")?;
             Ok(Arc::new(Image::from_bytes(format, bytes)))
         }
-    }
-}
-
-impl Focusable for LocalPreview {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl Render for LocalPreview {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let viewport = window.viewport_size();
-        let max_height = f32::from(viewport.height) * 0.65;
-        let body: AnyElement = match &self.video {
-            Some(video) => {
-                let ratio = video
-                    .read(cx)
-                    .natural()
-                    .filter(|n| n.width > 0. && n.height > 0.)
-                    .map_or(16. / 9., |n| n.width / n.height);
-                // The dialog body is 496 - 2 × 24 wide.
-                let height = (448. / ratio).min(max_height);
-                div()
-                    .w_full()
-                    .h(px(height))
-                    .rounded(px(8.))
-                    .overflow_hidden()
-                    .child(video.clone())
-                    .into_any_element()
-            }
-            None => {
-                let image = window
-                    .use_asset::<LocalImage>(&self.path, cx)
-                    .and_then(Result::ok)
-                    .and_then(|image| image.use_render_image(window, cx));
-                match image {
-                    Some(image) => {
-                        let natural = image.size(0);
-                        let ratio = natural.width.0 as f32 / natural.height.0.max(1) as f32;
-                        let height = (448. / ratio).min(max_height);
-                        div()
-                            .w_full()
-                            .h(px(height))
-                            .child(img(image).size_full().object_fit(ObjectFit::Contain))
-                            .into_any_element()
-                    }
-                    None => div().h(px(120.)).into_any_element(),
-                }
-            }
-        };
-        let finite = self
-            .video
-            .as_ref()
-            .and_then(|video| finite_duration(video.read(cx).duration()));
-        let _ = finite;
-        div()
-            .id("local-preview")
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    window.defer(cx, close_preview);
-                    cx.stop_propagation();
-                }
-            }))
-            .occlude()
-            .w(viewport.width)
-            .h(viewport.height)
-            .child(
-                Scrim::new().child(
-                    div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            Dialog::new("local-preview-dialog", self.name.clone())
-                                .on_close(|_, window, cx| window.defer(cx, close_preview))
-                                .child(body),
-                        ),
-                ),
-            )
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.defer(cx, close_preview)
-            })
     }
 }
 

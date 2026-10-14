@@ -52,7 +52,7 @@ use live_markdown::LiveMarkdown;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `maxLength` of the editor.
 const MAX_CHARS: usize = 16_000;
@@ -151,6 +151,8 @@ pub struct Composer {
     sending: bool,
     /// The host allows sending (a thread needs a loaded reply target).
     can_send: bool,
+    /// Eager uploads were paused because the composer is disabled.
+    uploads_paused: bool,
     editing: Option<Arc<MessageRow>>,
     /// The text the edit started from.
     edit_initial: Option<String>,
@@ -198,10 +200,11 @@ pub struct Composer {
     /// First frames of video drafts, by file; `None` while decoding or when
     /// there is none.
     posters: std::cell::RefCell<std::collections::HashMap<String, Option<Arc<RenderImage>>>>,
-    /// Poofs of removed attachments, still playing.
-    bursts: Vec<poof::Burst>,
-    /// The draft file whose preview dialog is open.
-    previewing: Option<String>,
+    /// Removed files still leaving: where they were, and since when.
+    exiting: Vec<(usize, DraftFile, Instant)>,
+    /// A conversation pane is this composer's drop zone and shows the drop
+    /// overlay; otherwise the composer shows it.
+    zoned: bool,
     /// Why the last send failed (`error`), under the tools.
     error: Option<SharedString>,
     /// Formats toggled at a collapsed caret, outermost first: their empty
@@ -451,6 +454,7 @@ impl Composer {
             placeholder,
             sending: false,
             can_send: true,
+            uploads_paused: false,
             editing: None,
             edit_generation: 0,
             edit_initial: None,
@@ -478,8 +482,8 @@ impl Composer {
             files,
             queue,
             attach_error: None,
-            previewing: None,
-            bursts: Vec::new(),
+            exiting: Vec::new(),
+            zoned: false,
             posters: Default::default(),
             error: None,
             pending: Vec::new(),
@@ -575,6 +579,26 @@ impl Composer {
         if self.context != context {
             self.context = context;
             cx.notify();
+        }
+    }
+
+    /// A disabled composer (the host's, or a read-only or archived
+    /// channel) pauses its draft's eager uploads; enabling it resumes them
+    /// without a retry.
+    fn sync_uploads(&mut self, cx: &mut Context<Self>) {
+        let disabled = !self.can_send
+            || self
+                .summary(cx)
+                .is_some_and(|channel| channel.archived || channel.read_only);
+        if disabled != self.uploads_paused {
+            self.uploads_paused = disabled;
+            self.files.update(cx, |files, cx| {
+                if disabled {
+                    files.cancel(cx)
+                } else {
+                    files.resume(cx)
+                }
+            });
         }
     }
 
@@ -795,15 +819,22 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.error = None;
-        let files = self.files.read(cx).items.clone();
-        if submission.editing.is_none() && !files.is_empty() {
+        let has_files = !self.files.read(cx).items.is_empty();
+        if submission.editing.is_none() && has_files {
+            // A file that failed meanwhile (say, during the outside-channel
+            // prompt) waits for Retry or removal.
+            if self.files.read(cx).blocked() {
+                cx.notify();
+                return;
+            }
             let draft = self.draft_json(cx);
-            self.files.update(cx, |draft, cx| draft.clear(cx));
             self.clear_after_send(window, cx);
             let followup = self.draft_json(cx);
-            let owner = self.draft_key();
+            let (owner, files) = (self.draft_key(), self.files.clone());
+            // Send takes the files with their running upload; clearing the
+            // composer does not stop it.
             submission.upload = self.queue.update(cx, |queue, cx| {
-                queue.start(owner, files, draft, followup, cx)
+                queue.start(owner, &files, draft, followup, cx)
             });
             self.sending = false;
         } else {
@@ -2452,6 +2483,12 @@ impl Composer {
     // ----- attachments -----
 
     fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Development only: a headless session has no file dialog. The
+        // variable may list several files, as `PATH` does.
+        if let Some(files) = std::env::var_os("BUZZ_DEV_PICK_FILE") {
+            self.add_paths(std::env::split_paths(&files).collect(), cx);
+            return;
+        }
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -2652,30 +2689,23 @@ impl Composer {
     }
 
     fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
-        let voice = self
-            .files
-            .read(cx)
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .and_then(|item| item.voice.clone());
+        let found = {
+            let items = &self.files.read(cx).items;
+            items
+                .iter()
+                .position(|item| item.id == id)
+                .map(|index| (index, items[index].clone()))
+        };
+        let voice = found.as_ref().and_then(|(_, item)| item.voice.clone());
+        if let Some((index, item)) = found
+            && item.voice.is_none()
+        {
+            self.exiting.push((index, item, Instant::now()));
+        }
         if let Some(voice) = voice {
             media::forget_local(&voice.key, cx);
         }
         self.files.update(cx, |files, cx| files.remove(id, cx));
-        cx.notify();
-    }
-
-    /// The poof and plop of a removal, at the button pressed.
-    fn poof(&mut self, event: &ClickEvent, cx: &mut Context<Self>) {
-        self.bursts.retain(|burst| !burst.done());
-        // At most six at once (`slice(-5)` plus the new one).
-        if self.bursts.len() >= 6 {
-            self.bursts.remove(0);
-        }
-        self.bursts
-            .push(poof::Burst::new(event.position(), px(20.)));
-        poof::plop();
         cx.notify();
     }
 
@@ -2873,7 +2903,8 @@ impl Composer {
 /// Makes a whole conversation pane the composer's drop zone
 /// (`data-attachment-drop-zone`): files dropped anywhere in it attach to
 /// this composer, which shows the drop state.
-pub fn drop_zone(pane: Div, composer: &Entity<Composer>) -> Div {
+pub fn drop_zone(pane: Div, composer: &Entity<Composer>, cx: &mut App) -> Div {
+    composer.update(cx, |composer, _| composer.zoned = true);
     let (moving, dropped) = (composer.downgrade(), composer.downgrade());
     pane.on_drag_move(move |event: &DragMoveEvent<ExternalPaths>, _, cx| {
         let over = event.bounds.contains(&event.event.position);
@@ -2888,6 +2919,43 @@ pub fn drop_zone(pane: Div, composer: &Entity<Composer>) -> Div {
             cx.notify();
         });
     })
+}
+
+/// "Drop files into this conversation" over the drop zone while files
+/// are dragged over it (`FileDropOverlay`). The zone must be `relative`.
+pub fn drop_overlay(composer: &Composer, cx: &App) -> Option<AnyElement> {
+    if !composer.drag_over {
+        return None;
+    }
+    let c = cx.colors();
+    Some(
+        div()
+            .absolute()
+            .inset(px(8.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .p(px(16.))
+            .border_2()
+            .border_dashed()
+            .border_color(c.border_focus)
+            .rounded(px(20.))
+            .bg(c.surface_panel)
+            .opacity(0.95)
+            .text_label()
+            .text_color(c.text_standard)
+            .text_center()
+            .child(Icon::new(IconName::CloudUpload).size(32.))
+            .child("Drop files into this conversation")
+            .into_any_element(),
+    )
+}
+
+/// The drop overlay of `composer`'s pane.
+pub fn pane_drop_overlay(composer: &Entity<Composer>, cx: &App) -> Option<AnyElement> {
+    drop_overlay(composer.read(cx), cx)
 }
 
 /// `draft:<channel>`, or `draft:<channel>:thread:<root>` for a thread.
@@ -3015,6 +3083,101 @@ fn spring(t: f32) -> f32 {
 fn reveal(instant: bool) -> Animation {
     Animation::new(Duration::from_millis(if instant { 1 } else { 140 }))
         .with_easing(|t: f32| 1. - (1. - t).powi(4))
+}
+
+/// A media tile's side: twice a file chip's height (40 + 2 × 2 + 2).
+const MEDIA_TILE: f32 = 92.;
+/// The composer's outer curve across its padding and border (20 - 6 - 1).
+const MEDIA_RADIUS: f32 = 13.;
+/// How long a removed tile takes to leave.
+const TILE_EXIT: Duration = Duration::from_millis(180);
+
+/// `--easing-enter`.
+fn ease_enter(t: f32) -> f32 {
+    buzz_ui::tokens::easing::cubic_bezier(buzz_ui::tokens::easing::ENTER, t)
+}
+
+/// A tile's 20px round control (`IconButton size="xs" shape="round"
+/// variant="primary"`).
+fn control_button(id: SharedString, disabled: bool, c: &buzz_ui::Colors) -> Stateful<Div> {
+    let hover = c.affordance_prominent_hover;
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(20.))
+        .rounded_full()
+        .bg(if disabled {
+            c.affordance_disabled
+        } else {
+            c.affordance_prominent
+        })
+        .text_color(if disabled {
+            c.text_unavailable
+        } else {
+            c.text_inverse
+        })
+        .when(!disabled, |d| {
+            d.cursor_pointer().hover(move |s| s.bg(hover))
+        })
+}
+
+/// The 16px upload ring: the bytes sent, or while there are no byte counts
+/// (queued or preparing), a quarter arc turning every 700ms.
+fn upload_ring(id: SharedString, fraction: Option<f32>, color: Hsla, reduce: bool) -> AnyElement {
+    let ring = move |turn: f32| {
+        let sweep = fraction.map_or(0.25, |f| f.clamp(0., 1.)) * std::f32::consts::TAU;
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                // The 24-unit artwork: radius 9, stroke 3.
+                let scale = f32::from(bounds.size.width) / 24.;
+                let center = bounds.center();
+                let radius = 9. * scale;
+                let arc = |from: f32, sweep: f32| {
+                    let steps = ((sweep / 0.05).ceil() as usize).max(2);
+                    let mut path = PathBuilder::stroke(px(3. * scale));
+                    for step in 0..=steps {
+                        let angle =
+                            from + sweep * step as f32 / steps as f32 - std::f32::consts::FRAC_PI_2;
+                        let at = point(
+                            center.x + px(radius * angle.cos()),
+                            center.y + px(radius * angle.sin()),
+                        );
+                        if step == 0 {
+                            path.move_to(at);
+                        } else {
+                            path.line_to(at);
+                        }
+                    }
+                    path.build().ok()
+                };
+                if let Some(track) = arc(0., std::f32::consts::TAU) {
+                    window.paint_path(track, color.opacity(0.5));
+                }
+                if sweep > 0.
+                    && let Some(progress) = arc(turn * std::f32::consts::TAU, sweep)
+                {
+                    window.paint_path(progress, color);
+                }
+            },
+        )
+        .size(px(16.))
+    };
+    if fraction.is_some() || reduce {
+        return div().size(px(16.)).child(ring(0.)).into_any_element();
+    }
+    div()
+        .size(px(16.))
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(700)).repeat(),
+            move |d, delta| d.child(ring(delta)),
+        )
+        .into_any_element()
 }
 
 /// The picture a draft file shows: an image's own pixels. Other files
@@ -3471,32 +3634,114 @@ impl Composer {
     }
 
     /// The draft's files (`ComposerAttachments.tsx`): one row that scrolls
-    /// sideways. Images show as 46px previews with their actions on the
-    /// corner; other files, and failed ones, as 18rem chips.
-    fn attachment_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// sideways. Pictures and videos show as square tiles with their
+    /// control hanging off the corner; other files as 18rem chips. Every
+    /// file opens in the draft viewer.
+    fn attachment_row(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let items = self.files.read(cx).items.clone();
-        if items.is_empty() || self.editing.is_some() {
+        let reduce = cx.reduce_motion();
+        self.exiting
+            .retain(|(_, _, at)| !reduce && at.elapsed() < TILE_EXIT);
+        if (items.is_empty() && self.exiting.is_empty()) || self.editing.is_some() {
             return None;
         }
+        if !self.exiting.is_empty()
+            || items
+                .iter()
+                .any(|item| item.status != attachments::Status::Ready)
+        {
+            // The exits and the preparation ring move.
+            window.request_animation_frame();
+        }
         let disabled = self.sending;
-        let children: Vec<AnyElement> = items
+        let mut children: Vec<AnyElement> = items
             .iter()
             .map(|item| match &item.voice {
                 Some(voice) => self.voice_item(item, voice, disabled, cx),
                 None => self.file_item(item, disabled, cx),
             })
             .collect();
+        // A row that scrolls sideways does not take its tiles' height on
+        // its own: the tallest tile sets it, and voice notes their card's.
+        let tallest = items
+            .iter()
+            .chain(self.exiting.iter().map(|(_, item, _)| item))
+            .filter(|item| item.voice.is_none())
+            .map(|item| match item.preview() {
+                attachments::Preview::Image | attachments::Preview::Video => MEDIA_TILE,
+                _ => 46.,
+            })
+            .reduce(f32::max);
+        for (index, item, at) in self.exiting.clone() {
+            let tile = self.exiting_item(&item, at, cx);
+            children.insert(index.min(children.len()), tile);
+        }
+        // Scroll padding keeps the hanging controls inside the scroller.
+        // buzz-app cancels it with negative margins, which take a GPUI
+        // row's height away, so the tiles sit that much lower here.
         Some(
             div()
                 .id("composer-attachments")
                 .flex()
                 .flex_none()
+                .when_some(tallest, |d, tallest| d.h(px(tallest + 10.)))
                 .gap(px(8.))
                 .min_w_0()
+                .pt(px(10.))
+                .pr(px(10.))
                 .overflow_x_scroll()
                 .children(children)
                 .into_any_element(),
         )
+    }
+
+    /// A removed file shrinking away (scale 0.75, 12px down, faded, 180ms).
+    fn exiting_item(&self, item: &DraftFile, at: Instant, cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
+        let t = ease_enter((at.elapsed().as_secs_f32() / TILE_EXIT.as_secs_f32()).min(1.));
+        let scale = 1. - 0.25 * t;
+        let media = matches!(
+            item.preview(),
+            attachments::Preview::Image | attachments::Preview::Video
+        );
+        let (width, height) = if media {
+            (MEDIA_TILE, MEDIA_TILE)
+        } else {
+            (288., 46.)
+        };
+        let content = if media {
+            preview_source(item)
+                .or_else(|| self.poster(item, cx))
+                .map(|source| source.size_full().into_any_element())
+        } else {
+            None
+        };
+        div()
+            .flex_none()
+            .w(px(width))
+            .h(px(height))
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(1. - t)
+            .child(
+                div()
+                    .relative()
+                    .top(px(12. * t))
+                    .w(px(width * scale))
+                    .h(px(height * scale))
+                    .overflow_hidden()
+                    .rounded(px(if media { MEDIA_RADIUS } else { 8. }))
+                    .border_1()
+                    .border_color(c.border_standard)
+                    .bg(c.surface_panel)
+                    .children(content),
+            )
+            .into_any_element()
     }
 
     fn file_item(&self, item: &DraftFile, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -3504,150 +3749,171 @@ impl Composer {
         let id = SharedString::from(item.id.clone());
         let size = attachments::file_size(item.uploaded.as_ref().map_or(item.size, |a| a.size));
         let status = item.status.label();
-        let kind = item
-            .uploaded
-            .as_ref()
-            .map_or(item.mime.as_str(), |a| a.mime.as_str())
-            .to_string();
-        let preview = preview_source(item).or_else(|| self.poster(item, cx));
-        // A failed file shows its whole chip, preview and all.
-        let media = preview.is_some() && item.status != attachments::Status::Error;
-        let busy = item.status.busy();
-        let group = SharedString::from(format!("remove-{}", item.id));
-        let remove_id = id.clone();
-        let remove = div()
-            .id(SharedString::from(format!("remove-attachment-{id}")))
-            .group(group.clone())
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(px(20.))
-            .rounded(px(10.))
-            .bg(if disabled {
-                c.affordance_disabled
-            } else {
-                c.affordance_prominent
-            })
-            .text_color(if disabled {
-                c.text_unavailable
-            } else {
-                c.text_inverse
-            })
-            .when(!disabled, |d| d.cursor_pointer())
-            .tooltip(Tooltip::text("Remove attachment"))
-            .child(
-                div()
-                    .when(busy, |d| {
-                        d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
-                    })
-                    .child(Icon::new(IconName::X).size(12.)),
+        let media = matches!(
+            item.preview(),
+            attachments::Preview::Image | attachments::Preview::Video
+        );
+        let source = if media {
+            preview_source(item).or_else(|| self.poster(item, cx))
+        } else {
+            None
+        };
+        let error = item.status == attachments::Status::Error;
+        let busy = item.status == attachments::Status::Queued || item.status.busy();
+        let group = SharedString::from(format!("attachment-{}", item.id));
+        let reduce = cx.reduce_motion();
+        // The corner control: progress (Cancel on hover), Retry, or Remove.
+        let control_id = id.clone();
+        let control =
+            control_button(
+                SharedString::from(format!("attachment-control-{id}")),
+                disabled,
+                &c,
             )
-            .when(busy, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .group_hover(group, |s| s.opacity(0.))
-                        .child(Spinner::new().size(12.).color(c.text_inverse)),
-                )
+            .map(|d| {
+                if busy {
+                    let fraction = item
+                        .transfer
+                        .map(|(sent, total)| sent as f32 / total.max(1) as f32);
+                    d.tooltip(Tooltip::text("Cancel upload and remove attachment"))
+                        .child(div().group_hover(group.clone(), |s| s.opacity(0.)).child(
+                            upload_ring(
+                                SharedString::from(format!("upload-ring-{id}")),
+                                fraction,
+                                c.text_inverse,
+                                reduce,
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .child(Icon::new(IconName::X).size(16.)),
+                        )
+                } else if error {
+                    d.tooltip(Tooltip::text(format!(
+                        "{} Press Delete to remove.",
+                        item.error.clone().unwrap_or_else(|| "Retry upload".into())
+                    )))
+                    .child(Icon::new(IconName::ArrowsClockwise).size(16.))
+                } else {
+                    d.child(Icon::new(IconName::X).size(16.))
+                }
             })
             .when(!disabled, |d| {
-                d.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                    this.poof(event, cx);
-                    this.remove_attachment(&remove_id, cx)
+                d.on_click(cx.listener(move |this, _, _, cx| {
+                    if error {
+                        this.retry_attachment(&control_id, cx)
+                    } else {
+                        this.remove_attachment(&control_id, cx)
+                    }
                 }))
             });
-        let issue = item.error.clone().map(|error| {
-            div()
-                .id(SharedString::from(format!("attachment-issue-{id}")))
-                .size(px(20.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(c.text_danger)
-                .tooltip(Tooltip::text(error))
-                .child(Icon::new(IconName::WarningCircle).size(12.))
-        });
-        let retry_id = id.clone();
-        let retry = (item.status == attachments::Status::Error).then(|| {
-            IconButton::new(
-                SharedString::from(format!("retry-attachment-{id}")),
-                IconName::ArrowsClockwise,
+        let remove_id = id.clone();
+        let remove = error.then(|| {
+            control_button(
+                SharedString::from(format!("attachment-remove-{id}")),
+                disabled,
+                &c,
             )
-            .size(IconButtonSize::Xs)
-            .disabled(disabled)
-            .tooltip("Retry upload")
-            .on_click(cx.listener(move |this, _, _, cx| this.retry_attachment(&retry_id, cx)))
+            .tooltip(Tooltip::text(format!("Remove {}", item.name)))
+            .child(Icon::new(IconName::X).size(16.))
+            .when(!disabled, |d| {
+                d.on_click(
+                    cx.listener(move |this, _, _, cx| this.remove_attachment(&remove_id, cx)),
+                )
+            })
         });
         let actions = div()
             .flex()
             .flex_none()
             .items_center()
             .self_start()
-            .children(issue)
-            .children(retry)
-            .child(remove);
-        let thumb = preview.map(|source| {
-            let open_id = id.clone();
-            div()
-                .id(SharedString::from(format!("attachment-preview-{id}")))
-                .relative()
-                .flex_none()
-                .size(px(if media { 46. } else { 40. }))
-                .rounded(px(12.))
-                .overflow_hidden()
-                .bg(c.surface_panel)
-                .cursor_pointer()
-                .tooltip(Tooltip::text(format!("{} · {size} · {status}", item.name)))
-                .child(source.size_full())
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(12.))
-                        .border(px(0.5))
-                        .border_color(c.border_standard),
-                )
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.open_preview(&open_id, window, cx)),
-                )
+            .child(control)
+            .children(remove);
+        let open_id = id.clone();
+        let open = cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.open_preview(&open_id, window, cx)
         });
         if media {
+            let hidden = media::draft_tile_hidden(&item.id, cx);
+            let preview = div()
+                .id(SharedString::from(format!("attachment-preview-{id}")))
+                .relative()
+                .size_full()
+                .rounded(px(MEDIA_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(c.border_standard)
+                .bg(c.surface_panel)
+                .cursor_pointer()
+                .child(media::track_tile(&media::draft_tile_key(&item.id)))
+                .map(|d| match source {
+                    Some(source) => d.child(source.size_full().when(hidden, |s| s.invisible())),
+                    None => d
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::FileText).size(24.).color(c.text_subtle)),
+                })
+                .on_click(open);
+            // Only Remove waits for hover; progress and Retry stay shown.
+            let quiet = !busy && !error;
             return div()
                 .id(SharedString::from(format!("attachment-{id}")))
+                .group(group)
                 .relative()
-                .flex()
                 .flex_none()
-                .size(px(46.))
-                .children(thumb)
+                .size(px(MEDIA_TILE))
+                .child(preview)
                 .child(
                     div()
                         .absolute()
-                        .top(px(2.))
-                        .right(px(2.))
+                        .top(px(-10.))
+                        .right(px(if error { -20. } else { -10. }))
                         .rounded_full()
                         .bg(c.surface_panel)
+                        .when(quiet, |d| {
+                            d.opacity(0.).group_hover(
+                                SharedString::from(format!("attachment-{}", item.id)),
+                                |s| s.opacity(1.),
+                            )
+                        })
                         .child(actions),
                 )
                 .into_any_element();
         }
-        let file_icon = div()
-            .size(px(40.))
+        let thumb = div()
+            .id(SharedString::from(format!("attachment-preview-{id}")))
+            .relative()
             .flex_none()
+            .size(px(40.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(9.))
-            .bg(c.affordance_subtle)
+            .rounded(px(8.))
+            .overflow_hidden()
+            .bg(c.surface_panel)
             .text_color(c.text_subtle)
-            .child(Icon::new(IconName::FileText).size(24.));
+            .cursor_pointer()
+            .child(Icon::new(IconName::FileText).size(24.))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(c.border_standard),
+            )
+            .on_click(open);
         div()
             .id(SharedString::from(format!("attachment-{id}")))
+            .group(group)
             .relative()
             .flex()
             .flex_none()
@@ -3658,13 +3924,10 @@ impl Composer {
             .h(px(46.))
             .p(px(2.))
             .min_w_0()
-            .rounded(px(12.))
+            .rounded(px(8.))
             .border_1()
             .border_color(c.border_standard)
-            .map(|d| match thumb {
-                Some(thumb) => d.child(thumb),
-                None => d.child(file_icon),
-            })
+            .child(thumb)
             .child(
                 div()
                     .flex()
@@ -3673,15 +3936,9 @@ impl Composer {
                     .min_w_0()
                     .child(
                         div()
-                            .id(SharedString::from(format!("attachment-name-{id}")))
                             .text_label_sm()
                             .text_color(c.text_standard)
                             .truncate()
-                            .tooltip(Tooltip::text(format!(
-                                "{} · {size} · {}",
-                                item.name,
-                                if kind.is_empty() { "File" } else { &kind }
-                            )))
                             .child(item.name.clone()),
                     )
                     .child(
@@ -3948,68 +4205,9 @@ impl Composer {
         None
     }
 
-    /// "Preview <name>": the picture or video in a dialog titled with it.
+    /// Opens a draft file in the fullscreen draft viewer.
     fn open_preview(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self
-            .files
-            .read(cx)
-            .items
-            .iter()
-            .find(|item| item.id == id)
-            .cloned()
-        else {
-            return;
-        };
-        match &item.source {
-            Source::Path(path) => {
-                let mime = if is_video(&item) && !item.mime.starts_with("video/") {
-                    "video/mp4".to_string()
-                } else {
-                    item.mime.clone()
-                };
-                media::open_local_preview(path, &mime, &item.name, window, cx);
-            }
-            // A pasted picture has no file to open.
-            Source::Bytes(_) => {
-                self.previewing = Some(id.to_string());
-                cx.notify();
-            }
-        }
-    }
-
-    /// "Preview <name>": the image in a dialog titled with its name.
-    fn preview_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let id = self.previewing.as_ref()?;
-        let item = self
-            .files
-            .read(cx)
-            .items
-            .iter()
-            .find(|item| &item.id == id)?
-            .clone();
-        let source = preview_source(&item)?;
-        let dialog = Dialog::new("attachment-preview", item.name.clone())
-            .on_close(cx.listener(|this, _, _, cx| {
-                this.previewing = None;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .w_full()
-                    .h(window.viewport_size().height * 0.65)
-                    .child(source.size_full().object_fit(ObjectFit::Contain)),
-            );
-        let content = div()
-            .key_context("AttachmentPreview")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    this.previewing = None;
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .child(dialog);
-        Some(overlay::modal(window, content, None).into_any_element())
+        media::open_draft_preview(self.files.clone(), id.to_string(), window, cx);
     }
 
     fn tools(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4408,8 +4606,7 @@ impl Composer {
                         }
                     })
                     .when(!disabled, |d| {
-                        d.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                            this.poof(event, cx);
+                        d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.remove_attachment(&remove_id, cx)
                         }))
                     }),
@@ -4953,6 +5150,7 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        self.sync_uploads(cx);
         self.markdown.follow_theme(&self.input, &c, cx);
         // The caret can move without an edit.
         let key = {
@@ -5180,25 +5378,21 @@ impl Render for Composer {
             .when(editing, |d| d.child(self.edit_header(cx)))
             .children(self.edit_retry(cx))
             .children(self.background_status(cx))
-            .when(self.drag_over, |d| {
-                d.child(
-                    div()
-                        .px(px(8.))
-                        .text_caption()
-                        .text_color(c.text_subtle)
-                        .child("Drop files to attach"),
-                )
-            })
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .min_w_0()
-                    .pl(px(4.))
-                    .pt(px(4.))
-                    .children(self.attachment_row(cx))
-                    .child(textarea),
+                    // The tiles align with the toolbar, not the text.
+                    .when(!has_attachments, |d| d.pl(px(4.)).pt(px(4.)))
+                    .children(self.attachment_row(window, cx))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .when(has_attachments, |d| d.pl(px(4.)))
+                            .child(textarea),
+                    ),
             )
             .children(self.notice.clone().map(|notice| {
                 div()
@@ -5278,6 +5472,9 @@ impl Render for Composer {
         let chat = self.chat;
         let composer = div()
             .relative()
+            // The attachment row scrolls sideways, which lets a crowded
+            // pane squeeze it to nothing; the composer keeps its height.
+            .flex_none()
             .mx(px(16.))
             .mb(if chat { px(12.) } else { px(16.) })
             // Me's composer sits at the transcript's measure.
@@ -5299,14 +5496,9 @@ impl Render for Composer {
             .children(self.mention_picker_popup(cx))
             .children(picker)
             .child(shell)
+            .when(!self.zoned, |d| d.children(drop_overlay(self, cx)))
             .children(self.toasts(window, cx))
-            .children({
-                self.bursts.retain(|burst| !burst.done());
-                poof::overlay(&self.bursts, window, cx)
-            })
-            .when(self.has_files(cx), |d| d.child(poof::preload()))
             .children(self.outsiders_dialog(window, cx))
-            .children(self.preview_dialog(window, cx))
             .children(self.link.as_ref().map(|(dialog, _)| {
                 overlay::modal(window, dialog.clone(), None).into_any_element()
             }));
