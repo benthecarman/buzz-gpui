@@ -642,26 +642,38 @@ impl CodexRuntime {
             .values()
             .map(|lane| locked(&lane.tail).1.clone())
             .collect();
+        let (inner, host) = (Arc::downgrade(&self.inner), entry.spawn.host());
+        // A server that closed, as when the last agent stopped, ended its
+        // shells with it.
+        let current = move |server: &Arc<Server>| {
+            inner.upgrade().is_some_and(|inner| {
+                locked(&inner.servers)
+                    .get(&host)
+                    .is_some_and(|current| Arc::ptr_eq(current, server))
+            })
+        };
         let stopped = async move {
             futures::future::join_all(tails).await;
-            let threads: Vec<String> = {
-                let mut threads = locked(&server.threads);
-                let owned: Vec<String> = threads
-                    .iter()
-                    .filter(|(_, owner)| **owner == entry.pubkey)
-                    .map(|(thread, _)| thread.clone())
-                    .collect();
-                threads.retain(|_, owner| *owner != entry.pubkey);
-                owned
-            };
+            let threads: Vec<String> = locked(&server.threads)
+                .iter()
+                .filter(|(_, owner)| **owner == entry.pubkey)
+                .map(|(thread, _)| thread.clone())
+                .collect();
             for thread_id in threads {
-                let _ = server
+                if !current(&server) {
+                    return;
+                }
+                locked(&server.threads).remove(&thread_id);
+                if let Err(error) = server
                     .rpc
                     .request(
                         "thread/backgroundTerminals/clean",
                         json!({ "threadId": thread_id }),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(%error, "Codex could not clean a stopped agent's terminals");
+                }
             }
         };
         let task = tokio::spawn(stopped);

@@ -1816,3 +1816,53 @@ async fn steers_a_mid_turn_message_whose_pick_matches_the_running_turn_or_has_no
     f.published_reach(1).await;
     assert_eq!(f.starts().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_idle_terminal_clean_neither_ends_the_shared_server_nor_blocks_the_agents_return()
+{
+    let f = fixture();
+    let other = second(&f);
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    f.run(f.delivery_for(&other, "start a dev server")).await;
+    f.starts_reach(2).await;
+    let thread = f.thread_of(1);
+    f.complete_turn(1, "SERVER RUNNING").await;
+    until(|| locked(&other.published).len() == 1).await;
+    f.fake.state().errors.insert(
+        "thread/backgroundTerminals/clean".into(),
+        "thread/backgroundTerminals/clean failed".into(),
+    );
+    f.runtime.sync(&[agent_key()]);
+    until(|| {
+        f.last_sent("thread/backgroundTerminals/clean", &thread)
+            .is_some()
+    })
+    .await;
+    flush().await;
+    assert_eq!(f.fake.state().ended, 0);
+    f.complete_turn(0, "STILL HERE").await;
+    f.published_reach(1).await;
+    assert_eq!(f.contents(), ["STILL HERE"]);
+    f.runtime.sync(&[agent_key(), "9".repeat(64)]);
+    f.run(f.delivery_for(&other, "back")).await;
+    f.starts_reach(3).await;
+    assert!(f.last_sent("thread/resume", &thread).is_some());
+    f.complete_turn(2, "BACK").await;
+    until(|| locked(&other.published).len() == 2).await;
+    assert_eq!(contents_of(&other), ["SERVER RUNNING", "BACK"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn does_not_clean_after_the_last_agent_closes_the_server() {
+    let f = fixture();
+    f.run(f.delivery("start a dev server")).await;
+    f.starts_reach(1).await;
+    f.complete_turn(0, "SERVER RUNNING").await;
+    f.status_reaches("Idle").await;
+    f.runtime.sync(&[]);
+    until(|| f.fake.state().ended == 1).await;
+    flush().await;
+    assert!(f.fake.calls("thread/backgroundTerminals/clean").is_empty());
+    assert!(f.runtime.sessions(&agent_key()).is_empty());
+}
