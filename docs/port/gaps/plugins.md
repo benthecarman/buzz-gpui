@@ -110,6 +110,14 @@ its defaults are complete. The status is a quick check of the port only.
 | Inbox detail heading names its conversation as a link, with an "Open conversation" / "Open full thread" / "Open in channel" tooltip (#819) | src/bundled/inbox/InboxDetail.tsx | DONE (ui/src/components/panel_header.rs `label_link`, app/src/ui/inbox/detail.rs) | No keyboard focus ring: the port has no focus model there | S |
 | Me sidebar rows show the working-agents badge (hidden on hover) and the Messages activity popover; threads open in the channel reader (#817) | src/bundled/me/MeSidebar.tsx; src/bundled/channels/WorkingAgentsBadge.tsx; useWorkingAgents.ts | DONE (ui/sidebar/rows.rs, ui/sidebar.rs, ui/channel_activity.rs, ui/me/sections.rs) | — | M |
 
+## buzz-app main of 2026-10-14
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Bundled catalog without Agents (v1) and Templates & teams; Agents2's plugin becomes buzz.agents "Agents" (#859, #871) | crates/plugin-manager/src/lib.rs; src/bundled/index.ts | DONE (buzzodz-plugins at the pin; plugins.rs `DEFAULT_OFF`) | — | S |
+
+---
+
 ## Counts
 
 - Main table, 35 rows: DONE 26, SKIPPED (decided) 8, DIFFERENT 1 (`managed_npm.rs`: the port uses harnesses installed on PATH, by design).

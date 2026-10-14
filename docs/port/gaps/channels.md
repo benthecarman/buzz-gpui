@@ -1017,6 +1017,14 @@ The relay side of lifecycle and details editing matches well (templates, permiss
 | "View channel usage" panel and usage archive read (2,000-record cap) | BU/index.tsx:7-46; BU/use-usage-archive.ts:1-160 | DONE (crates/app/src/ui/channel_usage.rs, crates/relay/src/usage.rs, crates/relay/src/archive.rs) | - | M |
 | Usage view (agent/session pickers, totals, tokens, cache, USD, per-turn list) | BU/ChannelUsage.tsx:1-301 | DONE (crates/app/src/ui/channel_usage.rs) | - | L |
 
+## buzz-app main of 2026-10-14
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Templates & teams plugin removed: Templates card, template selector and group default in Create a channel, Save as template in the channel menu and settings, group default template in Personal groups; copy "Personal organization only. Moving channels never changes their members or Canvas.", "…will move back to Channels. This does not delete any channels.", "…It will not create another channel or continue its setup." (#859 `29c36a8b`) | src/bundled/channel-templates/**; src/bundled/channels/{CreateChannelDialog,ChannelHeaderMenu,ChannelsPage,ChannelGroupsDialog,SidebarSection}.tsx; src/features/channel-templates/capability.ts | DONE (removed ui/templates; ui/new_channel.rs keeps setup notices and the recovery summary; ui/channel_menu.rs; ui/channel_settings.rs; ui/settings/personal_groups.rs; ui/sidebar/dialogs.rs) | A group's saved default stays in its record. The relay layer's template, team payload and team text code is left unused, to keep this sync's churn in the relay crate small | M |
+
+---
+
 ## DONE count
 
 **DONE: 547** of 562 rows.

@@ -182,6 +182,13 @@ manager (`crates/app/src/plugins.rs`); external plugins are skipped.
 
 ---
 
+## buzz-app main of 2026-10-14
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Settings → Agents without v1: no harness list, Claude/Codex/Pi setup or agent defaults; Hosts block (this port's), saved agent activity and Remember mentioned agents remain (#859 `29c36a8b`) | src/app/AgentSettings.tsx | DONE (ui/settings/agents.rs) | Hosts copy now says agents keep their keys there and stay saved when a host is removed | S |
+| Sign-out keeps the Agents list beside the old controller's list and defaults; removing agents deletes the old controller's keys when its list exists, then every Agents key, for both the agents and agents2 folders; erase note "Kept agents keep their names, types and keys; their settings on this device are erased." (#858, #859, #871) | src-tauri/src/{lib,sign_out}.rs; src/features/identity/SignOut.tsx | DONE (sign_out.rs, ui/settings/profile/sign_out.rs) | — | S |
+
 ## Not applicable: macOS/Windows only
 
 - Dock unread badge settings ("Dock unread badge", Allow notifications and
