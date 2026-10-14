@@ -59,6 +59,17 @@ pub type OnClose = Arc<dyn Fn(&mut Window, &mut App)>;
 /// one the panel still shows.
 pub type OnDifferent = Rc<dyn Fn(EventId, EventId, &mut Window, &mut App)>;
 
+/// The thread composer's placeholder. It never addresses the viewer:
+/// a thread they started, as every agent exchange is, stays neutral.
+fn reply_placeholder(root: &MessageRow, viewer: &str, name: &str) -> SharedString {
+    let starter = root.workflow_owner.unwrap_or(root.author);
+    if starter.to_hex() == viewer {
+        "Reply in thread".into()
+    } else {
+        format!("Reply in thread to {name}").into()
+    }
+}
+
 /// A same-thread link that could not open; the thread stays usable.
 struct SelectionFailure {
     message: EventId,
@@ -833,7 +844,7 @@ impl ThreadPanel {
         let can_send = self.can_send();
         let placeholder = self.snapshot.root.as_ref().map(|root| {
             let name = super::workflows::sender_name(&profiles, root);
-            SharedString::from(format!("Reply in thread to {name}"))
+            reply_placeholder(root, &self.viewer, &name)
         });
         self.composer.update(cx, |composer, cx| {
             composer.set_context(context, cx);
@@ -1712,6 +1723,35 @@ fn render_summary(
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn the_reply_placeholder_never_addresses_the_viewer() {
+        use nostr::prelude::Keys;
+        let (viewer, other) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let root = |author, workflow_owner| MessageRow {
+            author,
+            workflow_owner,
+            ..crate::ui::markdown::tests::row("Root")
+        };
+        let viewer_hex = viewer.to_hex();
+        assert_eq!(
+            reply_placeholder(&root(other, None), &viewer_hex, "Bob"),
+            "Reply in thread to Bob"
+        );
+        assert_eq!(
+            reply_placeholder(&root(viewer, None), &viewer_hex, "Alice"),
+            "Reply in thread"
+        );
+        // A workflow the viewer owns, posted by its relay.
+        assert_eq!(
+            reply_placeholder(&root(other, Some(viewer)), &viewer_hex, "Deploy"),
+            "Reply in thread"
+        );
+        assert_eq!(
+            reply_placeholder(&root(viewer, Some(other)), &viewer_hex, "Deploy"),
+            "Reply in thread to Deploy"
+        );
+    }
 
     #[test]
     fn narrow_panels_flatten_indentation_sooner() {
