@@ -134,6 +134,8 @@ pub struct Choice {
     pub label: String,
     /// The real names known for the key; none for a key fallback.
     pub aliases: Vec<String>,
+    /// The generated key suffix that ends `label` (`Honey · 4prr`), if any.
+    pub qualifier: Option<String>,
     pub member: bool,
     pub agent: bool,
     pub owned: bool,
@@ -253,20 +255,51 @@ pub fn rank<'a>(
 /// The one choice Space selects for `query`, across the full choice set
 /// (`exactMention`): an exact name no other name continues.
 pub fn exact_mention<'a>(choices: &'a [Choice], query: &str) -> Option<&'a Choice> {
+    exact_mention_among(choices, query, |_| true)
+}
+
+/// [`exact_mention`] where only choices `among` can equal the name, while
+/// every choice can still continue it. A key qualifier or generated
+/// `(agent)` suffix only tells namesakes apart, so it never continues the
+/// name; a literal name `Honey (agent)` still does.
+pub fn exact_mention_among<'a>(
+    choices: &'a [Choice],
+    query: &str,
+    among: impl Fn(&Choice) -> bool,
+) -> Option<&'a Choice> {
     let needle = normalize_name(query);
     if needle.is_empty() {
         return None;
     }
     let names = |c: &'a Choice| c.aliases.iter().chain(std::iter::once(&c.label));
+    let longer = |c: &'a Choice| -> Vec<&'a str> {
+        let label = match c.qualifier.as_deref() {
+            Some(qualifier) => c
+                .label
+                .strip_suffix(&format!(" · {qualifier}"))
+                .unwrap_or(&c.label),
+            None => &c.label,
+        };
+        let aliases = c.aliases.iter().map(String::as_str);
+        if c.agent
+            && c.aliases
+                .iter()
+                .any(|name| format!("{} (agent)", name.trim()) == label)
+        {
+            aliases.collect()
+        } else {
+            aliases.chain(std::iter::once(label)).collect()
+        }
+    };
     if choices
         .iter()
-        .any(|c| names(c).any(|name| extends_name(name, &needle)))
+        .any(|c| longer(c).iter().any(|name| extends_name(name, &needle)))
     {
         return None;
     }
-    let mut exact = choices
-        .iter()
-        .filter(|c| !c.aliases.is_empty() && names(c).any(|name| normalize_name(name) == needle));
+    let mut exact = choices.iter().filter(|c| {
+        !c.aliases.is_empty() && among(c) && names(c).any(|name| normalize_name(name) == needle)
+    });
     match (exact.next(), exact.next()) {
         (Some(one), None) => Some(one),
         _ => None,
@@ -328,6 +361,7 @@ mod tests {
                     agent: c["agent"].as_bool().unwrap_or(false),
                     owned: c["owned"].as_bool().unwrap_or(false),
                     managed: c["managed"].as_bool().unwrap_or(false),
+                    qualifier: c["qualifier"].as_str().map(str::to_string),
                 }
             })
             .collect()

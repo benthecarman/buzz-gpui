@@ -269,6 +269,14 @@ impl Names {
             .unwrap_or_else(|| fallback.to_string())
     }
 
+    /// The generated key suffix that ends `pubkey`'s label (`Honey · 4prr`),
+    /// if a namesake needed one.
+    pub fn qualifier(&self, pubkey: &str) -> Option<&str> {
+        self.labels
+            .get(&pubkey.to_ascii_lowercase())
+            .and_then(|label| label.qualifier.as_deref())
+    }
+
     /// `profile?.name ?? pubkey.slice(0, 10)` through the policy.
     pub fn display(&self, pubkey: &str) -> String {
         let fallback: String = pubkey.chars().take(10).collect();

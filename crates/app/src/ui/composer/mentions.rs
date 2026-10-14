@@ -88,6 +88,8 @@ pub fn complete(inputs: &Inputs, query: &str, directory: Directory) -> Completio
             keys.push(key.clone());
         }
     }
+    // Keys known without the directory search.
+    let local: HashSet<String> = keys.iter().cloned().collect();
     let (found, searching, failed, more) = match directory {
         Directory::Idle => (&[][..], false, false, false),
         Directory::Loading(people) => (people, true, false, false),
@@ -137,6 +139,7 @@ pub fn complete(inputs: &Inputs, query: &str, directory: Directory) -> Completio
                 name: aliases.first().cloned().unwrap_or_else(|| label.clone()),
                 label,
                 aliases,
+                qualifier: names.qualifier(key).map(str::to_string),
                 member: member_set.contains(key.as_str()),
                 agent: names.is_agent(key),
                 owned,
@@ -192,10 +195,22 @@ pub fn complete(inputs: &Inputs, query: &str, directory: Directory) -> Completio
             member: choice.member,
         })
         .collect();
+    // Space (README section 5): once every member is named, an exact local
+    // name (a member or an agent offered for mention) selects at once. Any
+    // other exact name needs the full choice set: while the directory
+    // search runs, failed, or has more pages, a namesake may be missing.
+    let missing_names = members
+        .iter()
+        .any(|key| !inputs.profiles.contains_key(key.as_str()));
     let complete = !searching && !failed && !more;
-    let space = complete
-        .then(|| mention_rules::exact_mention(&choices, query))
+    let space = (!missing_names)
+        .then(|| mention_rules::exact_mention_among(&choices, query, |c| local.contains(&c.key)))
         .flatten()
+        .or_else(|| {
+            complete
+                .then(|| mention_rules::exact_mention(&choices, query))
+                .flatten()
+        })
         .filter(|choice| people.iter().any(|p| p.pubkey == choice.key))
         .map(|choice| choice.key.clone());
     let missing_members = channel.is_some_and(|c| c.members.is_empty());
@@ -469,6 +484,119 @@ mod tests {
                 }
             )
             .closed
+        );
+    }
+
+    #[test]
+    fn space_selects_an_exact_member_without_waiting_for_the_directory() {
+        let (viewer, jitter, other, outside, longer) = (key(1), key(2), key(3), key(4), key(5));
+        let library = AgentLibrary::default();
+        let (presence, history) = (HashMap::new(), HashMap::new());
+        let space = |names: &[(String, &str)], members: Vec<String>, query, directory| {
+            let profiles = profiles(names);
+            let channel = ChannelSummary {
+                id: "c".into(),
+                channel_type: Some(ChannelType::Stream),
+                members,
+                ..Default::default()
+            };
+            let inputs = Inputs {
+                channel: Some(&channel),
+                roster_ready: true,
+                profiles: &profiles,
+                library: &library,
+                viewer: &viewer,
+                origin: None,
+                presence: &presence,
+                history: &history,
+                teams: &[],
+            };
+            complete(&inputs, query, directory).space
+        };
+        let named = [
+            (viewer.clone(), "Me"),
+            (jitter.clone(), "Jitter"),
+            (other.clone(), "Other"),
+            (outside.clone(), "Jitter"),
+            (longer.clone(), "Jitter Bug"),
+        ];
+        let members = vec![viewer.clone(), jitter.clone(), other.clone()];
+        let found = [outside.clone()];
+        // Before the search answers, and whatever it finds after.
+        for directory in [
+            Directory::Loading(&[]),
+            Directory::Done {
+                people: &[],
+                more: false,
+            },
+            Directory::Done {
+                people: &found,
+                more: true,
+            },
+            Directory::Failed,
+        ] {
+            assert_eq!(
+                space(&named, members.clone(), "jitter", directory),
+                Some(jitter.clone())
+            );
+        }
+        // A member namesake keeps Space as prose.
+        let twins = [
+            (viewer.clone(), "Me"),
+            (jitter.clone(), "Jitter"),
+            (other.clone(), "Jitter"),
+        ];
+        assert_eq!(
+            space(&twins, members.clone(), "jitter", Directory::Loading(&[])),
+            None
+        );
+        // So does a member whose name is not known yet.
+        assert_eq!(
+            space(
+                &named[..2],
+                members.clone(),
+                "jitter",
+                Directory::Loading(&[])
+            ),
+            None
+        );
+        // A longer outside name blocks once the directory returns it.
+        let bug = [longer.clone()];
+        assert_eq!(
+            space(
+                &named,
+                members.clone(),
+                "jitter",
+                Directory::Done {
+                    people: &bug,
+                    more: false
+                }
+            ),
+            None
+        );
+        // An outside-only name still waits for the full directory.
+        let only = [(viewer.clone(), "Me"), (outside.clone(), "Solo")];
+        let solo = [outside.clone()];
+        assert_eq!(
+            space(
+                &only,
+                vec![viewer.clone()],
+                "solo",
+                Directory::Loading(&solo)
+            ),
+            None
+        );
+        assert_eq!(
+            space(
+                &only,
+                vec![viewer.clone()],
+                "solo",
+                Directory::Done {
+                    people: &solo,
+                    more: false
+                }
+            ),
+            Some(outside.clone())
         );
     }
 
