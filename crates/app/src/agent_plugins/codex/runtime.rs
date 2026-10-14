@@ -72,6 +72,8 @@ pub struct Run {
     /// The model and effort the owner picked for this turn.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Told when the request this run hands over is answered.
+    pub working: crate::agent_plugins::HoldUntil,
 }
 
 /// One conversation's state, for the Codex tab.
@@ -148,6 +150,34 @@ struct Request {
     /// The model and effort the owner picked for this turn.
     model: Option<String>,
     effort: Option<String>,
+    /// Called once a final send answers this request, or one steered
+    /// after it.
+    answered: Answered,
+}
+
+/// Settles a request's working hold once it is answered. Cheap to clone.
+#[derive(Clone)]
+struct Answered(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+
+impl Answered {
+    /// The answer, and the future that settles with it (or when the
+    /// request is dropped unanswered, which never holds anything).
+    fn new() -> (Self, BoxFuture<'static, ()>) {
+        let (sender, receiver) = oneshot::channel();
+        let replied = async move {
+            if receiver.await.is_err() {
+                futures::future::pending::<()>().await;
+            }
+        }
+        .boxed();
+        (Self(Arc::new(Mutex::new(Some(sender)))), replied)
+    }
+
+    fn answer(&self) {
+        if let Some(sender) = locked(&self.0).take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 /// A conversation's Codex thread, saved across restarts.
@@ -178,6 +208,9 @@ struct Active {
     version: AtomicU64,
     /// The version a final `send` answered.
     sent_version: Mutex<Option<u64>>,
+    /// Every request this turn has taken in, the first and each steered
+    /// one.
+    requests: Mutex<Vec<Request>>,
 }
 
 impl Active {
@@ -837,6 +870,7 @@ impl CodexRuntime {
             spawn,
             model,
             effort,
+            working,
         } = run;
         let (event, interest) = match wake {
             Wake::Timer => {
@@ -854,6 +888,10 @@ impl CodexRuntime {
             return Err("Connect to the agent's community first".into());
         };
         let channel_id = channel.ok_or("The event has no unambiguous channel")?;
+        // Codex makes one more model call after a final send before its
+        // turn ends; the agent is done working on this request once it has
+        // replied.
+        let (answered, replied) = Answered::new();
         let settings = Config::read(&config);
         let info = relay.channel(&channel_id);
         let dm = info.as_ref().is_some_and(|info| info.dm);
@@ -871,6 +909,7 @@ impl CodexRuntime {
             tool_root,
             model,
             effort,
+            answered: answered.clone(),
             conversation: Conversation {
                 name: info
                     .and_then(|info| info.name)
@@ -911,15 +950,38 @@ impl CodexRuntime {
                     previous.await;
                     this.steer(request, text, key, entry, accepted).await;
                 });
-                *steering = async move {
+                let accepted = async move {
                     if task.await.is_err() {
                         tracing::error!("Codex steering failed");
                     }
                 }
                 .boxed()
                 .shared();
+                *steering = accepted.clone();
+                // The steered turn, or one started in its place, answers
+                // this mention.
+                let steered = lane.clone();
+                let done = async move {
+                    accepted.await;
+                    let tail = locked(&steered.tail).1.clone();
+                    tail.await;
+                };
+                working(
+                    async move {
+                        futures::future::select(replied, done.boxed()).await;
+                    }
+                    .boxed(),
+                );
             }
-            None => self.start(request, text, key, lane, entry),
+            None => {
+                let job = self.start(request, text, key, lane, entry);
+                working(
+                    async move {
+                        futures::future::select(replied, job).await;
+                    }
+                    .boxed(),
+                );
+            }
         }
         Ok(())
     }
@@ -971,6 +1033,7 @@ impl CodexRuntime {
             }
             active.rpc.request("turn/steer", params).await?;
             *locked(&active.reply) = request.clone();
+            locked(&active.requests).push(request.clone());
             active.version.fetch_add(1, Ordering::SeqCst);
             Ok::<_, String>(Steered::Done)
         }
@@ -1004,7 +1067,7 @@ impl CodexRuntime {
             .entry(key.clone())
             .or_insert_with(|| Arc::new(Lane::new(entry.after.clone())))
             .clone();
-        self.start(request, text, key, lane, entry.clone());
+        drop(self.start(request, text, key, lane, entry.clone()));
     }
 
     /// Queues a turn behind the conversation's last one. Callers hold the
@@ -1016,7 +1079,7 @@ impl CodexRuntime {
         key: String,
         lane: Arc<Lane>,
         entry: Arc<Entry>,
-    ) {
+    ) -> Shared<BoxFuture<'static, ()>> {
         let id = self.inner.next_job.fetch_add(1, Ordering::Relaxed);
         let pubkey = request.agent.pubkey();
         // Before the turn is spawned, which may report Working first.
@@ -1043,6 +1106,7 @@ impl CodexRuntime {
             job
         };
         // Agents2 can deliver follow-ups and other conversations at once.
+        let done = job.clone();
         tokio::spawn(async move {
             job.await;
             // Checked under the map's lock, which queuing holds too.
@@ -1056,6 +1120,7 @@ impl CodexRuntime {
                 lanes.remove(&key);
             }
         });
+        done
     }
 
     /// The request's conversation before it, read as the owner.
@@ -1125,6 +1190,7 @@ impl CodexRuntime {
         };
         let version = active.version.load(Ordering::SeqCst);
         let request = active.reply();
+        let answering = locked(&active.requests).clone();
         let memories: Memories = {
             let (this, request, check, signal) = (
                 self.clone(),
@@ -1177,6 +1243,9 @@ impl CodexRuntime {
         )
         .await?;
         if fin {
+            for taken in &answering {
+                taken.answered.answer();
+            }
             let mut sent = locked(&active.sent_version);
             *sent = Some(sent.map_or(version, |sent| sent.max(version)));
         }
@@ -1282,6 +1351,7 @@ impl CodexRuntime {
                 .shared(),
             steering: Mutex::new(futures::future::ready(()).boxed().shared()),
             reply: Mutex::new(request.clone()),
+            requests: Mutex::new(vec![request.clone()]),
             finished: AtomicBool::new(false),
             workspace: Mutex::new(request.settings.workspace.clone()),
             signal: signal.clone(),

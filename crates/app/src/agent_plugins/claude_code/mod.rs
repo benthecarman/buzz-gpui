@@ -289,6 +289,7 @@ impl AgentType for ClaudeCodeType {
             spawn,
             model: delivery.model,
             effort: delivery.effort,
+            working: super::hold_until(delivery.working),
         };
         let runtime = state.read(cx).runtime.clone();
         let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });

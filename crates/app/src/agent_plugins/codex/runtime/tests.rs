@@ -198,6 +198,8 @@ struct Fixture {
     storage: Arc<MemoryStorage>,
     next: Mutex<u64>,
     tools: Mutex<u64>,
+    /// What each delivery counted as working until, in order.
+    holds: Arc<Mutex<Vec<Shared<BoxFuture<'static, ()>>>>>,
 }
 
 impl Drop for Fixture {
@@ -234,6 +236,7 @@ fn fixture_with(storage: Arc<MemoryStorage>) -> Fixture {
         storage,
         next: Mutex::new(0),
         tools: Mutex::new(0),
+        holds: Arc::default(),
     }
 }
 
@@ -271,6 +274,10 @@ impl Fixture {
             spawn: self.fake.spawner(),
             model: None,
             effort: None,
+            working: {
+                let holds = self.holds.clone();
+                Arc::new(move |done| locked(&holds).push(done.shared()))
+            },
         }
     }
 
@@ -293,6 +300,16 @@ impl Fixture {
 
     async fn run(&self, run: Run) {
         self.runtime.run(run).await.unwrap();
+    }
+
+    /// How many deliveries count as working, and how many have stopped.
+    fn holds(&self) -> (usize, usize) {
+        let holds = locked(&self.holds).clone();
+        let settled = holds
+            .iter()
+            .filter(|hold| (*hold).clone().now_or_never().is_some())
+            .count();
+        (holds.len(), settled)
     }
 
     fn starts(&self) -> Vec<Value> {
@@ -709,8 +726,13 @@ async fn serializes_follow_ups_and_replies_to_the_latest_accepted_request() {
     assert_eq!(f.steers(), 0);
     open.send(()).unwrap();
     f.steered(2).await;
+    // Each mention counts as working until the turn it was steered into
+    // answers.
+    flush().await;
+    assert_eq!(f.holds(), (3, 0));
     f.complete().await;
     f.published_reach(1).await;
+    until(|| f.holds() == (3, 3)).await;
     let steering = f.fake.calls("turn/steer");
     let text = |index: usize| steering[index]["params"]["input"][0]["text"].to_string();
     assert!(text(0).contains("Request: \\\"FIRST_STEER\\\""));
@@ -1343,6 +1365,10 @@ async fn a_follow_up_pending_after_a_final_send_gets_its_own_answer() {
     assert!(f.fake.calls("turn/interrupt").is_empty());
     open.send(()).unwrap();
     f.steered(1).await;
+    // The prior answer settles only the first request.
+    until(|| f.holds().1 == 1).await;
+    flush().await;
+    assert_eq!(f.holds(), (2, 1));
     f.complete_turn(0, "NEW ANSWER").await;
     f.status_reaches("Idle").await;
     assert_eq!(f.contents(), ["prior answer", "NEW ANSWER"]);
@@ -1363,6 +1389,9 @@ async fn a_final_send_finishes_normally_and_keeps_background_terminals() {
     assert_eq!(reply["success"], true);
     assert_eq!(f.published().len(), 1);
     assert_eq!(f.status().as_deref(), Some("Working"));
+    // The request is answered, so it stops counting as working before
+    // Codex's closing model call ends the turn.
+    until(|| f.holds() == (1, 1)).await;
     f.end_turn(0, "completed");
     until(|| !f.fake.calls("thread/unsubscribe").is_empty()).await;
     f.status_reaches("Idle").await;

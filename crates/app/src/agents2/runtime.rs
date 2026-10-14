@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use super::attention::{EventData, EventWatch, Interest, TimerWatch};
+pub use super::working::Working;
 use buzz_host::api::{
     AppAgentEvent, AppAgentRequest, AppAgentResponse, HostProtocol, Request, Response,
 };
@@ -60,6 +61,9 @@ pub struct Delivery {
     /// The effort level the owner asked for in the triggering message: one
     /// of that model's efforts. `None` means the agent's own default.
     pub effort: Option<String>,
+    /// Counts the run as working after `run` returns, for a type that
+    /// hands its work off and returns early: see [`Working::until`].
+    pub working: Working,
     /// Fires on the run's deadline, or when the agent is removed or its
     /// type is replaced. Advisory: the handle keeps working, so finishing
     /// up is harmless.

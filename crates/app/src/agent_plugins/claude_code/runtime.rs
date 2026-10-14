@@ -195,6 +195,8 @@ pub struct Run {
     /// The model and effort the owner picked for this turn.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Told when the turn this run hands over settles.
+    pub working: crate::agent_plugins::HoldUntil,
 }
 
 /// One agent, as `sync` describes it.
@@ -480,13 +482,17 @@ impl ClaudeRuntime {
                 prompt,
                 interest,
             } => {
-                let done = entry.sessions.deliver(
-                    format!("timer/{slug}"),
-                    timer_prompt(&slug, &prompt, interest.as_deref()),
-                    0,
-                    DeliverOptions::default(),
-                );
-                self.watch(done, None);
+                let done = entry
+                    .sessions
+                    .deliver(
+                        format!("timer/{slug}"),
+                        timer_prompt(&slug, &prompt, interest.as_deref()),
+                        0,
+                        DeliverOptions::default(),
+                    )
+                    .shared();
+                (run.working)(done.clone().map(drop).boxed());
+                self.watch(done.boxed(), None);
                 return;
             }
             Wake::Mention { event } => (event, "@mention", None),
@@ -548,8 +554,12 @@ impl ClaudeRuntime {
                 },
             },
         );
+        // The turn outlives `run`, which the host is told so it shows it as
+        // working.
+        let done = done.shared();
+        (run.working)(done.clone().map(drop).boxed());
         self.notify();
-        self.watch(done, Some((run.agent, channel, event)));
+        self.watch(done.boxed(), Some((run.agent, channel, event)));
     }
 
     /// Notes when a turn settles, and says in the thread when it failed.

@@ -8,6 +8,17 @@ mod tabs;
 
 use crate::agents2::attention::EventData;
 use crate::buzz_mcp::BuzzEvent;
+use futures::future::BoxFuture;
+use std::sync::Arc;
+
+/// Keeps a delivery counted as working until the future settles: its
+/// turn outlives `run`, which returns once the turn is handed over.
+pub type HoldUntil = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
+
+/// A delivery's [`HoldUntil`], from its working hold.
+fn hold_until(working: crate::agents2::runtime::Working) -> HoldUntil {
+    Arc::new(move |done| working.until(done))
+}
 
 /// The event an agent was woken for, as the Buzz tools take it.
 fn event_of(event: &EventData) -> BuzzEvent {

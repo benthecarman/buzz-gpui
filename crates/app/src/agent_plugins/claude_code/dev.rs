@@ -101,6 +101,7 @@ fn turns(pubkey: &str, cx: &mut App) {
                     spawn: spawn.clone(),
                     model: None,
                     effort: None,
+                    working: std::sync::Arc::new(|_| {}),
                 })
                 .await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;

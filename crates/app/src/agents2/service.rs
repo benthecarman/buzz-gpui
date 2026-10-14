@@ -22,6 +22,7 @@ use super::runtime::{
 use super::store::{
     self, AgentRecord, FileStorage, Storage, read_records, set_attention, write_records,
 };
+use super::working::{self, Working};
 use super::{Agent, AgentChange};
 use crate::community::{AppState, Community, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
@@ -1484,6 +1485,7 @@ impl Agents2 {
                 };
                 let timeout = kind.timeout();
                 let (mut delivery, agent) = *delivery;
+                let working = delivery.working.clone();
                 let run = {
                     let lifetime = lifetime.clone();
                     cx.spawn(async move |cx| {
@@ -1517,6 +1519,7 @@ impl Agents2 {
                 )
                 .await;
                 source.cancel();
+                working.release();
                 let failed = match ended {
                     futures::future::Either::Left((Err(error), _)) => {
                         tracing::error!(agent = %pubkey, %error, "agent run failed");
@@ -1637,6 +1640,7 @@ impl Agents2 {
         if let Some(runner) = self.runners.get_mut(pubkey) {
             runner.working_since = Some(now_ms());
         }
+        let working = self.working(&handle, &job, cx);
         let delivery = Delivery {
             trigger: job.trigger,
             channel: job.channel,
@@ -1644,9 +1648,76 @@ impl Agents2 {
             config: agent.config.clone(),
             model: None,
             effort: None,
+            working,
             cancel,
         };
         Start::Run(kind.kind, Box::new((delivery, agent)), lifetime, source)
+    }
+
+    /// Counts a run as working until it and everything it handed to
+    /// [`Working::until`] have settled, or the longest run allowed has
+    /// passed. A mention run is reacted to, and shown typing here,
+    /// meanwhile: both are STOPGAPs, and nothing shows without them.
+    fn working(&self, agent: &AgentHandle, job: &Job, cx: &mut Context<Self>) -> Working {
+        let runtime = Runtime::handle(cx);
+        let Trigger::Mention { event } = &job.trigger else {
+            return Working::none(runtime);
+        };
+        let Some(channel) = job
+            .channel
+            .clone()
+            .or_else(|| event.tag("h").map(str::to_owned))
+        else {
+            return Working::none(runtime);
+        };
+        let mut ends = Vec::new();
+        // STOPGAP(agent-working-reactions): delete with working.rs's.
+        ends.push(working::react_while_working(
+            agent, event, &channel, &runtime,
+        ));
+        // STOPGAP(agent-local-typing): delete with `Session::type_locally`.
+        let (stop, stopped) = futures::channel::oneshot::channel::<()>();
+        let (pubkey, root) = (agent.pubkey.clone(), working::thread_root(event));
+        cx.spawn(async move |this, cx| {
+            let mut stopped = stopped;
+            loop {
+                let shown = this.update(cx, |this, cx| {
+                    this.type_locally(&pubkey, &channel, &root, true, cx)
+                });
+                if shown.is_err() {
+                    return;
+                }
+                let pulse = cx.background_executor().timer(working::PULSE);
+                if let futures::future::Either::Left(_) =
+                    futures::future::select(&mut stopped, pulse).await
+                {
+                    break;
+                }
+            }
+            // Ends it now rather than when the last pulse would expire.
+            let _ = this.update(cx, |this, cx| {
+                this.type_locally(&pubkey, &channel, &root, false, cx)
+            });
+        })
+        .detach();
+        ends.push(Box::new(move || {
+            let _ = stop.send(());
+        }));
+        Working::new(ends, runtime)
+    }
+
+    /// Shows a running agent typing in its own community, while that is
+    /// ready, on this device only.
+    fn type_locally(&self, pubkey: &str, channel: &str, root: &str, typing: bool, cx: &App) {
+        let Some(community) = self.relay(pubkey) else {
+            return;
+        };
+        let community = community.read(cx);
+        if community.snapshot.status == SessionStatus::Ready {
+            community
+                .session
+                .type_locally(pubkey, channel, Some(root.to_owned()), typing);
+        }
     }
 
     // ----- changes -----

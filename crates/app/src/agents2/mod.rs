@@ -21,6 +21,7 @@ pub mod registry;
 pub mod runtime;
 mod service;
 pub mod store;
+mod working;
 
 use attention::{AttentionObject, TimerState};
 use serde_json::Value;
