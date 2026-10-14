@@ -1726,3 +1726,93 @@ async fn lets_go_of_a_rejected_steering_mention_without_ending_the_running_turn(
     until(|| f.holds() == (2, 2)).await;
     assert_eq!(f.contents()[1], "FIRST ANSWER");
 }
+
+fn settings(start: &Value) -> (Value, Value, Value) {
+    let params = &start["params"];
+    (
+        params["threadId"].clone(),
+        params["model"].clone(),
+        params["effort"].clone(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_a_mid_turn_pick_that_differs_from_the_running_turn_as_the_next_turn() {
+    let f = fixture();
+    f.run(f.delivery("first")).await;
+    f.starts_reach(1).await;
+    f.run(picked(
+        f.delivery("deeper"),
+        Some("deep-model"),
+        Some("xhigh"),
+    ))
+    .await;
+    flush().await;
+    f.complete_turn(0, "FIRST").await;
+    f.starts_reach(2).await;
+    // An effort pick alone queues too, on the agent's own model.
+    f.run(picked(f.delivery("harder"), None, Some("high")))
+        .await;
+    flush().await;
+    f.complete_turn(1, "SECOND").await;
+    f.starts_reach(3).await;
+    assert_eq!(f.steers(), 0);
+    let shape: Vec<_> = f.starts().iter().map(settings).collect();
+    assert_eq!(
+        shape,
+        [
+            (json!("thread-1"), json!("test-model"), json!("low")),
+            (json!("thread-1"), json!("deep-model"), json!("xhigh")),
+            (json!("thread-1"), json!("test-model"), json!("high")),
+        ]
+    );
+    f.complete_turn(2, "THIRD").await;
+    f.published_reach(3).await;
+    assert_eq!(f.contents(), ["FIRST", "SECOND", "THIRD"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_a_plain_follow_up_behind_a_queued_differing_pick() {
+    let f = fixture();
+    f.run(f.delivery("first")).await;
+    f.starts_reach(1).await;
+    f.run(picked(f.delivery("deeper"), Some("deep-model"), None))
+        .await;
+    f.run(f.delivery("plain")).await;
+    flush().await;
+    f.complete_turn(0, "FIRST").await;
+    f.starts_reach(2).await;
+    // "plain" is still queued while "deeper" runs, so this cannot steer
+    // either.
+    f.run(f.delivery("later")).await;
+    flush().await;
+    f.complete_turn(1, "SECOND").await;
+    f.starts_reach(3).await;
+    f.complete_turn(2, "THIRD").await;
+    f.starts_reach(4).await;
+    assert_eq!(f.steers(), 0);
+    let input = |index: usize| f.starts()[index]["params"].to_string();
+    assert!(input(1).contains("deeper"));
+    assert!(input(1).contains("\"model\":\"deep-model\""));
+    assert!(input(2).contains("plain"));
+    assert!(input(2).contains("\"model\":\"test-model\""));
+    assert!(input(3).contains("later"));
+    f.complete_turn(3, "FOURTH").await;
+    f.published_reach(4).await;
+    assert_eq!(f.contents(), ["FIRST", "SECOND", "THIRD", "FOURTH"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn steers_a_mid_turn_message_whose_pick_matches_the_running_turn_or_has_none() {
+    let f = fixture();
+    f.run(picked(f.delivery("first"), Some("test-model"), Some("low")))
+        .await;
+    f.starts_reach(1).await;
+    f.run(picked(f.delivery("same"), Some("test-model"), Some("low")))
+        .await;
+    f.run(f.delivery("plain")).await;
+    f.steered(2).await;
+    f.complete().await;
+    f.published_reach(1).await;
+    assert_eq!(f.starts().len(), 1);
+}

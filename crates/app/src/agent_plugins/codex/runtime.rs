@@ -197,6 +197,10 @@ struct Active {
     /// The latest accepted request, which tools reply to.
     reply: Mutex<Request>,
     finished: AtomicBool,
+    /// What the turn runs on, once resolved; a differing pick queues a
+    /// turn.
+    model: Mutex<Option<String>>,
+    effort: Mutex<Option<String>>,
     /// Where the turn started, for file tools.
     workspace: Mutex<String>,
     signal: Signal,
@@ -228,6 +232,8 @@ impl Active {
 struct Lane {
     /// The last job queued, by id.
     tail: Mutex<(u64, Shared<BoxFuture<'static, ()>>)>,
+    /// Turns waiting on `tail` to start; steering past them would reorder.
+    queued: AtomicU64,
     active: Mutex<Option<Arc<Active>>>,
 }
 
@@ -236,6 +242,7 @@ impl Lane {
     fn new(after: Shared<BoxFuture<'static, ()>>) -> Self {
         Self {
             tail: Mutex::new((0, after)),
+            queued: AtomicU64::new(0),
             active: Mutex::default(),
         }
     }
@@ -949,10 +956,11 @@ impl CodexRuntime {
                 // delivery.
                 let mut steering = locked(&active.steering);
                 let previous = steering.clone();
-                let (this, accepted) = (self.clone(), active.clone());
+                let (this, accepted, steered) = (self.clone(), active.clone(), lane.clone());
                 let task = tokio::spawn(async move {
                     previous.await;
-                    this.steer(request, text, key, entry, accepted).await;
+                    this.steer(request, text, key, entry, steered, accepted)
+                        .await;
                 });
                 let accepted = async move {
                     if task.await.is_err() {
@@ -998,6 +1006,7 @@ impl CodexRuntime {
         text: String,
         key: String,
         entry: Arc<Entry>,
+        lane: Arc<Lane>,
         active: Arc<Active>,
     ) {
         /// What became of the follow-up, when it did not fail.
@@ -1014,7 +1023,20 @@ impl CodexRuntime {
             // already posted, and the follow-up, often a retry sent after
             // reading it, starts afresh. The failed turn stays on the
             // lane until it has left its thread.
-            if active.finished() {
+            // Steering cannot carry a model or effort, so a differing pick
+            // waits for this turn and runs as the next one. Everything
+            // after it queues too until the lane drains: steering would
+            // run later messages first.
+            let differs = |picked: &Option<String>, running: &Mutex<Option<String>>| {
+                picked
+                    .as_ref()
+                    .is_some_and(|picked| locked(running).as_ref() != Some(picked))
+            };
+            if active.finished()
+                || lane.queued.load(Ordering::SeqCst) > 0
+                || differs(&request.model, &active.model)
+                || differs(&request.effort, &active.effort)
+            {
                 return Ok(Steered::NextTurn);
             }
             ready?;
@@ -1095,9 +1117,11 @@ impl CodexRuntime {
         let job = {
             let mut tail = locked(&lane.tail);
             let previous = tail.1.clone();
+            lane.queued.fetch_add(1, Ordering::SeqCst);
             let (this, key, lane, entry) = (self.clone(), key.clone(), lane.clone(), entry.clone());
             let task = tokio::spawn(async move {
                 previous.await;
+                lane.queued.fetch_sub(1, Ordering::SeqCst);
                 if entry.abort.aborted() {
                     return;
                 }
@@ -1356,6 +1380,8 @@ impl CodexRuntime {
             reply: Mutex::new(request.clone()),
             requests: Mutex::new(vec![request.clone()]),
             finished: AtomicBool::new(false),
+            model: Mutex::default(),
+            effort: Mutex::default(),
             workspace: Mutex::new(request.settings.workspace.clone()),
             signal: signal.clone(),
             version: AtomicU64::new(0),
@@ -1486,6 +1512,8 @@ impl CodexRuntime {
                 .flatten()
                 .find(|level| !level.is_empty() && supported(level))
                 .unwrap_or_else(|| selected.default_reasoning_effort.clone());
+            *locked(&active.model) = model.clone();
+            *locked(&active.effort) = Some(effort.clone());
             // CLI overrides replace this table; disabled servers still need
             // a transport.
             let mcp: Map<String, Value> = normalized
