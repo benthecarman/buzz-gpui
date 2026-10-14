@@ -726,6 +726,7 @@ async fn early_connection_loss_is_error_before_publication_and_uncertain_after()
             confirm: tx,
             status: Status::Qr {
                 matrix: Arc::new(QrMatrix::encode("fixture").unwrap()),
+                uri: "fixture".into(),
             },
             payload_sent,
         });

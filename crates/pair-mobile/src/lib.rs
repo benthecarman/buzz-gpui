@@ -36,6 +36,8 @@ pub enum Status {
     Connecting,
     Qr {
         matrix: Arc<QrMatrix>,
+        /// The code as text, for "Copy pairing code".
+        uri: String,
     },
     /// The six digits, and whether the phone enters them (`code_entry`)
     /// or the user compares them.
@@ -372,10 +374,11 @@ async fn run(
             pending,
             auth,
             matrix,
+            uri.to_string(),
             connection_started,
         ))
     };
-    let (mut exchange, mut socket, relay_url, pending, mut auth, matrix, connection_started) = tokio::select! {
+    let (mut exchange, mut socket, relay_url, pending, mut auth, matrix, uri, connection_started) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Ok(()),
         result = tokio::time::timeout(Duration::from_secs(35), setup) =>
@@ -389,6 +392,7 @@ async fn run(
         id,
         Status::Qr {
             matrix: Arc::new(matrix),
+            uri,
         },
     );
     exchange_until_deadline(

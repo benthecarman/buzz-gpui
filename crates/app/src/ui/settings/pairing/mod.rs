@@ -188,6 +188,9 @@ pub struct PairingSettings {
     relay: String,
     relay_input: Entity<InputState>,
     reveal: qr::Reveal,
+    /// The pairing code last copied: "Copied" shows while it is the one on
+    /// screen.
+    copied: Option<String>,
     /// The card's width at the last layout, for its container query.
     width: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
@@ -241,6 +244,7 @@ impl PairingSettings {
             relay: String::new(),
             relay_input,
             reveal: qr::Reveal::default(),
+            copied: None,
             width: Rc::new(Cell::new(px(WIDE))),
             _subscriptions: subscriptions,
         };
@@ -408,7 +412,7 @@ impl PairingSettings {
         };
         match &state {
             Status::Connecting => children.push(progress("Creating pairing code…")),
-            Status::Qr { matrix } => {
+            Status::Qr { matrix, .. } => {
                 let elapsed = self.reveal.elapsed(matrix, window, cx);
                 children.push(qr::qr_code(matrix.clone(), elapsed).into_any_element());
             }
@@ -461,6 +465,45 @@ impl PairingSettings {
             );
         }
         children
+    }
+
+    /// "Copy pairing code" below the QR (#1003). Its slot is kept in
+    /// every phase so the steps never shift.
+    fn copy_slot(&self, state: &Status, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.available {
+            return None;
+        }
+        let button = match state {
+            Status::Qr { uri, .. } => {
+                let copied = self.copied.as_deref() == Some(uri.as_str());
+                let uri = uri.clone();
+                Some(
+                    button(
+                        "pair-copy",
+                        if copied {
+                            "Copied"
+                        } else {
+                            "Copy pairing code"
+                        },
+                    )
+                    .full_width()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(uri.clone()));
+                        this.copied = Some(uri.clone());
+                        cx.notify();
+                    })),
+                )
+            }
+            _ => None,
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .min_h(rems(2.5))
+                .children(button)
+                .into_any_element(),
+        )
     }
 
     /// The code, and what to do with it.
@@ -558,6 +601,7 @@ impl Render for PairingSettings {
         let wide = self.width.get() >= px(WIDE);
         let panel = self.panel(window, cx);
         let state = self.state(cx).clone();
+        let copy = self.copy_slot(&state, cx);
         let width = self.width.clone();
         let steps = steps(&state).into_iter().enumerate().map(|(index, step)| {
             div()
@@ -662,7 +706,8 @@ impl Render for PairingSettings {
                                             .overflow_y_scroll()
                                             .text_center()
                                             .children(panel),
-                                    ),
+                                    )
+                                    .children(copy),
                             )
                             .child(
                                 div()

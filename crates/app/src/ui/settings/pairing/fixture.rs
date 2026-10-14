@@ -87,9 +87,13 @@ impl Native for Fixture {
         let value = self.read();
         let text = |key: &str| value[key].as_str().unwrap_or_default().to_owned();
         Ok(match value["phase"].as_str().unwrap_or_default() {
-            "qr" => Status::Qr {
-                matrix: self.matrix(value["uri"].as_str().unwrap_or(URI)),
-            },
+            "qr" => {
+                let uri = value["uri"].as_str().unwrap_or(URI);
+                Status::Qr {
+                    matrix: self.matrix(uri),
+                    uri: uri.to_owned(),
+                }
+            }
             "code" => Status::Code {
                 code: text("code"),
                 code_entry: value["codeEntry"].as_bool().unwrap_or(true),

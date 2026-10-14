@@ -227,11 +227,16 @@ async fn begin(
             community,
         )
         .unwrap();
-    let Status::Qr { matrix } = wait(&pairing, id, |s| !matches!(s, Status::Connecting)).await
+    let Status::Qr {
+        matrix,
+        uri: copied,
+    } = wait(&pairing, id, |s| !matches!(s, Status::Connecting)).await
     else {
         panic!("no QR: {:?}", pairing.status(id));
     };
     let uri = SHOWN.lock().unwrap().get(id).cloned().unwrap();
+    // "Copy pairing code" copies exactly what the QR shows.
+    assert_eq!(copied, uri);
     assert_eq!(
         *matrix,
         QrMatrix::encode(&uri).unwrap(),
