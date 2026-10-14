@@ -203,7 +203,8 @@ struct Runner {
     queue: VecDeque<Job>,
     running: bool,
     window: Window,
-    /// Events seen, and events it wrote (so replies to it are addressed).
+    /// Events seen, and events it wrote (so reactions to them reach no
+    /// watch).
     seen: Bounded,
     wrote: Arc<Mutex<Bounded>>,
     compiled: Option<Compiled>,
@@ -1355,8 +1356,8 @@ impl Agents2 {
                 if !runner.seen.insert(&event.id) {
                     continue;
                 }
-                // An agent never hears itself; its own events make replies
-                // addressed.
+                // An agent never hears itself; its own events keep
+                // reactions to them from its watches.
                 if event.pubkey == agent.pubkey {
                     runner
                         .wrote

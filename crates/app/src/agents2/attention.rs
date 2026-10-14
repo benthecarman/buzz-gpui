@@ -686,9 +686,10 @@ pub fn tags_agent(event: &EventData, agent: &str) -> bool {
 }
 
 /// Directly addressed events take the runtime's built-in mention path,
-/// never a watch: a DM to the agent, a chat event that p-tags it, or any
-/// event with an `e` tag naming something it wrote. Its own events are the
-/// caller's to skip.
+/// never a watch: a DM to the agent, a chat event that p-tags it, or a
+/// non-chat event with an `e` tag naming something it wrote. A chat reply
+/// that does not mention it, even in its own thread, is not addressed: only
+/// a watch can wake it for one. Its own events are the caller's to skip.
 pub fn addressed_to(event: &EventData, agent: &str, wrote: impl Fn(&str) -> bool) -> bool {
     if event.pubkey == agent {
         return false;
@@ -696,11 +697,13 @@ pub fn addressed_to(event: &EventData, agent: &str, wrote: impl Fn(&str) -> bool
     if event.kind == 4 {
         return tags_agent(event, agent);
     }
-    (CHAT_KINDS.contains(&event.kind) && tags_agent(event, agent))
-        || event.tags.iter().any(|tag| {
-            tag.first().map(String::as_str) == Some("e")
-                && tag.get(1).is_some_and(|id| !id.is_empty() && wrote(id))
-        })
+    if CHAT_KINDS.contains(&event.kind) {
+        return tags_agent(event, agent);
+    }
+    event.tags.iter().any(|tag| {
+        tag.first().map(String::as_str) == Some("e")
+            && tag.get(1).is_some_and(|id| !id.is_empty() && wrote(id))
+    })
 }
 
 /// Steps 1, 2 and 4 of event watch matching. Step 3 (addressed events and

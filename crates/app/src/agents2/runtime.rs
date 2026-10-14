@@ -22,8 +22,7 @@ use std::sync::{Arc, Mutex};
 /// Why an agent woke.
 #[derive(Clone, Debug)]
 pub enum Trigger {
-    /// Directly addressed: a chat message that mentions the agent or
-    /// replies to something it wrote.
+    /// Directly addressed: a chat message that mentions the agent.
     Mention { event: Arc<EventData> },
     /// One matching watch; an event that matches several runs once for
     /// each.
@@ -201,7 +200,7 @@ pub struct AgentHandle {
     pub name: String,
     pub owner: String,
     pub(crate) host: HostLink,
-    /// Events the agent wrote, so replies to them are addressed to it.
+    /// Events the agent wrote, so reactions to them reach no watch.
     pub(crate) wrote: Arc<Mutex<Bounded>>,
 }
 

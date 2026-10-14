@@ -51,7 +51,7 @@ pub fn summary(agent: &Agent, channels: &[ChannelChoice], c: &Colors) -> Div {
         .flex_col()
         .gap(rems(0.375))
         .text_body_sm()
-        .child(line(IconName::At, "Mentions and replies".into()))
+        .child(line(IconName::At, "Mentions".into()))
         .children(on.iter().map(|object| {
             line(
                 watch_icon(&object.value),
@@ -1556,18 +1556,19 @@ impl Render for AttentionPanel {
             .gap(rems(1.5))
             .min_w_0()
             .child(div().text_body_sm().text_color(c.text_subtle).child(
-                "What wakes this agent. Mentions and replies always do. For anything else, add \
-                 an Interest: something it looks after, with instructions. The watches and \
-                 timers under an Interest decide when it wakes for it.",
+                "What wakes this agent. Mentions always do. For anything else, including \
+                 replies in its threads that don't mention it, add an Interest: something it \
+                 looks after, with instructions. The watches and timers under an Interest \
+                 decide when it wakes for it.",
             ))
             .child(group(
                 vec![
                     preference_row(
                         IconName::At,
-                        "Mentions and replies",
+                        "Mentions",
                         Some(
                             div()
-                                .child("Messages that mention it or reply to it. Always on.")
+                                .child("Messages that mention it. Always on.")
                                 .into_any_element(),
                         ),
                         false,

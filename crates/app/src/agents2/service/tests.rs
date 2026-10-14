@@ -95,6 +95,34 @@ fn mentions_wake_and_addressed_events_skip_watches() {
         e.tags = vec![vec!["e".into(), "mine".into()]];
     });
     assert!(heard(&agent, &owner(), &reaction, &mine, &watches).is_empty());
+    // A reply in a thread it started wakes it only by a watch, or by naming
+    // it.
+    let reply = |e: &mut EventData| {
+        e.tags.push(vec![
+            "e".into(),
+            "mine".into(),
+            String::new(),
+            "reply".into(),
+        ])
+    };
+    assert_eq!(
+        kinds(&heard(
+            &agent,
+            &owner(),
+            &event("q", reply),
+            &mine,
+            &watches
+        )),
+        ["watch"]
+    );
+    let named = event("n", |e| {
+        reply(e);
+        e.tags.push(vec!["p".into(), agent.clone()]);
+    });
+    assert_eq!(
+        kinds(&heard(&agent, &owner(), &named, &mine, &watches)),
+        ["mention"]
+    );
     // Anything else reaches the watches, one run per match.
     let plain = event("p", |_| {});
     let triggers = heard(&agent, &owner(), &plain, &none, &watches);

@@ -244,7 +244,7 @@ fn watches_match_by_since_channel_kind_and_tags() {
 }
 
 #[test]
-fn mentions_dms_and_replies_to_the_agent_are_addressed() {
+fn mentions_dms_and_reactions_to_the_agent_not_replies_are_addressed() {
     let agent = agent();
     let none = |_: &str| false;
     let mine = |id: &str| id == "mine";
@@ -266,9 +266,11 @@ fn mentions_dms_and_replies_to_the_agent_are_addressed() {
         &agent,
         none
     ));
-    assert!(addressed_to(
+    // A reply in its thread is not addressed unless it names the agent;
+    // only a watch can wake it for one.
+    assert!(!addressed_to(
         &EventData {
-            tags: tags(&[&["e", "mine"]]),
+            tags: tags(&[&["e", "mine", "", "reply"]]),
             ..event()
         },
         &agent,
