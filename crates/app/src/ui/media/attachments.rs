@@ -246,9 +246,9 @@ fn open(
     }
 }
 
-/// `.imageGroup`: one row of 72px tiles that scrolls sideways and never
-/// wraps (`.imageStrip`), then "N images" under groups. Tiles take
-/// keyboard focus, show a ring for it and scroll into view.
+/// `.imageGroup`: every image whole, at its own proportions, one under
+/// another in attachment order (`.imageList`), then "N images" under
+/// groups. Previews take keyboard focus and show a ring for it.
 fn image_group(
     row: &Arc<MessageRow>,
     members: Vec<(usize, &Attachment)>,
@@ -257,70 +257,34 @@ fn image_group(
 ) -> AnyElement {
     let c = *cx.colors();
     let count = members.len();
-    let items: Vec<(usize, Attachment)> = members
-        .into_iter()
-        .map(|(index, attachment)| (index, attachment.clone()))
-        .collect();
-    let hidden: Vec<bool> = items
+    let previews: Vec<AnyElement> = members
         .iter()
-        .map(|(_, attachment)| tile_hidden(&attachment.url, cx))
+        .enumerate()
+        .map(|(position, (index, attachment))| {
+            let label: SharedString = if count > 1 {
+                format!("Open image {} of {count}", position + 1).into()
+            } else {
+                "Open image attachment".into()
+            };
+            let hidden = tile_hidden(&attachment.url, cx);
+            image_preview(row, *index, attachment, rows, label, hidden)
+        })
         .collect();
-    let (row, rows) = (row.clone(), rows.clone());
     div()
         .mt(px(8.))
         .min_w_0()
         .flex()
         .flex_col()
-        .child(Lazy::new(
-            SharedString::from(format!("images-{}", row.id.to_hex())),
-            move |window, cx| {
-                let scroll = window.use_keyed_state("strip", cx, |_, _| ScrollHandle::new());
-                let focus: Vec<FocusHandle> = items
-                    .iter()
-                    .map(|(index, _)| {
-                        window
-                            .use_keyed_state(
-                                SharedString::from(format!("tile-{index}")),
-                                cx,
-                                |_, cx| cx.focus_handle().tab_stop(true),
-                            )
-                            .read(cx)
-                            .clone()
-                    })
-                    .collect();
-                let scroll = scroll.read(cx).clone();
-                // Keyboard focus reveals the tile inside the strip.
-                if window.last_input_was_keyboard()
-                    && let Some(position) = focus.iter().position(|f| f.is_focused(window))
-                {
-                    scroll.scroll_to_item(position);
-                }
-                div()
-                    .id("image-strip")
-                    .flex()
-                    .gap(px(8.))
-                    .p(px(4.))
-                    .overflow_x_scroll()
-                    .track_scroll(&scroll)
-                    .children(items.iter().zip(focus).zip(hidden.iter()).enumerate().map(
-                        |(position, (((index, attachment), focus), hidden))| {
-                            let label: SharedString = if items.len() > 1 {
-                                format!("Open image {} of {}", position + 1, items.len()).into()
-                            } else {
-                                "Open image attachment".into()
-                            };
-                            let tile = Tile {
-                                index: *index,
-                                focus,
-                                hidden: *hidden,
-                                label,
-                            };
-                            image_tile(&row, attachment, &rows, tile, &c)
-                        },
-                    ))
-                    .into_any_element()
-            },
-        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(8.))
+                .p(px(4.))
+                .min_w_0()
+                .children(previews),
+        )
         .when(count > 1, |d| {
             d.child(
                 div()
@@ -333,89 +297,151 @@ fn image_group(
         .into_any_element()
 }
 
-/// One thumbnail's place in its strip.
-struct Tile {
-    index: usize,
-    focus: FocusHandle,
-    hidden: bool,
-    /// "Open image N of M" (`aria-label`).
-    label: SharedString,
+/// An image of `width` × `height` within 360 wide and 320 tall, never
+/// enlarged (`AttachmentImage`).
+fn preview_size(width: f32, height: f32) -> (f32, f32) {
+    let shown = 360f32.min(width).min(320. * width / height);
+    (shown, shown * height / width)
 }
 
-fn image_tile(
+/// The frame an image takes: its decoded size, else its `imeta dim`
+/// (when that reserves at least a pixel each way), else 360 × 320.
+fn preview_frame(natural: Option<(f32, f32)>, claimed: Option<(f32, f32)>) -> (f32, f32) {
+    if let Some((width, height)) = natural.filter(|(w, h)| *w > 0. && *h > 0.) {
+        // Exceptionally thin originals keep a pixel each way.
+        let (width, height) = preview_size(width, height);
+        return (width.max(1.), height.max(1.));
+    }
+    claimed
+        .filter(|(w, h)| *w > 0. && *h > 0.)
+        .map(|(w, h)| preview_size(w, h))
+        .filter(|(w, h)| w.is_finite() && h.is_finite() && *w >= 1. && *h >= 1.)
+        .unwrap_or((360., 320.))
+}
+
+/// One image, whole (`object-fit: contain`): it reserves its frame while
+/// loading, with the blurhash or the inset fill, then follows the
+/// decoded image's proportions with no backing. A failed decode keeps
+/// the loading preview; media that cannot load at all says so in place.
+fn image_preview(
     row: &Arc<MessageRow>,
+    index: usize,
     attachment: &Attachment,
     rows: &Rc<Rows>,
-    tile: Tile,
-    c: &buzz_ui::Colors,
+    label: SharedString,
+    hidden: bool,
 ) -> AnyElement {
-    let Tile {
-        index,
-        focus,
-        hidden,
-        label,
-    } = tile;
     let id = SharedString::from(format!("image-{}-{index}", row.id.to_hex()));
-    // A URL that cannot load at all says so; one that fails keeps its fill.
-    if attachment.insecure {
-        return div()
-            .id(id)
-            .flex_none()
-            .size(px(72.))
-            .child(super::unavailable_tile(c))
-            .into_any_element();
-    }
     let media = rows.directory.media.clone();
-    let (target, item, rows, key_target, key_item, key_rows) = (
-        row.clone(),
-        attachment.clone(),
-        rows.clone(),
-        row.clone(),
-        attachment.clone(),
-        rows.clone(),
-    );
-    div()
-        .id(id)
-        .relative()
-        .size(px(72.))
-        .flex_none()
-        .rounded(px(16.))
-        .bg(c.surface_inset)
-        .cursor_pointer()
-        .track_focus(&focus)
-        .role(Role::Link)
-        .aria_label(label)
-        .focus_visible(|s| s.border_2().border_color(c.border_focus))
-        .when(hidden, |d| d.opacity(0.))
-        .child(track_tile(&attachment.url))
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(px(16.))
-                .overflow_hidden()
-                .child(super::thumbnail(
-                    &attachment.url,
-                    attachment.blurhash.as_deref(),
-                    &media,
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(px(16.))
-                .border_1()
-                .border_color(c.border_image),
-        )
-        .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                open(&key_rows, &key_target, &key_item, 0., window, cx);
-                cx.stop_propagation();
-            }
-        })
-        .on_click(move |_, window, cx| open(&rows, &target, &item, 0., window, cx))
-        .into_any_element()
+    let remote = super::Remote {
+        url: attachment.url.clone().into(),
+        fallback: None,
+        media: media.clone(),
+    };
+    let claimed = attachment
+        .dimensions
+        .map(|d| (d.width as f32, d.height as f32));
+    let hash = attachment.blurhash.clone().map(SharedString::from);
+    let (row, item, rows) = (row.clone(), attachment.clone(), rows.clone());
+    Lazy::new(id.clone(), move |window, cx| {
+        let c = *cx.colors();
+        let insecure = item.insecure;
+        let image = (!insecure)
+            .then(|| super::decoded(&remote, window, cx).and_then(Result::ok))
+            .flatten();
+        let natural = image.as_ref().map(|image| {
+            let size = image.size(0);
+            (size.width.0 as f32, size.height.0 as f32)
+        });
+        let (width, height) = preview_frame(natural, claimed);
+        let ready = image.is_some();
+        let blur = (!ready && !insecure)
+            .then(|| {
+                hash.as_ref()
+                    .and_then(|hash| window.use_asset::<super::Blurhash>(hash, cx).flatten())
+            })
+            .flatten();
+        let frame = div()
+            .id(id.clone())
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .max_w_full()
+            .min_w(px(1.))
+            .my(px(4.))
+            // The height follows the width, also when the row narrows it.
+            .child(div().w_full().pt(relative(height / width)));
+        if insecure {
+            return frame
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(px(4.))
+                        .rounded(px(16.))
+                        .overflow_hidden()
+                        .bg(c.surface_inset)
+                        .text_caption()
+                        .text_color(c.text_subtle)
+                        .child("Image unavailable"),
+                )
+                .into_any_element();
+        }
+        let focus = window
+            .use_keyed_state(SharedString::from(format!("{id}-focus")), cx, |_, cx| {
+                cx.focus_handle().tab_stop(true)
+            })
+            .read(cx)
+            .clone();
+        let (key_row, key_item, key_rows) = (row.clone(), item.clone(), rows.clone());
+        let (click_row, click_item, click_rows) = (row.clone(), item.clone(), rows.clone());
+        frame
+            .cursor_pointer()
+            .track_focus(&focus)
+            .role(Role::Link)
+            .aria_label(label.clone())
+            .rounded(px(16.))
+            .focus_visible(|s| s.border_2().border_color(c.border_focus))
+            .when(hidden, |d| d.opacity(0.))
+            .child(track_tile(&item.url))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(16.))
+                    .overflow_hidden()
+                    .when(!ready, |d| d.bg(c.surface_inset))
+                    .when_some(blur, |d, blur| {
+                        d.child(img(blur).absolute().inset_0().size_full().rounded(px(16.)))
+                    })
+                    .when_some(image, |d, image| {
+                        // Pixels clip to the corners themselves.
+                        d.child(img(image).absolute().inset_0().size_full().rounded(px(16.)))
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(16.))
+                    .border_1()
+                    .border_color(c.border_image),
+            )
+            .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    open(&key_rows, &key_row, &key_item, 0., window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .on_click(move |_, window, cx| {
+                open(&click_rows, &click_row, &click_item, 0., window, cx)
+            })
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// Files, and audio that does not play inline (`FileAttachment`): a card
@@ -561,6 +587,22 @@ fn mime_label(mime: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn images_show_whole_within_360_by_320() {
+        // Wide, tall and small images keep their proportions, never grow.
+        assert_eq!(preview_frame(Some((1600., 900.)), None), (360., 202.5));
+        assert_eq!(preview_frame(Some((900., 1600.)), None), (180., 320.));
+        assert_eq!(preview_frame(Some((100., 50.)), None), (100., 50.));
+        // Until decoded, `imeta dim` reserves the frame, else 360 × 320.
+        assert_eq!(preview_frame(None, Some((800., 800.))), (320., 320.));
+        assert_eq!(preview_frame(None, None), (360., 320.));
+        // Metadata that would reserve less than a pixel is ignored...
+        assert_eq!(preview_frame(None, Some((1., 10000.))), (360., 320.));
+        // ...but a decoded thin original keeps a pixel each way.
+        assert_eq!(preview_frame(Some((1., 10000.)), None), (1., 320.));
+        assert_eq!(preview_frame(Some((10000., 1.)), None), (360., 1.));
+    }
 
     #[test]
     fn thread_seeks_forget_the_oldest_and_never_reuse_requests() {

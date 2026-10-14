@@ -34,7 +34,6 @@ pub use timecode::body as text;
 pub use video::{OpenReview, video_preview};
 
 use buzz_relay_client::Media;
-use buzz_ui::TypeStyled;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
@@ -246,21 +245,6 @@ pub fn thumbnail(url: &str, blurhash: Option<&str>, media: &Media) -> impl IntoE
             })
             .into_any_element()
     })
-}
-
-/// A thumbnail whose URL cannot be loaded at all (`.imageUnavailable`).
-pub(super) fn unavailable_tile(c: &buzz_ui::Colors) -> Div {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .p(px(4.))
-        .rounded(px(8.))
-        .bg(c.affordance_subtle_hover)
-        .text_caption()
-        .text_color(c.text_subtle)
-        .child("Image unavailable")
 }
 
 /// Builds its content during layout, where the window is available for

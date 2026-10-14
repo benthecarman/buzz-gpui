@@ -1493,7 +1493,8 @@ fn jumbo(parts: &[EmojiPart], id: &str, media: &Media) -> AnyElement {
         .mt(px(4.))
         .min_h(px(48.))
         .text_size(px(42.))
-        .line_height(px(42.))
+        // Every wrapped line takes the emoji line height.
+        .line_height(px(48.))
         .children(parts.iter().enumerate().map(|(index, part)| {
             match part {
                 EmojiPart::Text(text) => SelectableText::new(
