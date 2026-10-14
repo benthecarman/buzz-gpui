@@ -1702,3 +1702,27 @@ async fn starts_fresh_instead_of_restoring_a_binding_whose_tools_are_out_of_date
         f.published_reach(1).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lets_go_of_a_rejected_steering_mention_without_ending_the_running_turn() {
+    let f = fixture();
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    f.fake
+        .state()
+        .errors
+        .insert("turn/steer".into(), "model busy".into());
+    f.run(f.delivery("new request")).await;
+    f.published_reach(1).await;
+    assert!(f.contents()[0].contains("Steering was not accepted: model busy"));
+    // The rejection answers the mention; the turn it could not join works
+    // on.
+    until(|| f.holds() == (2, 1)).await;
+    let first = locked(&f.holds)[0].clone();
+    assert!(first.now_or_never().is_none());
+    assert_eq!(f.starts().len(), 1);
+    f.complete_turn(0, "FIRST ANSWER").await;
+    f.status_reaches("Idle").await;
+    until(|| f.holds() == (2, 2)).await;
+    assert_eq!(f.contents()[1], "FIRST ANSWER");
+}

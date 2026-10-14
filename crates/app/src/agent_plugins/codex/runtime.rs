@@ -147,7 +147,7 @@ struct Request {
     model: Option<String>,
     effort: Option<String>,
     /// Called once a final send answers this request, or one steered
-    /// after it.
+    /// after it, or a steering rejection is posted in its place.
     answered: Answered,
 }
 
@@ -1050,6 +1050,10 @@ impl CodexRuntime {
                 if let Err(failure) = self.publish(&request, &notice).await {
                     tracing::error!(%failure, "Codex steering failed");
                 }
+                // The running turn never took this request in, so nothing
+                // else answers it: let go of its working hold now, not at
+                // that turn's end.
+                request.answered.answer();
             }
         }
     }
