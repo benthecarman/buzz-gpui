@@ -1,32 +1,23 @@
 //! Every agent host the GUI manages: the one embedded in this process and any
 //! remote `buzzd` instances from the config file.
 
-pub mod control;
-pub mod models;
-mod sign_in;
-
 use crate::agent_plugins::process::{HostSpawner, ProcessSinks, Spawner};
 use crate::config::{Config, CredentialsBackend, HOST_TOKEN_SERVICE, RemoteHost};
 use crate::runtime::Runtime;
-use buzz_host::api::{
-    AgentDefaults, AgentsSnapshot, Harness, HarnessKind, HostAnswer, HostAsk, HostEvent,
-    HostProtocol, InstallReport, Request, Response,
-};
+use buzz_host::api::{HostAnswer, HostAsk, HostProtocol};
 use buzz_host::credentials::{FileCredentials, KeyringCredentials};
 use buzz_host::{AgentHost, HostConfig, RpcHandler};
 #[cfg(unix)]
 use buzz_host_rpc::transport::UnixConnector;
 use buzz_host_rpc::transport::{self, Connector, TcpConnector};
 use buzz_host_rpc::{
-    ClientEvent, ClientHandler, ConnectionState, HostClient, HostClientOptions, HostInfo, RpcError,
+    ClientHandler, ConnectionState, HostClient, HostClientOptions, HostInfo, RpcError,
     ServerOptions,
 };
-use buzz_identity::Identity;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use gpui_kit::{App, AppContext, Context, Entity, Global, SharedString, Task};
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Agent keys created on this machine use the same credential service as
@@ -37,10 +28,6 @@ pub(crate) const AGENT_KEY_SERVICE: &str = "dev.local.buzz.foundation.agents";
 /// to stop its agents.
 type Embedded = (tokio::task::JoinHandle<std::io::Result<()>>, Arc<AgentHost>);
 
-/// How long a request that waits on a person (a keyring prompt, a browser
-/// sign-in) or an installer may take.
-pub const PERSON_WAIT: Duration = Duration::from_secs(600);
-
 pub struct Hosts {
     pub hosts: Vec<Entity<HostConnection>>,
     /// Owns the embedded host's server; dropping it stops local agents.
@@ -49,40 +36,11 @@ pub struct Hosts {
 
 impl Global for Hosts {}
 
-/// An install job on a host (buzz-app's `HarnessInstallState`).
-#[derive(Clone, Debug, Default)]
-pub struct Install {
-    pub installing: bool,
-    pub report: Option<InstallReport>,
-    /// Set when the host could not run the install at all.
-    pub error: Option<SharedString>,
-}
-
 pub struct HostConnection {
     pub label: SharedString,
     /// `None` for the host inside this process.
     pub remote: Option<RemoteHost>,
     pub state: ConnectionState,
-    pub agents: AgentsSnapshot,
-    pub harnesses: Option<Vec<Harness>>,
-    /// The last harness check failed; `harnesses` holds the one before.
-    pub harnesses_failed: bool,
-    /// Pi, Claude Code and Codex adapter installs, kept here so they
-    /// outlive the page that started them.
-    pub pi_install: Install,
-    pub claude_install: Install,
-    pub codex_install: Install,
-    /// Fetched when a form needs them, not on connect: hosts older than
-    /// this request drop the connection on it.
-    pub defaults: Option<AgentDefaults>,
-    /// Writes in flight and what the last ones left unconfirmed.
-    pub control: control::Control,
-    /// A snapshot arrived since this connection was made.
-    received: bool,
-    /// Counts sessions with the host. A snapshot asked for in an earlier
-    /// one is not applied: its sequence numbers are another process's.
-    session: u64,
-    signing: SigningSlot,
     client: Arc<HostClient<HostProtocol>>,
     /// Where output of processes started on this host goes.
     processes: ProcessSinks,
@@ -269,20 +227,6 @@ fn start_embedded(
     Ok((connector, (server, host)))
 }
 
-/// The command an older host's harness list implies when it is not
-/// installed.
-fn legacy_command(kind: buzz_host::api::HarnessKind) -> &'static str {
-    use buzz_host::api::HarnessKind;
-    match kind {
-        HarnessKind::BuzzAgent => "buzz-agent",
-        HarnessKind::Goose => "goose",
-        HarnessKind::Pi => "buzz-pi-acp",
-        HarnessKind::Claude => "claude-agent-acp",
-        HarnessKind::Hermes => "hermes-acp",
-        HarnessKind::Codex => "codex-acp",
-    }
-}
-
 fn remote_connector(host: &RemoteHost) -> Result<Arc<dyn Connector>, String> {
     if let Some(address) = host.address.strip_prefix("tcp://")
         && !address.is_empty()
@@ -315,89 +259,28 @@ fn remote_token(host: &RemoteHost) -> Option<String> {
         .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }
 
-/// What the GUI will sign for a host: armed by an import the user started,
-/// for exactly the keys they chose, so a host cannot get any other agent
-/// key attested to the user.
-struct Signing {
-    identity: Arc<Identity>,
-    pubkeys: HashSet<String>,
-}
-
-type SigningSlot = Arc<Mutex<Option<Signing>>>;
-
-/// The client a host's asks may send requests back over, set once it is
-/// spawned.
-type ClientSlot = Arc<std::sync::OnceLock<std::sync::Weak<HostClient<HostProtocol>>>>;
-
 struct Answers {
-    signing: SigningSlot,
-    /// Opens pages in the browser, on the UI thread.
-    browser: futures::channel::mpsc::UnboundedSender<String>,
-    /// The host runs on another machine, so its sign-in redirects to a
-    /// loopback port there, not here.
-    remote: bool,
-    client: ClientSlot,
     /// Claude Code process output, by handle.
     processes: ProcessSinks,
 }
 
 impl ClientHandler<HostProtocol> for Answers {
     fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        let agent_pubkey = match ask {
-            HostAsk::AttestAgent { agent_pubkey } => agent_pubkey,
-            HostAsk::OpenUrl { url } => {
-                // A host may only open web pages here, not files or apps.
-                if !web_page(&url) {
-                    return Box::pin(async {
-                        Err(RpcError::Failed("The host may open only web pages".into()))
-                    });
-                }
-                let browser = self.browser.clone();
-                let client = self.client.get().cloned();
-                let remote = self.remote;
-                return Box::pin(async move {
-                    if remote {
-                        let client = client
-                            .ok_or_else(|| RpcError::Failed("Not connected to the host".into()))?;
-                        sign_in::relay(&url, client)
-                            .await
-                            .map_err(RpcError::Failed)?;
-                    }
-                    browser
-                        .unbounded_send(url)
-                        .map_err(|_| RpcError::Failed("Could not open the browser".into()))?;
-                    Ok(HostAnswer::Opened)
-                });
-            }
+        match ask {
             // claude code: delivered as the ask is read, so in order.
             HostAsk::ProcessOutput { handle, output } => {
                 let answer = self.processes.deliver(handle, output);
-                return Box::pin(async move { answer });
+                Box::pin(async move { answer })
             }
-        };
-        let mut slot = self
-            .signing
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let answer = match slot.as_mut() {
-            Some(signing) if signing.pubkeys.contains(&agent_pubkey) => {
-                signing.pubkeys.remove(&agent_pubkey);
-                signing
-                    .identity
-                    .attest_agent(&agent_pubkey)
-                    .map(HostAnswer::Attestation)
-                    .map_err(|error| RpcError::Failed(error.to_string()))
-            }
-            _ => Err(RpcError::Failed(
-                "This app did not ask to import that agent".into(),
-            )),
-        };
-        Box::pin(async move { answer })
+            // Asks of older hosts for v1 agents, which this app no longer
+            // has.
+            HostAsk::AttestAgent { .. } | HostAsk::OpenUrl { .. } => Box::pin(async {
+                Err(RpcError::Failed(
+                    "This app no longer manages harness agents".into(),
+                ))
+            }),
+        }
     }
-}
-
-fn web_page(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 impl HostConnection {
@@ -409,18 +292,11 @@ impl HostConnection {
         cx: &mut App,
     ) -> Entity<Self> {
         let runtime = Runtime::handle(cx);
-        let signing = SigningSlot::default();
-        let slot = ClientSlot::default();
-        let (browser, pages) = futures::channel::mpsc::unbounded();
         let processes = ProcessSinks::default();
         let client = Arc::new(HostClient::<HostProtocol>::spawn(
             &runtime,
             connector,
             Arc::new(Answers {
-                signing: signing.clone(),
-                browser,
-                remote: remote.is_some(),
-                client: slot.clone(),
                 processes: processes.clone(),
             }),
             HostClientOptions {
@@ -428,14 +304,6 @@ impl HostConnection {
                 ..Default::default()
             },
         ));
-        let _ = slot.set(Arc::downgrade(&client));
-        cx.spawn(async move |cx| {
-            let mut pages = pages;
-            while let Some(url) = pages.next().await {
-                cx.update(|cx| cx.open_url(&url));
-            }
-        })
-        .detach();
         processes.follow(&client, &runtime);
         cx.new(|cx| {
             let watch = Self::watch(&client, &runtime, cx);
@@ -443,17 +311,6 @@ impl HostConnection {
                 label,
                 remote,
                 state: client.state().borrow().clone(),
-                agents: AgentsSnapshot::default(),
-                harnesses: None,
-                harnesses_failed: false,
-                pi_install: Install::default(),
-                claude_install: Install::default(),
-                codex_install: Install::default(),
-                defaults: None,
-                control: Default::default(),
-                received: false,
-                session: 0,
-                signing,
                 client,
                 processes,
                 _watch: watch,
@@ -470,340 +327,33 @@ impl HostConnection {
         })
     }
 
-    /// Mirrors connection state and host events into this entity.
+    /// Mirrors connection state into this entity. Older hosts' agent
+    /// snapshots are of v1 agents, which this app no longer lists.
     fn watch(
         client: &Arc<HostClient<HostProtocol>>,
         runtime: &tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        enum Update {
-            State(ConnectionState),
-            Event(Box<ClientEvent<HostEvent>>),
-        }
-        let (sender, mut updates) = futures::channel::mpsc::unbounded();
+        let (sender, mut states_in) = futures::channel::mpsc::unbounded();
         let mut states = client.state();
-        let mut events = client.events();
         runtime.spawn(async move {
-            loop {
-                let update = tokio::select! {
-                    changed = states.changed() => match changed {
-                        Ok(()) => Update::State(states.borrow_and_update().clone()),
-                        Err(_) => return,
-                    },
-                    event = events.recv() => match event {
-                        Ok(event) => Update::Event(Box::new(event)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            Update::Event(Box::new(ClientEvent::Resync))
-                        }
-                        Err(_) => return,
-                    },
-                };
-                if sender.unbounded_send(update).is_err() {
+            while states.changed().await.is_ok() {
+                let state = states.borrow_and_update().clone();
+                if sender.unbounded_send(state).is_err() {
                     return;
                 }
             }
         });
         cx.spawn(async move |this, cx| {
-            while let Some(update) = updates.next().await {
-                let refresh = this.update(cx, |this, cx| {
-                    let refresh = match update {
-                        Update::Event(event) => match *event {
-                            // A restarted host numbers its snapshots from
-                            // 0 again.
-                            ClientEvent::Connected(_) => {
-                                this.session += 1;
-                                this.agents.seq = 0;
-                                true
-                            }
-                            ClientEvent::Resync => true,
-                            ClientEvent::Event {
-                                body: HostEvent::Agents(snapshot),
-                                ..
-                            } => {
-                                this.apply(snapshot);
-                                false
-                            }
-                            ClientEvent::Disconnected => false,
-                        },
-                        Update::State(state) => {
-                            this.state = state;
-                            false
-                        }
-                    };
-                    cx.notify();
-                    refresh
-                });
-                match refresh {
-                    Ok(true) => {
-                        if let Ok(task) = this.update(cx, |this, cx| this.refresh(cx)) {
-                            task.detach();
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(_) => return,
-                }
-            }
-        })
-    }
-
-    /// Ignores snapshots older than the one already shown.
-    fn apply(&mut self, snapshot: AgentsSnapshot) {
-        if snapshot.seq >= self.agents.seq {
-            self.agents = snapshot;
-            self.received = true;
-        }
-    }
-
-    /// Reads the agents again, and the harnesses from hosts whose snapshot
-    /// does not list them.
-    pub fn refresh(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        let agents = self.request(Request::Agents, cx);
-        cx.spawn(async move |this, cx| {
-            let agents = agents.await;
-            let legacy = matches!(&agents, Ok(Response::Agents(snapshot))
-                if snapshot.harness_options.is_none());
-            let harnesses = this.update(cx, |this, cx| {
-                let read = matches!(agents, Ok(Response::Agents(_)));
-                this.refreshed(read);
-                // Settings lists the snapshot's harnesses as older hosts
-                // list theirs.
-                if !legacy {
-                    if read && let Some(options) = &this.agents.harness_options {
-                        this.harnesses = Some(buzz_host::harness::legacy(
-                            options,
-                            this.agents.claude_setup.as_ref(),
-                            this.agents.codex_setup.as_ref(),
-                        ));
-                    }
-                    this.harnesses_failed = !read;
-                }
-                cx.notify();
-                legacy.then(|| this.request(Request::Harnesses, cx))
-            });
-            if let Ok(Some(harnesses)) = harnesses {
-                let harnesses = harnesses.await;
-                let _ = this.update(cx, |this, cx| {
-                    match harnesses {
-                        Ok(Response::Harnesses(list)) => {
-                            this.harnesses = Some(list);
-                            this.harnesses_failed = false;
-                        }
-                        _ => this.harnesses_failed = true,
-                    }
+            while let Some(state) = states_in.next().await {
+                let alive = this.update(cx, |this, cx| {
+                    this.state = state;
                     cx.notify();
                 });
-            }
-        })
-    }
-
-    /// The agents snapshot, with an older host's harnesses as options.
-    pub fn snapshot(&self) -> AgentsSnapshot {
-        let mut snapshot = self.agents.clone();
-        if snapshot.harness_options.is_none() {
-            snapshot.harness_options = self.harness_options();
-        }
-        snapshot
-    }
-
-    /// The harnesses agents can use: the snapshot's options, or those an
-    /// older host lists, converted.
-    pub fn harness_options(&self) -> Option<Vec<buzz_host::api::HarnessOption>> {
-        if let Some(options) = &self.agents.harness_options {
-            return Some(options.clone());
-        }
-        let legacy = self.harnesses.as_ref()?;
-        Some(
-            legacy
-                .iter()
-                .map(|harness| buzz_host::api::HarnessOption {
-                    command: harness
-                        .command
-                        .clone()
-                        .unwrap_or_else(|| legacy_command(harness.kind).into()),
-                    label: harness.label.clone(),
-                    available: harness.command.is_some(),
-                    status: if harness.command.is_some() {
-                        "ready"
-                    } else {
-                        "cli-needed"
-                    }
-                    .into(),
-                    ..Default::default()
-                })
-                .collect(),
-        )
-    }
-
-    /// Runs a request on the I/O runtime. Responses that carry a snapshot
-    /// are applied here, so callers only handle errors.
-    pub fn request(
-        &self,
-        request: Request,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<Response, RpcError>> {
-        let client = self.client.clone();
-        let response = Runtime::handle(cx).spawn(async move { client.request(request).await });
-        cx.spawn(async move |this, cx| {
-            let response = response
-                .await
-                .unwrap_or_else(|_| Err(RpcError::Failed("Request was cancelled".into())));
-            match &response {
-                Ok(Response::Agents(snapshot)) => {
-                    let snapshot = snapshot.clone();
-                    let _ = this.update(cx, |this, cx| {
-                        this.apply(snapshot);
-                        cx.notify();
-                    });
+                if alive.is_err() {
+                    return;
                 }
-                Ok(Response::Defaults(defaults)) => {
-                    let defaults = defaults.clone();
-                    let _ = this.update(cx, |this, cx| {
-                        this.defaults = Some(defaults);
-                        cx.notify();
-                    });
-                }
-                _ => {}
             }
-            response
-        })
-    }
-
-    /// Whether an install is running on this host.
-    pub fn installing(&self) -> bool {
-        self.pi_install.installing
-            || self.claude_install.installing
-            || self.codex_install.installing
-    }
-
-    /// Installs Pi, Claude Code or Codex's ACP adapter on the host, then
-    /// checks harnesses again (buzz-app's `installHarness`).
-    pub fn install(&mut self, kind: HarnessKind, cx: &mut Context<Self>) {
-        let label = match kind {
-            HarnessKind::Pi => "Pi",
-            HarnessKind::Claude => "Claude Code",
-            HarnessKind::Codex => "the Codex ACP adapter",
-            _ => return,
-        };
-        if self.installing() {
-            return;
-        }
-        *self.install_mut(kind) = Install {
-            installing: true,
-            ..Install::default()
-        };
-        cx.notify();
-        // Downloads and npm installs take minutes.
-        let response = self.request_within(Request::InstallHarness { kind }, PERSON_WAIT * 3, cx);
-        cx.spawn(async move |this, cx| {
-            let response = response.await;
-            let refresh = this.update(cx, |this, cx| {
-                *this.install_mut(kind) = match response {
-                    Ok(Response::Installed(report)) => Install {
-                        installing: false,
-                        report: Some(report),
-                        error: None,
-                    },
-                    // Hosts from before an installer cannot read its request.
-                    Err(RpcError::Failed(reason))
-                        if reason.contains("does not support this request") =>
-                    {
-                        Install {
-                            installing: false,
-                            report: None,
-                            error: Some(format!("Update this host to install {label}.").into()),
-                        }
-                    }
-                    _ => Install {
-                        installing: false,
-                        report: None,
-                        error: Some(
-                            format!(
-                                "Couldn’t install {label}. Try again or check the desktop app."
-                            )
-                            .into(),
-                        ),
-                    },
-                };
-                cx.notify();
-                this.refresh(cx)
-            });
-            if let Ok(refresh) = refresh {
-                refresh.await;
-            }
-        })
-        .detach();
-    }
-
-    fn install_mut(&mut self, kind: HarnessKind) -> &mut Install {
-        match kind {
-            HarnessKind::Claude => &mut self.claude_install,
-            HarnessKind::Codex => &mut self.codex_install,
-            _ => &mut self.pi_install,
-        }
-    }
-
-    /// As [`Self::request`], waiting up to `timeout`: for requests that
-    /// wait on a person (a sign-in, a keyring prompt) or an installer.
-    pub fn request_within(
-        &self,
-        request: Request,
-        timeout: Duration,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<Response, RpcError>> {
-        let client = self.client.clone();
-        let session = self.session;
-        let response =
-            Runtime::handle(cx).spawn(async move { client.request_within(request, timeout).await });
-        cx.spawn(async move |this, cx| {
-            let response = response
-                .await
-                .unwrap_or_else(|_| Err(RpcError::Failed("Request was cancelled".into())));
-            if let Ok(Response::Agents(snapshot)) = &response {
-                let snapshot = snapshot.clone();
-                let _ = this.update(cx, |this, cx| {
-                    if this.session == session {
-                        this.apply(snapshot);
-                        cx.notify();
-                    }
-                });
-            }
-            response
-        })
-    }
-
-    /// Loads the host's agent defaults into [`Self::defaults`].
-    pub fn load_defaults(&self, cx: &mut Context<Self>) {
-        self.request(Request::Defaults, cx).detach();
-    }
-
-    /// Commits an import. While it runs, the host may ask this app to attest
-    /// the given agent keys, and only those, with `identity`.
-    pub fn import(
-        &mut self,
-        token: String,
-        ids: Vec<String>,
-        pubkeys: HashSet<String>,
-        identity: Arc<Identity>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<Response, control::Failure>> {
-        let lane = control::Lane {
-            credential_write: true,
-            ..Default::default()
-        };
-        // A refused import must leave the one running its signing slot.
-        let armed = self.refusal(&lane).is_none();
-        let slot = self.signing.clone();
-        if armed {
-            *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
-                Some(Signing { identity, pubkeys });
-        }
-        let response = self.write(Request::ImportCommit { token, ids }, lane, cx);
-        cx.spawn(async move |_, _| {
-            let response = response.await;
-            if armed {
-                *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
-            }
-            response
         })
     }
 
@@ -833,21 +383,4 @@ pub fn forget_remote_hosts() -> Result<(), String> {
         return Ok(());
     }
     crate::config::save_hosts(&[])
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn hosts_open_only_web_pages() {
-        assert!(super::web_page("https://claude.ai/oauth?code=1"));
-        assert!(super::web_page("http://localhost:4242/callback"));
-        for url in [
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "ssh://x",
-            "/tmp/x",
-        ] {
-            assert!(!super::web_page(url), "{url}");
-        }
-    }
 }

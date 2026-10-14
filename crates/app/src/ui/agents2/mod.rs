@@ -17,14 +17,18 @@ use buzz_ui::{ActiveTheme, Button, ButtonSize, Colors, IconName, TypeStyled, tok
 use gpui_kit::*;
 use std::collections::HashMap;
 
-pub const PAGE: Page = Page::new("buzz.agents2/agents2");
+pub const PAGE: Page = Page::AGENTS;
 
 /// Registers the Agents2 primary page (`buzz.agents2`).
 pub fn register(cx: &mut App) {
     pages::register(
-        PageSpec::sidebar(PAGE, "Agents2", IconName::Browser, |window, cx| {
-            cx.new(|cx| Agents2Page::new(window, cx)).into()
-        }),
+        PageSpec {
+            // Agents shares the channel sidebar and its collapse toggle.
+            collapsible: true,
+            ..PageSpec::sidebar(PAGE, "Agents2", IconName::Robot, |window, cx| {
+                cx.new(|cx| Agents2Page::new(window, cx)).into()
+            })
+        },
         cx,
     );
 }

@@ -171,32 +171,6 @@ impl AttachmentDraft {
         Ok(())
     }
 
-    /// Adds a file already on the relay, such as the one a pasted snapshot
-    /// link names: it sends as it is, without another upload.
-    pub fn add_uploaded(
-        &mut self,
-        attachment: Attachment,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        if self.items.len() >= MAX_FILES {
-            return Err(format!("Attach at most {MAX_FILES} files per message."));
-        }
-        self.items.push(DraftFile {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: attachment.name.clone(),
-            mime: attachment.mime.clone(),
-            size: attachment.size,
-            source: Source::Bytes(Arc::from(Vec::new())),
-            voice: None,
-            status: Status::Ready,
-            uploaded: Some(attachment),
-            error: None,
-            transfer: None,
-        });
-        cx.notify();
-        Ok(())
-    }
-
     /// Moves files, with their results and errors, into an empty draft.
     fn adopt(&mut self, files: Vec<DraftFile>, cx: &mut Context<Self>) -> bool {
         if !self.items.is_empty() || files.is_empty() {

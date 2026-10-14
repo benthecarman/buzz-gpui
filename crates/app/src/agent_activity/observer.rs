@@ -129,22 +129,6 @@ pub fn thinking(community: &Entity<Community>, channel: &str, cx: &App) -> Vec<S
     agents
 }
 
-/// Whether `agent` is thinking anywhere (the Agents card): a working
-/// turn or typing in any community.
-pub fn agent_thinking(agent: &str, cx: &App) -> bool {
-    let Some(registry) = cx.try_global::<Registry>() else {
-        return false;
-    };
-    registry.0.values().any(|activity| {
-        let snapshot = &activity.read(cx).snapshot;
-        snapshot
-            .turns
-            .iter()
-            .any(|turn| turn.agent == agent && turn.state == super::turns::TurnState::Working)
-            || snapshot.typing.iter().any(|t| t.agent == agent)
-    })
-}
-
 /// Who works in `channel` (or one thread of it) by observed evidence:
 /// working turns with their live labels, and typing from agents that
 /// send telemetry (`currentActivity` without the owned-typing part,

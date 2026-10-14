@@ -23,7 +23,7 @@ mod updates;
 
 use crate::community::{AppState, Community};
 use crate::hosts::HostConnection;
-use crate::ui::agents::{AddHost, DefaultsDialog};
+use crate::ui::agents::AddHost;
 use crate::ui::overlay;
 pub use agents::{followup_draft, remember_mentioned_agents};
 pub use archive::capture as capture_agent_activity;
@@ -136,11 +136,6 @@ enum Modal {
     AddHost {
         dialog: Entity<AddHost>,
         _subscription: Subscription,
-    },
-    /// The Agents page's defaults dialog, for one host.
-    Defaults {
-        dialog: Entity<DefaultsDialog>,
-        _subscriptions: [Subscription; 2],
     },
     RemoveHost {
         host: Entity<HostConnection>,
@@ -485,7 +480,6 @@ impl SettingsPage {
         let (content, dismiss): (AnyElement, Option<overlay::Dismiss>) =
             match self.modal.as_ref()? {
                 Modal::AddHost { dialog, .. } => (dialog.clone().into_any_element(), None),
-                Modal::Defaults { dialog, .. } => (dialog.clone().into_any_element(), None),
                 Modal::RemoveHost { host, error } => (
                     self.remove_host_dialog(host, error.clone(), cx),
                     Some(close),

@@ -742,18 +742,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         );
     }
     if let Some(at) = menu_at {
-        let snapshot = directory
-            .session
-            .clone()
-            .filter(|session| super::agents::snapshot_preview::can_preview_link(session, url));
-        wrapper = wrapper.child(link_menu(
-            id,
-            url,
-            at,
-            menu_state,
-            snapshot,
-            (menu_focus, focus),
-        ));
+        wrapper = wrapper.child(link_menu(id, url, at, menu_state, (menu_focus, focus)));
     }
     wrapper.into_any_element()
 }
@@ -806,14 +795,13 @@ struct OpenMenu {
 }
 
 /// The external link's context menu (`MessageLink.tsx`): open in the
-/// browser, preview a snapshot, or copy the link. It takes focus, moves
+/// browser or copy the link. It takes focus, moves
 /// with the arrow keys, and gives focus back to the link as it closes.
 fn link_menu(
     id: SharedString,
     url: &str,
     open: OpenMenu,
     state: Entity<Option<OpenMenu>>,
-    snapshot: Option<std::sync::Arc<buzz_relay_client::Session>>,
     (menu_focus, trigger): (FocusHandle, FocusHandle),
 ) -> AnyElement {
     type Action = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -825,17 +813,6 @@ fn link_menu(
         Some(IconName::Browser),
         Rc::new(move |_, cx| cx.open_url(&browser)),
     ));
-    if let Some(session) = snapshot {
-        let url = url.to_string();
-        items.push((
-            "snapshot",
-            "Preview snapshot",
-            None,
-            Rc::new(move |window, cx| {
-                super::agents::snapshot_preview::preview_link(&session, &url, window, cx)
-            }),
-        ));
-    }
     let copy = url.to_string();
     items.push((
         "copy",

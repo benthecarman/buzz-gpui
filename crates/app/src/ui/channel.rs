@@ -622,11 +622,6 @@ impl ChannelPage {
             )
         });
         let personal = self.personal;
-        // A mentioned agent of the viewer's that is stopped wakes for it.
-        let wake = (
-            self.community.read(cx).origin.clone(),
-            super::agents::wake::floor(),
-        );
         // With no recipients to resolve and no files to upload, the intent
         // is queued now, so the row shows on the next frame.
         let queued = (session_send.is_none() && submission.upload.is_none()).then(|| {
@@ -685,12 +680,6 @@ impl ChannelPage {
                 match result {
                     Ok(()) => {
                         this.error = None;
-                        super::agents::wake::sent(
-                            &wake.0,
-                            &submission.mentions.recipients,
-                            wake.1,
-                            cx,
-                        );
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
                     }

@@ -1,11 +1,13 @@
 //! The Add host dialog: connects to a remote `buzzd`.
 
-use super::editor::Dismissed;
 use super::form::field;
 use crate::hosts::Hosts;
 use buzz_ui::{ActiveTheme, Button, Dialog, Surface, TextField, TypeStyled};
 use gpui_kit::component::input::InputState;
 use gpui_kit::*;
+
+/// The dialog closed, saved or not.
+pub struct Dismissed;
 
 pub struct AddHost {
     name: Entity<InputState>,

@@ -1,27 +1,19 @@
-//! Settings → Agents (§5a.11, adapted): the agent hosts, the harnesses
-//! this computer can run, its agent defaults, saved agent activity, and the
-//! "Remember mentioned agents" message preference.
+//! Settings → Agents (`AgentSettings.tsx`): the agent hosts, saved agent
+//! activity, and the "Remember mentioned agents" message preference.
 //!
-//! The Hosts block is this port's addition for remote hosts. Harnesses and
-//! the inline Agent defaults card are this computer's, as in buzz-app,
-//! unless another host is picked in the Harnesses heading; a remote host's
-//! defaults also open from its row.
-
-mod harnesses;
+//! The Hosts block is this port's addition for remote hosts.
 
 use super::{
-    Modal, SettingsPage, button, form_group, header, inline_header, preference_row, rows_group,
-    section,
+    Modal, SettingsPage, button, header, inline_header, preference_row, rows_group, section,
 };
 use crate::community::AppState;
 use crate::hosts::{HostConnection, Hosts};
-use crate::ui::agents::{AddHost, DefaultsCard, DefaultsDialog, Dismissed, Saved};
+use crate::ui::agents::{AddHost, Dismissed};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, AlertDialog, Badge, BadgeTone, Button, ButtonSize, Icon, IconButton,
     IconButtonSize, IconName, Surface, Switch, TypeStyled,
 };
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::ops::Range;
 
@@ -84,27 +76,6 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// A remote host's "Agent defaults", the dialog the Agents page opens.
-    fn agent_defaults(
-        &mut self,
-        host: Entity<HostConnection>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let dialog = cx.new(|cx| DefaultsDialog::new(host, window, cx));
-        let subscriptions = [
-            cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx)),
-            cx.subscribe(&dialog, |this, _, Saved(text), cx| {
-                this.show_toast(text.clone(), cx)
-            }),
-        ];
-        self.modal = Some(Modal::Defaults {
-            dialog,
-            _subscriptions: subscriptions,
-        });
-        cx.notify();
-    }
-
     fn remove_host(&mut self, cx: &mut Context<Self>) {
         let Some(Modal::RemoveHost { host, error }) = &mut self.modal else {
             return;
@@ -132,8 +103,8 @@ impl SettingsPage {
             .child(inline_header(
                 "Hosts",
                 Some(
-                    "Agents run on this computer or on machines running buzzd. Remove a host to \
-                     disconnect from it; its agents keep running there."
+                    "Agents keep their keys on this computer or on machines running buzzd. \
+                     Remove a host to disconnect from it; its agents stay saved there."
                         .into(),
                 ),
                 vec![
@@ -148,55 +119,10 @@ impl SettingsPage {
             ))
             .child(rows_group(rows, cx));
 
-        // This computer's harnesses and defaults, as in buzz-app, or the
-        // host picked in the Harnesses heading. Both live while the section
-        // is shown, so returning checks again.
-        let local = hosts
-            .iter()
-            .find(|host| host.read(cx).remote.is_none())
-            .cloned();
-        let harnesses = {
-            let host = local.clone();
-            window.use_keyed_state("settings-harnesses", cx, move |_, cx| {
-                harnesses::Harnesses::new(host, cx)
-            })
-        };
-        // A picked host that was since removed falls back to this computer,
-        // and Harnesses lets go of it.
-        let shown = harnesses.read(cx).host();
-        if shown.as_ref().is_some_and(|host| !hosts.contains(host)) {
-            harnesses.update(cx, |harnesses, cx| harnesses.show(local.clone(), cx));
-        }
-        let picked = harnesses.read(cx).host().or(local);
-        let defaults = picked.map(|host| {
-            let card = window.use_keyed_state(
-                (
-                    "settings-agent-defaults",
-                    host.entity_id().as_u64() as usize,
-                ),
-                cx,
-                |window, cx| DefaultsCard::new(host.clone(), false, window, cx),
-            );
-            div().when(host.read(cx).defaults.is_some(), |this| {
-                this.child(inline_header(
-                    "Agent defaults",
-                    Some(
-                        "Used when an agent starts without its own choices. Changes apply on \
-                         its next start."
-                            .into(),
-                    ),
-                    Vec::new(),
-                    cx,
-                ))
-                .child(form_group(vec![card.into_any_element()], cx))
-            })
-        });
         let mut parts = vec![
             header("Agents", None, cx).into_any_element(),
             hosts_block.into_any_element(),
         ];
-        parts.push(harnesses.into_any_element());
-        parts.extend(defaults.map(IntoElement::into_any_element));
         parts.push(self.archive_section(window, cx).into_any_element());
         let remember = remember_mentioned_agents(cx);
         parts.push(
@@ -265,28 +191,10 @@ impl SettingsPage {
             Some(remote) => remote.address.clone().into(),
         };
         let remote = state.remote.is_some();
-        let connected = matches!(state.state, ConnectionState::Connected { .. });
         let label = state.label.clone();
         let reconnect = host.clone();
         let remove = host.clone();
-        let defaults = host.clone();
         let mut trailing = vec![Badge::new(badge).tone(tone).into_any_element()];
-        // This computer's defaults are the card below.
-        if remote {
-            trailing.push(
-                IconButton::new(
-                    SharedString::from(format!("host-defaults-{index}")),
-                    IconName::SlidersHorizontal,
-                )
-                .size(IconButtonSize::Sm)
-                .disabled(!connected)
-                .tooltip("Agent defaults")
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.agent_defaults(defaults.clone(), window, cx)
-                }))
-                .into_any_element(),
-            );
-        }
         trailing.push(
             IconButton::new(
                 SharedString::from(format!("host-reconnect-{index}")),
@@ -344,7 +252,7 @@ impl SettingsPage {
         AlertDialog::new(format!("Remove {label}?"))
             .description(format!(
                 "This disconnects from {address} and forgets its token. Agents on that host \
-                 keep running, and you can add it again later."
+                 stay saved there, and you can add it again later."
             ))
             .children(
                 error.map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),

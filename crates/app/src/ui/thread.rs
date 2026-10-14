@@ -750,10 +750,6 @@ impl ThreadPanel {
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.clone();
         let mentions = submission.mentions.clone();
-        let wake = (
-            self.community.read(cx).origin.clone(),
-            super::agents::wake::floor(),
-        );
         // Keep the new reply in sight: open its branch, or follow the end
         // for a reply to the root.
         self.sent = Some(Sent {
@@ -801,12 +797,6 @@ impl ThreadPanel {
                 match result {
                     Ok(()) => {
                         this.error = None;
-                        super::agents::wake::sent(
-                            &wake.0,
-                            &submission.mentions.recipients,
-                            wake.1,
-                            cx,
-                        );
                         // A background send may land after the reader chose
                         // another target.
                         if parent.is_some() && this.reply_parent == parent {

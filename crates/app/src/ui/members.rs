@@ -23,7 +23,7 @@ use buzz_ui::{
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -116,8 +116,6 @@ pub struct MembersDialog {
     error: Option<SharedString>,
     /// Additions the session tracks here: in flight, or failed.
     additions: Vec<MemberAddition>,
-    /// Added agents that did not start, by key.
-    start_errors: HashMap<String, String>,
     /// "<name> is in the channel."
     notice: Option<SharedString>,
     /// "Send message" is opening the conversation.
@@ -167,7 +165,6 @@ impl MembersDialog {
             busy: HashSet::new(),
             error: None,
             additions: Vec::new(),
-            start_errors: HashMap::new(),
             notice: None,
             opening: false,
             operation: None,
@@ -362,10 +359,8 @@ impl MembersDialog {
         cx.notify();
     }
 
-    /// Adds someone, then starts an added agent the viewer manages here
-    /// (`memberAdditions.add`). A failure stays with the person, with
-    /// Retry; an agent that was added but did not start retries only its
-    /// start.
+    /// Adds someone (`memberAdditions.add`). A failure stays with the
+    /// person, with Retry.
     fn add(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
         if super::archives::hides(&self.community, &pubkey, cx) {
             self.error = Some("Archived identities cannot be added. Choose someone else.".into());
@@ -376,28 +371,16 @@ impl MembersDialog {
             return;
         }
         self.notice = None;
-        let retry_start = self.start_errors.remove(&pubkey).is_some();
         let session = self.community.read(cx).session.clone();
-        let community = self.community.clone();
         let channel = self.channel.id.clone();
         self.additions.retain(|addition| addition.pubkey != pubkey);
         cx.spawn_in(window, async move |this, cx| {
-            let added = match retry_start {
-                true => Ok(()),
-                false => session.add_member(&channel, &pubkey).await,
-            };
-            let started = match &added {
-                Ok(()) => start_added_agent(&community, &channel, &pubkey, retry_start, cx).await,
-                Err(_) => Ok(()),
-            };
+            let added = session.add_member(&channel, &pubkey).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy.remove(&pubkey);
                 if added.is_ok() {
                     let name = display_name(&this.community.read(cx).snapshot.profiles, &pubkey);
                     this.notice = Some(format!("{name} is in the channel.").into());
-                }
-                if let Err(error) = started {
-                    this.start_errors.insert(pubkey.clone(), error);
                 }
                 this.refresh(window, cx);
             });
@@ -715,11 +698,6 @@ impl MembersDialog {
             .filter(|addition| !self.busy.contains(&addition.pubkey))
             .filter_map(|addition| Some((addition.pubkey.clone(), addition.error.clone()?)))
             .collect();
-        for (pubkey, error) in &self.start_errors {
-            if !errors.iter().any(|(key, _)| key == pubkey) {
-                errors.push((pubkey.clone(), error.clone()));
-            }
-        }
         errors.sort();
         errors
     }
@@ -1212,87 +1190,6 @@ fn agents_failed(cx: &App) -> bool {
         })
     })
 }
-
-/// Starts an agent the viewer manages here once it is in the channel
-/// (`startAddedAgent`). Anyone else, or an agent another device manages,
-/// is left alone.
-pub(crate) async fn start_added_agent(
-    community: &Entity<Community>,
-    channel: &str,
-    pubkey: &str,
-    retry_start: bool,
-    cx: &mut AsyncWindowContext,
-) -> Result<(), String> {
-    use buzz_host::api::{AgentAction, ProcessStatus, Response};
-    let (origin, viewer, session) = community.read_with(cx, |community, _| {
-        (
-            community.origin.clone(),
-            community.session.viewer().to_string(),
-            community.session.clone(),
-        )
-    });
-    let find = |cx: &mut AsyncWindowContext| {
-        cx.update(|_, cx| super::profile_panel::community_agents(&origin, pubkey, cx))
-            .unwrap_or_default()
-    };
-    let Some((host, _)) = find(cx).into_iter().next() else {
-        return Ok(());
-    };
-    // A failed start may be retried long after its membership write.
-    if retry_start {
-        let _ = session.refresh_members(channel).await;
-    }
-    host.update(cx, |host, cx| host.refresh_status(cx)).await;
-    let ready = host.read_with(cx, |host, _| {
-        host.status() == crate::hosts::control::Status::Ready
-    });
-    let agent = find(cx).into_iter().next().map(|(_, agent)| agent);
-    let member = community.read_with(cx, |community, _| {
-        community
-            .snapshot
-            .channels
-            .iter()
-            .find(|c| c.id == channel)
-            .is_some_and(|c| c.members.iter().any(|m| m == pubkey))
-    });
-    if retry_start && !member {
-        return Err(MEMBERSHIP_CHANGED.into());
-    }
-    let Some(agent) = agent.filter(|_| ready && member) else {
-        return Err("Added, but the local agent could not be checked. Retry to start it.".into());
-    };
-    let running = |status| {
-        matches!(
-            status,
-            ProcessStatus::Running | ProcessStatus::Waiting | ProcessStatus::Starting
-        )
-    };
-    if running(agent.status) {
-        return Ok(());
-    }
-    let start = host.update(cx, |host, cx| {
-        host.act(&agent.id, AgentAction::Start, Some(viewer), None, cx)
-    });
-    let not_running = || "The agent is not running. Retry to start it.".to_string();
-    let detail = match start.await {
-        Ok(Response::Agents(snapshot)) => {
-            match snapshot.agents.into_iter().find(|a| a.id == agent.id) {
-                Some(started) if running(started.status) => return Ok(()),
-                Some(started) => started.error.unwrap_or_else(not_running),
-                None => not_running(),
-            }
-        }
-        Ok(_) => not_running(),
-        Err(failure) => failure.message,
-    };
-    Err(format!(
-        "Added to the channel, but the agent did not start. {detail}"
-    ))
-}
-
-/// `MembershipChanged`.
-const MEMBERSHIP_CHANGED: &str = "Membership changed. This agent is no longer in the channel and \
-                                  was not started. Select Add to invite it again.";
 
 #[cfg(test)]
 mod tests {

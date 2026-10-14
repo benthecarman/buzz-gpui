@@ -2675,19 +2675,6 @@ impl Composer {
         if consumed {
             return true;
         }
-        // A copied snapshot link attaches its file (`snapshot-clipboard.ts`).
-        let session = self.community.read(cx).session.clone();
-        if self.editing.is_none()
-            && let Some(attachment) =
-                super::agents::snapshot_preview::pasted_attachment(item, &session)
-        {
-            let added = self
-                .files
-                .update(cx, |draft, cx| draft.add_uploaded(attachment, cx));
-            self.attach_error = added.err().map(Into::into);
-            cx.notify();
-            return true;
-        }
         self.paste_text(item, window, cx)
     }
 

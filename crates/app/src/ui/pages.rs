@@ -18,7 +18,7 @@ pub struct Page(&'static str);
 impl Page {
     pub const ME: Page = Page("buzz.me/me");
     pub const MESSAGES: Page = Page("buzz.channels/channels");
-    pub const AGENTS: Page = Page("buzz.agents/agents");
+    pub const AGENTS: Page = Page("buzz.agents2/agents2");
     /// Settings is shell-owned: never a primary page, but a place.
     pub const SETTINGS: Page = Page("settings");
 
@@ -141,16 +141,6 @@ pub fn init(cx: &mut App) {
     super::inbox::register(cx);
     super::reminders::register(cx);
     super::workflows::register(cx);
-    register(
-        PageSpec {
-            // Agents shares the channel sidebar and its collapse toggle.
-            collapsible: true,
-            ..PageSpec::sidebar(Page::AGENTS, "Agents", IconName::Robot, |_, cx| {
-                cx.new(super::agents::AgentsPage::new).into()
-            })
-        },
-        cx,
-    );
     super::agents2::register(cx);
     super::mission_control::register(cx);
 }

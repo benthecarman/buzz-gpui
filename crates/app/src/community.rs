@@ -413,7 +413,6 @@ impl Community {
             community._notifications = Some(notifications);
         });
         crate::agent_activity::observer::attach(&community, identity.clone(), cx);
-        crate::ui::agents::review::listen(&community, identity.clone(), cx);
         crate::ui::settings::capture_agent_activity(&community, identity, cx);
         community
     }

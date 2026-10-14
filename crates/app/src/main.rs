@@ -27,7 +27,6 @@ mod runtime;
 mod shortcuts;
 mod sign_out;
 mod single_instance;
-mod snapshot;
 mod sounds;
 mod tray;
 mod ui;
@@ -123,7 +122,6 @@ fn main() {
         idle::Idle::init(cx);
         plugins::Plugins::init(cx);
         agents2::init(cx);
-        ui::agents::init(cx);
         agent_plugins::claude_code::init(cx);
         agent_plugins::codex::init(cx);
         mission_control::init(cx);
