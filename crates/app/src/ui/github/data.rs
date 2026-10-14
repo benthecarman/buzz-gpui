@@ -303,7 +303,7 @@ mod tests {
     use serde_json::json;
 
     fn pull() -> Reference {
-        parse("https://github.com/block/buzz/pull/23#discussion_r1").unwrap()
+        parse("https://github.com/block/buzz/pull/23#issuecomment-1").unwrap()
     }
 
     fn read(reference: &Reference, value: Value) -> Details {

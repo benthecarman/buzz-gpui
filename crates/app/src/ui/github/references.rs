@@ -31,6 +31,26 @@ pub struct Reference {
     pub label: String,
 }
 
+/// Fragments the panel can show (`displayableFragments`). The pull
+/// request Discussion tab lists conversation comments and submitted
+/// reviews; review-thread (`discussion_r…`), timeline event and other
+/// anchors fall through to the browser instead of opening a panel that
+/// cannot show them. Issues render only their body, so no fragment
+/// qualifies.
+fn displayable(surface: &str, fragment: &str) -> bool {
+    if fragment.is_empty() {
+        return true;
+    }
+    surface == "pull"
+        && ["issuecomment-", "pullrequestreview-"]
+            .iter()
+            .any(|prefix| {
+                fragment
+                    .strip_prefix(prefix)
+                    .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            })
+}
+
 fn name(part: &str) -> bool {
     !part.is_empty()
         && part
@@ -73,9 +93,13 @@ pub fn parse(value: &str) -> Option<Reference> {
             .is_some_and(|b| (b'1'..=b'9').contains(b))
             && t.bytes().all(|b| b.is_ascii_digit())
     };
-    if (surface == "pull" || surface == "issues") && rest.len() == 1 && positive(&target) {
-        let hash = url
-            .fragment()
+    let fragment = url.fragment().unwrap_or_default();
+    if (surface == "pull" || surface == "issues")
+        && rest.len() == 1
+        && positive(&target)
+        && displayable(surface, fragment)
+    {
+        let hash = Some(fragment)
             .filter(|f| !f.is_empty())
             .map(|f| format!("#{f}"))
             .unwrap_or_default();
@@ -138,10 +162,10 @@ mod tests {
 
     #[test]
     fn keeps_the_fragment_on_pulls_and_shortens_commits() {
-        let pull = parse("https://github.com/block/buzz/pull/23#discussion_r1").unwrap();
+        let pull = parse("https://github.com/block/buzz/pull/23#issuecomment-1").unwrap();
         assert_eq!(
             pull.url,
-            "https://github.com/block/buzz/pull/23#discussion_r1"
+            "https://github.com/block/buzz/pull/23#issuecomment-1"
         );
         assert_eq!(pull.label, "#23");
         let commit = parse("https://github.com/block/buzz/commit/ABCDEF1234").unwrap();
@@ -150,5 +174,40 @@ mod tests {
             parse("https://github.com/block/buzz/").unwrap().label,
             "buzz"
         );
+    }
+
+    #[test]
+    fn claims_only_pull_and_issue_links_the_panel_can_show() {
+        let pull = "https://github.com/block/buzz-app/pull/838";
+        for fragment in ["", "#issuecomment-123", "#pullrequestreview-456"] {
+            let url = format!("{pull}{fragment}");
+            assert_eq!(parse(&url).map(|r| r.url), Some(url.clone()), "{url}");
+        }
+        let issue = "https://github.com/block/buzz-app/issues/12";
+        assert_eq!(parse(issue).map(|r| r.url), Some(issue.to_string()));
+        for suffix in [
+            "#discussion_r4240253516",
+            "#event-987",
+            "#partial-timeline",
+            "#issuecomment-",
+            "#pullrequestreview-abc",
+            "/files",
+            "/files#diff-0123abcd",
+            "/files#r4240253516",
+            "/files/abcdef1..0123456",
+            "/commits",
+            "/commits/abcdef1",
+            "/commits/abcdef1#r4240253516",
+            "/checks",
+            "/checks?check_run_id=1",
+            "/conflicts",
+            "/changes",
+            "/activity",
+        ] {
+            let url = format!("{pull}{suffix}");
+            assert_eq!(parse(&url), None, "{url}");
+        }
+        let url = format!("{issue}#issuecomment-123");
+        assert_eq!(parse(&url), None, "{url}");
     }
 }
