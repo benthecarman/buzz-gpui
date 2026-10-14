@@ -64,22 +64,31 @@ impl Workspace {
         )
     }
 
-    /// Whether the header toggle collapses the sidebar on this page.
+    /// Whether the header toggle collapses the sidebar on this page:
+    /// Settings and every primary page, those with a navigation entry.
     fn collapsible(&self, cx: &App) -> bool {
         self.page == Page::SETTINGS
-            || pages::spec(self.page, cx).is_some_and(|spec| spec.collapsible)
+            || pages::spec(self.page, cx)
+                .is_some_and(|spec| spec.collapsible || spec.placement != pages::Placement::Hidden)
     }
 
-    fn toggle_label(&self, narrow: bool) -> &'static str {
-        let me = self.page == Page::ME;
-        match (narrow, self.drawer_open, self.sidebar_open, me) {
-            (true, true, _, _) => "Hide navigation",
-            (true, false, _, _) => "Show navigation",
-            (false, _, true, true) => "Hide Me sidebar",
-            (false, _, true, false) => "Hide Channel sidebar",
-            (false, _, false, true) => "Show Me sidebar",
-            (false, _, false, false) => "Show Channel sidebar",
+    fn toggle_label(&self, narrow: bool) -> SharedString {
+        if narrow {
+            return match self.drawer_open {
+                true => "Hide navigation",
+                false => "Show navigation",
+            }
+            .into();
         }
+        let sidebar = if self.page == Page::ME {
+            "Me sidebar"
+        } else if self.page == Page::MESSAGES || self.page == Page::AGENTS {
+            "Channel sidebar"
+        } else {
+            "sidebar"
+        };
+        let verb = if self.sidebar_open { "Hide" } else { "Show" };
+        format!("{verb} {sidebar}").into()
     }
 
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {

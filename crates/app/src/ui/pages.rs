@@ -65,8 +65,8 @@ pub struct PageSpec {
     pub icon: IconName,
     pub placement: Placement,
     pub navigation: Navigation,
-    /// The header toggle collapses the sidebar (Messages, Agents, Me and
-    /// Settings). Other pages always show it on a wide window.
+    /// The header toggle collapses the sidebar even with no navigation
+    /// entry; every primary page and Settings have it.
     pub collapsible: bool,
     pub badge: Option<Badge>,
     pub build: Option<Build>,
