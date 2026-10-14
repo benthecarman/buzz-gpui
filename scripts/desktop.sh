@@ -11,7 +11,8 @@
 #
 # The app runs in the dev shell as the user unit $DESKTOP_UNIT (default
 # desktop-app), with its log at /tmp/$DESKTOP_UNIT.log; give each concurrent
-# user its own unit. The
+# user its own unit. VK_DRIVER_FILES and friends pass through, so a busy or
+# faulty GPU can be left out of Vulkan's device probe. The
 # session has no secret service: sign in with BUZZ_DEV_NSEC_FILE, and set
 # HOME (or the XDG dirs) to keep test data out of your own profile.
 set -euo pipefail
@@ -42,6 +43,7 @@ case ${1:-} in
       for var in DBUS_SESSION_BUS_ADDRESS LD_LIBRARY_PATH XDG_DATA_DIRS \
         BUZZ_DEV_NSEC_FILE BUZZ_DEV_PICK_FILE SSL_CERT_FILE \
         BUZZ_UPDATE_URL BUZZ_UPDATE_KIND BUZZ_UPDATE_INSTALLER \
+        VK_DRIVER_FILES VK_ICD_FILENAMES VK_LOADER_DRIVERS_DISABLE \
         RUST_LOG HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME; do
         [[ -v $var ]] && env+=(-E "$var")
       done
