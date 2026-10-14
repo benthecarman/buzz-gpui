@@ -212,13 +212,13 @@ impl Media {
     /// `/media/<64 lowercase hex>[.ext]` with `ext` `[a-z0-9]{1,8}` or
     /// `thumb.jpg`, and no query or fragment (`relay.rs` `media_url`).
     pub fn is_relay_media(&self, url: &str) -> bool {
-        relay_media_url(&self.0.origin, url).is_some()
+        relay_media_url(&self.0.origin, still(&self.0.origin, url)).is_some()
     }
 
     /// The relay's thumbnail for its own media, which avatars use
     /// (`mediaUrl(..., "small")`). `None` for any other URL.
     pub fn thumbnail(&self, url: &str) -> Option<String> {
-        let url = relay_media_url(&self.0.origin, url)?;
+        let url = relay_media_url(&self.0.origin, still(&self.0.origin, url))?;
         let name = url.path().strip_prefix("/media/")?;
         let hash = name.split('.').next()?;
         let mut thumb = url.clone();
@@ -253,6 +253,7 @@ impl Media {
     /// The whole body of `url`: signed for this relay's media, plain for
     /// other `https://` URLs, refused for anything else.
     pub async fn fetch(&self, url: &str) -> Result<Arc<[u8]>, MediaError> {
+        let url = still(&self.0.origin, url);
         let target = if let Some(url) = relay_media_url(&self.0.origin, url) {
             Target::Relay(url)
         } else {
@@ -476,6 +477,17 @@ pub(crate) fn server(url: &Url) -> String {
     }
 }
 
+/// The still image of this relay's media (`mediaUrl`): buzz desktop
+/// appends `#buzz-anim=<url>` to an animated avatar. A fragment never
+/// reaches the relay and the media rules refuse one, so the still loads.
+fn still<'a>(origin: &RelayOrigin, url: &'a str) -> &'a str {
+    if url.starts_with(&format!("{}/media/", origin.http())) {
+        url.split('#').next().unwrap_or(url)
+    } else {
+        url
+    }
+}
+
 fn relay_media_url(origin: &RelayOrigin, value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
     let base = Url::parse(&origin.http()).ok()?;
@@ -567,6 +579,16 @@ mod tests {
             "https://relay.example.com/media/{HASH}.jpg?x=1"
         )));
         assert!(!ok(&format!("https://relay.example.com/media/{HASH}.JPG")));
+        // An empty query or fragment still counts; so does a double
+        // extension or an animated avatar's link.
+        assert!(!ok(&format!("https://relay.example.com/media/{HASH}?")));
+        assert!(!ok(&format!("https://relay.example.com/media/{HASH}#")));
+        assert!(!ok(&format!(
+            "https://relay.example.com/media/{HASH}.tar.gz"
+        )));
+        assert!(!ok(&format!(
+            "https://relay.example.com/media/{HASH}.png#buzz-anim=x"
+        )));
         assert!(!ok("https://relay.example.com/media/abc.jpg"));
         assert!(!ok(&format!("https://relay.example.com/files/{HASH}.jpg")));
 
@@ -594,6 +616,24 @@ mod tests {
             Some(format!("https://relay.example.com/media/{HASH}.thumb.jpg"))
         );
         assert_eq!(media.thumbnail("https://example.com/a.png"), None);
+        // An animated avatar shows its still, as a thumbnail too.
+        let animated = format!(
+            "https://relay.example.com/media/{HASH}.png#buzz-anim=https%3A%2F%2Frelay.example.com%2Fmedia%2F{HASH}.gif"
+        );
+        assert_eq!(
+            media.thumbnail(&animated),
+            Some(format!("https://relay.example.com/media/{HASH}.thumb.jpg"))
+        );
+        assert!(media.is_relay_media(&animated));
+        assert_eq!(
+            still(media.origin(), &animated),
+            format!("https://relay.example.com/media/{HASH}.png")
+        );
+        // Other hosts keep their fragment.
+        assert_eq!(
+            still(media.origin(), "https://example.com/a.png#x"),
+            "https://example.com/a.png#x"
+        );
     }
 
     #[test]
