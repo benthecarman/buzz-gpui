@@ -28,7 +28,9 @@ pub struct Config {
 #[serde(deny_unknown_fields, default)]
 pub struct Embedded {
     pub credentials: CredentialsBackend,
-    /// Default working directory for agents on this machine.
+    /// The v1 agents' working directory, gone with them; still read so
+    /// older config files load.
+    #[allow(dead_code)]
     pub workspace: Option<PathBuf>,
 }
 

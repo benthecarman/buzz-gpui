@@ -60,10 +60,8 @@ struct Gui(ProcessSinks);
 
 impl ClientHandler<HostProtocol> for Gui {
     fn handle(&self, ask: HostAsk) -> BoxFuture<'static, Result<HostAnswer, RpcError>> {
-        let answer = match ask {
-            HostAsk::ProcessOutput { handle, output } => self.0.deliver(handle, output),
-            _ => Err(RpcError::Failed("unexpected ask".into())),
-        };
+        let HostAsk::ProcessOutput { handle, output } = ask;
+        let answer = self.0.deliver(handle, output);
         Box::pin(async move { answer })
     }
 }
@@ -154,10 +152,7 @@ async fn connect_host() -> (Arc<HostClient<HostProtocol>>, Spawner) {
             version: "test".into(),
         },
         state_dir: state.join("state"),
-        workspace: state.join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.join("keys")).unwrap()),
-        watch_interval: Duration::from_millis(200),
-        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();

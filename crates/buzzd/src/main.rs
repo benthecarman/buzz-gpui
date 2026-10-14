@@ -12,7 +12,6 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -40,7 +39,9 @@ struct Config {
     /// Addresses to listen on: `tcp://host:port` or `unix:///path`.
     listen: Vec<String>,
     state_dir: Option<PathBuf>,
-    /// Default working directory for new agents.
+    /// The v1 agents' working directory, gone with them; still read so
+    /// older config files load.
+    #[allow(dead_code)]
     workspace: Option<PathBuf>,
     /// `files` (default; owner-only key files) or `keyring`.
     credentials: Option<String>,
@@ -49,7 +50,6 @@ struct Config {
 const DEFAULT_LISTEN: &str = "tcp://127.0.0.1:7420";
 
 fn main() -> Result<()> {
-    buzz_host::dispatch_supervisor();
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -98,15 +98,7 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
             version: env!("CARGO_PKG_VERSION").into(),
         },
         state_dir: state_dir.clone(),
-        workspace: match config.workspace {
-            Some(dir) => dir,
-            None => dirs::home_dir()
-                .context("no home directory")?
-                .join("buzz-agents"),
-        },
         credentials,
-        watch_interval: Duration::from_secs(1),
-        legacy_dir: dirs::data_dir(),
     })
     .map_err(anyhow::Error::msg)?;
     let handler = Arc::new(RpcHandler(host));
@@ -151,9 +143,9 @@ async fn run(config: Config, state_dir: PathBuf, token: String) -> Result<()> {
             result?.context("listener failed")?;
         }
     }
-    tracing::info!("stopping agents");
+    tracing::info!("stopping agent processes");
     // Closing listeners drops their connections and with them the last
-    // references to the host, whose drop stops every agent.
+    // references to the host, whose drop stops every agent process.
     servers.shutdown().await;
     drop(handler);
     Ok(())

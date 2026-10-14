@@ -109,10 +109,6 @@ impl AppState {
     pub fn set_identity(identity: buzz_identity::Identity, cx: &mut App) {
         crate::perf::step(crate::perf::STARTUP, "identity");
         let identity = Arc::new(identity);
-        // Agents start only for this key.
-        if let Some(host) = crate::hosts::Hosts::embedded(cx) {
-            host.set_owner(identity.pubkey_hex());
-        }
         let store = cx.global::<Self>().store.clone();
         let saved = cx.global::<Self>().saved(&identity.pubkey_hex());
         let (mode, presence_error) = load_presence_mode(&store, &identity.pubkey_hex());

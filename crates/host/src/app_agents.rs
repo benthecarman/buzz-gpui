@@ -12,7 +12,6 @@ mod pictures;
 
 use crate::api::{AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol};
 use crate::blocking;
-use crate::profile::authorization;
 use base64::Engine;
 use buzz_agent_controller::{
     AppAgent, AppAgents, CREDENTIALS_BUSY, Credentials, NewAppAgent, Published, Secret,
@@ -569,6 +568,15 @@ impl AppAgentHost {
         let signed = post(&agent, &key, signed).await?;
         serde_json::to_string(&signed).map_err(|_| "Invalid agent event".into())
     }
+}
+
+/// A NIP-98 `Authorization` header for `event`.
+fn authorization(event: Value) -> Result<String> {
+    let json = serde_json::to_vec(&event).map_err(|_| "Could not authorize profile request")?;
+    Ok(format!(
+        "Nostr {}",
+        base64::engine::general_purpose::STANDARD.encode(json)
+    ))
 }
 
 fn client(seconds: u64) -> Result<reqwest::Client> {

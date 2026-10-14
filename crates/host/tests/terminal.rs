@@ -31,10 +31,7 @@ fn host(state: &tempfile::TempDir) -> Arc<AgentHost> {
             version: "test".into(),
         },
         state_dir: state.path().join("state"),
-        workspace: state.path().join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
-        watch_interval: Duration::from_millis(100),
-        legacy_dir: None,
     })
     .unwrap()
 }
@@ -386,7 +383,7 @@ impl buzz_host_rpc::HostHandler<OldHost> for OldHandler {
         _: buzz_host_rpc::Peer<OldHost>,
         _: OldRequest,
     ) -> BoxFuture<'static, Result<Response, RpcError>> {
-        Box::pin(async { Ok(Response::Agents(Default::default())) })
+        Box::pin(async { Ok(Response::Done) })
     }
 }
 

@@ -20,18 +20,18 @@ buzz-gpui (laptop)                              buzzd (dev server)
 - Chat goes from the GUI directly to the relay. Agents also talk to the relay
   directly, as their own identities, through `buzz-acp`. A host never carries
   chat traffic.
-- A host owns everything that is local to a machine: the agent controller and
-  process supervision, agent keys, harness detection, logs, and the login
-  shells behind channel terminals.
+- A host owns what is local to a machine: agent keys, the processes agent
+  types declare (such as Claude Code and Codex), and the login shells behind
+  channel terminals. The GUI runs each agent and asks the host that holds its
+  key to sign for it, one bounded request at a time.
 - The GUI always runs one embedded host for agents on this machine. It talks to
   the embedded host over the same protocol as a remote one, through an
   in-memory transport, so both paths run the same code.
 - Remote hosts are `buzzd` processes. The transport is a trait. TCP and Unix
   sockets ship first; Tailscale (or anything else) is set up in front of the
   TCP port.
-- When a host needs the human's signature (the owner attestation on agent
-  create or import), it asks the GUI over RPC. The human key never leaves the
-  GUI process.
+- A new agent's key is made on its host; the GUI signs the owner attestation
+  for it and sends it back. The human key never leaves the GUI process.
 
 ## Host protocol (crates/host-rpc)
 
@@ -41,8 +41,8 @@ buzz-gpui (laptop)                              buzzd (dev server)
 - Handshake: `Hello { protocol, token, client }` →
   `Welcome { protocol, host }` or `Rejected { reason }`. A token is required on
   every listener except the in-memory one.
-- Requests and responses pair by `id`. The host pushes events, such as agent
-  state changes, without polling.
+- Requests and responses pair by `id`. Either side may push events or ask the
+  other side (the host sends process output this way).
 - Reconnect is state-based, not replay-based. After a reconnect the client asks
   for a fresh snapshot. Events carry a sequence number, so the client can drop
   stale ones. Host actions are idempotent, so a client may retry a request
@@ -64,7 +64,8 @@ updated incrementally; no projection is rebuilt from scratch on each event.
 
 ## Reused code
 
-- From buzz-app: `buzz-agent-controller`, `buzz-credential-store` and
+- From buzz-app: `buzz-agent-controller` (Agents identities and custody),
+  `buzz-desktop`, `buzz-credential-store`, `buzzodz-plugins` and
   `buzz-pairing`, as git dependencies pinned to a revision.
 - buzz-app's TypeScript and its Tauri host are the reference for behavior. We
   do not depend on them.

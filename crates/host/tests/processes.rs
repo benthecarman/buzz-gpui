@@ -48,7 +48,6 @@ impl ClientHandler<HostProtocol> for Gui {
                     None => Err(RpcError::Failed("No such process".into())),
                 }
             }
-            _ => Err(RpcError::Failed("unexpected ask".into())),
         };
         Box::pin(async move { answer })
     }
@@ -93,10 +92,7 @@ fn start_host() -> Setup {
             version: "test".into(),
         },
         state_dir: state.path().join("state"),
-        workspace: state.path().join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
-        watch_interval: Duration::from_millis(100),
-        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
@@ -415,7 +411,7 @@ impl HostHandler<Old> for OldHost {
         request: OldRequest,
     ) -> BoxFuture<'static, Result<Response, RpcError>> {
         let OldRequest::Agents = request;
-        Box::pin(async { Ok(Response::Agents(AgentsSnapshot::default())) })
+        Box::pin(async { Ok(Response::Done) })
     }
 }
 
@@ -435,7 +431,7 @@ async fn old_hosts_refuse_process_requests_and_stay_connected() {
         .unwrap_err();
     assert!(error.to_string().contains("update it"), "{error}");
     assert!(matches!(
-        client.request(Request::Agents).await,
-        Ok(Response::Agents(_))
+        *client.state().borrow(),
+        buzz_host_rpc::ConnectionState::Connected { .. }
     ));
 }

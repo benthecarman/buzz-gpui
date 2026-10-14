@@ -68,10 +68,7 @@ async fn custody_over_rpc() {
     let host = AgentHost::start(HostConfig {
         info: info(),
         state_dir: state.path().join("state"),
-        workspace: state.path().join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
-        watch_interval: Duration::from_millis(100),
-        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
@@ -355,7 +352,7 @@ mod old {
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub enum Response {
-        Agents(AgentsSnapshot),
+        Agents,
     }
 
     pub struct OldProtocol;
@@ -384,7 +381,7 @@ mod old {
             _: Peer<OldProtocol>,
             Request::Agents: Request,
         ) -> BoxFuture<'static, Result<Response, RpcError>> {
-            Box::pin(async { Ok(Response::Agents(AgentsSnapshot::default())) })
+            Box::pin(async { Ok(Response::Agents) })
         }
     }
 }
@@ -418,10 +415,10 @@ async fn old_hosts_answer_app_agent_requests_as_unsupported() {
     };
     let message = failed(ask(&client, picture).await);
     assert!(message.contains("does not support"), "{message}");
-    // The connection survives, and the requests the old host knows work.
+    // The connection survives.
     assert!(matches!(
-        client.request(Request::Agents).await,
-        Ok(Response::Agents(_))
+        *client.state().borrow(),
+        buzz_host_rpc::ConnectionState::Connected { .. }
     ));
 }
 
@@ -441,10 +438,7 @@ async fn one_gui_runs_each_agent_until_it_lets_go_or_disconnects() {
     let host = AgentHost::start(HostConfig {
         info: info(),
         state_dir: state.path().join("state"),
-        workspace: state.path().join("workspace"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
-        watch_interval: Duration::from_millis(100),
-        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();

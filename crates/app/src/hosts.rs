@@ -18,7 +18,6 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use gpui_kit::{App, AppContext, Context, Entity, Global, SharedString, Task};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Agent keys created on this machine use the same credential service as
 /// buzz-app, so both apps see them.
@@ -199,7 +198,7 @@ fn start_embedded(
     };
     // The host starts background work on the I/O runtime.
     let _runtime = runtime.enter();
-    let host = AgentHost::start_for_owner(HostConfig {
+    let host = AgentHost::start(HostConfig {
         info: HostInfo {
             id: "local".into(),
             name: "This computer".into(),
@@ -207,15 +206,7 @@ fn start_embedded(
             version: env!("CARGO_PKG_VERSION").into(),
         },
         state_dir: data.join("host"),
-        workspace: config
-            .embedded
-            .workspace
-            .clone()
-            .or_else(|| dirs::home_dir().map(|home| home.join("buzz-agents")))
-            .ok_or("No home directory")?,
         credentials,
-        watch_interval: Duration::from_secs(1),
-        legacy_dir: dirs::data_dir(),
     })?;
     let (connector, listener) = transport::memory();
     let server = runtime.spawn(buzz_host_rpc::serve(
@@ -272,13 +263,6 @@ impl ClientHandler<HostProtocol> for Answers {
                 let answer = self.processes.deliver(handle, output);
                 Box::pin(async move { answer })
             }
-            // Asks of older hosts for v1 agents, which this app no longer
-            // has.
-            HostAsk::AttestAgent { .. } | HostAsk::OpenUrl { .. } => Box::pin(async {
-                Err(RpcError::Failed(
-                    "This app no longer manages harness agents".into(),
-                ))
-            }),
         }
     }
 }

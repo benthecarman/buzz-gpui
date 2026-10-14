@@ -11,8 +11,8 @@
 //! An owner made over a connection is closed when that connection closes,
 //! so a GUI that goes away never leaves shells running.
 
+use crate::Asker;
 use crate::api::{Request, Response};
-use crate::import::Asker;
 use buzz_desktop::terminal as pty;
 use buzz_host_rpc::RpcError;
 use serde::{Deserialize, Serialize};
