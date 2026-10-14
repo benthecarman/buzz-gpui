@@ -30,7 +30,9 @@ fn kind_label(kind: ItemKind) -> &'static str {
 }
 
 enum HomeState {
-    Loading,
+    /// Checking, with the session's last answer for the channel, which the
+    /// button keeps showing meanwhile.
+    Loading(Option<Home>),
     None,
     Ambiguous,
     Error,
@@ -85,7 +87,7 @@ impl ResourcePicker {
         });
         let mut picker = Self {
             context,
-            home: HomeState::Loading,
+            home: HomeState::Loading(None),
             open: false,
             closed: None,
             input,
@@ -98,7 +100,7 @@ impl ResourcePicker {
             _check: None,
             _input: subscription,
         };
-        picker.load_home(cx);
+        picker.load_home(false, cx);
         picker
     }
 
@@ -117,10 +119,12 @@ impl ResourcePicker {
             .is_none_or(|composer| composer.read(cx).sending())
     }
 
-    fn load_home(&mut self, cx: &mut Context<Self>) {
-        self.home = HomeState::Loading;
+    /// Checks the channel's project on every mount and Retry. Until it
+    /// answers, a mount shows the session's last answer; a Retry does not.
+    fn load_home(&mut self, retry: bool, cx: &mut Context<Self>) {
         let projects = self.context.community.read(cx).session.projects();
         let channel = self.context.channel.clone();
+        self.home = HomeState::Loading((!retry).then(|| projects.peek_home(&channel)).flatten());
         self._home = Some(cx.spawn(async move |this, cx| {
             let home = projects.home(channel).await;
             let _ = this.update(cx, |this, cx| {
@@ -343,7 +347,7 @@ impl ResourcePicker {
                 .child(
                     div().flex().child(
                         Button::new("resource-retry-project", "Retry project")
-                            .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.load_home(true, cx))),
                     ),
                 )
                 .into_any_element();
@@ -478,10 +482,20 @@ impl ResourcePicker {
 impl Render for ResourcePicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        // Hidden until the home project is known, unlike buzz-app, which
-        // shows it disabled while loading: most channels have none, so it
-        // flashed in the composer on every switch.
-        if matches!(self.home, HomeState::None | HomeState::Loading) {
+        // While checking, the session's last answer decides: none known or
+        // no project hides the button, so it does not flash on a switch; a
+        // known project shows it disabled.
+        let pending = matches!(self.home, HomeState::Loading(_));
+        let (hidden, unavailable) = match &self.home {
+            HomeState::Loading(cached) => (
+                matches!(cached, None | Some(Home::None)),
+                matches!(cached, Some(Home::Ambiguous)),
+            ),
+            HomeState::None => (true, false),
+            HomeState::Ambiguous | HomeState::Error => (false, true),
+            HomeState::Project(_) => (false, false),
+        };
+        if hidden {
             return div().into_any_element();
         }
         let disabled = self.disabled(cx);
@@ -493,13 +507,14 @@ impl Render for ResourcePicker {
             self.checking = None;
             self.rejected = None;
         }
-        let tooltip = if self.project().is_some() {
+        let tooltip = if pending {
+            "Loading project…".to_string()
+        } else if self.project().is_some() {
             LABEL.to_string()
         } else {
             format!("{LABEL} (unavailable)")
         };
-        let unavailable = matches!(self.home, HomeState::Ambiguous | HomeState::Error);
-        let open = self.open && !disabled;
+        let open = self.open && !disabled && !pending;
         let popup = open.then(|| {
             let content = self.popup(cx);
             div().absolute().left_0().top_0().child(deferred(
@@ -576,7 +591,7 @@ impl Render for ResourcePicker {
                 IconButton::new("resource-picker-trigger", IconName::GitPullRequest)
                     .size(IconButtonSize::Sm)
                     .selected(open)
-                    .disabled(disabled)
+                    .disabled(disabled || pending)
                     .tooltip(tooltip)
                     .when(unavailable, |b| b.icon_color(c.text_warning))
                     .on_click(cx.listener(|this, _, window, cx| {

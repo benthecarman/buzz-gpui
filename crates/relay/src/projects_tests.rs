@@ -830,6 +830,227 @@ fn a_project_home_needs_a_repository_bound_to_the_channel() {
     assert!(authoritative_projects(&[unlisted], &[repo("c1")], "c1").is_empty());
 }
 
+/// Answers like [`Fake`], except that each queued gate holds one read
+/// until the test releases it.
+struct Gated {
+    events: Vec<Verified>,
+    gates: Mutex<std::collections::VecDeque<futures::channel::oneshot::Receiver<Gate>>>,
+}
+
+type Gate = Result<Vec<Verified>, ReadError>;
+
+impl Gated {
+    fn hold(&self) -> futures::channel::oneshot::Sender<Gate> {
+        let (send, receive) = futures::channel::oneshot::channel();
+        self.gates.lock().unwrap().push_back(receive);
+        send
+    }
+}
+
+impl ProjectReads for Gated {
+    fn read(
+        &self,
+        filters: Vec<Filter>,
+    ) -> impl Future<Output = Result<Vec<Verified>, ReadError>> + Send {
+        let gate = self.gates.lock().unwrap().pop_front();
+        let answer: Vec<Verified> = self
+            .events
+            .iter()
+            .filter(|e| filters.iter().any(|f| matches(e, f)))
+            .cloned()
+            .collect();
+        async move {
+            match gate {
+                Some(gate) => gate.await.unwrap_or(Ok(Vec::new())),
+                None => Ok(answer),
+            }
+        }
+    }
+}
+
+fn gated(events: Vec<Verified>) -> Destinations<Gated> {
+    Destinations::new(Gated {
+        events,
+        gates: Mutex::new(Default::default()),
+    })
+}
+
+fn offline() -> ReadError {
+    ReadError {
+        kind: ReadErrorKind::Unavailable,
+        message: "offline".into(),
+        status: None,
+        retry_after: None,
+    }
+}
+
+fn status(home: &Option<Home>) -> &'static str {
+    match home {
+        None => "unknown",
+        Some(Home::None) => "none",
+        Some(Home::Ambiguous) => "ambiguous",
+        Some(Home::Project(_)) => "home",
+    }
+}
+
+/// The channel repository and its projects, by `d`.
+fn channel_homes(world: &World, projects: &[&str]) -> Vec<Verified> {
+    let address = world.address();
+    let mut events = vec![world.event(
+        REPOSITORY,
+        &[&["d", "repo"], &["buzz-channel", "c1"]],
+        "",
+        1,
+    )];
+    for d in projects {
+        events.push(world.event(
+            PROJECT,
+            &[&["d", d], &["a", &address], &["buzz-channel", "c1"]],
+            "",
+            1,
+        ));
+    }
+    events
+}
+
+#[test]
+fn homes_are_kept_until_the_next_check_completes() {
+    use futures::FutureExt;
+    let world = World::new();
+    for (projects, expected) in [
+        (vec![], "none"),
+        (vec!["one"], "home"),
+        (vec!["one", "two"], "ambiguous"),
+    ] {
+        let events = if projects.is_empty() {
+            Vec::new()
+        } else {
+            channel_homes(&world, &projects)
+        };
+        let destinations = gated(events.clone());
+        let first = block_on(destinations.home("c1")).ok();
+        assert_eq!(status(&first), expected);
+        assert_eq!(status(&destinations.peek_home("c1")), expected);
+        // Another session keeps its own.
+        assert_eq!(status(&gated(events).peek_home("c1")), "unknown");
+        let release = destinations.read.hold();
+        let mut next = Box::pin(destinations.home("c1"));
+        assert!(next.as_mut().now_or_never().is_none());
+        assert_eq!(status(&destinations.peek_home("c1")), expected);
+        release.send(Ok(Vec::new())).unwrap();
+        assert!(matches!(block_on(next), Ok(Home::None)));
+        assert_eq!(status(&destinations.peek_home("c1")), "none");
+    }
+}
+
+#[test]
+fn a_failed_cleared_or_cancelled_check_keeps_no_invalid_answer() {
+    use futures::FutureExt;
+    let world = World::new();
+    for outcome in ["failure", "cancel", "clear"] {
+        let destinations = gated(channel_homes(&world, &["one"]));
+        block_on(destinations.home("c1")).unwrap();
+        let release = destinations.read.hold();
+        let mut next = Box::pin(destinations.home("c1"));
+        assert!(next.as_mut().now_or_never().is_none());
+        match outcome {
+            "cancel" => drop(next),
+            "clear" => {
+                destinations.homes.clear();
+                release.send(Ok(Vec::new())).unwrap();
+                assert!(block_on(next).is_err());
+            }
+            _ => {
+                release.send(Err(offline())).unwrap();
+                assert!(block_on(next).is_err());
+            }
+        }
+        let kept = if outcome == "cancel" {
+            "home"
+        } else {
+            "unknown"
+        };
+        assert_eq!(status(&destinations.peek_home("c1")), kept, "{outcome}");
+    }
+}
+
+#[test]
+fn an_older_check_cannot_replace_or_erase_a_newer_answer() {
+    use futures::FutureExt;
+    let world = World::new();
+    for outcome in ["success", "failure", "cancel"] {
+        let destinations = gated(channel_homes(&world, &["one"]));
+        let release = destinations.read.hold();
+        let mut older = Box::pin(destinations.home("c1"));
+        assert!(older.as_mut().now_or_never().is_none());
+        block_on(destinations.home("c1")).unwrap();
+        match outcome {
+            "success" => {
+                release.send(Ok(Vec::new())).unwrap();
+                assert!(matches!(block_on(older), Ok(Home::None)));
+            }
+            "failure" => {
+                release.send(Err(offline())).unwrap();
+                assert!(block_on(older).is_err());
+            }
+            _ => drop(older),
+        }
+        assert_eq!(status(&destinations.peek_home("c1")), "home", "{outcome}");
+    }
+}
+
+#[test]
+fn kept_homes_are_bounded_by_count_and_bytes() {
+    let destinations = gated(Vec::new());
+    for channel in 0..65 {
+        block_on(destinations.home(&channel.to_string())).unwrap();
+    }
+    assert_eq!(status(&destinations.peek_home("0")), "unknown");
+    assert_eq!(status(&destinations.peek_home("64")), "none");
+    let world = World::new();
+    let mut events = channel_homes(&world, &[]);
+    events.push(world.event(
+        PROJECT,
+        &[
+            &["d", "large"],
+            &["a", &world.address()],
+            &["buzz-channel", "c1"],
+        ],
+        &"x".repeat(1024 * 1024),
+        1,
+    ));
+    let oversized = gated(events);
+    assert!(matches!(
+        block_on(oversized.home("c1")),
+        Ok(Home::Project(_))
+    ));
+    assert_eq!(status(&oversized.peek_home("c1")), "unknown");
+}
+
+#[test]
+fn a_cancelled_newer_check_leaves_the_surviving_one_its_answer() {
+    use futures::FutureExt;
+    for after in [false, true] {
+        let destinations = gated(Vec::new());
+        let release_older = destinations.read.hold();
+        let mut older = Box::pin(destinations.home("c1"));
+        assert!(older.as_mut().now_or_never().is_none());
+        let _release_newer = destinations.read.hold();
+        let mut newer = Box::pin(destinations.home("c1"));
+        assert!(newer.as_mut().now_or_never().is_none());
+        if after {
+            release_older.send(Ok(Vec::new())).unwrap();
+            block_on(older).unwrap();
+            drop(newer);
+        } else {
+            drop(newer);
+            release_older.send(Ok(Vec::new())).unwrap();
+            block_on(older).unwrap();
+        }
+        assert_eq!(status(&destinations.peek_home("c1")), "none");
+    }
+}
+
 #[test]
 fn homes_resolve_one_surviving_project_and_fail_closed() {
     let world = World::new();

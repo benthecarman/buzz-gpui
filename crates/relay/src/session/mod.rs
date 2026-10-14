@@ -331,6 +331,8 @@ pub struct Session {
     /// The private recipe catalog, Me groups and placement.
     me_kit: me_kit::MeKit,
     workflows: crate::workflows::Workflows,
+    /// The composer resource picker's channel homes (`projects.peekHome`).
+    homes: crate::projects::Homes,
     /// Submitted shares by source conversation (`share-attempt.ts`).
     shares: std::sync::Mutex<HashMap<String, Arc<share::ShareAttempt>>>,
     task: tokio::task::JoinHandle<()>,
@@ -457,6 +459,7 @@ impl Session {
             http.clone(),
         );
         let media = Media::new(runtime.clone(), origin.clone(), identity.clone());
+        let homes = crate::projects::Homes::default();
         let direct = account::Direct {
             http: http.clone(),
             reader: reader.clone(),
@@ -534,6 +537,7 @@ impl Session {
             roster_refresh: RosterRefresh::Idle,
             live_view: Arc::default(),
             workflows: workflows.clone(),
+            homes: homes.clone(),
         };
         let task = runtime.spawn(actor.run(inbox));
         Self {
@@ -552,6 +556,7 @@ impl Session {
             kit: Arc::default(),
             me_kit: kit,
             workflows,
+            homes,
             shares: Default::default(),
             task,
         }
@@ -1220,6 +1225,8 @@ struct Actor {
     /// The inbox and its history read.
     inbox: inbox::Owner,
     workflows: crate::workflows::Workflows,
+    /// Cleared when the stream drops and on Clear cache.
+    homes: crate::projects::Homes,
     /// Send observers, attached to the outbox once it exists.
     send_observers: Vec<(
         u64,
@@ -1360,6 +1367,7 @@ impl Actor {
                 }
             }
             Message::ClearCache(reply) => {
+                self.homes.clear();
                 let cleared = self.clear_cache();
                 let reconnect = self.relay.is_none();
                 let commands = self.commands.clone();
@@ -2069,6 +2077,7 @@ impl Actor {
                 self.reminders_stale();
                 self.inbox_stale();
                 self.workflows.interrupt();
+                self.homes.clear();
                 self.presence_connected(false);
                 self.channels_disconnected();
                 self.activity_cancel();

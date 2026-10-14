@@ -8,7 +8,7 @@ use crate::event::Verified;
 use crate::origin::RelayOrigin;
 use crate::projects::{
     Destinations, Entity, EntityDetail, EntityFailure, EntityRoute, GitRead, GitSnapshot, Home,
-    ProjectReads, community_git_repository, git_response,
+    Homes, ProjectReads, community_git_repository, git_response,
 };
 use crate::reader::{ReadError, ReadOptions, Reader};
 use crate::socket::Filter;
@@ -37,6 +37,7 @@ impl Session {
             identity: self.direct.identity.clone(),
             origin: self.origin.clone(),
             runtime: self.runtime.clone(),
+            homes: self.homes.clone(),
         }
     }
 }
@@ -48,6 +49,7 @@ pub struct Projects {
     identity: Arc<Identity>,
     origin: RelayOrigin,
     runtime: tokio::runtime::Handle,
+    homes: Homes,
 }
 
 /// A task on the I/O runtime that stops when its awaiting future is
@@ -72,7 +74,7 @@ impl Projects {
     }
 
     fn destinations(&self) -> Destinations<Reader> {
-        Destinations::new(self.reader.clone())
+        Destinations::with_homes(self.reader.clone(), self.homes.clone())
     }
 
     /// The recent directory of repositories and projects.
@@ -86,6 +88,13 @@ impl Projects {
         let destinations = self.destinations();
         self.run(async move { destinations.load(&route).await })
             .await
+    }
+
+    /// The last completed answer of [`Self::home`] for `channel` in this
+    /// session, so a new picker can keep its button steady while it
+    /// checks again.
+    pub fn peek_home(&self, channel: &str) -> Option<Home> {
+        self.homes.peek(channel)
     }
 
     /// The channel's project, for the composer's resource picker.

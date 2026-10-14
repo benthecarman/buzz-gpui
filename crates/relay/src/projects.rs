@@ -11,6 +11,7 @@
 //! A valid address is never authorization: every read goes through the
 //! viewer's verified session reads, and the relay decides what they see.
 
+use crate::budget::ByteLru;
 use crate::event::{Verified, is_newer, newest};
 use crate::reader::{ReadError, ReadErrorKind};
 use crate::socket::{Filter, filter};
@@ -19,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 pub const REPOSITORY: u16 = 30617;
 pub const PROJECT: u16 = 30621;
@@ -643,14 +645,169 @@ pub trait ProjectReads: Send + Sync {
     ) -> impl Future<Output = Result<Vec<Verified>, ReadError>> + Send;
 }
 
+/// Channel homes a session keeps.
+const HOMES: usize = 64;
+/// Their byte budget.
+const HOMES_BYTES: usize = 1024 * 1024;
+
+/// The last completed project answer for each channel, in session memory
+/// only, so a recreated picker keeps its button steady while it checks
+/// again. An older check cannot replace a newer completed one, and none
+/// can restore an answer cleared after it started.
+#[derive(Clone)]
+pub struct Homes(Arc<Mutex<HomesState>>);
+
+struct HomesState {
+    cache: ByteLru<Home>,
+    /// Checks by channel. A cancelled newer check must not stop a
+    /// surviving older one from keeping its result.
+    attempts: HashMap<String, Attempts>,
+    epoch: u64,
+}
+
+#[derive(Default)]
+struct Attempts {
+    next: u64,
+    completed: u64,
+    pending: u32,
+}
+
+impl Default for Homes {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(HomesState {
+            cache: ByteLru::new(HOMES, HOMES_BYTES),
+            attempts: HashMap::new(),
+            epoch: 0,
+        })))
+    }
+}
+
+impl Homes {
+    fn state(&self) -> std::sync::MutexGuard<'_, HomesState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The last completed answer for `channel`, if any.
+    pub fn peek(&self, channel: &str) -> Option<Home> {
+        self.state().cache.peek(channel).cloned()
+    }
+
+    /// Forgets every answer; checks in flight keep none of theirs.
+    pub fn clear(&self) {
+        let mut state = self.state();
+        state.epoch += 1;
+        state.attempts.clear();
+        state.cache.clear();
+    }
+
+    fn begin(&self, channel: &str) -> HomeAttempt {
+        let mut state = self.state();
+        let epoch = state.epoch;
+        let attempts = state.attempts.entry(channel.to_string()).or_default();
+        attempts.next += 1;
+        attempts.pending += 1;
+        HomeAttempt {
+            homes: self.clone(),
+            channel: channel.to_string(),
+            attempt: attempts.next,
+            epoch,
+        }
+    }
+}
+
+/// One check of a channel's home. Dropping it unfinished is a
+/// cancellation: the cache keeps what it had.
+struct HomeAttempt {
+    homes: Homes,
+    channel: String,
+    attempt: u64,
+    epoch: u64,
+}
+
+impl HomeAttempt {
+    /// Keeps a completed answer, or forgets the channel's after a failure,
+    /// unless a newer check already completed. A check that outlived a
+    /// clear fails.
+    fn finish(self, result: Result<Home, EntityFailure>) -> Result<Home, EntityFailure> {
+        let mut state = self.homes.state();
+        if state.epoch != self.epoch {
+            return Err(EntityFailure::Unavailable);
+        }
+        let newest = state
+            .attempts
+            .get_mut(&self.channel)
+            .filter(|attempts| self.attempt > attempts.completed)
+            .map(|attempts| attempts.completed = self.attempt)
+            .is_some();
+        if newest {
+            match &result {
+                Ok(home) => {
+                    state
+                        .cache
+                        .set(self.channel.clone(), home.clone(), home.byte_size());
+                }
+                Err(_) => {
+                    state.cache.remove(&self.channel);
+                }
+            }
+        }
+        // Dropping `self` locks again.
+        drop(state);
+        result
+    }
+}
+
+impl Drop for HomeAttempt {
+    fn drop(&mut self) {
+        let mut state = self.homes.state();
+        if state.epoch != self.epoch {
+            return;
+        }
+        if let Some(attempts) = state.attempts.get_mut(&self.channel) {
+            attempts.pending -= 1;
+            if attempts.pending == 0 {
+                state.attempts.remove(&self.channel);
+            }
+        }
+    }
+}
+
+impl Home {
+    /// About its JSON size, for the cache's byte budget.
+    fn byte_size(&self) -> usize {
+        match self {
+            Self::None | Self::Ambiguous => 24,
+            Self::Project(project) => {
+                64 + project.owner.len()
+                    + project.dtag.len()
+                    + project.address.len()
+                    + project.name.len()
+                    + project.description.len()
+                    + project.event.byte_size()
+            }
+        }
+    }
+}
+
 /// `projectDestinations`.
 pub struct Destinations<R> {
     read: R,
+    homes: Homes,
 }
 
 impl<R: ProjectReads> Destinations<R> {
     pub fn new(read: R) -> Self {
-        Self { read }
+        Self::with_homes(read, Homes::default())
+    }
+
+    /// Reads that keep channel homes in `homes`, the session's cache.
+    pub fn with_homes(read: R, homes: Homes) -> Self {
+        Self { read, homes }
+    }
+
+    /// The last completed answer for `channel` (`peekHome`).
+    pub fn peek_home(&self, channel: &str) -> Option<Home> {
+        self.homes.peek(channel)
     }
 
     async fn read(&self, filters: Vec<Value>) -> Result<Vec<Verified>, EntityFailure> {
@@ -733,8 +890,15 @@ impl<R: ProjectReads> Destinations<R> {
     }
 
     /// The channel's one project. Only a complete read is evidence of
-    /// "none"; a capped read is unavailable.
+    /// "none"; a capped read is unavailable. The answer is kept for
+    /// [`Self::peek_home`]; a failure forgets the kept one.
     pub async fn home(&self, channel: &str) -> Result<Home, EntityFailure> {
+        let attempt = self.homes.begin(channel);
+        let result = self.read_home(channel).await;
+        attempt.finish(result)
+    }
+
+    async fn read_home(&self, channel: &str) -> Result<Home, EntityFailure> {
         let events = self
             .read(
                 [PROJECT, REPOSITORY]
