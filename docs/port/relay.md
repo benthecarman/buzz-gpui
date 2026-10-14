@@ -691,8 +691,8 @@ Frame dispatch is in `live.ts:705-904`. The frame's sub id is looked up in `wire
 
 | Mechanism | Constant | Source |
 |---|---|---|
-| Socket reconnect backoff | `500 * 2**attempts` ms: 500, 1000, 2000, 4000, 8000. **No jitter.** | `live.ts:677` |
-| Max automatic reconnects | 5. After that: `status:"error"`, "Live reconnect attempts exhausted; retry available" | `live.ts:671-675` |
+| Socket reconnect backoff | Equal jitter: `delay * (0.5 + random/2)`, `delay` starting at 500 ms and doubling to a 30 s cap (250–500 ms first, 15–30 s capped). A full minute authenticated (`recover`) resets it; a brief authentication does not (buzz-app #996) | `live.ts` |
+| Max automatic reconnects | None: transient disconnects and auth timeouts retry while the session is active. Auth rejection or signing failure stays terminal until Retry | `live.ts` |
 | Attempt counter reset | **Only in `retry()`** (user action). It is *not* reset when AUTH succeeds. | `live.ts:1055-1069` |
 | Auth deadline | 10 000 ms (server: 5 s) | `live.ts:698-701` |
 | Per-REQ setup deadline | 10 000 ms | `live.ts:558-565` |

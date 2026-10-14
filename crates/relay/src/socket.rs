@@ -5,11 +5,12 @@
 //! publication until the relay accepts that authentication: a Buzz relay
 //! always asks, so a connection that never authenticates is a failed one.
 //! A refused or unsignable authentication is terminal until
-//! [`RelaySocket::reconnect`]; a dropped connection is retried after
-//! `500 ms · 2ⁿ`, capped at [`SocketOptions::max_backoff`], for as long as
-//! it keeps dropping. An authenticated connection starts the backoff over.
-//! Unlike `live.ts`, whose budget lasts the page's life, a desktop session
-//! stays open for days and must not give up after a few network changes.
+//! [`RelaySocket::reconnect`]; a dropped connection is retried for as long
+//! as it keeps dropping, after an equal-jitter delay of half to all of
+//! `500 ms · 2ⁿ`, capped at [`SocketOptions::max_backoff`] (`live.ts`). A
+//! full minute authenticated starts the backoff over, so each rollout of a
+//! relay is recovered from promptly; a brief authentication does not, so a
+//! flapping relay is not hammered.
 //!
 //! Publications are correlated with their `OK`, never replayed: an event
 //! whose receipt was lost is reported as unconfirmed and the caller (the
@@ -235,8 +236,13 @@ pub struct SocketOptions {
     pub min_backoff: Duration,
     /// The longest reconnect delay.
     pub max_backoff: Duration,
-    /// Reconnects in a row without authenticating before the socket waits
-    /// for [`RelaySocket::reconnect`]. `None` retries forever.
+    /// How long a connection must stay authenticated before the next drop
+    /// starts the backoff over.
+    pub healthy_after: Duration,
+    /// A sample in `0..1` that spreads each delay over half to all of it.
+    pub jitter: fn() -> f64,
+    /// Reconnects in a row without a healthy connection before the socket
+    /// waits for [`RelaySocket::reconnect`]. `None` retries forever.
     pub max_reconnects: Option<u32>,
     /// Re-send open subscriptions after a reconnect. When off, they are
     /// reported [`SubscriptionEvent::Lost`] so the owner can rebuild them.
@@ -254,6 +260,8 @@ impl Default for SocketOptions {
             dead_after: Duration::from_secs(70),
             min_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(30),
+            healthy_after: Duration::from_secs(60),
+            jitter: random_unit,
             max_reconnects: None,
             resubscribe: true,
             cooldown: Cooldown::default(),
@@ -463,7 +471,7 @@ struct Actor {
     queue: mpsc::UnboundedReceiver<Command>,
     /// An earlier connection already sent the subscriptions.
     subscribed_once: bool,
-    /// Reconnects so far; only the user's retry resets it (`live.ts`).
+    /// Reconnects since the last healthy connection or the user's retry.
     attempts: u32,
 }
 
@@ -506,11 +514,13 @@ impl Actor {
                         .max_reconnects
                         .is_none_or(|max| self.attempts < max)
                     {
-                        let retry_in = self
+                        let ceiling = self
                             .options
                             .min_backoff
                             .saturating_mul(1 << self.attempts.min(16))
                             .min(self.options.max_backoff);
+                        let sample = (self.options.jitter)().clamp(0.0, 1.0);
+                        let retry_in = ceiling.mul_f64(0.5 + sample / 2.0);
                         self.attempts += 1;
                         tracing::debug!(origin = %self.origin, %error, ?retry_in, "relay socket lost");
                         self.state
@@ -705,8 +715,7 @@ impl Actor {
                     }
                 }
                 _ = &mut open_after, if !session.authenticated && !session.authenticating => {
-                    session.authenticated = true;
-                    self.authenticated()
+                    self.authenticated(&mut session)
                 }
                 command = self.queue.recv() => {
                     let Some(command) = command else {
@@ -765,10 +774,16 @@ impl Actor {
     /// Fails everything waiting on this connection (`clearSocket`) and keeps
     /// subscriptions for the next one.
     fn lost(&mut self, session: Option<&mut Session>, end: End) -> End {
-        if let Some(session) = session
-            && let Some((_, reply, _)) = session.presence.take()
-        {
-            let _ = reply.send(PresenceSend::Unconfirmed);
+        if let Some(session) = session {
+            if session
+                .authenticated_at
+                .is_some_and(|at| at.elapsed() >= self.options.healthy_after)
+            {
+                self.attempts = 0;
+            }
+            if let Some((_, reply, _)) = session.presence.take() {
+                let _ = reply.send(PresenceSend::Unconfirmed);
+            }
         }
         for publication in std::mem::take(&mut self.publications) {
             finish(publication, "Socket connection interrupted");
@@ -781,8 +796,9 @@ impl Actor {
         end
     }
 
-    fn authenticated(&mut self) -> Vec<String> {
-        self.attempts = 0;
+    fn authenticated(&mut self, session: &mut Session) -> Vec<String> {
+        session.authenticated = true;
+        session.authenticated_at = Some(Instant::now());
         self.state.send_replace(SocketState::Ready);
         self.resubscribe_all()
     }
@@ -885,8 +901,7 @@ impl Actor {
                     if message.get(2) != Some(&Value::Bool(true)) {
                         return Err(End::Terminal("Relay rejected live authentication".into()));
                     }
-                    session.authenticated = true;
-                    return Ok(self.authenticated());
+                    return Ok(self.authenticated(session));
                 }
                 if session.presence.as_ref().is_some_and(|(p, _, _)| *p == id) {
                     let (_, reply, _) = session.presence.take().expect("presence receipt");
@@ -1104,7 +1119,18 @@ struct Session {
     auth_event: Option<EventId>,
     /// The relay accepted our AUTH: subscriptions and publications go out.
     authenticated: bool,
+    authenticated_at: Option<Instant>,
     presence: Option<PresenceReceipt>,
+}
+
+/// A uniform sample in `0..1` (`Math.random`), from the standard library's
+/// randomly seeded hasher, which is plenty for spreading reconnects.
+fn random_unit() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+    let bits = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    (bits >> 11) as f64 / (1u64 << 53) as f64
 }
 
 impl Session {

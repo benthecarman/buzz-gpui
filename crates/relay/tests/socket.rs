@@ -171,10 +171,12 @@ impl FakeRelay {
     }
 }
 
+/// No jitter: every delay is its full ceiling.
 fn options() -> SocketOptions {
     SocketOptions {
         min_backoff: Duration::from_millis(20),
         publish_timeout: Duration::from_secs(2),
+        jitter: || 1.0,
         ..Default::default()
     }
 }
@@ -388,6 +390,91 @@ async fn reconnects_back_off_and_stop_after_a_set_limit() {
     ));
 }
 
+async fn authenticate(relay: &mut FakeRelay, socket: &RelaySocket) {
+    assert!(matches!(relay.next().await, Seen::Connected));
+    assert!(matches!(relay.next().await, Seen::Auth(_)));
+    wait_state(socket, |s| *s == SocketState::Ready).await;
+}
+
+#[tokio::test]
+async fn only_a_healthy_connection_restores_prompt_reconnects() {
+    let mut relay = FakeRelay::start(Behaviour::default()).await;
+    let (identity, _) = viewer();
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            healthy_after: Duration::from_millis(300),
+            ..options()
+        },
+    );
+    let waits = |socket: &RelaySocket| {
+        let state = socket.state();
+        async move {
+            let mut state = state;
+            let found = tokio::time::timeout(
+                Duration::from_secs(10),
+                state.wait_for(|s| matches!(s, SocketState::Waiting { .. })),
+            )
+            .await
+            .expect("never waited")
+            .unwrap()
+            .clone();
+            match found {
+                SocketState::Waiting { retry_in, .. } => retry_in,
+                _ => unreachable!(),
+            }
+        }
+    };
+    authenticate(&mut relay, &socket).await;
+    relay.kick.send(()).unwrap();
+    assert_eq!(waits(&socket).await, Duration::from_millis(20));
+    // Authenticating alone does not reset the backoff of a flapping relay.
+    authenticate(&mut relay, &socket).await;
+    relay.kick.send(()).unwrap();
+    assert_eq!(waits(&socket).await, Duration::from_millis(40));
+    // A healthy stretch authenticated does, for the next rollout.
+    authenticate(&mut relay, &socket).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    relay.kick.send(()).unwrap();
+    assert_eq!(waits(&socket).await, Duration::from_millis(20));
+}
+
+#[tokio::test]
+async fn reconnect_delays_spread_over_half_to_all_of_the_ceiling() {
+    let relay = FakeRelay::start(Behaviour {
+        drop_all: true,
+        ..Default::default()
+    })
+    .await;
+    let (identity, _) = viewer();
+    let socket = connect(
+        &relay,
+        &identity,
+        SocketOptions {
+            jitter: || 0.0,
+            max_backoff: Duration::from_millis(80),
+            ..options()
+        },
+    );
+    let mut waits = Vec::new();
+    let mut state = socket.state();
+    while waits.len() < 5 {
+        tokio::time::timeout(Duration::from_secs(10), state.changed())
+            .await
+            .expect("socket stalled")
+            .unwrap();
+        if let SocketState::Waiting { retry_in, .. } = state.borrow_and_update().clone() {
+            waits.push(retry_in);
+        }
+    }
+    let expected: Vec<Duration> = [10, 20, 40, 40, 40]
+        .into_iter()
+        .map(Duration::from_millis)
+        .collect();
+    assert_eq!(waits, expected);
+}
+
 #[tokio::test]
 async fn reconnects_keep_going_with_a_capped_backoff() {
     let relay = FakeRelay::start(Behaviour {
@@ -422,21 +509,6 @@ async fn reconnects_keep_going_with_a_capped_backoff() {
         .map(Duration::from_millis)
         .collect();
     assert_eq!(waits, expected);
-}
-
-#[tokio::test]
-async fn an_authenticated_connection_starts_the_backoff_over() {
-    let relay = FakeRelay::start(Behaviour::default()).await;
-    let (identity, _) = viewer();
-    let socket = socket(&relay, &identity);
-    for _ in 0..3 {
-        wait_state(&socket, |s| matches!(s, SocketState::Ready)).await;
-        relay.kick.send(()).unwrap();
-        assert!(matches!(
-            wait_state(&socket, |s| matches!(s, SocketState::Waiting { .. })).await,
-            SocketState::Waiting { retry_in, .. } if retry_in == Duration::from_millis(20)
-        ));
-    }
 }
 
 #[tokio::test]
