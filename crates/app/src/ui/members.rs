@@ -128,6 +128,7 @@ pub struct MembersDialog {
     filter: Option<Group>,
     filter_open: bool,
     _subscription: Subscription,
+    _agents: Option<Subscription>,
 }
 
 impl EventEmitter<Dismissed> for MembersDialog {}
@@ -173,6 +174,9 @@ impl MembersDialog {
             filter: None,
             filter_open: false,
             _subscription: subscription,
+            // Shows the agent list failing or reading again.
+            _agents: crate::agents2::Agents2::global(cx)
+                .map(|agents| cx.observe(&agents, |_, _, cx| cx.notify())),
         };
         dialog.refresh(window, cx);
         super::archives::ensure(&dialog.community, false, cx);
@@ -201,12 +205,16 @@ impl MembersDialog {
     }
 
     /// "Refresh member data": the roster and roles again, which also
-    /// settles an uncertain role change the roster now shows.
+    /// settles an uncertain role change the roster now shows, and the
+    /// viewer's agents from their hosts.
     fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading || !self.busy.is_empty() {
             return;
         }
         self.error = None;
+        if let Some(agents) = crate::agents2::Agents2::global(cx) {
+            agents.update(cx, |agents, cx| agents.refresh(cx).detach());
+        }
         let session = self.community.read(cx).session.clone();
         let channel = self.channel.id.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -1178,17 +1186,10 @@ impl Render for MembersDialog {
     }
 }
 
-/// A host the viewer's agents live on could not list them.
+/// The viewer's agent list could not be read; Refresh reads it again.
 fn agents_failed(cx: &App) -> bool {
-    cx.try_global::<crate::hosts::Hosts>().is_some_and(|hosts| {
-        hosts.hosts.iter().any(|host| {
-            !matches!(
-                host.read(cx).state,
-                buzz_host_rpc::ConnectionState::Connected { .. }
-                    | buzz_host_rpc::ConnectionState::Connecting { .. }
-            )
-        })
-    })
+    crate::agents2::Agents2::global(cx)
+        .is_some_and(|agents| matches!(agents.read(cx).status(), crate::agents2::Status::Error(_)))
 }
 
 #[cfg(test)]
