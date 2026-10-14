@@ -627,6 +627,7 @@ fn reply_row(text: &str, key: &str, viewer: &str) -> MessageRow {
         id: nostr::prelude::EventId::from_byte_array(digest(key, text)),
         channel: Arc::from("agent-activity"),
         kind: 9,
+        audience: None,
         author,
         signer: None,
         workflow_owner: None,

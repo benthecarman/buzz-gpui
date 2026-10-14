@@ -429,6 +429,7 @@ fn body(text: &str, community: &Community, cx: &App) -> AnyElement {
         id: buzz_relay_client::EventId::from_byte_array(id),
         channel: Arc::from("projects"),
         kind: 9,
+        audience: None,
         author: nostr::prelude::PublicKey::from_byte_array([1; 32]),
         signer: None,
         workflow_owner: None,

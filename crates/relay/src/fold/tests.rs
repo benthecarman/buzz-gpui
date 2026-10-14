@@ -541,6 +541,40 @@ fn preserves_code_indentation_when_projecting_images() {
 }
 
 #[test]
+fn reads_the_audience_from_the_original_events_signed_tag() {
+    let p = people();
+    let rivet = "b".repeat(64);
+    let tagged = |audience: &str| {
+        let event = message(
+            &p.alice,
+            CHANNEL,
+            "hi",
+            5,
+            &[&["p", &rivet], &["audience", audience]],
+        );
+        (event.clone(), fold(&p.relay, &[event])[0].audience)
+    };
+    assert_eq!(tagged("everyone").1, None);
+    assert_eq!(tagged("unknown").1, None);
+    let (original, audience) = tagged("agents");
+    assert_eq!(audience, Some(Audience::Agents));
+    // An edit carries no audience of its own.
+    let edit = signed(
+        &p.alice,
+        kinds::EDIT,
+        "edited",
+        6,
+        &[&["e", &original.id_hex()]],
+    );
+    assert_eq!(
+        fold(&p.relay, &[original, edit])[0].audience,
+        Some(Audience::Agents)
+    );
+    let plain = message(&p.alice, CHANNEL, "hi", 5, &[]);
+    assert_eq!(fold(&p.relay, &[plain])[0].audience, None);
+}
+
+#[test]
 fn keeps_the_original_kind_hint_independent_of_body_and_edits() {
     let p = people();
     let cases = [

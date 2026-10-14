@@ -26,6 +26,7 @@ pub use projection::MessageProjection;
 pub use reply_tree::{ReplyTree, reply_tree};
 pub use thread::{ThreadReference, thread_reference};
 
+use crate::audience::{Audience, audience};
 use crate::event::{Verified, kinds};
 use nostr::prelude::{Event, EventId, PublicKey};
 use serde_json::{Map, Value};
@@ -106,6 +107,10 @@ pub struct MessageRow {
     /// The original event's kind, regardless of edits. 40002 marks an agent
     /// envelope and 40008 a diff; both are display hints, not authority.
     pub kind: u16,
+    /// The original event's signed audience: agents is coordination
+    /// between agents, shown quietly. `None` is everyone; unknown values
+    /// too.
+    pub audience: Option<Audience>,
     /// Displayed author ([`message_author`]).
     pub author: PublicKey,
     /// The signing key, when relay attribution makes it differ from `author`.
@@ -431,6 +436,7 @@ impl<'a> Fold<'a> {
             thread_root_id: reference.map(|r| r.root_id),
             reply_parent_id: reference.map(|r| r.parent_id),
             sent_from_thread: sent_from_thread(event),
+            audience: audience(event),
             diff: (kind == kinds::DIFF).then(|| DiffMeta {
                 file_path: event.tag("file").map(str::to_owned),
                 repo_url: event.tag("repo").map(str::to_owned),
@@ -448,6 +454,7 @@ impl<'a> Fold<'a> {
             id: event.id,
             channel: self.channel.clone(),
             kind: event.kind_u16(),
+            audience: None,
             author: event.pubkey,
             signer: None,
             workflow_owner: None,

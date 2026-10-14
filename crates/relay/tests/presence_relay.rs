@@ -132,7 +132,7 @@ async fn presence_typing_and_mentions_reach_another_session() {
         )
         .unwrap();
     let message = bob_id.sign(Purpose::Content, unsigned).unwrap();
-    RelayHttp::new(origin.clone(), bob_id)
+    RelayHttp::new(origin.clone(), bob_id.clone())
         .post("/events", serde_json::to_string(&message).unwrap())
         .await
         .unwrap();
@@ -155,4 +155,37 @@ async fn presence_typing_and_mentions_reach_another_session() {
     assert_eq!(arrived.channel_id, core);
     assert_eq!(arrived.author, bob_pk);
     assert_eq!(arrived.preview, content);
+    assert_eq!(arrived.audience, None);
+
+    // A mention between agents still arrives, saying who it is for: the
+    // app does not alert people of it.
+    let unsigned = bob_id
+        .template(
+            Purpose::Content,
+            kinds::CHAT,
+            Timestamp::now().as_secs(),
+            vec![
+                vec!["h".into(), core.clone()],
+                vec!["p".into(), alice_pk.clone()],
+                vec!["audience".into(), "agents".into()],
+            ],
+            format!("{content} for agents"),
+        )
+        .unwrap();
+    let quiet = bob_id.sign(Purpose::Content, unsigned).unwrap();
+    RelayHttp::new(origin.clone(), bob_id)
+        .post("/events", serde_json::to_string(&quiet).unwrap())
+        .await
+        .unwrap();
+    let arrived = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let item = incoming.recv().await.unwrap();
+            if item.message_id == quiet.id {
+                return item;
+            }
+        }
+    })
+    .await
+    .expect("the agents' mention arrives");
+    assert_eq!(arrived.audience, Some(Audience::Agents));
 }

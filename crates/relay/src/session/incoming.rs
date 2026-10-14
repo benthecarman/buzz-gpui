@@ -15,6 +15,7 @@
 
 use super::Actor;
 use super::unread::now_ms;
+use crate::audience::{Audience, audience};
 use crate::event::{Verified, kinds};
 use crate::read_state::{Completeness, ReadCapability, ReadSyncStatus};
 use crate::unread::{AttentionStatus, Category, preview_text, workflow_owner};
@@ -43,6 +44,8 @@ pub struct IncomingMessage {
     pub workflow_owner: Option<String>,
     /// The message text (kind 40002: its body), at most 4096 characters.
     pub preview: String,
+    /// The signed audience: agents is coordination between agents.
+    pub audience: Option<Audience>,
     pub category: Category,
     /// Mentions the viewer: channel mute does not apply.
     pub mentioned: bool,
@@ -212,6 +215,7 @@ impl Actor {
                 author: event.pubkey_hex(),
                 workflow_owner: workflow_owner(event, authority.as_deref()),
                 preview: preview_text(event).chars().take(PREVIEW_CHARS).collect(),
+                audience: audience(event),
                 category: candidate.category,
                 mentioned: attention.mentioned,
                 thread_root: attention.root_id.clone(),

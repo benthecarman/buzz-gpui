@@ -672,6 +672,7 @@ mod tests {
             author: "ab".repeat(32),
             workflow_owner: None,
             preview: preview.into(),
+            audience: None,
             category,
             mentioned: category == Category::Mention,
             thread_root: None,

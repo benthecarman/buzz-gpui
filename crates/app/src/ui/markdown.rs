@@ -2337,6 +2337,7 @@ pub(super) mod tests {
             id: nostr::prelude::EventId::from_byte_array([1; 32]),
             channel: Arc::from("c"),
             kind: 9,
+            audience: None,
             author: buzz_identity::Identity::ephemeral().public_key(),
             signer: None,
             workflow_owner: None,

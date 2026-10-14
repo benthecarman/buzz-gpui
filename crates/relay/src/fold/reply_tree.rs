@@ -81,6 +81,7 @@ mod tests {
             id: id(n),
             channel: Arc::from("c"),
             kind: 9,
+            audience: None,
             author: Keys::generate().public_key(),
             signer: None,
             workflow_owner: None,
