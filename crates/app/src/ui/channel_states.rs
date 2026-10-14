@@ -11,7 +11,7 @@
 
 use super::navigation::Target;
 use buzz_relay_client::{ChannelSummary, ChannelType, SessionSnapshot, SessionStatus};
-use buzz_ui::{ActiveTheme, Button, ButtonSize, Icon, IconName, NavigationItem, TypeStyled};
+use buzz_ui::{ActiveTheme, Button, ButtonSize, Icon, IconName, TypeStyled};
 use gpui_kit::*;
 use std::time::Duration;
 
@@ -199,28 +199,6 @@ pub fn failure(
                                 .on_click(on_settings),
                         ),
                 ),
-        )
-        .into_any_element()
-}
-
-/// The channel sidebar with no community: the page rows, then "Choose a
-/// community to see channels."
-pub fn personal_sidebar(agents: NavigationItem, cx: &App) -> AnyElement {
-    let c = cx.colors();
-    div()
-        .flex()
-        .flex_col()
-        .size_full()
-        .px(rems(0.5))
-        .py(rems(0.5))
-        .child(div().flex().flex_col().mb(rems(0.75)).child(agents))
-        .child(
-            div()
-                .py(rems(2.))
-                .px(rems(1.))
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child("Choose a community to see channels."),
         )
         .into_any_element()
 }

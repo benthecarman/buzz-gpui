@@ -1040,8 +1040,7 @@ impl ChannelSidebar {
                 row
             })
             .collect::<Vec<_>>();
-        let navigation =
-            (!page_rows.is_empty()).then(|| rows::row_list().mb(rems(0.75)).children(page_rows));
+        let navigation = (!page_rows.is_empty()).then(|| page_list(page_rows));
 
         // Before the relay is ready: the page rows and a status line. A
         // saved snapshot shows its sidebar instead.
@@ -1057,22 +1056,17 @@ impl ChannelSidebar {
             let session = self.session(cx);
             return frame()
                 .child(
-                    div()
-                        .id("sidebar")
-                        .flex()
-                        .flex_col()
-                        .size_full()
-                        .overflow_y_scroll()
-                        .children(navigation)
-                        .child(empty(message, &c))
-                        .when(retry, |this| {
+                    scrollport().child(list().children(navigation).child(empty(message, &c)).when(
+                        retry,
+                        |this| {
                             this.child(
                                 div().flex().px(rems(1.)).child(
                                     Button::new("retry-channels", "Retry channels")
                                         .on_click(move |_, _, _| session.retry()),
                                 ),
                             )
-                        }),
+                        },
+                    )),
                 )
                 .into_any_element();
         }
@@ -1099,19 +1093,7 @@ impl ChannelSidebar {
             crate::perf::shown(crate::perf::STARTUP, "sidebar");
             crate::perf::shown(crate::perf::SWITCH, "sidebar");
         }
-        // The list reaches into the frame's side padding, keeping the
-        // padding inside it, so the unread pill at the panel's edge is
-        // not clipped.
-        let mut list = div()
-            .id("sidebar")
-            .flex()
-            .flex_col()
-            .h_full()
-            .mx(rems(-0.5))
-            .px(rems(0.5))
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .children(navigation);
+        let mut list = list().track_scroll(&self.scroll).children(navigation);
         for (at, section) in sections.iter().enumerate() {
             list = list.child(self.section(at, section, &snapshot, &index, props, window, cx));
         }
@@ -1149,10 +1131,7 @@ impl ChannelSidebar {
                 }
             }))
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
+                scrollport()
                     .child(list)
                     .children(super::sidebar_unread::pills(
                         &edges,
@@ -1380,6 +1359,47 @@ impl ChannelSidebar {
         }
         notices
     }
+}
+
+/// The channel sidebar of the personal space (no community): its page
+/// rows and "Choose a community to see channels.", in the same frame,
+/// scrollport and row insets as a community's, so switching spaces moves
+/// nothing (`SidebarList`, #945).
+pub fn personal(rows: Vec<NavigationItem>, cx: &App) -> AnyElement {
+    let c = *cx.colors();
+    frame()
+        .child(
+            scrollport().child(
+                list()
+                    .child(page_list(rows))
+                    .child(empty("Choose a community to see channels.".into(), &c)),
+            ),
+        )
+        .into_any_element()
+}
+
+/// The page rows above the channels.
+fn page_list(rows: Vec<NavigationItem>) -> Div {
+    rows::row_list().mb(rems(0.75)).children(rows)
+}
+
+/// Holds the list and what floats over it (the unread pills).
+fn scrollport() -> Div {
+    div().relative().flex_1().min_h_0()
+}
+
+/// The scrolling list. It reaches into the frame's side padding, keeping
+/// the padding inside it, so the unread pill at the panel's edge is not
+/// clipped.
+fn list() -> Stateful<Div> {
+    div()
+        .id("sidebar")
+        .flex()
+        .flex_col()
+        .h_full()
+        .mx(rems(-0.5))
+        .px(rems(0.5))
+        .overflow_y_scroll()
 }
 
 /// The sidebar's frame: the shell's navigation column sets its width.

@@ -349,15 +349,17 @@ impl Workspace {
         let Some(community) = self.community.clone() else {
             // The personal space: the page rows, and no channels.
             let page = self.page;
-            return Some(super::channel_states::personal_sidebar(
-                buzz_ui::NavigationItem::new("page-agents", "Agents")
-                    .sidebar()
-                    .icon(IconName::Robot)
-                    .icon_stroke(2.5)
-                    .selected(page == Page::AGENTS)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.select_page(Page::AGENTS, window, cx)
-                    })),
+            return Some(crate::ui::sidebar::personal(
+                vec![
+                    buzz_ui::NavigationItem::new("page-agents", "Agents")
+                        .sidebar()
+                        .icon(IconName::Robot)
+                        .icon_stroke(2.5)
+                        .selected(page == Page::AGENTS)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.select_page(Page::AGENTS, window, cx)
+                        })),
+                ],
                 cx,
             ));
         };
