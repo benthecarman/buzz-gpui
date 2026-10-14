@@ -287,6 +287,31 @@ fn rounded_rect(
     path.close();
 }
 
+/// The Buzz mark `width` wide, playing from `since`, its cut-outs in
+/// `background`: the thread loading mark (`ThreadLoading`). With reduced
+/// motion it holds its first frame, as `buzz-mark.svg` does.
+pub fn mark(since: Instant, width: Pixels, background: Hsla, window: &mut Window, cx: &App) -> Div {
+    let phase = if cx.reduce_motion() {
+        0.
+    } else {
+        window.request_animation_frame();
+        let elapsed = since.elapsed().as_secs_f32();
+        (elapsed / CYCLE.as_secs_f32()).fract()
+    };
+    let ink = if cx.theme().is_dark() {
+        gpui_kit::white()
+    } else {
+        gpui_kit::black()
+    };
+    div().w(width).h(width * (VIEW.3 / VIEW.2)).child(
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| paint_mark(phase, bounds, ink, background, window),
+        )
+        .size_full(),
+    )
+}
+
 /// Whether the launch surface still shows.
 #[derive(Clone, Debug)]
 pub struct Launch {

@@ -61,6 +61,13 @@ pub struct Workspace {
     main_strip: ScrollHandle,
     /// The main tab last scrolled into view.
     revealed_main: Option<String>,
+    /// The channel and the main tab last shown, to tell a new selection.
+    main_shown: Option<(Option<String>, Option<String>)>,
+    /// A thread pushing in over the main tab it replaces, since when.
+    main_motion: Option<(std::time::Instant, Option<String>)>,
+    /// The next main selection comes from the keyboard, which skips the
+    /// push.
+    keyboard_switch: bool,
     /// Where tabs were laid out, for dragging them.
     tab_geometry: super::tab_drag::Geometry,
     /// Where a tab being dragged would land.
@@ -171,6 +178,9 @@ impl Workspace {
             tab_strip: ScrollHandle::new(),
             main_strip: ScrollHandle::new(),
             revealed_main: None,
+            main_shown: None,
+            main_motion: None,
+            keyboard_switch: false,
             tab_geometry: Default::default(),
             drag_target: None,
             drag_cancelled: false,

@@ -7,7 +7,9 @@
 use super::Workspace;
 use super::layout::Split;
 use crate::community::Community;
-use crate::ui::channel::{ChannelPage, Launcher, MainTab, MainTabs, PaneButton, PaneToggle};
+use crate::ui::channel::{
+    ChannelPage, Launcher, MainMotion, MainTab, MainTabs, PaneButton, PaneToggle,
+};
 use crate::ui::channel_menu::MenuPanel;
 use crate::ui::channel_panels::{self, ChannelPanel};
 use crate::ui::channel_settings::{self as settings_panel, ChannelRemoved, ChannelSettingsPanel};
@@ -392,6 +394,7 @@ impl Workspace {
                 return;
             }
             let next = step(&ids, &state.selected_main().unwrap_or_default());
+            self.keyboard_switch = true;
             self.select_main_tab((!next.is_empty()).then_some(next), window, cx);
             return;
         }
@@ -814,6 +817,29 @@ impl Workspace {
             })
             .collect();
         let selected = state.selected_main();
+        // A newly selected thread pushes in, unless the keyboard chose it or
+        // motion is reduced; going back to the conversation is immediate.
+        let channel = self.channel_id(cx);
+        let keyboard = std::mem::take(&mut self.keyboard_switch);
+        if let Some((was_channel, was_selected)) =
+            self.main_shown.replace((channel.clone(), selected.clone()))
+            && was_channel == channel
+            && was_selected != selected
+        {
+            let pushes = selected.is_some() && !keyboard && !cx.reduce_motion();
+            self.main_motion = pushes.then(|| (std::time::Instant::now(), was_selected));
+        }
+        let motion = self
+            .main_motion
+            .as_ref()
+            .map(|(started, leave)| MainMotion {
+                started: *started,
+                leave: leave
+                    .as_ref()
+                    .and_then(|id| self.tab_views.get(id))
+                    .and_then(TabView::thread)
+                    .map(|panel| panel.clone().into()),
+            });
         let content = selected.as_ref().map(|id| match self.tab_views.get(id) {
             Some(TabView::Thread { panel, .. }) => panel.clone().into(),
             _ => AnyView::from(cx.new(|_| Unavailable)),
@@ -829,6 +855,7 @@ impl Workspace {
             }),
             geometry: self.tab_geometry.clone(),
             strip: self.main_strip.clone(),
+            motion,
         }
     }
 

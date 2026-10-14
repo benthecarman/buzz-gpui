@@ -21,6 +21,7 @@ use buzz_relay_client::{
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconName, PanelHeader, Tab, TabVariant,
     Tabs, TypeStyled,
+    tokens::{duration, easing},
 };
 use chrono::NaiveDate;
 use gpui_kit::component::input::TextareaState;
@@ -149,6 +150,11 @@ pub struct ThreadPanel {
     pub summary: Option<ChannelSummary>,
     /// A preview's Join prompt, in place of the composer.
     join: Option<Entity<JoinNotice>>,
+    /// When the panel opened, for its loading mark.
+    opened: std::time::Instant,
+    /// When its first page landed and its rows first showed; until then
+    /// the loading mark holds the thread's place.
+    presented: Option<std::time::Instant>,
     /// The reader started joining this preview.
     joining: bool,
     _selecting: Option<Task<()>>,
@@ -308,6 +314,8 @@ impl ThreadPanel {
             on_different: None,
             summary: None,
             join: None,
+            opened: std::time::Instant::now(),
+            presented: None,
             joining: false,
             _selecting: None,
             focus,
@@ -366,6 +374,38 @@ impl ThreadPanel {
             true => Access::Member,
             false => Access::Other,
         }
+    }
+
+    /// The Buzz loading mark in the thread's place (`ThreadLoading`), sized
+    /// to the area waiting, between 80 and 160px. It appears after a
+    /// moment, so a thread that loads at once never flashes it.
+    fn loading(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let height = self.list.viewport_bounds().size.height;
+        let area = match (self.width > px(0.), height > px(0.)) {
+            (true, true) => self.width.min(height),
+            (true, false) => self.width,
+            _ => px(480.),
+        };
+        let width = (area * 0.24).clamp(px(80.), px(160.));
+        let background = cx.colors().surface_panel;
+        let mark = super::launch::mark(self.opened, width, background, window, cx);
+        let (delay, fade) = (duration::STATE.as_secs_f32(), duration::STATE.as_secs_f32());
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(mark.with_animation(
+                ElementId::Name(format!("thread-loading-{}", cx.entity_id()).into()),
+                Animation::new(std::time::Duration::from_secs_f32(delay + fade)),
+                move |mark, t| {
+                    let at = t * (delay + fade);
+                    let shown = ((at - delay) / fade).clamp(0., 1.);
+                    mark.opacity(easing::cubic_bezier(easing::ENTER, shown))
+                },
+            ))
+            .into_any_element()
     }
 
     /// The message last asked of the panel, which a host compares with
@@ -1104,7 +1144,20 @@ impl Render for ThreadPanel {
         };
         let older_page = self.older_page_status();
 
-        let body = if self.entries.is_empty() {
+        // Seeded rows are not the thread yet: the loading mark holds its
+        // place until this view's first page lands. Later pages and
+        // repairs keep the rows showing.
+        if self.presented.is_none() {
+            let first_page = snapshot.root.is_some() && snapshot.direction.is_some();
+            let settled = snapshot.status == ThreadStatus::Ready
+                && !(snapshot.direction != Some(Direction::Older) && snapshot.can_load_more);
+            if first_page || settled || snapshot.status == ThreadStatus::Error {
+                self.presented = Some(std::time::Instant::now());
+            }
+        }
+        let body = if self.presented.is_none() {
+            self.loading(window, cx)
+        } else if self.entries.is_empty() {
             div().flex_1().into_any_element()
         } else {
             let branch = Rc::new(Branch {
@@ -1168,6 +1221,9 @@ impl Render for ThreadPanel {
                 }),
                 cx,
             );
+            // The rows fade in once they first show.
+            let fade = Animation::new(duration::STATE)
+                .with_easing(|t| easing::cubic_bezier(easing::STATE, t));
             div()
                 .id("thread-history")
                 .relative()
@@ -1230,6 +1286,11 @@ impl Render for ThreadPanel {
                 )
                 .child(after_layout)
                 .children(jump)
+                .with_animation(
+                    ElementId::Name(format!("thread-rows-{}", cx.entity_id()).into()),
+                    fade,
+                    |rows, t| rows.opacity(t),
+                )
                 .into_any_element()
         };
 
@@ -1248,9 +1309,6 @@ impl Render for ThreadPanel {
                 )
                 .into_any_element(),
             );
-        }
-        if snapshot.status == ThreadStatus::Loading && self.entries.is_empty() {
-            status.push(note("Loading thread…".into()).into_any_element());
         }
         // A failed link selection notes itself instead of the target.
         let selection = self

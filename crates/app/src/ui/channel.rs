@@ -166,6 +166,65 @@ pub struct MainTabs {
     /// Where the strip and its tabs are, for tab drags.
     pub geometry: super::tab_drag::Geometry,
     pub strip: ScrollHandle,
+    /// A thread just selected pushes in over what it replaces.
+    pub motion: Option<MainMotion>,
+}
+
+/// A thread selected in the main pane slides in from the right over what
+/// it replaces, which drifts left and dims underneath until it lands.
+#[derive(Clone)]
+pub struct MainMotion {
+    pub started: std::time::Instant,
+    /// What it replaces: another thread, or `None` for the conversation.
+    pub leave: Option<AnyView>,
+}
+
+/// How long the push takes.
+const PUSH: std::time::Duration = std::time::Duration::from_millis(300);
+
+impl MainMotion {
+    /// Its progress, eased; `None` once it has landed.
+    fn progress(&self) -> Option<f32> {
+        let t = self.started.elapsed().as_secs_f32() / PUSH.as_secs_f32();
+        (t < 1.).then(|| buzz_ui::tokens::easing::cubic_bezier((0.2, 0., 0., 1.), t))
+    }
+}
+
+/// The push: `leave` drifts left and dims under `enter`, which slides in
+/// from the right with the dock's shadow.
+fn push(leave: AnyElement, enter: AnyElement, t: f32, cx: &App) -> AnyElement {
+    let c = cx.colors();
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .child(
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .size_full()
+                .left(relative(-0.2 * t))
+                .opacity(1. - 0.4 * t)
+                .child(leave),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w_full()
+                .left(relative(1. - t))
+                .flex()
+                .flex_col()
+                .bg(c.surface_panel)
+                .shadow(buzz_ui::tokens::shadow::sm())
+                .child(enter),
+        )
+        .into_any_element()
 }
 
 /// The header's "Toggle tab pane" button.
@@ -1119,8 +1178,28 @@ impl Render for ChannelPage {
                 })
         });
         // A thread selected in the main pane covers the conversation, whose
-        // reading position and draft stay as they were.
-        if let Some(thread) = shown_thread {
+        // reading position and draft stay as they were. A newly selected
+        // one pushes in over what it replaces.
+        let motion = main
+            .and_then(|main| main.motion.clone())
+            .and_then(|motion| motion.progress().map(|t| (motion.leave, t)));
+        if motion.is_some() {
+            window.request_animation_frame();
+        }
+        let pushing_conversation = shown_thread.is_some() && matches!(motion, Some((None, _)));
+        if let Some(thread) = shown_thread.clone().filter(|_| !pushing_conversation) {
+            let content = match motion {
+                Some((Some(leave), t)) => {
+                    push(leave.into_any_element(), thread.into_any_element(), t, cx)
+                }
+                _ => div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(thread)
+                    .into_any_element(),
+            };
             return div()
                 .flex()
                 .flex_col()
@@ -1130,7 +1209,7 @@ impl Render for ChannelPage {
                 .text_body_sm()
                 .text_color(c.text_standard)
                 .children(header)
-                .child(div().flex().flex_col().flex_1().min_h_0().child(thread))
+                .child(content)
                 .into_any_element();
         }
 
@@ -1348,6 +1427,30 @@ impl Render for ChannelPage {
             .message_actions
             .update(cx, |actions, cx| actions.status(cx));
 
+        let body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(timeline)
+            .children(self.error.clone().map(|error| {
+                div()
+                    .mx(px(16.))
+                    .mb(px(8.))
+                    .text_caption()
+                    .text_color(c.text_warning)
+                    .child(error)
+            }))
+            .children(status)
+            .child(composer)
+            .children(overlays);
+        // A thread pushing in over the conversation, which drifts under it.
+        let body = match (shown_thread, motion) {
+            (Some(thread), Some((_, t))) => {
+                push(body.into_any_element(), thread.into_any_element(), t, cx)
+            }
+            _ => body.into_any_element(),
+        };
         // The whole pane takes dropped files for the composer.
         super::composer::drop_zone(div(), &self.composer, cx)
             .relative()
@@ -1366,18 +1469,7 @@ impl Render for ChannelPage {
                 }
             }))
             .children(header)
-            .child(timeline)
-            .children(self.error.clone().map(|error| {
-                div()
-                    .mx(px(16.))
-                    .mb(px(8.))
-                    .text_caption()
-                    .text_color(c.text_warning)
-                    .child(error)
-            }))
-            .children(status)
-            .child(composer)
-            .children(overlays)
+            .child(body)
             .children(super::composer::pane_drop_overlay(&self.composer, cx))
             .into_any_element()
     }
