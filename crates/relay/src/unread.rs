@@ -603,11 +603,22 @@ pub struct InboxItem {
     pub preview: String,
     pub created_at: u64,
     pub mentioned: bool,
+    /// Verified group members with their time and whether they mention
+    /// the viewer, in `message_ids` order (Inbox archive reopening).
+    pub messages: Vec<InboxMessage>,
     pub thread: bool,
     pub unread_count: u32,
     pub manual: bool,
     /// A thread prefix never acknowledges its top-level root.
     pub read_through: Vec<ReadThrough>,
+}
+
+/// One member of an inbox conversation, as the archive reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboxMessage {
+    pub id: String,
+    pub created_at: u64,
+    pub mentioned: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1992,6 +2003,14 @@ impl<F: ThreadFollowStore> Unread<F> {
                     preview: preview_text(event),
                     created_at: latest.event.created_at_secs(),
                     mentioned: entries.iter().any(|entry| entry.mentioned),
+                    messages: entries
+                        .iter()
+                        .map(|entry| InboxMessage {
+                            id: entry.event.id_hex(),
+                            created_at: entry.event.created_at_secs(),
+                            mentioned: entry.mentioned,
+                        })
+                        .collect(),
                     thread: entries.iter().any(|entry| entry.parent_id.is_some()),
                     unread_count: unread.len() as u32,
                     manual,
@@ -4198,6 +4217,23 @@ mod tests {
         assert_eq!(thread.unread_count, 2);
         assert_eq!(thread.preview, "First reply");
         assert_eq!(thread.target, ReadTarget::thread("room", &r));
+        // Each member's time and mention, for the archive (#677).
+        let facts = [(reply.id_hex(), 22, false), (newer.id_hex(), 23, true)].map(
+            |(id, created_at, mentioned)| InboxMessage {
+                id,
+                created_at,
+                mentioned,
+            },
+        );
+        assert_eq!(thread.messages, facts);
+        assert_eq!(
+            thread.message_ids,
+            thread
+                .messages
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(before.items[0].channel_id, "dm");
         assert_eq!(before.items[0].target, ReadTarget::channel("dm"));
         assert!(Arc::ptr_eq(&before, &h.unread.inbox(&h.reads)));

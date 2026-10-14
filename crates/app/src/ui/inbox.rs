@@ -1,8 +1,10 @@
 //! The Inbox plugin (`bundled/inbox`): mentions, direct messages and
-//! replies in followed threads, with view and sender filters, an unread
-//! toggle, a detail pane that previews the conversation, and the viewer's
-//! saved drafts.
+//! replies in followed threads, with type, sender and status filters, an
+//! unread toggle, a detail pane that previews the conversation, archiving
+//! (see [`archive`]), and the viewer's saved drafts. Filter choices and
+//! archives are saved on this device per account and community.
 
+mod archive;
 mod detail;
 mod drafts;
 mod model;
@@ -24,7 +26,7 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use model::{Kind, Sender, View};
+use model::{Filters, Kind, Sender, Show, View};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -53,17 +55,39 @@ struct Selection {
 
 /// A failed action Retry may run again while its row is unchanged.
 #[derive(Clone)]
-struct Failed {
-    item: InboxItem,
-    unread: bool,
+enum Failed {
+    /// Reading the row, or marking it unread.
+    Read { item: InboxItem, unread: bool },
+    /// Archiving or restoring it; Retry keeps the click's cutoff.
+    Archive {
+        item: InboxItem,
+        archived: bool,
+        navigate: bool,
+        at: u64,
+    },
+}
+
+/// Why a guarded view-state write did not happen.
+enum Replace {
+    /// Another write came first.
+    Changed,
+    Failed,
 }
 
 pub struct InboxPage {
     community: Option<Entity<Community>>,
     state: Arc<InboxState>,
     view: View,
+    show: Show,
     sender: Sender,
     unread_only: bool,
+    /// The saved archives as last read or written, and their index.
+    archives: Option<String>,
+    archive_index: archive::Index,
+    /// The rows as last shown, for moving on from an archived one.
+    rendered: Vec<InboxItem>,
+    /// The inbox state the archives were last reconciled with.
+    reconciled: Option<Arc<InboxState>>,
     selected: Option<Selection>,
     detail: Option<Entity<detail::InboxDetail>>,
     drafts: drafts::State,
@@ -85,8 +109,13 @@ impl InboxPage {
             community: None,
             state: Arc::new(InboxState::default()),
             view: View::default(),
+            show: Show::default(),
             sender: Sender::default(),
             unread_only: false,
+            archives: None,
+            archive_index: archive::Index::default(),
+            rendered: Vec::new(),
+            reconciled: None,
             selected: None,
             detail: None,
             drafts: drafts::State::default(),
@@ -111,8 +140,13 @@ impl InboxPage {
         self.community = current.clone();
         self.state = Arc::new(InboxState::default());
         self.view = View::default();
+        self.show = Show::default();
         self.sender = Sender::default();
         self.unread_only = false;
+        self.archives = None;
+        self.archive_index = archive::Index::default();
+        self.rendered = Vec::new();
+        self.reconciled = None;
         self.selected = None;
         self.detail = None;
         self.drafts = drafts::State::default();
@@ -124,6 +158,12 @@ impl InboxPage {
         self._watch = None;
         self._community = None;
         if let Some(community) = current {
+            let filters = Filters::read(self.saved(model::FILTERS_KEY, cx).as_deref());
+            self.view = filters.activity;
+            self.show = filters.show;
+            self.sender = filters.sender;
+            self.unread_only = filters.unread_only;
+            self.load_archives(cx);
             let receiver = community.read(cx).session.inbox();
             self._watch = Some(crate::mirror::mirror(
                 receiver,
@@ -136,6 +176,160 @@ impl InboxPage {
                 this.check_selection(cx);
                 cx.notify();
             }));
+        }
+        cx.notify();
+    }
+
+    /// A view-state value saved for this account and community.
+    fn saved(&self, key: &str, cx: &App) -> Option<String> {
+        let community = self.community.as_ref()?;
+        let partition = community.read(cx).partition();
+        cx.global::<AppState>()
+            .store
+            .view_state(&partition, key)
+            .ok()
+            .flatten()
+    }
+
+    /// Saves `value` if the stored one is still `expected`.
+    fn replace(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        value: &str,
+        cx: &App,
+    ) -> Result<(), Replace> {
+        let Some(community) = self.community.as_ref() else {
+            return Err(Replace::Failed);
+        };
+        let partition = community.read(cx).partition();
+        let store = &cx.global::<AppState>().store;
+        let current = store
+            .view_state(&partition, key)
+            .map_err(|_| Replace::Failed)?;
+        if current.as_deref() != expected {
+            return Err(Replace::Changed);
+        }
+        store
+            .set_view_state(&partition, key, Some(value))
+            .map_err(|_| Replace::Failed)
+    }
+
+    fn save_filters(&self, cx: &App) {
+        let filters = Filters {
+            show: self.show,
+            activity: self.view,
+            sender: self.sender,
+            unread_only: self.unread_only,
+        };
+        let saved = self.saved(model::FILTERS_KEY, cx);
+        if self
+            .replace(model::FILTERS_KEY, saved.as_deref(), &filters.to_json(), cx)
+            .is_err()
+        {
+            tracing::warn!("could not save the Inbox filters");
+        }
+    }
+
+    fn load_archives(&mut self, cx: &App) {
+        let revision = self.saved(archive::KEY, cx);
+        if revision != self.archives || self.archive_index.is_empty() {
+            self.archive_index = archive::Index::new(archive::read(revision.as_deref()));
+            self.archives = revision;
+        }
+    }
+
+    fn archived(&self, item: &InboxItem) -> bool {
+        archive::is_archived(&self.archive_index, item, self.view == View::Mentions)
+    }
+
+    /// Saves reply reopening and retires archives a fresh mention renewed
+    /// (`reopenArchives`). A newer saved revision is read instead.
+    fn reopen(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        let revision = self.archives.clone();
+        let Some(next) = archive::reopened(revision.as_deref(), &self.state.inbox.items) else {
+            return Ok(());
+        };
+        let result = self.replace(archive::KEY, revision.as_deref(), &next, cx);
+        self.load_archives(cx);
+        cx.notify();
+        match result {
+            Err(Replace::Failed) => Err(archive::REOPEN_UNSAVED),
+            _ => Ok(()),
+        }
+    }
+
+    /// Archives or restores a conversation (`archive`). Archiving the open
+    /// conversation moves on to the next row shown (or the one before);
+    /// with none left the detail closes. Restore keeps the reader open.
+    fn archive(
+        &mut self,
+        item: InboxItem,
+        archived: bool,
+        navigate: bool,
+        at: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending {
+            return;
+        }
+        self.failed = None;
+        self.menu = None;
+        let at = at.unwrap_or_else(super::reminders::now_seconds);
+        let same = |row: &InboxItem| {
+            row.channel_id == item.channel_id && row.message_ids.contains(&item.message_id)
+        };
+        if !self.state.inbox.items.iter().any(same) {
+            self.error = Some(buzz_relay_client::session::INBOX_EXPIRED.into());
+            cx.notify();
+            return;
+        }
+        self.load_archives(cx);
+        let leaves = match self.show {
+            Show::Inbox => archived,
+            Show::Archived => !archived,
+        };
+        let next = self
+            .rendered
+            .iter()
+            .position(same)
+            .filter(|_| leaves)
+            .and_then(|index| {
+                self.rendered
+                    .get(index + 1)
+                    .or_else(|| index.checked_sub(1).and_then(|i| self.rendered.get(i)))
+            })
+            .cloned();
+        let open = self.selected_item().is_some_and(same);
+        let revision = self.archives.clone();
+        let saved = archive::updated(revision.as_deref(), &item, archived, at).and_then(|json| {
+            self.replace(archive::KEY, revision.as_deref(), &json, cx)
+                .map_err(|error| match error {
+                    Replace::Changed => archive::CHANGED,
+                    Replace::Failed => archive::UNSAVED,
+                })
+        });
+        self.load_archives(cx);
+        match saved {
+            Err(error) => {
+                self.error = Some(error.into());
+                self.failed = Some(Failed::Archive {
+                    item,
+                    archived,
+                    navigate,
+                    at,
+                });
+            }
+            Ok(()) => {
+                self.error = None;
+                if leaves && navigate && open {
+                    match next {
+                        Some(next) => self.select(&next, window, cx),
+                        None => self.close_detail(cx),
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -210,6 +404,17 @@ impl InboxPage {
                 let _ = page.update(cx, |this, cx| this.close_detail(cx));
             })
             .detach();
+            cx.subscribe_in(
+                detail,
+                window,
+                |this, _, _: &detail::ToggleArchive, window, cx| {
+                    if let Some(item) = this.selected_item().cloned() {
+                        let archived = !this.archived(&item);
+                        this.archive(item, archived, archived, None, window, cx);
+                    }
+                },
+            )
+            .detach();
         }
         if model::has_unread(item) && self.state.can_read {
             self.mutate(item.clone(), false, cx);
@@ -243,7 +448,7 @@ impl InboxPage {
                     Err(error) => {
                         // Retry runs it again only while the row is current.
                         if error != buzz_relay_client::session::INBOX_EXPIRED {
-                            this.failed = Some(Failed { item, unread });
+                            this.failed = Some(Failed::Read { item, unread });
                         }
                         this.error = Some(if error.is_empty() {
                             FAILED.into()
@@ -259,9 +464,13 @@ impl InboxPage {
     }
 
     fn refresh(&mut self, retry_sync: bool, cx: &mut Context<Self>) {
-        let Some(community) = &self.community else {
+        let Some(community) = self.community.clone() else {
             return;
         };
+        self.load_archives(cx);
+        if let Err(error) = self.reopen(cx) {
+            self.error = Some(error.into());
+        }
         let session = &community.read(cx).session;
         session.refresh_inbox();
         if retry_sync {
@@ -270,11 +479,20 @@ impl InboxPage {
         cx.notify();
     }
 
-    fn retry(&mut self, cx: &mut Context<Self>) {
+    fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.failed.take() {
-            Some(failed) => {
+            Some(Failed::Read { item, unread }) => {
                 self.error = None;
-                self.mutate(failed.item, failed.unread, cx);
+                self.mutate(item, unread, cx);
+            }
+            Some(Failed::Archive {
+                item,
+                archived,
+                navigate,
+                at,
+            }) => {
+                self.error = None;
+                self.archive(item, archived, navigate, Some(at), window, cx);
             }
             None => {
                 self.error = None;
@@ -309,7 +527,23 @@ impl InboxPage {
             self.open_drafts(cx);
         } else if view != View::Drafts {
             self.drafts = drafts::State::default();
+            self.save_filters(cx);
         }
+        cx.notify();
+    }
+
+    /// Inbox or Archived; the open conversation closes.
+    fn set_show(&mut self, show: Show, cx: &mut Context<Self>) {
+        self.filters_open = false;
+        if show == self.show {
+            cx.notify();
+            return;
+        }
+        self.failed = None;
+        self.selected = None;
+        self.detail = None;
+        self.show = show;
+        self.save_filters(cx);
         cx.notify();
     }
 
@@ -335,6 +569,14 @@ impl InboxPage {
         });
         let sender = self.sender;
         let menu = Menu::new()
+            .tall()
+            .child(MenuLabel::new("Type").quiet())
+            .children(View::TYPES.into_iter().map(|view| {
+                MenuItem::new(("inbox-type", view as usize), view.label())
+                    .highlighted(self.view == view)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
+            }))
+            .child(MenuSeparator::new())
             .child(MenuLabel::new("From").quiet())
             .child(
                 MenuItem::new("inbox-from-people", "People")
@@ -343,6 +585,7 @@ impl InboxPage {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.sender =
                             model::toggle_sender(this.sender, true, sender == Sender::Agents);
+                        this.save_filters(cx);
                         cx.notify();
                     })),
             )
@@ -353,16 +596,26 @@ impl InboxPage {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.sender =
                             model::toggle_sender(this.sender, false, sender == Sender::Humans);
+                        this.save_filters(cx);
                         cx.notify();
                     })),
             )
             .child(MenuSeparator::new())
-            .child(MenuLabel::new("Show").quiet())
-            .children(View::ALL.into_iter().map(|view| {
-                MenuItem::new(("inbox-show", view as usize), view.label())
-                    .highlighted(self.view == view)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
-            }));
+            .child(MenuLabel::new("Status").quiet())
+            .children([(Show::Inbox, "Inbox"), (Show::Archived, "Archived")].map(
+                |(show, label)| {
+                    MenuItem::new(("inbox-status", show as usize), label)
+                        .highlighted(self.show == show)
+                        .disabled(drafts)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_show(show, cx)))
+                },
+            ))
+            .child(MenuSeparator::new())
+            .child(
+                MenuItem::new("inbox-drafts", View::Drafts.label())
+                    .highlighted(drafts)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_view(View::Drafts, cx))),
+            );
         div()
             .flex()
             .flex_none()
@@ -378,15 +631,18 @@ impl InboxPage {
                 div()
                     .relative()
                     .child(
-                        Button::new("inbox-filters", model::summary(self.view, self.sender))
-                            .size(ButtonSize::Sm)
-                            .ghost()
-                            .icon_end(IconName::CaretDown)
-                            .selected(self.filters_open)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.filters_open = !this.filters_open;
-                                cx.notify();
-                            })),
+                        Button::new(
+                            "inbox-filters",
+                            model::summary(self.view, self.show, self.sender),
+                        )
+                        .size(ButtonSize::Sm)
+                        .ghost()
+                        .icon_end(IconName::CaretDown)
+                        .selected(self.filters_open)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.filters_open = !this.filters_open;
+                            cx.notify();
+                        })),
                     )
                     .when(self.filters_open, |this| {
                         this.child(overlay::dropdown(window, Align::Start, menu, dismiss))
@@ -420,6 +676,7 @@ impl InboxPage {
                     .tooltip("Show unread only")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.unread_only = !this.unread_only;
+                        this.save_filters(cx);
                         cx.notify();
                     })),
                 )
@@ -491,8 +748,12 @@ impl InboxPage {
         };
         let click_item = item.clone();
         let menu_id = item.id.clone();
+        let archived = self.archived(item);
+        let archive_item = item.clone();
+        let group = SharedString::from(format!("inbox-row-{}", item.id));
         div()
-            .id(SharedString::from(format!("inbox-row-{}", item.id)))
+            .id(group.clone())
+            .group(group.clone())
             .flex()
             .items_center()
             .gap(space::ROW_GAP)
@@ -568,6 +829,39 @@ impl InboxPage {
             .child(div().flex_none().size(space::S2).when(unread, |this| {
                 this.rounded_full().bg(c.text_navigation_unread)
             }))
+            // Revealed on hover; a click never opens or reads the row.
+            .child(
+                div()
+                    .flex_none()
+                    .invisible()
+                    .group_hover(group, |this| this.visible())
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("inbox-archive-{}", item.id)),
+                            if archived {
+                                IconName::ArchiveOff
+                            } else {
+                                IconName::Archive
+                            },
+                        )
+                        .size(IconButtonSize::Sm)
+                        .disabled(self.pending)
+                        .tooltip(if archived { "Restore" } else { "Archive" })
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.archive(
+                                    archive_item.clone(),
+                                    !archived,
+                                    !archived,
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                            },
+                        )),
+                    ),
+            )
             .on_click(cx.listener(move |this, _, window, cx| this.select(&click_item, window, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -591,12 +885,33 @@ impl InboxPage {
             .clone();
         let unread = model::has_unread(&item);
         let disabled = self.pending || unread || !self.state.can_read;
-        let content = Menu::new().size(buzz_ui::MenuSize::Compact).child(
-            MenuItem::new("inbox-mark-unread", "Mark unread")
+        let archived = self.archived(&item);
+        let archive_item = item.clone();
+        let content = Menu::new()
+            .size(buzz_ui::MenuSize::Compact)
+            .child(
+                MenuItem::new(
+                    "inbox-archive",
+                    if archived {
+                        "Restore conversation"
+                    } else {
+                        "Archive conversation"
+                    },
+                )
                 .size(buzz_ui::MenuSize::Compact)
-                .disabled(disabled)
-                .on_click(cx.listener(move |this, _, _, cx| this.mutate(item.clone(), true, cx))),
-        );
+                .disabled(self.pending)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.archive(archive_item.clone(), !archived, !archived, None, window, cx)
+                })),
+            )
+            .child(
+                MenuItem::new("inbox-mark-unread", "Mark unread")
+                    .size(buzz_ui::MenuSize::Compact)
+                    .disabled(disabled)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.mutate(item.clone(), true, cx)),
+                    ),
+            );
         let page = cx.entity().downgrade();
         let dismiss: Dismiss = Rc::new(move |_, cx| {
             let _ = page.update(cx, |this, cx| {
@@ -680,6 +995,17 @@ impl Render for InboxPage {
                 ]));
             }
         }
+        // New activity may reopen archived conversations.
+        if !self
+            .reconciled
+            .as_ref()
+            .is_some_and(|seen| Arc::ptr_eq(seen, &self.state))
+        {
+            self.reconciled = Some(self.state.clone());
+            if let Err(error) = self.reopen(cx) {
+                self.error = Some(error.into());
+            }
+        }
         let state = self.state.clone();
         let drafts = self.view == View::Drafts;
         let roster_loading = snapshot.roster == RosterStatus::Loading;
@@ -713,7 +1039,7 @@ impl Render for InboxPage {
                     Button::new("inbox-retry", "Retry inbox")
                         .size(ButtonSize::Sm)
                         .loading(self.pending)
-                        .on_click(cx.listener(|this, _, _, cx| this.retry(cx)))
+                        .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
                         .into_any_element(),
                 ])
             });
@@ -766,10 +1092,12 @@ impl Render for InboxPage {
         let viewer = community.read(cx).session.viewer().to_string();
         let origin = community.read(cx).origin.clone();
         let names = identity::names(&snapshot.profiles, &library, &viewer, Some(&origin), None);
+        let showing_archived = self.show == Show::Archived;
         let activity: Vec<&InboxItem> = state
             .inbox
             .items
             .iter()
+            .filter(|item| self.archived(item) == showing_archived)
             .filter(|item| {
                 let dm = channel(&item.channel_id)
                     .is_some_and(|channel| channel.channel_type == Some(ChannelType::Dm));
@@ -884,25 +1212,67 @@ impl Render for InboxPage {
                     .py(space::PAGE_SECTION_GAP)
                     .px(space::PANEL_INSET)
                     .max_w(rems(40.))
-                    .child(div().text_label().child(if self.unread_only {
-                        "No unread activity in this view"
-                    } else {
-                        "No recent activity in this view"
-                    }))
+                    .child(
+                        div()
+                            .text_label()
+                            .child(match (showing_archived, self.unread_only) {
+                                (true, true) => "No archived conversations match Unread only",
+                                (true, false) => "No archived conversations in this view",
+                                (false, true) => "No unread activity in this view",
+                                (false, false) => "No recent activity in this view",
+                            }),
+                    )
                     .child(div().text_body().text_color(c.text_subtle).child(
-                        "Mentions, direct messages, and replies in threads you participate in \
-                         appear here.",
+                        match (showing_archived, self.view == View::Mentions) {
+                            (true, true) => {
+                                "Archived mentions stay here until you restore them or receive \
+                                 a new mention."
+                            }
+                            (true, false) => {
+                                "Archived conversations stay here until you restore them, \
+                                 receive a new participating-thread reply, or receive a new \
+                                 mention."
+                            }
+                            (false, _) => {
+                                "Mentions, direct messages, and replies in threads you \
+                                 participate in appear here."
+                            }
+                        },
                     ))
+                    .when(showing_archived && self.unread_only, |this| {
+                        this.child(
+                            div().pt(space::S2).child(
+                                Button::new(
+                                    "inbox-show-all-archived",
+                                    "Show all archived conversations",
+                                )
+                                .size(ButtonSize::Sm)
+                                .ghost()
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.unread_only = false;
+                                        this.save_filters(cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                        )
+                    })
                     .into_any_element(),
             );
         }
-        // Keep the open detail's preview state current.
+        // Keep the open detail's preview and archive state current.
         if let (Some(detail), Some(item)) = (self.detail.clone(), self.selected_item().cloned()) {
             let incomplete = self.preview_incomplete(&item);
+            let archive = detail::ArchiveAction {
+                archived: self.archived(&item),
+                disabled: self.pending,
+            };
             detail.update(cx, |detail, cx| {
-                detail.update_item(item, incomplete, window, cx)
+                detail.update_item(item, incomplete, archive, window, cx)
             });
         }
+        self.rendered = visible;
         let detail = self
             .detail
             .clone()

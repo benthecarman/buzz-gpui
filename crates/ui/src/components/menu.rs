@@ -30,6 +30,9 @@ pub enum MenuSize {
 #[derive(IntoElement, Default)]
 pub struct Menu {
     size: MenuSize,
+    /// Grows to its content instead of stopping at 24rem: for menus whose
+    /// every row must stay reachable (`maxHeight: var(--available-height)`).
+    tall: bool,
     children: Vec<AnyElement>,
 }
 
@@ -40,6 +43,11 @@ impl Menu {
 
     pub fn size(mut self, size: MenuSize) -> Self {
         self.size = size;
+        self
+    }
+
+    pub fn tall(mut self) -> Self {
+        self.tall = true;
         self
     }
 }
@@ -65,7 +73,7 @@ impl RenderOnce for Menu {
             } else {
                 20.
             }))
-            .max_h(rems(24.))
+            .when(!self.tall, |this| this.max_h(rems(24.)))
             .overflow_hidden()
             .when(compact, |this| this.rounded(radius::ROW).p(rems(0.125)))
             .when(!compact, |this| this.p(rems(0.25)))

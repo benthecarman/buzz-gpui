@@ -25,6 +25,17 @@ pub enum Incomplete {
 /// The detail asks the page to close it.
 pub struct Closed;
 
+/// The header's Archive or Restore conversation.
+pub struct ToggleArchive;
+
+/// What the header's archive button shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArchiveAction {
+    pub archived: bool,
+    /// An Inbox action is running.
+    pub disabled: bool,
+}
+
 enum Reader {
     Channel(Entity<ChannelPage>),
     Thread(Entity<ThreadPanel>),
@@ -43,6 +54,7 @@ pub struct InboxDetail {
     community: Entity<Community>,
     item: InboxItem,
     incomplete: Option<Incomplete>,
+    archive: ArchiveAction,
     /// Made once the conversation is available and settled; kept while a
     /// later check withholds it, so its scroll and draft survive.
     reader: Option<Reader>,
@@ -53,6 +65,7 @@ pub struct InboxDetail {
 }
 
 impl EventEmitter<Closed> for InboxDetail {}
+impl EventEmitter<ToggleArchive> for InboxDetail {}
 
 impl InboxDetail {
     pub fn new(
@@ -69,6 +82,7 @@ impl InboxDetail {
             community,
             item,
             incomplete,
+            archive: ArchiveAction::default(),
             reader: None,
             reveal: None,
             focus,
@@ -82,9 +96,14 @@ impl InboxDetail {
         &mut self,
         item: InboxItem,
         incomplete: Option<Incomplete>,
+        archive: ArchiveAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.archive != archive {
+            self.archive = archive;
+            cx.notify();
+        }
         if self.item == item && self.incomplete == incomplete {
             return;
         }
@@ -276,6 +295,24 @@ impl Render for InboxDetail {
                             "Open in channel"
                         },
                         cx.listener(|this, _, _, cx| this.open(cx)),
+                    )
+                    .action(
+                        IconButton::new(
+                            "inbox-archive",
+                            if self.archive.archived {
+                                IconName::ArchiveOff
+                            } else {
+                                IconName::Archive
+                            },
+                        )
+                        .size(IconButtonSize::Sm)
+                        .disabled(self.archive.disabled || !available || self.incomplete.is_some())
+                        .tooltip(if self.archive.archived {
+                            "Restore conversation"
+                        } else {
+                            "Archive conversation"
+                        })
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ToggleArchive))),
                     )
                     .action(
                         IconButton::new("inbox-open", IconName::ArrowSquareOut)

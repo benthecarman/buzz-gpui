@@ -4,8 +4,12 @@
 
 use crate::ui::keys::format_public_key;
 use buzz_relay_client::unread::InboxItem;
+use serde_json::{Value, json};
 
-/// The "Show" choices.
+/// The view-state key of the saved filter choices.
+pub const FILTERS_KEY: &str = "inbox:filters";
+
+/// The "Type" choices, and Drafts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum View {
     #[default]
@@ -17,13 +21,8 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 5] = [
-        View::All,
-        View::Threads,
-        View::Mentions,
-        View::Dms,
-        View::Drafts,
-    ];
+    /// The "Type" group; Drafts has its own item.
+    pub const TYPES: [View; 4] = [View::All, View::Threads, View::Mentions, View::Dms];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -34,6 +33,14 @@ impl View {
             View::Drafts => "Drafts",
         }
     }
+}
+
+/// The "Status" choices: the active Inbox or its archive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Show {
+    #[default]
+    Inbox,
+    Archived,
 }
 
 /// The "From" choices.
@@ -53,13 +60,85 @@ pub enum Kind {
     Unknown,
 }
 
-/// The filter trigger's text: "All", or "Mentions · Agents".
-pub fn summary(view: View, sender: Sender) -> String {
-    let label = view.label();
-    match (view, sender) {
-        (View::Drafts, _) | (_, Sender::Everyone) => label.to_owned(),
-        (_, Sender::Humans) => format!("{label} · People"),
-        (_, Sender::Agents) => format!("{label} · Agents"),
+/// The filter trigger's text: "All", "Mentions · Archived · Agents", or
+/// just "Archived" for all archived activity.
+pub fn summary(view: View, show: Show, sender: Sender) -> String {
+    if view == View::Drafts {
+        return view.label().to_owned();
+    }
+    let archived = show == Show::Archived;
+    [
+        (!(view == View::All && archived)).then(|| view.label()),
+        archived.then_some("Archived"),
+        match sender {
+            Sender::Everyone => None,
+            Sender::Humans => Some("People"),
+            Sender::Agents => Some("Agents"),
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// The choices saved on this device for the account and community
+/// (`readFilters`): each missing or unknown field takes its default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Filters {
+    pub show: Show,
+    /// Never Drafts, which is not saved.
+    pub activity: View,
+    pub sender: Sender,
+    pub unread_only: bool,
+}
+
+impl Filters {
+    pub fn read(saved: Option<&str>) -> Self {
+        let value: Value = saved
+            .and_then(|saved| serde_json::from_str(saved).ok())
+            .unwrap_or(Value::Null);
+        let field = |key: &str| value.get(key).and_then(Value::as_str);
+        Self {
+            show: match field("show") {
+                Some("archived") => Show::Archived,
+                _ => Show::Inbox,
+            },
+            activity: match field("activity") {
+                Some("dms") => View::Dms,
+                Some("threads") => View::Threads,
+                Some("mentions") => View::Mentions,
+                _ => View::All,
+            },
+            sender: match field("sender") {
+                Some("humans") => Sender::Humans,
+                Some("agents") => Sender::Agents,
+                _ => Sender::Everyone,
+            },
+            unread_only: field("attention") == Some("unread"),
+        }
+    }
+
+    pub fn to_json(self) -> String {
+        json!({
+            "show": match self.show {
+                Show::Inbox => "inbox",
+                Show::Archived => "archived",
+            },
+            "activity": match self.activity {
+                View::Dms => "dms",
+                View::Threads => "threads",
+                View::Mentions => "mentions",
+                View::All | View::Drafts => "all",
+            },
+            "sender": match self.sender {
+                Sender::Everyone => "everyone",
+                Sender::Humans => "humans",
+                Sender::Agents => "agents",
+            },
+            "attention": if self.unread_only { "unread" } else { "all" },
+        })
+        .to_string()
     }
 }
 
@@ -167,8 +246,43 @@ mod tests {
         assert_eq!(toggle_sender(Sender::Everyone, true, false), Sender::Agents);
         assert_eq!(toggle_sender(Sender::Agents, false, false), Sender::Agents);
         assert_eq!(toggle_sender(Sender::Agents, true, true), Sender::Everyone);
-        assert_eq!(summary(View::Mentions, Sender::Humans), "Mentions · People");
-        assert_eq!(summary(View::Drafts, Sender::Agents), "Drafts");
+        assert_eq!(
+            summary(View::Mentions, Show::Inbox, Sender::Humans),
+            "Mentions · People"
+        );
+        assert_eq!(
+            summary(View::Drafts, Show::Archived, Sender::Agents),
+            "Drafts"
+        );
+        assert_eq!(
+            summary(View::All, Show::Archived, Sender::Everyone),
+            "Archived"
+        );
+        assert_eq!(
+            summary(View::Dms, Show::Archived, Sender::Agents),
+            "DMs · Archived · Agents"
+        );
+    }
+
+    #[test]
+    fn saved_filters_default_field_by_field() {
+        let saved = Filters {
+            show: Show::Archived,
+            activity: View::Mentions,
+            sender: Sender::Agents,
+            unread_only: true,
+        };
+        assert_eq!(Filters::read(Some(&saved.to_json())), saved);
+        assert_eq!(Filters::read(None), Filters::default());
+        // An older combined status, or a bad field, falls back alone.
+        let mixed = Filters::read(Some(r#"{"show":"all","activity":"dms","sender":7}"#));
+        assert_eq!(
+            mixed,
+            Filters {
+                activity: View::Dms,
+                ..Filters::default()
+            }
+        );
     }
 
     #[test]
