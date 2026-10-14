@@ -291,16 +291,27 @@ impl Workspace {
         }
     }
 
+    /// Choosing a tab resumes typing in it: a conversation's or thread's
+    /// composer takes the focus, its caret where it was; other tabs take
+    /// it themselves.
     pub(super) fn select_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.update_tabs(cx, |state| state.select(id));
-        self.focus_tab(id, window, cx);
+        self.resume_tab(id, window, cx);
+    }
+
+    fn resume_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_tab_views(window, cx);
+        match self.tab_views.get(id).and_then(TabView::thread).cloned() {
+            Some(panel) => ThreadPanel::focus_composer(&panel, window, cx),
+            None => self.focus_tab(id, window, cx),
+        }
     }
 
     /// Shows a main-pane tab: a thread, or with `None` the conversation.
     fn select_main_tab(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.update_tabs(cx, |state| state.select_main(id.clone()));
         match id {
-            Some(id) => self.focus_tab(&id, window, cx),
+            Some(id) => self.resume_tab(&id, window, cx),
             None => self.focus_composer(window, cx),
         }
     }

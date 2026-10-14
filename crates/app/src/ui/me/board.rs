@@ -255,9 +255,19 @@ impl SessionWork {
         }
     }
 
+    /// Choosing a tab resumes typing in its composer, where it has one.
     fn select_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.update_tabs(cx, |state| state.select(id));
-        self.focus_tab(id, window, cx);
+        self.ensure_tab_views(window, cx);
+        let panel = match self.tab_views.get(id) {
+            Some(TabView::Thread { panel, .. }) => Some(panel.clone()),
+            _ if id == channel_tabs::THREAD => self.thread.clone(),
+            _ => None,
+        };
+        match panel {
+            Some(panel) => ThreadPanel::focus_composer(&panel, window, cx),
+            None => self.focus_tab(id, window, cx),
+        }
     }
 
     fn close_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
