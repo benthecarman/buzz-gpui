@@ -4,10 +4,9 @@
 use super::row::AgentRow;
 use crate::hosts::Hosts;
 use crate::mission_control::Fleet;
-use crate::mission_control::model::{Board, HostSummary, Key, Link};
+use crate::mission_control::model::{Board, HostSummary, Key, Link, Status};
 use crate::ui::agents2::empty_state;
 use crate::ui::settings::OpenHostSettings;
-use buzz_host::api::ProcessStatus;
 use buzz_ui::{
     ActiveTheme, Badge, BadgeTone, Button, ButtonSize, Colors, Icon, IconButton, IconButtonSize,
     IconName, PanelHeader, TypeStyled, tokens::radius,
@@ -22,8 +21,8 @@ enum Filter {
     #[default]
     All,
     Attention,
-    Running,
-    Stopped,
+    Working,
+    Offline,
 }
 
 /// What the page draws itself, apart from its rows' contents: a change
@@ -31,7 +30,7 @@ enum Filter {
 #[derive(PartialEq)]
 struct Shape {
     hosts: Vec<HostSummary>,
-    rows: Vec<(Key, ProcessStatus, Link, bool, bool)>,
+    rows: Vec<(Key, Status, Link, bool, bool)>,
 }
 
 impl Shape {
@@ -125,12 +124,8 @@ impl MissionControlPage {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let hosts = cx
-            .try_global::<Hosts>()
-            .map(|hosts| hosts.hosts.clone())
-            .unwrap_or_default();
-        for host in hosts {
-            host.update(cx, |host, cx| host.refresh_status(cx).detach());
+        if let Some(agents) = crate::agents2::Agents2::global(cx) {
+            agents.update(cx, |agents, cx| agents.refresh(cx).detach());
         }
         if let Some(fleet) = &self.fleet {
             fleet.update(cx, |fleet, cx| fleet.read_usage(cx));
@@ -171,9 +166,9 @@ impl MissionControlPage {
             0 if live => "No agents".to_string(),
             0 => "No known agents".to_string(),
             total if live => format!(
-                "{total} agent{} · {} running",
+                "{total} agent{} · {} working",
                 if total == 1 { "" } else { "s" },
-                host.running
+                host.working
             ),
             total => format!(
                 "{total} agent{} last known",
@@ -295,13 +290,12 @@ impl MissionControlPage {
             .entries
             .iter()
             .filter(|e| self.host.is_none_or(|host| e.key.host == host));
-        let (mut all, mut attention, mut running, mut stopped) = (0, 0, 0, 0);
+        let (mut all, mut attention, mut working, mut offline) = (0, 0, 0, 0);
         for entry in entries {
             all += 1;
             attention += entry.attention.is_some() as usize;
-            running += (entry.status == ProcessStatus::Running) as usize;
-            stopped +=
-                matches!(entry.status, ProcessStatus::Stopped | ProcessStatus::Failed) as usize;
+            working += entry.doing.active as usize;
+            offline += offline_entry(entry) as usize;
         }
         let chip = |filter: Filter, label: &str, count: usize, cx: &mut Context<Self>| {
             let selected = self.filter == filter;
@@ -350,8 +344,8 @@ impl MissionControlPage {
             .gap(rems(0.5))
             .child(chip(Filter::All, "All agents", all, cx))
             .child(chip(Filter::Attention, "Needs attention", attention, cx))
-            .child(chip(Filter::Running, "Running", running, cx))
-            .child(chip(Filter::Stopped, "Stopped", stopped, cx))
+            .child(chip(Filter::Working, "Working", working, cx))
+            .child(chip(Filter::Offline, "Offline", offline, cx))
     }
 
     fn list(&self, c: &Colors, cx: &App) -> AnyElement {
@@ -363,10 +357,8 @@ impl MissionControlPage {
             .filter(|e| match self.filter {
                 Filter::All => true,
                 Filter::Attention => e.attention.is_some(),
-                Filter::Running => e.status == ProcessStatus::Running,
-                Filter::Stopped => {
-                    matches!(e.status, ProcessStatus::Stopped | ProcessStatus::Failed)
-                }
+                Filter::Working => e.doing.active,
+                Filter::Offline => offline_entry(e),
             })
             .collect();
         if shown.is_empty() {
@@ -495,4 +487,9 @@ impl Render for MissionControlPage {
                     ),
             )
     }
+}
+
+/// Its host or its community is not connected.
+fn offline_entry(entry: &crate::mission_control::model::Entry) -> bool {
+    entry.link != Link::Connected || entry.status == Status::Connecting
 }

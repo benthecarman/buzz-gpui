@@ -76,15 +76,12 @@ fn cached_evidence_still_ages_out_of_the_time_windows() {
     assert_eq!(evidence.at(t0() + USAGE_WINDOW_MS).recent_turns, 0);
 }
 
-fn running(since: u64) -> (Agent, Option<u64>) {
-    (
-        Agent {
-            id: "x".into(),
-            status: ProcessStatus::Running,
-            ..Default::default()
-        },
-        Some(since),
-    )
+fn running(since: u64) -> Run {
+    Run {
+        status: Status::Ready,
+        since: Some(since),
+        failed: None,
+    }
 }
 
 #[test]
@@ -110,17 +107,14 @@ fn an_open_turn_names_its_running_tool_and_progress() {
         live.place,
         Some(("wss://relay".to_string(), "c1".to_string()))
     );
-    let (agent, since) = running(t0() - 60_000);
+    let run = running(t0() - 60_000);
     let now = t0() + 30_000;
-    let shown = doing(&agent, since, Some(&live), Link::Connected, now);
+    let shown = doing(&run, Some(&live), Link::Connected, now);
     assert_eq!(
         (shown.text.as_str(), shown.elapsed.as_deref(), shown.active),
         ("Reading main.rs", Some("30s"), true)
     );
-    assert_eq!(
-        attention(&agent, since, Some(&live), Link::Connected, now),
-        None
-    );
+    assert_eq!(attention(&run, Some(&live), Link::Connected, now), None);
 }
 
 #[test]
@@ -137,17 +131,14 @@ fn a_quiet_turn_is_stuck_after_the_limit() {
         // Heartbeats keep coming, but nothing else does.
         t0() + 20 * 60_000,
     );
-    let (agent, since) = running(t0() - 60_000);
+    let run = running(t0() - 60_000);
     let progress = t0() + 20_000;
     let before = progress + STUCK_MS - 1000;
     let live = live_in(&snap, "o", &agent_key(), before).unwrap();
     assert_eq!(live.turn.as_ref().unwrap().label, "Writing a reply");
-    assert_eq!(
-        attention(&agent, since, Some(&live), Link::Connected, before),
-        None
-    );
+    assert_eq!(attention(&run, Some(&live), Link::Connected, before), None);
     let after = progress + STUCK_MS;
-    let stuck = attention(&agent, since, Some(&live), Link::Connected, after).unwrap();
+    let stuck = attention(&run, Some(&live), Link::Connected, after).unwrap();
     assert_eq!(stuck.need, Need::Stuck);
     assert_eq!(stuck.reason, "No progress for 5m 0s");
     // Silence while the feed is interrupted proves nothing.
@@ -155,16 +146,7 @@ fn a_quiet_turn_is_stuck_after_the_limit() {
         listening: false,
         ..live.clone()
     };
-    assert_eq!(
-        attention(&agent, since, Some(&deaf), Link::Connected, after),
-        None
-    );
-    // A process that started after the turn's evidence is not running it.
-    let restarted = Some(t0() + 21 * 60_000);
-    assert_eq!(
-        attention(&agent, restarted, Some(&live), Link::Connected, after),
-        None
-    );
+    assert_eq!(attention(&run, Some(&deaf), Link::Connected, after), None);
 }
 
 #[test]
@@ -181,13 +163,13 @@ fn a_running_tool_gets_longer_before_it_is_stuck() {
         listening: true,
         ..Default::default()
     };
-    let (agent, since) = running(0);
+    let run = running(0);
     assert_eq!(
-        attention(&agent, since, Some(&live), Link::Connected, STUCK_MS),
+        attention(&run, Some(&live), Link::Connected, STUCK_MS),
         None
     );
     assert_eq!(
-        attention(&agent, since, Some(&live), Link::Connected, TOOL_STUCK_MS).map(|a| a.need),
+        attention(&run, Some(&live), Link::Connected, TOOL_STUCK_MS).map(|a| a.need),
         Some(Need::Stuck)
     );
 }
@@ -209,8 +191,8 @@ fn a_pending_permission_waits_on_the_owner() {
     let now = t0() + 21_000;
     let live = live_in(&snap, "o", &agent_key(), now).unwrap();
     assert_eq!(live.turn.as_ref().unwrap().label, "Waiting for permission");
-    let (agent, since) = running(0);
-    let waiting = attention(&agent, since, Some(&live), Link::Connected, now).unwrap();
+    let run = running(0);
+    let waiting = attention(&run, Some(&live), Link::Connected, now).unwrap();
     assert_eq!(
         (waiting.need, waiting.reason.as_str()),
         (Need::Waiting, "Waiting for permission")
@@ -234,83 +216,112 @@ fn a_failed_last_turn_needs_attention_for_a_while() {
     let now = t0() + 60_000;
     let live = live_in(&snap, "o", &agent_key(), now).unwrap();
     assert!(live.turn.is_none());
-    let (agent, since) = running(0);
-    let failed = attention(&agent, since, Some(&live), Link::Connected, now).unwrap();
+    let run = running(0);
+    let failed = attention(&run, Some(&live), Link::Connected, now).unwrap();
     assert_eq!(
         (failed.need, failed.reason.as_str()),
         (Need::Failed, "Turn failed: rate limited")
     );
     let later = t0() + 20_000 + TURN_ERROR_MS;
+    assert_eq!(attention(&run, Some(&live), Link::Connected, later), None);
     assert_eq!(
-        attention(&agent, since, Some(&live), Link::Connected, later),
-        None
-    );
-    assert_eq!(
-        doing(&agent, since, Some(&live), Link::Connected, now).text,
+        doing(&run, Some(&live), Link::Connected, now).text,
         "Idle · last active just now"
     );
 }
 
 #[test]
-fn process_states_map_to_needs() {
-    let agent = |status, error: Option<&str>| Agent {
+fn runner_states_map_to_needs() {
+    let run = |status, since, failed: Option<(u64, &str)>| Run {
         status,
-        error: error.map(str::to_string),
-        ..Default::default()
+        since,
+        failed: failed.map(|(at, error)| (at, error.to_string())),
     };
-    let need = |agent: &Agent, since, link| attention(agent, since, None, link, 10 * 60_000);
+    let now = 60 * 60_000;
+    let need = |run: &Run, link| attention(run, None, link, now);
     assert_eq!(
         need(
-            &agent(ProcessStatus::Failed, Some("exit 1\ntrace")),
-            None,
+            &run(Status::Ready, None, Some((now - 1000, "exit 1\ntrace"))),
             Link::Connected
         ),
         Some(Attention {
             need: Need::Failed,
-            reason: "exit 1".into()
+            reason: "Run failed: exit 1".into()
         })
     );
     assert_eq!(
         need(
-            &agent(ProcessStatus::Stopped, Some("crashed")),
-            None,
+            &run(Status::Ready, None, Some((now - TURN_ERROR_MS, "old"))),
+            Link::Connected
+        ),
+        None,
+        "a failure long ago is history"
+    );
+    assert_eq!(need(&run(Status::Ready, None, None), Link::Connected), None);
+    let connecting = run(Status::Connecting, Some(now - 60_000), None);
+    assert_eq!(
+        need(&connecting, Link::Connected),
+        None,
+        "a minute of connecting is normal"
+    );
+    assert_eq!(
+        need(
+            &run(Status::Connecting, Some(now - 10 * 60_000), None),
+            Link::Connected
+        )
+        .map(|a| a.reason),
+        Some("Connecting for 10m 0s".into())
+    );
+    assert_eq!(
+        need(
+            &run(Status::Working, Some(now - TOOL_STUCK_MS), None),
             Link::Connected
         )
         .map(|a| a.need),
-        Some(Need::Failed)
+        Some(Need::Stuck)
     );
     assert_eq!(
-        need(&agent(ProcessStatus::Stopped, None), None, Link::Connected),
+        need(
+            &run(Status::Working, Some(now - 60_000), None),
+            Link::Connected
+        ),
         None
-    );
-    let waiting = agent(ProcessStatus::Waiting, None);
-    assert_eq!(
-        need(&waiting, Some(10 * 60_000 - 1000), Link::Connected),
-        None,
-        "every start waits a moment for its key"
-    );
-    assert_eq!(
-        need(&waiting, Some(0), Link::Connected).map(|a| a.need),
-        Some(Need::Waiting)
-    );
-    let starting = agent(ProcessStatus::Starting, None);
-    assert_eq!(
-        need(&starting, Some(9 * 60_000), Link::Connected),
-        None,
-        "a minute of starting is normal"
-    );
-    assert_eq!(
-        need(&starting, Some(0), Link::Connected).map(|a| a.reason),
-        Some("Starting for 10m 0s".into())
     );
     // An unreachable host's last state proves nothing.
     assert_eq!(
-        need(&agent(ProcessStatus::Failed, None), None, Link::Offline),
+        need(
+            &run(Status::Ready, None, Some((now, "exit 1"))),
+            Link::Offline
+        ),
         None
+    );
+    let shown = doing(
+        &run(Status::Working, Some(now - 30_000), None),
+        None,
+        Link::Connected,
+        now,
+    );
+    assert_eq!(
+        (shown.text.as_str(), shown.elapsed.as_deref(), shown.active),
+        ("Working", Some("30s"), true)
+    );
+    assert_eq!(
+        doing(
+            &run(Status::Elsewhere, None, None),
+            None,
+            Link::Connected,
+            now
+        )
+        .text,
+        "Runs in another app"
+    );
+    assert_eq!(
+        doing(&run(Status::Ready, None, None), None, Link::Offline, now).text,
+        "Last known: ready"
     );
 }
 
-fn entry(name: &str, host: u64, status: ProcessStatus, need: Option<Need>) -> Entry {
+fn entry(name: &str, host: u64, status: Status, need: Option<Need>) -> Entry {
     Entry {
         key: Key {
             host,
@@ -335,28 +346,28 @@ fn entry(name: &str, host: u64, status: ProcessStatus, need: Option<Need>) -> En
 }
 
 #[test]
-fn attention_sorts_first_then_work_then_stopped_then_offline() {
-    let mut working = entry("Busy", 0, ProcessStatus::Running, None);
+fn attention_sorts_first_then_work_then_elsewhere_then_offline() {
+    let mut working = entry("Busy", 0, Status::Working, None);
     working.doing.active = true;
-    let mut offline = entry("Aardvark", 2, ProcessStatus::Running, None);
+    let mut offline = entry("Aardvark", 2, Status::Ready, None);
     offline.link = Link::Offline;
     let mut entries = vec![
         offline,
-        entry("Zed", 0, ProcessStatus::Stopped, None),
-        entry("Idle", 1, ProcessStatus::Running, None),
-        entry("Stuck", 1, ProcessStatus::Running, Some(Need::Stuck)),
+        entry("Zed", 0, Status::Elsewhere, None),
+        entry("Idle", 1, Status::Ready, None),
+        entry("Stuck", 1, Status::Working, Some(Need::Stuck)),
         working,
-        entry("Boot", 0, ProcessStatus::Starting, None),
-        entry("Asks", 0, ProcessStatus::Running, Some(Need::Waiting)),
-        entry("broken", 1, ProcessStatus::Failed, Some(Need::Failed)),
-        entry("Alpha", 0, ProcessStatus::Stopped, None),
+        entry("Boot", 0, Status::Connecting, None),
+        entry("Asks", 0, Status::Ready, Some(Need::Waiting)),
+        entry("broken", 1, Status::Ready, Some(Need::Failed)),
+        entry("Alpha", 0, Status::Elsewhere, None),
     ];
     sort(&mut entries);
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         names,
         [
-            "broken", "Asks", "Stuck", "Busy", "Idle", "Boot", "Alpha", "Zed", "Aardvark"
+            "broken", "Asks", "Stuck", "Busy", "Idle", "Alpha", "Zed", "Boot", "Aardvark"
         ]
     );
 }
@@ -364,8 +375,8 @@ fn attention_sorts_first_then_work_then_stopped_then_offline() {
 #[test]
 fn notifications_fire_on_transitions_after_the_baseline() {
     let mut tracker = Tracker::default();
-    let failed = entry("A", 1, ProcessStatus::Failed, Some(Need::Failed));
-    let calm = entry("B", 1, ProcessStatus::Running, None);
+    let failed = entry("A", 1, Status::Ready, Some(Need::Failed));
+    let calm = entry("B", 1, Status::Ready, None);
     // What is wrong when a host first answers is the baseline.
     assert!(
         tracker
@@ -378,7 +389,7 @@ fn notifications_fire_on_transitions_after_the_baseline() {
             .is_empty()
     );
     // B starts waiting: one alert, once.
-    let waiting = entry("B", 1, ProcessStatus::Running, Some(Need::Waiting));
+    let waiting = entry("B", 1, Status::Ready, Some(Need::Waiting));
     let alerts = tracker.observe(&[failed.clone(), waiting.clone()], false);
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0].name, "B");
@@ -388,7 +399,7 @@ fn notifications_fire_on_transitions_after_the_baseline() {
             .is_empty()
     );
     // Waiting turns into stuck: a new need alerts again.
-    let stuck = entry("B", 1, ProcessStatus::Running, Some(Need::Stuck));
+    let stuck = entry("B", 1, Status::Ready, Some(Need::Stuck));
     assert_eq!(tracker.observe(&[failed.clone(), stuck], false).len(), 1);
     // The host goes offline and comes back unchanged: no news.
     let mut gone = failed.clone();
@@ -400,7 +411,7 @@ fn notifications_fire_on_transitions_after_the_baseline() {
             .is_empty()
     );
     // Recovering and failing again is news; while quiet it is only noted.
-    let fine = entry("A", 1, ProcessStatus::Running, None);
+    let fine = entry("A", 1, Status::Ready, None);
     assert!(tracker.observe(&[fine, calm.clone()], false).is_empty());
     assert!(
         tracker
@@ -409,7 +420,7 @@ fn notifications_fire_on_transitions_after_the_baseline() {
     );
     assert!(tracker.observe(&[failed, calm], false).is_empty());
     // A second host has its own baseline.
-    let other = entry("C", 2, ProcessStatus::Failed, Some(Need::Failed));
+    let other = entry("C", 2, Status::Ready, Some(Need::Failed));
     assert!(tracker.observe(&[other], false).is_empty());
 }
 

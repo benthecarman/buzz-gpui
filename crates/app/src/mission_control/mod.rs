@@ -1,13 +1,12 @@
 //! Mission control: one live picture of every agent on every host this
 //! app manages, with the agents that need their owner first.
 //!
-//! [`Fleet`] joins each host's agent snapshot with the activity the
-//! owner's agents report in every open community, once a second and
-//! whenever a host changes, into a [`model::Board`] the page draws. It
-//! lives for the app, not the page, so an agent that fails, gets stuck or
-//! waits on its owner raises a desktop notification wherever the window
-//! is. Hosts send when an agent entered its status; for older hosts the
-//! time this app first saw it stands in.
+//! [`Fleet`] joins the owner's Agents, by the host that holds each key,
+//! with what their runners do and the activity they report in every open
+//! community, once a second and whenever a host changes, into a
+//! [`model::Board`] the page draws. It lives for the app, not the page, so
+//! an agent that fails, gets stuck or waits on its owner raises a desktop
+//! notification wherever the window is.
 
 pub mod model;
 
@@ -16,12 +15,11 @@ use crate::community::{AppState, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
 use crate::notifications::categories::{self, CategorySpec, Submission};
 use crate::ui::navigation::{Place, Target};
-use buzz_host::api::ProcessStatus;
 use buzz_host_rpc::ConnectionState;
 use buzz_relay_client::archive::community_key;
 use buzz_relay_client::usage::{SavedMetrics, Scan, scan};
 use gpui_kit::*;
-use model::{Board, Entry, HostSummary, Key, Link, Live, Need, Tracker, Usage};
+use model::{Board, Entry, HostSummary, Key, Link, Live, Need, Run, Status, Tracker, Usage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,9 +59,8 @@ struct Seen {
 pub struct Fleet {
     board: Arc<Board>,
     tracker: Tracker,
-    /// When this app first saw each agent in its status, for hosts that
-    /// do not say.
-    statuses: HashMap<Key, (ProcessStatus, u64)>,
+    /// When this app first saw each agent in its status.
+    statuses: HashMap<Key, (Status, u64)>,
     communities: HashMap<EntityId, Seen>,
     usage: HashMap<String, Usage>,
     usage_read: Option<Instant>,
@@ -182,6 +179,24 @@ impl Fleet {
             .unwrap_or_default();
         self.observe_hosts(&hosts, cx);
         let lives = self.lives(now, cx);
+        // The owner's agents in every joined community, each with the host
+        // holding its key and what its runner does.
+        let agents: Vec<_> = crate::agents2::Agents2::global(cx)
+            .map(|service| {
+                let service = service.read(cx);
+                service
+                    .running()
+                    .iter()
+                    .map(|agent| {
+                        (
+                            agent.clone(),
+                            service.host_of(&agent.pubkey),
+                            service.run_state(&agent.pubkey),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut entries = Vec::new();
         let mut summaries = Vec::new();
         for host in &hosts {
@@ -194,29 +209,36 @@ impl Fleet {
                 ConnectionState::Rejected { reason } => (Link::Refused, Some(reason.clone())),
             };
             let first = entries.len();
-            for agent in &state.agents.agents {
+            for (agent, run) in agents
+                .iter()
+                .filter(|(_, held_by, _)| held_by.as_ref() == Some(host))
+                .map(|(agent, _, run)| (agent, run))
+            {
                 let key = Key {
                     host: key,
-                    id: agent.id.clone(),
+                    id: agent.pubkey.clone(),
                 };
-                let seen = self
-                    .statuses
-                    .entry(key.clone())
-                    .or_insert((agent.status, now));
-                if seen.0 != agent.status {
-                    *seen = (agent.status, now);
+                let status = if !run.ready {
+                    Status::Connecting
+                } else if run.working_since.is_some() {
+                    Status::Working
+                } else if run.held {
+                    Status::Ready
+                } else {
+                    Status::Elsewhere
+                };
+                let seen = self.statuses.entry(key.clone()).or_insert((status, now));
+                if seen.0 != status {
+                    *seen = (status, now);
                 }
-                // When this app first saw a running agent is not when it
-                // started, so it cannot tell a restart after a turn; it
-                // stands in only for how long a transition has taken.
-                let since = agent
-                    .status_since
-                    .or((agent.status != ProcessStatus::Running).then_some(seen.1));
+                let run = Run {
+                    status,
+                    since: run.working_since.or(Some(seen.1)),
+                    failed: run.failed.clone(),
+                };
                 let live = lives.get(&agent.pubkey);
-                let model = agent
-                    .launch_model
-                    .clone()
-                    .or_else(|| Some(agent.harness.model.clone()))
+                let model = crate::agents2::type_of(&agent.agent_type, cx)
+                    .map(|kind| kind.summary_of(agent))
                     .filter(|model| !model.is_empty());
                 entries.push(Entry {
                     key,
@@ -226,10 +248,10 @@ impl Fleet {
                     name: agent.name.clone(),
                     picture: agent.picture.clone().filter(|p| !p.is_empty()),
                     model,
-                    status: agent.status,
+                    status,
                     link,
-                    attention: model::attention(agent, since, live, link, now),
-                    doing: model::doing(agent, since, live, link, now),
+                    attention: model::attention(&run, live, link, now),
+                    doing: model::doing(&run, live, link, now),
                     usage: model::usage_line(self.usage.get(&agent.pubkey), live),
                     place: live.and_then(|live| live.place.clone()),
                 });
@@ -242,10 +264,7 @@ impl Fleet {
                 link,
                 detail,
                 total: mine.len(),
-                running: mine
-                    .iter()
-                    .filter(|e| e.status == ProcessStatus::Running)
-                    .count(),
+                working: mine.iter().filter(|e| e.doing.active).count(),
                 attention: mine.iter().filter(|e| e.attention.is_some()).count(),
             });
         }

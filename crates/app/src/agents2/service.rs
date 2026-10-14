@@ -211,6 +211,30 @@ struct Runner {
     /// Whether the host may hold the agent for this GUI; true at first, so
     /// an agent that starts out of view is let go of once.
     may_hold: bool,
+    /// When the run in progress started, Unix ms.
+    working_since: Option<u64>,
+    /// The last run's failure: when it ended, Unix ms, and why.
+    failed: Option<(u64, String)>,
+}
+
+/// What a runner is doing, for Mission control.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunState {
+    /// When the run in progress started, Unix ms.
+    pub working_since: Option<u64>,
+    /// This app holds the agent; another app on its host runs it otherwise.
+    pub held: bool,
+    /// Its community is ready to run it in.
+    pub ready: bool,
+    /// The last run's failure, until a run succeeds: when it ended, Unix
+    /// ms, and why.
+    pub failed: Option<(u64, String)>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 /// The agent and runnable type a drain step saw, to tell whether either
@@ -623,6 +647,23 @@ impl Agents2 {
     /// The selected community, while it is bound.
     fn selected(&self, cx: &App) -> Option<&Bound> {
         self.bound.get(&selected_origin(cx)?)
+    }
+
+    /// What a running agent's runner is doing, for Mission control.
+    pub fn run_state(&self, pubkey: &str) -> RunState {
+        let ready = self.ready(pubkey).is_some();
+        match self.runners.get(pubkey) {
+            Some(runner) => RunState {
+                working_since: runner.working_since,
+                held: runner.may_hold,
+                ready,
+                failed: runner.failed.clone(),
+            },
+            None => RunState {
+                ready,
+                ..RunState::default()
+            },
+        }
     }
 
     /// The host holding the agent's key.
@@ -1123,6 +1164,8 @@ impl Agents2 {
                             compiled: None,
                             serial: self.serial,
                             may_hold: true,
+                            working_since: None,
+                            failed: None,
                         },
                     );
                 }
@@ -1345,14 +1388,24 @@ impl Agents2 {
                 )
                 .await;
                 source.cancel();
-                match ended {
+                let failed = match ended {
                     futures::future::Either::Left((Err(error), _)) => {
                         tracing::error!(agent = %pubkey, %error, "agent run failed");
+                        Some(error.to_string())
                     }
-                    futures::future::Either::Left((Ok(()), _)) => {}
+                    futures::future::Either::Left((Ok(()), _)) => None,
                     // The run keeps going unfenced; the queue moves on.
-                    futures::future::Either::Right((_, run)) => run.detach(),
-                }
+                    futures::future::Either::Right((_, run)) => {
+                        run.detach();
+                        None
+                    }
+                };
+                let _ = this.update(cx, |this, _| {
+                    if let Some(runner) = this.runners.get_mut(&pubkey) {
+                        runner.working_since = None;
+                        runner.failed = failed.map(|error| (now_ms(), error));
+                    }
+                });
             }
             let _ = this.update(cx, |this, _| {
                 if let Some(runner) = this.runners.get_mut(&pubkey)
@@ -1452,6 +1505,9 @@ impl Agents2 {
             host: link(&host, cx),
             wrote: runner.wrote.clone(),
         };
+        if let Some(runner) = self.runners.get_mut(pubkey) {
+            runner.working_since = Some(now_ms());
+        }
         let delivery = Delivery {
             trigger: job.trigger,
             channel: job.channel,

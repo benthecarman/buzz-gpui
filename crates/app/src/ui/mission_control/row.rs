@@ -1,15 +1,12 @@
 //! One agent's row: who and where it is, its status and what needs its
-//! owner, what it is doing now and its recent usage, and its controls.
+//! owner, what it is doing now and its recent usage, and its menu.
 //! Each row is its own view, so a tick that changes one agent's elapsed
 //! time redraws that row and reuses the others' last frame.
 
-use crate::community::{AppState, IdentityState};
-use crate::hosts::{HostConnection, Hosts};
-use crate::mission_control::model::{Entry, Link, Need, status_label};
-use crate::ui::navigation::{self, Place, Target};
+use crate::community::AppState;
+use crate::mission_control::model::{Entry, Link, Need, Status, status_label};
+use crate::ui::navigation::{self, Target};
 use crate::ui::overlay::{self, Align, Dismiss};
-use crate::ui::pages::Page;
-use buzz_host::api::{AgentAction, ProcessStatus};
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Badge, BadgeTone, Colors, Icon, IconButton, IconButtonSize,
     IconName, Menu, MenuItem, MenuSeparator, TypeStyled,
@@ -25,65 +22,16 @@ pub const HEIGHT: Rems = rems(4.25);
 pub struct AgentRow {
     pub entry: Entry,
     menu: bool,
-    /// The action sent and not yet answered.
-    pending: Option<AgentAction>,
 }
 
 impl AgentRow {
     pub fn new(entry: Entry) -> Self {
-        Self {
-            entry,
-            menu: false,
-            pending: None,
-        }
+        Self { entry, menu: false }
     }
 
     /// An open menu draws every frame, as overlays expect.
     pub fn overlay_open(&self) -> bool {
         self.menu
-    }
-
-    fn host(&self, cx: &App) -> Option<Entity<HostConnection>> {
-        cx.try_global::<Hosts>()?
-            .hosts
-            .iter()
-            .find(|host| host.entity_id().as_u64() == self.entry.key.host)
-            .cloned()
-    }
-
-    fn act(&mut self, action: AgentAction, cx: &mut Context<Self>) {
-        let Some(host) = self.host(cx) else {
-            return;
-        };
-        let owner = match &cx.global::<AppState>().identity {
-            IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
-            _ => None,
-        };
-        let id = self.entry.key.id.clone();
-        let task = host.update(cx, |host, cx| host.act(&id, action, owner, None, cx));
-        self.pending = Some(action);
-        self.menu = false;
-        cx.notify();
-        let name = self.entry.name.clone();
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.pending = None;
-                if let Err(failure) = result {
-                    let verb = match action {
-                        AgentAction::Start => "start",
-                        AgentAction::Stop => "stop",
-                        AgentAction::Restart => "restart",
-                    };
-                    crate::ui::notice::error(
-                        format!("Couldn’t {verb} {name}. {}", failure.message),
-                        cx,
-                    );
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
@@ -92,38 +40,12 @@ impl AgentRow {
     }
 
     fn controls(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let entry = &self.entry;
-        let live = entry.link == Link::Connected;
-        let busy = self.pending.is_some();
-        let button = |action: AgentAction, icon: IconName, tip: &str, cx: &mut Context<Self>| {
-            IconButton::new(
-                SharedString::from(format!("mc-{action:?}-{}-{}", entry.key.host, entry.key.id)),
-                icon,
-            )
-            .size(IconButtonSize::Sm)
-            .disabled(!live || busy)
-            .tooltip(format!("{tip} {}", entry.name))
-            .on_click(cx.listener(move |this, _, _, cx| this.act(action, cx)))
-        };
-        let mut controls = div().flex().flex_none().items_center().gap(rems(0.25));
-        controls = match entry.status {
-            ProcessStatus::Running => controls
-                .child(button(
-                    AgentAction::Restart,
-                    IconName::ArrowsClockwise,
-                    "Restart",
-                    cx,
-                ))
-                .child(button(AgentAction::Stop, IconName::Stop, "Stop", cx)),
-            ProcessStatus::Starting | ProcessStatus::Waiting => {
-                controls.child(button(AgentAction::Stop, IconName::Stop, "Stop", cx))
-            }
-            ProcessStatus::Stopping => controls,
-            ProcessStatus::Stopped | ProcessStatus::Failed => {
-                controls.child(button(AgentAction::Start, IconName::Play, "Start", cx))
-            }
-        };
-        controls.child(self.menu(window, cx))
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(rems(0.25))
+            .child(self.menu(window, cx))
     }
 
     fn menu(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -181,11 +103,11 @@ impl AgentRow {
             .child(MenuSeparator::new());
         let agent = pubkey.clone();
         menu = menu.child(
-            item("mc-edit", "Edit agent", IconName::PencilSimple)
+            item("mc-profile", "View profile", IconName::User)
                 .disabled(pubkey.is_empty())
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     this.close_menu(cx);
-                    edit(agent.clone(), window, cx);
+                    navigation::show_profile(agent.clone(), event.position(), window, cx);
                 })),
         );
         let weak = cx.entity().downgrade();
@@ -199,16 +121,13 @@ impl AgentRow {
 /// The status pill: a dot in the status's tone and its name. A turn in
 /// progress reads "Working" here rather than animating the avatar, so a
 /// busy fleet redraws once a second, for its timers, not every frame.
-fn status_pill(status: ProcessStatus, active: bool, link: Link, c: &Colors) -> Div {
+fn status_pill(status: Status, active: bool, link: Link, c: &Colors) -> Div {
     let (dot, text) = match status {
         _ if link != Link::Connected => (c.text_unavailable, c.text_metadata),
-        ProcessStatus::Running if active => (c.border_accent, c.text_accent),
-        ProcessStatus::Running => (c.status_online, c.text_standard),
-        ProcessStatus::Failed => (c.border_danger, c.text_danger),
-        ProcessStatus::Starting | ProcessStatus::Stopping | ProcessStatus::Waiting => {
-            (c.border_warning, c.text_subtle)
-        }
-        ProcessStatus::Stopped => (c.text_unavailable, c.text_subtle),
+        _ if active => (c.border_accent, c.text_accent),
+        Status::Working | Status::Ready => (c.status_online, c.text_standard),
+        Status::Connecting => (c.border_warning, c.text_subtle),
+        Status::Elsewhere => (c.text_unavailable, c.text_subtle),
     };
     div()
         .flex()
@@ -465,23 +384,4 @@ fn message(agent: String, window: &mut Window, cx: &mut App) {
             }
         })
         .detach();
-}
-
-/// The agent's editor on the Agents page.
-fn edit(pubkey: String, window: &mut Window, cx: &mut App) {
-    let _ = window;
-    let community = AppState::current(cx).map(|c| c.read(cx).origin.to_string());
-    navigation::with_workspace(cx, move |workspace, window, cx| {
-        workspace.navigate(
-            Target {
-                community,
-                place: Place::Route {
-                    page: Page::AGENTS,
-                    params: serde_json::json!({ "pubkey": pubkey }),
-                },
-            },
-            window,
-            cx,
-        )
-    });
 }

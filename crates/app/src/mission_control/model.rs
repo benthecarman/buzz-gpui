@@ -1,5 +1,5 @@
 //! Mission control's picture of the fleet, free of GPUI so it can be
-//! tested: what each agent does now, from its host's status and its
+//! tested: what each agent does now, from its runner's state and its
 //! observed activity; whether it needs its owner; the order the page
 //! lists agents in; and which changes deserve a notification.
 
@@ -7,7 +7,6 @@ use crate::agent_activity::current::{tool_label, working_duration};
 use crate::agent_activity::transcript_model::{ItemKind, Scope, TranscriptTurn, transcript};
 use crate::agent_activity::turns::TurnState;
 use crate::agent_activity::{FeedStatus, Snapshot};
-use buzz_host::api::{Agent, ProcessStatus};
 use buzz_relay_client::archive::ArchiveRecord;
 use buzz_relay_client::usage::decode_usage;
 use std::collections::{HashMap, HashSet};
@@ -16,12 +15,10 @@ use std::collections::{HashMap, HashSet};
 pub const STUCK_MS: u64 = 5 * 60_000;
 /// ...or this long while a tool runs, since builds and tests are quiet.
 pub const TOOL_STUCK_MS: u64 = 15 * 60_000;
-/// Waiting to start this long means a prompt is waiting on the owner.
-pub const WAITING_MS: u64 = 15_000;
-/// Starting or stopping for this long is stuck.
+/// Connecting to its community for this long is stuck.
 pub const TRANSITION_STUCK_MS: u64 = 2 * 60_000;
-/// A failed last turn needs the owner for this long, or until another
-/// turn starts.
+/// A failed last turn or run needs the owner for this long, or until
+/// another one starts.
 pub const TURN_ERROR_MS: u64 = 30 * 60_000;
 /// Open turns older than this are lost evidence, not current work.
 pub const ABANDONED_MS: u64 = 6 * 60 * 60_000;
@@ -47,6 +44,29 @@ impl Link {
             Self::Refused => "Refused",
         }
     }
+}
+
+/// What an agent's runner is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Status {
+    /// A run is in progress in this app.
+    Working,
+    /// This app runs it and waits for something to answer.
+    Ready,
+    /// Another app on its host runs it.
+    Elsewhere,
+    /// Its community is not connected yet, so it hears nothing.
+    Connecting,
+}
+
+/// An agent's runner as Mission control reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub status: Status,
+    /// When it entered its status, Unix ms: the run's start while working.
+    pub since: Option<u64>,
+    /// The last run's failure: when it ended, Unix ms, and why.
+    pub failed: Option<(u64, String)>,
 }
 
 /// An agent's open turn, from observed activity.
@@ -288,68 +308,30 @@ pub fn first_line(text: &str) -> String {
     }
 }
 
-/// Whether `agent` needs its owner now. Agents of a host that is not
+/// Whether the agent needs its owner now. Agents of a host that is not
 /// connected show their last known state, which proves nothing.
-pub fn attention(
-    agent: &Agent,
-    since: Option<u64>,
-    live: Option<&Live>,
-    link: Link,
-    now: u64,
-) -> Option<Attention> {
+pub fn attention(run: &Run, live: Option<&Live>, link: Link, now: u64) -> Option<Attention> {
     if link != Link::Connected {
         return None;
     }
-    let error = agent.error.as_deref().map(first_line);
-    match agent.status {
-        ProcessStatus::Failed => {
-            return attention_of(
-                Need::Failed,
-                error.unwrap_or_else(|| "The agent stopped unexpectedly.".into()),
-            );
-        }
-        ProcessStatus::Stopped => {
-            return error.and_then(|error| attention_of(Need::Failed, error));
-        }
-        // Every start waits briefly for its key; only a wait that lasts is
-        // a prompt nobody answered.
-        ProcessStatus::Waiting => {
-            return since
-                .is_none_or(|since| now.saturating_sub(since) >= WAITING_MS)
-                .then(|| Attention {
-                    need: Need::Waiting,
-                    reason: "Waiting to start. Unlock the keyring if it asks.".into(),
-                });
-        }
-        ProcessStatus::Starting | ProcessStatus::Stopping => {
-            let since = since?;
-            let stuck = now.saturating_sub(since);
-            let verb = if agent.status == ProcessStatus::Starting {
-                "Starting"
-            } else {
-                "Stopping"
-            };
-            return (stuck >= TRANSITION_STUCK_MS).then(|| Attention {
-                need: Need::Stuck,
-                reason: format!("{verb} for {}", working_duration(since, now)),
-            });
-        }
-        ProcessStatus::Running => {}
+    if run.status == Status::Connecting {
+        let since = run.since?;
+        return (now.saturating_sub(since) >= TRANSITION_STUCK_MS).then(|| Attention {
+            need: Need::Stuck,
+            reason: format!("Connecting for {}", working_duration(since, now)),
+        });
     }
-    let live = live?;
-    if let Some(turn) = &live.turn {
+    if let Some(turn) = live.and_then(|live| live.turn.as_ref()) {
         if turn.waiting_permission {
             return attention_of(Need::Waiting, "Waiting for permission");
         }
-        // A process started after the turn's last evidence cannot be
-        // running it any more.
-        let current = since.is_none_or(|since| since <= turn.evidence_at);
         let limit = if turn.tool_running {
             TOOL_STUCK_MS
         } else {
             STUCK_MS
         };
-        if live.listening && current && now.saturating_sub(turn.progress_at) >= limit {
+        let listening = live.is_some_and(|live| live.listening);
+        if listening && now.saturating_sub(turn.progress_at) >= limit {
             return attention_of(
                 Need::Stuck,
                 format!(
@@ -360,10 +342,28 @@ pub fn attention(
         }
         return None;
     }
-    let (ended, error) = live.failed_turn.as_ref()?;
-    (now.saturating_sub(*ended) < TURN_ERROR_MS)
-        .then(|| attention_of(Need::Failed, format!("Turn failed: {}", first_line(error))))
+    if run.status == Status::Working {
+        let since = run.since?;
+        return (now.saturating_sub(since) >= TOOL_STUCK_MS).then(|| Attention {
+            need: Need::Stuck,
+            reason: format!("No progress for {}", working_duration(since, now)),
+        });
+    }
+    // The newer of the last failed run and the last failed turn.
+    let turn = live.and_then(|live| live.failed_turn.as_ref());
+    let (ended, reason) = match (&run.failed, turn) {
+        (Some(run), Some(turn)) if turn.0 > run.0 => (turn.0, turn_failed(&turn.1)),
+        (Some(run), _) => (run.0, format!("Run failed: {}", first_line(&run.1))),
+        (None, Some(turn)) => (turn.0, turn_failed(&turn.1)),
+        (None, None) => return None,
+    };
+    (now.saturating_sub(ended) < TURN_ERROR_MS)
+        .then(|| attention_of(Need::Failed, reason))
         .flatten()
+}
+
+fn turn_failed(error: &str) -> String {
+    format!("Turn failed: {}", first_line(error))
 }
 
 /// "just now", "5m ago", "3h ago", "2d ago".
@@ -386,79 +386,51 @@ pub struct Doing {
     pub active: bool,
 }
 
-pub fn doing(
-    agent: &Agent,
-    since: Option<u64>,
-    live: Option<&Live>,
-    link: Link,
-    now: u64,
-) -> Doing {
+pub fn doing(run: &Run, live: Option<&Live>, link: Link, now: u64) -> Doing {
     let last = live
         .and_then(|live| live.last_seen)
         .map(|at| format!("last active {}", ago(at, now)));
     let elapsed = |at: Option<u64>| at.map(|at| working_duration(at, now));
     if link != Link::Connected {
         return Doing {
-            text: format!("Last known: {}", status_label(agent.status).to_lowercase()),
+            text: format!("Last known: {}", status_label(run.status).to_lowercase()),
             ..Default::default()
         };
     }
-    match agent.status {
-        ProcessStatus::Running => match live.and_then(|live| live.turn.as_ref()) {
-            Some(turn) => Doing {
-                text: turn.label.clone(),
-                elapsed: elapsed(Some(turn.started_at)),
-                active: true,
-            },
-            None => Doing {
-                text: match last {
-                    Some(last) => format!("Idle · {last}"),
-                    None => "Idle".into(),
-                },
-                ..Default::default()
-            },
+    let idle = |text: &str| Doing {
+        text: match &last {
+            Some(last) => format!("{text} · {last}"),
+            None => text.into(),
         },
-        ProcessStatus::Starting => Doing {
-            text: "Starting…".into(),
-            elapsed: elapsed(since),
+        ..Default::default()
+    };
+    match (run.status, live.and_then(|live| live.turn.as_ref())) {
+        (Status::Connecting, _) => Doing {
+            text: "Connecting to its community…".into(),
+            elapsed: elapsed(run.since),
             active: false,
         },
-        ProcessStatus::Stopping => Doing {
-            text: "Stopping…".into(),
-            elapsed: elapsed(since),
-            active: false,
+        (_, Some(turn)) => Doing {
+            text: turn.label.clone(),
+            elapsed: elapsed(Some(turn.started_at)),
+            active: true,
         },
-        ProcessStatus::Waiting => Doing {
-            text: "Waiting to start".into(),
-            elapsed: elapsed(since),
-            active: false,
+        (Status::Working, None) => Doing {
+            text: "Working".into(),
+            elapsed: elapsed(run.since),
+            active: true,
         },
-        // The error itself is the attention reason, shown beside this.
-        ProcessStatus::Failed => Doing {
-            text: match last {
-                Some(last) => format!("Not running · {last}"),
-                None => "Not running".into(),
-            },
-            ..Default::default()
-        },
-        ProcessStatus::Stopped => Doing {
-            text: match last {
-                Some(last) => format!("Stopped · {last}"),
-                None => "Stopped".into(),
-            },
-            ..Default::default()
-        },
+        (Status::Ready, None) => idle("Idle"),
+        (Status::Elsewhere, None) => idle("Runs in another app"),
     }
 }
 
-pub fn status_label(status: ProcessStatus) -> &'static str {
+pub fn status_label(status: Status) -> &'static str {
     match status {
-        ProcessStatus::Running => "Running",
-        ProcessStatus::Starting => "Starting",
-        ProcessStatus::Stopping => "Stopping",
-        ProcessStatus::Waiting => "Waiting",
-        ProcessStatus::Failed => "Exited",
-        ProcessStatus::Stopped => "Stopped",
+        Status::Working => "Working",
+        Status::Ready => "Ready",
+        Status::Elsewhere => "Elsewhere",
+        Status::Connecting => "Connecting",
     }
 }
 
@@ -567,8 +539,9 @@ pub struct Entry {
     pub pubkey: String,
     pub name: String,
     pub picture: Option<String>,
+    /// Its type's name.
     pub model: Option<String>,
-    pub status: ProcessStatus,
+    pub status: Status,
     pub link: Link,
     pub attention: Option<Attention>,
     pub doing: Doing,
@@ -578,7 +551,7 @@ pub struct Entry {
 }
 
 /// Where an entry sorts: attention first, by urgency; then agents at work,
-/// running, in transition, stopped; agents of unreachable hosts last.
+/// ready, run elsewhere, connecting; agents of unreachable hosts last.
 fn group(entry: &Entry) -> u8 {
     if entry.link != Link::Connected {
         return 9;
@@ -587,11 +560,10 @@ fn group(entry: &Entry) -> u8 {
         return attention.need as u8;
     }
     match entry.status {
-        ProcessStatus::Running if entry.doing.active => 3,
-        ProcessStatus::Running => 4,
-        ProcessStatus::Starting | ProcessStatus::Stopping | ProcessStatus::Waiting => 5,
-        ProcessStatus::Failed => 0,
-        ProcessStatus::Stopped => 6,
+        _ if entry.doing.active => 3,
+        Status::Working | Status::Ready => 4,
+        Status::Elsewhere => 5,
+        Status::Connecting => 6,
     }
 }
 
@@ -616,7 +588,8 @@ pub struct HostSummary {
     /// Why it is offline or refused.
     pub detail: Option<String>,
     pub total: usize,
-    pub running: usize,
+    /// Agents at work now.
+    pub working: usize,
     pub attention: usize,
 }
 
