@@ -33,8 +33,11 @@
 //! 3. **Completion.** [`Completion::admit`] lists verified events the
 //!    session should now run through its `accept()` pipeline (profiles,
 //!    outbox echo, timelines and every thread's `receive`). It is empty for
-//!    a page whose bounds failed, and an exact target's overlays are held
-//!    back until the target folded completely. [`Completion::denied`] means
+//!    a page whose bounds failed, and an exact target is held back, with
+//!    its overlays, until it folded completely. When
+//!    [`Completion::admission`] is set, the list is that complete fold:
+//!    hand the events `accept()` kept to [`ThreadState::admitted`], which
+//!    goes on from there (`acceptTarget`). [`Completion::denied`] means
 //!    the relay refused the read (401/403): deny the channel in discovery
 //!    and purge as for any revocation; this view already revoked itself.
 //!    [`Completion::next`] is the next read of the same run; start it like
@@ -265,6 +268,9 @@ pub struct ThreadRead {
 pub struct Completion {
     /// Verified events to run through the session's `accept()` pipeline.
     pub admit: Vec<Verified>,
+    /// `admit` is an exact target's complete fold: pass the events
+    /// `accept()` kept to [`ThreadState::admitted`].
+    pub admission: bool,
     /// The next read of this run.
     pub next: Option<ThreadRead>,
     /// The relay refused the read: deny the channel.
@@ -327,6 +333,7 @@ struct Run {
     /// The verified root of this run, prepended to every strict page.
     root: Vec<Verified>,
     page: usize,
+    /// The exact target read, staged until its fold is admitted.
     selected: Option<Verified>,
     pending: Option<Pending>,
 }
@@ -342,6 +349,15 @@ struct Selection {
 }
 
 type EventMap = HashMap<EventId, Verified>;
+
+/// Whose target fold the session is admitting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admitting {
+    /// The run's exact target.
+    Target,
+    /// The retarget's candidate.
+    Selection,
+}
 
 /// One thread view (`createThreadView`). See the module docs for how the
 /// session drives it.
@@ -363,6 +379,8 @@ pub struct ThreadState {
     pages: usize,
     run: Option<Run>,
     selection: Option<Selection>,
+    /// A complete target fold waits for the session's admission.
+    admitting: Option<Admitting>,
     /// A refresh was asked for while a run was in flight.
     again: bool,
     accessible: bool,
@@ -407,6 +425,7 @@ impl ThreadState {
             pages: 0,
             run: None,
             selection: None,
+            admitting: None,
             again: false,
             accessible: true,
             next_token: 1,
@@ -503,7 +522,8 @@ impl ThreadState {
         });
         let filter = message_filter(&self.config.channel, &id);
         match self.issue_selection(ReadStep::Target, vec![filter]) {
-            ControlFlow::Continue(read) => Ok(read),
+            ControlFlow::Continue(Some(read)) => Ok(read),
+            ControlFlow::Continue(None) => Err(Retarget::Cancelled),
             ControlFlow::Break(outcome) => Err(outcome),
         }
     }
@@ -569,7 +589,7 @@ impl ThreadState {
             .cloned()
             .collect();
         out.next = match step {
-            ReadStep::Target => self.on_target(events, &mut out.admit),
+            ReadStep::Target => self.on_target(events),
             ReadStep::Overlays => self.on_overlays(events, &mut out.admit),
             ReadStep::Tombstones => self.on_tombstones(events, &mut out.admit),
             ReadStep::Selected => {
@@ -586,6 +606,27 @@ impl ThreadState {
                 self.on_page(events, None)
             }
         };
+        out.admission = self.admitting.is_some();
+        out
+    }
+
+    /// The session admitted a target fold this view handed out with
+    /// [`Completion::admission`]; `visible` is what its `accept()` kept.
+    /// A target it refused is unavailable, and only an admitted one names
+    /// the thread's root (`readTarget`).
+    pub fn admitted(&mut self, visible: &[Verified]) -> Completion {
+        let mut out = Completion::default();
+        match self.admitting.take() {
+            Some(Admitting::Target) => out.next = self.target_admitted(visible),
+            Some(Admitting::Selection) => match self.selection_admitted(visible) {
+                ControlFlow::Continue(read) => out.next = Some(read),
+                ControlFlow::Break(outcome) => {
+                    self.selection = None;
+                    out.retarget = Some(outcome);
+                }
+            },
+            None => {}
+        }
         out
     }
 
@@ -770,34 +811,41 @@ impl ThreadState {
         }
     }
 
-    fn on_target(
-        &mut self,
-        events: Vec<Verified>,
-        admit: &mut Vec<Verified>,
-    ) -> Option<ThreadRead> {
-        // The immutable selected content is admitted at once, like any read;
-        // only its separately fetched overlays wait for the whole fold.
-        admit.extend(events.iter().cloned());
+    fn on_target(&mut self, events: Vec<Verified>) -> Option<ThreadRead> {
+        // The candidate is only checked here. Nothing of it reaches the
+        // session's reconciliation, or names the root, until its whole
+        // fold is admitted (`readTarget`).
         let target = self.run.as_ref()?.target;
-        if self.superseded() {
-            // A retarget chose another message meanwhile; the thread
-            // itself is still read.
-            return self.begin_root();
-        }
         let Some(event) = self.selected_in(&events, &target) else {
-            self.target_status = Some(TargetStatus::Unavailable);
-            self.fields.status = ThreadStatus::Ready;
-            self.fields.can_load_more = false;
-            self.publish();
-            return self.end_run();
+            return self.target_unavailable();
         };
-        self.root_id = Some(thread_reference(&event).map_or(event.id, |r| r.root_id));
-        if !self.extend_remote([event.clone()]) {
+        // Staged, a live deletion of it resolves without showing an
+        // incomplete fold.
+        self.staged.clear();
+        self.staged.insert(event.id, event.clone());
+        if union_over_budget(&[&self.remote, &self.staged]) {
+            self.overflow();
             return None;
         }
         self.run.as_mut()?.selected = Some(event);
         let filter = overlays_filter(&target);
         self.issue(ReadStep::Overlays, vec![filter])
+    }
+
+    /// The run's exact target cannot show: missing, refused, or folded
+    /// away.
+    fn target_unavailable(&mut self) -> Option<ThreadRead> {
+        self.staged.clear();
+        if self.superseded() {
+            // A retarget chose another message meanwhile; the thread
+            // itself is still read.
+            return self.begin_root();
+        }
+        self.target_status = Some(TargetStatus::Unavailable);
+        self.fields.status = ThreadStatus::Ready;
+        self.fields.can_load_more = false;
+        self.publish();
+        self.end_run()
     }
 
     /// A retarget changed the selection after this run read its target.
@@ -812,16 +860,14 @@ impl ThreadState {
         events: Vec<Verified>,
         admit: &mut Vec<Verified>,
     ) -> Option<ThreadRead> {
-        self.staged = self
-            .related(&events)
-            .into_iter()
-            .map(|event| (event.id, event))
-            .collect();
+        let selected = self.run.as_ref()?.target;
+        for event in self.related_to(&events, Some(selected)) {
+            self.staged.insert(event.id, event);
+        }
         if union_over_budget(&[&self.remote, &self.staged]) {
             self.overflow();
             return None;
         }
-        let selected = self.run.as_ref()?.target;
         let overlays = overlays_of(&[&self.remote, &self.staged], &selected);
         if overlays.is_empty() {
             return self.finish_target(admit);
@@ -834,7 +880,8 @@ impl ThreadState {
         events: Vec<Verified>,
         admit: &mut Vec<Verified>,
     ) -> Option<ThreadRead> {
-        for event in self.related(&events) {
+        let selected = self.run.as_ref()?.target;
+        for event in self.related_to(&events, Some(selected)) {
             self.staged.insert(event.id, event);
         }
         if union_over_budget(&[&self.remote, &self.staged]) {
@@ -844,13 +891,25 @@ impl ThreadState {
         self.finish_target(admit)
     }
 
-    /// Admits the target with its complete overlay closure at once.
+    /// Hands the target with its complete overlay closure to the session
+    /// at once, then waits for [`admitted`](Self::admitted).
     fn finish_target(&mut self, admit: &mut Vec<Verified>) -> Option<ThreadRead> {
+        admit.extend(fold_evidence(&self.remote, &self.staged));
+        self.admitting = Some(Admitting::Target);
+        None
+    }
+
+    /// The session admitted the target's fold: the target, if it kept
+    /// it, now names the root and shows.
+    fn target_admitted(&mut self, visible: &[Verified]) -> Option<ThreadRead> {
         let selected = self.run.as_ref()?.selected.clone()?;
-        let mut accepted = vec![selected];
-        accepted.extend(self.staged.values().cloned());
-        admit.extend(accepted.iter().cloned());
-        let related = self.related(&accepted);
+        if !visible.iter().any(|event| event.id == selected.id) {
+            return self.target_unavailable();
+        }
+        // Refused evidence never names a root that later live traffic
+        // could fill in; only an admitted target does.
+        self.root_id = Some(thread_reference(&selected).map_or(selected.id, |r| r.root_id));
+        let related = self.related_to(visible, Some(selected.id));
         if !self.extend_remote(related) {
             return None;
         }
@@ -1049,6 +1108,7 @@ impl ThreadState {
     fn purge(&mut self, clear: bool) {
         self.run = None;
         self.selection = None;
+        self.admitting = None;
         self.again = false;
         self.staged.clear();
         if self.config.exact {
@@ -1097,6 +1157,7 @@ impl ThreadState {
     fn overflow(&mut self) {
         self.run = None;
         self.selection = None;
+        self.admitting = None;
         self.again = false;
         self.remote.clear();
         self.staged.clear();
@@ -1138,19 +1199,20 @@ impl ThreadState {
                     .cloned()
                     .collect();
                 match step {
-                    ReadStep::Target => self.on_selection_target(events, &mut out.admit),
+                    ReadStep::Target => self.on_selection_target(events),
                     ReadStep::Overlays => self.on_selection_overlays(events, &mut out.admit),
                     _ => self.on_selection_tombstones(events, &mut out.admit),
                 }
             }
         };
         match flow {
-            ControlFlow::Continue(read) => out.next = Some(read),
+            ControlFlow::Continue(read) => out.next = read,
             ControlFlow::Break(outcome) => {
                 self.selection = None;
                 out.retarget = Some(outcome);
             }
         }
+        out.admission = self.admitting.is_some();
         out
     }
 
@@ -1158,7 +1220,7 @@ impl ThreadState {
         &mut self,
         step: ReadStep,
         filters: Vec<Filter>,
-    ) -> ControlFlow<Retarget, ThreadRead> {
+    ) -> ControlFlow<Retarget, Option<ThreadRead>> {
         let token = self.next_token;
         self.next_token += 1;
         let Some(selection) = self.selection.as_mut() else {
@@ -1166,12 +1228,12 @@ impl ThreadState {
         };
         selection.token = token;
         selection.step = step;
-        ControlFlow::Continue(ThreadRead {
+        ControlFlow::Continue(Some(ThreadRead {
             token,
             step,
             filters,
             options: ReadOptions::default(),
-        })
+        }))
     }
 
     fn selection_id(&self) -> ControlFlow<Retarget, EventId> {
@@ -1204,11 +1266,9 @@ impl ThreadState {
     fn on_selection_target(
         &mut self,
         events: Vec<Verified>,
-        admit: &mut Vec<Verified>,
-    ) -> ControlFlow<Retarget, ThreadRead> {
-        // The candidate's immutable content is admitted at once, like any
-        // read; its overlays wait for the whole fold.
-        admit.extend(events.iter().cloned());
+    ) -> ControlFlow<Retarget, Option<ThreadRead>> {
+        // Only checked here: the bare candidate never enters this or any
+        // other view's reconciliation before its complete fold does.
         let id = self.selection_id()?;
         let Some(event) = self.selected_in(&events, &id) else {
             return ControlFlow::Break(Retarget::Unavailable);
@@ -1225,7 +1285,7 @@ impl ThreadState {
         &mut self,
         events: Vec<Verified>,
         admit: &mut Vec<Verified>,
-    ) -> ControlFlow<Retarget, ThreadRead> {
+    ) -> ControlFlow<Retarget, Option<ThreadRead>> {
         let id = self.selection_id()?;
         let related = self.related_to(&events, Some(id));
         self.stage_selection(related)?;
@@ -1243,25 +1303,38 @@ impl ThreadState {
         &mut self,
         events: Vec<Verified>,
         admit: &mut Vec<Verified>,
-    ) -> ControlFlow<Retarget, ThreadRead> {
+    ) -> ControlFlow<Retarget, Option<ThreadRead>> {
         let id = self.selection_id()?;
         let related = self.related_to(&events, Some(id));
         self.stage_selection(related)?;
         self.finish_selection(admit)
     }
 
-    /// Admits the candidate with its complete overlay closure, then makes
-    /// it the selected target if it still folds to a row.
-    fn finish_selection(&mut self, admit: &mut Vec<Verified>) -> ControlFlow<Retarget, ThreadRead> {
-        let Some(selection) = self.selection.as_mut() else {
+    /// Hands the candidate with its complete overlay closure to the
+    /// session, then waits for [`admitted`](Self::admitted).
+    fn finish_selection(
+        &mut self,
+        admit: &mut Vec<Verified>,
+    ) -> ControlFlow<Retarget, Option<ThreadRead>> {
+        let Some(selection) = &self.selection else {
+            return ControlFlow::Break(Retarget::Cancelled);
+        };
+        admit.extend(fold_evidence(&self.remote, &selection.staged));
+        self.admitting = Some(Admitting::Selection);
+        ControlFlow::Continue(None)
+    }
+
+    /// The session admitted the candidate's fold: it becomes the selected
+    /// target if the session kept it and it still folds to a row.
+    fn selection_admitted(&mut self, visible: &[Verified]) -> ControlFlow<Retarget, ThreadRead> {
+        let Some(selection) = &self.selection else {
             return ControlFlow::Break(Retarget::Cancelled);
         };
         let id = selection.id;
-        let accepted: Vec<Verified> = std::mem::take(&mut selection.staged)
-            .into_values()
-            .collect();
-        admit.extend(accepted.iter().cloned());
-        let related = self.related_to(&accepted, Some(id));
+        if !visible.iter().any(|event| event.id == id) {
+            return ControlFlow::Break(Retarget::Unavailable);
+        }
+        let related = self.related_to(visible, Some(id));
         if !self.extend_remote(related) {
             return ControlFlow::Break(Retarget::Error);
         }
@@ -1509,6 +1582,18 @@ fn overlays_of(maps: &[&EventMap], id: &EventId) -> Vec<EventId> {
         .map(|event| event.id)
         .collect();
     overlays.into_iter().collect()
+}
+
+/// A staged target fold as the session admits it: the staged events, and
+/// the live deletions of them this view retained while its reads were
+/// held, so every view withdraws what they delete (`readTarget`).
+fn fold_evidence(remote: &EventMap, staged: &EventMap) -> Vec<Verified> {
+    let deletions = remote.values().filter(|event| {
+        matches!(event.kind_u16(), kinds::DELETION | kinds::MODERATOR_DELETE)
+            && !staged.contains_key(&event.id)
+            && e_targets(event).iter().any(|id| staged.contains_key(id))
+    });
+    staged.values().chain(deletions).cloned().collect()
 }
 
 /// [`over_budget`] for the union of `maps`; earlier maps win duplicates.

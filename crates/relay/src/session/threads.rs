@@ -268,7 +268,7 @@ impl Actor {
         let Some(thread) = self.threads.get_mut(&id) else {
             return;
         };
-        let completion = thread.state.complete(token, result);
+        let mut completion = thread.state.complete(token, result);
         thread.settle(completion.retarget);
         if completion.denied {
             if let Some(discovery) = &mut self.discovery {
@@ -277,8 +277,19 @@ impl Actor {
             self.purge_denied();
             self.publish();
         }
-        if !completion.admit.is_empty() {
-            self.accept(&completion.admit);
+        let visible = if completion.admit.is_empty() {
+            Vec::new()
+        } else {
+            self.accept(&completion.admit)
+        };
+        // An exact target's fold goes on with what the session kept
+        // (`acceptTarget`).
+        if completion.admission {
+            let Some(thread) = self.threads.get_mut(&id) else {
+                return;
+            };
+            completion = thread.state.admitted(&visible);
+            thread.settle(completion.retarget);
         }
         if let Some(next) = completion.next {
             self.thread_read(id, next);

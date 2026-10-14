@@ -56,12 +56,27 @@ fn reply_ids(snapshot: &ThreadSnapshot) -> Vec<EventId> {
     snapshot.replies.iter().map(|row| row.id).collect()
 }
 
+/// Runs a completion's evidence through the session's `accept()` as the
+/// session does: every view receives it, and a target fold goes on with
+/// what was kept (here all of it).
+fn admit(state: &mut ThreadState, completion: Completion) -> Completion {
+    state.receive(&completion.admit);
+    if !completion.admission {
+        return completion;
+    }
+    let more = state.admitted(&completion.admit);
+    Completion {
+        admit: completion.admit,
+        denied: completion.denied,
+        ..more
+    }
+}
+
 /// Completes a read the way the session would: verify inside `complete`,
-/// then admit what it returns through `receive`.
+/// then admit what it returns.
 fn step(state: &mut ThreadState, read: ThreadRead, events: &[Verified]) -> Option<ThreadRead> {
     let completion = state.complete(read.token, ok(events));
-    state.receive(&completion.admit);
-    completion.next
+    admit(state, completion).next
 }
 
 struct Fx {
@@ -241,7 +256,7 @@ impl Driver {
                 None => Ok(events.into()),
             };
             let completion = state.complete(read.token, result);
-            state.receive(&completion.admit);
+            let completion = admit(state, completion);
             self.admitted.extend(completion.admit);
             self.denied |= completion.denied;
             next = completion.next;
@@ -1850,7 +1865,7 @@ fn answer(
 ) -> Retarget {
     loop {
         let completion = state.complete(read.token, ok(&respond(read.step)));
-        state.receive(&completion.admit);
+        let completion = admit(state, completion);
         if let Some(outcome) = completion.retarget {
             assert!(completion.next.is_none());
             return outcome;
@@ -1876,6 +1891,9 @@ fn retarget_selects_within_the_thread_without_reloading_it() {
     assert_eq!(tombstones.step, ReadStep::Tombstones);
     assert!(state.snapshot().target.is_none());
     let completion = state.complete(tombstones.token, ok(&[]));
+    // The candidate and its overlays reach the session only as one fold.
+    assert!(completion.admission);
+    let completion = admit(&mut state, completion);
     assert_eq!(completion.retarget, Some(Retarget::Selected));
     assert!(completion.admit.iter().any(|event| event.id == edit.id));
     let snapshot = state.snapshot();
@@ -2023,9 +2041,11 @@ fn a_retarget_during_an_exact_repair_keeps_its_selection() {
         _ => Vec::new(),
     });
     assert_eq!(outcome, Retarget::Selected);
-    // The repair's late read of the old target neither reselects it nor
+    // The repair's late fold of the old target neither reselects it nor
     // hides the new one; the thread is still read.
-    let page = step(&mut state, repair, std::slice::from_ref(&reply)).unwrap();
+    let overlays = step(&mut state, repair, std::slice::from_ref(&reply)).unwrap();
+    assert_eq!(overlays.step, ReadStep::Overlays);
+    let page = step(&mut state, overlays, &[]).unwrap();
     assert_eq!(page.step, ReadStep::Legacy);
     assert!(step(&mut state, page, &thread).is_none());
     let snapshot = state.snapshot();
@@ -2055,4 +2075,88 @@ fn access_loss_or_a_clear_cancels_a_retarget() {
     assert!(completion.denied);
     assert_eq!(completion.retarget, Some(Retarget::Cancelled));
     assert!(matches!(state.retarget(first.id), Err(Retarget::Cancelled)));
+}
+
+#[test]
+fn a_candidate_refused_by_admission_never_names_the_thread() {
+    let (fx, root, reply) = exact();
+    let mut state = fx.state(reply.id, true, None);
+    let read = state.refresh().unwrap();
+    let completion = state.complete(read.token, ok(std::slice::from_ref(&reply)));
+    // The bare candidate reaches no other view.
+    assert!(completion.admit.is_empty());
+    let completion = state.complete(completion.next.unwrap().token, ok(&[]));
+    assert!(completion.admission);
+    assert!(completion.admit.iter().any(|event| event.id == reply.id));
+    // The session's admission refuses it.
+    let completion = state.admitted(&[]);
+    assert!(completion.next.is_none());
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.target_status, Some(TargetStatus::Unavailable));
+    assert!(snapshot.root.is_none() && snapshot.target.is_none());
+    assert!(snapshot.replies.is_empty());
+    assert!(state.root_id().is_none());
+    state.receive(&[root.clone(), fx.reply(&root, "Later live reply", 10_002)]);
+    let snapshot = state.snapshot();
+    assert!(snapshot.root.is_none() && snapshot.target.is_none());
+    assert!(snapshot.replies.is_empty());
+}
+
+#[test]
+fn a_retarget_holds_its_candidate_out_of_the_replies_until_it_folds() {
+    let (fx, root, first, _, mut state) = opened();
+    let candidate = fx.reply(&root, "Bare candidate", 90);
+    let read = state.retarget(candidate.id).unwrap();
+    let completion = state.complete(read.token, ok(std::slice::from_ref(&candidate)));
+    assert!(completion.admit.is_empty());
+    let overlays = completion.next.unwrap();
+    assert!(!reply_ids(&state.snapshot()).contains(&candidate.id));
+    let edit = fx.aux(40003, &candidate, "Complete candidate", 91);
+    let completion = state.complete(overlays.token, ok(std::slice::from_ref(&edit)));
+    let tombstones = completion.next.unwrap();
+    assert!(completion.admit.is_empty());
+    assert!(!reply_ids(&state.snapshot()).contains(&candidate.id));
+    let completion = state.complete(tombstones.token, ok(&[]));
+    let completion = admit(&mut state, completion);
+    assert_eq!(completion.retarget, Some(Retarget::Selected));
+    let snapshot = state.snapshot();
+    let target = snapshot.target.as_ref().unwrap();
+    assert_eq!(
+        (target.id, target.content.as_str()),
+        (candidate.id, "Complete candidate")
+    );
+    assert!(reply_ids(&snapshot).contains(&first.id));
+}
+
+#[test]
+fn a_retarget_admits_finite_and_live_tombstones_of_its_staged_overlays() {
+    for live in [false, true] {
+        let (fx, root, _, _, mut state) = opened();
+        let candidate = fx.reply(&root, "Original candidate", 90);
+        let edit = fx.aux(40003, &candidate, "Withdrawn edit", 91);
+        let reaction = fx.aux(7, &candidate, "+", 91);
+        let withdrawn = [fx.aux(5, &edit, "", 92), fx.aux(5, &reaction, "", 92)];
+        let read = state.retarget(candidate.id).unwrap();
+        let completion = state.complete(read.token, ok(std::slice::from_ref(&candidate)));
+        let overlays = completion.next.unwrap();
+        let completion = state.complete(overlays.token, ok(&[edit.clone(), reaction.clone()]));
+        let tombstones = completion.next.unwrap();
+        assert_eq!(tombstones.step, ReadStep::Tombstones);
+        if live {
+            state.receive(&withdrawn);
+        }
+        let response = if live { Vec::new() } else { withdrawn.to_vec() };
+        let completion = state.complete(tombstones.token, ok(&response));
+        // The deletions go with the fold, so views that never saw them
+        // withdraw what they delete too.
+        for deletion in &withdrawn {
+            assert!(completion.admit.iter().any(|event| event.id == deletion.id));
+        }
+        let completion = admit(&mut state, completion);
+        assert_eq!(completion.retarget, Some(Retarget::Selected));
+        let snapshot = state.snapshot();
+        let target = snapshot.target.as_ref().unwrap();
+        assert_eq!(target.content, candidate.content);
+        assert!(target.reactions.is_empty());
+    }
 }
