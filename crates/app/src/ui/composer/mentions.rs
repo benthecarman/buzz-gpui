@@ -601,6 +601,53 @@ mod tests {
     }
 
     #[test]
+    fn offers_the_viewers_own_agents_outside_the_channel_before_directory_people() {
+        let (viewer, member, agent, aaron) = (key(1), key(2), key(3), key(4));
+        let profiles = profiles(&[
+            (viewer.clone(), "Me"),
+            (member.clone(), "Member"),
+            (aaron.clone(), "Aaron"),
+        ]);
+        let channel = ChannelSummary {
+            id: "c".into(),
+            channel_type: Some(ChannelType::Stream),
+            members: vec![viewer.clone(), member.clone()],
+            ..Default::default()
+        };
+        // An agent on a remote host, not in the channel yet.
+        let library = AgentLibrary {
+            agents: vec![(
+                agent.clone(),
+                "Outside agent".into(),
+                "wss://relay.example".into(),
+            )],
+        };
+        let (presence, history) = (HashMap::new(), HashMap::new());
+        let inputs = Inputs {
+            channel: Some(&channel),
+            roster_ready: true,
+            profiles: &profiles,
+            library: &library,
+            viewer: &viewer,
+            origin: None,
+            presence: &presence,
+            history: &history,
+            teams: &[],
+        };
+        let found = [aaron.clone()];
+        let done = complete(
+            &inputs,
+            "",
+            Directory::Done {
+                people: &found,
+                more: false,
+            },
+        );
+        let labels: Vec<&str> = done.people.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Me", "Member", "Outside agent", "Aaron"]);
+    }
+
+    #[test]
     fn history_keeps_recent_picks_per_channel() {
         let mut history = History::default();
         history.remember("c", "a");
