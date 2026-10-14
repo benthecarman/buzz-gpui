@@ -9,6 +9,7 @@
 //! files survive navigation (not a restart), as in buzz-app's tab.
 
 use crate::community::Community;
+use buzz_relay_client::messages::RunPick;
 use buzz_relay_client::upload::{self, MAX_UPLOAD, Source, Stage, Upload, UploadError};
 use buzz_relay_client::{Attachment, Media};
 use futures::StreamExt;
@@ -16,7 +17,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::Shared;
 use gpui_kit::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -92,6 +93,9 @@ pub struct Recovered {
     pub draft: String,
     /// The reason, for the composer's error line.
     pub error: Option<SharedString>,
+    /// The model and effort picks of the send, which return with its text
+    /// alone.
+    pub picks: BTreeMap<String, RunPick>,
 }
 
 /// What a draft file previews as (`draftAttachmentMedia`): the relay's
@@ -644,6 +648,8 @@ struct Job {
     draft: String,
     /// The draft the composer was left with, which a recovery may replace.
     followup: String,
+    /// Every model and effort pick at Send, handed back with the text.
+    picks: BTreeMap<String, RunPick>,
     /// For the host, once the files are uploaded.
     ready: Option<oneshot::Sender<Vec<Attachment>>>,
 }
@@ -654,6 +660,7 @@ struct Held {
     files: Vec<DraftFile>,
     draft: String,
     followup: String,
+    picks: BTreeMap<String, RunPick>,
     error: Option<SharedString>,
 }
 
@@ -789,14 +796,16 @@ impl Queue {
     }
 
     /// Takes the files of `source` after Send, with their upload still
-    /// running, and waits for them in order. `draft` is the text as sent
-    /// and `followup` what the composer was left with, for handing back.
+    /// running, and waits for them in order. `draft` is the text as sent,
+    /// `followup` what the composer was left with and `picks` the model and
+    /// effort picks at Send, for handing back.
     pub fn start(
         &mut self,
         owner: String,
         source: &Entity<AttachmentDraft>,
         draft: String,
         followup: String,
+        picks: BTreeMap<String, RunPick>,
         cx: &mut Context<Self>,
     ) -> Option<BackgroundSend> {
         let community = self.community.upgrade()?;
@@ -830,6 +839,7 @@ impl Queue {
             cancelled: false,
             draft,
             followup,
+            picks,
             ready: Some(ready),
         });
         cx.notify();
@@ -926,6 +936,7 @@ impl Queue {
             files,
             draft: job.draft,
             followup: job.followup,
+            picks: job.picks,
             error: error.map(SharedString::from),
         };
         if !self.restore(&held, cx) {
@@ -989,11 +1000,13 @@ impl Queue {
         let files = held.files.clone();
         let error = held.error.clone();
         let draft_text = held.draft.clone();
+        let picks = held.picks.clone();
         target.update(cx, |target, cx| {
             target.adopt(files, cx);
             target.recovered = Some(Recovered {
                 draft: draft_text,
                 error,
+                picks,
             });
             cx.notify();
         });

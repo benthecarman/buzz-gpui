@@ -291,6 +291,11 @@ enum Capture {
     Failed(SharedString),
 }
 
+/// Whether a recovered send still owns the saved draft.
+fn recovery_owns(saved: Option<&str>, recovered: &str) -> bool {
+    saved == Some(recovered)
+}
+
 /// `formatVoiceNoteDuration`: whole seconds as `m:ss`.
 fn voice_time(seconds: f64) -> String {
     let whole = if seconds.is_finite() {
@@ -526,6 +531,7 @@ impl Composer {
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
+        composer.take_missed_recovery(window, cx);
         composer
     }
 
@@ -832,9 +838,10 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.error = None;
-        // Only agents still notified by this message are asked.
-        submission.mentions.picks =
-            models::sent_picks(&submission.mentions.picks, &submission.mentions.recipients);
+        // The whole captured pick set returns with a recovered draft; only
+        // agents still notified by this message are asked.
+        let picks = submission.mentions.picks.clone();
+        submission.mentions.picks = models::sent_picks(&picks, &submission.mentions.recipients);
         let has_files = !self.files.read(cx).items.is_empty();
         if submission.editing.is_none() && has_files {
             // A file that failed meanwhile (say, during the outside-channel
@@ -850,7 +857,7 @@ impl Composer {
             // Send takes the files with their running upload; clearing the
             // composer does not stop it.
             submission.upload = self.queue.update(cx, |queue, cx| {
-                queue.start(owner, &files, draft, followup, cx)
+                queue.start(owner, &files, draft, followup, picks, cx)
             });
             self.sending = false;
         } else {
@@ -1281,6 +1288,8 @@ impl Composer {
         self.error = recovered.error.clone();
         self.revision = Some(Some(recovered.draft.clone()));
         self.draft_issue = None;
+        // The picks belong to this revision: they come back with it.
+        self.run_models.picks = recovered.picks.clone();
         if self.editing.is_some() {
             self.stash = serde_json::from_str::<Draft>(&recovered.draft)
                 .ok()
@@ -1295,6 +1304,26 @@ impl Composer {
             self.restyle(cx);
         }
         cx.notify();
+    }
+
+    /// A recovery that landed while no composer showed this draft: taken
+    /// only while its saved text still owns the draft, so an old error or
+    /// pick never attaches to a replacement written meanwhile.
+    fn take_missed_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self
+            .files
+            .read(cx)
+            .recovered
+            .as_ref()
+            .map(|r| r.draft.clone())
+        else {
+            return;
+        };
+        if recovery_owns(self.stored_draft(cx).ok().flatten().as_deref(), &draft) {
+            self.take_recovered(window, cx);
+        } else {
+            self.files.update(cx, |files, _| files.recovered = None);
+        }
     }
 
     fn partition(&self, cx: &App) -> Partition {
@@ -5728,5 +5757,18 @@ mod tests {
             channel_reference("0e9d-1", "general_chat"),
             "[\\#general\\_chat](buzz://channel/0e9d-1)"
         );
+    }
+
+    #[test]
+    fn replays_a_missed_recovery_only_onto_its_own_draft() {
+        let sent = r#"{"text":"think hard@Honey ","tokens":[]}"#;
+        assert!(recovery_owns(Some(sent), sent));
+        // A replacement written while the composer was away keeps neither
+        // the old error nor the old picks.
+        assert!(!recovery_owns(
+            Some(r#"{"text":"later","tokens":[]}"#),
+            sent
+        ));
+        assert!(!recovery_owns(None, sent));
     }
 }
