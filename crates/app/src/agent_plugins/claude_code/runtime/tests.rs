@@ -176,6 +176,7 @@ impl Setup {
     fn sync(&self, config: Config) {
         self.runtime.sync(vec![Synced {
             pubkey: own(),
+            name: "Claude".into(),
             config: config.value(),
             spawn: self.fake.spawner(),
         }]);
@@ -449,6 +450,7 @@ async fn keeps_one_spare_for_all_its_agents_and_none_once_they_are_gone() {
     let setup = Setup::new(vec![]);
     let agent = |pubkey: String| Synced {
         pubkey,
+        name: "Claude".into(),
         config: Config::default().value(),
         spawn: setup.fake.spawner(),
     };
@@ -642,4 +644,47 @@ fn reads_model_ids_and_aliases_as_names() {
     assert_eq!(model_name("claude-opus-4[1m]"), "Opus 4");
     assert_eq!(model_name("opus"), "Opus");
     assert_eq!(model_name("my-proxy/model"), "my-proxy/model");
+}
+
+#[tokio::test]
+async fn names_the_agent_in_its_system_prompt_resuming_idle_sessions_when_it_is_renamed() {
+    let root = message("2", "@Claude hi", |event| {
+        event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
+    });
+    let reply = message("3", "@Claude again", |event| {
+        event.tags = tags(&[
+            &["h", CHANNEL],
+            &["e", &root.id, "", "reply"],
+            &["p", &own()],
+        ]);
+    });
+    let setup = Setup::new(vec![root.clone(), reply.clone()]);
+    let run = |event: BuzzEvent, name: &str| {
+        // A rename reaches the runtime as a changed agent list.
+        setup.runtime.sync(vec![Synced {
+            pubkey: own(),
+            name: name.into(),
+            config: Config::default().value(),
+            spawn: setup.fake.spawner(),
+        }]);
+        setup.deliver(Wake::Mention { event }, Config::default().value())
+    };
+    let system = |process: &FakeClaude| {
+        process
+            .requests("initialize")
+            .first()
+            .and_then(|request| request["appendSystemPrompt"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    run(root, "Claude").await;
+    flush().await;
+    let first = setup.used()[0].clone();
+    assert!(system(&first).contains(&format!("You are Claude (pubkey {}).", own())));
+    run(reply, "Pollen").await;
+    flush().await;
+    let second = setup.used()[1].clone();
+    assert!(first.killed());
+    assert!(second.args().contains(&"--resume".to_string()));
+    assert!(system(&second).contains(&format!("You are Pollen (pubkey {}).", own())));
+    setup.runtime.dispose();
 }

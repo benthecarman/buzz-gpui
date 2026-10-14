@@ -121,6 +121,7 @@ impl ClaudeCode {
                 let host = agents.host_of(&agent.pubkey)?;
                 Some(Synced {
                     pubkey: agent.pubkey.clone(),
+                    name: agent.name.clone(),
                     config: agent.config.clone(),
                     spawn: host.read(cx).spawner(PROCESS_OWNER),
                 })

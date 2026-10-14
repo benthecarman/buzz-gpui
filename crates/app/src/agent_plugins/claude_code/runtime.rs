@@ -195,6 +195,8 @@ pub struct Run {
 /// One agent, as `sync` describes it.
 pub struct Synced {
     pub pubkey: String,
+    /// Its name, for its prompt; a rename restarts idle sessions.
+    pub name: String,
     pub config: Value,
     pub spawn: Spawner,
 }
@@ -206,6 +208,8 @@ type MemoryRead = Shared<BoxFuture<'static, Result<Vec<Memory>, String>>>;
 
 struct EntryState {
     config: Config,
+    /// The agent's name, for its prompt; a rename restarts idle sessions.
+    name: Option<String>,
     /// The core memory and when it was read: `None` when it could not be.
     memory: Option<(Option<Option<String>>, Instant)>,
     /// The agent's handle from its latest delivery, for the tools to act
@@ -316,13 +320,16 @@ impl ClaudeRuntime {
             let existing = locked(&self.inner.agents).get(&agent.pubkey).cloned();
             match existing {
                 None => {
-                    self.entry(&agent.pubkey, next, agent.spawn);
+                    let entry = self.entry(&agent.pubkey, next, agent.spawn);
+                    locked(&entry.state).name = Some(agent.name);
                 }
                 Some(entry) => {
                     let changed = {
                         let mut state = locked(&entry.state);
-                        let changed = state.config != next;
+                        let changed =
+                            state.config != next || state.name.as_ref() != Some(&agent.name);
                         state.config = next;
+                        state.name = Some(agent.name);
                         changed
                     };
                     if changed {
@@ -713,6 +720,7 @@ impl ClaudeRuntime {
         }
         let state = Arc::new(Mutex::new(EntryState {
             config: initial,
+            name: None,
             memory: None,
             handle: None,
             contexts: HashMap::new(),
@@ -728,7 +736,10 @@ impl ClaudeRuntime {
                 let (this, state, pubkey, spawn) =
                     (this.clone(), state.clone(), pubkey.clone(), spawn.clone());
                 async move {
-                    let config = locked(&state).config.clone();
+                    let (config, name) = {
+                        let state = locked(&state);
+                        (state.config.clone(), state.name.clone())
+                    };
                     let memory = this.memory(&pubkey, &state).await;
                     let Where { cwd, model, .. } = config.at(&spawn);
                     Ok(Launch {
@@ -738,6 +749,7 @@ impl ClaudeRuntime {
                         system_prompt: system_prompt(
                             config.scope(),
                             &config.workspace,
+                            name.as_deref().map(|name| (name, pubkey.as_str())),
                             &config.instructions,
                             memory.as_ref().map(|memory| memory.as_deref()),
                         ),
@@ -749,7 +761,10 @@ impl ClaudeRuntime {
         };
         let fingerprint = {
             let state = state.clone();
-            Arc::new(move || locked(&state).config.fingerprint())
+            Arc::new(move || {
+                let state = locked(&state);
+                json!([state.config.fingerprint(), state.name]).to_string()
+            })
         };
         let mut options =
             SessionsOptions::new(spawn, (self.inner.store)(pubkey), launch, fingerprint);

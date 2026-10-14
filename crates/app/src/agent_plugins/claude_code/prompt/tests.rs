@@ -69,6 +69,7 @@ fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
     let prompt = system_prompt(
         Scope::Thread,
         "~/.buzz",
+        None,
         "Be terse.",
         Some(Some("I am Claude.")),
     );
@@ -77,9 +78,21 @@ fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
     assert!(prompt.contains("<workspace>\nCurrent working directory: ~/.buzz\n</workspace>"));
     assert!(prompt.contains("<agent-instructions>\nBe terse.\n</agent-instructions>"));
     assert!(prompt.contains("<core-memory>\nI am Claude.\n</core-memory>"));
-    assert!(system_prompt(Scope::Thread, "/w", "", Some(None)).contains("No core memory found."));
-    assert!(!system_prompt(Scope::Channel, "/w", "", None).contains("<core-memory>"));
-    assert!(system_prompt(Scope::Channel, "/w", "", None).contains("per-channel session"));
+    assert!(
+        system_prompt(Scope::Thread, "/w", None, "", Some(None)).contains("No core memory found.")
+    );
+    assert!(!system_prompt(Scope::Channel, "/w", None, "", None).contains("<core-memory>"));
+    assert!(system_prompt(Scope::Channel, "/w", None, "", None).contains("per-channel session"));
+}
+
+#[test]
+fn names_the_agent_first_when_it_is_known() {
+    let agent = "a".repeat(64);
+    let prompt = system_prompt(Scope::Thread, "/w", Some(("Claude", &agent)), "", None);
+    assert!(prompt.starts_with("<identity>\n"));
+    assert!(prompt.contains(&format!(
+        "<identity>\nYou are Claude (pubkey {agent}).\n</identity>\n\n<base>\n"
+    )));
 }
 
 #[test]

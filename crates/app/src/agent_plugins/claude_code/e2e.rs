@@ -213,6 +213,7 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
     };
     runtime.sync(vec![Synced {
         pubkey: agent.pubkey(),
+        name: agent.name(),
         config: config.value(),
         spawn: spawn.clone(),
     }]);

@@ -43,6 +43,9 @@ fn section(tag: &str, body: &str, attributes: &str) -> String {
 pub fn system_prompt(
     scope: Scope,
     cwd: &str,
+    // Who the agent is, as its name and pubkey, so it can name itself and
+    // the session viewer can too.
+    agent: Option<(&str, &str)>,
     instructions: &str,
     // The agent's `core` memory: `Some(None)` when it has none yet, `None`
     // when it could not be read.
@@ -52,7 +55,15 @@ pub fn system_prompt(
         Scope::Thread => THREAD_MODEL,
         Scope::Channel => CHANNEL_MODEL,
     };
-    let mut parts = vec![
+    let mut parts = Vec::new();
+    if let Some((name, pubkey)) = agent {
+        parts.push(section(
+            "identity",
+            &format!("You are {name} (pubkey {pubkey})."),
+            "",
+        ));
+    }
+    parts.extend([
         section(
             "base",
             &format!(
@@ -68,7 +79,7 @@ pub fn system_prompt(
             &format!("Current working directory: {cwd}"),
             "",
         ),
-    ];
+    ]);
     if !instructions.trim().is_empty() {
         parts.push(section("agent-instructions", instructions, ""));
     }
