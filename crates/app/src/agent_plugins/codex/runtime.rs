@@ -881,7 +881,7 @@ impl CodexRuntime {
             Wake::Mention { event } => (event, String::new()),
             Wake::Watch { event, interest } => (event, interest.unwrap_or_default()),
         };
-        if event.pubkey != agent.owner() {
+        if !crate::agent_plugins::from_owner(&event, &agent.owner()) {
             return Ok(());
         }
         let Some((scope, relay)) = self.relay(&agent.pubkey()) else {
@@ -1185,7 +1185,7 @@ impl CodexRuntime {
             })
         };
         check()?;
-        let Value::Object(mut args) = call.arguments else {
+        let Value::Object(args) = call.arguments else {
             return Err("Buzz tool arguments must be an object".into());
         };
         let version = active.version.load(Ordering::SeqCst);
@@ -1225,12 +1225,7 @@ impl CodexRuntime {
             check: Some(check),
             signal: Some(active.signal.clone()),
         };
-        let send = call.tool == "send";
-        let fin = send && args.get("final") == Some(&Value::Bool(true));
-        // By default a reply goes to the latest request's thread.
-        if send && !args.contains_key("reply") && !args.contains_key("channel") {
-            args.insert("reply".into(), json!(root_of(&request.event)));
-        }
+        let fin = call.tool == "send" && args.get("final") == Some(&Value::Bool(true));
         let context = Context {
             channel: Some(request.conversation.channel_id.clone()),
             root: request.tool_root.clone(),

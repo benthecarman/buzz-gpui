@@ -404,15 +404,15 @@ pub(crate) fn admit(window: &mut Window, queued: usize, now: Instant) -> bool {
     true
 }
 
-/// What one event wakes an agent for. `same_owner` says the author is
-/// another agent of this agent's owner: two of one owner's agents would
-/// otherwise answer each other forever, so one hears another only when it
-/// is named in something that does not reply to it. Addressed events never
-/// reach a watch, and only conversation starts a mention run.
+/// What one event wakes an agent of `owner` for. Another of the owner's
+/// agents wakes it only by naming it, wherever: were a reply to it enough,
+/// two agents replying to each other would never stop. The claimed owner
+/// only narrows this; the type verifies it before answering. Addressed
+/// events never reach a watch, and only conversation starts a mention run.
 pub(crate) fn heard(
     agent: &str,
+    owner: &str,
     event: &Arc<EventData>,
-    same_owner: bool,
     wrote: &dyn Fn(&str) -> bool,
     watches: &[CompiledWatch],
 ) -> Vec<Trigger> {
@@ -421,12 +421,12 @@ pub(crate) fn heard(
             event: event.clone(),
         }]
     };
-    if same_owner {
-        let replies_to_it = event.tags.iter().any(|tag| {
-            tag.first().map(String::as_str) == Some("e")
-                && tag.get(1).is_some_and(|id| !id.is_empty() && wrote(id))
-        });
-        return if CHAT_KINDS.contains(&event.kind) && tags_agent(event, agent) && !replies_to_it {
+    let sibling = event.tags.iter().any(|tag| {
+        tag.first().map(String::as_str) == Some("auth")
+            && tag.get(1).map(String::as_str) == Some(owner)
+    });
+    if sibling {
+        return if CHAT_KINDS.contains(&event.kind) && tags_agent(event, agent) {
             mention()
         } else {
             Vec::new()
@@ -1328,10 +1328,6 @@ impl Agents2 {
             .iter()
             .map(|event| Arc::new(EventData::from(event.as_ref())))
             .collect();
-        let owners: HashMap<String, String> = self
-            .saved()
-            .map(|saved| (saved.summary.pubkey, saved.summary.owner))
-            .collect();
         let mut drains = Vec::new();
         let now = Instant::now();
         let sessions = self.sessions();
@@ -1369,11 +1365,10 @@ impl Agents2 {
                         .insert(&event.id);
                     continue;
                 }
-                let same_owner = owners.get(&event.pubkey) == Some(&agent.owner);
                 let wrote = runner.wrote.clone();
                 let wrote =
                     move |id: &str| wrote.lock().unwrap_or_else(|p| p.into_inner()).contains(id);
-                for trigger in heard(&agent.pubkey, event, same_owner, &wrote, &watches) {
+                for trigger in heard(&agent.pubkey, &agent.owner, event, &wrote, &watches) {
                     if admit(&mut runner.window, runner.queue.len(), now) {
                         runner.queue.push_back(Job {
                             trigger,

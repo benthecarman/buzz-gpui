@@ -26,7 +26,6 @@ const SCOPES: [(&str, &str); 2] = [
     ("thread", "One session per thread"),
     ("channel", "One session per channel"),
 ];
-const RESPOND_TO: [(&str, &str); 2] = [("owner", "Only you"), ("anyone", "Anyone who mentions it")];
 
 /// The line that says where Claude Code stands.
 pub fn status_line(state: &SetupState) -> String {
@@ -310,7 +309,6 @@ impl Render for ClaudeTab {
 pub enum Picker {
     Model,
     Scope,
-    RespondTo,
 }
 
 /// What the agent runs with. Saving restarts idle sessions with the change.
@@ -429,7 +427,6 @@ impl Picking for SettingsTab {
         match picker {
             Picker::Model => self.draft.model = value,
             Picker::Scope => self.draft.scope = value,
-            Picker::RespondTo => self.draft.respond_to = value,
         }
     }
 }
@@ -449,16 +446,6 @@ impl Render for SettingsTab {
             "channel"
         } else {
             "thread"
-        };
-        let respond_to = if self.draft.respond_to == "anyone" {
-            "anyone"
-        } else {
-            "owner"
-        };
-        let answers = if respond_to == "anyone" {
-            "Claude runs commands on this computer as you, with no approval step. Anyone who can mention it can ask it to."
-        } else {
-            "Messages from anyone else are ignored."
         };
         div()
             .flex()
@@ -500,21 +487,6 @@ impl Render for SettingsTab {
                     cx,
                 ),
                 None,
-                &c,
-            ))
-            .child(field(
-                "Answers",
-                choice(
-                    self.open,
-                    Picker::RespondTo,
-                    "claude-code-respond-to",
-                    respond_to,
-                    options(&RESPOND_TO),
-                    self.saving,
-                    window,
-                    cx,
-                ),
-                Some(answers.into()),
                 &c,
             ))
             .child(field(

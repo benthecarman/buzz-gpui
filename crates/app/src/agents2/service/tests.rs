@@ -8,6 +8,10 @@ fn bot() -> String {
     "c".repeat(64)
 }
 
+fn owner() -> String {
+    "a".repeat(64)
+}
+
 fn event(id: &str, patch: impl FnOnce(&mut EventData)) -> Arc<EventData> {
     let mut event = EventData {
         id: format!("{id:0<64}"),
@@ -81,7 +85,7 @@ fn mentions_wake_and_addressed_events_skip_watches() {
     let none = |_: &str| false;
     let mention = event("m", |e| e.tags.push(vec!["p".into(), agent.clone()]));
     assert_eq!(
-        kinds(&heard(&agent, &mention, false, &none, &watches)),
+        kinds(&heard(&agent, &owner(), &mention, &none, &watches)),
         ["mention"]
     );
     // A reaction to its message is addressed: no watch, and no run.
@@ -90,10 +94,10 @@ fn mentions_wake_and_addressed_events_skip_watches() {
         e.kind = 7;
         e.tags = vec![vec!["e".into(), "mine".into()]];
     });
-    assert!(heard(&agent, &reaction, false, &mine, &watches).is_empty());
+    assert!(heard(&agent, &owner(), &reaction, &mine, &watches).is_empty());
     // Anything else reaches the watches, one run per match.
     let plain = event("p", |_| {});
-    let triggers = heard(&agent, &plain, false, &none, &watches);
+    let triggers = heard(&agent, &owner(), &plain, &none, &watches);
     assert_eq!(kinds(&triggers), ["watch"]);
     let Trigger::Watch { slug, interest, .. } = &triggers[0] else {
         panic!("watch");
@@ -103,31 +107,40 @@ fn mentions_wake_and_addressed_events_skip_watches() {
 }
 
 #[test]
-fn an_owners_agents_do_not_answer_each_other_forever() {
+fn wakes_on_another_of_the_owners_agents_only_when_it_names_the_agent() {
     let agent = bot();
     let watches = compile(&attention(json!({
         "watch/all": {"type": "event", "interest_id": "default", "enabled": true,
             "since": 1, "channels": "all", "kinds": []},
     })));
     let mine = |id: &str| id == "mine";
-    let named = event("n", |e| e.tags.push(vec!["p".into(), agent.clone()]));
-    assert_eq!(
-        kinds(&heard(&agent, &named, true, &mine, &watches)),
-        ["mention"]
-    );
-    // A sibling's reply to it is not heard, even naming it.
-    let reply = event("r", |e| {
-        e.tags.push(vec!["p".into(), agent.clone()]);
+    let auth = vec!["auth".to_string(), owner(), String::new(), "f".repeat(128)];
+    let reply = |e: &mut EventData| {
         e.tags.push(vec![
             "e".into(),
             "mine".into(),
             String::new(),
             "reply".into(),
         ]);
+    };
+    // The sibling replies to its message without naming it, and says
+    // what its watch matches. Neither wakes it: two agents replying to
+    // each other would otherwise never stop.
+    let unnamed = event("r", |e| {
+        reply(e);
+        e.tags.push(auth.clone());
     });
-    assert!(heard(&agent, &reply, true, &mine, &watches).is_empty());
-    // Nor anything a watch would match.
-    assert!(heard(&agent, &event("w", |_| {}), true, &mine, &watches).is_empty());
+    assert!(heard(&agent, &owner(), &unnamed, &mine, &watches).is_empty());
+    // Naming it wakes it, even in reply to its own message.
+    let callback = event("c", |e| {
+        reply(e);
+        e.tags.push(vec!["p".into(), agent.clone()]);
+        e.tags.push(auth.clone());
+    });
+    assert_eq!(
+        kinds(&heard(&agent, &owner(), &callback, &mine, &watches)),
+        ["mention"]
+    );
 }
 
 #[test]
@@ -140,10 +153,10 @@ fn disabled_watches_and_bad_filters_never_match() {
     })));
     assert_eq!(watches.len(), 1);
     let none = |_: &str| false;
-    assert!(heard(&bot(), &event("x", |_| {}), false, &none, &watches).is_empty());
+    assert!(heard(&bot(), &owner(), &event("x", |_| {}), &none, &watches).is_empty());
     let go = event("g", |e| e.content = "go".into());
     assert_eq!(
-        kinds(&heard(&bot(), &go, false, &none, &watches)),
+        kinds(&heard(&bot(), &owner(), &go, &none, &watches)),
         ["watch"]
     );
 }

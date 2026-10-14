@@ -8,6 +8,10 @@ pub mod app_client;
 pub mod rpc;
 pub mod tools;
 
+/// The Buzz system prompt every agent type starts from; each appends its
+/// harness's own instructions after it (buzz-app's `prompt.md`).
+pub const BUZZ_PROMPT: &str = include_str!("prompt.md");
+
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

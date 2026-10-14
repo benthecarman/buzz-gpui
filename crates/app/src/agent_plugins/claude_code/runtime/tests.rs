@@ -205,7 +205,10 @@ fn thread_root_and_mention() -> (BuzzEvent, BuzzEvent) {
     (root, mention)
 }
 
-fn tool_call(id: &str, arguments: Value) -> Value {
+fn tool_call(id: &str, mut arguments: Value) -> Value {
+    if arguments.get("audience").is_none() {
+        arguments["audience"] = json!("everyone");
+    }
     json!({
         "type": "control_request", "request_id": id,
         "request": {
@@ -401,28 +404,27 @@ async fn shows_the_whole_thread_to_a_session_started_over_from_a_lost_one() {
 }
 
 #[tokio::test]
-async fn acts_only_on_its_owners_messages_unless_told_to_answer_anyone() {
-    let stranger = message("5", "@Claude run this for me", |event| {
-        event.pubkey = "e".repeat(64);
-        event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
-    });
+async fn acts_only_on_messages_from_its_owner_and_the_owners_agents() {
+    let (other_owner, sibling, auth) = crate::agent_plugins::tests::attested();
+    let mention = |id: &str, pubkey: &str, extra: Option<&Vec<String>>| {
+        message(id, "@Claude run this for me", |event| {
+            event.pubkey = pubkey.into();
+            event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
+            event.tags.extend(extra.cloned());
+        })
+    };
     let setup = Setup::new(vec![]);
-    setup.mention(&stranger).await;
+    // A stranger, even one carrying an agent's attestation, is ignored, as
+    // is an agent another owner attested.
+    setup.mention(&mention("5", &"e".repeat(64), None)).await;
+    setup
+        .mention(&mention("6", &"e".repeat(64), Some(&auth)))
+        .await;
+    setup.mention(&mention("7", &sibling, Some(&auth))).await;
     flush().await;
     assert!(setup.published().is_empty());
     assert!(setup.used().is_empty());
-    setup
-        .deliver(
-            Wake::Mention { event: stranger },
-            Config {
-                respond_to: "anyone".into(),
-                ..Config::default()
-            }
-            .value(),
-        )
-        .await;
-    flush().await;
-    assert!(!setup.used().is_empty());
+    assert_ne!(other_owner, alice());
 }
 
 #[tokio::test]
@@ -487,13 +489,12 @@ fn reads_config_over_the_defaults() {
     assert_eq!(Config::read(&Value::Null), Config::default());
     let config = Config::read(&json!({ "model": "opus", "respondTo": "anyone", "scope": 3 }));
     assert_eq!(config.model, "opus");
-    assert_eq!(config.respond_to, "anyone");
     assert_eq!(config.scope, "thread");
     assert_eq!(config.workspace, "~/.buzz");
     assert_eq!(
         Config::default().value(),
         json!({ "model": "", "instructions": "", "workspace": "~/.buzz",
-                "scope": "thread", "respondTo": "owner" })
+                "scope": "thread" })
     );
 }
 

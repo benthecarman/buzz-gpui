@@ -400,7 +400,10 @@ impl Fixture {
     }
 
     /// Codex calls a Buzz tool in turn `index` and gets its answer.
-    async fn tool_in(&self, name: &str, args: Value, index: usize, overrides: Value) -> Value {
+    async fn tool_in(&self, name: &str, mut args: Value, index: usize, overrides: Value) -> Value {
+        if name == "send" && args.get("audience").is_none() {
+            args["audience"] = json!("everyone");
+        }
         let id = {
             let mut tools = locked(&self.tools);
             *tools += 1;

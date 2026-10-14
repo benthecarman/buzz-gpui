@@ -43,9 +43,9 @@ while IFS= read -r line; do
     calls=$((calls + 1))
     path=$(printf '%s' "$line" | sed -n 's/.*READ:\([^ \\"]*\).*/\1/p')
     if [ -n "$path" ]; then
-      arguments=$(printf '{"path":"%s","final":true}' "$path")
+      arguments=$(printf '{"path":"%s","audience":"everyone","final":true}' "$path")
     else
-      arguments='{"text":"pong","final":true}'
+      arguments='{"text":"pong","audience":"everyone","final":true}'
     fi
     printf '{"type":"control_request","request_id":"tool-%s","request":{"subtype":"mcp_message","server_name":"buzz","message":{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"send","arguments":%s}}}}\n' "$calls" "$calls" "$arguments"
     # The tool's answer comes back before the turn ends.

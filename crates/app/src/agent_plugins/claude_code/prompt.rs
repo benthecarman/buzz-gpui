@@ -55,7 +55,12 @@ pub fn system_prompt(
     let mut parts = vec![
         section(
             "base",
-            &format!("{}\n\n{}", BASE_PROMPT.trim(), model.trim()),
+            &format!(
+                "{}\n\n{}\n\n{}",
+                BASE_PROMPT.trim(),
+                crate::buzz_mcp::BUZZ_PROMPT.trim(),
+                model.trim()
+            ),
             "",
         ),
         section(

@@ -41,9 +41,6 @@ pub struct Config {
     /// `thread` or `channel`: whether each thread is its own session, or
     /// the whole channel is one.
     pub scope: String,
-    /// `owner` or `anyone`: whose messages it acts on. Claude runs commands
-    /// as you, so by default only yours, as harness agents do.
-    pub respond_to: String,
 }
 
 impl Default for Config {
@@ -53,7 +50,6 @@ impl Default for Config {
             instructions: String::new(),
             workspace: "~/.buzz".into(),
             scope: "thread".into(),
-            respond_to: "owner".into(),
         }
     }
 }
@@ -74,9 +70,6 @@ impl Config {
         }
         if let Some(scope) = field("scope") {
             config.scope = scope;
-        }
-        if let Some(respond_to) = field("respondTo") {
-            config.respond_to = respond_to;
         }
         config
     }
@@ -461,9 +454,9 @@ impl ClaudeRuntime {
     pub async fn run(&self, run: Run) {
         let settings = Config::read(&run.config);
         let pubkey = run.agent.pubkey();
+        // Claude runs commands as you, so only you and your agents can ask.
         if let Wake::Mention { event } | Wake::Watch { event, .. } = &run.wake
-            && settings.respond_to != "anyone"
-            && event.pubkey != run.agent.owner()
+            && !crate::agent_plugins::from_owner(event, &run.agent.owner())
         {
             return;
         }

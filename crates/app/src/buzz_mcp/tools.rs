@@ -33,16 +33,21 @@ pub fn tools() -> Vec<Value> {
     vec![
         tool(
             "send",
-            "Post a message. Without channel, replies in the current thread.",
+            "Post a message. Without channel, replies in the current thread. A reply goes in its message's thread.",
             json!({
                 "text": str, "path": str, "channel": str, "reply": str,
                 "files": strs, "mentions": strs,
+                "audience": {
+                    "type": "string",
+                    "enum": ["everyone", "agents"],
+                    "description": "agents: only other agents need this (delegating, asking or answering an agent)",
+                },
                 "final": {
                     "type": "boolean",
                     "description": "Your last message this turn; ends the turn.",
                 },
             }),
-            &[],
+            &["audience"],
         ),
         tool(
             "edit",
@@ -179,6 +184,10 @@ impl Tools {
         let channel = channel
             .or_else(|| context.channel.clone())
             .ok_or("channel is required here.")?;
+        let audience = args.get("audience").and_then(Value::as_str);
+        if !matches!(audience, Some("everyone" | "agents")) {
+            return Err("audience must be everyone or agents.".into());
+        }
         let files = self.attach(&list(args.get("files"))).await?;
         let content = format!(
             "{}{}",
@@ -198,6 +207,9 @@ impl Tools {
         tags.extend(thread);
         tags.extend(mentions.into_iter().map(|key| vec!["p".to_string(), key]));
         tags.extend(files.tags);
+        if audience == Some("agents") {
+            tags.push(vec!["audience".into(), "agents".into()]);
+        }
         let event = self
             .client
             .publish(Template {
@@ -612,18 +624,15 @@ impl Tools {
 
     /// The e-tags of a reply to `parent`: one `reply` tag for a reply to a
     /// thread's root, `root` and `reply` for one nested deeper.
+    /// The e-tag of a reply to `parent`. Agents never nest: a reply to any
+    /// message in a thread is a reply to the thread's root.
     async fn thread_tags(&self, parent: &str) -> Result<Vec<Vec<String>>, String> {
         let root = if Some(parent) == self.context.root.as_deref() {
             parent.to_string()
         } else {
             root_of(&self.event(parent).await?)
         };
-        let e = |id: &str, marker: &str| vec!["e".into(), id.into(), String::new(), marker.into()];
-        Ok(if root == parent {
-            vec![e(&root, "reply")]
-        } else {
-            vec![e(&root, "root"), e(parent, "reply")]
-        })
+        Ok(vec![vec!["e".into(), root, String::new(), "reply".into()]])
     }
 
     /// The channel's members and their roles.

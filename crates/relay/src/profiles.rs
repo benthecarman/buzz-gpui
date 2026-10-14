@@ -129,19 +129,37 @@ fn conditions_hold(conditions: &str, kind: u16, created_at: u64) -> bool {
 /// `sha256("nostr:agent-auth:<agent>:<conditions>")`. Provenance only: the
 /// event stays authored by the agent.
 pub fn attested_owner(event: &Verified) -> Option<String> {
+    let tags: Vec<Vec<String>> = event.tags_named("auth").map(<[String]>::to_vec).collect();
+    attested_owner_of(
+        &event.pubkey_hex(),
+        event.kind_u16(),
+        event.created_at_secs(),
+        &tags,
+    )
+}
+
+/// [`attested_owner`] of an event the caller already checked the
+/// signature of, by its author, kind, time and tags.
+pub fn attested_owner_of(
+    target: &str,
+    kind: u16,
+    created_at: u64,
+    tags: &[Vec<String>],
+) -> Option<String> {
     use secp256k1::{Secp256k1, XOnlyPublicKey, schnorr::Signature};
     use sha2::{Digest, Sha256};
-    let mut auth = event.tags_named("auth");
+    let mut auth = tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("auth"));
     let tag = auth.next()?;
     if auth.next().is_some() || tag.len() != 4 {
         return None;
     }
     let (owner, conditions, sig) = (&tag[1], &tag[2], &tag[3]);
-    let target = event.pubkey_hex();
     if !is_hex(owner, 64)
         || !is_hex(sig, 128)
-        || *owner == target
-        || !conditions_hold(conditions, event.kind_u16(), event.created_at_secs())
+        || owner == target
+        || !conditions_hold(conditions, kind, created_at)
     {
         return None;
     }

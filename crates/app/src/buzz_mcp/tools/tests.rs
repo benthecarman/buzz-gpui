@@ -207,7 +207,7 @@ async fn replies_in_the_current_thread_and_notifies_the_members_it_names() {
         &client,
         &in_thread(),
         "send",
-        json!({ "text": "@Alice Smith see `@Bob`" }),
+        json!({ "audience": "everyone", "text": "@Alice Smith see `@Bob`" }),
     )
     .await
     .unwrap();
@@ -232,7 +232,7 @@ async fn refuses_to_post_a_name_it_cannot_resolve_unless_told_who_it_means() {
         &client,
         &in_thread(),
         "send",
-        json!({ "text": "hi @Carol" }),
+        json!({ "audience": "everyone", "text": "hi @Carol" }),
     )
     .await
     .unwrap_err();
@@ -244,7 +244,7 @@ async fn refuses_to_post_a_name_it_cannot_resolve_unless_told_who_it_means() {
         &client,
         &in_thread(),
         "send",
-        json!({ "text": "hi @Carol", "mentions": [bob()] }),
+        json!({ "audience": "everyone", "text": "hi @Carol", "mentions": [bob()] }),
     )
     .await
     .unwrap();
@@ -256,13 +256,13 @@ async fn refuses_to_post_a_name_it_cannot_resolve_unless_told_who_it_means() {
 }
 
 #[tokio::test]
-async fn nests_a_reply_and_posts_a_files_text_and_images() {
+async fn replies_to_a_message_inside_a_thread_at_its_root_and_posts_a_files_text_and_images() {
     let client = fake(community());
     call(
         &client,
         &in_thread(),
         "send",
-        json!({ "reply": nested(), "path": "notes.md", "files": ["shot.png"] }),
+        json!({ "audience": "everyone", "reply": nested(), "path": "notes.md", "files": ["shot.png"] }),
     )
     .await
     .unwrap();
@@ -273,8 +273,7 @@ async fn nests_a_reply_and_posts_a_files_text_and_images() {
             content: "# notes.md\n![image](https://relay/media/x.png)".into(),
             tags: tags(&[
                 &["h", "chan"],
-                &["e", &root(), "", "root"],
-                &["e", &nested(), "", "reply"],
+                &["e", &root(), "", "reply"],
                 &[
                     "imeta",
                     "url https://relay/media/x.png",
@@ -295,7 +294,7 @@ async fn posts_at_the_channels_top_level_when_given_a_channel() {
         &client,
         &in_thread(),
         "send",
-        json!({ "channel": "other", "text": "hello" }),
+        json!({ "audience": "everyone", "channel": "other", "text": "hello" }),
     )
     .await
     .unwrap();
@@ -479,7 +478,7 @@ async fn replies_in_the_channel_of_the_message_it_answers() {
         &client,
         &in_thread(),
         "send",
-        json!({ "reply": elsewhere.id, "text": "over here" }),
+        json!({ "audience": "everyone", "reply": elsewhere.id, "text": "over here" }),
     )
     .await
     .unwrap();
@@ -554,4 +553,36 @@ fn npub_links_and_pubkeys() {
     assert_eq!(pubkey(&npub).unwrap(), key.to_hex());
     assert_eq!(pubkey(&"A".repeat(64)).unwrap(), "a".repeat(64));
     assert_eq!(pubkey("nope").unwrap_err(), "Not a pubkey: nope");
+}
+
+#[tokio::test]
+async fn tags_a_message_for_agents_and_needs_the_audience_said() {
+    let client = fake(community());
+    call(
+        &client,
+        &in_thread(),
+        "send",
+        json!({ "text": "@Bob run the suite", "audience": "agents" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        client.published.lock().unwrap()[0].tags,
+        tags(&[
+            &["h", "chan"],
+            &["e", &root(), "", "reply"],
+            &["p", &bob()],
+            &["audience", "agents"],
+        ])
+    );
+    for refused in [
+        json!({ "text": "hi" }),
+        json!({ "text": "hi", "audience": "humans" }),
+    ] {
+        let error = call(&client, &in_thread(), "send", refused)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "audience must be everyone or agents.");
+    }
+    assert_eq!(client.published.lock().unwrap().len(), 1);
 }
