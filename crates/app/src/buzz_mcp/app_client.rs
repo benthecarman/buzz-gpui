@@ -1,5 +1,5 @@
 //! The Buzz tools' client inside the app (buzz-app's
-//! `src/buzz-mcp/app-client.ts`), shared by the Claude Code and Codex
+//! `src/buzz-mcp/app-client.ts`), shared by the Claude and Codex
 //! types: the agent's host-held key signs and reads through its Agents2
 //! handle, files are read by a declared process on that host, and memory is
 //! read back through the owner, to whom it is encrypted.

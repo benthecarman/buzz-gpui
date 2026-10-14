@@ -1,6 +1,6 @@
 //! The Buzz tools as an MCP server inside the app (buzz-app's
 //! `src/buzz-mcp/rpc.ts`): answers one JSON-RPC message at a time, as
-//! Claude Code sends them over its stream-json pipe to an in-process
+//! Claude sends them over its stream-json pipe to an in-process
 //! (`sdk`) server. Holds no state between messages.
 
 use super::tools::{Reply, call_tool, tools};

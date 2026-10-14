@@ -156,7 +156,7 @@ pub struct HostSpawner {
 
 /// The agent types whose processes hosts run, by owner, as people know
 /// them.
-const OWNERS: &[(&str, &str)] = &[("claude-code", "Claude Code"), ("codex", "Codex")];
+const OWNERS: &[(&str, &str)] = &[("claude-code", "Claude"), ("codex", "Codex")];
 
 /// What to tell someone whose host is too old for `owner`'s processes:
 /// older than the process bridge, or than the type's declarations.
@@ -350,7 +350,7 @@ mod tests {
         let old = || RpcError::Failed("The other side does not support this request".into());
         assert_eq!(
             failure("claude-code", old()),
-            "Update this host to run Claude Code agents"
+            "Update this host to run Claude agents"
         );
         // A host from before Codex knows the bridge but not its processes.
         assert_eq!(

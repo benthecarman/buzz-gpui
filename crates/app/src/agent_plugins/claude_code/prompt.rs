@@ -39,7 +39,7 @@ fn section(tag: &str, body: &str, attributes: &str) -> String {
     format!("<{tag}{attributes}>\n{}\n</{tag}>", body.trim())
 }
 
-/// Appended to Claude Code's own system prompt.
+/// Appended to Claude's own system prompt.
 pub fn system_prompt(
     scope: Scope,
     cwd: &str,

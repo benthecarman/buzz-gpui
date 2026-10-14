@@ -1,5 +1,5 @@
-//! Claude Code agents, buzz-app's `src/agent-plugins/claude-code`: an
-//! Agents2 type whose agents are Claude Code sessions on the host that holds
+//! Claude agents, buzz-app's `src/agent-plugins/claude-code`: an
+//! Agents2 type whose agents are Claude sessions on the host that holds
 //! them, so they run on remote buzzd hosts as well as this computer. Each
 //! conversation the agent is in is one continuing session; Claude answers
 //! with the in-process Buzz tools. Compiled in: there is no plugin loading.
@@ -42,7 +42,7 @@ const HANDOVER: Duration = Duration::from_secs(2 * 60);
 /// The runtime and each host's setup view, kept for the app's lifetime.
 pub struct ClaudeCode {
     runtime: ClaudeRuntime,
-    /// Claude Code's setup on each host, by host entity.
+    /// Claude's setup on each host, by host entity.
     setups: HashMap<EntityId, ClaudeSetup>,
     _subscriptions: Vec<Subscription>,
 }
@@ -54,7 +54,7 @@ impl Global for ClaudeCodeGlobal {}
 /// Registers the type and starts its runtime. Call after `agents2::init`.
 pub fn init(cx: &mut App) {
     if let Err(error) = register_type(PLUGIN, Arc::new(ClaudeCodeType), cx) {
-        tracing::error!(%error, "could not register the Claude Code agent type");
+        tracing::error!(%error, "could not register the Claude agent type");
         return;
     }
     let state = cx.new(|cx| {
@@ -135,7 +135,7 @@ impl ClaudeCode {
         self.runtime.sync(synced);
     }
 
-    /// Claude Code's setup on the host that holds `pubkey`.
+    /// Claude's setup on the host that holds `pubkey`.
     fn setup_for(&mut self, pubkey: &str, cx: &mut Context<Self>) -> ClaudeSetup {
         let host: Option<Entity<HostConnection>> =
             Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(pubkey));
@@ -156,7 +156,7 @@ struct Unavailable;
 
 impl Render for Unavailable {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().child("Claude Code agents run only in the desktop app")
+        div().child("Claude agents run only in the desktop app")
     }
 }
 
@@ -166,12 +166,12 @@ impl AgentType for ClaudeCodeType {
     }
 
     fn title(&self) -> SharedString {
-        "Claude Code".into()
+        "Claude".into()
     }
 
     fn description(&self) -> Option<SharedString> {
         Some(
-            "Claude Code on this computer. Each thread it is mentioned in is one continuing session."
+            "Claude on this computer. Each thread it is mentioned in is one continuing session."
                 .into(),
         )
     }
@@ -201,7 +201,7 @@ impl AgentType for ClaudeCodeType {
     fn summary(&self, agent: &Agent) -> Option<String> {
         let model = Config::read(&agent.config).model;
         Some(if model.is_empty() {
-            "Claude Code".into()
+            "Claude".into()
         } else {
             model
         })
@@ -246,14 +246,14 @@ impl AgentType for ClaudeCodeType {
         Some(cx.background_spawn(async move {
             listed
                 .await
-                .unwrap_or_else(|_| Err("Claude Code stopped".to_string()))
+                .unwrap_or_else(|_| Err("Claude stopped".to_string()))
         }))
     }
 
     fn run(&self, delivery: Delivery, cx: &mut App) -> Task<Result<(), String>> {
-        tracing::debug!(agent = %delivery.agent.pubkey, "Claude Code delivery");
+        tracing::debug!(agent = %delivery.agent.pubkey, "Claude delivery");
         let Some(state) = ClaudeCode::global(cx) else {
-            return Task::ready(Err("Claude Code is not running".into()));
+            return Task::ready(Err("Claude is not running".into()));
         };
         let host =
             Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(&delivery.agent.pubkey));
@@ -293,9 +293,7 @@ impl AgentType for ClaudeCodeType {
         };
         let runtime = state.read(cx).runtime.clone();
         let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });
-        cx.background_spawn(
-            async move { handed.await.map_err(|_| "Claude Code stopped".to_string()) },
-        )
+        cx.background_spawn(async move { handed.await.map_err(|_| "Claude stopped".to_string()) })
     }
 
     fn timeout(&self) -> Duration {

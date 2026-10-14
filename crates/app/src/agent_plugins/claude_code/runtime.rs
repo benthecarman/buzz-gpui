@@ -33,7 +33,7 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
-    /// A Claude model or alias; empty uses Claude Code's own default.
+    /// A Claude model or alias; empty uses Claude's own default.
     pub model: String,
     pub instructions: String,
     /// The agent's working directory, absolute or `~/…`.
@@ -112,7 +112,7 @@ const MEMORY_TIMEOUT: Duration = Duration::from_secs(5);
 const NAMES_TIMEOUT: Duration = Duration::from_secs(2);
 const CHAT: [u32; 2] = [9, 40002];
 
-/// What a session can switch to between turns. Claude Code runs `max` as
+/// What a session can switch to between turns. Claude runs `max` as
 /// `xhigh` in a stream-json session, so it is not offered.
 const EFFORTS: [(&str, &str); 4] = [
     ("low", "Low"),
@@ -239,7 +239,7 @@ struct Inner {
     store: StoreFn,
 }
 
-/// Every Claude Code agent's sessions. Cheap to clone.
+/// Every Claude agent's sessions. Cheap to clone.
 #[derive(Clone)]
 pub struct ClaudeRuntime {
     inner: Arc<Inner>,
@@ -386,7 +386,7 @@ impl ClaudeRuntime {
             .iter()
             .find(|model| own == model.value || Some(&own) == model.resolved_model.as_ref())
             .map_or(own.clone(), |model| model.value.clone());
-        // An own model Claude Code does not list is still the one it runs.
+        // An own model Claude does not list is still the one it runs.
         if models.iter().any(|model| model.id == current) {
             return Ok(Models { current, models });
         }
@@ -394,7 +394,7 @@ impl ClaudeRuntime {
         let mut listed = vec![Model {
             id: current.clone(),
             label: if current.is_empty() {
-                "Claude Code".into()
+                "Claude".into()
             } else {
                 model_name(&current)
             },
@@ -567,7 +567,7 @@ impl ClaudeRuntime {
             if let (false, Some((agent, channel, event))) = (settled.ok, report) {
                 let error = settled.error.unwrap_or_default();
                 if let Err(failure) = Self::report(agent.as_ref(), &channel, &event, &error).await {
-                    tracing::warn!(%failure, "Claude Code could not report a failed turn");
+                    tracing::warn!(%failure, "Claude could not report a failed turn");
                 }
             }
             this.notify();
@@ -648,9 +648,9 @@ impl ClaudeRuntime {
                     earlier.sort_by_key(|item| item.created_at);
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, "Claude Code could not read the conversation")
+                    tracing::warn!(%error, "Claude could not read the conversation")
                 }
-                Err(_) => tracing::warn!("Claude Code timed out reading the conversation"),
+                Err(_) => tracing::warn!("Claude timed out reading the conversation"),
             }
         }
         // A session already has its own replies; a new one is shown them too.
@@ -837,7 +837,7 @@ impl ClaudeRuntime {
                     .map(|memory| memory.body),
             ),
             Err(error) => {
-                tracing::warn!(%error, "Claude Code could not read the agent's memory");
+                tracing::warn!(%error, "Claude could not read the agent's memory");
                 None
             }
         };

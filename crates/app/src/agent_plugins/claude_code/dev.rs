@@ -1,5 +1,5 @@
 //! Development only: `BUZZ_DEV_CLAUDE_CODE_TURNS=1` hands the selected
-//! community's first Claude Code agent two mentions from its owner, so its
+//! community's first Claude agent two mentions from its owner, so its
 //! Running sessions list fills without live events (the TLS test relay's
 //! WebSocket is not trusted by the relay client, so none arrive there).
 //! Debug builds only.
@@ -37,7 +37,7 @@ pub fn init(cx: &mut App) {
                 return;
             }
         }
-        tracing::warn!("no Claude Code agent to hand turns to");
+        tracing::warn!("no Claude agent to hand turns to");
     })
     .detach();
 }

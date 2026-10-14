@@ -136,7 +136,7 @@ fn state(state: &str) -> Value {
     })
 }
 
-/// As recorded from Claude Code 2.1: a message written just as a turn
+/// As recorded from Claude 2.1: a message written just as a turn
 /// ends is followed by idle, then running, and only then taken.
 #[tokio::test]
 async fn a_message_written_as_the_turn_ends_waits_for_its_own_turn() {

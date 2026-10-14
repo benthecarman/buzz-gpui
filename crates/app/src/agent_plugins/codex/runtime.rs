@@ -1506,7 +1506,7 @@ impl CodexRuntime {
                 "cwd": workspace,
                 "developerInstructions": developer_instructions(&name, &agent, None),
                 "approvalPolicy": "never",
-                // Matches Claude Code's bypassPermissions; only the owner
+                // Matches Claude's bypassPermissions; only the owner
                 // can start work.
                 "sandbox": "danger-full-access",
                 "config": {

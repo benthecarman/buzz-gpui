@@ -41,7 +41,7 @@ pub type ToolServer =
 #[derive(Clone, Default)]
 pub struct Launch {
     pub cwd: String,
-    /// Appended to Claude Code's own system prompt.
+    /// Appended to Claude's own system prompt.
     pub system_prompt: String,
     pub model: Option<String>,
     /// A saved session to continue.
@@ -52,7 +52,7 @@ pub struct Launch {
     pub tools: Option<ToolServer>,
 }
 
-/// A model Claude Code lists as one a session can switch to.
+/// A model Claude lists as one a session can switch to.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeModel {
@@ -99,7 +99,7 @@ impl Settled {
 
 /// What `claude` is started with: as the SDK starts it, reporting when it
 /// is idle, signed in as `claude auth login` left it, and never as part of
-/// a Claude Code session that started the app.
+/// a Claude session that started the app.
 pub fn env() -> BTreeMap<String, Option<String>> {
     let mut env = BTreeMap::new();
     env.insert("CLAUDE_CODE_ENTRYPOINT".into(), Some("sdk-ts".into()));
@@ -186,9 +186,9 @@ struct State {
     /// result.
     reports_state: bool,
     requests: u64,
-    /// Control requests awaiting Claude Code's answer, by request id.
+    /// Control requests awaiting Claude's answer, by request id.
     calls: HashMap<String, oneshot::Sender<Value>>,
-    /// The models Claude Code lists, from its answer to `initialize`.
+    /// The models Claude lists, from its answer to `initialize`.
     listed: Listed,
     /// The model the session reported when it began.
     reported: Option<String>,
@@ -204,7 +204,7 @@ struct State {
 
 struct Inner {
     process: Process,
-    /// The session's own model, as launched; `None` is Claude Code's
+    /// The session's own model, as launched; `None` is Claude's
     /// default.
     own_model: Option<String>,
     /// Replaced when a spare is given to the agent that takes it.
@@ -396,7 +396,7 @@ impl ClaudeProcess {
         self.state().listed.clone()
     }
 
-    /// The effort a turn without a pick runs at, when Claude Code reports
+    /// The effort a turn without a pick runs at, when Claude reports
     /// it.
     pub async fn read_effort(&self) -> Option<String> {
         self.read_own_effort().await;
@@ -477,16 +477,16 @@ impl ClaudeProcess {
         let claude = self.clone();
         async move {
             let Some(write) = write else {
-                return Settled::failed("Claude Code is not running");
+                return Settled::failed("Claude is not running");
             };
             if let Err(error) = write.await {
                 claude.settle(Settled::failed(format!(
-                    "Claude Code did not take the message: {error}"
+                    "Claude did not take the message: {error}"
                 )));
             }
             receiver
                 .await
-                .unwrap_or_else(|_| Settled::failed("Claude Code was stopped"))
+                .unwrap_or_else(|_| Settled::failed("Claude was stopped"))
         }
     }
 
@@ -501,15 +501,15 @@ impl ClaudeProcess {
         let (done, result) = oneshot::channel();
         let queued = self.inner.writes.send((format!("{message}\n"), done));
         async move {
-            queued.map_err(|_| "Claude Code is not running".to_string())?;
+            queued.map_err(|_| "Claude is not running".to_string())?;
             result
                 .await
-                .unwrap_or_else(|_| Err("Claude Code is not running".into()))
+                .unwrap_or_else(|_| Err("Claude is not running".into()))
         }
     }
 
     /// Writes a control request: the first future settles with the write,
-    /// the second with Claude Code's response.
+    /// the second with Claude's response.
     fn request(
         &self,
         request: Value,
@@ -535,7 +535,7 @@ impl ClaudeProcess {
         (written, answered)
     }
 
-    /// Sends a control request and resolves with Claude Code's response.
+    /// Sends a control request and resolves with Claude's response.
     fn call(&self, request: Value) -> impl std::future::Future<Output = Value> + Send + 'static {
         let (written, answer) = self.request(request);
         async move {
@@ -545,7 +545,7 @@ impl ClaudeProcess {
             }
             answer
                 .await
-                .unwrap_or_else(|_| failed("Claude Code exited".into()))
+                .unwrap_or_else(|_| failed("Claude exited".into()))
         }
     }
 
@@ -569,16 +569,16 @@ impl ClaudeProcess {
         tokio::spawn(async move {
             let answer = answer.await;
             if answer["subtype"] != "success" {
-                tracing::warn!(error = %answer["error"], "Claude Code did not change its model");
+                tracing::warn!(error = %answer["error"], "Claude did not change its model");
             }
         });
     }
 
     /// Changes effort without restarting, which keeps the prompt cache:
-    /// Claude Code sends effort per message. Clearing the flag setting
+    /// Claude sends effort per message. Clearing the flag setting
     /// would not restore the session's own level, so that is read before
     /// the first change and set back explicitly. Written ahead of the
-    /// message without waiting, as Claude Code takes its input in order, so
+    /// message without waiting, as Claude takes its input in order, so
     /// a turn never waits on it.
     fn set_effort(&self, effort: Option<String>) {
         if self.state().effort == effort {
@@ -588,7 +588,7 @@ impl ClaudeProcess {
         let level = {
             let mut state = self.state();
             let Some(level) = effort.clone().or_else(|| state.own_effort.clone()) else {
-                tracing::warn!("Claude Code's own effort is unknown; keeping the last one");
+                tracing::warn!("Claude's own effort is unknown; keeping the last one");
                 return;
             };
             state.effort = effort;
@@ -601,7 +601,7 @@ impl ClaudeProcess {
         tokio::spawn(async move {
             let answer = answer.await;
             if answer["subtype"] != "success" {
-                tracing::warn!(error = %answer["error"], "Claude Code did not change its effort");
+                tracing::warn!(error = %answer["error"], "Claude did not change its effort");
             }
         });
     }
@@ -647,7 +647,7 @@ impl ClaudeProcess {
         let calls: Vec<oneshot::Sender<Value>> =
             self.state().calls.drain().map(|(_, call)| call).collect();
         for call in calls {
-            let _ = call.send(json!({ "subtype": "error", "error": "Claude Code exited" }));
+            let _ = call.send(json!({ "subtype": "error", "error": "Claude exited" }));
         }
         let error = {
             let mut state = self.state();
@@ -656,7 +656,7 @@ impl ClaudeProcess {
                 let last = state.stderr.trim().lines().last().unwrap_or("").to_string();
                 if last.is_empty() {
                     format!(
-                        "Claude Code exited ({})",
+                        "Claude exited ({})",
                         code.map_or("signal".into(), |code| code.to_string())
                     )
                 } else {
@@ -689,7 +689,7 @@ impl ClaudeProcess {
         }
         // Its output can't be followed any more, so it stops.
         if oversized {
-            self.state().last_error = Some("Claude Code output frame is too large".into());
+            self.state().last_error = Some("Claude output frame is too large".into());
             let claude = self.clone();
             tokio::spawn(async move { claude.kill().await });
         }
@@ -789,7 +789,7 @@ impl ClaudeProcess {
                         .filter(|result| !result.is_empty())
                         .map(str::to_string)
                         .unwrap_or_else(|| {
-                            format!("Claude Code stopped ({})", subtype.unwrap_or("undefined"))
+                            format!("Claude stopped ({})", subtype.unwrap_or("undefined"))
                         }),
                 );
             }
@@ -808,7 +808,7 @@ impl ClaudeProcess {
         });
     }
 
-    /// Answers what Claude Code asks its host: calls to the Buzz tools, the
+    /// Answers what Claude asks its host: calls to the Buzz tools, the
     /// hook after `send`, and, since permissions are bypassed, anything
     /// else only so an unexpected request does not stall the turn.
     fn answer(&self, message: Value) {

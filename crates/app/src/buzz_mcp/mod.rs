@@ -1,6 +1,6 @@
 //! The Buzz tools an agent acts with, a port of buzz-app's `src/buzz-mcp`.
 //!
-//! Claude Code agents call them as an in-process MCP server over their
+//! Claude agents call them as an in-process MCP server over their
 //! stream-json pipe ([`rpc::respond`]); whoever holds the agent's key
 //! implements [`BuzzClient`], so the tools never see the key itself.
 

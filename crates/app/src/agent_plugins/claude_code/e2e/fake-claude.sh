@@ -1,11 +1,11 @@
 #!/bin/sh
-# A stand-in for Claude Code for the end-to-end test: answers --version and
+# A stand-in for Claude for the end-to-end test: answers --version and
 # `auth status`, and speaks enough stream-json for Buzz. Each user message
 # is answered with a final `send` through the in-process Buzz tools; a
 # message holding READ:<path> sends that file's text instead.
 case "$1" in
 --version)
-  echo "2.1.3 (Claude Code)"
+  echo "2.1.3 (Claude)"
   exit 0
   ;;
 auth)

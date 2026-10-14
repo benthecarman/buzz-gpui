@@ -252,7 +252,7 @@ fn remote_token(host: &RemoteHost) -> Option<String> {
 }
 
 struct Answers {
-    /// Claude Code process output, by handle.
+    /// Agent type process output, by handle.
     processes: ProcessSinks,
 }
 

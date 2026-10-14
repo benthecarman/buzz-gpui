@@ -1,4 +1,4 @@
-//! Claude Code on a host: whether it is installed and signed in, and the
+//! Claude on a host: whether it is installed and signed in, and the
 //! installer and sign-in, each run as a declared process (buzz-app's
 //! `setup.ts`).
 
@@ -61,7 +61,7 @@ pub async fn check_claude(spawn: &Spawner) -> ClaudeStatus {
                 let stderr = stderr.trim();
                 return ClaudeStatus::Error {
                     message: if stderr.is_empty() {
-                        "Claude Code did not start".into()
+                        "Claude did not start".into()
                     } else {
                         stderr.into()
                     },
@@ -115,7 +115,7 @@ pub struct SetupState {
     pub output: String,
 }
 
-/// The one view of Claude Code on a host. Cheap to clone.
+/// The one view of Claude on a host. Cheap to clone.
 #[derive(Clone)]
 pub struct ClaudeSetup {
     inner: Arc<Inner>,
@@ -130,7 +130,7 @@ struct Inner {
 }
 
 /// Why setup cannot run without a host to run it on.
-pub const NO_HOST: &str = "Claude Code agents run only in the desktop app";
+pub const NO_HOST: &str = "Claude agents run only in the desktop app";
 
 impl ClaudeSetup {
     pub fn new(spawn: Option<Spawner>) -> Self {

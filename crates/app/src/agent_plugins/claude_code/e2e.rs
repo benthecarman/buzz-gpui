@@ -352,7 +352,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
         destination: relay.clone(),
         owner: alice.pubkey_hex(),
         agent_type: format!("{}/{}", super::PLUGIN, super::TYPE_ID),
-        name: "Claude Code Test".into(),
+        name: "Claude Test".into(),
     })
     .await
     else {
@@ -389,7 +389,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
 
     let handle = AgentHandle {
         pubkey: pubkey.clone(),
-        name: "Claude Code Test".into(),
+        name: "Claude Test".into(),
         owner: alice.pubkey_hex(),
         host: HostLink {
             client: client.clone(),
@@ -422,7 +422,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
             vec!["h".into(), general.clone()],
             vec!["p".into(), pubkey.clone()],
         ],
-        format!("@Claude Code Test ping {}", now()),
+        format!("@Claude Test ping {}", now()),
     )
     .await;
     let event: BuzzEvent = serde_json::from_value(serde_json::to_value(&mention).unwrap()).unwrap();

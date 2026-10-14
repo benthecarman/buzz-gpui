@@ -93,7 +93,7 @@ type Starting = Shared<BoxFuture<'static, Option<Arc<Live>>>>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
     pub models: Vec<ClaudeModel>,
-    /// The model it runs, as Claude Code reports it.
+    /// The model it runs, as Claude reports it.
     pub model: Option<String>,
     pub effort: Option<String>,
 }
@@ -297,7 +297,7 @@ impl AgentSessions {
                     let result = {
                         let (this, holder) = (self.clone(), process.clone());
                         async move {
-                            let stopped = || "Claude Code was stopped".to_string();
+                            let stopped = || "Claude was stopped".to_string();
                             let current = |this: &AgentSessions| {
                                 let state = this.state();
                                 !state.disposed
@@ -382,7 +382,7 @@ impl AgentSessions {
         DeliverOptions { steer, fresh, pick }: DeliverOptions,
     ) -> Settled {
         if self.state().disposed {
-            return Settled::failed("Claude Code was stopped");
+            return Settled::failed("Claude was stopped");
         }
         // Messages reach the process in the order they arrived, even when
         // they all wait for it to start and wake together.
@@ -424,7 +424,7 @@ impl AgentSessions {
             let live = match this.start(resume).await {
                 Ok(live) => Some(live),
                 Err(error) => {
-                    tracing::warn!(%error, "Claude Code could not start");
+                    tracing::warn!(%error, "Claude could not start");
                     None
                 }
             };
@@ -452,11 +452,11 @@ impl AgentSessions {
             .opening
             .insert(key.clone(), (id, starting.clone()));
         let Some(live) = starting.await else {
-            return Settled::failed("Claude Code could not start");
+            return Settled::failed("Claude could not start");
         };
         if self.state().disposed {
             live.process.kill().await;
-            return Settled::failed("Claude Code was stopped");
+            return Settled::failed("Claude was stopped");
         }
         let delivered = self.answer(&key, &live, &text, pick.clone(), place).await;
         // A saved session that no longer loads starts over rather than
@@ -878,7 +878,7 @@ impl Spare {
             match ClaudeProcess::spawn(&spawn, &launch).await {
                 Ok(process) => Some(process),
                 Err(error) => {
-                    tracing::warn!(%error, "Claude Code could not start a spare session");
+                    tracing::warn!(%error, "Claude could not start a spare session");
                     None
                 }
             }
@@ -1006,7 +1006,7 @@ impl FileSessions {
                 .name("claude-sessions".into())
                 .spawn(move || write_sessions(path));
             if let Err(error) = spawned {
-                tracing::warn!(%error, "Claude Code sessions were not saved");
+                tracing::warn!(%error, "Claude sessions were not saved");
                 self.with(|loaded| loaded.writing = false);
             }
         }
@@ -1033,7 +1033,7 @@ fn write_sessions(path: PathBuf) {
             .map_err(std::io::Error::from)
             .and_then(|bytes| crate::atomic_file::write(&path, &bytes));
         if let Err(error) = written {
-            tracing::warn!(%error, "Claude Code sessions were not saved");
+            tracing::warn!(%error, "Claude sessions were not saved");
         }
     }
 }

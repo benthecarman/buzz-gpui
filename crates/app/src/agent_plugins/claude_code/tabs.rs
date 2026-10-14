@@ -1,4 +1,4 @@
-//! The type's tabs (buzz-app's `tabs.ts`): Claude, with Claude Code's
+//! The type's tabs (buzz-app's `tabs.ts`): Claude, with Claude's
 //! status on the agent's host, its setup and the agent's running sessions;
 //! and Settings, what the agent runs with.
 
@@ -17,7 +17,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 const MODELS: [(&str, &str); 4] = [
-    ("", "Claude Code default"),
+    ("", "Claude default"),
     ("opus", "Opus"),
     ("sonnet", "Sonnet"),
     ("haiku", "Haiku"),
@@ -27,23 +27,23 @@ const SCOPES: [(&str, &str); 2] = [
     ("channel", "One session per channel"),
 ];
 
-/// The line that says where Claude Code stands.
+/// The line that says where Claude stands.
 pub fn status_line(state: &SetupState) -> String {
     match (&state.status, state.checking) {
-        (None, _) | (_, true) => "Checking Claude Code…".into(),
-        (Some(ClaudeStatus::Missing), _) => "Claude Code is not installed.".into(),
+        (None, _) | (_, true) => "Checking Claude…".into(),
+        (Some(ClaudeStatus::Missing), _) => "Claude is not installed.".into(),
         (Some(ClaudeStatus::SignedOut { version }), _) => {
-            format!("Claude Code {version} needs you to sign in.")
+            format!("Claude {version} needs you to sign in.")
         }
         (Some(ClaudeStatus::Ready { version, account }), _) => match account {
-            Some(account) => format!("Claude Code {version} is ready ({account})."),
-            None => format!("Claude Code {version} is ready."),
+            Some(account) => format!("Claude {version} is ready ({account})."),
+            None => format!("Claude {version} is ready."),
         },
         (Some(ClaudeStatus::Error { message }), _) => message.clone(),
     }
 }
 
-/// Claude Code on the agent's host, and what this agent has running.
+/// Claude on the agent's host, and what this agent has running.
 pub struct ClaudeTab {
     pubkey: String,
     setup: ClaudeSetup,
@@ -173,7 +173,7 @@ impl Render for ClaudeTab {
         let mut buttons = div().flex().flex_wrap().gap(space::S2);
         if matches!(status, Some(ClaudeStatus::Missing)) {
             buttons = buttons.child(
-                Button::new("claude-code-install", "Install Claude Code")
+                Button::new("claude-code-install", "Install Claude")
                     .prominent()
                     .loading(running == Some(Step::Install))
                     .disabled(running.is_some())
@@ -471,7 +471,7 @@ impl Render for SettingsTab {
                 TextField::new(&self.workspace)
                     .surface(Surface::Floating)
                     .disabled(self.saving),
-                Some("The folder Claude Code works in. Use ~/ for your home folder.".into()),
+                Some("The folder Claude works in. Use ~/ for your home folder.".into()),
                 &c,
             ))
             .child(field(

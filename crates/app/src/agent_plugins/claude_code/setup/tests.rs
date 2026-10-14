@@ -98,7 +98,7 @@ async fn finds_claude_code_missing_when_it_cannot_be_started() {
         Script::Fail("Could not start claude: No such file"),
     )]));
     assert_eq!(check_claude(&spawn).await, ClaudeStatus::Missing);
-    let update = "Update this host to run Claude Code agents";
+    let update = "Update this host to run Claude agents";
     assert_eq!(
         crate::agent_plugins::process::update_host("claude-code"),
         update
@@ -107,7 +107,7 @@ async fn finds_claude_code_missing_when_it_cannot_be_started() {
     assert_eq!(
         check_claude(&old).await,
         ClaudeStatus::Error {
-            message: "Update this host to run Claude Code agents".into()
+            message: "Update this host to run Claude agents".into()
         }
     );
 }
@@ -115,7 +115,7 @@ async fn finds_claude_code_missing_when_it_cannot_be_started() {
 #[tokio::test]
 async fn reports_the_version_and_whether_it_is_signed_in() {
     let signed_out: Spawner = Arc::new(scripted(&[
-        ("claude --version", run("2.1.3 (Claude Code)\n", 0)),
+        ("claude --version", run("2.1.3 (Claude)\n", 0)),
         ("claude auth status --json", run("{\"loggedIn\":false}", 1)),
     ]));
     assert_eq!(
@@ -125,7 +125,7 @@ async fn reports_the_version_and_whether_it_is_signed_in() {
         }
     );
     let ready: Spawner = Arc::new(scripted(&[
-        ("claude --version", run("2.1.3 (Claude Code)\n", 0)),
+        ("claude --version", run("2.1.3 (Claude)\n", 0)),
         (
             "claude auth status --json",
             run(
@@ -202,7 +202,7 @@ async fn explains_that_it_needs_a_host() {
     assert_eq!(
         setup.snapshot().status,
         Some(ClaudeStatus::Error {
-            message: "Claude Code agents run only in the desktop app".into()
+            message: "Claude agents run only in the desktop app".into()
         })
     );
 }

@@ -39,7 +39,7 @@ pub struct FakeState {
 }
 
 impl FakeState {
-    /// Claude Code reports running and idle only when asked to.
+    /// Claude reports running and idle only when asked to.
     fn reports_state(&self) -> bool {
         self.options
             .env
@@ -48,7 +48,7 @@ impl FakeState {
     }
 }
 
-/// The models the fake lists, as Claude Code's `initialize` answer does.
+/// The models the fake lists, as Claude's `initialize` answer does.
 pub fn listed_models() -> Value {
     json!([
         { "value": "default", "resolvedModel": "claude-opus-5-5" },
@@ -160,7 +160,7 @@ impl FakeClaude {
             result["result"] = json!(error);
         }
         self.emit(result);
-        // Claude Code reports idle only when asked to.
+        // Claude reports idle only when asked to.
         if idle {
             self.emit(json!({
                 "type": "system", "subtype": "session_state_changed",
@@ -294,7 +294,7 @@ impl ProcessControl for FakeClaude {
     }
 }
 
-/// A spawn whose `claude` processes answer like Claude Code. Sessions named
+/// A spawn whose `claude` processes answer like Claude. Sessions named
 /// in `known` (or created by a process) can be resumed; others fail to
 /// load.
 #[derive(Clone, Default)]
