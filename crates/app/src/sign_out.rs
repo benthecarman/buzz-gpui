@@ -1,7 +1,7 @@
 //! Sign out of Buzz, ported from buzz-app's `src-tauri/src/sign_out.rs`
 //! until the fork's native library carries it. Signing out only records
-//! intent in a marker outside app data, closes signing, stops agents and
-//! restarts. The next launch, holding alone the lock for its key (and, for
+//! intent in a marker outside app data, closes signing, stops agent
+//! processes and restarts. The next launch, holding alone the lock for its key (and, for
 //! an erase, the lock every Buzz shares), does every deletion before any
 //! window, service or identity read: agent keys (when asked), the erase,
 //! then the human key. Each step is safe to repeat; any failure keeps the
@@ -57,26 +57,41 @@ struct Keep {
     inside: Option<&'static [Keep]>,
 }
 
-/// What a kept agent needs to be identified and start again: the host's
-/// agent list with each agent's settings and the shared agent defaults
-/// (buzz-app's `KEPT_FILES`), and, with file credentials, the agents' keys.
-/// Everything else under the host (saved logins, logs, run folders) goes.
+/// The host's folders of the Agents list and of the earlier agent system,
+/// whose agents Agents can still bring over.
+const AGENTS: &str = "agents2";
+const OLD_AGENTS: &str = "agent-controller";
+
+/// What kept agents need to be identified and start again (buzz-app's
+/// `KEPT`): the host's Agents list, the earlier system's list and defaults
+/// to bring over from, and, with file credentials, the agents' keys.
+/// Everything else under the host (hosting locks, saved logins, logs, run
+/// folders) goes.
 const KEEP: &[Keep] = &[
     Keep {
         name: "host",
-        inside: Some(&[Keep {
-            name: "agent-controller",
-            inside: Some(&[
-                Keep {
-                    name: "agents.json",
+        inside: Some(&[
+            Keep {
+                name: AGENTS,
+                inside: Some(&[Keep {
+                    name: "identities.json",
                     inside: None,
-                },
-                Keep {
-                    name: "defaults.json",
-                    inside: None,
-                },
-            ]),
-        }]),
+                }]),
+            },
+            Keep {
+                name: OLD_AGENTS,
+                inside: Some(&[
+                    Keep {
+                        name: "agents.json",
+                        inside: None,
+                    },
+                    Keep {
+                        name: "defaults.json",
+                        inside: None,
+                    },
+                ]),
+            },
+        ]),
     },
     Keep {
         name: "agent-keys",
@@ -162,9 +177,9 @@ impl Paths {
         }
     }
 
-    /// The embedded host's agent list.
-    fn registry(&self) -> PathBuf {
-        self.app_data.join("host").join("agent-controller")
+    /// The embedded host's folder, which holds its agent lists.
+    fn host(&self) -> PathBuf {
+        self.app_data.join("host")
     }
 
     /// Each erased folder, and what it keeps unless agents go too.
@@ -179,8 +194,10 @@ impl Paths {
     /// or removes, its trash and the kept folders must be real or absent.
     fn unlinked(&self, choices: Choices) -> std::io::Result<()> {
         if choices.remove_agents {
-            real_dir(&self.app_data.join("host"))?;
-            real_dir(&self.registry())?;
+            real_dir(&self.host())?;
+            for registry in [AGENTS, OLD_AGENTS] {
+                real_dir(&self.host().join(registry))?;
+            }
         }
         if !choices.wipe {
             return Ok(());
@@ -617,13 +634,13 @@ fn finish(
     paths
         .unlinked(choices)
         .map_err(|error| format!("check erased folders: {error}"))?;
-    let registry = paths.registry();
+    let host = paths.host();
     if choices.remove_agents
-        && registry
+        && host
             .try_exists()
             .map_err(|error| format!("check agent list: {error}"))?
     {
-        remove_agent_keys(&registry).map_err(|error| format!("remove agent keys: {error}"))?;
+        remove_agent_keys(&host).map_err(|error| format!("remove agent keys: {error}"))?;
     }
     let targets = if choices.wipe {
         paths.targets(choices)
@@ -758,10 +775,10 @@ pub fn boot() {
         tracing::warn!("no data folder; sign out is unavailable");
         return;
     };
-    let registry_root = paths.app_data.clone();
+    let app_data = paths.app_data.clone();
     match boot_with(
         &paths,
-        |registry| remove_agent_keys(&registry_root, registry),
+        |host| remove_agent_keys(&app_data, host),
         identity::remove,
     ) {
         Ok(instance) => {
@@ -772,8 +789,9 @@ pub fn boot() {
 }
 
 /// "Also remove my agents": deletes every local agent's key, from the
-/// store the embedded host uses.
-fn remove_agent_keys(app_data: &Path, registry: &Path) -> Result<(), String> {
+/// store the embedded host uses: the earlier system's agents, then the
+/// Agents list's. Absence is success, so it repeats safely.
+fn remove_agent_keys(app_data: &Path, host: &Path) -> Result<(), String> {
     use buzz_host::credentials::{FileCredentials, KeyringCredentials};
     let credentials: Box<dyn buzz_host::Credentials> =
         match crate::config::Config::load().embedded.credentials {
@@ -785,11 +803,19 @@ fn remove_agent_keys(app_data: &Path, registry: &Path) -> Result<(), String> {
                     .map_err(|error| error.to_string())?,
             ),
         };
-    buzz_agent_controller::delete_local_agent_keys(registry.to_path_buf(), &*credentials)
+    let old = host.join(OLD_AGENTS);
+    if old
+        .try_exists()
+        .map_err(|error| format!("check agent registry: {error}"))?
+    {
+        buzz_agent_controller::delete_local_agent_keys(old, &*credentials)?;
+    }
+    buzz_agent_controller::AppAgents::open(host.join(AGENTS).join("identities.json"))
+        .delete_keys(&*credentials)
 }
 
-/// Records the choices, closes signing, stops agents and restarts; the
-/// next launch deletes. Errors are what the dialog shows.
+/// Records the choices, closes signing, stops agent processes and
+/// restarts; the next launch deletes. Errors are what the dialog shows.
 pub fn sign_out(choices: Choices, cx: &mut App) -> Task<Result<(), String>> {
     if let Some(message) = current_refusal(choices.wipe, choices.remove_agents) {
         return Task::ready(Err(message.into()));

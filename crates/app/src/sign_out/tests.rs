@@ -30,6 +30,7 @@ fn paths_for(root: &Path) -> Paths {
 }
 
 const CONTROLLER: &str = "buzz-gpui/host/agent-controller";
+const AGENTS2: &str = "buzz-gpui/host/agents2";
 
 fn fixture() -> (Scratch, Paths) {
     let dir = Scratch::new();
@@ -37,6 +38,10 @@ fn fixture() -> (Scratch, Paths) {
     let controller = dir.path().join(CONTROLLER);
     fs::create_dir_all(&controller).unwrap();
     fs::write(controller.join("agents.json"), "agents").unwrap();
+    let agents = dir.path().join(AGENTS2);
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(agents.join("identities.json"), "[]").unwrap();
+    fs::write(agents.join("hosts.lock"), "").unwrap();
     fs::create_dir_all(paths.app_data.join("agent-keys")).unwrap();
     fs::write(paths.app_data.join("agent-keys/agent-1"), "key").unwrap();
     fs::write(paths.app_data.join("buzz.sqlite3"), "store").unwrap();
@@ -108,13 +113,15 @@ fn walk(root: &Path, dir: &Path) -> Vec<String> {
 }
 
 /// What an erase that keeps agents leaves.
-const KEPT_AGENTS: [&str; 7] = [
+const KEPT_AGENTS: [&str; 9] = [
     "buzz-gpui/",
     "buzz-gpui/agent-keys/",
     "buzz-gpui/agent-keys/agent-1",
     "buzz-gpui/host/",
     "buzz-gpui/host/agent-controller/",
     "buzz-gpui/host/agent-controller/agents.json",
+    "buzz-gpui/host/agents2/",
+    "buzz-gpui/host/agents2/identities.json",
     "cache/",
 ];
 
@@ -197,8 +204,9 @@ fn wipe_keeps_agents_unless_they_are_removed_too() {
         assert_eq!(
             finish_pending(
                 &paths,
-                |registry| {
-                    assert!(registry.join("agents.json").exists());
+                |host| {
+                    assert!(host.join("agent-controller/agents.json").exists());
+                    assert!(host.join("agents2/identities.json").exists());
                     removed.set(true);
                     Ok(())
                 },
