@@ -82,6 +82,29 @@ fn parses_a_consistent_channel() {
 }
 
 #[test]
+fn reads_the_type_from_the_first_t_tag_of_a_labeled_channel() {
+    // The relay writes the type first, then labels (NIP-CL).
+    let mut channel = Channel::new();
+    channel.meta.push(vec!["t".into(), "workspace".into()]);
+    channel.meta.push(vec!["t".into(), "team:core".into()]);
+    let state = channel.state().unwrap();
+    assert_eq!(state.channel_type, StateType::Stream);
+    assert_eq!(
+        state.role(&key(2)),
+        Some(MemberRole::Member),
+        "member authority reads the same state"
+    );
+
+    let mut channel = Channel::new();
+    channel.meta.retain(|tag| tag[0] != "t");
+    channel
+        .meta
+        .push(vec!["t".into(), "stream".into(), "extra".into()]);
+    channel.meta.push(vec!["t".into(), "workspace".into()]);
+    assert_eq!(channel.state().unwrap_err().0, "Malformed channel t state");
+}
+
+#[test]
 fn refuses_inconsistent_roles() {
     let mut channel = Channel::new();
     channel.admins.push((key(2), "admin"));

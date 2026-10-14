@@ -203,6 +203,18 @@ fn exact_tag<'a>(event: &'a Verified, name: &str) -> Result<Option<&'a str>, Lif
     Ok(first.map(|tag| tag[1].as_str()))
 }
 
+/// The channel type of relay-signed channel state (`channelTypeTag`).
+/// NIP-CL puts the type in the first `t` tag; later `t` tags are channel
+/// labels, not a second type.
+fn channel_type_tag(event: &Verified) -> Result<Option<&str>, LifecycleError> {
+    let first = event.tags.iter().find(|tag| tag.kind() == "t");
+    match first.map(|tag| tag.as_slice()) {
+        Some(tag) if tag.len() != 2 => Err(error("Malformed channel t state")),
+        Some(tag) => Ok(Some(tag[1].as_str())),
+        None => Ok(None),
+    }
+}
+
 fn record<'a>(
     events: &'a [Verified],
     kind: u16,
@@ -277,7 +289,7 @@ impl ChannelState {
         let (Some(metadata), Some(admins), Some(roster)) = (metadata, admins, roster) else {
             return Err(error(UNVERIFIED));
         };
-        let channel_type = match exact_tag(metadata, "t")? {
+        let channel_type = match channel_type_tag(metadata)? {
             Some("stream") => StateType::Stream,
             Some("forum") => StateType::Forum,
             Some("dm") => StateType::Dm,
