@@ -140,6 +140,12 @@ colors! {
     border_accent = "--border-accent": "#be93e4", "#8457aa";
     /// Hairline around message images and videos.
     border_image = "": "rgba(0, 0, 0, 0.1)", "rgba(255, 255, 255, 0.1)";
+    /// `--shadow-panel`'s 1px contour: a dark ring in light mode, a quiet
+    /// light rim in dark mode.
+    shadow_panel_ring = "": "rgba(0, 0, 0, 0.06)", "rgba(255, 255, 255, 0.08)";
+    /// `--shadow-panel`'s lift (light mode only).
+    shadow_panel_lift = "": "rgba(0, 0, 0, 0.06)", "rgba(0, 0, 0, 0)";
+    shadow_panel_soft = "": "rgba(0, 0, 0, 0.04)", "rgba(0, 0, 0, 0)";
     /// Media-glass rim.
     border_media_glass = "--border-media-glass": "rgba(255, 255, 255, 0.1)", "rgba(255, 255, 255, 0.1)";
 

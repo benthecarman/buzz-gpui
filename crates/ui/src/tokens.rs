@@ -211,6 +211,19 @@ pub mod shadow {
         ]
     }
 
+    /// `--shadow-panel`: workspace panels' translucent contour and subtle
+    /// lift (`0 0 0 1px ring, 0 1px 2px -1px lift, 0 2px 4px soft`); dark
+    /// mode keeps only the light rim, whose lift colors are transparent.
+    pub fn panel(ring: Hsla, lift: Hsla, soft: Hsla) -> Vec<BoxShadow> {
+        vec![
+            BoxShadow::new(px(0.), px(0.), ring).spread_radius(px(1.)),
+            BoxShadow::new(px(0.), px(1.), lift)
+                .blur_radius(px(2.))
+                .spread_radius(px(-1.)),
+            BoxShadow::new(px(0.), px(2.), soft).blur_radius(px(4.)),
+        ]
+    }
+
     /// The glass rims: `inset 0 1px 0 rim-lit, inset 0 -1px 0 rim-shade`.
     pub fn rims(lit: Hsla, shade: Hsla) -> Vec<BoxShadow> {
         vec![

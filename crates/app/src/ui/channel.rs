@@ -62,6 +62,8 @@ pub struct ChannelPage {
     list: ListState,
     /// The row holding keyboard focus last frame.
     keyboard_row: Option<EventId>,
+    /// The edge has shown history controls, so it keeps their space.
+    history_space: bool,
     composer: Entity<Composer>,
     input: Entity<TextareaState>,
     /// Row actions: the hover bar, menus, reactions and dialogs.
@@ -268,6 +270,7 @@ impl ChannelPage {
             items,
             list,
             keyboard_row: None,
+            history_space: false,
             composer,
             input,
             message_actions,
@@ -774,9 +777,11 @@ impl ChannelPage {
     }
 
     /// The list's first row: the window's error, then load older, its
-    /// progress, its retry, or the history window limit (§4.3).
+    /// progress, its retry, or the history window limit (§4.3). It is 16px
+    /// tall, or a control's height more once `history_space` reserves it.
     fn edge(
         snapshot: &buzz_relay_client::TimelineSnapshot,
+        history_space: bool,
         model: Entity<ChannelModel>,
         cx: &App,
     ) -> AnyElement {
@@ -784,7 +789,7 @@ impl ChannelPage {
         let error = snapshot.error.clone().map(|error| div().child(error));
         let frame = || {
             div()
-                .h(px(56.))
+                .min_h(px(if history_space { 56. } else { 16. }))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -924,6 +929,14 @@ impl Render for ChannelPage {
             window.focus(&self.focus, cx);
         }
         let snapshot = self.model.read(cx).snapshot.clone();
+        // Once the edge shows a history control it keeps that space, so
+        // removing the control cannot move the reader's anchor as older
+        // rows arrive.
+        self.history_space |= snapshot.has_more
+            || snapshot.loading_older
+            || snapshot.history_limited
+            || snapshot.error.is_some();
+        let history_space = self.history_space;
         if crate::perf::on() && !self.items.is_empty() {
             use crate::perf::{STARTUP, SWITCH, shown};
             shown(SWITCH, "timeline");
@@ -1087,7 +1100,7 @@ impl Render for ChannelPage {
                 .flex()
                 .flex_col()
                 .px(inset)
-                .child(Self::edge(&snapshot, self.model.clone(), cx))
+                .child(Self::edge(&snapshot, history_space, self.model.clone(), cx))
                 .when(!snapshot.has_more, |d| {
                     d.child(
                         div()
@@ -1141,6 +1154,7 @@ impl Render for ChannelPage {
                                 chat,
                                 div().px(inset).child(Self::edge(
                                     &edge_snapshot,
+                                    history_space,
                                     model.clone(),
                                     cx,
                                 )),

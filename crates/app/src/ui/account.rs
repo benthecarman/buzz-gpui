@@ -454,7 +454,7 @@ impl Account {
         div()
             .mt(px(4.))
             .w(rems(18.))
-            .p(rems(0.75))
+            .p(rems(0.5))
             .flex()
             .flex_col()
             .floating_surface(&c)

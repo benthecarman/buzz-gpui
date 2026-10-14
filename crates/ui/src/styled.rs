@@ -59,13 +59,18 @@ impl<T: Styled> TypeStyled for T {}
 
 /// The material recipes from `DS/styles/materials.css`.
 pub trait MaterialStyled: Styled + Sized {
-    /// `.panel`: opaque panel fill, 1px standard border, radius 20, shadow-xs.
+    /// `.panel`: opaque panel fill, radius 16, a transparent 1px border that
+    /// keeps the geometry, and `shadow-panel` for the contour and lift.
     fn panel_surface(self, colors: &Colors) -> Self {
         self.bg(colors.surface_panel)
             .border_1()
-            .border_color(colors.border_standard)
-            .rounded(radius::PANEL)
-            .shadow(shadow::xs())
+            .border_color(gpui_kit::transparent_black())
+            .rounded(radius::CONTAINER)
+            .shadow(shadow::panel(
+                colors.shadow_panel_ring,
+                colors.shadow_panel_lift,
+                colors.shadow_panel_soft,
+            ))
     }
 
     /// `floating-surface`: menus, selects, popovers, toasts. Radius 16,

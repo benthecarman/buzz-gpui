@@ -10,7 +10,8 @@ use buzz_relay_client::user_status::TEXT_LIMIT;
 use buzz_relay_client::{Session, StatusInput, UserStatus};
 use buzz_ui::{
     ActiveTheme, Button, Dialog, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
-    Popover, PopoverPadding, PopoverWidth, Select, Surface, TextField, TypeStyled,
+    NavigationItem, NavigationItemVariant, Popover, PopoverPadding, PopoverWidth, Select, Surface,
+    TextField, TypeStyled,
     tokens::{radius, size},
 };
 use chrono::{
@@ -764,27 +765,16 @@ impl Render for StatusEditor {
                 .gap(rems(0.5))
                 .child(Self::label("Quick statuses", cx))
                 .child(
+                    // Option rows, flush with the section's text.
                     div()
                         .flex()
                         .flex_col()
-                        .py(rems(0.5))
-                        .border_1()
-                        .border_color(c.border_standard)
-                        .rounded(radius::CONTROL)
-                        .overflow_hidden()
+                        .mx(rems(-0.5))
                         .children(QUICK.into_iter().map(|(emoji, label)| {
-                            div()
-                                .id(SharedString::from(format!("quick-{label}")))
-                                .flex()
-                                .items_center()
-                                .gap(rems(0.75))
-                                .min_h(rems(2.5))
-                                .px(rems(1.5))
-                                .text_label_sm()
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(c.affordance_floating_hover))
-                                .child(div().text_body_lg().child(emoji))
-                                .child(label)
+                            NavigationItem::new(SharedString::from(format!("quick-{label}")), label)
+                                .variant(NavigationItemVariant::Option)
+                                .surface(Surface::Floating)
+                                .leading(div().text_body_lg().child(emoji))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.emoji = emoji.to_string();
                                     this.text.update(cx, |state, cx| {

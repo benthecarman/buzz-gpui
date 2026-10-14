@@ -8,7 +8,7 @@ use crate::ui::pages::{self, Page, Placement};
 use crate::ui::resize_handle::ResizeHandle;
 use crate::ui::sidebar::{self, SidebarProps, SidebarView};
 use crate::ui::{overlay, window_controls};
-use buzz_ui::tokens::{duration, easing, shadow};
+use buzz_ui::tokens::{duration, easing};
 use buzz_ui::{
     ActiveTheme, IconButton, IconButtonSize, IconName, MaterialStyled, NavigationItem, Popover,
     PopoverPadding, PopoverWidth, Surface, Tab, TabVariant, Tabs,
@@ -38,6 +38,8 @@ pub(super) struct Motion {
 
 /// CSS `ease-in-out`.
 const EASE_IN_OUT: (f32, f32, f32, f32) = (0.42, 0., 0.58, 1.);
+/// The gap between the sidebar's and the content's panels (`space-1`).
+const SURFACE_GAP: f32 = 4.;
 
 impl Workspace {
     fn viewport_width(window: &Window) -> f32 {
@@ -463,14 +465,15 @@ impl Workspace {
             }
         }
 
+        // The sidebar is its own panel, 4px (`space-1`) from the content's.
         let column = navigation.map(|navigation| {
             div()
                 .id("shell-navigation")
                 .flex_none()
                 .h_full()
                 .w(px(width))
-                .border_r_1()
-                .border_color(c.border_standard)
+                .overflow_hidden()
+                .panel_surface(&c)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if event.keystroke.key == "escape" && this.drawer_open {
                         cx.stop_propagation();
@@ -490,21 +493,23 @@ impl Workspace {
                         .bottom_0()
                         .left_0()
                         .max_w(px(Self::content_width(window) - 16.))
-                        .bg(c.surface_panel)
-                        .shadow(shadow::sm())
                         .child(column)
                 }),
             ),
             (false, Some(column)) => (
                 Some(
+                    // The gap travels with the sidebar's track, which
+                    // keeps its end in place while it opens and closes.
                     div()
                         .relative()
+                        .flex()
+                        .justify_end()
                         .flex_none()
                         .h_full()
-                        .w(px(width * shown))
+                        .w(px((width + SURFACE_GAP) * shown))
                         .overflow_hidden()
                         .when(shown == 0., |this| this.invisible())
-                        .child(column),
+                        .child(div().flex_none().h_full().pr(px(SURFACE_GAP)).child(column)),
                 ),
                 None,
             ),
@@ -514,26 +519,31 @@ impl Workspace {
             let max = layout::clamp_sidebar(f32::MAX, Self::content_width(window));
             let weak = cx.entity().downgrade();
             let commit = weak.clone();
-            div().relative().w_0().h_full().child(
-                ResizeHandle::new("sidebar-resize", width, SIDEBAR_MIN, max)
-                    .on_resize(move |next, _, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.sidebar_view.width = next;
-                            cx.notify();
-                        });
-                    })
-                    .on_commit(move |_, cx| {
-                        let _ = commit.update(cx, |this, cx| this.save_sidebar_view(cx));
-                    }),
-            )
+            // Centred in the gap between the two panels.
+            div()
+                .relative()
+                .left(px(-SURFACE_GAP / 2.))
+                .w_0()
+                .h_full()
+                .child(
+                    ResizeHandle::new("sidebar-resize", width, SIDEBAR_MIN, max)
+                        .grip_opacity(0.5)
+                        .on_resize(move |next, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.sidebar_view.width = next;
+                                cx.notify();
+                            });
+                        })
+                        .on_commit(move |_, cx| {
+                            let _ = commit.update(cx, |this, cx| this.save_sidebar_view(cx));
+                        }),
+                )
         });
 
         div()
             .relative()
             .flex()
             .size_full()
-            .overflow_hidden()
-            .panel_surface(&c)
             .children(in_flow)
             .children(handle)
             .child(
@@ -545,6 +555,7 @@ impl Workspace {
                     .min_w_0()
                     .h_full()
                     .overflow_hidden()
+                    .panel_surface(&c)
                     .child(main),
             )
             .children(drawer)

@@ -32,6 +32,8 @@ pub struct ResizeHandle {
     direction: f32,
     on_resize: OnResize,
     on_commit: Option<OnCommit>,
+    /// The grip's opacity while shown (`--resize-grip-opacity`).
+    grip: f32,
 }
 
 /// What travels with a drag, so each handle answers only its own.
@@ -55,7 +57,14 @@ impl ResizeHandle {
             direction: 1.,
             on_resize: Rc::new(|_, _, _| {}),
             on_commit: None,
+            grip: 1.,
         }
+    }
+
+    /// A quieter grip, for a handle in a gap between surfaces.
+    pub fn grip_opacity(mut self, opacity: f32) -> Self {
+        self.grip = opacity;
+        self
     }
 
     /// The handle sits on the left edge of what it resizes.
@@ -108,6 +117,7 @@ impl RenderOnce for ResizeHandle {
         let dragging = start.get().is_some() && cx.has_active_drag();
         let engaged = dragging || focus.is_focused(window);
         let (width, min, max, direction) = (self.width, self.min, self.max, self.direction);
+        let grip = self.grip;
         let group = SharedString::from(format!("{id}-group"));
 
         let on_resize = self.on_resize.clone();
@@ -196,8 +206,8 @@ impl RenderOnce for ResizeHandle {
                             .h(px(56.))
                             .rounded_full()
                             .bg(c.border_focus)
-                            .opacity(if engaged { 1. } else { 0. })
-                            .group_hover(group, |this| this.opacity(1.)),
+                            .opacity(if engaged { grip } else { 0. })
+                            .group_hover(group, move |this| this.opacity(grip)),
                     ),
             )
     }

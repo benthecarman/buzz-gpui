@@ -3085,9 +3085,13 @@ fn reveal(instant: bool) -> Animation {
         .with_easing(|t: f32| 1. - (1. - t).powi(4))
 }
 
+/// The composer's corners: the send control's (10) plus its inset (6),
+/// measured from the outer border.
+const COMPOSER_RADIUS: f32 = 17.;
 /// A media tile's side: twice a file chip's height (40 + 2 × 2 + 2).
 const MEDIA_TILE: f32 = 92.;
-/// The composer's outer curve across its padding and border (20 - 6 - 1).
+/// The composer's outer curve across its padding and border (20 - 6 - 1;
+/// buzz-app keeps the panel radius here).
 const MEDIA_RADIUS: f32 = 13.;
 /// How long a removed tile takes to leave.
 const TILE_EXIT: Duration = Duration::from_millis(180);
@@ -3536,7 +3540,7 @@ impl Composer {
             .mb(px(-12.))
             .px(px(12.))
             .py(px(8.))
-            .rounded_t(px(19.))
+            .rounded_t(px(COMPOSER_RADIUS - 1.))
             .bg(c.surface_inset)
             .text_label_sm()
             .text_color(c.text_subtle)
@@ -5247,7 +5251,7 @@ impl Render for Composer {
             .pt(px(if has_attachments { 6. } else { 12. }))
             .px(px(6.))
             .pb(px(6.))
-            .rounded(px(20.))
+            .rounded(px(COMPOSER_RADIUS))
             .border_1()
             .border_color(if self.drag_over {
                 c.border_focus
