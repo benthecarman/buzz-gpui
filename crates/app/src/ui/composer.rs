@@ -17,6 +17,7 @@ mod live_markdown;
 mod mention_picker;
 pub(crate) mod mention_rules;
 mod mentions;
+mod models;
 pub(crate) mod poof;
 
 use super::emoji_picker::{self, Candidate, Dismissed, EmojiPicker, Picked};
@@ -257,6 +258,9 @@ pub struct Composer {
     tools: Vec<AnyView>,
     /// A new Me conversation's first message carries no files.
     no_attachments: bool,
+    /// Model and effort picked for mentioned agents' next run, and the
+    /// gauge popover's state.
+    run_models: models::RunModels,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -430,6 +434,10 @@ impl Composer {
             cx.notify();
         }));
         subscriptions.push(cx.observe(&queue, |_, _, cx| cx.notify()));
+        // Mentioned agents may become the viewer's, or change type.
+        if let Some(agents) = crate::agents2::Agents2::global(cx) {
+            subscriptions.push(cx.observe(&agents, |_, _, cx| cx.notify()));
+        }
         cx.on_release(move |this: &mut Self, cx| {
             this.write_draft(cx);
             let key = this.draft_key();
@@ -514,6 +522,7 @@ impl Composer {
             no_followup: false,
             tools,
             no_attachments: false,
+            run_models: models::RunModels::default(),
             _subscriptions: subscriptions,
         };
         composer.load_draft(window, cx);
@@ -730,6 +739,7 @@ impl Composer {
     /// remembered agents.
     fn clear_after_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completion = None;
+        self.run_models.picks.clear();
         let followup = std::mem::take(&mut self.followup);
         let next = if !self.no_followup && crate::ui::settings::remember_mentioned_agents(cx) {
             let (text, chips) = crate::ui::settings::followup_draft(&followup);
@@ -822,6 +832,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.error = None;
+        // Only agents still notified by this message are asked.
+        submission.mentions.picks =
+            models::sent_picks(&submission.mentions.picks, &submission.mentions.recipients);
         let has_files = !self.files.read(cx).items.is_empty();
         if submission.editing.is_none() && has_files {
             // A file that failed meanwhile (say, during the outside-channel
@@ -886,12 +899,18 @@ impl Composer {
             .collect();
         self.sending = true;
         self.completion = None;
+        // An edit, or a new conversation's first message, asks for no run.
+        let picks = if self.editing.is_none() && !self.no_attachments {
+            self.run_models.picks.clone()
+        } else {
+            Default::default()
+        };
         let mut submission = Submission {
             content,
             mentions: Mentions {
                 recipients: mentioned,
                 references: Vec::new(),
-                ..Default::default()
+                picks,
             },
             upload: None,
             editing: self.editing.clone(),
@@ -905,7 +924,12 @@ impl Composer {
                 .find(|c| c.id == self.channel);
             let viewer = community.session.viewer();
             match admission(channel, viewer, submission.mentions.recipients.clone()) {
-                Admission::Send(mentions) => submission.mentions = mentions,
+                Admission::Send(mentions) => {
+                    submission.mentions = Mentions {
+                        picks: std::mem::take(&mut submission.mentions.picks),
+                        ..mentions
+                    }
+                }
                 Admission::Ask { missing, can_add } => {
                     let draft = self.input.read(cx).value().to_string();
                     self.outsiders = Some(Outsiders {
@@ -5180,6 +5204,7 @@ impl Render for Composer {
         if self.drag_over && !cx.has_active_drag() {
             self.drag_over = false;
         }
+        self.refresh_run_models(cx);
         let can_submit = self.can_submit(cx);
         let editing = self.editing.is_some();
         let has_attachments = self.has_files(cx) && !editing;
@@ -5424,6 +5449,7 @@ impl Render for Composer {
                         .items_center()
                         .gap(px(8.))
                         .child(self.tools(cx))
+                        .children(self.run_models_button(cx))
                         .child(
                             IconButton::new("send", IconName::ArrowUp)
                                 .size(IconButtonSize::Sm)
@@ -5503,6 +5529,7 @@ impl Render for Composer {
             )
             .children(self.completion_popup(cx))
             .children(self.mention_picker_popup(cx))
+            .children(self.run_models_popup(cx))
             .children(picker)
             .child(shell)
             .when(!self.zoned, |d| d.children(drop_overlay(self, cx)))

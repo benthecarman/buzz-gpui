@@ -199,6 +199,10 @@ impl Fills {
 /// Button sizes (min-height 24 / 32 / 40 / 52).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ButtonSize {
+    /// A caption-sized inline choice, such as the composer's model name:
+    /// 24px high, 4px side padding and icon gap, 12px icons. Pair it with
+    /// the ghost variant for an unframed label.
+    Inline,
     Xs,
     /// Alias `compact`.
     Sm,
@@ -210,7 +214,7 @@ pub enum ButtonSize {
 impl ButtonSize {
     fn height(self) -> Rems {
         rems(match self {
-            Self::Xs => 1.5,
+            Self::Inline | Self::Xs => 1.5,
             Self::Sm => 2.,
             Self::Md => 2.5,
             Self::Lg => 3.25,
@@ -219,6 +223,7 @@ impl ButtonSize {
 
     fn padding_x(self) -> Rems {
         rems(match self {
+            Self::Inline => 0.25,
             Self::Xs => 0.75,
             Self::Sm => 1.,
             Self::Md | Self::Lg => 1.5,
@@ -227,6 +232,7 @@ impl ButtonSize {
 
     fn padding_y(self) -> Rems {
         rems(match self {
+            Self::Inline => 0.,
             Self::Xs => 0.25,
             Self::Sm => 0.375,
             Self::Md => 0.5,
@@ -236,16 +242,21 @@ impl ButtonSize {
 
     fn text(self) -> TextRole {
         match self {
-            Self::Xs => TextRole::Caption,
+            Self::Inline | Self::Xs => TextRole::Caption,
             _ => TextRole::LabelSm,
         }
     }
 
     fn icon(self) -> f32 {
         match self {
+            Self::Inline => 12.,
             Self::Xs | Self::Sm => 16.,
             Self::Md | Self::Lg => 24.,
         }
+    }
+
+    fn gap(self) -> Rems {
+        rems(if self == Self::Inline { 0.25 } else { 0.5 })
     }
 }
 
@@ -279,6 +290,7 @@ pub struct Button {
     /// A compact select's trigger: the outline at `border-standard`.
     quiet: bool,
     tooltip: Option<SharedString>,
+    label_color: Option<Hsla>,
     on_click: Option<ClickHandler>,
     focus: Option<FocusHandle>,
 }
@@ -300,9 +312,17 @@ impl Button {
             full_width: false,
             quiet: false,
             tooltip: None,
+            label_color: None,
             on_click: None,
             focus: None,
         }
+    }
+
+    /// Recolours the text alone, such as an inline choice's subtle label
+    /// beside a standard caret.
+    pub fn label_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.label_color = Some(color.into());
+        self
     }
 
     /// Makes the button take keyboard focus through `focus`, with the
@@ -425,13 +445,16 @@ impl RenderOnce for Button {
         let label = div()
             .flex()
             .items_center()
-            .gap(rems(0.5))
+            .gap(self.size.gap())
             .whitespace_nowrap()
             .when(self.loading, |this| this.opacity(0.))
             .when_some(self.icon, |this, icon| {
                 this.child(Icon::new(icon).size(icon_size).color(f.text))
             })
-            .child(self.label)
+            .child(match self.label_color.filter(|_| !self.disabled) {
+                Some(color) => div().text_color(color).child(self.label).into_any_element(),
+                None => self.label.into_any_element(),
+            })
             .when_some(self.icon_end, |this, icon| {
                 this.child(Icon::new(icon).size(icon_size).color(f.text))
             });

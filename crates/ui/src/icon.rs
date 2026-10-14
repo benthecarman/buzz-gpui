@@ -140,6 +140,7 @@ tabler_icons! {
     Flag => "outline/flag",
     FolderOpen => "outline/folder-open",
     FolderSimple => "outline/folder",
+    Gauge => "outline/gauge",
     Gear => "outline/settings",
     GitBranch => "outline/git-branch",
     GitCommit => "outline/git-commit",
