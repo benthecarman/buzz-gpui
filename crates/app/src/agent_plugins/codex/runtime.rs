@@ -26,11 +26,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
-/// The longest one turn may run.
-pub const TURN_DEADLINE: Duration = Duration::from_secs(29 * 60);
 /// Saved bindings per agent; older ones are forgotten, never Codex's own
 /// history.
 const SAVED_LIMIT: usize = 200;
@@ -39,7 +36,6 @@ const VIEWS: usize = 32;
 const DETAIL_LIMIT: usize = 4000;
 /// The abort reasons of buzz-app's `AbortController` and `AbortSignal`.
 const ABORTED: &str = "The operation was aborted.";
-const TIMED_OUT: &str = "The operation timed out.";
 const TURN_ENDED: &str = "The Codex turn has ended";
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1323,13 +1319,13 @@ impl CodexRuntime {
         entry: Arc<Entry>,
     ) {
         let signal = Signal::default();
-        // The entry's end, the turn's deadline, or the turn's own end.
+        // The entry's end, or the turn's own end. No deadline of our own:
+        // a turn runs until Codex ends it.
         let deadline = {
             let (signal, abort) = (signal.clone(), entry.abort.clone());
             tokio::spawn(async move {
                 tokio::select! {
                     reason = abort.wait() => signal.abort(&reason),
-                    () = tokio::time::sleep(TURN_DEADLINE) => signal.abort(TIMED_OUT),
                     _ = signal.wait() => {}
                 }
             })

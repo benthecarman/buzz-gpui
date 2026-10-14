@@ -1650,8 +1650,7 @@ impl Agents2 {
     }
 
     /// Counts a run as working until it and everything it handed to
-    /// [`Working::until`] have settled, or the longest run allowed has
-    /// passed. A mention run is reacted to, and shown typing here,
+    /// [`Working::until`] have settled, however long that takes. A mention run is reacted to, and shown typing here,
     /// meanwhile: both are STOPGAPs, and nothing shows without them.
     fn working(&self, agent: &AgentHandle, job: &Job, cx: &mut Context<Self>) -> Working {
         let runtime = Runtime::handle(cx);

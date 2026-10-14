@@ -5,7 +5,6 @@
 //! working hold stays.
 
 use super::attention::EventData;
-use super::registry::TIMEOUT_LIMIT;
 use super::runtime::AgentHandle;
 use buzz_host::api::AppAgentEvent;
 use futures::FutureExt;
@@ -31,18 +30,13 @@ pub struct Working {
 
 impl Working {
     /// A hold held by the run itself, which ends what `ends` started once
-    /// every hold is released, or the longest run allowed has passed.
+    /// every hold is released, however long that takes: the harness, not
+    /// Buzz, decides how long an agent works.
     pub(crate) fn new(ends: Vec<End>, runtime: tokio::runtime::Handle) -> Self {
-        let working = Self {
+        Self {
             state: Arc::new(Mutex::new(State { holds: 1, ends })),
             runtime,
-        };
-        let timeout = working.clone();
-        working.runtime.spawn(async move {
-            tokio::time::sleep(TIMEOUT_LIMIT).await;
-            timeout.stop();
-        });
-        working
+        }
     }
 
     /// A run with nothing to show.
