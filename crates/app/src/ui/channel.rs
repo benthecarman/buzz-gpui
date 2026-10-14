@@ -117,6 +117,8 @@ pub struct ChannelPage {
     /// A conversation on the Me page: "Message your agents", and only the
     /// viewer's own agents can be mentioned in.
     personal: bool,
+    /// Me's selected assistant, for sends that mention nobody.
+    selected_agent: Option<String>,
 }
 
 /// A header button toggling a channel panel (`channelLauncher`).
@@ -277,6 +279,7 @@ impl ChannelPage {
             launchers: Vec::new(),
             menu_panels: Vec::new(),
             personal: false,
+            selected_agent: None,
             jump: Jump::default(),
             focus,
             reporter: Reporter::default(),
@@ -302,8 +305,20 @@ impl ChannelPage {
     pub fn set_personal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.personal = true;
         self.composer.update(cx, |composer, cx| {
-            composer.set_placeholder("Message your agents".into(), window, cx)
+            composer.set_placeholder("Message your agents".into(), window, cx);
+            composer.set_chat(None, cx);
         });
+    }
+
+    /// Me's controls under the composer (assistant and project).
+    pub fn set_chat_controls(&mut self, controls: AnyView, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.set_chat(Some(controls), cx));
+    }
+
+    /// Me's selected assistant: a plain send goes to it (`selectedAgent`).
+    pub fn set_selected_agent(&mut self, agent: Option<String>) {
+        self.selected_agent = agent.filter(|agent| !agent.is_empty());
     }
 
     /// The header's members button and actions menu.
@@ -622,6 +637,11 @@ impl ChannelPage {
             )
         });
         let personal = self.personal;
+        // In Me a message naming nobody goes to the selected assistant.
+        let selected = self
+            .selected_agent
+            .clone()
+            .filter(|_| personal && mentions.recipients.is_empty());
         // With no recipients to resolve and no files to upload, the intent
         // is queued now, so the row shows on the next frame.
         let queued = (session_send.is_none() && submission.upload.is_none()).then(|| {
@@ -643,7 +663,7 @@ impl ChannelPage {
                     let mut explicit = mentions.recipients.clone();
                     explicit.append(&mut mentions.references);
                     super::me::recipients::prepare(
-                        &session, &channel, explicit, personal, known, profiles, rules,
+                        &session, &channel, explicit, selected, personal, known, profiles, rules,
                     )
                     .await
                 };
@@ -1018,7 +1038,10 @@ impl Render for ChannelPage {
         }
 
         let unread = self.unread.clone();
+        let chat = self.personal;
         let mut rows = Rows::new(viewer, directory);
+        // Me's chats put the viewer's own messages on the right.
+        rows.align_viewer = chat;
         let actions = self.message_actions.clone();
         MessageActions::fill(&actions, &mut rows, cx);
         rows.interaction.focused = super::message::keyboard_row(rows.in_thread, window);
@@ -1114,20 +1137,26 @@ impl Render for ChannelPage {
                 .child(
                     list(self.list.clone(), move |index, _, cx| {
                         if index == 0 {
-                            return div()
-                                .px(inset)
-                                .child(Self::edge(&edge_snapshot, model.clone(), cx))
-                                .into_any_element();
+                            return measure(
+                                chat,
+                                div().px(inset).child(Self::edge(
+                                    &edge_snapshot,
+                                    model.clone(),
+                                    cx,
+                                )),
+                            );
                         }
                         match items.get(index - 1) {
-                            Some(item) => div()
-                                .relative()
-                                .px(inset)
-                                .child(message::render(item, &rows, cx))
-                                .child(drawn.probe(index))
-                                // The end space scrolls with the history.
-                                .when(index == count, |d| d.pb(END_SPACE))
-                                .into_any_element(),
+                            Some(item) => measure(
+                                chat,
+                                div()
+                                    .relative()
+                                    .px(inset)
+                                    .child(message::render(item, &rows, cx))
+                                    .child(drawn.probe(index))
+                                    // The end space scrolls with the history.
+                                    .when(index == count, |d| d.pb(END_SPACE)),
+                            ),
                             None => div().into_any_element(),
                         }
                     })
@@ -1188,6 +1217,21 @@ impl Render for ChannelPage {
             .children(status)
             .child(composer)
             .children(overlays)
+    }
+}
+
+/// Me's chat transcript is centered at a reading measure
+/// (`data-chat-presentation`, 52rem); other conversations use the width.
+fn measure(chat: bool, row: Div) -> AnyElement {
+    if chat {
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(row.w_full().max_w(rems(52.)))
+            .into_any_element()
+    } else {
+        row.into_any_element()
     }
 }
 

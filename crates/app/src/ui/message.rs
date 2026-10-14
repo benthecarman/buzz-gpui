@@ -238,6 +238,9 @@ pub struct Rows {
     pub marks: Marks,
     /// Time chips and viewer opening (`media::RowMedia`).
     pub media: media::RowMedia,
+    /// Me's chats: the viewer's own messages sit on the right
+    /// (`alignViewer`).
+    pub align_viewer: bool,
 }
 
 /// Unread and agent activity the page follows for the rows it shows.
@@ -270,6 +273,7 @@ impl Rows {
             reaction_error: None,
             marks: Marks::default(),
             media: media::RowMedia::default(),
+            align_viewer: false,
         }
     }
 
@@ -467,7 +471,16 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
             .into_any_element()
     };
 
-    let mut body = div().flex().flex_col().flex_1().min_w_0();
+    // The viewer's message in a chat: right of the row, as wide as it
+    // needs up to 85% of it.
+    let aligned = rows.align_viewer && author == rows.viewer;
+    let mut body = div().flex().flex_col().min_w_0().map(|d| {
+        if aligned {
+            d.flex_none().max_w(relative(0.85))
+        } else {
+            d.flex_1()
+        }
+    });
     if item.head {
         body = body.child(byline(row, &name, rows, cx));
     }
@@ -543,6 +556,7 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         .child(stop)
         .relative()
         .flex()
+        .when(aligned, |d| d.flex_row_reverse())
         .gap(px(gap))
         .pt(if item.head { px(14.) } else { px(2.) })
         .pb(px(2.))

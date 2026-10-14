@@ -242,6 +242,14 @@ pub struct Composer {
     /// The agents the message being sent mentions as recipients, `(pubkey,
     /// chip text)`, kept for the next draft ("Remember mentioned agents").
     followup: Vec<(String, String)>,
+    /// Controls on their own row under the tools (Me's assistant and
+    /// project); hidden while editing.
+    trailing: Option<AnyView>,
+    /// Me's chat presentation (#1005): centered at the transcript's
+    /// measure, the tools on one row with Send.
+    chat: bool,
+    /// Me: no remembered-agent follow-up draft after a send.
+    no_followup: bool,
     /// Plugin tools in the toolbar (`composer_tools`).
     tools: Vec<AnyView>,
     /// A new Me conversation's first message carries no files.
@@ -494,6 +502,9 @@ impl Composer {
             capture_focus: cx.focus_handle(),
             wave_tick: std::cell::Cell::new((0, std::time::Instant::now())),
             followup: Vec::new(),
+            trailing: None,
+            chat: false,
+            no_followup: false,
             tools,
             no_attachments: false,
             _subscriptions: subscriptions,
@@ -505,6 +516,23 @@ impl Composer {
     /// Offers no attachments (a new conversation's first message).
     pub fn without_attachments(&mut self) {
         self.no_attachments = true;
+    }
+
+    /// Me's new-chat composer: `trailing` controls below its tools, at
+    /// the full width, and no remembered-agent follow-up.
+    pub fn set_trailing(&mut self, trailing: AnyView, cx: &mut Context<Self>) {
+        self.no_followup = true;
+        self.trailing = Some(trailing);
+        cx.notify();
+    }
+
+    /// Me's chat composer: centered, with `trailing` controls below its
+    /// tools, and no remembered-agent follow-up (`chatPresentation`).
+    pub fn set_chat(&mut self, trailing: Option<AnyView>, cx: &mut Context<Self>) {
+        self.chat = true;
+        self.no_followup = true;
+        self.trailing = trailing;
+        cx.notify();
     }
 
     /// The text field, for focus.
@@ -676,7 +704,7 @@ impl Composer {
     fn clear_after_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completion = None;
         let followup = std::mem::take(&mut self.followup);
-        let next = if crate::ui::settings::remember_mentioned_agents(cx) {
+        let next = if !self.no_followup && crate::ui::settings::remember_mentioned_agents(cx) {
             let (text, chips) = crate::ui::settings::followup_draft(&followup);
             let mut content = InputContent::new(text);
             for (range, id, chip) in chips {
@@ -5182,10 +5210,14 @@ impl Render for Composer {
             .children(self.context_box(cx))
             .children(self.capture_row(window, cx))
             .when(self.capture.is_none(), |d| {
+                // Me keeps the tools and Send on one row, with its
+                // controls on the row below.
+                let single = self.chat || self.trailing.is_some();
+                let trailing = self.trailing.clone().filter(|_| !editing);
                 d.child(
                     div()
                         .flex()
-                        .flex_wrap()
+                        .when(!single, |d| d.flex_wrap())
                         .items_center()
                         .gap(px(8.))
                         .child(self.tools(cx))
@@ -5204,6 +5236,17 @@ impl Render for Composer {
                                 ),
                         ),
                 )
+                .when_some(trailing, |d, trailing| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(8.))
+                            .w_full()
+                            .child(trailing),
+                    )
+                })
             })
             .children(self.error.clone().map(|error| {
                 div()
@@ -5232,10 +5275,13 @@ impl Render for Composer {
 
         // The picker fits the composer's width (`EmojiPicker` layout).
         let fit = self.picker.clone();
-        div()
+        let chat = self.chat;
+        let composer = div()
             .relative()
             .mx(px(16.))
-            .mb(px(16.))
+            .mb(if chat { px(12.) } else { px(16.) })
+            // Me's composer sits at the transcript's measure.
+            .when(chat, |d| d.w_full().max_w(rems(52.)))
             .child(
                 canvas(
                     move |bounds, window, cx| {
@@ -5261,11 +5307,19 @@ impl Render for Composer {
             .when(self.has_files(cx), |d| d.child(poof::preload()))
             .children(self.outsiders_dialog(window, cx))
             .children(self.preview_dialog(window, cx))
-            .children(
-                self.link.as_ref().map(|(dialog, _)| {
-                    overlay::modal(window, dialog.clone(), None).into_any_element()
-                }),
-            )
+            .children(self.link.as_ref().map(|(dialog, _)| {
+                overlay::modal(window, dialog.clone(), None).into_any_element()
+            }));
+        if chat {
+            div()
+                .flex()
+                .justify_center()
+                .w_full()
+                .child(composer)
+                .into_any_element()
+        } else {
+            composer.into_any_element()
+        }
     }
 }
 

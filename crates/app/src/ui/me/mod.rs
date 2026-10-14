@@ -3,12 +3,13 @@
 //!
 //! Me lists the conversations placed in it (the Me kit record's
 //! `channels`) in the viewer's Me groups. Choosing one shows it on its own
-//! board; "New conversation" starts one, which creates a private work
+//! board; "New chat" starts one, which creates a private work
 //! session, places it in Me and sends the first message. Which of these
 //! shows is Me's selection, kept per community by [`MeModel`], which the
 //! page and its sidebar share.
 
 mod board;
+mod controls;
 pub mod dialogs;
 mod new_session;
 pub mod pending;

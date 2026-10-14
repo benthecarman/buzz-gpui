@@ -1,4 +1,4 @@
-//! "Session settings" (`sessions/WorkspaceSettings.tsx`,
+//! "Project settings" (`sessions/WorkspaceSettings.tsx`,
 //! `DraftSessionSettings.tsx`, `WorkspaceFields.tsx`): project folders,
 //! a new worktree and Canvas for a session, a Me group's defaults, or a
 //! new conversation's draft.
@@ -1032,7 +1032,7 @@ impl WorkspaceSettings {
             if section && (!self.lineup.agents.is_empty() || !self.lineup.team_ids.is_empty()) {
                 fields = fields.child(
                     paragraph(
-                        "The selected template’s agents and teams are also included in new sessions.",
+                        "The selected template’s agents and teams are also included in new chats.",
                     )
                     .text_color(c.text_subtle),
                 );
@@ -1129,7 +1129,7 @@ impl Render for WorkspaceSettings {
         } else {
             "Save changes"
         };
-        let dialog = Dialog::new("me-session-settings", "Session settings")
+        let dialog = Dialog::new("me-session-settings", "Project settings")
             .stable_height()
             .on_close(cx.listener(|this, _, _, cx| this.close(cx)))
             .children(body)
@@ -1441,7 +1441,7 @@ mod tests {
         let saved = read_saved(&session, &target).await.unwrap();
         assert_eq!(saved.content, defaults);
         let record = kit::template(&saved.entries, &saved.recipe_id).unwrap();
-        assert_eq!(record.record["value"]["name"], "Launch sessions");
+        assert_eq!(record.record["value"]["name"], "Launch chats");
         assert_eq!(kit::tag(&record.record), kit::ME_KIT_TAG);
         // New conversations in the group start from them.
         let setup = load_session_setup(&session, &group, true).await.unwrap();

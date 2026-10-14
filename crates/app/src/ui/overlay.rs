@@ -165,3 +165,41 @@ pub fn dropdown(
             .with_priority(MENU_LAYER + 1),
         )
 }
+
+/// [`dropdown`] opening upward from its trigger, as a menu on a control at
+/// the bottom of the window does (`side="top"`).
+pub fn dropup(
+    window: &Window,
+    align: Align,
+    content: impl IntoElement,
+    on_dismiss: Dismiss,
+) -> impl IntoElement {
+    let anchor = match align {
+        Align::Start => Anchor::BottomLeft,
+        Align::End => Anchor::BottomRight,
+    };
+    div()
+        .absolute()
+        .top_0()
+        .map(|this| match align {
+            Align::Start => this.left_0(),
+            Align::End => this.right_0(),
+        })
+        .child(
+            deferred(anchored().position(point(px(0.), px(0.))).child(layer(
+                "menu-backdrop",
+                window,
+                Some(on_dismiss),
+            )))
+            .with_priority(MENU_LAYER),
+        )
+        .child(
+            deferred(
+                anchored()
+                    .anchor(anchor)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(div().id("dropup").occlude().mb(px(4.)).child(content)),
+            )
+            .with_priority(MENU_LAYER + 1),
+        )
+}

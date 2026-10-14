@@ -89,13 +89,35 @@ pub fn session_recipients(
     Ok(agents)
 }
 
+/// A selected assistant that left the viewer's agents (`prepareRecipients`).
+pub const ASSISTANT_UNAVAILABLE: &str =
+    "The selected assistant is no longer available. Choose another assistant and retry.";
+
+/// Me's recipients for a send: `selected` (the chat's assistant, given
+/// only when the message mentions nobody) if still one of the viewer's
+/// agents, else the explicit mentions.
+pub fn with_selected(
+    explicit: Vec<String>,
+    selected: Option<String>,
+    rules: &AgentRules,
+) -> Result<Vec<String>, String> {
+    match selected {
+        Some(agent) if !rules.selectable.contains(&agent) => Err(ASSISTANT_UNAVAILABLE.into()),
+        Some(agent) => Ok(vec![agent]),
+        None => Ok(explicit),
+    }
+}
+
 /// Before a send in a session: the recipients, with any mentioned agent
 /// who is not a member added first (`prepareRecipients`). In Me only the
-/// viewer's own agents may be added.
+/// viewer's own agents may be added, and a message naming nobody goes to
+/// the `selected` assistant.
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare(
     session: &buzz_relay_client::Session,
     channel: &str,
     explicit: Vec<String>,
+    selected: Option<String>,
     personal: bool,
     known: Vec<String>,
     profiles: Profiles,
@@ -108,7 +130,7 @@ pub async fn prepare(
         .cloned()
         .ok_or("The session changed. Review its channel and retry.")?;
     let recipients = if personal {
-        explicit
+        with_selected(explicit, selected, &rules)?
     } else {
         session_recipients(&summary, &profiles, &known, session.viewer(), explicit)?
     };
@@ -153,6 +175,27 @@ mod tests {
         assert_eq!(
             session_recipients(&channel, &profiles, &known, "me", vec!["x".into()]).unwrap(),
             ["x"]
+        );
+    }
+
+    #[test]
+    fn a_selected_assistant_takes_plain_sends_while_available() {
+        let rules = AgentRules {
+            selectable: vec!["a".into()],
+            archived: Vec::new(),
+        };
+        assert_eq!(
+            with_selected(Vec::new(), Some("a".into()), &rules).unwrap(),
+            ["a"]
+        );
+        assert_eq!(
+            with_selected(vec!["b".into()], None, &rules).unwrap(),
+            ["b"]
+        );
+        assert!(with_selected(Vec::new(), None, &rules).unwrap().is_empty());
+        assert_eq!(
+            with_selected(Vec::new(), Some("gone".into()), &rules).unwrap_err(),
+            ASSISTANT_UNAVAILABLE
         );
     }
 

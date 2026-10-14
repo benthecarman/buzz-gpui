@@ -1,6 +1,6 @@
 //! Me's sidebar (`me/MeSidebar.tsx`) and its grouped history
-//! (`sessions/SessionSections.tsx`): "New conversation", the viewer's Me
-//! groups, then "Conversations", each row with its actions menu. Rows share
+//! (`sessions/SessionSections.tsx`): "New chat", the viewer's Me groups
+//! as Projects, then "Chats", each row with its actions menu. Rows share
 //! the Messages sidebar's working indicator and activity popover.
 //!
 //! Groups and moves go through the Me groups store, which shows a move at
@@ -249,13 +249,13 @@ impl MeSidebar {
         let ids: HashSet<&String> = sections.iter().map(|s| &s.id).collect();
         groups.push(Group {
             id: String::new(),
-            name: "Conversations".into(),
+            name: "Chats".into(),
             rows: conversations
                 .iter()
                 .filter(|c| assigned(&c.id).is_none_or(|section| !ids.contains(section)))
                 .collect(),
         });
-        // Me hides an empty Conversations group.
+        // Me hides an empty Chats group.
         groups.retain(|group| !group.id.is_empty() || !group.rows.is_empty());
         groups
     }
@@ -289,7 +289,7 @@ impl MeSidebar {
             .text_color(c.text_standard)
             .hover(move |s| s.bg(ix.row_hover))
             .child(Self::heading_icon(IconName::Plus))
-            .child("New conversation")
+            .child("New chat")
             .on_click(cx.listener(|this, _, _, cx| this.select(Selection::New, cx)))
             .into_any_element()
     }
@@ -336,31 +336,17 @@ impl MeSidebar {
                 .child(div().min_w_0().truncate().child(group.name.clone()))
                 .child(caret);
         } else {
-            // The folder turns into the caret while the header is hovered.
+            // A project shows its disclosure caret, not a folder (#1005).
             heading = heading
                 .child(
                     div()
-                        .relative()
+                        .flex()
                         .flex_none()
+                        .items_center()
+                        .justify_center()
                         .w(rems(1.25))
                         .h(rems(1.5))
-                        .child(
-                            Self::heading_icon(IconName::FolderSimple)
-                                .absolute()
-                                .inset_0()
-                                .group_hover(hover.clone(), |s| s.opacity(0.)),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .opacity(0.)
-                                .group_hover(hover.clone(), |s| s.opacity(1.))
-                                .child(caret),
-                        ),
+                        .child(caret),
                 )
                 .child(div().min_w_0().truncate().child(group.name.clone()));
         }
@@ -393,7 +379,7 @@ impl MeSidebar {
                     .icon_size(15.)
                     .stroke_width(2.5)
                     .icon_color(c.text_unavailable)
-                    .tooltip(format!("New session in {name}"))
+                    .tooltip(format!("New chat in {name}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(Selection::NewIn(new_id.clone()), cx)
                     })),
@@ -446,9 +432,14 @@ impl MeSidebar {
                     true => self.row(row, &group.id, shared, window, cx),
                     false => self.row_placeholder(&row.id),
                 })
+                // A project's chats are indented under it.
+                .map(|row| match group.id.is_empty() {
+                    true => row,
+                    false => div().ml(rems(1.25)).child(row).into_any_element(),
+                })
                 .collect();
             if rows.is_empty() && !group.id.is_empty() {
-                rows.push(list_message("No sessions in this section.", cx).into_any_element());
+                rows.push(list_message("No chats in this project.", cx).into_any_element());
             }
             rows
         } else {
@@ -469,7 +460,7 @@ impl MeSidebar {
             (group.id.clone(), group.name.clone(), group.id.clone());
         Menu::new()
             .child(
-                MenuItem::new("me-section-settings", "Session settings…").on_click(cx.listener(
+                MenuItem::new("me-section-settings", "Project settings…").on_click(cx.listener(
                     move |this, _, window, cx| {
                         let Some(community) = this.community(cx) else {
                             return;
@@ -486,7 +477,7 @@ impl MeSidebar {
                 )),
             )
             .child(
-                MenuItem::new("me-delete-section", "Delete section")
+                MenuItem::new("me-delete-section", "Delete project")
                     .danger()
                     .disabled(!writable || self.deleting.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -882,7 +873,7 @@ impl MeSidebar {
                         this.hover_sub(*hovered, Sub::None, cx)
                     }))
                     .child(
-                        MenuItem::new("me-session-settings", "Session settings…")
+                        MenuItem::new("me-session-settings", "Chat settings…")
                             .icon(IconName::Gear)
                             .icon_size(16.)
                             .disabled(read_only)
@@ -941,7 +932,7 @@ impl MeSidebar {
         if !menu.section.is_empty() {
             let id = menu.id.clone();
             list = list.child(
-                MenuItem::new("me-move-conversations", "Conversations")
+                MenuItem::new("me-move-conversations", "Chats")
                     .on_click(cx.listener(move |this, _, _, cx| this.move_to(&id, None, cx))),
             );
         }
@@ -960,7 +951,7 @@ impl MeSidebar {
         }
         let (id, title) = (menu.id.clone(), menu.title.clone());
         list.child(
-            MenuItem::new("me-move-new", "New group…").on_click(cx.listener(
+            MenuItem::new("me-move-new", "New project…").on_click(cx.listener(
                 move |this, _, window, cx| {
                     let dialog =
                         dialogs::Dialog::new_section(id.clone(), title.clone(), window, cx);
@@ -974,12 +965,14 @@ impl MeSidebar {
     fn copy_menu(&self, menu: &RowMenu, cx: &mut Context<Self>) -> AnyElement {
         let (name, id, link) = (menu.title.clone(), menu.id.clone(), channel_link(&menu.id));
         Menu::new()
-            .child(MenuItem::new("me-copy-name", "Copy session name").on_click(
-                cx.listener(move |this, _, _, cx| this.copy(name.clone(), "Session name", cx)),
+            .child(MenuItem::new("me-copy-name", "Copy chat name").on_click(
+                cx.listener(move |this, _, _, cx| this.copy(name.clone(), "Chat name", cx)),
             ))
-            .child(MenuItem::new("me-copy-id", "Copy session ID").on_click(
-                cx.listener(move |this, _, _, cx| this.copy(id.clone(), "Session ID", cx)),
-            ))
+            .child(
+                MenuItem::new("me-copy-id", "Copy chat ID").on_click(
+                    cx.listener(move |this, _, _, cx| this.copy(id.clone(), "Chat ID", cx)),
+                ),
+            )
             .child(
                 MenuItem::new("me-copy-link", "Copy link to session").on_click(
                     cx.listener(move |this, _, _, cx| this.copy(link.clone(), "Session link", cx)),
@@ -1010,7 +1003,7 @@ impl MeSidebar {
             .collect();
         let mut out = Vec::new();
         if moves.iter().any(|m| m.pending) {
-            out.push(list_message("Saving section…", cx).into_any_element());
+            out.push(list_message("Saving project…", cx).into_any_element());
         }
         for failed in moves.iter().filter(|m| m.error.is_some()) {
             let (retry, dismiss) = (
@@ -1189,6 +1182,18 @@ impl Render for MeSidebar {
             selected: selected.as_deref(),
         };
         let groups = self.groups(&conversations, cx);
+        // The Me groups are the viewer's projects.
+        if groups.iter().any(|group| !group.id.is_empty()) {
+            content = content.child(
+                div()
+                    .px(rems(0.5))
+                    .pt(rems(0.5))
+                    .text_caption()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(c.text_subtle)
+                    .child("PROJECTS"),
+            );
+        }
         for group in &groups {
             content = content.child(self.group(group, &shared, window, cx));
         }

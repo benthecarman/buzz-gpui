@@ -7,6 +7,7 @@
 //! ([`pending`]), so a failure or restart resumes where it stopped and
 //! never makes a second session.
 
+use super::controls::{self, AssistantChosen, ChatControls, ProjectChosen};
 use super::dialogs::{self, DialogHost};
 use super::pending::{self, PendingStart};
 use super::recipients;
@@ -30,7 +31,12 @@ pub struct NewSession {
     model: Entity<MeModel>,
     /// `me` or `me:section:<id>`.
     key: String,
+    /// The project the chat starts in: the opened group's, until another
+    /// is chosen below the composer.
     section: Option<String>,
+    /// The follow-up assistant chosen below the composer, or empty.
+    agent: String,
+    controls: Entity<ChatControls>,
     composer: Entity<Composer>,
     pending: Option<PendingStart>,
     /// Unlocked to change the text after a failure before the message
@@ -73,7 +79,62 @@ impl NewSession {
             }
         });
         let pending = pending::read(&community, &key, cx);
+        // A sent invitation fixes the assistant; otherwise the saved choice.
+        let agent = match &pending {
+            Some(start) if start.invitation_id.is_some() => start.agent.clone().unwrap_or_default(),
+            _ => saved(&community, &format!("{key}:new-agent"), cx)
+                .or_else(|| pending.as_ref().and_then(|start| start.agent.clone()))
+                .filter(|agent| agent.len() == 64 && agent.bytes().all(|b| b.is_ascii_hexdigit()))
+                .unwrap_or_default(),
+        };
+        let section = saved(&community, &format!("{key}:new-project"), cx)
+            .map(|project| (!project.is_empty()).then_some(project))
+            .unwrap_or(section);
+        let controls = cx.new(|cx| ChatControls {
+            assistant: cx
+                .new(|_| controls::AssistantControl::new(community.clone(), agent.clone())),
+            project: cx.new(|cx| {
+                controls::ProjectControl::draft(
+                    community.clone(),
+                    section.clone().unwrap_or_default(),
+                    cx,
+                )
+            }),
+        });
+        composer.update(cx, |composer, cx| {
+            composer.set_trailing(controls.clone().into(), cx)
+        });
+        let (assistant, project) = {
+            let controls = controls.read(cx);
+            (controls.assistant.clone(), controls.project.clone())
+        };
         let subscriptions = vec![
+            cx.subscribe(&assistant, |this, _, AssistantChosen(agent), cx| {
+                this.agent = agent.clone();
+                save_view(
+                    &this.community,
+                    &format!("{}:new-agent", this.key),
+                    Some(agent),
+                    cx,
+                );
+                cx.notify();
+            }),
+            cx.subscribe(&project, |this, _, ProjectChosen(project), cx| {
+                let next = (!project.is_empty()).then(|| project.clone());
+                if next == this.section {
+                    return;
+                }
+                this.section = next;
+                save_view(
+                    &this.community,
+                    &format!("{}:new-project", this.key),
+                    Some(project),
+                    cx,
+                );
+                // The old project's draft settings no longer apply.
+                let _ = pending::set_draft_canvas(&this.community, &this.key, None, cx);
+                cx.notify();
+            }),
             cx.subscribe_in(
                 &composer,
                 window,
@@ -91,6 +152,8 @@ impl NewSession {
             model,
             key,
             section,
+            agent,
+            controls,
             composer,
             pending,
             editing: false,
@@ -182,6 +245,12 @@ impl NewSession {
             },
         };
         let mentions = current.recipients.clone();
+        // A plain first message goes to the chosen assistant; a mention
+        // overrides it.
+        if current.message_id.is_none() {
+            current.agent =
+                (mentions.is_empty() && !self.agent.is_empty()).then(|| self.agent.clone());
+        }
         let mut recipients: Vec<String> = if mentions.is_empty() {
             current.agent.clone().into_iter().collect()
         } else {
@@ -331,6 +400,10 @@ impl NewSession {
                     Ok(()) => {
                         pending::clear(&this.community, &this.key, cx);
                         let _ = pending::set_draft_canvas(&this.community, &this.key, None, cx);
+                        let key = this.key.clone();
+                        save_view(&this.community, &format!("{key}:new-agent"), None, cx);
+                        save_view(&this.community, &format!("{key}:new-project"), None, cx);
+                        controls::write_assistant(&this.community, &current.id, &this.agent, cx);
                         this.pending = None;
                         this.composer
                             .update(cx, |composer, cx| composer.sent(window, cx));
@@ -388,6 +461,13 @@ impl NewSession {
                             if next.invitation_id.as_deref() == Some(hex.as_str()) {
                                 next.invitation_id = None;
                                 next.agent = None;
+                                // A rejected invitation's assistant is chosen again.
+                                this.agent.clear();
+                                let key = format!("{}:new-agent", this.key);
+                                save_view(&this.community, &key, None, cx);
+                                let assistant = this.controls.read(cx).assistant.clone();
+                                assistant
+                                    .update(cx, |control, cx| control.set_value(String::new(), cx));
                             } else {
                                 next.message_id = None;
                             }
@@ -439,7 +519,7 @@ impl NewSession {
                 });
             });
             let content = Menu::new().child(
-                MenuItem::new("me-new-settings", "Session settings…")
+                MenuItem::new("me-new-settings", "Chat settings…")
                     .icon(IconName::Gear)
                     .icon_size(16.)
                     .disabled(disabled)
@@ -459,7 +539,7 @@ impl NewSession {
         });
         PanelHeader::new()
             .joined(true)
-            .label(Some(IconName::Hash), "New conversation")
+            .label(Some(IconName::Hash), "New chat")
             .action(
                 div()
                     .relative()
@@ -475,6 +555,28 @@ impl NewSession {
                     )
                     .children(menu),
             )
+    }
+}
+
+/// A new chat's saved string choice (`readView`).
+fn saved(community: &Entity<Community>, key: &str, cx: &App) -> Option<String> {
+    cx.global::<crate::community::AppState>()
+        .store
+        .view_state(&community.read(cx).partition(), key)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<String>(&json).ok())
+}
+
+/// Saves (or with `None`, clears) a new chat's choice.
+fn save_view(community: &Entity<Community>, key: &str, value: Option<&str>, cx: &App) {
+    let json = value.map(|value| serde_json::to_string(value).expect("strings serialize"));
+    if let Err(error) = cx
+        .global::<crate::community::AppState>()
+        .store
+        .set_view_state(&community.read(cx).partition(), key, json.as_deref())
+    {
+        tracing::warn!(%error, "could not save the new chat's choice");
     }
 }
 
@@ -507,8 +609,21 @@ impl Render for NewSession {
                 .as_ref()
                 .and_then(|data| data.sections.iter().find(|s| s.id == *section))
                 .map(|s| s.name.clone())
-                .unwrap_or_else(|| "this section".into())
+                .unwrap_or_else(|| "this project".into())
         });
+        // The assistant is fixed once its invitation or the message is
+        // sent; the project once anything is.
+        let (assistant, project) = {
+            let controls = self.controls.read(cx);
+            (controls.assistant.clone(), controls.project.clone())
+        };
+        let fixed = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.invitation_id.is_some() || p.message_id.is_some());
+        let started = self.pending.is_some();
+        assistant.update(cx, |control, cx| control.set_disabled(busy || fixed, cx));
+        project.update(cx, |control, cx| control.set_disabled(busy || started, cx));
         let note = |text: &str| {
             div()
                 .mt(rems(0.75))
@@ -530,7 +645,7 @@ impl Render for NewSession {
             .w_full()
             .mt_auto()
             .when_some(section_name, |this, name| {
-                this.child(note(&format!("New session in {name}")).mb(rems(0.5)))
+                this.child(note(&format!("New chat in {name}")).mb(rems(0.5)))
             })
             .child(self.composer.clone())
             .when(!available, |this| {

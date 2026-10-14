@@ -1,5 +1,5 @@
 //! Me's dialogs, shown over the sidebar or the conversation that opened
-//! them: "Create new section", "Rename session", "Session settings" and
+//! them: "Create new project", "Rename session", "Project settings" and
 //! "Share conversation". Each is its own view and reports back through
 //! [`DialogEvent`].
 
@@ -167,7 +167,7 @@ impl Dialog {
     }
 }
 
-/// "Create new section" (`NewSection` in `SessionSections.tsx`).
+/// "Create new project" (`NewSection` in `SessionSections.tsx`).
 pub struct NewSectionDialog {
     channel: String,
     title: String,
@@ -184,7 +184,7 @@ impl EventEmitter<DialogEvent> for NewSectionDialog {}
 
 impl NewSectionDialog {
     fn new(channel: String, title: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Section name"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         input.update(cx, |state, cx| state.focus(window, cx));
         let subscription =
             cx.subscribe_in(
@@ -230,9 +230,9 @@ impl NewSectionDialog {
 impl Render for NewSectionDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.name(cx).is_empty();
-        DialogBox::new("me-new-section", "Create new section")
+        DialogBox::new("me-new-section", "Create new project")
             .description(format!(
-                "Move {} into a personal section that syncs across Buzz.",
+                "Move {} into a personal project that syncs across Buzz.",
                 self.title
             ))
             .on_close(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close)))
@@ -242,7 +242,7 @@ impl Render for NewSectionDialog {
                     div()
                         .text_body_sm()
                         .text_color(cx.colors().text_danger)
-                        .child("Sections are unavailable. Close this dialog and retry sections."),
+                        .child("Projects are unavailable. Close this dialog and retry."),
                 )
             })
             .footer(

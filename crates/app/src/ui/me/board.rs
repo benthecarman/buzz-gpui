@@ -4,6 +4,7 @@
 //! board but with Me's own tabs.
 
 use super::MeModel;
+use super::controls::{self, AssistantChosen, ChatControls};
 use super::dialogs::{self, DialogHost};
 use crate::community::Community;
 use crate::ui::channel::{ChannelPage, OpenThread};
@@ -39,6 +40,8 @@ pub struct SessionWork {
     model: Entity<MeModel>,
     channel: ChannelSummary,
     page: Entity<ChannelPage>,
+    /// The assistant and project controls under the composer.
+    controls: Entity<ChatControls>,
     thread: Option<Entity<ThreadPanel>>,
     tab_views: HashMap<String, TabView>,
     tab_strip: ScrollHandle,
@@ -136,7 +139,26 @@ impl SessionWork {
         page.read(cx)
             .header_actions()
             .update(cx, |actions, _| actions.members_only = true);
+        let assistant = controls::read_assistant(&community, &channel.id, cx);
+        let controls = cx.new(|cx| ChatControls {
+            assistant: cx
+                .new(|_| controls::AssistantControl::new(community.clone(), assistant.clone())),
+            project: cx.new(|cx| {
+                controls::ProjectControl::chat(community.clone(), channel.id.clone(), cx)
+            }),
+        });
+        page.update(cx, |page, cx| {
+            page.set_selected_agent(Some(assistant));
+            page.set_chat_controls(controls.clone().into(), cx);
+        });
+        let assistant = controls.read(cx).assistant.clone();
         let subscriptions = vec![
+            cx.subscribe(&assistant, |this, _, AssistantChosen(agent), cx| {
+                controls::write_assistant(&this.community, &this.channel.id, agent, cx);
+                let agent = agent.clone();
+                this.page
+                    .update(cx, |page, _| page.set_selected_agent(Some(agent)));
+            }),
             cx.observe(&community, |this, community, cx| {
                 if let Some(current) = community
                     .read(cx)
@@ -156,6 +178,7 @@ impl SessionWork {
             model,
             channel,
             page,
+            controls,
             thread: None,
             tab_views: HashMap::new(),
             tab_strip: ScrollHandle::new(),
@@ -575,7 +598,7 @@ impl SessionWork {
                         })),
                 )
                 .child(
-                    MenuItem::new("me-session-settings", "Session settings…")
+                    MenuItem::new("me-session-settings", "Chat settings…")
                         .icon(IconName::Gear)
                         .icon_size(16.)
                         .disabled(channel.read_only)
@@ -675,6 +698,10 @@ impl Render for SessionWork {
         let showing = state.showing();
         let heading = self.heading(showing, window, cx);
         let placement = self.placement(cx);
+        // The controls wait for placement and stop for archived chats.
+        let disabled = self.channel.archived || !self.model.read(cx).placed(&self.channel.id);
+        let controls = self.controls.clone();
+        controls.update(cx, |controls, cx| controls.set_disabled(disabled, cx));
         let side = self
             .drawer
             .as_ref()

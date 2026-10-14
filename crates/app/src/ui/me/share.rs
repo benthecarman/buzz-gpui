@@ -1507,7 +1507,7 @@ impl Render for SessionShare {
         let mut form = div().flex().flex_col().gap(space::S3).min_w_0();
         if direct {
             form = form.child(div().child(
-                "Move this conversation to Messages with its full history, Canvas and existing agents. No new conversation is created.",
+                "Move this conversation to Messages with its full history, Canvas and existing agents. No new conversation is created. Later agent conversations use Messages threads; the private provider session from Me does not transfer.",
             ));
             form = match self.shared_details(cx) {
                 Some(details) => {

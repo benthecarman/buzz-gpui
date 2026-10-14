@@ -274,8 +274,8 @@ pub fn section_template(id: &str, section_name: &str, lineup: &Lineup, canvas: &
         "canvas": canvas,
         "type": "template",
         "id": id,
-        "name": format!("{name} sessions"),
-        "description": "Starting workspace and Canvas for new sessions in this section.",
+        "name": format!("{name} chats"),
+        "description": "Starting workspace and Canvas for new chats in this project.",
     })
 }
 
@@ -535,15 +535,15 @@ mod tests {
     fn section_templates_fit_the_record_budget() {
         let id = format!("me-section-{}", "0".repeat(64));
         let value = section_template(&id, "Launch", &Lineup::default(), "Work carefully");
-        assert_eq!(value["name"], "Launch sessions");
+        assert_eq!(value["name"], "Launch chats");
         assert_eq!(
             value["description"],
-            "Starting workspace and Canvas for new sessions in this section."
+            "Starting workspace and Canvas for new chats in this project."
         );
         check_template(&value).unwrap();
         // The name keeps at most 100 UTF-16 units of the group's name.
         let long = section_template(&id, &"😀".repeat(60), &Lineup::default(), "");
-        assert_eq!(long["name"], format!("{} sessions", "😀".repeat(50)));
+        assert_eq!(long["name"], format!("{} chats", "😀".repeat(50)));
         let full = section_template(&id, "Launch", &Lineup::default(), &"x".repeat(16 * 1024));
         assert_eq!(
             check_template(&full).unwrap_err(),
