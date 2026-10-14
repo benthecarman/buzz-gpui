@@ -2,6 +2,7 @@
 //! (buzz-app's `bundled/agents2` and `features/agents2/*.tsx`).
 
 mod attention;
+mod bring_over;
 mod manage;
 mod page;
 mod tabs;

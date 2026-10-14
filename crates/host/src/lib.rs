@@ -25,6 +25,10 @@ pub struct HostConfig {
     /// Holds the Agents identities and which GUI runs each.
     pub state_dir: PathBuf,
     pub credentials: Arc<dyn Credentials>,
+    /// The platform data directory old Buzz keeps its agents in
+    /// (`~/.local/share` on Linux), to bring them over. `None` leaves only
+    /// this host's own v1 agents to bring over.
+    pub legacy_dir: Option<PathBuf>,
 }
 
 /// Asks the GUI on the other end of a connection.
@@ -62,8 +66,19 @@ pub struct AgentHost {
 impl AgentHost {
     /// Opens the saved identities. Must run inside tokio.
     pub fn start(config: HostConfig) -> Result<Arc<Self>, String> {
+        // The v1 agent controller kept its library here.
+        let old = buzz_agent_controller::OldStores {
+            harness: config
+                .state_dir
+                .join("agent-controller")
+                .join("agents.json"),
+            data_dir: config
+                .legacy_dir
+                .unwrap_or_else(|| config.state_dir.join("no-old-buzz")),
+        };
         let app_agents = app_agents::AppAgentHost::new(
             config.state_dir.join("agents2").join("identities.json"),
+            old,
             config.credentials,
         );
         let (events, _) = broadcast::channel(1);

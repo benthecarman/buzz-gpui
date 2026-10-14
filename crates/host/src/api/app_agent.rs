@@ -32,8 +32,8 @@ pub enum AppAgentRequest {
         pubkey: String,
         name: String,
     },
-    /// Sets the picture its profile shows, an `https` URL (an upload to its
-    /// community); empty removes it. [`Self::PublishProfile`] then
+    /// Sets the picture its profile shows, an `https` URL without
+    /// credentials; empty removes it. [`Self::PublishProfile`] then
     /// publishes it. Hosts from before pictures answer that they do not
     /// support this request, so a GUI never believes a picture was saved
     /// that was not.
@@ -56,8 +56,8 @@ pub enum AppAgentRequest {
         pubkey: String,
         event: AppAgentEvent,
     },
-    /// Publishes the agent's name and picture as its profile unless its
-    /// community already has them.
+    /// Publishes the agent's name, picture and description as its profile
+    /// unless its community already has them.
     PublishProfile {
         pubkey: String,
     },
@@ -104,6 +104,25 @@ pub enum AppAgentRequest {
     Release {
         pubkey: String,
     },
+    /// Identities earlier agent systems saved on this host, which Agents can
+    /// take over (`app_agent_portable`). Answers
+    /// [`AppAgentResponse::Portable`]. Hosts from before this answer that
+    /// they do not support it.
+    Portable,
+    /// Takes over one of them as an agent of `agent_type` in `destination`,
+    /// keeping its key, name, picture and description (`app_agent_port`).
+    /// As with [`Self::CreatePrepare`], the GUI then signs the owner
+    /// attestation for the returned pubkey and sends it in
+    /// [`Self::CreateCommit`]. The old store keeps the identity.
+    PortPrepare {
+        request_id: String,
+        source: PortSource,
+        pubkey: String,
+        /// The community, as a relay URL.
+        destination: String,
+        owner: String,
+        agent_type: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +141,7 @@ pub enum AppAgentResponse {
     Uploaded(String),
     /// Whether the asking GUI runs the agent: see [`AppAgentRequest::Claim`].
     Claimed(bool),
+    Portable(PortableAgents),
 }
 
 /// An Agents2 agent's identity; never its key.
@@ -141,6 +161,38 @@ pub struct AppAgentSummary {
     /// Its key is gone. Its community still has to drop it from its
     /// channels and archive it, after which it is forgotten.
     pub deleted: bool,
+}
+
+/// Where an earlier agent system saved an identity on the host: its v1
+/// harness agents, or the installed or development build of old Buzz.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortSource {
+    Harness,
+    Installed,
+    Development,
+}
+
+/// An identity an earlier agent system saved, which Agents can take over.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableAgent {
+    pub source: PortSource,
+    pub pubkey: String,
+    pub name: String,
+    #[serde(default)]
+    pub picture: Option<String>,
+    /// The community it was saved for there, if valid.
+    #[serde(default)]
+    pub relay: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PortableAgents {
+    pub agents: Vec<PortableAgent>,
+    /// A store that could not be read; the others are still listed.
+    pub warnings: Vec<String>,
 }
 
 /// An event for an agent to sign.

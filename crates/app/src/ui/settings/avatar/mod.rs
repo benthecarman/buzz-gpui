@@ -8,6 +8,10 @@ mod raster;
 
 pub use editor::{AvatarDismissed, AvatarDone, AvatarEditor, Preview, WIDTH as EDITOR_WIDTH};
 
+use crate::ui::overlay;
+use buzz_ui::{Popover, PopoverWidth};
+use gpui_kit::*;
+
 use buzz_relay_client::upload::{UploadFile, sniff_image};
 use std::io::Read;
 use std::path::Path;
@@ -24,6 +28,50 @@ const HEIC_FAILED: &str = "Image conversion failed. This HEIC/HEIF photo could n
 const IO_FAILED: &str = "Media preparation could not access temporary storage. Check available \
                          disk space and retry.";
 const CONVERSION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The "Edit avatar" popover, 8px under the badge and centred on it. A
+/// press anywhere else closes it without a change.
+pub fn popover(
+    window: &Window,
+    editor: Entity<AvatarEditor>,
+    on_dismiss: overlay::Dismiss,
+) -> impl IntoElement {
+    let size = window.viewport_size();
+    div()
+        .absolute()
+        .top_full()
+        .left(relative(0.5))
+        .child(
+            deferred(
+                anchored().position(point(px(0.), px(0.))).child(
+                    div()
+                        .id("avatar-backdrop")
+                        .occlude()
+                        .w(size.width)
+                        .h(size.height)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            on_dismiss(window, cx)
+                        }),
+                ),
+            )
+            .with_priority(2),
+        )
+        .child(
+            deferred(
+                anchored()
+                    .anchor(Anchor::TopCenter)
+                    .snap_to_window_with_margin(px(12.))
+                    .child(
+                        div().id("avatar-popover").occlude().mt(px(8.)).child(
+                            Popover::new()
+                                .width(PopoverWidth::Auto)
+                                .child(div().w(px(EDITOR_WIDTH - 26.)).child(editor)),
+                        ),
+                    ),
+            )
+            .with_priority(3),
+        )
+}
 
 /// Reads a chosen avatar, refusing anything but a web image or a HEIC
 /// photo, which becomes a JPEG.
@@ -193,6 +241,7 @@ fn private_dir() -> std::io::Result<PrivateDir> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::prelude::v1::test;
 
     fn scratch() -> PrivateDir {
         private_dir().unwrap()

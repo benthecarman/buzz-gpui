@@ -53,6 +53,7 @@ async fn host() -> Spawner {
         },
         state_dir: state.join("state"),
         credentials: Arc::new(FileCredentials::new(state.join("keys")).unwrap()),
+        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();

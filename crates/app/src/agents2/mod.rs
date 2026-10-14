@@ -34,7 +34,7 @@ pub use registry::{
 };
 #[allow(unused_imports)]
 pub use runtime::{AgentHandle, Cancellation, Delivery, Trigger};
-pub use service::{Agents2, PICTURES_UNSUPPORTED, Status};
+pub use service::{Agents2, PICTURES_UNSUPPORTED, Portable, Portables, Status};
 
 /// One of the viewer's agents, in the community at `relay`.
 #[derive(Clone, Debug, PartialEq)]

@@ -8,14 +8,18 @@
 //!   Attention tab on the right.
 //!
 //! New agents are made in the peek slot, so making one never covers the
-//! grid.
+//! grid, and so are agents brought over from an earlier agent system.
 
 use super::attention::summary as attention_summary;
+use super::bring_over::{BringOver, BringOverEvent};
 use super::{AgentDelete, AgentTabs, Removed, empty_state, problem};
 use crate::agents2::{Agent, AgentChange, Agents2, RegisteredType, Status, type_of, types};
 use crate::hosts::HostConnection;
 use crate::ui::agents::form::field;
 use crate::ui::overlay::{self, Align, Dismiss};
+use crate::ui::settings::avatar::{
+    AvatarDismissed, AvatarDone, AvatarEditor, Preview, popover as avatar_popover,
+};
 use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, Colors, IconButton, IconButtonSize,
@@ -36,11 +40,18 @@ const GRID_PADDING_REM: f32 = 1.5;
 /// Below this viewport width the side panel narrows and Build stacks.
 const NARROW_REM: f32 = 52.;
 
+/// What the peek slot shows instead of a selected agent's peek.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Side {
+    Creating,
+    Porting,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Frame {
     Browse {
         selected: Option<String>,
-        creating: bool,
+        side: Option<Side>,
     },
     Build {
         pubkey: String,
@@ -104,6 +115,7 @@ pub struct Agents2Page {
     frame: Frame,
     grid: FocusHandle,
     new_agent: Option<Entity<NewAgent>>,
+    bring_over: Option<Entity<BringOver>>,
     build: Option<Entity<Build>>,
     /// Counts side panel openings, so each one animates in.
     side_opened: usize,
@@ -122,10 +134,11 @@ impl Agents2Page {
         Self {
             frame: Frame::Browse {
                 selected: None,
-                creating: false,
+                side: None,
             },
             grid: cx.focus_handle(),
             new_agent: None,
+            bring_over: None,
             build: None,
             side_opened: 0,
             side_key: None,
@@ -137,9 +150,10 @@ impl Agents2Page {
     fn browse(&mut self, selected: Option<String>, cx: &mut Context<Self>) {
         self.frame = Frame::Browse {
             selected,
-            creating: false,
+            side: None,
         };
         self.new_agent = None;
+        self.bring_over = None;
         self.build = None;
         cx.notify();
     }
@@ -150,6 +164,7 @@ impl Agents2Page {
             .detach();
         self.build = Some(view);
         self.new_agent = None;
+        self.bring_over = None;
         self.frame = Frame::Build { pubkey };
         cx.notify();
     }
@@ -166,9 +181,25 @@ impl Agents2Page {
         )
         .detach();
         self.new_agent = Some(form);
+        self.bring_over = None;
         self.frame = Frame::Browse {
             selected: None,
-            creating: true,
+            side: Some(Side::Creating),
+        };
+        cx.notify();
+    }
+
+    fn bring_over(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(BringOver::new);
+        cx.subscribe(&view, |this, _, event: &BringOverEvent, cx| match event {
+            BringOverEvent::Close => this.browse(None, cx),
+        })
+        .detach();
+        self.bring_over = Some(view);
+        self.new_agent = None;
+        self.frame = Frame::Browse {
+            selected: None,
+            side: Some(Side::Porting),
         };
         cx.notify();
     }
@@ -221,7 +252,7 @@ impl Agents2Page {
     fn header(
         &self,
         building: Option<&Agent>,
-        creating: bool,
+        side: Option<Side>,
         cx: &mut Context<Self>,
     ) -> PanelHeader {
         let service = Agents2::global(cx);
@@ -253,10 +284,16 @@ impl Agents2Page {
                 .title("Agents2")
                 .when(!types(cx).is_empty() && ready, |this| {
                     this.action(
+                        Button::new("bring-over", "Bring over")
+                            .size(ButtonSize::Sm)
+                            .disabled(side == Some(Side::Porting))
+                            .on_click(cx.listener(|this, _, _, cx| this.bring_over(cx))),
+                    )
+                    .action(
                         Button::new("new-agent", "New agent")
                             .size(ButtonSize::Sm)
                             .icon(IconName::Plus)
-                            .disabled(creating)
+                            .disabled(side == Some(Side::Creating))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.new_agent(window, cx)),
                             ),
@@ -454,7 +491,7 @@ fn agent_picture(agent: &Agent, cx: &App) -> Option<ImageSource> {
     (!picture.is_empty()).then(|| crate::ui::media::avatar(&picture, community.session.media()))
 }
 
-fn side_body() -> Div {
+pub(super) fn side_body() -> Div {
     div()
         .flex()
         .flex_col()
@@ -493,12 +530,12 @@ impl Render for Agents2Page {
             self.build = None;
             self.frame = Frame::Browse {
                 selected: None,
-                creating: false,
+                side: None,
             };
         }
-        let (selected, creating) = match &self.frame {
-            Frame::Browse { selected, creating } => (find(selected.as_ref(), cx), *creating),
-            Frame::Build { .. } => (None, false),
+        let (selected, side_shown) = match &self.frame {
+            Frame::Browse { selected, side } => (find(selected.as_ref(), cx), *side),
+            Frame::Build { .. } => (None, None),
         };
         let has_types = !types(cx).is_empty();
         let narrow =
@@ -531,10 +568,10 @@ impl Render for Agents2Page {
                 .into_any_element(),
             (_, Some(_), Some(view)) => view.clone().into_any_element(),
             _ => {
-                let side_key = if creating {
-                    Some("new".to_string())
-                } else {
-                    selected.as_ref().map(|agent| agent.pubkey.clone())
+                let side_key = match side_shown {
+                    Some(Side::Creating) => Some("new".to_string()),
+                    Some(Side::Porting) => Some("port".to_string()),
+                    None => selected.as_ref().map(|agent| agent.pubkey.clone()),
                 };
                 if side_key != self.side_key {
                     if side_key.is_some() {
@@ -542,12 +579,16 @@ impl Render for Agents2Page {
                     }
                     self.side_key = side_key.clone();
                 }
-                let side: Option<AnyElement> = if creating {
-                    self.new_agent.clone().map(|form| form.into_any_element())
-                } else {
-                    selected
+                let side: Option<AnyElement> = match side_shown {
+                    Some(Side::Creating) => {
+                        self.new_agent.clone().map(|form| form.into_any_element())
+                    }
+                    Some(Side::Porting) => {
+                        self.bring_over.clone().map(|view| view.into_any_element())
+                    }
+                    None => selected
                         .as_ref()
-                        .map(|agent| self.peek(agent, window, cx).into_any_element())
+                        .map(|agent| self.peek(agent, window, cx).into_any_element()),
                 };
                 let inventory: AnyElement = if !service.read(cx).agents().is_empty() {
                     let index_selected = selected.as_ref().map(|a| a.pubkey.as_str());
@@ -588,7 +629,7 @@ impl Render for Agents2Page {
                         .child(measure)
                         .children(tiles)
                         .into_any_element()
-                } else if status == Status::Ready && !creating {
+                } else if status == Status::Ready && side_shown.is_none() {
                     empty_state(
                         "\u{2726}",
                         "No agents yet",
@@ -662,7 +703,7 @@ impl Render for Agents2Page {
             .h_full()
             .text_color(c.text_standard)
             .text_body()
-            .child(self.header(building.as_ref(), creating, cx))
+            .child(self.header(building.as_ref(), side_shown, cx))
             .child(div().flex_1().min_h_0().child(body))
     }
 }
@@ -936,7 +977,7 @@ impl Render for NewAgent {
     }
 }
 
-fn radio_dot(checked: bool, c: &Colors) -> Div {
+pub(super) fn radio_dot(checked: bool, c: &Colors) -> Div {
     div()
         .flex()
         .flex_none()
@@ -971,9 +1012,11 @@ pub struct Build {
     /// Escape blurs too, and blur saves; this skips that one save.
     cancelled: bool,
     name_error: Option<SharedString>,
-    /// A picture is uploading or saving.
+    /// A picture is saving.
     picture_busy: bool,
     picture_error: Option<SharedString>,
+    /// The avatar editor, while open.
+    avatar: Option<(Entity<AvatarEditor>, [Subscription; 2])>,
     copied: usize,
     copied_shown: bool,
     tabs: Entity<AgentTabs>,
@@ -1025,6 +1068,7 @@ impl Build {
             name_error: None,
             picture_busy: false,
             picture_error: None,
+            avatar: None,
             copied: 0,
             copied_shown: false,
             tabs,
@@ -1095,45 +1139,45 @@ impl Build {
         .detach();
     }
 
-    /// Picks an image, uploads it to the agent's community and saves it as
-    /// the agent's picture, which its host then publishes in its profile.
-    fn upload_picture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the avatar editor on the agent's picture; Done saves it, which
+    /// its host then publishes in its profile (`AvatarEditor`).
+    fn open_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent) = self.current(cx) else {
             return;
         };
+        if self.picture_busy || self.avatar.is_some() {
+            return;
+        }
         if agent.picture.is_none() {
             self.picture_error = Some(crate::agents2::PICTURES_UNSUPPORTED.into());
             return cx.notify();
         }
-        let Some(community) = agent_community(&agent, cx) else {
-            self.picture_error =
-                Some("Connect to the agent’s community to change its picture.".into());
-            return cx.notify();
-        };
-        let session = community.read(cx).session.clone();
-        let path = crate::ui::agents::choose_picture(cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let Some(path) = path.await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.picture_busy = true;
-                this.picture_error = None;
+        let community = agent_community(&agent, cx);
+        let picture = agent.picture.clone().unwrap_or_default();
+        let editor = cx.new(|cx| AvatarEditor::new(picture, community, window, cx));
+        let subscriptions = [
+            cx.subscribe(&editor, |this, _, AvatarDone(picture), cx| {
+                this.avatar = None;
+                this.change_picture(picture.clone(), cx);
+            }),
+            cx.subscribe(&editor, |this, _, _: &AvatarDismissed, cx| {
+                this.avatar = None;
                 cx.notify();
-            });
-            let uploaded = crate::ui::agents::upload_agent_picture(
-                path,
-                session.media(),
-                cx.background_executor(),
-            )
-            .await;
-            let saved = match uploaded {
-                Ok(url) => match this.update(cx, |this, cx| this.save_picture(url, cx)) {
-                    Ok(task) => task.await,
-                    Err(_) => return,
-                },
-                Err(error) => Err(error),
-            };
+            }),
+        ];
+        editor.update(cx, |editor, cx| editor.focus(window, cx));
+        self.avatar = Some((editor, subscriptions));
+        self.picture_error = None;
+        cx.notify();
+    }
+
+    /// Saves `picture`, an uploaded image's URL; empty removes it.
+    fn change_picture(&mut self, picture: String, cx: &mut Context<Self>) {
+        self.picture_busy = true;
+        self.picture_error = None;
+        let task = self.save_picture(picture, cx);
+        cx.spawn(async move |this, cx| {
+            let saved = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.picture_busy = false;
                 this.picture_error = saved.err().map(Into::into);
@@ -1141,6 +1185,7 @@ impl Build {
             });
         })
         .detach();
+        cx.notify();
     }
 
     fn save_picture(
@@ -1162,22 +1207,6 @@ impl Build {
                 cx,
             )
         })
-    }
-
-    fn remove_picture(&mut self, cx: &mut Context<Self>) {
-        self.picture_busy = true;
-        self.picture_error = None;
-        let task = self.save_picture(String::new(), cx);
-        cx.spawn(async move |this, cx| {
-            let saved = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.picture_busy = false;
-                this.picture_error = saved.err().map(Into::into);
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1275,51 +1304,87 @@ impl Render for Build {
             }))
             .child(TextField::new(&self.name).invalid(self.name_error.is_some()))
             .children(problem(self.name_error.as_ref(), &c));
-        let shown = agent_picture(&agent, cx);
-        let has_picture = shown.is_some();
+        // The compact avatar editor: the picture, or the draft while the
+        // editor is open, with the edit badge over its lower right.
+        let draft = self
+            .avatar
+            .as_ref()
+            .map(|(editor, _)| editor.read(cx).preview(cx));
+        let artwork = match draft {
+            Some(Preview::Emoji { art, color }) => div()
+                .size_full()
+                .rounded(radius::CONTAINER)
+                .overflow_hidden()
+                .bg(color)
+                .children(art.map(|art| img(art).size_full()))
+                .into_any_element(),
+            draft => {
+                let shown = match draft {
+                    Some(Preview::Picture(picture)) => agent_community(&agent, cx)
+                        .filter(|_| !picture.is_empty())
+                        .map(|community| {
+                            crate::ui::media::avatar(&picture, community.read(cx).session.media())
+                        }),
+                    _ => agent_picture(&agent, cx),
+                };
+                Avatar::new(agent.name.clone())
+                    .size(AvatarSize::Px(96.))
+                    .squircle()
+                    .when_some(shown, |avatar, picture| avatar.image(picture))
+                    .into_any_element()
+            }
+        };
+        let page = cx.entity().downgrade();
+        let dismiss: Dismiss = Rc::new(move |_, cx| {
+            let _ = page.update(cx, |this, cx| {
+                this.avatar = None;
+                cx.notify();
+            });
+        });
+        let popover = self
+            .avatar
+            .as_ref()
+            .map(|(editor, _)| avatar_popover(window, editor.clone(), dismiss));
+        let has_picture = agent.picture.as_ref().is_some_and(|p| !p.is_empty());
+        let badge = div()
+            .absolute()
+            .left(px(96. * 0.859375 - 16.))
+            .top(px(96. * 0.859375 - 16.))
+            .child(
+                IconButton::new(
+                    "agent-picture",
+                    if has_picture {
+                        IconName::PencilSimple
+                    } else {
+                        IconName::Plus
+                    },
+                )
+                .size(IconButtonSize::Sm)
+                .variant(buzz_ui::ButtonVariant::Prominent)
+                .shape(buzz_ui::IconButtonShape::Round)
+                .disabled(self.picture_busy)
+                .tooltip("Edit avatar")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.avatar.take().is_some() {
+                        cx.notify();
+                    } else {
+                        this.open_avatar(window, cx);
+                    }
+                })),
+            )
+            .children(popover);
         let picture = div()
             .flex()
             .flex_col()
             .flex_none()
             .gap(rems(0.5))
             .child(
-                div().flex_none().size(rems(6.)).child(
-                    Avatar::new(agent.name.clone())
-                        .size(AvatarSize::Px(96.))
-                        .squircle()
-                        .when_some(shown, |avatar, picture| avatar.image(picture)),
-                ),
-            )
-            .child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(rems(0.5))
-                    .child(
-                        Button::new(
-                            "agent-picture",
-                            if has_picture {
-                                "Change picture"
-                            } else {
-                                "Upload picture"
-                            },
-                        )
-                        .size(ButtonSize::Sm)
-                        .loading(self.picture_busy)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if !this.picture_busy {
-                                this.upload_picture(window, cx)
-                            }
-                        })),
-                    )
-                    .when(has_picture, |this| {
-                        this.child(
-                            Button::new("agent-picture-remove", "Remove")
-                                .size(ButtonSize::Sm)
-                                .disabled(self.picture_busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.remove_picture(cx))),
-                        )
-                    }),
+                    .relative()
+                    .flex_none()
+                    .size(rems(6.))
+                    .child(artwork)
+                    .child(badge),
             )
             .children(problem(self.picture_error.as_ref(), &c));
         let rail = div()

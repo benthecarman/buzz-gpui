@@ -7,7 +7,9 @@ mod sign_out;
 
 pub use sign_out::{SignOutClosed, SignOutDialog};
 
-use super::avatar::{AvatarDismissed, AvatarDone, AvatarEditor, EDITOR_WIDTH, Preview};
+use super::avatar::{
+    AvatarDismissed, AvatarDone, AvatarEditor, Preview, popover as avatar_popover,
+};
 use super::{
     Modal, SettingsPage, button, field, form_group, header, inline_header, note, preference_row,
     rows_group, section,
@@ -17,8 +19,8 @@ use crate::ui::{media, overlay};
 use buzz_relay_client::account::{ABOUT_LIMIT, picture_error};
 use buzz_relay_client::{ProfileEdit, RelayOrigin};
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonSize, IconName, Popover,
-    PopoverWidth, TextArea, TextField, Toast, ToastTone, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, ButtonVariant, IconButton, IconButtonSize, IconName, TextArea,
+    TextField, Toast, ToastTone, TypeStyled,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
@@ -26,50 +28,6 @@ use gpui_kit::*;
 use private_key::PrivateKey;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
-
-/// The "Edit avatar" popover, 8px under the badge and centred on it. A
-/// press anywhere else closes it without a change.
-fn avatar_popover(
-    window: &Window,
-    editor: Entity<AvatarEditor>,
-    on_dismiss: overlay::Dismiss,
-) -> impl IntoElement {
-    let size = window.viewport_size();
-    div()
-        .absolute()
-        .top_full()
-        .left(relative(0.5))
-        .child(
-            deferred(
-                anchored().position(point(px(0.), px(0.))).child(
-                    div()
-                        .id("avatar-backdrop")
-                        .occlude()
-                        .w(size.width)
-                        .h(size.height)
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            on_dismiss(window, cx)
-                        }),
-                ),
-            )
-            .with_priority(2),
-        )
-        .child(
-            deferred(
-                anchored()
-                    .anchor(Anchor::TopCenter)
-                    .snap_to_window_with_margin(px(12.))
-                    .child(
-                        div().id("avatar-popover").occlude().mt(px(8.)).child(
-                            Popover::new()
-                                .width(PopoverWidth::Auto)
-                                .child(div().w(px(EDITOR_WIDTH - 26.)).child(editor)),
-                        ),
-                    ),
-            )
-            .with_priority(3),
-        )
-}
 
 /// Viewer preference holding the default profile (buzz-app's
 /// `client.profile`): what joining a community starts from, and what

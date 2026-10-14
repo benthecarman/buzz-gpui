@@ -207,6 +207,7 @@ fn start_embedded(
         },
         state_dir: data.join("host"),
         credentials,
+        legacy_dir: dirs::data_dir(),
     })?;
     let (connector, listener) = transport::memory();
     let server = runtime.spawn(buzz_host_rpc::serve(

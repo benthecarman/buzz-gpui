@@ -4,23 +4,25 @@
 //! asks for one bounded event, read, upload or memory write at a time, and
 //! the host signs it as the agent and sends it to the agent's community.
 //! Identities live in their own file under the host's state directory, with
-//! keys in the host's credential store, so Agents2 never waits on the
-//! harness agent controller.
+//! keys in the host's credential store. Identities earlier agent systems
+//! saved on the host can be taken over with their keys.
 
 mod hosting;
 mod pictures;
 
-use crate::api::{AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol};
+use crate::api::{
+    AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol, PortSource,
+    PortableAgent, PortableAgents,
+};
 use crate::blocking;
 use base64::Engine;
 use buzz_agent_controller::{
-    AppAgent, AppAgents, CREDENTIALS_BUSY, Credentials, NewAppAgent, Published, Secret,
+    AppAgent, AppAgents, CREDENTIALS_BUSY, Credentials, NewAppAgent, OldStores, Published, Secret,
 };
 use buzz_host_rpc::Peer;
 use hosting::{Holder, Hosting};
-use pictures::{Picture, Pictures};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -68,7 +70,9 @@ struct Staged {
 #[derive(Clone)]
 pub(crate) struct AppAgentHost {
     agents: AppAgents,
-    pictures: Pictures,
+    /// Earlier agent systems' identities on this host, which it can take
+    /// over.
+    old: OldStores,
     credentials: Arc<dyn Credentials>,
     /// Each key after its first read, so only create and first use reach the
     /// credential store, whose lock refuses rather than waits.
@@ -98,25 +102,51 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn summary(agent: AppAgent, picture: Picture) -> AppAgentSummary {
+fn summary(agent: AppAgent) -> AppAgentSummary {
     AppAgentSummary {
         pubkey: agent.pubkey,
         relay: agent.relay,
         owner: agent.owner,
         agent_type: agent.agent_type,
         name: agent.name,
-        picture: Some(picture.picture),
+        picture: Some(agent.picture.unwrap_or_default()),
         deleted: agent.deleted,
+    }
+}
+
+fn source(source: PortSource) -> buzz_agent_controller::PortSource {
+    match source {
+        PortSource::Harness => buzz_agent_controller::PortSource::Harness,
+        PortSource::Installed => buzz_agent_controller::PortSource::Installed,
+        PortSource::Development => buzz_agent_controller::PortSource::Development,
+    }
+}
+
+fn portable(agent: buzz_agent_controller::Portable) -> PortableAgent {
+    use buzz_agent_controller::PortSource as Old;
+    PortableAgent {
+        source: match agent.source {
+            Old::Harness => PortSource::Harness,
+            Old::Installed => PortSource::Installed,
+            Old::Development => PortSource::Development,
+        },
+        pubkey: agent.pubkey,
+        name: agent.name,
+        picture: agent.picture,
+        relay: agent.relay,
     }
 }
 
 impl AppAgentHost {
     /// `path` is the identity file, e.g. `<state>/agents2/identities.json`.
-    pub(crate) fn new(path: PathBuf, credentials: Arc<dyn Credentials>) -> Self {
+    /// Pictures saved beside it before identities held them move in.
+    pub(crate) fn new(path: PathBuf, old: OldStores, credentials: Arc<dyn Credentials>) -> Self {
         let hosts = path.with_file_name("hosts");
+        let agents = AppAgents::open(path.clone());
+        pictures::migrate(&path.with_file_name("pictures.json"), &agents);
         Self {
-            pictures: Pictures::open(path.with_file_name("pictures.json")),
-            agents: AppAgents::open(path),
+            agents,
+            old,
             credentials,
             keys: Arc::default(),
             profiles: Arc::default(),
@@ -171,20 +201,10 @@ impl AppAgentHost {
         use AppAgentResponse as A;
         match request {
             R::List => {
-                let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
-                blocking(move || {
-                    let mut pictures: BTreeMap<String, Picture> = pictures.all()?;
-                    Ok(agents
-                        .list()?
-                        .into_iter()
-                        .map(|agent| {
-                            let picture = pictures.remove(&agent.pubkey).unwrap_or_default();
-                            summary(agent, picture)
-                        })
-                        .collect())
-                })
-                .await
-                .map(A::Agents)
+                let agents = self.agents.clone();
+                blocking(move || Ok(agents.list()?.into_iter().map(summary).collect()))
+                    .await
+                    .map(A::Agents)
             }
             R::CreatePrepare {
                 request_id,
@@ -205,23 +225,18 @@ impl AppAgentHost {
                     .map(|()| A::Done)
             }
             R::SetPicture { pubkey, picture } => {
-                let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
-                blocking(move || {
-                    agents.get(&pubkey)?;
-                    pictures.set(&pubkey, &picture)
-                })
-                .await
-                .map(|()| A::Done)
+                let agents = self.agents.clone();
+                let picture = Some(picture.trim().to_owned()).filter(|url| !url.is_empty());
+                blocking(move || agents.set_picture(&pubkey, picture))
+                    .await
+                    .map(|()| A::Done)
             }
             R::Delete { pubkey } => self.delete(pubkey).await.map(|()| A::Done),
             R::Forget { pubkey } => {
-                let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
-                blocking(move || {
-                    agents.forget(&pubkey)?;
-                    pictures.forget(&pubkey)
-                })
-                .await
-                .map(|()| A::Done)
+                let agents = self.agents.clone();
+                blocking(move || agents.forget(&pubkey))
+                    .await
+                    .map(|()| A::Done)
             }
             R::Publish { pubkey, event } => self.publish(pubkey, event).await.map(A::Event),
             R::PublishProfile { pubkey } => self.publish_profile(pubkey).await.map(|()| A::Done),
@@ -242,6 +257,29 @@ impl AppAgentHost {
                 body,
                 after,
             } => self.remember(pubkey, slug, body, after).await.map(A::Event),
+            R::Portable => {
+                let old = self.old.clone();
+                blocking(move || {
+                    let found = old.list();
+                    Ok(PortableAgents {
+                        agents: found.agents.into_iter().map(portable).collect(),
+                        warnings: found.warnings,
+                    })
+                })
+                .await
+                .map(A::Portable)
+            }
+            R::PortPrepare {
+                request_id,
+                source,
+                pubkey,
+                destination,
+                owner,
+                agent_type,
+            } => self
+                .port(request_id, source, pubkey, destination, owner, agent_type)
+                .await
+                .map(|pubkey| A::Prepared { pubkey }),
             R::Claim { .. } | R::Release { .. } => {
                 Err("Agents2 claims need a GUI connection".into())
             }
@@ -341,6 +379,74 @@ impl AppAgentHost {
         Ok(pubkey)
     }
 
+    /// Takes over an identity an earlier agent system saved, with its key,
+    /// name, picture and description, as [`Self::prepare`] makes a new one.
+    /// A retry with the same request ID and inputs gets the same key back.
+    async fn port(
+        &self,
+        request_id: String,
+        from: PortSource,
+        pubkey: String,
+        destination: String,
+        owner: String,
+        agent_type: String,
+    ) -> Result<String> {
+        if let Some(pending) = locked(&self.creating)
+            .iter()
+            .find(|c| c.request_id == request_id)
+        {
+            if (
+                pending.prepared.pubkey(),
+                &pending.destination,
+                &pending.owner,
+                &pending.agent_type,
+            ) != (pubkey.as_str(), &destination, &owner, &agent_type)
+            {
+                return Err("Create destination or owner changed".into());
+            }
+            return Ok(pubkey);
+        }
+        let (old, credentials) = (self.old.clone(), self.credentials.clone());
+        let taken = pubkey.clone();
+        let (found, key) = blocking(move || {
+            credentials.retry();
+            let mut waits = 0;
+            loop {
+                match old.take(source(from), &taken, credentials.as_ref()) {
+                    Err(error) if error == CREDENTIALS_BUSY && waits < BUSY_WAITS => {
+                        waits += 1;
+                        std::thread::sleep(BUSY_WAIT);
+                    }
+                    taken => return taken,
+                }
+            }
+        })
+        .await?;
+        let name = found.name.clone();
+        let prepared = AppAgents::adopt(
+            &destination,
+            &owner,
+            &agent_type,
+            key,
+            &found.name,
+            found.picture,
+            found.about,
+        )?;
+        let mut creating = locked(&self.creating);
+        if creating.len() >= PENDING_CREATES {
+            creating.pop_front();
+        }
+        creating.push_back(Creating {
+            request_id,
+            destination,
+            owner,
+            agent_type,
+            name,
+            prepared,
+        });
+        Ok(pubkey)
+    }
+
     /// Saves the prepared identity with the owner's attestation. Nothing is
     /// saved unless the attestation is for this key and owner and the key
     /// is stored.
@@ -364,7 +470,7 @@ impl AppAgentHost {
                 host.agents
                     .commit(pending.prepared, &tag, host.credentials.as_ref())?;
             keys.insert(agent.pubkey.clone(), Arc::new(key));
-            Ok(summary(agent, Picture::default()))
+            Ok(summary(agent))
         })
         .await
     }
@@ -395,38 +501,34 @@ impl AppAgentHost {
         serde_json::to_string(&signed).map_err(|_| "Invalid agent event".into())
     }
 
-    /// Publishes the agent's profile if its name or picture differs from
-    /// the last one its community accepted. Safe to call any time; one runs
-    /// per agent at a time.
+    /// Publishes changed public metadata: its name, picture and
+    /// description. Safe to call any time; one publication runs per agent
+    /// at a time and records only what its community accepted.
     async fn publish_profile(&self, pubkey: String) -> Result<()> {
         let turn = self.profile_turn(&pubkey);
         let _turn = turn.lock().await;
         let agent = self.agent(pubkey).await?;
-        let pictures = self.pictures.clone();
-        let saved = agent.pubkey.clone();
-        let picture = blocking(move || pictures.get(&saved)).await?;
-        if picture.current(&agent) {
+        if agent.profile_is_current() {
             return Ok(());
         }
         let (agent, key) = self.key(agent).await?;
-        let event = pictures::profile_event(&agent, &key, &picture.picture)?;
+        let event = agent.profile_event(&key)?;
         let signed = post(&agent, &key, event).await?;
         let created_at = signed
             .get("created_at")
             .and_then(Value::as_u64)
             .ok_or("Invalid agent event")?;
-        let (agents, pictures) = (self.agents.clone(), self.pictures.clone());
+        let agents = self.agents.clone();
         blocking(move || {
             agents.published(
                 &agent.pubkey,
                 Published {
                     name: agent.name,
-                    picture: None,
-                    about: None,
+                    picture: agent.picture,
+                    about: agent.about,
                     created_at,
                 },
-            )?;
-            pictures.published(&agent.pubkey, picture.picture, created_at)
+            )
         })
         .await
     }
@@ -677,12 +779,21 @@ mod tests {
         }
     }
 
+    /// Earlier stores that do not exist.
+    fn old(dir: &std::path::Path) -> OldStores {
+        OldStores {
+            harness: dir.join("agent-controller/agents.json"),
+            data_dir: dir.join("data"),
+        }
+    }
+
     #[tokio::test]
     async fn a_first_key_read_waits_out_a_busy_store() {
         let key = Secret::generate().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let host = AppAgentHost::new(
             dir.path().join("identities.json"),
+            old(dir.path()),
             Arc::new(Busy(key.hex().to_string(), AtomicU32::new(3))),
         );
         let agent = AppAgent {
@@ -707,6 +818,7 @@ mod tests {
         let credentials = crate::credentials::FileCredentials::new(dir.path().join("keys"));
         let host = AppAgentHost::new(
             dir.path().join("identities.json"),
+            old(dir.path()),
             Arc::new(credentials.unwrap()),
         );
         let pubkey = "c".repeat(64);
@@ -730,6 +842,7 @@ mod tests {
         let credentials = crate::credentials::FileCredentials::new(dir.path().join("keys"));
         let host = AppAgentHost::new(
             dir.path().join("identities.json"),
+            old(dir.path()),
             Arc::new(credentials.unwrap()),
         );
         host.stage("a".into(), "QUJD".into()).unwrap();

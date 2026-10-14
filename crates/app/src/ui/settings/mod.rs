@@ -6,7 +6,7 @@ mod about;
 mod agents;
 mod appearance;
 mod archive;
-mod avatar;
+pub(crate) mod avatar;
 pub mod cards;
 mod communities;
 pub(crate) use communities::left_text;

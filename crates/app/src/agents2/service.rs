@@ -26,7 +26,7 @@ use super::{Agent, AgentChange};
 use crate::community::{AppState, Community, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
 use crate::runtime::Runtime;
-use buzz_host::api::{AppAgentRequest, AppAgentResponse, AppAgentSummary};
+use buzz_host::api::{AppAgentRequest, AppAgentResponse, AppAgentSummary, PortableAgent};
 use buzz_host_rpc::ConnectionState;
 use buzz_identity::Identity;
 use buzz_relay_client::{LiveBatch, RelayOrigin, Session, SessionStatus};
@@ -226,6 +226,22 @@ pub struct LocalAgent {
     /// The canonical `wss://` community origin it was created for.
     pub relay: String,
     pub owner: String,
+}
+
+/// An identity an earlier agent system saved on one of the hosts, which
+/// Agents can take over there.
+#[derive(Clone)]
+pub struct Portable {
+    pub agent: PortableAgent,
+    pub host: Entity<HostConnection>,
+}
+
+/// What every host could bring over (`PortableAgents`).
+#[derive(Clone, Default)]
+pub struct Portables {
+    pub agents: Vec<Portable>,
+    /// A store that could not be read; the others are still listed.
+    pub warnings: Vec<String>,
 }
 
 /// What a runner is doing, for Mission control.
@@ -1570,16 +1586,108 @@ impl Agents2 {
         host: Option<Entity<HostConnection>>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Agent, String>> {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Task::ready(Err("Name the agent".into()));
+        }
+        self.add(
+            type_key,
+            host,
+            cx,
+            |request_id, destination, owner, agent_type| AppAgentRequest::CreatePrepare {
+                request_id,
+                destination,
+                owner,
+                agent_type,
+                name,
+            },
+        )
+    }
+
+    /// Identities earlier agent systems saved on the connected hosts that
+    /// are not Agents yet. A host from before this lists none.
+    pub fn portable(&self, cx: &mut Context<Self>) -> Task<Result<Portables, String>> {
+        let hosts = self.hosts(cx);
+        if hosts.is_empty() {
+            return Task::ready(Err("Agents run only in the desktop app".into()));
+        }
+        let own: HashSet<String> = self.local().into_iter().map(|agent| agent.pubkey).collect();
+        let asks: Vec<_> = hosts
+            .into_iter()
+            .map(|host| {
+                let link = link(&host, cx);
+                (host, link)
+            })
+            .collect();
+        cx.spawn(async move |_, _| {
+            let mut found = Portables::default();
+            for (host, link) in asks {
+                match link.app_agent(AppAgentRequest::Portable).await {
+                    Ok(AppAgentResponse::Portable(listed)) => {
+                        found.warnings.extend(listed.warnings);
+                        found.agents.extend(
+                            listed
+                                .agents
+                                .into_iter()
+                                .filter(|agent| !own.contains(&agent.pubkey))
+                                .map(|agent| Portable {
+                                    agent,
+                                    host: host.clone(),
+                                }),
+                        );
+                    }
+                    Err(error) if error == UNSUPPORTED => {}
+                    Err(error) => found.warnings.push(error),
+                    Ok(_) => found
+                        .warnings
+                        .push("The host answered with something else".into()),
+                }
+            }
+            Ok(found)
+        })
+    }
+
+    /// Takes one over as an agent of `type_key` in the selected community,
+    /// keeping its key, name and picture. Its instructions and settings
+    /// stay behind.
+    pub fn port(
+        &mut self,
+        portable: &Portable,
+        type_key: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Agent, String>> {
+        let (source, pubkey) = (portable.agent.source, portable.agent.pubkey.clone());
+        self.add(
+            type_key,
+            Some(portable.host.clone()),
+            cx,
+            move |request_id, destination, owner, agent_type| AppAgentRequest::PortPrepare {
+                request_id,
+                source,
+                pubkey,
+                destination,
+                owner,
+                agent_type,
+            },
+        )
+    }
+
+    /// Saves a new identity of `type_key` in the selected community with the
+    /// type's default settings: `prepare` asks its host for the key, which
+    /// the owner attests.
+    fn add(
+        &mut self,
+        type_key: &str,
+        host: Option<Entity<HostConnection>>,
+        cx: &mut Context<Self>,
+        prepare: impl FnOnce(String, String, String, String) -> AppAgentRequest + 'static,
+    ) -> Task<Result<Agent, String>> {
         let Some(binding) = self.selected(cx).and_then(|bound| bound.binding.as_ref()) else {
             return Task::ready(Err("Connect to a community first".into()));
         };
         let Some(kind) = registry::type_of(type_key, cx) else {
             return Task::ready(Err("That agent type is not available".into()));
         };
-        let name = name.trim().to_owned();
-        if name.is_empty() {
-            return Task::ready(Err("Name the agent".into()));
-        }
         let host = host.or_else(|| {
             cx.try_global::<Hosts>()?
                 .hosts
@@ -1596,21 +1704,15 @@ impl Agents2 {
         };
         let link = link(&host, cx);
         let identity = binding.identity.clone();
-        let destination = binding.destination.clone();
-        let owner = binding.viewer.clone();
-        let type_key = type_key.to_owned();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request = prepare(
+            request_id.clone(),
+            binding.destination.clone(),
+            binding.viewer.clone(),
+            type_key.to_owned(),
+        );
         cx.spawn(async move |this, cx| {
-            let request_id = uuid::Uuid::new_v4().to_string();
-            let AppAgentResponse::Prepared { pubkey } = link
-                .app_agent(AppAgentRequest::CreatePrepare {
-                    request_id: request_id.clone(),
-                    destination,
-                    owner,
-                    agent_type: type_key,
-                    name,
-                })
-                .await?
-            else {
+            let AppAgentResponse::Prepared { pubkey } = link.app_agent(request).await? else {
                 return Err("The host answered with something else".into());
             };
             let auth = identity

@@ -69,6 +69,7 @@ async fn custody_over_rpc() {
         info: info(),
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
+        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
@@ -201,7 +202,7 @@ async fn custody_over_rpc() {
             )
             .await
         ),
-        "Choose a picture uploaded to the agent's community"
+        "Use an HTTPS image URL without credentials"
     );
     assert_eq!(
         failed(
@@ -439,6 +440,7 @@ async fn one_gui_runs_each_agent_until_it_lets_go_or_disconnects() {
         info: info(),
         state_dir: state.path().join("state"),
         credentials: Arc::new(FileCredentials::new(state.path().join("keys")).unwrap()),
+        legacy_dir: None,
     })
     .unwrap();
     let (connector, listener) = transport::memory();
@@ -485,4 +487,129 @@ async fn one_gui_runs_each_agent_until_it_lets_go_or_disconnects() {
         pubkey: "../x".into(),
     };
     assert_eq!(failed(ask(&one, invalid).await), "Invalid agent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v1_agent_is_brought_over_with_its_key_name_and_picture() {
+    use buzz_agent_controller::{Credentials, Secret};
+    use sha2::{Digest, Sha256};
+    let state = tempfile::tempdir().unwrap();
+    let keys = FileCredentials::new(state.path().join("keys")).unwrap();
+    // A harness agent the v1 controller saved on this host.
+    let key = Secret::generate().unwrap();
+    let relay = "wss://old.example.com";
+    let credential = format!("{}-{:x}", key.pubkey(), Sha256::digest(relay.as_bytes()));
+    keys.add(&credential, &key).unwrap();
+    let library = state.path().join("state/agent-controller");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        library.join("agents.json"),
+        serde_json::json!({
+            "version": 1,
+            "agents": [{
+                "pubkey": key.pubkey(),
+                "relayUrl": relay,
+                "name": "Scout",
+                "picture": "https://old.example.com/media/scout.png",
+                "systemPrompt": "Look around.",
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let host = AgentHost::start(HostConfig {
+        info: info(),
+        state_dir: state.path().join("state"),
+        credentials: Arc::new(keys),
+        legacy_dir: Some(state.path().join("data")),
+    })
+    .unwrap();
+    let (connector, listener) = transport::memory();
+    tokio::spawn(serve(
+        listener,
+        Arc::new(RpcHandler(host)),
+        ServerOptions::default(),
+    ));
+    let client = HostClient::<HostProtocol>::spawn(
+        &tokio::runtime::Handle::current(),
+        Arc::new(connector),
+        Arc::new(NoAsks),
+        HostClientOptions::default(),
+    );
+    connected(&client).await;
+
+    let AppAgentResponse::Portable(found) = ask(&client, AppAgentRequest::Portable).await.unwrap()
+    else {
+        panic!("expected portable agents");
+    };
+    assert_eq!(
+        found.agents,
+        vec![PortableAgent {
+            source: PortSource::Harness,
+            pubkey: key.pubkey().into(),
+            name: "Scout".into(),
+            picture: Some("https://old.example.com/media/scout.png".into()),
+            relay: relay.into(),
+        }]
+    );
+    assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+
+    let owner = Identity::ephemeral();
+    let port = |request_id: &str| AppAgentRequest::PortPrepare {
+        request_id: request_id.into(),
+        source: PortSource::Harness,
+        pubkey: key.pubkey().into(),
+        destination: "wss://relay.example.com".into(),
+        owner: owner.pubkey_hex(),
+        agent_type: "test/echo".into(),
+    };
+    let AppAgentResponse::Prepared { pubkey } = ask(&client, port("port-1")).await.unwrap() else {
+        panic!("expected prepared");
+    };
+    assert_eq!(pubkey, key.pubkey(), "the agent keeps its key");
+    let AppAgentResponse::Created(created) = ask(
+        &client,
+        AppAgentRequest::CreateCommit {
+            request_id: "port-1".into(),
+            auth: owner.attest_agent(&pubkey).unwrap(),
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("expected created");
+    };
+    assert_eq!(
+        created,
+        AppAgentSummary {
+            pubkey: pubkey.clone(),
+            relay: "wss://relay.example.com".into(),
+            owner: owner.pubkey_hex(),
+            agent_type: "test/echo".into(),
+            name: "Scout".into(),
+            picture: Some("https://old.example.com/media/scout.png".into()),
+            deleted: false,
+        }
+    );
+    // Its old store keeps it, and bringing it over again is refused.
+    let AppAgentResponse::Portable(again) = ask(&client, AppAgentRequest::Portable).await.unwrap()
+    else {
+        panic!("expected portable agents");
+    };
+    assert_eq!(again.agents.len(), 1);
+    let AppAgentResponse::Prepared { .. } = ask(&client, port("port-2")).await.unwrap() else {
+        panic!("expected prepared");
+    };
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::CreateCommit {
+                    request_id: "port-2".into(),
+                    auth: owner.attest_agent(&pubkey).unwrap(),
+                },
+            )
+            .await
+        ),
+        "That agent is already here"
+    );
 }
