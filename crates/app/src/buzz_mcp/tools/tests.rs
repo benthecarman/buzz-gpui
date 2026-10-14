@@ -51,6 +51,7 @@ pub(crate) struct Fake {
     pub events: Vec<BuzzEvent>,
     pub published: Mutex<Vec<Template>>,
     pub remembered: Mutex<Vec<(String, String, u64)>>,
+    pub media: Mutex<Vec<String>>,
 }
 
 fn matches(filter: &Value, item: &BuzzEvent) -> bool {
@@ -107,6 +108,17 @@ impl BuzzClient for Fake {
             event.id = "e".repeat(64);
         });
         Box::pin(async move { Ok(published) })
+    }
+    fn media(&self, url: String) -> BoxFuture<'static, ClientResult<String>> {
+        use base64::Engine;
+        self.media.lock().unwrap().push(url.clone());
+        let bytes: &[u8] = if url.ends_with(".png") {
+            &PNG
+        } else {
+            &[1, 2, 3]
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Box::pin(async move { Ok(data) })
     }
     fn upload(&self, _: Vec<u8>, mime: String) -> BoxFuture<'static, ClientResult<Upload>> {
         Box::pin(async move {
@@ -197,7 +209,9 @@ fn args(value: Value) -> Args {
 }
 
 async fn call(client: &Arc<Fake>, context: &Context, name: &str, value: Value) -> ToolResult {
-    call_tool(client.clone(), context, name, &args(value)).await
+    call_tool(client.clone(), context, name, &args(value))
+        .await
+        .map(|reply| reply.text())
 }
 
 #[tokio::test]
@@ -511,7 +525,7 @@ async fn lists_its_tools_before_it_can_call_them() {
         &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
     )
     .await;
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 12);
     let call = respond(
         None,
         &context,
@@ -585,4 +599,35 @@ async fn tags_a_message_for_agents_and_needs_the_audience_said() {
         assert_eq!(error, "audience must be everyone or agents.");
     }
     assert_eq!(client.published.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn shows_a_media_image_to_the_agent_and_nothing_else() {
+    use base64::Engine;
+    let client = fake(vec![]);
+    let png = base64::engine::general_purpose::STANDARD.encode(&PNG[..]);
+    assert_eq!(
+        respond(
+            Some(client.clone()),
+            &Context::default(),
+            &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                     "params": { "name": "media_get", "arguments": { "url": "abc.png" } } }),
+        )
+        .await,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": { "content": [{ "type": "image", "data": png, "mimeType": "image/png" }] },
+        })
+    );
+    assert_eq!(*client.media.lock().unwrap(), ["abc.png"]);
+    let error = call(
+        &client,
+        &Context::default(),
+        "media_get",
+        json!({ "url": "abc.txt" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("Only JPEG, PNG, GIF and WebP"), "{error}");
 }

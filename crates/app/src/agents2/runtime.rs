@@ -131,6 +131,9 @@ pub(crate) struct HostLink {
     pub runtime: tokio::runtime::Handle,
 }
 
+/// What fetching media through a host from before it answers.
+pub const MEDIA_UNSUPPORTED: &str = "Update the agent's host to let it see Buzz images.";
+
 /// What hosts from before Agents2 answer.
 pub const UNSUPPORTED: &str = "This host does not support Agents yet; update it.";
 
@@ -276,6 +279,24 @@ impl AgentHandle {
                 serde_json::from_str(&json).map_err(|_| "Invalid upload receipt".into())
             }
             _ => Err("Invalid upload receipt".into()),
+        }
+    }
+
+    /// Downloads one of its community's media blobs, by URL or
+    /// `sha256[.ext]`, as the agent: base64.
+    pub async fn media(&self, url: &str) -> Result<String, String> {
+        match self
+            .host
+            .app_agent(AppAgentRequest::Media {
+                pubkey: self.pubkey.clone(),
+                url: url.into(),
+            })
+            .await
+        {
+            Ok(AppAgentResponse::Media(data)) => Ok(data),
+            Ok(_) => Err("Invalid agent media".into()),
+            Err(error) if error == UNSUPPORTED => Err(MEDIA_UNSUPPORTED.into()),
+            Err(error) => Err(error),
         }
     }
 

@@ -28,6 +28,10 @@ pub trait AgentActions: Send + Sync {
     fn publish(&self, event: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>>;
     fn query(&self, filters: Vec<Value>) -> BoxFuture<'static, ClientResult<Vec<BuzzEvent>>>;
     fn upload(&self, data: Vec<u8>, mime: String) -> BoxFuture<'static, ClientResult<Upload>>;
+    /// One of its community's media blobs, as base64.
+    fn media(&self, _url: String) -> BoxFuture<'static, ClientResult<String>> {
+        Box::pin(async { Err("Buzz media is not available here".to_string()) })
+    }
     fn remember(
         &self,
         slug: String,
@@ -82,6 +86,10 @@ impl AgentActions for AgentHandle {
             let receipt = handle.upload(&data, &mime).await?;
             serde_json::from_value(receipt).map_err(|_| "Invalid upload receipt".to_string())
         })
+    }
+    fn media(&self, url: String) -> BoxFuture<'static, ClientResult<String>> {
+        let handle = self.clone();
+        Box::pin(async move { handle.media(&url).await })
     }
     fn remember(
         &self,
@@ -192,6 +200,12 @@ impl BuzzClient for AppClient {
     fn upload(&self, data: Vec<u8>, mime: String) -> BoxFuture<'static, ClientResult<Upload>> {
         match self.checked() {
             Ok(()) => self.agent.upload(data, mime),
+            Err(error) => refused(error),
+        }
+    }
+    fn media(&self, url: String) -> BoxFuture<'static, ClientResult<String>> {
+        match self.checked() {
+            Ok(()) => self.agent.media(url),
             Err(error) => refused(error),
         }
     }

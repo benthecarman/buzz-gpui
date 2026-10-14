@@ -89,6 +89,7 @@ struct FakeAgent {
     uploads: Mutex<Vec<(Vec<u8>, String)>>,
     remembered: Mutex<Vec<(String, String, u64)>>,
     memories: Arc<Mutex<Vec<Memory>>>,
+    media: Mutex<Vec<String>>,
 }
 
 fn matches(event: &BuzzEvent, filter: &Value) -> bool {
@@ -159,6 +160,12 @@ impl AgentActions for FakeAgent {
             })
         }
         .boxed()
+    }
+    fn media(&self, url: String) -> BoxFuture<'static, ClientResult<String>> {
+        use base64::Engine;
+        locked(&self.media).push(url);
+        let data = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n");
+        async move { Ok(data) }.boxed()
     }
     fn remember(
         &self,
@@ -949,7 +956,7 @@ async fn restores_a_saved_binding_and_starts_fresh_in_another_workspace() {
     assert_eq!(
         *locked(&f.storage.0),
         HashMap::from([(
-            format!("buzz.codex.sessions.v3:{SCOPE}:{}", agent_key()),
+            format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key()),
             json!({ key(&root()): { "threadId": "thread-1", "workspace": "/tmp/codex-test" } }),
         )])
     );
@@ -1645,4 +1652,53 @@ async fn starts_a_turn_on_the_model_its_owner_picked_at_an_effort_that_model_sup
             (json!("test-model"), json!("low")),
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shows_codex_a_buzz_image_it_asks_for() {
+    use base64::Engine;
+    let f = fixture();
+    f.run(f.delivery("look at this")).await;
+    f.starts_reach(1).await;
+    let reply = f.tool("media_get", json!({ "url": "shot.png" })).await;
+    let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n");
+    assert_eq!(
+        reply,
+        json!({
+            "success": true,
+            "contentItems": [{
+                "type": "inputImage",
+                "imageUrl": format!("data:image/png;base64,{png}"),
+            }],
+        })
+    );
+    assert_eq!(*locked(&f.agent.media), ["shot.png"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starts_fresh_instead_of_restoring_a_binding_whose_tools_are_out_of_date() {
+    for version in ["v2", "v3"] {
+        let f = fixture();
+        f.storage
+            .set(
+                &format!("buzz.codex.sessions.{version}:{SCOPE}:{}", agent_key()),
+                json!({
+                    key(&root()): { "threadId": "legacy-thread", "workspace": "/tmp/codex-test" },
+                }),
+            )
+            .unwrap();
+        f.run(f.delivery("new work")).await;
+        f.starts_reach(1).await;
+        assert!(f.fake.calls("thread/resume").is_empty());
+        let started = &f.fake.calls("thread/start")[0]["params"];
+        let names: Vec<Value> = started["dynamicTools"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].clone())
+            .collect();
+        assert!(names.contains(&json!("media_get")));
+        f.complete().await;
+        f.published_reach(1).await;
+    }
 }

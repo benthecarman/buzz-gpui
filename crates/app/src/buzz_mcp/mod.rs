@@ -71,6 +71,11 @@ pub trait BuzzClient: Send + Sync {
     /// Signs `event` as the agent and posts it.
     fn publish(&self, event: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>>;
     fn upload(&self, data: Vec<u8>, mime: String) -> BoxFuture<'static, ClientResult<Upload>>;
+    /// Downloads a community media blob, by its URL or `sha256[.ext]`, as
+    /// base64.
+    fn media(&self, _url: String) -> BoxFuture<'static, ClientResult<String>> {
+        Box::pin(async { Err("Buzz media is not available here".to_string()) })
+    }
     /// A local file's bytes, for tools that take a `path`.
     fn read(&self, path: String) -> BoxFuture<'static, ClientResult<Vec<u8>>>;
     /// The agent's memory entries, decrypted.

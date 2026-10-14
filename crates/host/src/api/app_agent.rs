@@ -90,6 +90,14 @@ pub enum AppAgentRequest {
         body: String,
         after: u64,
     },
+    /// Downloads one of the agent's community's media blobs, by its URL or
+    /// `sha256[.ext]`, as the agent, so the agent can see a Buzz image.
+    /// Answers [`AppAgentResponse::Media`]. Hosts from before this answer
+    /// that they do not support it.
+    Media {
+        pubkey: String,
+        url: String,
+    },
     /// Whether the asking GUI runs the agent now. Every GUI connected to
     /// this host, and every copy of the app sharing its state directory,
     /// hears the same events; one runs each agent. Asked before each run,
@@ -150,6 +158,8 @@ pub enum AppAgentResponse {
         #[serde(default)]
         carry: Carry,
     },
+    /// A media blob, base64: see [`AppAgentRequest::Media`].
+    Media(String),
 }
 
 /// An Agents2 agent's identity; never its key.
@@ -314,6 +324,23 @@ mod tests {
         assert!(matches!(
             rmp_serde::from_slice(&wire(&old::AppAgentRequest::List)).unwrap(),
             AppAgentRequest::List
+        ));
+    }
+
+    #[test]
+    fn older_hosts_refuse_media_and_media_answers_round_trip() {
+        let media = AppAgentRequest::Media {
+            pubkey: "a".repeat(64),
+            url: "https://relay.example/media/a.png".into(),
+        };
+        assert!(rmp_serde::from_slice::<old::AppAgentRequest>(&wire(&media)).is_err());
+        assert!(matches!(
+            rmp_serde::from_slice(&wire(&media)).unwrap(),
+            AppAgentRequest::Media { url, .. } if url == "https://relay.example/media/a.png"
+        ));
+        assert!(matches!(
+            rmp_serde::from_slice(&wire(&AppAgentResponse::Media("iVBO".into()))).unwrap(),
+            AppAgentResponse::Media(data) if data == "iVBO"
         ));
     }
 }

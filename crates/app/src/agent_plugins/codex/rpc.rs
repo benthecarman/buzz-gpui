@@ -6,6 +6,7 @@
 
 use super::config::Model;
 use crate::agent_plugins::process::{Lines, Process, SpawnOptions, Spawner};
+use crate::buzz_mcp::tools::Reply;
 use buzz_host::api::ProcessOutput;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -53,9 +54,10 @@ impl ToolCall {
     }
 }
 
-/// Answers a tool call: its text, or an error for Codex to correct.
+/// Answers a tool call: its text or image, or an error for Codex to
+/// correct.
 pub type ToolHandler =
-    Arc<dyn Fn(ToolCall) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
+    Arc<dyn Fn(ToolCall) -> BoxFuture<'static, Result<Reply, String>> + Send + Sync>;
 
 type Answer = oneshot::Sender<Result<Value, String>>;
 
@@ -238,16 +240,17 @@ impl AppServer {
             let call = ToolCall::parse(message.get("params").unwrap_or(&Value::Null));
             let (this, answer) = (self.clone(), tool(call));
             tokio::spawn(async move {
-                let (success, text) = match answer.await {
-                    Ok(text) => (true, text),
-                    Err(text) => (false, text),
+                let (success, item) = match answer.await {
+                    Ok(Reply::Text(text)) => (true, json!({ "type": "inputText", "text": text })),
+                    Ok(Reply::Image { data, mime }) => (
+                        true,
+                        json!({ "type": "inputImage", "imageUrl": format!("data:{mime};base64,{data}") }),
+                    ),
+                    Err(text) => (false, json!({ "type": "inputText", "text": text })),
                 };
                 let reply = json!({
                     "id": id,
-                    "result": {
-                        "success": success,
-                        "contentItems": [{ "type": "inputText", "text": text }],
-                    },
+                    "result": { "success": success, "contentItems": [item] },
                 });
                 if let Err(error) = this.send(reply).await {
                     this.fail(error);

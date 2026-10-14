@@ -13,6 +13,24 @@ use std::time::Duration;
 type Args = Map<String, Value>;
 type ToolResult = Result<String, String>;
 
+/// A tool's answer: text, or an image (base64 `data`) for the agent to see.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reply {
+    Text(String),
+    Image { data: String, mime: String },
+}
+
+#[cfg(test)]
+impl Reply {
+    /// The text, or a short description of an image.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Image { mime, .. } => format!("[{mime}]"),
+        }
+    }
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     let mut schema = json!({
         "type": "object",
@@ -104,6 +122,12 @@ pub fn tools() -> Vec<Value> {
             json!({ "channel": str, "text": str, "path": str }),
             &[],
         ),
+        tool(
+            "media_get",
+            "See an image from a Buzz media URL.",
+            json!({ "url": str }),
+            &["url"],
+        ),
     ]
 }
 
@@ -132,13 +156,16 @@ pub async fn call_tool(
     context: &Context,
     name: &str,
     args: &Args,
-) -> ToolResult {
+) -> Result<Reply, String> {
     let tools = Tools {
         client,
         context: context.clone(),
         members: tokio::sync::Mutex::default(),
     };
-    match name {
+    if name == "media_get" {
+        return tools.media_get(args).await;
+    }
+    let text = match name {
         "send" => tools.send(args).await,
         "edit" => tools.edit(args).await,
         "react" => tools.react(args).await,
@@ -151,7 +178,8 @@ pub async fn call_tool(
         "mem_set" => tools.mem_set(args).await,
         "canvas" => tools.canvas(args).await,
         _ => Err(format!("No tool {name}")),
-    }
+    };
+    text.map(Reply::Text)
 }
 
 /// One call's helpers, so lookups it repeats are made once.
@@ -219,6 +247,23 @@ impl Tools {
             })
             .await?;
         Ok(format!("sent {}", event.id))
+    }
+
+    async fn media_get(&self, args: &Args) -> Result<Reply, String> {
+        use base64::Engine;
+        let url = required(args, "url")?;
+        let data = self.client.media(url).await?;
+        // The first 12 bytes name the type.
+        let head = base64::engine::general_purpose::STANDARD
+            .decode(data.get(..16).unwrap_or(&data))
+            .unwrap_or_default();
+        match sniff(&head) {
+            Some(mime) if mime.starts_with("image/") => Ok(Reply::Image {
+                data,
+                mime: mime.into(),
+            }),
+            _ => Err("Only JPEG, PNG, GIF and WebP images can be shown.".into()),
+        }
     }
 
     async fn edit(&self, args: &Args) -> ToolResult {

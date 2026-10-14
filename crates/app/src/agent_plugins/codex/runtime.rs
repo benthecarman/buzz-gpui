@@ -16,7 +16,7 @@ use crate::agent_plugins::owner_relay::{OwnerRelay, Scoped};
 use crate::agent_plugins::process::{SpawnOptions, Spawner, collect};
 use crate::agents2::{Effort as PickEffort, Model as PickModel, Models};
 use crate::buzz_mcp::app_client::{AgentActions, AppClient, Check, Memories, Signal};
-use crate::buzz_mcp::tools::{call_tool, tools};
+use crate::buzz_mcp::tools::{Reply, call_tool, tools};
 use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template};
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -789,10 +789,10 @@ impl CodexRuntime {
     }
 
     fn storage_key(request: &Request) -> String {
-        // Resume restores the persisted tool schema; bindings from before
-        // tools start fresh.
+        // Resume restores the persisted tool schema, so a binding from
+        // before a tool change starts fresh. v4 added media_get.
         format!(
-            "buzz.codex.sessions.v3:{}:{}",
+            "buzz.codex.sessions.v4:{}:{}",
             request.scope,
             request.agent.pubkey()
         )
@@ -1151,7 +1151,7 @@ impl CodexRuntime {
 
     /// Runs one Buzz tool for the turn that called it, whichever agent's
     /// it is.
-    async fn tool(&self, call: ToolCall) -> Result<String, String> {
+    async fn tool(&self, call: ToolCall) -> Result<Reply, String> {
         let entries: Vec<Arc<Entry>> = locked(&self.inner.entries).values().cloned().collect();
         let found = entries.into_iter().find_map(|entry| {
             let active = locked(&entry.lanes)

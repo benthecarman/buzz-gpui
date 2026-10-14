@@ -143,7 +143,7 @@ async fn answers_tool_calls_with_their_handler() {
     let tool: ToolHandler = Arc::new(|call: ToolCall| {
         async move {
             match call.tool.as_str() {
-                "send" => Ok(format!("sent {}", call.arguments["text"])),
+                "send" => Ok(Reply::Text(format!("sent {}", call.arguments["text"]))),
                 _ => Err("No such tool".to_string()),
             }
         }

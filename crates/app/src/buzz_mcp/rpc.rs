@@ -3,7 +3,7 @@
 //! Claude Code sends them over its stream-json pipe to an in-process
 //! (`sdk`) server. Holds no state between messages.
 
-use super::tools::{call_tool, tools};
+use super::tools::{Reply, call_tool, tools};
 use super::{BuzzClient, Context};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
@@ -52,7 +52,7 @@ pub async fn respond(
                 call_tool(client, context, &name, &args).await
             };
             match called.await {
-                Ok(text) => result(json!({ "content": [{ "type": "text", "text": text }] })),
+                Ok(reply) => result(json!({ "content": content(reply) })),
                 Err(text) => result(json!({
                     "content": [{ "type": "text", "text": text }],
                     "isError": true,
@@ -67,5 +67,13 @@ pub async fn respond(
                 "message": format!("No method {}", method.unwrap_or("undefined")),
             },
         }),
+    }
+}
+
+/// A tool's answer as MCP content.
+pub fn content(reply: Reply) -> Value {
+    match reply {
+        Reply::Text(text) => json!([{ "type": "text", "text": text }]),
+        Reply::Image { data, mime } => json!([{ "type": "image", "data": data, "mimeType": mime }]),
     }
 }

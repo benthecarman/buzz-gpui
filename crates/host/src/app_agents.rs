@@ -8,6 +8,7 @@
 //! saved on the host can be taken over with their keys.
 
 mod hosting;
+mod media;
 mod pictures;
 
 use crate::api::{
@@ -282,6 +283,10 @@ impl AppAgentHost {
                 .port(request_id, source, pubkey, destination, owner, agent_type)
                 .await
                 .map(|(pubkey, carry)| A::PortPrepared { pubkey, carry }),
+            R::Media { pubkey, url } => {
+                let (agent, key) = self.keyed(pubkey).await?;
+                media::fetch(&agent, &key, &url).await.map(A::Media)
+            }
             R::Claim { .. } | R::Release { .. } => {
                 Err("Agents2 claims need a GUI connection".into())
             }

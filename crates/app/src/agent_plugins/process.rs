@@ -209,6 +209,7 @@ impl Spawn for HostSpawner {
                     client,
                     handle,
                     owner,
+                    writing: Arc::default(),
                 })),
                 output,
             })
@@ -225,22 +226,52 @@ struct HostProcess {
     client: Arc<HostClient<HostProtocol>>,
     handle: u64,
     owner: &'static str,
+    /// Held across the pieces of one write, so no other lands between them.
+    writing: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Bytes per process write: hosts take at most 1 MiB at a time.
+const WRITE_PIECE: usize = 1024 * 1024;
+
+/// `data` in pieces of at most [`WRITE_PIECE`] bytes, never splitting a
+/// character; empty data is one empty piece.
+fn pieces(data: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = data;
+    while rest.len() > WRITE_PIECE {
+        let mut end = WRITE_PIECE;
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (piece, tail) = rest.split_at(end);
+        pieces.push(piece);
+        rest = tail;
+    }
+    pieces.push(rest);
+    pieces
 }
 
 impl ProcessControl for HostProcess {
+    /// A write longer than the host takes at once goes in pieces, in
+    /// order, closing stdin only after the last.
     fn write(&self, data: String, close: bool) -> BoxFuture<'static, Result<(), String>> {
-        let client = self.client.clone();
+        let (client, writing) = (self.client.clone(), self.writing.clone());
         let (handle, owner) = (self.handle, self.owner);
         Box::pin(async move {
-            client
-                .request(Request::ProcessWrite {
-                    handle,
-                    data,
-                    close,
-                })
-                .await
-                .map(drop)
-                .map_err(|error| failure(owner, error))
+            let _turn = writing.lock().await;
+            let pieces = pieces(&data);
+            let last = pieces.len() - 1;
+            for (index, piece) in pieces.into_iter().enumerate() {
+                client
+                    .request(Request::ProcessWrite {
+                        handle,
+                        data: piece.to_owned(),
+                        close: close && index == last,
+                    })
+                    .await
+                    .map_err(|error| failure(owner, error))?;
+            }
+            Ok(())
         })
     }
 
@@ -301,6 +332,18 @@ impl Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_writes_go_in_pieces_the_host_takes_without_splitting_characters() {
+        assert_eq!(pieces(""), [""]);
+        assert_eq!(pieces("short"), ["short"]);
+        let long = format!("{}é{}", "a".repeat(WRITE_PIECE - 1), "b".repeat(10));
+        let parts = pieces(&long);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), WRITE_PIECE - 1);
+        assert!(parts.iter().all(|part| part.len() <= WRITE_PIECE));
+        assert_eq!(parts.concat(), long);
+    }
 
     #[test]
     fn old_hosts_are_asked_to_update_for_the_type() {
