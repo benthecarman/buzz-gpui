@@ -188,6 +188,9 @@ manager (`crates/app/src/plugins.rs`); external plugins are skipped.
 |---|---|---|---|---|
 | Settings → Agents without v1: no harness list, Claude/Codex/Pi setup or agent defaults; Hosts block (this port's), saved agent activity and Remember mentioned agents remain (#859 `29c36a8b`) | src/app/AgentSettings.tsx | DONE (ui/settings/agents.rs) | Hosts copy now says agents keep their keys there and stay saved when a host is removed | S |
 | Sign-out keeps the Agents list beside the old controller's list and defaults; removing agents deletes the old controller's keys when its list exists, then every Agents key, for both the agents and agents2 folders; erase note "Kept agents keep their names, types and keys; their settings on this device are erased." (#858, #859, #871) | src-tauri/src/{lib,sign_out}.rs; src/features/identity/SignOut.tsx | DONE (sign_out.rs, ui/settings/profile/sign_out.rs) | — | S |
+| Pair mobile: "Copy pairing code" under the QR copies the code's text and reads "Copied" until a new code shows; its slot is kept in every phase (#1003) | src/bundled/pairing/PairingSettings.tsx; src/features/pairing/client.ts; src-tauri/src/pairing/mod.rs | DONE (app/src/ui/settings/pairing/mod.rs `copy_slot`; pair-mobile/src/lib.rs `Status::Qr::uri`) | DIFFERENT: no "Couldn’t copy. Try again" state, since GPUI's clipboard write reports no failure | S |
+| Settings → Personal groups removed with personal groups (#988) | src/bundled/channels/index.tsx | DONE (app/src/ui/settings/personal_groups.rs deleted) | — | S |
+| Native nsec backup HTTP client (#995) | crates/nsec-backup | N/A (library crate only; nothing in buzz-app's src/ or src-tauri uses it yet) | — | — |
 
 ## Not applicable: macOS/Windows only
 

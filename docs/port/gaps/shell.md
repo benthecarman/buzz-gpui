@@ -143,6 +143,14 @@ listed under "Webview / plugin-runtime only" at the end, not as gaps.
 | F6 leaves focus inside an open modal instead of reaching the toast stack behind it; recovery actions stay reachable once it closes (#520, ported ahead of merge) | src/shared/design-system/ui/Toast.tsx | N/A: the port's toasts have no F6 shortcut and no tab stops, and Tab never leaves a modal (main_window.rs `tab_through`). The PR's goose_models.rs test fix has no counterpart: the port has no Goose ACP model probe | — | — |
 | Me and Messages use the design-system chrome tabs: body-type labels; opening from a tab does not focus the composer (#798) | src/app/shell/AppShell.tsx; PageNavigation.tsx; ui/Tabs.tsx | DONE (ui/src/components/tabs.rs, ui/workspace/shell.rs, ui/me/mod.rs) | No keyboard focus or sliding pill: the port's tabs take no focus | S |
 
+## 12. buzz-app main of 2026-10-14
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Automatic updates for Windows and Linux previews (#1004) | .github/workflows/release.yml; scripts/{preview-feed,prune-preview-releases,candidate-version}.mjs; docs/releases.md | DIFFERENT (app/src/updates/): buzz-app publishes a rolling Tauri feed (`preview-feed/latest.json`) for darwin-aarch64, windows-x86_64, linux-x86_64-deb and linux-x86_64-appimage with Minisign signatures, keeps candidate builds updater-less and prunes old previews; NSIS installs per user, AppImage is replaced in place, the deb goes through `pkexec dpkg -i`. The port checks GitHub `releases/latest` of benthecarman/buzz-gpui (ETag, 15 s after launch, then every 6 h), verifies the .deb against the release's SHA256SUMS, installs it with `pkexec apt` and offers a restart; other packaged copies open the download. It has no preview channel, AppImage or Windows build, signature feed or prune job | Nothing to port: Linux .deb copies already update themselves | — |
+| Development browser broker decodes request bodies as a UTF-8 stream (#1038) | browser-host/relay-broker.mjs | N/A (development browser broker only) | — | — |
+| Vite dev watcher ignores `.scratch` (#1001) | vite.config.ts; scripts/check-push.mjs | N/A (web dev server and tooling only) | — | — |
+
 ## Platform-specific, not applicable on Linux
 
 - macOS overlay title bar: `titleBarStyle: Overlay`, `hiddenTitle`, traffic lights at (20, 26), and 80px left inset on the header (`src-tauri/tauri.conf.json:18-24`; `globals.css` `.shell-header-mac`).

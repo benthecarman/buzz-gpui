@@ -688,6 +688,12 @@ Rows: DONE 61, DIFFERENT 3.
 | Compact clock shares the byline clock's formatting (#609) | src/shared/datetime.ts; src/features/messages/MessageTimestamp.tsx | DONE (ui/time.rs; output already matched, now pinned by a test) | — | S |
 | A link to another message of the open thread, or to its root, selects it in place, keeping the reply being written, its reply target, the scroll position and open branches; Back and Forward select the earlier message in the same panel. The message must name the thread's root in its own signed ancestry and its overlays fold before it shows; a newer link wins; a link into another thread still opens that thread; one that cannot open keeps the thread and notes "That message is no longer available." or "Couldn’t open that message." with Try again (#853, ported ahead of merge) | src/features/relay/threads.ts `retarget`; src/features/relay/session.ts; src/features/messages/ThreadPanel.tsx `RetainedThreadPanel` | DONE (relay/src/threads.rs `ThreadState::retarget`, relay/src/session/threads.rs `ThreadView::retarget`, app/src/ui/thread.rs `select`, ui/workspace.rs `show_thread`; history records the thread of a selected message, ui/navigation.rs `Beside`) | The PR's popover close fix has no counterpart: GPUI popovers keep no library hover state | M |
 
+## 7. buzz-app main of 2026-10-14
+
+| Feature | buzz-app reference | Port status | What's needed | Size |
+|---|---|---|---|---|
+| Inbox conversation details offer Edit message on the viewer's messages; an emptied edit's deletion ends the edit and brings the reply draft back only on its receipt or echo, never on a discarded deletion or a replacement edit, and moves focus to the composer only from nowhere, the composer or the dialog; hiding the preview dismisses the delete confirmation without cancelling a sent deletion (#815) | src/bundled/inbox/InboxDetail.tsx; src/features/messages/{MessageManagement,MessageComposer}.tsx | DONE (app/src/ui/message_actions.rs `EditDeletion`, `set_presented`; ui/composer.rs `edit_session`) | The port's Inbox reader already had the shared message actions | S |
+
 ## Not counted: absent from buzz-app, or not applicable to a native app
 
 These were checked so that nobody ports them by mistake. In each case the port already matches.

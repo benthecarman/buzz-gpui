@@ -115,11 +115,11 @@ its defaults are complete. The status is a quick check of the port only.
 | Feature | buzz-app reference | Port status | What's needed | Size |
 |---|---|---|---|---|
 | Bundled catalog without Agents (v1) and Templates & teams; Agents2's plugin becomes buzz.agents "Agents" (#859, #871) | crates/plugin-manager/src/lib.rs; src/bundled/index.ts | DONE (buzzodz-plugins at the pin; plugins.rs `DEFAULT_OFF`) | — | S |
-
----
+| External plugin reload uses the exact recorded source folder (#1030) | crates/plugin-manager/src/lib.rs | SKIPPED (decided: external plugin import) | — | S |
 
 ## Counts
 
 - Main table, 35 rows: DONE 26, SKIPPED (decided) 8, DIFFERENT 1 (`managed_npm.rs`: the port uses harnesses installed on PATH, by design).
 - Other slices' plugins, 13 rows: DONE 12, SKIPPED (decided) 1 (Composer lab).
 - buzz-app main of 2026-10-10, 2 rows: DONE 2.
+- buzz-app main of 2026-10-14, 1 row: SKIPPED (decided) 1.
