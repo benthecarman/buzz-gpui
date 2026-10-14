@@ -146,10 +146,10 @@ pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Cont
                 }))
             }
             TabKind::Thread(thread) => {
-                if thread_channel(this, thread, cx).is_none() {
+                let Some(summary) = thread_channel(this, thread, cx) else {
                     continue;
-                }
-                thread_view(&community, &tab.id, thread, window, cx)
+                };
+                thread_view(&community, &tab.id, thread, summary, window, cx)
             }
         };
         this.tab_views().insert(tab.id.clone(), view);
@@ -189,6 +189,7 @@ fn thread_view<T: TabHost>(
     community: &Entity<Community>,
     id: &str,
     thread: &ThreadTab,
+    summary: ChannelSummary,
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> TabView {
@@ -214,6 +215,8 @@ fn thread_view<T: TabHost>(
             false => ThreadPanel::new(community, channel, message, on_close, window, cx),
         };
         panel.on_different = Some(on_different);
+        // A public preview's thread offers Join, as its conversation does.
+        panel.summary = Some(summary);
         panel
     });
     let root_id = id.to_string();

@@ -19,9 +19,9 @@ use crate::community::Community;
 use buzz_relay_client::lifecycle::{Action, ActionError, LifecyclePermissions};
 use buzz_relay_client::{ChannelSummary, ChannelType};
 use buzz_ui::{
-    ActiveTheme, Button, ButtonSize, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
-    MenuLabel, MenuSeparator, TypeStyled,
-    tokens::{radius, shadow, size, space},
+    ActiveTheme, Button, ButtonSize, ButtonVariant, Icon, IconButton, IconButtonSize, IconName,
+    Menu, MenuItem, MenuLabel, MenuSeparator, TypeStyled,
+    tokens::{duration, easing, radius, shadow, size, space},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -561,13 +561,23 @@ impl Render for ChannelActions {
 // ---------------------------------------------------------------------------
 // Join notice
 
-/// "Read-only preview · You haven’t joined this conversation.", with Join
-/// for streams and forums (`ChannelJoinNotice`).
+/// A public preview's Join prompt (`ChannelJoinNotice`): a capsule over
+/// the bottom of the history, in place of the composer. Streams and forums
+/// offer Join; the membership roster, not this prompt, makes the channel
+/// writable. The capsule shows once the conversation's content is ready,
+/// rising into place, and reports its height so the history reserves room
+/// for it.
 pub struct JoinNotice {
     community: Entity<Community>,
     channel: ChannelSummary,
     pending: bool,
     error: Option<SharedString>,
+    /// The host's content can show; the prompt waits for it, then stays.
+    revealed: bool,
+    /// When it was revealed, for its entrance.
+    entered: Option<u64>,
+    /// The capsule's height, for the history's end space.
+    pub height: Rc<std::cell::Cell<Pixels>>,
 }
 
 /// A join started; the page focuses its composer once the channel is
@@ -583,7 +593,25 @@ impl JoinNotice {
             channel,
             pending: false,
             error: None,
+            revealed: false,
+            entered: None,
+            height: Rc::default(),
         }
+    }
+
+    /// The host's content is ready: the prompt shows from now on.
+    pub fn set_ready(&mut self, ready: bool, cx: &mut Context<Self>) {
+        if ready && !self.revealed {
+            self.revealed = true;
+            self.entered = Some(cx.entity_id().as_u64());
+            cx.notify();
+        }
+    }
+
+    /// The room the history keeps clear under its end: the capsule and
+    /// its 12px margin.
+    pub fn inset(&self) -> Pixels {
+        self.height.get() + px(12.)
     }
 
     fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -617,26 +645,105 @@ impl Render for JoinNotice {
             self.channel.channel_type,
             Some(ChannelType::Stream | ChannelType::Forum)
         ) && !self.channel.archived;
-        div()
+        let height = self.height.clone();
+        let measure = canvas(
+            move |bounds, _, _| height.set(bounds.size.height),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        let mut capsule = div()
+            .relative()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(12.))
-            .px(px(16.))
-            .py(px(8.))
-            .mb(px(8.))
-            .text_body_sm()
-            .text_color(c.text_subtle)
-            .child("Read-only preview · You haven’t joined this conversation.")
+            .justify_center()
+            .gap(px(8.))
+            .p(px(6.))
+            .max_w_full()
+            .rounded(radius::CAPSULE)
+            .bg(c.glass_4)
+            .shadow({
+                let mut shadows = shadow::sm();
+                shadows.extend(shadow::rims(c.rim_lit, c.rim_shade));
+                shadows
+            })
+            .child(measure)
+            .child(
+                div()
+                    .px(px(8.))
+                    .text_body_sm()
+                    .text_color(c.text_subtle)
+                    .child(if joinable {
+                        "Join channel to send messages"
+                    } else {
+                        "You’re previewing this channel."
+                    }),
+            )
             .when(joinable, |this| {
                 this.child(
-                    Button::new("join-channel", "Join channel")
+                    Button::new("join-channel", "Join")
                         .size(ButtonSize::Sm)
+                        .variant(ButtonVariant::Prominent)
                         .loading(self.pending)
                         .on_click(cx.listener(|this, _, window, cx| this.join(window, cx))),
                 )
-                .children(self.error.clone())
-            })
+                .children(self.error.clone().map(|error| {
+                    div()
+                        .w_full()
+                        .max_w(rems(24.))
+                        .px(px(8.))
+                        .pb(px(4.))
+                        .text_body_sm()
+                        .text_color(c.text_danger)
+                        .child(error)
+                }))
+            });
+        if !self.revealed {
+            capsule = capsule.invisible();
+        }
+        let capsule = match self.entered {
+            // It rises into place after a short pause; with reduced motion
+            // it only fades.
+            Some(entered) => {
+                let reduce = cx.reduce_motion();
+                let (delay, fade, rise) = (
+                    duration::FAST.as_secs_f32(),
+                    duration::STATE.as_secs_f32(),
+                    duration::SETTLE.as_secs_f32(),
+                );
+                let total = if reduce { fade } else { delay + rise };
+                // Half its height below, as `translateY(50%)`.
+                let drop = self.height.get() / 2.;
+                capsule
+                    .with_animation(
+                        ElementId::Name(format!("join-notice-{entered}").into()),
+                        Animation::new(std::time::Duration::from_secs_f32(total)),
+                        move |capsule, t| {
+                            let at = t * total;
+                            let since = if reduce { at } else { (at - delay).max(0.) };
+                            let enter = |span: f32| {
+                                easing::cubic_bezier(easing::ENTER, (since / span).min(1.))
+                            };
+                            let lift = if reduce { 0. } else { 1. - enter(rise) };
+                            capsule.opacity(enter(fade)).top(drop * lift)
+                        },
+                    )
+                    .into_any_element()
+            }
+            None => capsule.into_any_element(),
+        };
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .flex()
+            .justify_center()
+            .p(px(12.))
+            .child(capsule)
     }
 }
 

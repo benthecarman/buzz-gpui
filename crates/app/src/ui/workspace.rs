@@ -992,7 +992,19 @@ impl Workspace {
                     return;
                 };
                 let snapshot = community.read(cx).snapshot.clone();
-                let Some(summary) = snapshot.channels.iter().find(|c| c.id == *channel) else {
+                // A preview already shown stays while a visit within it,
+                // such as one of its threads, opens.
+                let shown = self
+                    .channel
+                    .as_ref()
+                    .map(|page| page.read(cx).channel().clone())
+                    .filter(|shown| shown.id == *channel && shown.read_only && !shown.cached);
+                let Some(summary) = snapshot
+                    .channels
+                    .iter()
+                    .find(|c| c.id == *channel)
+                    .or(shown.as_ref())
+                else {
                     // A link can arrive before the channel list does; one
                     // the viewer has not joined is looked up exactly.
                     if snapshot.roster == RosterStatus::Ready {

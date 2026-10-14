@@ -927,42 +927,53 @@ impl ChannelPage {
         }
     }
 
-    /// The composer, with the read-only preview's Join and live-update
-    /// recovery above it (`ChannelJoinNotice`, `LiveStatus`), and who is
-    /// typing over its top edge.
+    /// A public preview: read-only and confirmed by the relay. It has a
+    /// Join prompt over its history instead of a composer.
+    fn preview(&self) -> bool {
+        self.channel.read_only && !self.channel.cached
+    }
+
+    /// The composer, with live-update recovery above it (`LiveStatus`),
+    /// and who is typing over its top edge. A preview has no composer.
     fn composer_shell(&self, typing: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let read_only = self.channel.read_only;
         self.composer
             .update(cx, |composer, cx| composer.set_can_send(!read_only, cx));
-        // A channel known only from the cache shows its disabled composer
-        // with the draft, without the join notice.
-        let join = read_only && !self.channel.cached;
+        let preview = self.preview();
         let composer = self.composer.downgrade();
+        let history = self.focus.clone();
         let live = self
             .live_status
             .then(|| {
                 super::live_status::recovery(
                     &self.community,
                     Some(&self.channel.id),
-                    // Retry removes the focused button: focus moves on.
-                    move |window, cx| {
-                        let _ = composer.update(cx, |composer, cx| composer.focus(window, cx));
+                    // Retry removes the focused button: focus moves on, to
+                    // the history where there is no composer.
+                    move |window, cx| match preview {
+                        true => window.focus(&history, cx),
+                        false => {
+                            let _ = composer.update(cx, |composer, cx| composer.focus(window, cx));
+                        }
                     },
                     cx,
                 )
             })
             .flatten();
+        // A channel known only from the cache shows its disabled composer
+        // with the draft.
         div()
             .flex()
             .flex_col()
-            .when(join, |d| d.child(self.join.clone()))
             .children(live)
-            .child(
-                div()
-                    .relative()
-                    .children(typing)
-                    .child(self.composer.clone()),
-            )
+            .when(!preview, |this| {
+                this.child(
+                    div()
+                        .relative()
+                        .children(typing)
+                        .child(self.composer.clone()),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1197,6 +1208,21 @@ impl Render for ChannelPage {
         )
         .absolute()
         .size_0();
+        // A preview's Join prompt waits for its content, then floats over
+        // the history's end, which keeps room for it.
+        let preview = self.preview();
+        if preview {
+            let ready = !self.items.is_empty()
+                || matches!(
+                    snapshot.status,
+                    TimelineStatus::Ready | TimelineStatus::Error(_)
+                );
+            self.join.update(cx, |join, cx| join.set_ready(ready, cx));
+        }
+        let preview_inset = match preview {
+            true => self.join.read(cx).inset(),
+            false => px(0.),
+        };
         let timeline = if self.items.is_empty() && snapshot.status != TimelineStatus::Ready {
             self.placeholder(&snapshot, cx)
         } else if self.items.is_empty() {
@@ -1225,6 +1251,7 @@ impl Render for ChannelPage {
             let jump = self.jump.render(
                 "jump-to-latest",
                 lane,
+                preview_inset,
                 cx.listener(|this, _, window, cx| {
                     this.list.set_follow_mode(FollowMode::Tail);
                     this.restore = None;
@@ -1273,8 +1300,9 @@ impl Render for ChannelPage {
                                     .px(inset)
                                     .child(message::render(item, &rows, cx))
                                     .child(drawn.probe(index))
-                                    // The end space scrolls with the history.
-                                    .when(index == count, |d| d.pb(END_SPACE)),
+                                    // The end space scrolls with the history,
+                                    // clear of a preview's Join prompt.
+                                    .when(index == count, |d| d.pb(END_SPACE + preview_inset)),
                             ),
                             None => div().into_any_element(),
                         }
@@ -1284,6 +1312,19 @@ impl Render for ChannelPage {
                 .child(after_layout)
                 .children(jump)
                 .into_any_element()
+        };
+
+        let timeline = match preview {
+            true => div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(timeline)
+                .child(self.join.clone())
+                .into_any_element(),
+            false => timeline,
         };
 
         // A saved conversation shows no one typing (`MessageComposer`).

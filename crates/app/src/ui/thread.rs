@@ -1,5 +1,6 @@
 //! The thread panel in the Messages board's right dock (ui.md §4.11).
 
+use super::channel_menu::{JoinNotice, Joining};
 use super::composer::{Composer, ComposerEvent, ReplyContext, Submission};
 use super::jump::{self, Jump};
 use super::markdown::Directory;
@@ -14,8 +15,8 @@ use buzz_relay_client::fold::{MessageRow, ReplyTree};
 use buzz_relay_client::session::ThreadView;
 use buzz_relay_client::threads::{Direction, ReadKind};
 use buzz_relay_client::{
-    Media, Profiles, Retarget, TargetStatus, ThreadSnapshot, ThreadStatus, UnreadDetail,
-    UnreadWatch,
+    ChannelSummary, ChannelType, Media, Profiles, Retarget, TargetStatus, ThreadSnapshot,
+    ThreadStatus, UnreadDetail, UnreadWatch,
 };
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, IconName, PanelHeader, Tab, TabVariant,
@@ -68,6 +69,16 @@ fn reply_placeholder(root: &MessageRow, viewer: &str, name: &str) -> SharedStrin
     } else {
         format!("Reply in thread to {name}").into()
     }
+}
+
+/// How the viewer stands in a thread's conversation.
+enum Access {
+    Member,
+    /// A public preview the viewer may join.
+    Joinable(ChannelSummary),
+    /// A preview they cannot join here.
+    Preview(ChannelSummary),
+    Other,
 }
 
 /// A same-thread link that could not open; the thread stays usable.
@@ -133,6 +144,13 @@ pub struct ThreadPanel {
     /// [`select`](Self::select), even if that failed.
     asked: EventId,
     pub on_different: Option<OnDifferent>,
+    /// The conversation as its host knows it, for one not in the joined
+    /// list, such as a public preview.
+    pub summary: Option<ChannelSummary>,
+    /// A preview's Join prompt, in place of the composer.
+    join: Option<Entity<JoinNotice>>,
+    /// The reader started joining this preview.
+    joining: bool,
     _selecting: Option<Task<()>>,
     /// The panel, focused when it opens; focus here (the history or the
     /// composer) is reading.
@@ -288,6 +306,9 @@ impl ThreadPanel {
             selection_failure: None,
             asked: root_id,
             on_different: None,
+            summary: None,
+            join: None,
+            joining: false,
             _selecting: None,
             focus,
             reporter: Reporter::default(),
@@ -315,6 +336,36 @@ impl ThreadPanel {
     pub fn set_presented(this: &Entity<Self>, presented: bool, cx: &mut App) {
         let actions = this.read(cx).message_actions.clone();
         actions.update(cx, |actions, cx| actions.set_presented(presented, cx));
+    }
+
+    /// How the viewer stands in the thread's conversation: a member may
+    /// reply; a public preview offers Join instead of the composer
+    /// (`useListedChannel`).
+    fn access(&self, cx: &App) -> Access {
+        let community = self.community.read(cx);
+        let listed = community
+            .snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.id == self.channel);
+        let Some(channel) = listed.or(self.summary.as_ref()) else {
+            return Access::Other;
+        };
+        if channel.read_only && !channel.cached {
+            let joinable = !channel.archived
+                && matches!(
+                    channel.channel_type,
+                    Some(ChannelType::Stream | ChannelType::Forum)
+                );
+            return match joinable {
+                true => Access::Joinable(channel.clone()),
+                false => Access::Preview(channel.clone()),
+            };
+        }
+        match listed.is_some_and(|channel| !channel.read_only && !channel.archived) {
+            true => Access::Member,
+            false => Access::Other,
+        }
     }
 
     /// The message last asked of the panel, which a host compares with
@@ -950,6 +1001,34 @@ impl Render for ThreadPanel {
             .iter()
             .find(|channel| channel.id == self.channel)
             .is_some_and(|channel| channel.read_only);
+        let access = self.access(cx);
+        // A preview offers Join in place of the composer; once a join the
+        // reader started makes them a member, they can reply.
+        let preview = match &access {
+            Access::Joinable(channel) | Access::Preview(channel) => Some(channel.clone()),
+            Access::Member | Access::Other => None,
+        };
+        if self.joining && matches!(access, Access::Member) {
+            self.joining = false;
+            ThreadPanel::focus_composer(&cx.entity(), window, cx);
+        }
+        if let Some(channel) = &preview
+            && self.join.is_none()
+        {
+            let community = self.community.clone();
+            let join = cx.new(|_| JoinNotice::new(community, channel.clone()));
+            self._subscriptions
+                .push(cx.subscribe(&join, |this, _, _: &Joining, _| this.joining = true));
+            self.join = Some(join);
+        }
+        let join = preview.as_ref().and(self.join.clone());
+        if let Some(join) = &join {
+            let ready = !self.entries.is_empty()
+                || matches!(snapshot.status, ThreadStatus::Ready | ThreadStatus::Error);
+            join.update(cx, |join, cx| join.set_ready(ready, cx));
+        }
+        let preview_inset = join.as_ref().map_or(px(0.), |join| join.read(cx).inset());
+        let community = self.community.read(cx);
         let root_hex = snapshot
             .root
             .as_ref()
@@ -1065,6 +1144,7 @@ impl Render for ThreadPanel {
                 .iter()
                 .position(|entry| !matches!(entry, Entry::Root(_) | Entry::Missing));
             let narrow_panel = f32::from(self.width) > 0. && f32::from(self.width) <= 320.;
+            let entry_count = entries.len();
             let after_layout = {
                 let weak = weak.clone();
                 canvas(
@@ -1079,6 +1159,7 @@ impl Render for ThreadPanel {
             let jump = self.jump.render(
                 "thread-jump-to-latest",
                 typing::has_agents(&self.activity, cx),
+                preview_inset,
                 cx.listener(|this, _, window, cx| {
                     this.list.set_follow_mode(FollowMode::Tail);
                     this.jump.set(false);
@@ -1140,6 +1221,8 @@ impl Render for ThreadPanel {
                             .children(status)
                             .child(render_entry(entry, &rows, &branch, &weak, cx))
                             .child(drawn.probe(index))
+                            // The last reply stays clear of a preview's Join.
+                            .when(index + 1 == entry_count, |d| d.pb(preview_inset))
                             .into_any_element()
                     })
                     .flex_1()
@@ -1272,7 +1355,18 @@ impl Render for ThreadPanel {
                 }
             }))
             .children(header)
-            .child(body)
+            .child(match join {
+                Some(join) => div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(body)
+                    .child(join)
+                    .into_any_element(),
+                None => body,
+            })
             .children(status)
             .child(div().h(px(12.)).flex_none())
             .children(self.error.clone().map(|error| {
@@ -1283,14 +1377,17 @@ impl Render for ThreadPanel {
                     .text_color(c.text_warning)
                     .child(error)
             }))
-            .when(snapshot.root.is_some() && self.root_verified(), |this| {
-                this.child(
-                    div()
-                        .relative()
-                        .children(typing)
-                        .child(self.composer_view(read_only, cx)),
-                )
-            })
+            .when(
+                preview.is_none() && snapshot.root.is_some() && self.root_verified(),
+                |this| {
+                    this.child(
+                        div()
+                            .relative()
+                            .children(typing)
+                            .child(self.composer_view(read_only, cx)),
+                    )
+                },
+            )
             .children(super::composer::pane_drop_overlay(&self.composer, cx))
     }
 }
@@ -1580,7 +1677,11 @@ fn render_reply(reply: &Reply, rows: &Rc<Rows>, branch: &Branch, cx: &mut App) -
                 .relative()
                 .pl(px(branch.indent(depth)))
                 .children(lines)
-                .child(message::day_divider(day.clone(), cx)),
+                .child(message::day_divider(
+                    day.clone(),
+                    reply.item.row.created_at,
+                    cx,
+                )),
         );
     }
     let item = Item {

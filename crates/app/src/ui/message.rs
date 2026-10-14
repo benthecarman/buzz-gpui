@@ -84,22 +84,79 @@ pub fn continues(previous: &MessageRow, row: &MessageRow) -> bool {
 }
 
 /// The day divider (§4.4): a label between two hairlines.
-pub fn day_divider(day: SharedString, cx: &App) -> Div {
+pub fn day_divider(day: SharedString, at: u64, cx: &App) -> Div {
     let c = *cx.colors();
+    // A half-pixel hairline, drawn as a pixel at half strength so it
+    // shows at any scale.
+    let rule = || {
+        div()
+            .flex_1()
+            .min_w_0()
+            .h(px(1.))
+            .bg(c.border_standard)
+            .opacity(0.5)
+    };
     div()
         .flex()
         .items_center()
-        .my(px(12.))
-        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
+        .justify_center()
+        .gap(px(16.))
+        .py(px(8.))
+        .my(px(20.))
+        .text_caption()
+        .text_color(c.text_subtle)
+        .child(rule())
         .child(
             div()
-                .px(px(12.))
-                .py(px(6.))
-                .text_caption()
-                .text_color(c.text_standard)
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .min_w_0()
+                .child(day_calendar(time::day_of_month(at), c.border_standard))
                 .child(day),
         )
-        .child(div().flex_1().h(px(1.)).bg(c.border_standard))
+        .child(rule())
+}
+
+/// The divider's decorative calendar tile: white in both themes, a red
+/// band along its top and the day of the month below it; the label
+/// beside it names the date.
+fn day_calendar(date: u32, border: Hsla) -> impl IntoElement {
+    // The 24-unit artwork drawn at 20px.
+    let unit = 20. / 24.;
+    div()
+        .relative()
+        .flex_none()
+        .size(px(20.))
+        .rounded(px(5.5 * unit))
+        .border(px(0.5))
+        .border_color(border)
+        .bg(rgb(0xffffff))
+        .overflow_hidden()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(7. * unit))
+                .bg(rgb(0xff0000)),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(7. * unit))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.))
+                .line_height(px(10.))
+                .text_color(rgb(0x111111))
+                .child(date.to_string()),
+        )
 }
 
 pub fn display_name(profiles: &Profiles, pubkey: &str) -> SharedString {
@@ -449,7 +506,7 @@ fn full(
 
     let mut container = div().flex().flex_col().w_full();
     if let Some(day) = &item.day {
-        container = container.child(day_divider(day.clone(), cx));
+        container = container.child(day_divider(day.clone(), item.row.created_at, cx));
     }
 
     if row.membership.is_some() {
@@ -832,7 +889,7 @@ fn quiet(item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
         });
     let mut container = div().flex().flex_col().w_full();
     if let Some(day) = &item.day {
-        container = container.child(day_divider(day.clone(), cx));
+        container = container.child(day_divider(day.clone(), item.row.created_at, cx));
     }
     container
         .child(

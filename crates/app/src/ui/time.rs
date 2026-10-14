@@ -62,6 +62,11 @@ fn day_at(seconds: u64, now: DateTime<Local>) -> String {
     }
 }
 
+/// The local day of the month, for the day divider's calendar.
+pub fn day_of_month(seconds: u64) -> u32 {
+    local(seconds).day()
+}
+
 /// Whether two times fall on the same local calendar day.
 pub fn same_day(a: u64, b: u64) -> bool {
     local(a).date_naive() == local(b).date_naive()

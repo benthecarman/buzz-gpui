@@ -229,7 +229,7 @@ pub fn render(
     let mut avatars = div().flex().flex_none().pr(px(6.));
     for id in description.targets.iter().take(3) {
         let name = names.display(id);
-        let mut avatar = Avatar::new(name).size(AvatarSize::Px(24.));
+        let mut avatar = Avatar::new(name).size(AvatarSize::Px(16.));
         if names.is_library_agent(id) {
             avatar = avatar.squircle();
         }
@@ -238,7 +238,7 @@ pub fn render(
         }
         avatars = avatars.child(
             div()
-                .size(px(28.))
+                .size(px(20.))
                 .mr(px(-6.))
                 .flex()
                 .items_center()
@@ -254,7 +254,7 @@ pub fn render(
     if description.targets.len() > 3 {
         avatars = avatars.child(
             div()
-                .size(px(24.))
+                .size(px(20.))
                 .mr(px(-6.))
                 .flex()
                 .flex_none()
@@ -273,10 +273,10 @@ pub fn render(
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(12.))
+        .gap(px(8.))
         .pt(px(8.))
         .pb(px(16.))
-        .text_body_sm()
+        .text_caption()
         .text_color(c.text_subtle)
         .child(avatars)
         .child(

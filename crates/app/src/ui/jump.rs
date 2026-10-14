@@ -50,10 +50,13 @@ impl Jump {
 
     /// The pill, fading in over 150ms and out over 120ms, rising 2px as it
     /// appears. `lane` lifts it clear of an agent activity pill.
+    /// `lane` lifts the pill over the composer's agent activity, and
+    /// `inset` over a preview's Join prompt.
     pub fn render(
         &self,
         id: &'static str,
         lane: bool,
+        inset: Pixels,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         cx: &App,
     ) -> Option<AnyElement> {
@@ -117,7 +120,7 @@ impl Jump {
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(2. + if lane { ACTIVITY_LANE } else { 0. }))
+                .bottom(px(2.) + if lane { px(ACTIVITY_LANE) } else { inset })
                 .flex()
                 .justify_center()
                 .child(pill)
