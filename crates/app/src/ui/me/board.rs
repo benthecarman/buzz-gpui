@@ -9,8 +9,10 @@ use super::dialogs::{self, DialogHost};
 use crate::community::Community;
 use crate::ui::channel::{ChannelPage, OpenThread};
 use crate::ui::channel_panels::{self, ChannelPanel};
-use crate::ui::channel_tab_views::{self, TabHost, TabView, tab_icon, usable};
-use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabState, ThreadTarget};
+use crate::ui::channel_tab_views::{
+    self, TabHost, TabView, root_content, tab_icon, thread_channel, thread_label, usable,
+};
+use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabPane, TabState, ThreadTarget};
 use crate::ui::message::channel_icon;
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::panels::{self, Close, Dock, TabItem};
@@ -60,6 +62,15 @@ impl TabHost for SessionWork {
 
     fn channel_id(&self, _: &App) -> Option<String> {
         Some(self.channel.id.clone())
+    }
+
+    fn page(&self) -> Option<Entity<ChannelPage>> {
+        Some(self.page.clone())
+    }
+
+    /// Me's conversations host threads in the side pane only.
+    fn thread_pane(&self, _: &App) -> TabPane {
+        TabPane::Side
     }
 
     fn tab_views(&mut self) -> &mut HashMap<String, TabView> {
@@ -204,7 +215,7 @@ impl SessionWork {
             model.update_tab_state(&id, cx, |state| {
                 let was = state.showing();
                 let result = f(state);
-                (result, !was && state.showing(), state.root_ids())
+                (result, !was && state.showing(), state.all_ids())
             })
         });
         if opened {
@@ -287,7 +298,7 @@ impl SessionWork {
                 let composer = page.read(cx).composer();
                 composer.update(cx, |state, cx| state.focus(window, cx));
             }
-            Some(TabView::Thread(panel)) => ThreadPanel::focus(panel, window, cx),
+            Some(TabView::Thread { panel, .. }) => ThreadPanel::focus(panel, window, cx),
             _ => {}
         }
     }
@@ -424,26 +435,24 @@ impl SessionWork {
                 }),
             });
         }
-        for tab in &state.tabs {
+        for tab in state.side_tabs() {
             let (label, icon): (SharedString, IconName) = match &tab.kind {
                 TabKind::Conversation { channel } => match usable(&self.community, channel, cx) {
                     Some(summary) => (summary.name.clone().into(), tab_icon(&summary)),
                     None => ("Unavailable conversation".into(), IconName::Browser),
                 },
-                TabKind::Thread { channel, .. } => match usable(&self.community, channel, cx) {
-                    Some(summary) => (
-                        format!("Thread · {}", summary.name).into(),
-                        tab_icon(&summary),
-                    ),
-                    None => ("Thread · Unavailable".into(), IconName::Browser),
-                },
+                TabKind::Thread(thread) => {
+                    let name = thread_channel(self, thread, cx).map(|summary| summary.name);
+                    let content = root_content(self, thread, cx);
+                    (
+                        thread_label(content.as_deref(), name.as_deref()).into(),
+                        IconName::ChatCircle,
+                    )
+                }
             };
             let content = match self.tab_views.get(&tab.id) {
                 Some(TabView::Conversation(page)) => page.clone().into_any_element(),
-                Some(TabView::Thread(panel)) => {
-                    panel.update(cx, |panel, _| panel.show_header = false);
-                    panel.clone().into_any_element()
-                }
+                Some(TabView::Thread { panel, .. }) => panel.clone().into_any_element(),
                 Some(TabView::Panel(view)) => view.clone().into_any_element(),
                 Some(TabView::Settings { .. }) | None => div()
                     .px(rems(1.))

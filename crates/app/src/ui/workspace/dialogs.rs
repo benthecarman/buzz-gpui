@@ -35,9 +35,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_channel(channel, window, cx);
+        self.show_channel(channel, window, cx);
+        self.routed = None;
+        self.place = (message, None);
+        self.record(cx);
         if let Some(message) = message {
-            self.reveal(message, window, cx);
+            self.reveal(message, None, window, cx);
         }
     }
 
@@ -206,7 +209,7 @@ impl Workspace {
             .channel
             .take()
             .map(|page| page.read(cx).channel_id().to_string());
-        self.thread = None;
+        self.leave_channel_tabs();
         let Some(community) = &self.community else {
             cx.notify();
             return;

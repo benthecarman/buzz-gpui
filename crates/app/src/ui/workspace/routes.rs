@@ -30,7 +30,7 @@ impl Workspace {
     ) {
         self.show_page(Page::MESSAGES, window, cx);
         self.channel = None;
-        self.thread = None;
+        self.leave_channel_tabs();
         if route == ChannelRoute::NewMessage {
             self.show_new_message(window, cx);
         } else {

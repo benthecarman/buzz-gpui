@@ -1,12 +1,13 @@
-//! The views behind a conversation's tab pane, shared by the Messages
-//! board and a conversation open in Me: made when a tab first shows on a
-//! visit, and dropped with it.
+//! The views behind a conversation's tabs, shared by the Messages board
+//! and a conversation open in Me: made when a tab first shows on a visit,
+//! and dropped with it. A thread tab's view is the same entity in either
+//! pane, so moving the tab keeps its reply, scroll position and branches.
 
 use crate::community::Community;
 use crate::ui::channel::{ChannelPage, OpenThread};
 use crate::ui::channel_panels::{self, ChannelPanel};
 use crate::ui::channel_settings::ChannelSettingsPanel;
-use crate::ui::channel_tabs::{TabKind, TabState};
+use crate::ui::channel_tabs::{TabKind, TabPane, TabState, ThreadTab};
 use crate::ui::message::channel_icon;
 use crate::ui::thread::{self, ThreadPanel};
 use buzz_relay_client::{ChannelSummary, ChannelType};
@@ -25,15 +26,30 @@ pub enum TabView {
         _subscription: Subscription,
     },
     Conversation(Entity<ChannelPage>),
-    Thread(Entity<ThreadPanel>),
+    Thread {
+        panel: Entity<ThreadPanel>,
+        /// Reports the reader's verified root to the tab.
+        _root: Subscription,
+    },
     Panel(AnyView),
 }
 
-/// A view that shows a conversation with its tab pane.
+impl TabView {
+    pub fn thread(&self) -> Option<&Entity<ThreadPanel>> {
+        match self {
+            TabView::Thread { panel, .. } => Some(panel),
+            _ => None,
+        }
+    }
+}
+
+/// A view that shows a conversation with its tabs.
 pub trait TabHost: Sized + 'static {
     fn community(&self) -> Option<Entity<Community>>;
-    /// The conversation the pane belongs to.
+    /// The conversation the tabs belong to.
     fn channel_id(&self, cx: &App) -> Option<String>;
+    /// That conversation's own page, whose rows name its threads' tabs.
+    fn page(&self) -> Option<Entity<ChannelPage>>;
     fn tab_views(&mut self) -> &mut HashMap<String, TabView>;
     fn tabs(&self, cx: &App) -> TabState;
     /// Changes the conversation's tabs, then drops the views of tabs that
@@ -41,6 +57,9 @@ pub trait TabHost: Sized + 'static {
     fn update_tabs(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut TabState));
     fn close_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>);
     fn focus_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>);
+    /// Where a thread opened from another conversation's tab goes: the
+    /// side pane, unless this host has a main pane for threads.
+    fn thread_pane(&self, cx: &App) -> TabPane;
     /// Makes a registered panel's view, opened from `channel` to show
     /// `target` and closed through `close`.
     fn panel_view(
@@ -54,12 +73,53 @@ pub trait TabHost: Sized + 'static {
     ) -> Option<AnyView>;
 }
 
-/// Makes the views of tabs that have none yet.
+/// The conversation a thread tab reads: its own conversation even as a
+/// preview (reading a thread is not write access), else one a tab may
+/// show (`tabChannel`).
+pub fn thread_channel<T: TabHost>(
+    this: &T,
+    thread: &ThreadTab,
+    cx: &App,
+) -> Option<ChannelSummary> {
+    let community = this.community()?;
+    if this.channel_id(cx).as_deref() == Some(thread.channel.as_str()) {
+        let page = this.page()?;
+        let channel = page.read(cx).channel();
+        return (!channel.cached).then(|| channel.clone());
+    }
+    usable(&community, &thread.channel, cx)
+}
+
+/// Makes the views of tabs that have none yet. A thread tab whose
+/// message changed has its view select it in place, keeping the reply
+/// being written; until the view knows its root, a new view opens it.
 pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Context<T>) {
     let (Some(community), Some(_)) = (this.community(), this.channel_id(cx)) else {
         return;
     };
     let state = this.tabs(cx);
+    for tab in &state.tabs {
+        let Some(thread) = tab.thread() else {
+            continue;
+        };
+        let Some(panel) = this
+            .tab_views()
+            .get(&tab.id)
+            .and_then(TabView::thread)
+            .cloned()
+        else {
+            continue;
+        };
+        if panel.read(cx).asked() == thread.message {
+            continue;
+        }
+        let kept = panel.update(cx, |panel, cx| panel.select(thread.message, window, cx));
+        if !kept {
+            // Media hook: a clip started in the replaced reader stops.
+            super::media::pause_audio(Some(panel.entity_id()), cx);
+            this.tab_views().remove(&tab.id);
+        }
+    }
     for tab in &state.tabs {
         if this.tab_views().contains_key(&tab.id) {
             continue;
@@ -73,8 +133,9 @@ pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Cont
                 let channel_id = channel.clone();
                 let open_thread: OpenThread = Arc::new(move |row, _, window, cx| {
                     let channel = channel_id.clone();
+                    let root = row.thread_root_id.unwrap_or(row.id);
                     let _ = weak.update(cx, |this, cx| {
-                        open_conversation_thread(this, channel, row.id, window, cx)
+                        open_conversation_thread(this, channel, row.id, root, window, cx)
                     });
                 });
                 let community = community.clone();
@@ -84,22 +145,11 @@ pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Cont
                     page
                 }))
             }
-            TabKind::Thread { channel, message } => {
-                if usable(&community, channel, cx).is_none() {
+            TabKind::Thread(thread) => {
+                if thread_channel(this, thread, cx).is_none() {
                     continue;
                 }
-                let id = tab.id.clone();
-                let weak = cx.entity().downgrade();
-                let on_close: thread::OnClose = Arc::new(move |window, cx| {
-                    let id = id.clone();
-                    let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
-                });
-                let (community, channel, message) = (community.clone(), channel.clone(), *message);
-                TabView::Thread(
-                    cx.new(|cx| {
-                        ThreadPanel::new(community, channel, message, on_close, window, cx)
-                    }),
-                )
+                thread_view(&community, &tab.id, thread, window, cx)
             }
         };
         this.tab_views().insert(tab.id.clone(), view);
@@ -131,20 +181,137 @@ pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Cont
     }
 }
 
-/// Opens a thread of another conversation as its own tab.
+/// A thread tab's reader. The tab strip names and closes it; Escape in
+/// it closes the tab. Its verified root merges a tab opened from a wrong
+/// hint into the tab already holding the thread, and a message found in
+/// another thread opens a tab of its own (`ConversationTab`).
+fn thread_view<T: TabHost>(
+    community: &Entity<Community>,
+    id: &str,
+    thread: &ThreadTab,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) -> TabView {
+    let weak = cx.entity().downgrade();
+    let close_id = id.to_string();
+    let on_close: thread::OnClose = Arc::new(move |window, cx| {
+        let id = close_id.clone();
+        let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
+    });
+    let weak = cx.entity().downgrade();
+    let divert_id = id.to_string();
+    let on_different: thread::OnDifferent = Rc::new(move |requested, kept, _, cx| {
+        let id = divert_id.clone();
+        let _ = weak.update(cx, |this, cx| {
+            this.update_tabs(cx, |state| state.divert_thread(&id, requested, kept))
+        });
+    });
+    let (community, channel, message) = (community.clone(), thread.channel.clone(), thread.message);
+    let exact = message != thread.root_id();
+    let panel = cx.new(|cx| {
+        let mut panel = match exact {
+            true => ThreadPanel::exact(community, channel, message, on_close, window, cx),
+            false => ThreadPanel::new(community, channel, message, on_close, window, cx),
+        };
+        panel.on_different = Some(on_different);
+        panel
+    });
+    let root_id = id.to_string();
+    let root = cx.observe(&panel, move |this, panel, cx| {
+        let Some(root) = panel.read(cx).loaded_root() else {
+            return;
+        };
+        let known = this
+            .tabs(cx)
+            .tab(&root_id)
+            .and_then(|tab| tab.thread().map(|thread| thread.root));
+        if known.is_some_and(|known| known != Some(root)) {
+            this.update_tabs(cx, |state| state.resolve_thread_root(&root_id, root));
+        }
+    });
+    TabView::Thread { panel, _root: root }
+}
+
+/// Opens a thread of another conversation as a tab.
 fn open_conversation_thread<T: TabHost>(
     this: &mut T,
     channel: String,
     message: EventId,
+    root: EventId,
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
-    let id = format!("thread:{channel}:{}", message.to_hex());
-    this.tab_views().remove(&id);
+    let pane = this.thread_pane(cx);
+    let mut id = String::new();
     this.update_tabs(cx, |state| {
-        state.open_conversation_thread(&channel, message, message)
+        id = state.open_thread_tab(&channel, message, root, pane);
     });
     this.focus_tab(&id, window, cx);
+}
+
+/// A thread tab's label: the start of its root's text, so several open
+/// threads stay apart, else "Thread · channel" (`threadLabel`). `content`
+/// is the root's Markdown when the conversation's rows hold it.
+pub fn thread_label(content: Option<&str>, channel: Option<&str>) -> String {
+    let text = content.map(plain).unwrap_or_default();
+    if !text.is_empty() {
+        return text;
+    }
+    match channel {
+        Some(name) => format!("Thread · {name}"),
+        None => "Thread".into(),
+    }
+}
+
+/// Markdown reduced to its words: links to their text, emphasis, code
+/// and heading marks dropped, whitespace collapsed, at most 80 characters.
+fn plain(markdown: &str) -> String {
+    let mut text = String::new();
+    let mut rest = markdown;
+    while let Some(start) = rest.find('[') {
+        text.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let link = after.find(']').and_then(|close| {
+            let label = &after[..close];
+            let tail = after[close + 1..].strip_prefix('(')?;
+            let end = tail.find(')')?;
+            Some((label, &tail[end + 1..]))
+        });
+        match link {
+            Some((label, tail)) => {
+                text.push_str(label);
+                rest = tail;
+            }
+            None => {
+                text.push('[');
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    let stripped: String = text
+        .chars()
+        .filter(|c| !matches!(c, '*' | '_' | '`' | '~' | '>' | '#'))
+        .collect();
+    stripped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+/// The root's Markdown, from the rows of the conversation it is in when
+/// this host shows them.
+pub fn root_content<T: TabHost>(this: &T, thread: &ThreadTab, cx: &App) -> Option<String> {
+    let root = thread.root_id();
+    let page = if this.channel_id(cx).as_deref() == Some(thread.channel.as_str()) {
+        this.page()
+    } else {
+        None
+    };
+    page.and_then(|page| page.read(cx).row_content(&root))
 }
 
 /// The conversation `id` when a tab may show it: joined, writable, not
@@ -173,5 +340,34 @@ pub fn tab_icon(channel: &ChannelSummary) -> IconName {
     match channel.channel_type {
         Some(ChannelType::Dm) => IconName::ChatCircle,
         _ => channel_icon(channel),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn thread_labels_read_the_roots_words() {
+        assert_eq!(
+            thread_label(
+                Some("**Deploy** the [new build](https://x.dev)\n\n> soon"),
+                None
+            ),
+            "Deploy the new build soon"
+        );
+        assert_eq!(
+            thread_label(Some("# `a` ~b~ _c_"), Some("general")),
+            "a b c"
+        );
+        assert_eq!(
+            thread_label(Some("  "), Some("general")),
+            "Thread · general"
+        );
+        assert_eq!(thread_label(None, None), "Thread");
+        assert_eq!(thread_label(Some("[unclosed link"), None), "[unclosed link");
+        let long = "word ".repeat(40);
+        assert_eq!(thread_label(Some(&long), None).chars().count(), 80);
     }
 }

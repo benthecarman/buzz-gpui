@@ -11,7 +11,7 @@ mod shell;
 use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::channel_states::{self, Failed, Reason};
-use super::channel_tabs::{TabState, ThreadTarget};
+use super::channel_tabs::{Routed, TabState};
 use super::navigation::{Beside, ChannelRoute, History, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
@@ -19,7 +19,7 @@ use super::settings::{
     CloseSettings, OpenHostSettings, OpenSettings, Section, SectionChanged, SettingsPage,
 };
 use super::sidebar::SidebarView;
-use super::thread::{self, Opening, ThreadPanel};
+use super::thread;
 use crate::community::{AppState, Community, IdentityState};
 use crate::deep_links::{self, Link};
 use crate::notifications::Conversation;
@@ -69,7 +69,16 @@ pub struct Workspace {
     companion_opening: u64,
     community: Option<Entity<Community>>,
     channel: Option<Entity<ChannelPage>>,
-    thread: Option<Entity<ThreadPanel>>,
+    /// The thread the current visit addresses, with the root its route
+    /// hints.
+    routed: Option<Routed>,
+    /// The message and thread the current conversation place names, as
+    /// history records it.
+    place: (Option<EventId>, Option<EventId>),
+    /// The main pane, which owns Close while focus is in it.
+    main_area: FocusHandle,
+    /// The side pane.
+    side_area: FocusHandle,
     /// Registered pages' views, made on first visit and kept.
     views: HashMap<Page, AnyView>,
     /// Pages' own sidebars, such as Me's.
@@ -159,7 +168,10 @@ impl Workspace {
             companion_opening: 0,
             community: None,
             channel: None,
-            thread: None,
+            routed: None,
+            place: (None, None),
+            main_area: cx.focus_handle(),
+            side_area: cx.focus_handle(),
             views: HashMap::new(),
             own_sidebars: HashMap::new(),
             settings: None,
@@ -360,7 +372,8 @@ impl Workspace {
         }
     }
 
-    /// Opens a channel and records the visit.
+    /// Opens a channel and records the visit, which shows its
+    /// conversation even when it is already open.
     pub fn select_channel(
         &mut self,
         channel: &ChannelSummary,
@@ -368,6 +381,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.show_channel(channel, window, cx);
+        self.routed = None;
+        self.place = (None, None);
         self.record(cx);
     }
 
@@ -400,12 +415,11 @@ impl Workspace {
         self._revealing = None;
         let weak = cx.entity().downgrade();
         let open_thread: super::channel::OpenThread = Arc::new(move |row, reply, window, cx| {
+            let root = row.thread_root_id.unwrap_or(row.id);
             let _ = weak.update(cx, |this, cx| {
-                this.open_thread(row.id, window, cx);
+                crate::perf::begin(crate::perf::THREAD);
                 // Reply writes in the thread; anything else reads it.
-                if reply && let Some(thread) = &this.thread {
-                    ThreadPanel::focus_composer(thread, window, cx);
-                }
+                this.open_thread(row.id, root, reply, window, cx);
             });
         });
         let page = cx.new(|cx| {
@@ -436,73 +450,11 @@ impl Workspace {
             }));
         });
         self.channel = Some(page);
-        self.restore_channel_tabs(window, cx);
         if let Some(root) = thread::dev_open_thread() {
-            self.open_thread(root, window, cx);
+            self.open_thread(root, root, false, window, cx);
         }
         if let Some(link) = crate::ui::github::dev_open_link() {
             self.route_link_to_tab(&link, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// Opens a thread beside the channel and records the visit.
-    pub fn open_thread(&mut self, root: EventId, window: &mut Window, cx: &mut Context<Self>) {
-        crate::perf::begin(crate::perf::THREAD);
-        self.show_thread(root, false, window, cx);
-        self.record(cx);
-    }
-
-    /// With `exact`, `id` is any message, revealed in its thread.
-    fn show_thread(
-        &mut self,
-        id: EventId,
-        exact: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.channel.is_none() {
-            return;
-        }
-        let opening = self.thread.as_ref().map(|thread| {
-            let opening = thread.read(cx).shown().open(id, exact);
-            (thread.clone(), opening)
-        });
-        match opening {
-            Some((thread, Opening::Shown)) => {
-                self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
-                ThreadPanel::focus(&thread, window, cx);
-            }
-            // A link into the open thread, to a message or to its root,
-            // selects it there, keeping the reply being written
-            // (`retainThread`); one into another thread comes back
-            // through `on_selection`.
-            Some((thread, Opening::Select)) => {
-                self.update_tabs(cx, |state| state.select(super::channel_tabs::THREAD));
-                thread.update(cx, |thread, cx| thread.select(id, window, cx));
-                cx.notify();
-            }
-            Some((_, Opening::Replace)) | None => {
-                self.open_thread_tab(ThreadTarget { root: id, exact }, window, cx);
-                cx.notify();
-            }
-        }
-    }
-
-    fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let had_tab = self.tabs(cx).thread.is_some();
-        self.update_tabs(cx, |state| state.close_thread());
-        let thread = self.thread.take();
-        // Media hook: a clip started in the thread stops with it.
-        if let Some(thread) = &thread {
-            super::media::pause_audio(Some(thread.entity_id()), cx);
-        }
-        if thread.is_none() && !had_tab {
-            return;
-        }
-        if let Some(channel) = &self.channel {
-            let composer = channel.read(cx).composer();
-            composer.update(cx, |state, cx| state.focus(window, cx));
         }
         cx.notify();
     }
@@ -738,12 +690,11 @@ impl Workspace {
         let place = match (self.page, &self.channel) {
             (Page::MESSAGES, Some(channel)) => {
                 let channel = channel.read(cx).channel_id().to_string();
-                let shown = self.thread.as_ref().map(|thread| thread.read(cx).shown());
-                let (message, thread) = shown.map(|shown| shown.place()).unzip();
+                let (message, thread) = self.place;
                 Place::Conversation {
                     channel,
                     message,
-                    thread: thread.flatten(),
+                    thread,
                     members: self.members_open(cx),
                 }
             }
@@ -770,20 +721,10 @@ impl Workspace {
         }
         let community = self.community.as_ref()?.read(cx).origin.to_string();
         let channel = self.channel.as_ref()?.read(cx).channel_id().to_string();
-        let tabs = self.tabs(cx);
-        let thread_shown =
-            tabs.showing() && tabs.selected_tab().as_deref() == Some(super::channel_tabs::THREAD);
         let thread = self
-            .thread
-            .as_ref()
-            .filter(|_| thread_shown)
-            .and_then(|thread| {
-                let thread = thread.read(cx);
-                // An exact panel's root is known once it loads.
-                thread
-                    .loaded_root()
-                    .or((!thread.is_exact()).then(|| thread.message_id()))
-            });
+            .shown_thread(cx)
+            .filter(|(of, _)| *of == channel)
+            .map(|(_, root)| root);
         Some(Conversation {
             community,
             channel,
@@ -821,7 +762,9 @@ impl Workspace {
                 self.history.current().is_none(),
                 cx,
             );
-            self.history.push(here);
+            if self.history.push(here) {
+                self.enter_visit(cx);
+            }
         }
         cx.notify();
     }
@@ -1053,7 +996,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows a channel, then the message or thread the place names.
+    /// Shows a channel, then the message or thread the place names. Each
+    /// history entry applies to the channel's tabs once: a thread visit
+    /// selects its thread, another restores the tabs it had, and none is
+    /// ever closed.
     fn open_place(
         &mut self,
         summary: &ChannelSummary,
@@ -1062,20 +1008,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.show_channel(summary, window, cx);
-        // The thread open beside the channel, once its root has loaded.
-        let open = self
-            .thread
-            .as_ref()
-            .and_then(|thread| thread.read(cx).loaded_root());
-        match Beside::of(message, thread, open) {
-            Beside::Thread(root) => self.show_thread(root, false, window, cx),
-            Beside::InThread(message) => self.show_thread(message, true, window, cx),
-            Beside::Find(message) => self.reveal(message, window, cx),
-            Beside::Nothing => self.close_thread(window, cx),
-        }
+        self.place = (message, thread);
+        self.routed = None;
+        // The members dialog first: a thread it opens over keeps it focused.
         if let Some(channel) = &self.channel {
             let actions = channel.read(cx).header_actions();
             actions.update(cx, |actions, cx| actions.show_members(members, window, cx));
+        }
+        match Beside::of(message, thread) {
+            Beside::Thread(root) => self.route_thread(root, root, window, cx),
+            // A message still finding its place waits to apply its visit.
+            Beside::Find { message, thread } => self.reveal(message, thread, window, cx),
+            Beside::Nothing => self.enter_visit(cx),
         }
     }
 
@@ -1091,13 +1035,13 @@ impl Workspace {
     /// or the failure notice when it cannot be read.
     fn resolve(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(community), Place::Conversation { channel, .. }) =
-            (&self.community, &target.place)
+            (self.community.clone(), &target.place)
         else {
             return;
         };
         self.page = Page::MESSAGES;
         self.channel = None;
-        self.thread = None;
+        self.leave_channel_tabs();
         let session = community.read(cx).session.clone();
         let id = channel.clone();
         let task = cx.spawn_in(window, {
@@ -1188,18 +1132,24 @@ impl Workspace {
     }
 
     /// Reveals a message in the open channel: in the timeline when it is a
-    /// loaded top-level message, else in the thread panel in exact mode
-    /// (relay.md §5c.5).
-    fn reveal(&mut self, message: EventId, window: &mut Window, cx: &mut Context<Self>) {
+    /// loaded top-level message, else in its thread's tab, whose root
+    /// `thread` hints (relay.md §5c.5).
+    fn reveal(
+        &mut self,
+        message: EventId,
+        thread: Option<EventId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(page) = self.channel.clone() else {
             return;
         };
         let outcome = page.update(cx, |page, cx| page.reveal(message, cx));
-        self.revealed(outcome, message, window, cx);
+        self.revealed(outcome, message, thread, window, cx);
         if outcome == Reveal::Loading {
             self._revealing = Some(cx.observe_in(&page, window, move |this, page, window, cx| {
                 let outcome = page.update(cx, |page, cx| page.reveal(message, cx));
-                this.revealed(outcome, message, window, cx);
+                this.revealed(outcome, message, thread, window, cx);
             }));
         }
     }
@@ -1208,15 +1158,44 @@ impl Workspace {
         &mut self,
         outcome: Reveal,
         message: EventId,
+        thread: Option<EventId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match outcome {
             Reveal::Loading => return,
-            Reveal::Shown => self.close_thread(window, cx),
-            Reveal::Absent => self.show_thread(message, true, window, cx),
+            Reveal::Shown => self.enter_visit(cx),
+            Reveal::Absent => self.route_thread(message, thread.unwrap_or(message), window, cx),
         }
         self._revealing = None;
+    }
+
+    /// The current visit addresses a thread: its tab is selected, or
+    /// added, and shows `message`.
+    fn route_thread(
+        &mut self,
+        message: EventId,
+        root: EventId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel) = self.channel.as_ref() else {
+            return;
+        };
+        self.routed = Some(Routed {
+            channel: channel.read(cx).channel_id().to_string(),
+            message,
+            root,
+        });
+        self.enter_visit(cx);
+        // Routed openings move focus to the thread, unless a dialog, such
+        // as the members one this visit opens, holds it.
+        if self.dialog.is_none()
+            && !self.members_open(cx)
+            && let Some(id) = self.shown_thread_tab(cx)
+        {
+            self.focus_routed(&id, window, cx);
+        }
     }
 
     /// A `buzz://` link: conversations bind to the selected community;

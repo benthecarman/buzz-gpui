@@ -16,7 +16,7 @@ use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::{ChannelSummary, EventId, TimelineStatus, UnreadDetail, UnreadWatch};
 use buzz_ui::{
     ActiveTheme, Button, ButtonSize, ButtonVariant, IconButton, IconButtonSize, IconName,
-    PanelHeader, TypeStyled,
+    PanelHeader, Tab, TabVariant, Tabs, TypeStyled,
 };
 use chrono::NaiveDate;
 use gpui_kit::component::input::TextareaState;
@@ -115,6 +115,9 @@ pub struct ChannelPage {
     pub launchers: Vec<Launcher>,
     /// Channel panels the header menu opens as tabs, set by the workspace.
     pub menu_panels: Vec<super::channel_menu::MenuPanel>,
+    /// The main pane's threads after this conversation, set by the
+    /// workspace each frame.
+    pub main_tabs: Option<MainTabs>,
     /// A conversation on the Me page: "Message your agents", and only the
     /// viewer's own agents can be mentioned in.
     personal: bool,
@@ -135,6 +138,28 @@ pub struct Launcher {
 
 /// Opens or closes the channel's tab pane.
 pub type PaneToggle = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A thread tab in the main pane, after the conversation's own tab.
+pub struct MainTab {
+    pub id: SharedString,
+    pub label: SharedString,
+    pub icon: IconName,
+    pub close: PaneToggle,
+}
+
+/// Shows a main-pane tab: a thread, or with `None` the conversation.
+pub type SelectMain = Rc<dyn Fn(Option<SharedString>, &mut Window, &mut App)>;
+
+/// The main pane's tab strip (`PanelWorkspace main`): the conversation's
+/// permanent tab, then the threads placed there. A lone conversation tab
+/// reads as the header's title.
+pub struct MainTabs {
+    pub tabs: Vec<MainTab>,
+    /// The thread shown in place of the conversation.
+    pub selected: Option<SharedString>,
+    pub content: Option<AnyView>,
+    pub select: SelectMain,
+}
 
 /// The header's "Toggle tab pane" button.
 #[derive(Clone)]
@@ -291,6 +316,7 @@ impl ChannelPage {
             live_status: false,
             launchers: Vec::new(),
             menu_panels: Vec::new(),
+            main_tabs: None,
             personal: false,
             selected_agent: None,
             jump: Jump::default(),
@@ -345,6 +371,14 @@ impl ChannelPage {
         actions.update(cx, |actions, cx| actions.set_presented(presented, cx));
     }
 
+    /// The Markdown of a loaded message of this timeline.
+    pub fn row_content(&self, id: &EventId) -> Option<String> {
+        self.items
+            .iter()
+            .find(|item| item.row.id == *id)
+            .map(|item| item.row.content.clone())
+    }
+
     pub fn channel_id(&self) -> &str {
         &self.channel.id
     }
@@ -367,30 +401,23 @@ impl ChannelPage {
         self.model.read(cx).snapshot.status == TimelineStatus::Loading
     }
 
-    /// Scrolls a top-level message into view and tints it briefly, paging in
-    /// older history while it may still be there. A reply is not revealed
-    /// here; there is no "around message" query (relay.md §5c.5).
+    /// Scrolls a top-level message of the loaded window into view. Any
+    /// other message, a reply or one outside the window, belongs in its
+    /// thread; there is no "around message" query (relay.md §5c.5). The
+    /// choice waits for the window's first page, and a window not yet
+    /// confirmed by the relay never holds it (`exactOpening`).
     pub fn reveal(&mut self, id: EventId, cx: &mut Context<Self>) -> Reveal {
+        let snapshot = &self.model.read(cx).snapshot;
+        if snapshot.status == TimelineStatus::Loading {
+            return Reveal::Loading;
+        }
         let index = self
             .items
             .iter()
-            .position(|item| item.row.id == id && item.row.thread_root_id.is_none());
+            .position(|item| item.row.id == id && item.row.thread_root_id.is_none())
+            .filter(|_| snapshot.status == TimelineStatus::Ready && !snapshot.stale);
         let Some(index) = index else {
-            // A cached window may be missing what the relay now has; older
-            // history is paged in until the message turns up or runs out.
-            let model = self.model.read(cx);
-            let snapshot = &model.snapshot;
-            return match snapshot.status {
-                TimelineStatus::Loading => Reveal::Loading,
-                TimelineStatus::Ready if snapshot.stale || snapshot.loading_older => {
-                    Reveal::Loading
-                }
-                TimelineStatus::Ready if snapshot.has_more && !snapshot.history_limited => {
-                    model.load_older();
-                    Reveal::Loading
-                }
-                _ => Reveal::Absent,
-            };
+            return Reveal::Absent;
         };
         // List row 0 is the edge. The reader is taken to the row and focus
         // moves to the history, with no tint (`useMessageReveal`).
@@ -1019,17 +1046,36 @@ impl Render for ChannelPage {
             .selected(launcher.pressed)
             .on_click(move |_, window, cx| toggle(window, cx))
         });
+        let main = self.main_tabs.as_ref().filter(|main| !main.tabs.is_empty());
+        let shown_thread = main.and_then(|main| main.content.clone());
         let header = (!self.secondary).then(|| {
-            PanelHeader::new()
-                .joined(true)
-                .label(
-                    Some(message::channel_icon(&self.channel)),
-                    super::sidebar::channel_label(&self.channel, &profiles),
-                )
+            let icon = message::channel_icon(&self.channel);
+            let name = super::sidebar::channel_label(&self.channel, &profiles);
+            let header = PanelHeader::new().joined(true);
+            let header = match main {
+                Some(main) => header.leading(main_strip(main, icon, name)),
+                None => header.label(Some(icon), name),
+            };
+            header
                 .action(self.actions.clone())
                 .action(div().flex().gap(rems(0.375)).children(launchers))
                 .when_some(pane, |header, pane| header.action(pane))
         });
+        // A thread selected in the main pane covers the conversation, whose
+        // reading position and draft stay as they were.
+        if let Some(thread) = shown_thread {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .text_body_sm()
+                .text_color(c.text_standard)
+                .children(header)
+                .child(div().flex().flex_col().flex_1().min_h_0().child(thread))
+                .into_any_element();
+        }
 
         {
             let items = self.items.clone();
@@ -1245,6 +1291,7 @@ impl Render for ChannelPage {
             .child(composer)
             .children(overlays)
             .children(super::composer::pane_drop_overlay(&self.composer, cx))
+            .into_any_element()
     }
 }
 
@@ -1261,6 +1308,39 @@ fn measure(chat: bool, row: Div) -> AnyElement {
     } else {
         row.into_any_element()
     }
+}
+
+/// The main pane's tab strip: the conversation, selected while no thread
+/// is, then the threads placed there, each closable.
+fn main_strip(main: &MainTabs, icon: IconName, name: impl Into<SharedString>) -> impl IntoElement {
+    let select = main.select.clone();
+    let mut strip = Tabs::new(TabVariant::Navigation).tab(
+        Tab::new("main-tab-conversation", name)
+            .icon(icon)
+            .selected(main.selected.is_none())
+            .on_click(move |_, window, cx| select(None, window, cx)),
+    );
+    for tab in &main.tabs {
+        let select = main.select.clone();
+        let id = tab.id.clone();
+        let close = tab.close.clone();
+        strip = strip.tab(
+            Tab::new(
+                SharedString::from(format!("main-tab-{}", tab.id)),
+                tab.label.clone(),
+            )
+            .icon(tab.icon)
+            .selected(main.selected.as_ref() == Some(&tab.id))
+            .on_click(move |_, window, cx| select(Some(id.clone()), window, cx))
+            .on_close(move |_, window, cx| close(window, cx)),
+        );
+    }
+    div()
+        .id("main-tab-strip")
+        .flex_1()
+        .min_w_0()
+        .overflow_x_scroll()
+        .child(strip)
 }
 
 /// Times a send from Enter to its optimistic row and the relay's answer.

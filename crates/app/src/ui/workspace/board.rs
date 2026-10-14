@@ -1,26 +1,30 @@
-//! The Messages board (`ChannelsPage.tsx`): the conversation, and beside
-//! it the channel's tab pane holding the thread, other conversations and
-//! threads and channel tools, with the companion panel stacked under it.
+//! The Messages board (`ChannelsPage.tsx`): the channel's main pane, its
+//! conversation followed by threads moved or opened there, and beside it
+//! the side pane holding threads, other conversations and their threads,
+//! Channel settings and channel tools, with the companion panel stacked
+//! under it.
 
 use super::Workspace;
 use super::layout::Split;
 use crate::community::Community;
-use crate::ui::channel::{Launcher, PaneButton, PaneToggle};
+use crate::ui::channel::{ChannelPage, Launcher, MainTab, MainTabs, PaneButton, PaneToggle};
 use crate::ui::channel_menu::MenuPanel;
 use crate::ui::channel_panels::{self, ChannelPanel};
 use crate::ui::channel_settings::{self as settings_panel, ChannelRemoved, ChannelSettingsPanel};
-use crate::ui::channel_tab_views::{self, TabHost, TabView, tab_icon, usable};
-use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabState, ThreadTarget};
+use crate::ui::channel_tab_views::{
+    self, TabHost, TabView, root_content, tab_icon, thread_channel, thread_label, usable,
+};
+use crate::ui::channel_tabs::{self, PanelTab, Routed, TabKind, TabPane, TabState};
 use crate::ui::pages::Page;
 use crate::ui::panels::{self, Close, Dock, TabItem};
-use crate::ui::thread::{self, ThreadPanel};
-use buzz_relay_client::{ChannelSummary, ChannelType, Retarget};
+use crate::ui::thread::ThreadPanel;
+use buzz_relay_client::{ChannelSummary, ChannelType};
 use buzz_ui::{ActiveTheme, IconName, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use nostr::prelude::EventId;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
 /// A channel panel opened from its header launcher.
 pub(super) struct Drawer {
@@ -36,6 +40,10 @@ impl TabHost for Workspace {
 
     fn channel_id(&self, cx: &App) -> Option<String> {
         self.tab_key(cx).map(|(_, channel)| channel)
+    }
+
+    fn page(&self) -> Option<Entity<ChannelPage>> {
+        self.channel.clone()
     }
 
     fn tab_views(&mut self) -> &mut HashMap<String, TabView> {
@@ -56,6 +64,10 @@ impl TabHost for Workspace {
 
     fn focus_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         Workspace::focus_tab(self, id, window, cx)
+    }
+
+    fn thread_pane(&self, cx: &App) -> TabPane {
+        Workspace::thread_pane(cx)
     }
 
     fn panel_view(
@@ -99,7 +111,17 @@ impl Workspace {
         if !was_showing && state.showing() {
             self.pane_opening += 1;
         }
-        let ids = state.root_ids();
+        let ids = state.all_ids();
+        let closed: Vec<EntityId> = self
+            .tab_views
+            .iter()
+            .filter(|(id, _)| !ids.contains(id))
+            .filter_map(|(_, view)| view.thread().map(Entity::entity_id))
+            .collect();
+        // Media hook: a clip started in a closed thread stops with it.
+        for thread in closed {
+            super::super::media::pause_audio(Some(thread), cx);
+        }
         self.tab_views.retain(|id, _| ids.contains(id));
         cx.notify();
         Some(result)
@@ -109,8 +131,15 @@ impl Workspace {
     /// does any launcher panel, which belongs to the visit.
     pub(super) fn leave_channel_tabs(&mut self) {
         self.tab_views.clear();
-        self.thread = None;
         self.drawer = None;
+        self.routed = None;
+        self.place = (None, None);
+    }
+
+    /// Where a new thread opens. Already-open threads stay where they
+    /// were placed.
+    pub(super) fn thread_pane(_cx: &App) -> TabPane {
+        TabPane::Side
     }
 
     /// A header launcher: shows the panel's tab when one is open, else
@@ -245,13 +274,6 @@ impl Workspace {
             .collect()
     }
 
-    /// The channel just shown gets back the thread it had.
-    pub(super) fn restore_channel_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(thread) = self.tabs(cx).thread {
-            self.make_thread(thread, window, cx);
-        }
-    }
-
     /// The header toggle (`Toggle tab pane`): hides or shows the pane
     /// with what it holds. With nothing to show it is disabled.
     pub(super) fn toggle_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -273,29 +295,43 @@ impl Workspace {
         self.focus_tab(id, window, cx);
     }
 
-    /// Closes the shown tab (Escape inside it, Mod+W). False when the
-    /// pane shows nothing.
+    /// Shows a main-pane tab: a thread, or with `None` the conversation.
+    fn select_main_tab(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_tabs(cx, |state| state.select_main(id.clone()));
+        match id {
+            Some(id) => self.focus_tab(&id, window, cx),
+            None => self.focus_composer(window, cx),
+        }
+    }
+
+    /// Closes the shown tab of the pane that owns Close (Mod+W): the main
+    /// pane while focus is in it, else the side pane. False when that
+    /// pane shows nothing it can close; the conversation never closes.
     pub(super) fn close_selected_tab(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let state = self.tabs(cx);
+        if self.main_area.contains_focused(window, cx) {
+            return match state.selected_main() {
+                Some(id) => {
+                    self.close_tab(&id, window, cx);
+                    true
+                }
+                None => false,
+            };
+        }
         if !state.showing() {
             return false;
         }
-        match state.selected_tab().as_deref() {
-            Some(channel_tabs::THREAD) => {
-                self.close_thread(window, cx);
-                self.record(cx);
-            }
+        match state.selected_tab() {
             Some(id) => {
-                let id = id.to_string();
                 self.close_tab(&id, window, cx);
+                true
             }
-            None => return false,
+            None => false,
         }
-        true
     }
 
     /// Mod+W: the shown channel tab closes; with none, the window does.
@@ -321,6 +357,8 @@ impl Workspace {
 
     fn close_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = id.to_string();
+        let state = self.tabs(cx);
+        let closing = state.tab(&id).and_then(|tab| tab.thread().cloned());
         let remaining = self
             .update_tabs(cx, |state| {
                 if id == channel_tabs::SETTINGS {
@@ -333,10 +371,30 @@ impl Workspace {
                 state.selected_tab()
             })
             .flatten();
-        match remaining {
-            Some(next) => self.focus_tab(&next, window, cx),
-            None => self.focus_composer(window, cx),
+        let Some(thread) = closing else {
+            match remaining {
+                Some(next) => self.focus_tab(&next, window, cx),
+                None => self.focus_composer(window, cx),
+            }
+            return;
+        };
+        // Closing the thread the route addresses returns the route to its
+        // channel, so only Back or Forward reopens it.
+        let addressed = self.routed.as_ref().is_some_and(|routed| {
+            routed.channel == thread.channel && routed.message == thread.message
+        });
+        if addressed {
+            self.visit_channel(cx);
         }
+        // Focus goes back to the conversation that opened it.
+        self.focus_composer(window, cx);
+    }
+
+    /// The open channel again, as a new visit.
+    fn visit_channel(&mut self, cx: &mut Context<Self>) {
+        self.routed = None;
+        self.place = (None, None);
+        self.record(cx);
     }
 
     fn focus_composer(&self, window: &mut Window, cx: &mut App) {
@@ -349,12 +407,6 @@ impl Workspace {
     /// Focus follows the shown tab.
     fn focus_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_tab_views(window, cx);
-        if id == channel_tabs::THREAD {
-            if let Some(thread) = &self.thread {
-                ThreadPanel::focus(thread, window, cx);
-            }
-            return;
-        }
         match self.tab_views.get(id) {
             Some(TabView::Settings { panel, .. }) => {
                 let handle = panel.read(cx).focus_handle(cx);
@@ -364,65 +416,108 @@ impl Workspace {
                 let composer = page.read(cx).composer();
                 composer.update(cx, |state, cx| state.focus(window, cx));
             }
-            Some(TabView::Thread(panel)) => ThreadPanel::focus(panel, window, cx),
+            Some(TabView::Thread { panel, .. }) => ThreadPanel::focus(panel, window, cx),
             _ => {}
         }
     }
 
-    /// Makes the thread view beside the conversation.
-    pub(super) fn make_thread(
+    /// Opens a thread of the channel from its timeline: an open tab is
+    /// selected wherever it was placed, else a new tab opens in the
+    /// preferred pane. Every opening keeps the work already open, and the
+    /// visit it leaves is kept for Back. Reply puts focus in the thread's
+    /// composer.
+    pub(super) fn open_thread(
         &mut self,
-        target: ThreadTarget,
+        message: EventId,
+        root: EventId,
+        reply: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<ThreadPanel>> {
-        let community = self.community.clone()?;
-        let channel = self.channel.as_ref()?.read(cx).channel_id().to_string();
-        let weak = cx.entity().downgrade();
-        let on_close: thread::OnClose = Arc::new(move |window, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.close_thread(window, cx);
-                this.record(cx);
-            });
-        });
-        let weak = cx.entity().downgrade();
-        let on_selection: thread::OnSelection =
-            Rc::new(move |message, exact, outcome, window, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    let target = ThreadTarget {
-                        root: message,
-                        exact,
-                    };
-                    match outcome {
-                        // The channel keeps the selection for its next visit.
-                        Retarget::Selected => {
-                            this.update_tabs(cx, |state| state.open_thread(target));
-                        }
-                        Retarget::Different => this.open_thread_tab(target, window, cx),
-                        _ => {}
-                    }
-                    cx.notify();
-                });
-            });
-        let panel = cx.new(|cx| {
-            let mut panel = match target.exact {
-                true => ThreadPanel::exact(community, channel, target.root, on_close, window, cx),
-                false => ThreadPanel::new(community, channel, target.root, on_close, window, cx),
-            };
-            panel.on_selection = Some(on_selection);
-            panel
-        });
-        // Media hook: a clip started in the replaced thread stops with it.
-        if let Some(old) = &self.thread {
-            super::super::media::pause_audio(Some(old.entity_id()), cx);
+    ) {
+        let Some(channel) = self.channel_id(cx) else {
+            return;
+        };
+        let pane = Self::thread_pane(cx);
+        let Some(id) = self.update_tabs(cx, |state| {
+            state.settings = false;
+            state.leave_visit();
+            // Transient details give way; selecting the thread is the
+            // last word.
+            state.retire_details();
+            state.open_thread_tab(&channel, message, root, pane)
+        }) else {
+            return;
+        };
+        self.ensure_tab_views(window, cx);
+        match self.tab_views.get(&id).and_then(TabView::thread).cloned() {
+            Some(panel) if reply => ThreadPanel::focus_composer(&panel, window, cx),
+            Some(panel) => ThreadPanel::focus(&panel, window, cx),
+            None => {}
         }
-        // An exact thread's root is known once it loads.
-        cx.observe(&panel, |this, _, cx| {
-            this.report_open(cx.active_window().is_some(), cx)
-        })
-        .detach();
-        self.thread = Some(panel.clone());
-        Some(panel)
+        self.routed = Some(Routed {
+            channel,
+            message,
+            root,
+        });
+        self.place = (Some(message), Some(root));
+        self.record(cx);
+    }
+
+    /// Applies the current history entry to the channel's tabs once: a
+    /// thread visit selects its thread, another restores the tabs it last
+    /// had.
+    pub(super) fn enter_visit(&mut self, cx: &mut Context<Self>) {
+        if self.page != Page::MESSAGES || self.channel.is_none() {
+            return;
+        }
+        let Some(entry) = self.history.current_id() else {
+            return;
+        };
+        let routed = self.routed.clone();
+        let kind = if routed.is_some() {
+            "thread"
+        } else {
+            "channel"
+        };
+        let visit = format!("{entry}:{kind}");
+        let pane = Self::thread_pane(cx);
+        self.update_tabs(cx, |state| state.enter_visit(&visit, routed.as_ref(), pane));
+    }
+
+    /// The tab of the thread the current visit addresses.
+    pub(super) fn shown_thread_tab(&self, cx: &App) -> Option<String> {
+        let routed = self.routed.as_ref()?;
+        self.tabs(cx)
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.thread().is_some_and(|thread| {
+                    thread.channel == routed.channel && thread.message == routed.message
+                })
+            })
+            .map(|tab| tab.id.clone())
+    }
+
+    /// Focus moves to a routed thread as it opens.
+    pub(super) fn focus_routed(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_tab(id, window, cx);
+    }
+
+    /// The thread on screen in either pane, with the conversation it is
+    /// in.
+    pub(super) fn shown_thread(&self, cx: &App) -> Option<(String, EventId)> {
+        let state = self.tabs(cx);
+        let id = state
+            .selected_main()
+            .or_else(|| state.showing().then(|| state.selected_tab()).flatten())?;
+        let thread = state.tab(&id)?.thread()?;
+        let root = self
+            .tab_views
+            .get(&id)
+            .and_then(TabView::thread)
+            .and_then(|panel| panel.read(cx).loaded_root())
+            .unwrap_or(thread.root_id());
+        Some((thread.channel.clone(), root))
     }
 
     /// A launcher's panel in the pane, which the toggle hides with it.
@@ -449,11 +544,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyView> {
         let community = self.community.clone()?;
-        let thread = self
-            .tabs(cx)
-            .thread
-            .filter(|_| self.thread.is_some())
-            .map(|thread| thread.root.to_hex());
+        let thread = self.routed.as_ref().map(|routed| routed.message.to_hex());
         Some((panel.build)(
             channel_panels::Opening {
                 community,
@@ -516,7 +607,43 @@ impl Workspace {
         channel_tab_views::ensure_views(self, window, cx);
     }
 
-    /// The pane's tabs as the tab strip shows them.
+    /// A conversation or thread tab's label and icon.
+    fn tab_identity(
+        &self,
+        tab: &channel_tabs::ConversationTab,
+        cx: &App,
+    ) -> (SharedString, IconName) {
+        let Some(community) = &self.community else {
+            return ("Unavailable conversation".into(), IconName::Browser);
+        };
+        match &tab.kind {
+            TabKind::Conversation { channel } => match usable(community, channel, cx) {
+                Some(summary) => (summary.name.clone().into(), tab_icon(&summary)),
+                None => ("Unavailable conversation".into(), IconName::Browser),
+            },
+            TabKind::Thread(thread) => {
+                let name = thread_channel(self, thread, cx).map(|summary| summary.name);
+                let content = root_content(self, thread, cx);
+                (
+                    thread_label(content.as_deref(), name.as_deref()).into(),
+                    IconName::ChatCircle,
+                )
+            }
+        }
+    }
+
+    /// "This conversation is no longer available."
+    fn unavailable(cx: &App) -> AnyElement {
+        div()
+            .px(rems(1.))
+            .py(rems(2.))
+            .text_body_sm()
+            .text_color(cx.colors().text_subtle)
+            .child("This conversation is no longer available.")
+            .into_any_element()
+    }
+
+    /// The side pane's tabs as its tab strip shows them.
     fn tab_items(
         &mut self,
         state: &TabState,
@@ -524,19 +651,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Vec<TabItem> {
         self.ensure_tab_views(window, cx);
-        let c = *cx.colors();
-        let Some(community) = self.community.clone() else {
-            return Vec::new();
-        };
-        let unavailable = || {
-            div()
-                .px(rems(1.))
-                .py(rems(2.))
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child("This conversation is no longer available.")
-                .into_any_element()
-        };
         let weak = cx.entity().downgrade();
         let closer = |id: String| -> Close {
             let weak = weak.clone();
@@ -558,54 +672,20 @@ impl Workspace {
                 close: closer(channel_tabs::SETTINGS.to_string()),
             });
         }
-        if state.thread.is_some()
-            && let Some(thread) = self.thread.clone()
-        {
-            thread.update(cx, |thread, _| thread.show_header = false);
-            let weak = cx.entity().downgrade();
-            items.push(TabItem {
-                id: channel_tabs::THREAD.into(),
-                label: "Thread".into(),
-                icon: IconName::ChatCircle,
-                content: thread.into_any_element(),
-                close: Rc::new(move |window, cx| {
-                    let _ = weak.update(cx, |this, cx| {
-                        this.close_thread(window, cx);
-                        this.record(cx);
-                    });
-                }),
-            });
-        }
-        for tab in &state.tabs {
-            let close = closer(tab.id.clone());
-            let (label, icon): (SharedString, IconName) = match &tab.kind {
-                TabKind::Conversation { channel } => match usable(&community, channel, cx) {
-                    Some(summary) => (summary.name.clone().into(), tab_icon(&summary)),
-                    None => ("Unavailable conversation".into(), IconName::Browser),
-                },
-                TabKind::Thread { channel, .. } => match usable(&community, channel, cx) {
-                    Some(summary) => (
-                        format!("Thread · {}", summary.name).into(),
-                        tab_icon(&summary),
-                    ),
-                    None => ("Thread · Unavailable".into(), IconName::Browser),
-                },
-            };
+        for tab in state.side_tabs() {
+            let (label, icon) = self.tab_identity(tab, cx);
             let content = match self.tab_views.get(&tab.id) {
                 Some(TabView::Conversation(page)) => page.clone().into_any_element(),
-                Some(TabView::Thread(panel)) => {
-                    panel.update(cx, |panel, _| panel.show_header = false);
-                    panel.clone().into_any_element()
-                }
+                Some(TabView::Thread { panel, .. }) => panel.clone().into_any_element(),
                 Some(TabView::Panel(view)) => view.clone().into_any_element(),
-                Some(TabView::Settings { .. }) | None => unavailable(),
+                Some(TabView::Settings { .. }) | None => Self::unavailable(cx),
             };
             items.push(TabItem {
                 id: tab.id.clone().into(),
                 label,
                 icon,
                 content,
-                close,
+                close: closer(tab.id.clone()),
             });
         }
         for opening in &state.panels {
@@ -637,12 +717,50 @@ impl Workspace {
         items
     }
 
+    /// The main pane's tabs after the conversation, and the thread shown
+    /// in its place.
+    fn main_tabs(&mut self, state: &TabState, cx: &mut Context<Self>) -> MainTabs {
+        let weak = cx.entity().downgrade();
+        let tabs = state
+            .main_tabs()
+            .map(|tab| {
+                let (label, icon) = self.tab_identity(tab, cx);
+                let weak = weak.clone();
+                let id = tab.id.clone();
+                MainTab {
+                    id: tab.id.clone().into(),
+                    label,
+                    icon,
+                    close: Rc::new(move |window, cx| {
+                        let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
+                    }),
+                }
+            })
+            .collect();
+        let selected = state.selected_main();
+        let content = selected.as_ref().map(|id| match self.tab_views.get(id) {
+            Some(TabView::Thread { panel, .. }) => panel.clone().into(),
+            _ => AnyView::from(cx.new(|_| Unavailable)),
+        });
+        MainTabs {
+            tabs,
+            selected: selected.map(SharedString::from),
+            content,
+            select: Rc::new(move |id, window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.select_main_tab(id.map(|id| id.to_string()), window, cx)
+                });
+            }),
+        }
+    }
+
     /// The Messages page with a channel open.
     pub(super) fn board(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(page) = self.channel.clone() else {
             return div().into_any_element();
         };
         let state = self.tabs(cx);
+        self.ensure_tab_views(window, cx);
         let side = self
             .drawer
             .as_ref()
@@ -661,6 +779,7 @@ impl Workspace {
         });
         let launchers = self.launchers(cx);
         let menu_panels = self.menu_panels(cx);
+        let main_tabs = self.main_tabs(&state, cx);
         page.update(cx, |page, _| {
             page.pane = Some(PaneButton {
                 open: state.pane_open && has_content,
@@ -669,6 +788,7 @@ impl Workspace {
             });
             page.launchers = launchers;
             page.menu_panels = menu_panels;
+            page.main_tabs = Some(main_tabs);
         });
         let pane = showing.then(|| {
             let items = self.tab_items(&state, window, cx);
@@ -701,8 +821,10 @@ impl Workspace {
             .map(IntoElement::into_any_element);
         let rows: Vec<AnyElement> = [pane, side, companion].into_iter().flatten().collect();
         let border = cx.colors().border_standard;
+        let side_area = self.side_area.clone();
         let dock = (!rows.is_empty()).then(|| {
             div()
+                .track_focus(&side_area)
                 .flex()
                 .flex_col()
                 .size_full()
@@ -740,6 +862,14 @@ impl Workspace {
                 .into_any_element(),
             None => page.into_any_element(),
         };
+        // The main pane owns Close while focus is in it.
+        let conversation = div()
+            .track_focus(&self.main_area)
+            .flex()
+            .size_full()
+            .min_w_0()
+            .child(conversation)
+            .into_any_element();
         let weak = cx.entity().downgrade();
         let commit = weak.clone();
         Dock {
@@ -760,20 +890,6 @@ impl Workspace {
             }),
         }
         .render(conversation, dock, cx)
-    }
-
-    /// Opens the thread beside the conversation, in its tab.
-    pub(super) fn open_thread_tab(
-        &mut self,
-        target: ThreadTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(panel) = self.make_thread(target, window, cx) else {
-            return;
-        };
-        self.update_tabs(cx, |state| state.open_thread(target));
-        ThreadPanel::focus(&panel, window, cx);
     }
 
     /// "View channel details": the Channel settings tab, focused, as only
@@ -838,5 +954,14 @@ impl Workspace {
         });
         self.focus_tab(&id, window, cx);
         true
+    }
+}
+
+/// A main-pane tab whose thread can no longer be read here.
+struct Unavailable;
+
+impl Render for Unavailable {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        Workspace::unavailable(cx)
     }
 }
