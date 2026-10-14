@@ -52,7 +52,6 @@ pub fn init(cx: &mut App) {
             title: "Todos",
             icon: IconName::ListChecks,
             matches: |_| false,
-            tool: true,
             launcher: Some(Launcher {
                 icon: IconName::ListChecks,
                 label: "Todos",

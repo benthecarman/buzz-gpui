@@ -104,9 +104,8 @@ pub struct ChannelPage {
     actions: Entity<ChannelActions>,
     /// Join for a read-only preview (§4.12).
     join: Entity<JoinNotice>,
-    /// The header's tab pane toggle, set by the workspace each frame:
-    /// whether the pane shows, and what the button does.
-    pub pane: Option<(bool, PaneToggle)>,
+    /// The header's tab pane toggle, set by the workspace each frame.
+    pub pane: Option<PaneButton>,
     /// Shown inside another channel's tab pane, so without its header.
     pub secondary: bool,
     /// The Messages page's conversation, which shows live-update
@@ -136,6 +135,17 @@ pub struct Launcher {
 
 /// Opens or closes the channel's tab pane.
 pub type PaneToggle = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// The header's "Toggle tab pane" button.
+#[derive(Clone)]
+pub struct PaneButton {
+    /// The pane shows.
+    pub open: bool,
+    /// The pane has something to show; with nothing the button is
+    /// disabled, as there are no blank tabs to open.
+    pub enabled: bool,
+    pub toggle: PaneToggle,
+}
 
 impl EventEmitter<ChannelClosed> for ChannelPage {}
 
@@ -985,15 +995,17 @@ impl Render for ChannelPage {
         }
         let profiles = community.snapshot.profiles.clone();
         let media = community.session.media().clone();
-        let pane = self.pane.clone().map(|(open, toggle)| {
+        let pane = self.pane.clone().map(|pane| {
+            let toggle = pane.toggle;
             IconButton::new("toggle-tab-pane", IconName::SidebarRight)
                 .size(IconButtonSize::Sm)
-                .tooltip(if open {
+                .tooltip(if pane.open {
                     "Close tab pane"
                 } else {
                     "Open tab pane"
                 })
-                .selected(open)
+                .selected(pane.open)
+                .disabled(!pane.enabled)
                 .on_click(move |_, window, cx| toggle(window, cx))
         });
         let launchers = self.launchers.iter().map(|launcher| {

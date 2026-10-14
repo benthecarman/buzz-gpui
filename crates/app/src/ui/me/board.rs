@@ -9,7 +9,6 @@ use super::dialogs::{self, DialogHost};
 use crate::community::Community;
 use crate::ui::channel::{ChannelPage, OpenThread};
 use crate::ui::channel_panels::{self, ChannelPanel};
-use crate::ui::channel_tab_picker::{ChannelTabPicker, Tool};
 use crate::ui::channel_tab_views::{self, TabHost, TabView, tab_icon, usable};
 use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabState, ThreadTarget};
 use crate::ui::message::channel_icon;
@@ -83,10 +82,6 @@ impl TabHost for SessionWork {
         SessionWork::focus_tab(self, id, window, cx)
     }
 
-    fn tools(&self, cx: &App) -> Vec<Tool> {
-        SessionWork::tools(self, cx)
-    }
-
     fn panel_view(
         &self,
         panel: &ChannelPanel,
@@ -99,10 +94,6 @@ impl TabHost for SessionWork {
         Some(SessionWork::panel_view(
             self, panel, channel, target, close, window, cx,
         ))
-    }
-
-    fn close_drawer(&mut self) {
-        self.drawer = None;
     }
 }
 
@@ -224,21 +215,19 @@ impl SessionWork {
         result
     }
 
-    fn new_tab_id() -> String {
-        format!("new:{}", uuid::Uuid::new_v4())
+    /// A launcher's panel in the pane, which the toggle hides with it.
+    fn side_drawer(&self) -> bool {
+        self.drawer
+            .as_ref()
+            .is_some_and(|d| d.placement == channel_panels::Placement::Side)
     }
 
-    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = Self::new_tab_id();
-        self.update_tabs(cx, |state| state.add_new(id.clone()));
-        self.focus_tab(&id, window, cx);
-    }
-
-    /// The heading toggle: shows the pane, adding a New tab when there is
-    /// nothing in it.
+    /// The heading toggle: hides or shows the pane with what it holds.
+    /// With nothing to show it is disabled.
     fn toggle_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let side = self.side_drawer();
         let showing = self.update_tabs(cx, |state| {
-            state.toggle_pane(Self::new_tab_id);
+            state.toggle_pane(side);
             state.showing()
         });
         match self.tabs(cx).selected_tab() {
@@ -294,7 +283,6 @@ impl SessionWork {
             return;
         }
         match self.tab_views.get(id) {
-            Some(TabView::Picker(picker)) => ChannelTabPicker::focus(&picker.clone(), window, cx),
             Some(TabView::Conversation(page)) => {
                 let composer = page.read(cx).composer();
                 composer.update(cx, |state, cx| state.focus(window, cx));
@@ -327,17 +315,6 @@ impl SessionWork {
         let panel = self.make_thread(target, window, cx);
         self.update_tabs(cx, |state| state.open_thread(target));
         ThreadPanel::focus(&panel, window, cx);
-    }
-
-    fn tools(&self, cx: &App) -> Vec<Tool> {
-        channel_panels::tools(&self.channel, cx)
-            .into_iter()
-            .map(|panel| Tool {
-                key: panel.key,
-                title: panel.title,
-                icon: panel.icon,
-            })
-            .collect()
     }
 
     /// Makes a registered panel's view, opened from `channel` to show
@@ -449,7 +426,6 @@ impl SessionWork {
         }
         for tab in &state.tabs {
             let (label, icon): (SharedString, IconName) = match &tab.kind {
-                TabKind::New => ("New tab".into(), IconName::Browser),
                 TabKind::Conversation { channel } => match usable(&self.community, channel, cx) {
                     Some(summary) => (summary.name.clone().into(), tab_icon(&summary)),
                     None => ("Unavailable conversation".into(), IconName::Browser),
@@ -463,7 +439,6 @@ impl SessionWork {
                 },
             };
             let content = match self.tab_views.get(&tab.id) {
-                Some(TabView::Picker(picker)) => picker.clone().into_any_element(),
                 Some(TabView::Conversation(page)) => page.clone().into_any_element(),
                 Some(TabView::Thread(panel)) => {
                     panel.update(cx, |panel, _| panel.show_header = false);
@@ -509,7 +484,7 @@ impl SessionWork {
     /// `SessionHeading` with Me's actions.
     fn heading(
         &mut self,
-        showing: bool,
+        (showing, has_content): (bool, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -642,6 +617,7 @@ impl SessionWork {
                         "Open tab pane"
                     })
                     .selected(showing)
+                    .disabled(!has_content)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_pane(window, cx))),
             )
             .into_any_element()
@@ -696,7 +672,8 @@ impl Render for SessionWork {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.tabs(cx);
         let showing = state.showing();
-        let heading = self.heading(showing, window, cx);
+        let has_content = state.has_panel() || self.side_drawer();
+        let heading = self.heading((state.pane_open && has_content, has_content), window, cx);
         let placement = self.placement(cx);
         // The controls wait for placement and stop for archived chats.
         let disabled = self.channel.archived || !self.model.read(cx).placed(&self.channel.id);
@@ -723,7 +700,6 @@ impl Render for SessionWork {
                 }
             }
             let weak = cx.entity().downgrade();
-            let add = weak.clone();
             panels::tabs(
                 items,
                 &selected,
@@ -731,9 +707,6 @@ impl Render for SessionWork {
                 Rc::new(move |id, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.select_tab(&id, window, cx));
                 }),
-                Some(Rc::new(move |window, cx| {
-                    let _ = add.update(cx, |this, cx| this.add_tab(window, cx));
-                })),
                 cx,
             )
         });

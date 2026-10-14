@@ -1,16 +1,14 @@
 //! The Messages board (`ChannelsPage.tsx`): the conversation, and beside
 //! it the channel's tab pane holding the thread, other conversations and
-//! threads, New tab pickers and channel tools, with the companion panel
-//! stacked under it.
+//! threads and channel tools, with the companion panel stacked under it.
 
 use super::Workspace;
 use super::layout::Split;
 use crate::community::Community;
-use crate::ui::channel::{Launcher, PaneToggle};
+use crate::ui::channel::{Launcher, PaneButton, PaneToggle};
 use crate::ui::channel_menu::MenuPanel;
 use crate::ui::channel_panels::{self, ChannelPanel};
 use crate::ui::channel_settings::{self as settings_panel, ChannelRemoved, ChannelSettingsPanel};
-use crate::ui::channel_tab_picker::{ChannelTabPicker, Tool};
 use crate::ui::channel_tab_views::{self, TabHost, TabView, tab_icon, usable};
 use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabState, ThreadTarget};
 use crate::ui::pages::Page;
@@ -60,10 +58,6 @@ impl TabHost for Workspace {
         Workspace::focus_tab(self, id, window, cx)
     }
 
-    fn tools(&self, cx: &App) -> Vec<Tool> {
-        Workspace::tools(self, cx)
-    }
-
     fn panel_view(
         &self,
         panel: &ChannelPanel,
@@ -74,10 +68,6 @@ impl TabHost for Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyView> {
         Workspace::panel_view(self, panel, channel, target, close, window, cx)
-    }
-
-    fn close_drawer(&mut self) {
-        self.drawer = None;
     }
 }
 
@@ -262,20 +252,13 @@ impl Workspace {
         }
     }
 
-    fn new_tab_id() -> String {
-        format!("new:{}", uuid::Uuid::new_v4())
-    }
-
-    pub(super) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = Self::new_tab_id();
-        self.update_tabs(cx, |state| state.add_new(id.clone()));
-        self.focus_tab(&id, window, cx);
-    }
-
+    /// The header toggle (`Toggle tab pane`): hides or shows the pane
+    /// with what it holds. With nothing to show it is disabled.
     pub(super) fn toggle_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let side = self.side_drawer();
         let showing = self
             .update_tabs(cx, |state| {
-                state.toggle_pane(Self::new_tab_id);
+                state.toggle_pane(side);
                 state.showing()
             })
             .unwrap_or_default();
@@ -377,7 +360,6 @@ impl Workspace {
                 let handle = panel.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
             }
-            Some(TabView::Picker(picker)) => ChannelTabPicker::focus(&picker.clone(), window, cx),
             Some(TabView::Conversation(page)) => {
                 let composer = page.read(cx).composer();
                 composer.update(cx, |state, cx| state.focus(window, cx));
@@ -443,24 +425,16 @@ impl Workspace {
         Some(panel)
     }
 
+    /// A launcher's panel in the pane, which the toggle hides with it.
+    fn side_drawer(&self) -> bool {
+        self.drawer
+            .as_ref()
+            .is_some_and(|drawer| drawer.placement == channel_panels::Placement::Side)
+    }
+
     /// The current channel's summary.
     fn current_summary(&self, cx: &App) -> Option<ChannelSummary> {
         Some(self.channel.as_ref()?.read(cx).channel().clone())
-    }
-
-    /// The channel's tools: registered channel panels offered under Tools.
-    fn tools(&self, cx: &App) -> Vec<Tool> {
-        let Some(channel) = self.current_summary(cx) else {
-            return Vec::new();
-        };
-        channel_panels::tools(&channel, cx)
-            .into_iter()
-            .map(|panel| Tool {
-                key: panel.key,
-                title: panel.title,
-                icon: panel.icon,
-            })
-            .collect()
     }
 
     /// Makes a registered panel's view for `opening`, closed through
@@ -605,7 +579,6 @@ impl Workspace {
         for tab in &state.tabs {
             let close = closer(tab.id.clone());
             let (label, icon): (SharedString, IconName) = match &tab.kind {
-                TabKind::New => ("New tab".into(), IconName::Browser),
                 TabKind::Conversation { channel } => match usable(&community, channel, cx) {
                     Some(summary) => (summary.name.clone().into(), tab_icon(&summary)),
                     None => ("Unavailable conversation".into(), IconName::Browser),
@@ -619,7 +592,6 @@ impl Workspace {
                 },
             };
             let content = match self.tab_views.get(&tab.id) {
-                Some(TabView::Picker(picker)) => picker.clone().into_any_element(),
                 Some(TabView::Conversation(page)) => page.clone().into_any_element(),
                 Some(TabView::Thread(panel)) => {
                     panel.update(cx, |panel, _| panel.show_header = false);
@@ -682,6 +654,7 @@ impl Workspace {
             .filter(|drawer| drawer.placement == channel_panels::Placement::Bottom)
             .map(|drawer| drawer.view.clone());
         let showing = state.showing();
+        let has_content = state.has_panel() || side.is_some();
         let weak = cx.entity().downgrade();
         let toggle: PaneToggle = Rc::new(move |window, cx| {
             let _ = weak.update(cx, |this, cx| this.toggle_pane(window, cx));
@@ -689,7 +662,11 @@ impl Workspace {
         let launchers = self.launchers(cx);
         let menu_panels = self.menu_panels(cx);
         page.update(cx, |page, _| {
-            page.pane = Some((showing, toggle));
+            page.pane = Some(PaneButton {
+                open: state.pane_open && has_content,
+                enabled: has_content,
+                toggle,
+            });
             page.launchers = launchers;
             page.menu_panels = menu_panels;
         });
@@ -706,7 +683,6 @@ impl Workspace {
                 }
             }
             let weak = cx.entity().downgrade();
-            let add = weak.clone();
             panels::tabs(
                 items,
                 &selected,
@@ -714,9 +690,6 @@ impl Workspace {
                 Rc::new(move |id, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.select_tab(&id, window, cx));
                 }),
-                Some(Rc::new(move |window, cx| {
-                    let _ = add.update(cx, |this, cx| this.add_tab(window, cx));
-                })),
                 cx,
             )
         });

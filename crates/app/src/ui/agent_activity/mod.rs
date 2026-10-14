@@ -31,7 +31,6 @@ pub fn init(cx: &mut App) {
             title: "Agent Activity",
             icon: IconName::ListBullets,
             matches: |target| selection(target).is_some(),
-            tool: false,
             launcher: None,
             menu: None,
             build: |opening, window, cx| {

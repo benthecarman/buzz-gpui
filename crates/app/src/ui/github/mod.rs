@@ -31,7 +31,6 @@ pub fn init(cx: &mut App) {
             title: "GitHub",
             icon: IconName::GithubLogo,
             matches: |target| references::parse(target).is_some(),
-            tool: false,
             launcher: None,
             menu: None,
             build: |opening, window, cx| {

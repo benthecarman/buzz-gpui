@@ -9,7 +9,6 @@ use buzz_ui::{
     ActiveTheme, IconButton, IconButtonSize, IconName, PanelHeader, Tab, TabVariant, Tabs,
     TypeStyled,
 };
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 
@@ -337,14 +336,14 @@ pub struct TabItem {
 }
 
 /// The channel's tabbed panel workspace (`PanelWorkspace`): navigation
-/// tabs with a close button each and an "Add tab" button, then the
-/// selected tab's content. Escape closes the selected tab.
+/// tabs with a close button each, then the selected tab's content. Tabs
+/// open from content; there is no blank tab to add. Escape closes the
+/// selected tab.
 pub fn tabs(
     items: Vec<TabItem>,
     selected: &str,
     strip_scroll: &ScrollHandle,
     on_select: SelectTab,
-    on_add: Option<Close>,
     cx: &App,
 ) -> AnyElement {
     let c = cx.colors();
@@ -368,8 +367,7 @@ pub fn tabs(
             active_close = Some(item.close);
         }
     }
-    // The strip scrolls sideways; "Add tab" shows while the header is
-    // hovered.
+    // The strip scrolls sideways.
     let header = div()
         .flex()
         .flex_col()
@@ -377,7 +375,6 @@ pub fn tabs(
         .child(
             div()
                 .id("panel-tab-header")
-                .group("panel-tab-header")
                 .flex()
                 .items_center()
                 .gap(rems(0.5))
@@ -391,21 +388,7 @@ pub fn tabs(
                         .overflow_x_scroll()
                         .track_scroll(strip_scroll)
                         .child(strip),
-                )
-                .when_some(on_add, |header, add| {
-                    header.child(
-                        div()
-                            .flex_none()
-                            .opacity(0.)
-                            .group_hover("panel-tab-header", |s| s.opacity(1.))
-                            .child(
-                                IconButton::new("add-tab", IconName::Plus)
-                                    .size(IconButtonSize::Sm)
-                                    .tooltip("Add tab")
-                                    .on_click(move |_, window, cx| add(window, cx)),
-                            ),
-                    )
-                }),
+                ),
         )
         .child(div().h(px(1.)).bg(c.border_standard));
     div()

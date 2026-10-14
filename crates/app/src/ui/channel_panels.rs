@@ -62,8 +62,6 @@ pub struct ChannelPanel {
     pub icon: IconName,
     /// Links this panel shows, opened as a tab beside the conversation.
     pub matches: fn(&str) -> bool,
-    /// Offered under Tools in the New tab picker.
-    pub tool: bool,
     pub launcher: Option<Launcher>,
     pub menu: Option<MenuEntry>,
     pub build: fn(Opening, &mut Window, &mut App) -> AnyView,
@@ -127,14 +125,6 @@ pub fn resolve(target: &str, cx: &App) -> Option<ChannelPanel> {
     all(cx).into_iter().find(|panel| (panel.matches)(target))
 }
 
-/// Tools offered for a channel: not for archived or read-only ones.
-pub fn tools(channel: &ChannelSummary, cx: &App) -> Vec<ChannelPanel> {
-    if channel.archived || channel.read_only {
-        return Vec::new();
-    }
-    all(cx).into_iter().filter(|panel| panel.tool).collect()
-}
-
 /// The channel menu's panel entries for `channel`.
 pub fn menu_entries(channel: &ChannelSummary, cx: &App) -> Vec<(ChannelPanel, &'static str)> {
     if channel.cached || channel.read_only {
@@ -191,7 +181,6 @@ pub fn dev_sample(cx: &mut App) {
             title: "Sample",
             icon: IconName::ListChecks,
             matches: |target| target.starts_with("buzz://dev-sample"),
-            tool: true,
             launcher: Some(Launcher {
                 icon: IconName::ListChecks,
                 label: "Sample",

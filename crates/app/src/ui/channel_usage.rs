@@ -38,7 +38,6 @@ pub fn init(cx: &mut App) {
             title: "Usage",
             icon: IconName::Browser,
             matches: |_| false,
-            tool: false,
             launcher: None,
             menu: Some(MenuEntry {
                 label: "View channel usage",

@@ -1,7 +1,7 @@
 //! The channel's secondary tabs (`useChannelTabState.ts`,
 //! `useConversationTabs.tsx`): the thread, Channel settings, other
-//! conversations and threads, channel tools, and New tab pickers, all in
-//! one pane beside the conversation.
+//! conversations and threads, and channel tools, all in one pane beside
+//! the conversation. Tabs open from content; there is no blank tab.
 //!
 //! The state is plain data kept per community and channel, so a channel
 //! reopens with the tabs it had; the views are made again on the visit.
@@ -13,8 +13,6 @@ pub const SETTINGS: &str = "settings";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TabKind {
-    /// A New tab picker.
-    New,
     /// Another conversation, readable and writable here.
     Conversation { channel: String },
     /// A thread in another conversation.
@@ -143,7 +141,7 @@ impl TabState {
         self.selected = next.to_string();
     }
 
-    /// Closes a conversation tab, picker or thread tab.
+    /// Closes a conversation tab or thread tab.
     pub fn close_tab(&mut self, id: &str) {
         let ids = self.root_ids();
         let shown = self.selected_tab();
@@ -170,45 +168,6 @@ impl TabState {
         let shown = self.selected_tab();
         self.panels.retain(|panel| panel.id() != id);
         self.after_close(id, &ids, shown.as_deref());
-    }
-
-    /// Adds a New tab picker and shows it.
-    pub fn add_new(&mut self, id: String) {
-        self.tabs.push(ConversationTab {
-            id: id.clone(),
-            kind: TabKind::New,
-        });
-        self.select(&id);
-    }
-
-    /// The picker `picker` chose `channel`: an open tab for it is shown
-    /// and the picker closes; otherwise the picker becomes that tab.
-    pub fn choose_conversation(&mut self, picker: &str, channel: &str) {
-        let target = format!("conversation:{channel}");
-        let existing = self.tabs.iter().any(|tab| {
-            tab.kind
-                == TabKind::Conversation {
-                    channel: channel.to_string(),
-                }
-        });
-        if existing {
-            self.tabs.retain(|tab| tab.id != picker);
-        } else if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == picker) {
-            *tab = ConversationTab {
-                id: target.clone(),
-                kind: TabKind::Conversation {
-                    channel: channel.to_string(),
-                },
-            };
-        }
-        self.select(&target);
-    }
-
-    /// The picker `picker` chose a channel tool: the picker closes and the
-    /// tool opens as a panel tab, or is shown if already open.
-    pub fn choose_tool(&mut self, picker: &str, panel: PanelTab) {
-        self.tabs.retain(|tab| tab.id != picker);
-        self.open_panel(panel);
     }
 
     pub fn open_panel(&mut self, panel: PanelTab) {
@@ -249,17 +208,11 @@ impl TabState {
         self.select(SETTINGS);
     }
 
-    /// The header toggle: hides the pane, or shows it, adding a New tab
-    /// when there is nothing to show.
-    pub fn toggle_pane(&mut self, new_id: impl FnOnce() -> String) {
-        if self.showing() {
-            self.pane_open = false;
-        } else {
-            self.pane_open = true;
-            if self.root_ids().is_empty() {
-                self.add_new(new_id());
-            }
-        }
+    /// The header toggle: hides the pane, or shows it again with its
+    /// tabs as they were; `side` is a launcher's panel in the pane. With
+    /// nothing to show the toggle is disabled.
+    pub fn toggle_pane(&mut self, side: bool) {
+        self.pane_open = !(self.pane_open && (self.has_panel() || side));
     }
 }
 
@@ -278,17 +231,24 @@ mod tests {
         }
     }
 
+    fn conversation(id: &str) -> ConversationTab {
+        ConversationTab {
+            id: format!("conversation:{id}"),
+            kind: TabKind::Conversation { channel: id.into() },
+        }
+    }
+
     #[test]
     fn settings_and_the_thread_lead_the_tabs() {
         let mut state = TabState::default();
         assert!(!state.has_panel());
-        state.add_new("new:1".into());
+        state.tabs.push(conversation("a"));
         state.open_thread(thread());
         state.open_settings();
         state.open_panel(PanelTab::tool("buzz.todos/todos", "c"));
         assert_eq!(
             state.root_ids(),
-            ["settings", "thread", "new:1", "buzz.todos/todos:c"]
+            ["settings", "thread", "conversation:a", "buzz.todos/todos:c"]
         );
         assert_eq!(state.selected_tab().as_deref(), Some("buzz.todos/todos:c"));
     }
@@ -296,41 +256,22 @@ mod tests {
     #[test]
     fn closing_the_shown_tab_shows_its_neighbour() {
         let mut state = TabState::default();
-        state.add_new("new:1".into());
-        state.add_new("new:2".into());
-        state.add_new("new:3".into());
-        state.select("new:2");
-        state.close_tab("new:2");
-        assert_eq!(state.selected_tab().as_deref(), Some("new:3"));
-        state.close_tab("new:3");
-        assert_eq!(state.selected_tab().as_deref(), Some("new:1"));
+        for id in ["1", "2", "3"] {
+            state.tabs.push(conversation(id));
+        }
+        state.select("conversation:2");
+        state.close_tab("conversation:2");
+        assert_eq!(state.selected_tab().as_deref(), Some("conversation:3"));
+        state.close_tab("conversation:3");
+        assert_eq!(state.selected_tab().as_deref(), Some("conversation:1"));
         // Closing a tab that isn't shown keeps the selection.
-        state.add_new("new:4".into());
-        state.close_tab("new:1");
-        assert_eq!(state.selected_tab().as_deref(), Some("new:4"));
-        state.close_tab("new:4");
+        state.tabs.push(conversation("4"));
+        state.select("conversation:4");
+        state.close_tab("conversation:1");
+        assert_eq!(state.selected_tab().as_deref(), Some("conversation:4"));
+        state.close_tab("conversation:4");
         assert_eq!(state.selected_tab(), None);
         assert!(!state.showing());
-    }
-
-    #[test]
-    fn a_picker_becomes_the_conversation_or_shows_the_open_one() {
-        let mut state = TabState::default();
-        state.add_new("new:1".into());
-        state.choose_conversation("new:1", "random");
-        assert_eq!(
-            state.tabs,
-            [ConversationTab {
-                id: "conversation:random".into(),
-                kind: TabKind::Conversation {
-                    channel: "random".into()
-                },
-            }]
-        );
-        state.add_new("new:2".into());
-        state.choose_conversation("new:2", "random");
-        assert_eq!(state.tabs.len(), 1);
-        assert_eq!(state.selected_tab().as_deref(), Some("conversation:random"));
     }
 
     #[test]
@@ -349,31 +290,24 @@ mod tests {
     }
 
     #[test]
-    fn the_toggle_hides_or_adds_a_picker() {
+    fn the_toggle_hides_and_shows_the_tabs_it_has() {
         let mut state = TabState::default();
-        state.toggle_pane(|| "new:1".into());
-        assert!(state.showing());
-        assert_eq!(state.selected_tab().as_deref(), Some("new:1"));
-        state.toggle_pane(|| unreachable!());
+        // Nothing to show: no blank tab appears.
+        state.toggle_pane(false);
         assert!(!state.showing());
-        assert_eq!(state.tabs.len(), 1);
-        state.toggle_pane(|| unreachable!());
+        assert!(state.root_ids().is_empty());
+        state.pane_open = true;
+        state.open_thread(thread());
+        state.toggle_pane(false);
+        assert!(!state.showing());
+        assert_eq!(state.root_ids(), ["thread"]);
+        state.toggle_pane(false);
         assert!(state.showing());
-    }
-
-    #[test]
-    fn a_tool_replaces_its_picker() {
-        let mut state = TabState::default();
-        state.add_new("new:1".into());
-        let tool = PanelTab::tool("buzz.terminal/terminal", "c");
-        state.choose_tool("new:1", tool.clone());
-        state.add_new("new:2".into());
-        state.choose_tool("new:2", tool);
-        assert!(state.tabs.is_empty());
-        assert_eq!(state.panels.len(), 1);
-        assert_eq!(
-            state.selected_tab().as_deref(),
-            Some("buzz.terminal/terminal:c")
-        );
+        // A launcher's side panel alone is something to hide.
+        state.close_thread();
+        state.toggle_pane(true);
+        assert!(!state.pane_open);
+        state.toggle_pane(true);
+        assert!(state.pane_open);
     }
 }

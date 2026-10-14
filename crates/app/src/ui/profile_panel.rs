@@ -64,7 +64,6 @@ pub fn init(cx: &mut App) {
             title: "Profile",
             icon: IconName::User,
             matches: |target| parse_target(target).is_some(),
-            tool: false,
             launcher: None,
             menu: None,
             build: |opening, window, cx| {
