@@ -137,7 +137,7 @@ fn main() {
         ui::moderation::init(cx);
         ui::settings::personal_groups::init(cx);
         ui::settings::pairing::init(cx);
-        ui::templates::init(cx);
+        ui::new_channel::init(cx);
         ui::channel_panels::dev_sample(cx);
         ui::terminal::init(cx);
         network::init(cx);

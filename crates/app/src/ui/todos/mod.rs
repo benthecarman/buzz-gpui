@@ -17,13 +17,12 @@ use crate::ui::canvas::{DraftWriter, js_error};
 use crate::ui::channel_panels::{self, ChannelPanel, Close, Launcher, Opening, Placement};
 use crate::ui::markdown::Directory;
 use crate::ui::overlay::{self, Align, Dismiss};
-use crate::ui::templates::empty_state;
 use buzz_relay_client::canvas::CanvasError;
 use buzz_relay_client::{EventId, Partition, RosterStatus, SessionStatus};
 use buzz_ui::{
     ActiveTheme, AlertDialog, Avatar, AvatarShape, AvatarSize, Button, ButtonSize, ButtonVariant,
     Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem, MenuLabel, PanelHeader, Popover,
-    Spinner, Surface, TextField, TypeStyled, tokens::space,
+    Spinner, Surface, TextField, TypeStyled, tokens::radius, tokens::space,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -1260,6 +1259,44 @@ impl Render for TodosPanel {
             .children(confirm)
             .into_any_element()
     }
+}
+
+/// `EmptyState` (`level` 4): a bordered card with an icon, title and
+/// description.
+pub(crate) fn empty_state(
+    icon: IconName,
+    title: &'static str,
+    description: &'static str,
+    cx: &App,
+) -> Div {
+    let c = cx.colors();
+    div()
+        .w_full()
+        .border_1()
+        .border_color(c.border_standard)
+        .rounded(radius::CONTAINER)
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(space::S4)
+        .py(space::S8)
+        .px(space::S6)
+        .text_center()
+        .child(Icon::new(icon).size(32.).color(c.text_subtle))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::S2)
+                .max_w(rems(30.))
+                .child(div().text_label_sm().child(title))
+                .child(
+                    div()
+                        .text_body_sm()
+                        .text_color(c.text_subtle)
+                        .child(description),
+                ),
+        )
 }
 
 #[cfg(test)]

@@ -985,7 +985,7 @@ impl Render for MembersDialog {
                         format!("{} · {}", group.label(), keys.len()),
                         cx,
                     ));
-                    let labels = super::templates::public_key_labels(state.roles.keys());
+                    let labels = super::keys::public_key_labels(state.roles.keys());
                     for (key, role) in keys {
                         let label = labels.get(key.as_str()).cloned().unwrap_or_default();
                         section = section.child(self.member_row(
@@ -1057,7 +1057,7 @@ impl Render for MembersDialog {
             }
             Some(Err(_)) => {
                 let members = summary.members.clone();
-                let labels = super::templates::public_key_labels(members.iter());
+                let labels = super::keys::public_key_labels(members.iter());
                 let mut keys: Vec<&String> = members
                     .iter()
                     .filter(|key| {

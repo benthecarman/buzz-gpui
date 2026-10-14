@@ -6,17 +6,19 @@
 
 use super::form_fields::{self, Bounded, TextKind};
 use super::modal::{Dismissed, OpenChannel, error};
-use super::templates::{self, TemplateEditor};
+use crate::community::AppState;
 use crate::community::Community;
-use buzz_relay_client::kit::setup::{ChannelCreationInput, CreationVisibility};
+use crate::ui::toasts;
+use buzz_relay_client::kit::setup::{ChannelCreationInput, ChannelSetup, CreationVisibility};
 use buzz_relay_client::lifecycle::{
     DEFAULT_TEMPORARY_TTL, DraftErrors, NewChannel, canonical_name, draft_errors,
 };
 use buzz_relay_client::sidebar::GroupSource;
 use buzz_relay_client::sidebar_store::PreferencesStatus;
-use buzz_ui::{Button, Dialog, Surface, Switch, tokens::space};
+use buzz_ui::{ActiveTheme, Button, Dialog, Surface, Switch, ToastTone, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 pub struct NewChannelDialog {
@@ -36,8 +38,6 @@ pub struct NewChannelDialog {
     on_open: OpenChannel,
     /// The sidebar group a new channel goes into (`initialGroup`).
     group: Option<String>,
-    /// The template selector, while Templates & teams is on.
-    template: Option<Entity<TemplateEditor>>,
     /// A creation awaiting "Retry channel"; the form shows it frozen.
     pending: Option<ChannelCreationInput>,
     /// Holds focus on the privacy and discard steps, so Escape steps back.
@@ -116,24 +116,6 @@ impl NewChannelDialog {
         let group = cx
             .try_global::<CreateIn>()
             .and_then(|create| create.0.clone());
-        // A personal group's default template applies to its new channels.
-        let group_default = group.as_ref().and_then(|group| {
-            let personal = community.read(cx).session.me_kit().snapshot().personal()?;
-            let found = personal.groups.into_iter().find(|g| g.id == *group)?;
-            Some(templates::GroupDefault {
-                name: found.name,
-                template_id: found.default_template_id,
-            })
-        });
-        let template = templates::provider(cx)
-            .map(|_| cx.new(|cx| TemplateEditor::in_group(community.clone(), group_default, cx)));
-        let mut subscriptions = subscriptions;
-        subscriptions.extend(template.as_ref().map(|editor| {
-            cx.subscribe(editor, |this, _, _: &templates::Changed, cx| {
-                this.error = None;
-                cx.notify();
-            })
-        }));
         let session = community.read(cx).session.clone();
         cx.spawn_in(window, async move |this, cx| {
             let Some(pending) = session.pending_creation().await else {
@@ -145,7 +127,6 @@ impl NewChannelDialog {
         cx.set_global(CreateIn(None));
         Self {
             group,
-            template,
             pending: None,
             community,
             name,
@@ -222,10 +203,7 @@ impl NewChannelDialog {
             self.privacy_choice = None;
         } else if self.confirm_discard {
             self.confirm_discard = false;
-        } else if self.pending.is_none()
-            && (self.draft(cx).dirty()
-                || self.template.as_ref().is_some_and(|t| t.read(cx).dirty()))
-        {
+        } else if self.pending.is_none() && self.draft(cx).dirty() {
             self.confirm_discard = true;
         } else {
             cx.emit(Dismissed);
@@ -285,15 +263,6 @@ impl NewChannelDialog {
         let input = match &self.pending {
             Some(pending) => pending.clone(),
             None => {
-                let setup = match self.template.as_ref().map(|t| t.read(cx).setup()) {
-                    Some(Err(problem)) => {
-                        self.error = Some(problem.into());
-                        cx.notify();
-                        return;
-                    }
-                    Some(Ok(setup)) => setup,
-                    None => None,
-                };
                 // A channel created from a sidebar group goes into it.
                 let setup = match &self.group {
                     Some(group) => {
@@ -317,13 +286,13 @@ impl NewChannelDialog {
                         }
                         let personal =
                             data.is_some_and(|d| d.group_source == GroupSource::Personal);
-                        let mut setup = setup.unwrap_or_default();
-                        setup.group_id = group.clone();
-                        setup.group_source =
-                            Some(if personal { "personal" } else { "legacy" }.into());
-                        Some(setup)
+                        Some(ChannelSetup {
+                            group_id: group.clone(),
+                            group_source: Some(if personal { "personal" } else { "legacy" }.into()),
+                            ..Default::default()
+                        })
                     }
-                    None => setup,
+                    None => None,
                 };
                 let channel = NewChannel {
                     name: canonical_name(&draft.name),
@@ -453,12 +422,7 @@ impl NewChannelDialog {
             .pending
             .as_ref()
             .and_then(|p| p.setup.as_ref())
-            .map(|setup| templates::setup_summary(setup.agents.len(), cx));
-        let problem = self
-            .template
-            .as_ref()
-            .filter(|_| !pending)
-            .and_then(|t| t.read(cx).draft().and_then(|d| d.problem.clone()));
+            .map(|setup| setup_summary(setup.agents.len(), cx));
         let title = match &self.group {
             Some(group) => {
                 let name = self
@@ -483,7 +447,7 @@ impl NewChannelDialog {
                     .flex()
                     .flex_col()
                     .gap(space::S4)
-                    .children(pending.then(|| templates::pending_notice(cx)))
+                    .children(pending.then(|| pending_notice(cx)))
                     // A name error waits until there is a name.
                     .child(form_fields::name_field(
                         &self.name,
@@ -497,7 +461,6 @@ impl NewChannelDialog {
                         pending,
                         cx,
                     ))
-                    .children(self.template.clone().filter(|_| !pending))
                     .child(form_fields::duration_field(
                         self.temporary,
                         self.temporary_ttl,
@@ -506,7 +469,6 @@ impl NewChannelDialog {
                         on_duration,
                         cx,
                     ))
-                    .children(problem.map(|message| error(message, cx)))
                     .children(summary)
                     .children(self.error.clone().map(|message| error(message, cx))),
             )
@@ -563,6 +525,99 @@ impl Render for NewChannelDialog {
                     .child(self.dialog(cx)),
             )
     }
+}
+
+/// Raises channel setup notices.
+pub fn init(cx: &mut App) {
+    setup_notices(cx);
+}
+
+/// The Retry notice of a creation that may already exist.
+fn pending_notice(cx: &App) -> Div {
+    crate::ui::settings::form::line(
+        "This attempt may already have created a channel. Retry checks it first and, if unconfirmed, resends only the same creation request. It will not create another channel or continue its setup.",
+        false,
+        cx,
+    )
+    .text_body()
+}
+
+/// What a recovered creation sets up (`recoverySummary`).
+fn setup_summary(agents: usize, cx: &App) -> Div {
+    let c = cx.colors();
+    div()
+        .text_body()
+        .text_color(c.text_standard)
+        .child(match agents {
+            0 => "Only you.".to_owned(),
+            1 => "1 selected agent.".to_owned(),
+            n => format!("{n} selected agents."),
+        })
+}
+
+/// "Channel setup couldn’t finish" notices (`ChannelSidebar.tsx`), raised
+/// as warning toasts for every community. Dismissing one only hides it.
+fn setup_notices(cx: &mut App) {
+    let watched: std::rc::Rc<std::cell::RefCell<HashSet<EntityId>>> = Default::default();
+    let follow = move |cx: &mut App| {
+        let Some(state) = cx.try_global::<AppState>() else {
+            return;
+        };
+        for community in state.communities.clone() {
+            if !watched.borrow_mut().insert(community.entity_id()) {
+                continue;
+            }
+            let session = community.read(cx).session.clone();
+            let mut creation = session.creation();
+            let weak = community.downgrade();
+            cx.spawn(async move |cx| {
+                let mut shown: HashSet<String> = HashSet::new();
+                loop {
+                    let notices = creation.borrow_and_update().notices.clone();
+                    let alive = cx.update(|cx| {
+                        if weak.upgrade().is_none() {
+                            return false;
+                        }
+                        for notice in &notices {
+                            if !shown.insert(notice.id.clone()) {
+                                continue;
+                            }
+                            let key = SharedString::from(format!("channel-setup:{}", notice.id));
+                            let (id, session, close) =
+                                (notice.id.clone(), session.clone(), key.clone());
+                            toasts::show(
+                                toasts::Notice {
+                                    key,
+                                    title: format!(
+                                        "Channel setup couldn’t finish: {}",
+                                        notice.name
+                                    )
+                                    .into(),
+                                    description: Some(notice.error.clone().into()),
+                                    tone: ToastTone::Warning,
+                                    timeout: None,
+                                    dismissible: false,
+                                    actions: vec![toasts::Action::new("Dismiss", move |_, cx| {
+                                        session.dismiss_setup_notice(&id);
+                                        toasts::dismiss(&close, cx);
+                                    })],
+                                },
+                                cx,
+                            );
+                        }
+                        shown.retain(|id| notices.iter().any(|n| n.id == *id));
+                        true
+                    });
+                    if !alive || creation.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+    };
+    follow(cx);
+    cx.observe_global::<AppState>(follow).detach();
 }
 
 #[cfg(test)]

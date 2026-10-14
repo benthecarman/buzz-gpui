@@ -59,7 +59,7 @@ thread_local! {
 
 /// buzz-app's defaults (`src/bundled/index.ts`), used only when the saved
 /// settings cannot be read.
-const DEFAULT_OFF: [&str; 3] = ["buzz.todos", "buzz.channel-templates", "buzz.bestie"];
+const DEFAULT_OFF: [&str; 2] = ["buzz.todos", "buzz.bestie"];
 
 fn default_disabled() -> HashSet<String> {
     DEFAULT_OFF.iter().map(|id| (*id).to_owned()).collect()

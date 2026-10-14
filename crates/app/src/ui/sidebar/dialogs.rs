@@ -254,7 +254,7 @@ impl ChannelSidebar {
                 let dialog = DialogBox::new("remove-section", format!("Remove {title}?"))
                     .description(format!(
                         "{count} {channels} will move back to Channels. This does not delete \
-                         any channels or saved templates."
+                         any channels."
                     ))
                     .on_close(cx.listener(move |this, _, _, cx| {
                         if !busy {

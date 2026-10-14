@@ -1089,7 +1089,7 @@ fn discriminators(people: &[(String, String)]) -> std::collections::HashMap<Stri
     by_name
         .into_values()
         .filter(|keys| keys.len() > 1)
-        .flat_map(|keys| super::templates::public_key_labels(keys.iter()))
+        .flat_map(|keys| super::keys::public_key_labels(keys.iter()))
         .collect()
 }
 

@@ -9,7 +9,7 @@
 use super::cards::{self, CardPlacement, SettingsCard};
 use super::{button, empty_card, header, section};
 use crate::community::{AppState, Community};
-use crate::ui::overlay::{self, Dismiss, select_menu};
+use crate::ui::overlay::{self, Dismiss};
 use buzz_relay_client::SessionStatus;
 use buzz_relay_client::kit::me::{self as kit, GroupsId};
 use buzz_relay_client::session::{MeKitSnapshot, MeKitStatus};
@@ -17,7 +17,6 @@ use buzz_relay_client::sidebar::{PersonalGroup, SidebarPreferences};
 use buzz_relay_client::sidebar_store::PreferencesStatus;
 use buzz_ui::{ActiveTheme, Button, Dialog, IconName, Surface, TextField, TypeStyled};
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -217,8 +216,6 @@ pub struct GroupsDialog {
     busy: bool,
     error: Option<SharedString>,
     scroll: ScrollHandle,
-    /// The group whose "Default for new channels" menu is open.
-    default_menu: Option<String>,
 }
 
 impl EventEmitter<Closed> for GroupsDialog {}
@@ -244,7 +241,6 @@ impl GroupsDialog {
             busy: false,
             error: None,
             scroll: ScrollHandle::new(),
-            default_menu: None,
         };
         for group in groups.groups {
             this.push(group, window, cx);
@@ -357,90 +353,8 @@ impl GroupsDialog {
     }
 }
 
-impl GroupsDialog {
-    /// "Default for new channels" (`GroupDefault`).
-    fn group_default(
-        &self,
-        group: &DraftGroup,
-        templates: &[(String, String)],
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let value = group.default_template_id.clone();
-        let mut options: Vec<(String, String)> = vec![(String::new(), "No template".into())];
-        options.extend(templates.iter().cloned());
-        if !value.is_empty() && !templates.iter().any(|(id, _)| *id == value) {
-            options.push((
-                value.clone(),
-                "Unavailable template — choose another or None".into(),
-            ));
-        }
-        let label = options
-            .iter()
-            .find(|(id, _)| *id == value)
-            .map(|(_, label)| label.clone())
-            .unwrap_or_default();
-        let open = self.default_menu.as_deref() == Some(group.id.as_str());
-        let id = group.id.clone();
-        let trigger =
-            buzz_ui::Select::new(SharedString::from(format!("group-default-{}", group.id)))
-                .value(label)
-                .surface(Surface::Floating)
-                .disabled(self.busy)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.default_menu = match this.default_menu.as_deref() == Some(id.as_str()) {
-                        true => None,
-                        false => Some(id.clone()),
-                    };
-                    cx.notify();
-                }));
-        let menu = || {
-            let items = options.into_iter().map(|(template, label)| {
-                let (group, checked) = (group.id.clone(), template == value);
-                buzz_ui::MenuItem::new(
-                    SharedString::from(format!("group-default-{group}-{template}")),
-                    label,
-                )
-                .checked(checked)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(draft) = this.groups.iter_mut().find(|g| g.id == group) {
-                        draft.default_template_id = template.clone();
-                    }
-                    this.default_menu = None;
-                    cx.notify();
-                }))
-            });
-            buzz_ui::Menu::new().children(items).into_any_element()
-        };
-        let weak = cx.entity().downgrade();
-        let dismiss: Dismiss = Rc::new(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.default_menu = None;
-                cx.notify();
-            });
-        });
-        let select = select_menu(
-            trigger,
-            open,
-            overlay::Align::Start,
-            Some(rems(20.)),
-            menu,
-            dismiss,
-            window,
-        )
-        .w_full();
-        div()
-            .flex()
-            .flex_col()
-            .gap(rems(0.5))
-            .child(div().text_label().child("Default for new channels"))
-            .child(select)
-            .into_any_element()
-    }
-}
-
 impl Render for GroupsDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let busy = self.busy;
         let ready = self.community.read(cx).session.me_kit().snapshot().ready();
@@ -457,8 +371,8 @@ impl Render for GroupsDialog {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(div().text_body_sm().text_color(c.text_subtle).child(
-                "Personal organization only. Defaults apply to new channels; moving \
-                         channels never changes their members or Canvas.",
+                "Personal organization only. Moving channels never changes their members or \
+                 Canvas.",
             ));
         if !self.existing {
             body = body.child(div().text_body_sm().child(
@@ -478,15 +392,6 @@ impl Render for GroupsDialog {
                 );
             }
         }
-        // Templates & teams on: each group may name a default template.
-        let templates: Option<Vec<(String, String)>> =
-            crate::ui::templates::provider(cx).map(|_| {
-                let kit = self.community.read(cx).session.kit().borrow().clone();
-                buzz_relay_client::kit::templates(&kit.entries)
-                    .into_iter()
-                    .map(|t| (t.id.clone(), t.name.clone()))
-                    .collect()
-            });
         for (index, group) in self.groups.iter().enumerate() {
             let (up, remove) = (group.id.clone(), group.id.clone());
             body = body.child(
@@ -500,18 +405,6 @@ impl Render for GroupsDialog {
                             .surface(Surface::Floating)
                             .disabled(busy),
                     )
-                    .map(|this| match templates.as_ref() {
-                        Some(templates) => {
-                            this.child(self.group_default(group, templates, window, cx))
-                        }
-                        None if !group.default_template_id.is_empty() => {
-                            this.child(div().text_body_sm().text_color(c.text_subtle).child(
-                                "Saved template default is preserved but inactive. Enable \
-                                 Templates & teams to edit or apply it.",
-                            ))
-                        }
-                        None => this,
-                    })
                     .child(
                         div()
                             .flex()
