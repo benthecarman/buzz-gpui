@@ -375,7 +375,15 @@ pub fn listen(community: &Entity<Community>, cx: &mut App) -> Task<()> {
     })
 }
 
+/// Coordination between agents never alerts people (`messages.ts`).
+fn alerts(item: &IncomingMessage) -> bool {
+    item.audience.is_none()
+}
+
 fn deliver(community: &Entity<Community>, item: &IncomingMessage, cx: &mut App) {
+    if !alerts(item) {
+        return;
+    }
     // Every community notifies, not only the selected one as in buzz-app,
     // whose other communities are not connected: here they all are, and
     // the rail marks them. A banner from one not in view names it.
@@ -813,6 +821,15 @@ mod tests {
         // An unfocused window still notifies.
         assert!(!in_front(&top, false, Some(&channel), false));
         assert!(!in_front(&top, true, Some(&channel), false));
+    }
+
+    #[test]
+    fn never_alerts_for_coordination_between_agents() {
+        use buzz_relay_client::Audience;
+        let mut quiet = item(Category::Mention, "@Wes run the suite");
+        quiet.audience = Some(Audience::Agents);
+        assert!(!alerts(&quiet));
+        assert!(alerts(&item(Category::Mention, "@Wes the suite passed")));
     }
 
     #[test]
