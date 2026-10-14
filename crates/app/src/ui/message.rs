@@ -13,7 +13,7 @@ use buzz_relay_client::{
 };
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
-    MaterialStyled, Menu, MenuItem, Presence, Surface, Tooltip, TypeStyled,
+    MaterialStyled, Menu, MenuItem, Presence, Surface, TextRole, Tooltip, TypeStyled,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -412,11 +412,12 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
             .id(SharedString::from(format!("time-{id}")))
             .flex_none()
             .w(px(gutter))
-            .h(px(20.))
+            // The prose's first line, so the caption centres on it.
+            .h(TextRole::Message.line_height())
             .flex()
             .justify_center()
+            .items_center()
             .text_caption()
-            .line_height(px(20.))
             .text_color(c.text_subtle)
             .when(!bar_visible, |d| d.invisible())
             .tooltip(time_tooltip(row.created_at))
@@ -514,7 +515,7 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
             div()
                 .id(SharedString::from(format!("md-{id}")))
                 .when(item.head, |d| d.mt(px(4.)))
-                .text_body_sm()
+                .text_message()
                 .text_color(c.text_standard)
                 .child(text),
         );

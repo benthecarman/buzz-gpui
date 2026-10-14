@@ -123,7 +123,7 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
     };
     let content = match &document.body {
         Document::Plain(text) => div()
-            .text_body_sm()
+            .text_message()
             .text_color(c.text_standard)
             .child(SelectableText::new(
                 SharedString::from(format!("plain-{id}")),
@@ -1556,7 +1556,7 @@ enum Container {
 fn margins(block: &Block) -> (f32, f32) {
     match block {
         Block::Heading(..) => (16., 6.),
-        _ => (12., 12.),
+        _ => (16., 16.),
     }
 }
 

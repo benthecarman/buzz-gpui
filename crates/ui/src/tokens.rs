@@ -114,6 +114,9 @@ pub enum TextRole {
     Body,
     /// 14 / 20, 400. Dense text, menus, descriptions.
     BodySm,
+    /// 14 / 22.75 (1.625 leading), 400. Sent and received message prose,
+    /// with a relaxed reading rhythm.
+    Message,
     /// 14 / 20, 500. Button labels, field labels, row labels.
     LabelSm,
     /// 12 / 16, 400.
@@ -131,7 +134,7 @@ impl TextRole {
             Self::Heading => 1.5,
             Self::BodyLg => 1.25,
             Self::Label => 1.,
-            Self::Body | Self::BodySm | Self::LabelSm => 0.875,
+            Self::Body | Self::BodySm | Self::Message | Self::LabelSm => 0.875,
             Self::Caption | Self::Mono => 0.75,
         })
     }
@@ -145,6 +148,7 @@ impl TextRole {
             Self::BodyLg => 1.75,
             Self::Label => 1.5,
             Self::Body | Self::BodySm | Self::LabelSm => 1.25,
+            Self::Message => 0.875 * 1.625,
             Self::Caption | Self::Mono => 1.,
         })
     }
@@ -167,7 +171,7 @@ impl TextRole {
             Self::BodyLg => -0.01,
             Self::Label => 0.,
             Self::Body => -0.005,
-            Self::BodySm => -0.0025,
+            Self::BodySm | Self::Message => -0.0025,
             Self::LabelSm => 0.0025,
             Self::Caption => 0.0133,
             Self::Mono => 0.03,
@@ -282,6 +286,8 @@ mod tests {
         assert_eq!(px(TextRole::Body.size()), 14.);
         assert_eq!(px(TextRole::Body.line_height()), 20.);
         assert_eq!(px(TextRole::Caption.line_height()), 16.);
+        assert_eq!(px(TextRole::Message.size()), 14.);
+        assert_eq!(px(TextRole::Message.line_height()), 22.75);
         assert!((px(TextRole::Display.line_height()) - 61.6).abs() < 0.01);
         assert!((px(TextRole::Heading.line_height()) - 26.4).abs() < 0.01);
         assert_eq!(px(radius::PANEL), 20.);

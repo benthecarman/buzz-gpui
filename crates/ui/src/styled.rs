@@ -41,6 +41,9 @@ pub trait TypeStyled: Styled + Sized {
     fn text_body_sm(self) -> Self {
         self.text_role(TextRole::BodySm)
     }
+    fn text_message(self) -> Self {
+        self.text_role(TextRole::Message)
+    }
     fn text_label_sm(self) -> Self {
         self.text_role(TextRole::LabelSm)
     }
