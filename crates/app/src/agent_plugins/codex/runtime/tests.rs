@@ -529,6 +529,18 @@ async fn hands_over_promptly_and_runs_conversations_on_one_server() {
             .unwrap()
             .contains("coding agent in Buzz")
     );
+    assert!(
+        started["developerInstructions"]
+            .as_str()
+            .unwrap()
+            .contains("Never publish a bare acknowledgement.")
+    );
+    assert!(
+        f.starts()[1]["params"]["additionalContext"]["buzz.instructions"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Read your `core` memory with `mem_get` at the start of a session")
+    );
     assert_eq!(
         started["config"],
         json!({
