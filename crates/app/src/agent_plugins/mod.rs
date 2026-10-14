@@ -60,10 +60,88 @@ pub(crate) fn from_owner(event: &BuzzEvent, owner: &str) -> bool {
         }) == Some(owner.to_owned())
 }
 
+/// The owner of a community workflow's message (`workflow-attribution.ts`):
+/// kind 9 signed by the community itself, marked once as a workflow and
+/// naming one owner. The caller has checked its signature.
+fn workflow_owner(event: &BuzzEvent, authority: Option<&str>) -> Option<String> {
+    if authority != Some(event.pubkey.as_str()) || event.kind != 9 {
+        return None;
+    }
+    let named = |name: &str| {
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some(name))
+            .collect::<Vec<_>>()
+    };
+    let (markers, owners) = (named("buzz:workflow"), named("buzz:workflow-owner"));
+    match (markers.as_slice(), owners.as_slice()) {
+        ([marker], [owner])
+            if marker.len() == 2
+                && marker[1] == "true"
+                && owner.len() == 2
+                && crate::buzz_mcp::tools::hex(&owner[1]) =>
+        {
+            Some(owner[1].clone())
+        }
+        _ => None,
+    }
+}
+
+/// Delegated mention provenance: the owner of a workflow message that
+/// explicitly targets `agent`. Ordinary `p` tags can come from template
+/// substitutions; only owner-authored targets grant prompt authority.
+pub(crate) fn workflow_mention_owner(
+    event: &BuzzEvent,
+    authority: Option<&str>,
+    agent: &str,
+) -> Option<String> {
+    let owner = workflow_owner(event, authority)?;
+    let mut targets = std::collections::HashSet::new();
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("buzz:workflow-mention"))
+    {
+        let target = tag
+            .get(1)
+            .filter(|target| crate::buzz_mcp::tools::hex(target));
+        match target {
+            Some(target) if tag.len() == 2 && targets.insert(target.clone()) => {}
+            _ => return None,
+        }
+    }
+    targets.contains(agent).then_some(owner)
+}
+
+/// [`from_owner`], or a verified workflow mention of `agent` in its own
+/// community delegated by the owner, or by an agent whose signed profile
+/// the owner attested.
+pub(crate) async fn from_owner_or_workflow(
+    event: &BuzzEvent,
+    owner: &str,
+    agent: &str,
+    relay: Option<&Arc<dyn owner_relay::OwnerRelay>>,
+) -> bool {
+    if from_owner(event, owner) {
+        return true;
+    }
+    let Some(relay) = relay else {
+        return false;
+    };
+    let Some(creator) = workflow_mention_owner(event, relay.authority().as_deref(), agent) else {
+        return false;
+    };
+    // A missing or failed profile read is no verdict; a later mention can
+    // try again.
+    creator == owner || relay.profile_owner(&creator).await.as_deref() == Some(owner)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use nostr::prelude::{Keys, ToBech32};
+    use std::collections::HashMap;
 
     /// An owner, an agent it attested, and that attestation's `auth` tag.
     pub(crate) fn attested() -> (String, String, Vec<String>) {
@@ -115,5 +193,142 @@ pub(crate) mod tests {
         let tags = reply_tags("c", &event, &"f".repeat(64));
         assert_eq!(tags.last(), Some(&vec!["p".to_string(), "f".repeat(64)]));
         assert!(!tags.iter().any(|tag| tag.get(1) == Some(&event.pubkey)));
+    }
+
+    fn workflow(signer: &str, extra: &[&[&str]]) -> BuzzEvent {
+        let mut tags: Vec<Vec<String>> = vec![
+            vec!["buzz:workflow".into(), "true".into()],
+            vec!["buzz:workflow-owner".into(), "c".repeat(64)],
+        ];
+        tags.extend(
+            extra
+                .iter()
+                .map(|tag| tag.iter().map(|part| part.to_string()).collect()),
+        );
+        BuzzEvent {
+            pubkey: signer.into(),
+            kind: 9,
+            created_at: 100,
+            tags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn delegates_only_to_explicit_canonical_workflow_targets() {
+        let (relay, other, creator) = ("r".repeat(64), "b".repeat(64), "c".repeat(64));
+        let relay = relay.replace('r', "1");
+        let targets: &[&[&str]] = &[
+            &["buzz:workflow-mention", &other],
+            &["buzz:workflow-mention", &creator],
+        ];
+        let event = workflow(&relay, targets);
+        assert_eq!(
+            workflow_mention_owner(&event, Some(&relay), &other),
+            Some(creator.clone())
+        );
+        assert_eq!(workflow_mention_owner(&event, Some(&relay), &relay), None);
+        assert_eq!(workflow_mention_owner(&event, None, &other), None);
+        assert_eq!(workflow_mention_owner(&event, Some(&other), &other), None);
+        let signed_elsewhere = workflow(&other, targets);
+        assert_eq!(
+            workflow_mention_owner(&signed_elsewhere, Some(&relay), &other),
+            None
+        );
+        let upper = other.to_uppercase();
+        for mentions in [
+            vec![],
+            vec![vec!["p", other.as_str()]],
+            vec![vec!["buzz:workflow-mention", creator.as_str()]],
+            vec![vec!["buzz:workflow-mention", other.as_str(), "extra"]],
+            vec![vec!["buzz:workflow-mention", upper.as_str()]],
+            vec![
+                vec!["buzz:workflow-mention", other.as_str()],
+                vec!["buzz:workflow-mention", other.as_str()],
+            ],
+            vec![
+                vec!["buzz:workflow-mention", other.as_str()],
+                vec!["buzz:workflow-mention"],
+            ],
+            vec![
+                vec!["buzz:workflow-mention", other.as_str()],
+                vec!["buzz:workflow-mention", "bad"],
+            ],
+        ] {
+            let mentions: Vec<&[&str]> = mentions.iter().map(Vec::as_slice).collect();
+            let event = workflow(&relay, &mentions);
+            assert_eq!(
+                workflow_mention_owner(&event, Some(&relay), &other),
+                None,
+                "{mentions:?}"
+            );
+        }
+    }
+
+    /// A community with a workflow authority and one creator profile.
+    struct Community {
+        authority: String,
+        profiles: HashMap<String, String>,
+        reads: std::sync::Mutex<usize>,
+    }
+
+    impl owner_relay::OwnerRelay for Community {
+        fn channel(&self, _: &str) -> Option<owner_relay::ChannelInfo> {
+            None
+        }
+        fn read(
+            &self,
+            _: Vec<serde_json::Value>,
+        ) -> BoxFuture<'static, Result<Vec<BuzzEvent>, String>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn names(
+            &self,
+            _: Vec<String>,
+            _: Vec<String>,
+        ) -> BoxFuture<'static, HashMap<String, String>> {
+            Box::pin(async { HashMap::new() })
+        }
+        fn memories(
+            &self,
+            _: &str,
+        ) -> BoxFuture<'static, Result<Vec<crate::buzz_mcp::Memory>, String>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn authority(&self) -> Option<String> {
+            Some(self.authority.clone())
+        }
+        fn profile_owner(&self, pubkey: &str) -> BoxFuture<'static, Option<String>> {
+            *self.reads.lock().unwrap() += 1;
+            let owner = self.profiles.get(pubkey).cloned();
+            Box::pin(async move { owner })
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_a_workflow_mention_delegated_by_the_owner_or_an_agent_it_attested() {
+        let (owner, agent, creator, stranger) = (
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "e".repeat(64),
+        );
+        let authority = "1".repeat(64);
+        let relay: Arc<dyn owner_relay::OwnerRelay> = Arc::new(Community {
+            authority: authority.clone(),
+            profiles: HashMap::from([(creator.clone(), owner.clone())]),
+            reads: std::sync::Mutex::new(0),
+        });
+        let prompt = workflow(&authority, &[&["buzz:workflow-mention", &agent]]);
+        assert!(from_owner_or_workflow(&prompt, &owner, &agent, Some(&relay)).await);
+        assert!(!from_owner_or_workflow(&prompt, &stranger, &agent, Some(&relay)).await);
+        // Without its community, or naming only by `p`, it is not trusted.
+        assert!(!from_owner_or_workflow(&prompt, &owner, &agent, None).await);
+        let legacy = workflow(&authority, &[&["p", &agent]]);
+        assert!(!from_owner_or_workflow(&legacy, &owner, &agent, Some(&relay)).await);
+        // A workflow the owner made needs no profile.
+        let mut own = prompt.clone();
+        own.tags[1][1] = owner.clone();
+        assert!(from_owner_or_workflow(&own, &owner, &agent, Some(&relay)).await);
     }
 }

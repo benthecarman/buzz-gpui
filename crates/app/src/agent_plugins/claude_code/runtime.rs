@@ -461,10 +461,19 @@ impl ClaudeRuntime {
     pub async fn run(&self, run: Run) {
         let settings = Config::read(&run.config);
         let pubkey = run.agent.pubkey();
-        // Claude runs commands as you, so only you and your agents can ask.
-        if let Wake::Mention { event } | Wake::Watch { event, .. } = &run.wake
-            && !crate::agent_plugins::from_owner(event, &run.agent.owner())
-        {
+        // Claude runs commands as you; mentions need owner or delegated
+        // authority.
+        let owner = run.agent.owner();
+        let trusted = match &run.wake {
+            Wake::Mention { event } => {
+                let relay = self.relay(&pubkey);
+                crate::agent_plugins::from_owner_or_workflow(event, &owner, &pubkey, relay.as_ref())
+                    .await
+            }
+            Wake::Watch { event, .. } => crate::agent_plugins::from_owner(event, &owner),
+            Wake::Timer { .. } => true,
+        };
+        if !trusted {
             return;
         }
         let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone());

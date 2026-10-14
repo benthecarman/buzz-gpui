@@ -877,10 +877,18 @@ impl CodexRuntime {
             Wake::Mention { event } => (event, String::new()),
             Wake::Watch { event, interest } => (event, interest.unwrap_or_default()),
         };
-        if !crate::agent_plugins::from_owner(&event, &agent.owner()) {
+        let scoped = self.relay(&agent.pubkey());
+        let trusted = crate::agent_plugins::from_owner_or_workflow(
+            &event,
+            &agent.owner(),
+            &agent.pubkey(),
+            scoped.as_ref().map(|(_, relay)| relay),
+        )
+        .await;
+        if !trusted {
             return Ok(());
         }
-        let Some((scope, relay)) = self.relay(&agent.pubkey()) else {
+        let Some((scope, relay)) = scoped else {
             return Err("Connect to the agent's community first".into());
         };
         let channel_id = channel.ok_or("The event has no unambiguous channel")?;

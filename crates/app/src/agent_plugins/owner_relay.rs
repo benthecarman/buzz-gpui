@@ -39,6 +39,16 @@ pub trait OwnerRelay: Send + Sync {
     /// The agent's memory, read back with the owner's key: it is encrypted
     /// to the owner, so no agent key is needed to read it.
     fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>>;
+    /// The community's own signing key (NIP-11 `self`), which signs its
+    /// workflows' messages, once known.
+    fn authority(&self) -> Option<String> {
+        None
+    }
+    /// The NIP-OA owner attested in `pubkey`'s newest signed profile, if
+    /// it can be read. A failed read is no verdict.
+    fn profile_owner(&self, _pubkey: &str) -> BoxFuture<'static, Option<String>> {
+        Box::pin(async { None })
+    }
 }
 
 /// A community, read with the owner's key: conversations for
@@ -143,6 +153,39 @@ impl OwnerRelay for AppRelay {
                 names.extend(newest.into_iter().map(|(pubkey, (_, name))| (pubkey, name)));
             }
             names
+        })
+    }
+
+    fn authority(&self) -> Option<String> {
+        let snapshot = self.snapshot.as_ref()?.borrow().clone();
+        snapshot
+            .relay
+            .as_ref()
+            .map(|relay| relay.authority.clone())
+            .filter(|authority| !authority.is_empty())
+    }
+
+    fn profile_owner(&self, pubkey: &str) -> BoxFuture<'static, Option<String>> {
+        let (http, pubkey) = (self.http.clone(), pubkey.to_string());
+        Box::pin(async move {
+            let filter = serde_json::json!({ "kinds": [0], "authors": [pubkey], "limit": 500 });
+            let events = http.query(&filters(vec![filter])).await.ok()?;
+            // Signatures are checked as the events are read.
+            let newest = events
+                .into_iter()
+                .filter(|event| event.kind.as_u16() == 0 && event.pubkey.to_hex() == pubkey)
+                .max_by_key(|event| event.created_at.as_secs())?;
+            let tags: Vec<Vec<String>> = newest
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect();
+            buzz_relay_client::profiles::attested_owner_of(
+                &pubkey,
+                0,
+                newest.created_at.as_secs(),
+                &tags,
+            )
         })
     }
 
