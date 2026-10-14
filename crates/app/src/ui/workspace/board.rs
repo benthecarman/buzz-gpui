@@ -17,6 +17,7 @@ use crate::ui::channel_tab_views::{
 use crate::ui::channel_tabs::{self, PanelTab, Routed, TabKind, TabPane, TabState};
 use crate::ui::pages::Page;
 use crate::ui::panels::{self, Close, Dock, TabItem};
+use crate::ui::tab_drag::{self, PaneOrder, Rules, TabDrag, TabGeometry};
 use crate::ui::thread::ThreadPanel;
 use buzz_relay_client::{ChannelSummary, ChannelType};
 use buzz_ui::{ActiveTheme, IconName, TypeStyled};
@@ -670,6 +671,7 @@ impl Workspace {
                 icon: IconName::Gear,
                 content: panel.clone().into_any_element(),
                 close: closer(channel_tabs::SETTINGS.to_string()),
+                drag: None,
             });
         }
         for tab in state.side_tabs() {
@@ -680,12 +682,18 @@ impl Workspace {
                 Some(TabView::Panel(view)) => view.clone().into_any_element(),
                 Some(TabView::Settings { .. }) | None => Self::unavailable(cx),
             };
+            let drag = tab.thread().map(|_| TabDrag {
+                id: tab.id.clone(),
+                label: label.clone(),
+                pane: TabPane::Side,
+            });
             items.push(TabItem {
                 id: tab.id.clone().into(),
                 label,
                 icon,
                 content,
                 close: closer(tab.id.clone()),
+                drag,
             });
         }
         for opening in &state.panels {
@@ -712,6 +720,7 @@ impl Workspace {
                 icon: panel.icon,
                 content,
                 close,
+                drag: None,
             });
         }
         items
@@ -727,6 +736,11 @@ impl Workspace {
                 let (label, icon) = self.tab_identity(tab, cx);
                 let weak = weak.clone();
                 let id = tab.id.clone();
+                let drag = TabDrag {
+                    id: tab.id.clone(),
+                    label: label.clone(),
+                    pane: TabPane::Main,
+                };
                 MainTab {
                     id: tab.id.clone().into(),
                     label,
@@ -734,6 +748,7 @@ impl Workspace {
                     close: Rc::new(move |window, cx| {
                         let _ = weak.update(cx, |this, cx| this.close_tab(&id, window, cx));
                     }),
+                    drag: Some(drag),
                 }
             })
             .collect();
@@ -751,6 +766,8 @@ impl Workspace {
                     this.select_main_tab(id.map(|id| id.to_string()), window, cx)
                 });
             }),
+            geometry: self.tab_geometry.clone(),
+            strip: self.main_strip.clone(),
         }
     }
 
@@ -759,8 +776,16 @@ impl Workspace {
         let Some(page) = self.channel.clone() else {
             return div().into_any_element();
         };
+        let laid_out = TabGeometry::clear(&self.tab_geometry);
+        if !cx.has_active_drag() {
+            // A drag released outside the board leaves nothing behind.
+            self.drag_target = None;
+            self.drag_cancelled = false;
+            TabGeometry::finish(&self.tab_geometry);
+        }
         let state = self.tabs(cx);
         self.ensure_tab_views(window, cx);
+        self.reveal_main(&state, &laid_out, window);
         let side = self
             .drawer
             .as_ref()
@@ -796,10 +821,10 @@ impl Workspace {
             // A newly selected tab scrolls into view; the user may scroll
             // away from it after.
             if self.revealed_tab.as_deref() != Some(selected.as_str()) {
-                let index = items.iter().position(|item| item.id.as_ref() == selected);
-                match index.map(|index| panels::reveal_tab(&self.tab_strip, index, window)) {
-                    Some(false) => window.request_animation_frame(),
-                    _ => self.revealed_tab = Some(selected.clone()),
+                let bounds = laid_out.get(&selected).copied();
+                match panels::reveal_tab(&self.tab_strip, bounds) {
+                    false => window.request_animation_frame(),
+                    true => self.revealed_tab = Some(selected.clone()),
                 }
             }
             let weak = cx.entity().downgrade();
@@ -810,6 +835,7 @@ impl Workspace {
                 Rc::new(move |id, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.select_tab(&id, window, cx));
                 }),
+                Some(&self.tab_geometry),
                 cx,
             )
         });
@@ -865,14 +891,18 @@ impl Workspace {
         // The main pane owns Close while focus is in it.
         let conversation = div()
             .track_focus(&self.main_area)
+            .relative()
             .flex()
             .size_full()
             .min_w_0()
             .child(conversation)
+            .child(tab_drag::record(&self.tab_geometry, |geometry, bounds| {
+                geometry.main = Some(bounds);
+            }))
             .into_any_element();
         let weak = cx.entity().downgrade();
         let commit = weak.clone();
-        Dock {
+        let board = Dock {
             id: "board".into(),
             split: Split::BOARD,
             preferred: self.board_width,
@@ -889,7 +919,186 @@ impl Workspace {
                 let _ = commit.update(cx, |_, _| {});
             }),
         }
-        .render(conversation, dock, cx)
+        .render(conversation, dock, cx);
+        let (moved, dropped, escape) = (
+            cx.entity().downgrade(),
+            cx.entity().downgrade(),
+            cx.entity().downgrade(),
+        );
+        let feedback = cx
+            .has_active_drag()
+            .then(|| tab_drag::feedback(self.drag_target, cx))
+            .flatten();
+        div()
+            .flex()
+            .size_full()
+            .min_w_0()
+            .on_drag_move::<TabDrag>(move |event, window, cx| {
+                let drag = event.drag(cx).clone();
+                let position = event.event.position;
+                let _ = moved.update(cx, |this, cx| this.drag_moved(&drag, position, window, cx));
+            })
+            .on_drop::<TabDrag>(move |drag, window, cx| {
+                let drag = drag.clone();
+                let _ = dropped.update(cx, |this, cx| this.drag_dropped(&drag, window, cx));
+            })
+            .capture_key_down(move |event, _, cx| {
+                if event.keystroke.key == "escape" && cx.has_active_drag() {
+                    cx.stop_propagation();
+                    let _ = escape.update(cx, |this, cx| this.cancel_drag(cx));
+                }
+            })
+            .child(board)
+            .children(feedback)
+            .into_any_element()
+    }
+
+    /// Scrolls the main strip to a newly selected tab.
+    fn reveal_main(
+        &mut self,
+        state: &TabState,
+        laid_out: &HashMap<String, Bounds<Pixels>>,
+        window: &mut Window,
+    ) {
+        let selected = state.selected_main().unwrap_or_default();
+        if self.revealed_main.as_deref() == Some(selected.as_str()) {
+            return;
+        }
+        let bounds = laid_out.get(&selected).copied();
+        if selected.is_empty() || panels::reveal_tab(&self.main_strip, bounds) {
+            self.revealed_main = Some(selected);
+        } else {
+            window.request_animation_frame();
+        }
+    }
+
+    /// Where a dragged tab could go: either pane for a thread of this
+    /// channel, only the side pane for another conversation's.
+    fn drag_rules<'a>(
+        &self,
+        state: &'a TabState,
+        side_strip: &'a [String],
+        can_move: &'a dyn Fn(TabPane) -> bool,
+    ) -> Rules<'a> {
+        let side_tabs = state.side_tabs().count();
+        let side_drawer = self.side_drawer();
+        Rules {
+            order: vec![
+                PaneOrder {
+                    pane: TabPane::Main,
+                    tabs: state.main_tabs().map(|tab| tab.id.as_str()).collect(),
+                    strip: std::iter::once(tab_drag::CONVERSATION)
+                        .chain(state.main_tabs().map(|tab| tab.id.as_str()))
+                        .collect(),
+                },
+                PaneOrder {
+                    pane: TabPane::Side,
+                    tabs: state.side_tabs().map(|tab| tab.id.as_str()).collect(),
+                    strip: side_strip.iter().map(String::as_str).collect(),
+                },
+            ],
+            can_move,
+            side_visible: state.pane_open && (state.has_panel() || side_drawer),
+            closed_side_index: (!state.pane_open || (state.root_ids().is_empty() && !side_drawer))
+                .then_some(side_tabs),
+        }
+    }
+
+    /// A dragged tab moved: its drop target follows the pointer, and a
+    /// long strip scrolls while the pointer is held near its ends.
+    fn drag_moved(
+        &mut self,
+        drag: &TabDrag,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drag_cancelled {
+            return;
+        }
+        let Some(start) = self.tab_geometry.borrow().start else {
+            return;
+        };
+        // A resized window is a new layout; the gesture ends.
+        if start.viewport != window.viewport_size() {
+            self.cancel_drag(cx);
+            return;
+        }
+        let state = self.tabs(cx);
+        let current = self.channel_id(cx);
+        let Some(thread) = state.tab(&drag.id).and_then(|tab| tab.thread()).cloned() else {
+            self.cancel_drag(cx);
+            return;
+        };
+        let can_move =
+            |pane: TabPane| pane == TabPane::Side || current.as_deref() == Some(&thread.channel);
+        let side_strip = state.root_ids();
+        let rules = self.drag_rules(&state, &side_strip, &can_move);
+        let target = tab_drag::target(
+            &self.tab_geometry.borrow(),
+            drag,
+            start.at,
+            position,
+            &rules,
+            self.drag_target,
+        );
+        for (pane, strip) in [
+            (tab_drag::PaneKey::Side, &self.tab_strip),
+            (tab_drag::PaneKey::Main, &self.main_strip),
+        ] {
+            let header = self.tab_geometry.borrow().headers.get(&pane).copied();
+            if header.is_some_and(|header| header.contains(&position)) {
+                tab_drag::scroll_near_ends(strip, position);
+            }
+        }
+        if target != self.drag_target {
+            self.drag_target = target;
+            cx.notify();
+        }
+    }
+
+    /// The pointer let go: the tab moves to the drop target, and takes
+    /// the focus where it landed.
+    fn drag_dropped(&mut self, drag: &TabDrag, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.drag_target.take();
+        let cancelled = std::mem::take(&mut self.drag_cancelled);
+        TabGeometry::finish(&self.tab_geometry);
+        cx.notify();
+        let Some(target) = target.filter(|_| !cancelled) else {
+            return;
+        };
+        let state = self.tabs(cx);
+        let current = self.channel_id(cx);
+        let Some(moving) = state.tab(&drag.id) else {
+            return;
+        };
+        let Some(thread) = moving.thread() else {
+            return;
+        };
+        if target.pane == TabPane::Main && current.as_deref() != Some(&thread.channel) {
+            return;
+        }
+        let order: Vec<&str> = state
+            .tabs
+            .iter()
+            .filter(|tab| tab.pane() == target.pane)
+            .map(|tab| tab.id.as_str())
+            .collect();
+        if moving.pane() == target.pane
+            && order.iter().position(|id| *id == drag.id) == Some(target.index)
+        {
+            return;
+        }
+        let id = drag.id.clone();
+        self.update_tabs(cx, |state| state.move_tab(&id, target.pane, target.index));
+        self.focus_tab(&id, window, cx);
+    }
+
+    /// Escape or a resize ends the drag without a move.
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        self.drag_target = None;
+        self.drag_cancelled = true;
+        cx.notify();
     }
 
     /// "View channel details": the Channel settings tab, focused, as only

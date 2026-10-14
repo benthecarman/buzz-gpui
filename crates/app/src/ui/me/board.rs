@@ -16,6 +16,7 @@ use crate::ui::channel_tabs::{self, PanelTab, TabKind, TabPane, TabState, Thread
 use crate::ui::message::channel_icon;
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::panels::{self, Close, Dock, TabItem};
+use crate::ui::tab_drag::{self, PaneOrder, Rules, TabDrag, TabGeometry};
 use crate::ui::thread::{self, ThreadPanel};
 use crate::ui::workspace::layout::Split;
 use buzz_relay_client::ChannelSummary;
@@ -47,6 +48,10 @@ pub struct SessionWork {
     tab_views: HashMap<String, TabView>,
     tab_strip: ScrollHandle,
     revealed_tab: Option<String>,
+    /// Where tabs were laid out, for reordering them by drag.
+    tab_geometry: tab_drag::Geometry,
+    drag_target: Option<tab_drag::DropTarget>,
+    drag_cancelled: bool,
     drawer: Option<Drawer>,
     menu_open: bool,
     dialog: Option<dialogs::Dialog>,
@@ -184,6 +189,9 @@ impl SessionWork {
             thread: None,
             tab_views: HashMap::new(),
             tab_strip: ScrollHandle::new(),
+            tab_geometry: Default::default(),
+            drag_target: None,
+            drag_cancelled: false,
             revealed_tab: None,
             drawer: None,
             menu_open: false,
@@ -433,6 +441,7 @@ impl SessionWork {
                 close: Rc::new(move |window, cx| {
                     let _ = weak.update(cx, |this, cx| this.close_thread(window, cx));
                 }),
+                drag: None,
             });
         }
         for tab in state.side_tabs() {
@@ -464,10 +473,15 @@ impl SessionWork {
             };
             items.push(TabItem {
                 id: tab.id.clone().into(),
-                label,
+                label: label.clone(),
                 icon,
                 content,
                 close: closer(tab.id.clone()),
+                drag: tab.thread().map(|_| TabDrag {
+                    id: tab.id.clone(),
+                    label: label.clone(),
+                    pane: TabPane::Side,
+                }),
             });
         }
         for opening in &state.panels {
@@ -485,6 +499,7 @@ impl SessionWork {
                 icon: panel.icon,
                 content,
                 close: closer(id),
+                drag: None,
             });
         }
         items
@@ -632,6 +647,80 @@ impl SessionWork {
             .into_any_element()
     }
 
+    /// A dragged tab moved: Me's tabs reorder within the side pane.
+    fn drag_moved(
+        &mut self,
+        drag: &TabDrag,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drag_cancelled {
+            return;
+        }
+        let Some(start) = self.tab_geometry.borrow().start else {
+            return;
+        };
+        if start.viewport != window.viewport_size() {
+            self.drag_target = None;
+            self.drag_cancelled = true;
+            cx.notify();
+            return;
+        }
+        let state = self.tabs(cx);
+        let can_move = |pane: TabPane| pane == TabPane::Side;
+        let strip = state.root_ids();
+        let rules = Rules {
+            order: vec![PaneOrder {
+                pane: TabPane::Side,
+                tabs: state.side_tabs().map(|tab| tab.id.as_str()).collect(),
+                strip: strip.iter().map(String::as_str).collect(),
+            }],
+            can_move: &can_move,
+            side_visible: true,
+            closed_side_index: None,
+        };
+        let target = tab_drag::target(
+            &self.tab_geometry.borrow(),
+            drag,
+            start.at,
+            position,
+            &rules,
+            self.drag_target,
+        );
+        let header = self
+            .tab_geometry
+            .borrow()
+            .headers
+            .get(&tab_drag::PaneKey::Side)
+            .copied();
+        if header.is_some_and(|header| header.contains(&position)) {
+            tab_drag::scroll_near_ends(&self.tab_strip, position);
+        }
+        if target != self.drag_target {
+            self.drag_target = target;
+            cx.notify();
+        }
+    }
+
+    fn drag_dropped(&mut self, drag: &TabDrag, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.drag_target.take();
+        let cancelled = std::mem::take(&mut self.drag_cancelled);
+        TabGeometry::finish(&self.tab_geometry);
+        cx.notify();
+        let Some(target) = target.filter(|_| !cancelled) else {
+            return;
+        };
+        let state = self.tabs(cx);
+        let order: Vec<&str> = state.side_tabs().map(|tab| tab.id.as_str()).collect();
+        if order.iter().position(|id| *id == drag.id) == Some(target.index) {
+            return;
+        }
+        let id = drag.id.clone();
+        self.update_tabs(cx, |state| state.move_tab(&id, target.pane, target.index));
+        self.focus_tab(&id, window, cx);
+    }
+
     /// Placement notices under the heading.
     fn placement(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let c = *cx.colors();
@@ -679,6 +768,12 @@ impl DialogHost for SessionWork {
 
 impl Render for SessionWork {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let laid_out = TabGeometry::clear(&self.tab_geometry);
+        if !cx.has_active_drag() {
+            self.drag_target = None;
+            self.drag_cancelled = false;
+            TabGeometry::finish(&self.tab_geometry);
+        }
         let state = self.tabs(cx);
         let showing = state.showing();
         let has_content = state.has_panel() || self.side_drawer();
@@ -702,10 +797,10 @@ impl Render for SessionWork {
             let items = self.tab_items(&state, window, cx);
             let selected = state.selected_tab().unwrap_or_default();
             if self.revealed_tab.as_deref() != Some(selected.as_str()) {
-                let index = items.iter().position(|item| item.id.as_ref() == selected);
-                match index.map(|index| panels::reveal_tab(&self.tab_strip, index, window)) {
-                    Some(false) => window.request_animation_frame(),
-                    _ => self.revealed_tab = Some(selected.clone()),
+                let bounds = laid_out.get(&selected).copied();
+                match panels::reveal_tab(&self.tab_strip, bounds) {
+                    false => window.request_animation_frame(),
+                    true => self.revealed_tab = Some(selected.clone()),
                 }
             }
             let weak = cx.entity().downgrade();
@@ -716,6 +811,7 @@ impl Render for SessionWork {
                 Rc::new(move |id, window, cx| {
                     let _ = weak.update(cx, |this, cx| this.select_tab(&id, window, cx));
                 }),
+                Some(&self.tab_geometry),
                 cx,
             )
         });
@@ -782,11 +878,40 @@ impl Render for SessionWork {
             on_commit: Rc::new(|_, _| {}),
         }
         .render(conversation, dock, cx);
+        let (moved, dropped, escape) = (
+            cx.entity().downgrade(),
+            cx.entity().downgrade(),
+            cx.entity().downgrade(),
+        );
+        let feedback = cx
+            .has_active_drag()
+            .then(|| tab_drag::feedback(self.drag_target, cx))
+            .flatten();
         div()
             .id("me-session")
             .size_full()
             .flex()
+            .on_drag_move::<TabDrag>(move |event, window, cx| {
+                let drag = event.drag(cx).clone();
+                let position = event.event.position;
+                let _ = moved.update(cx, |this, cx| this.drag_moved(&drag, position, window, cx));
+            })
+            .on_drop::<TabDrag>(move |drag, window, cx| {
+                let drag = drag.clone();
+                let _ = dropped.update(cx, |this, cx| this.drag_dropped(&drag, window, cx));
+            })
+            .capture_key_down(move |event, _, cx| {
+                if event.keystroke.key == "escape" && cx.has_active_drag() {
+                    cx.stop_propagation();
+                    let _ = escape.update(cx, |this, cx| {
+                        this.drag_target = None;
+                        this.drag_cancelled = true;
+                        cx.notify();
+                    });
+                }
+            })
             .child(board)
+            .children(feedback)
             .children(
                 self.dialog
                     .as_ref()

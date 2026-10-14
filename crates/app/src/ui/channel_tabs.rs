@@ -496,7 +496,6 @@ impl TabState {
     /// Moves a thread tab to `index` within `pane`'s own order. Its
     /// identity and view stay; only its place changes, and selection
     /// follows it.
-    #[allow(dead_code)] // Dragging tabs between panes comes next.
     pub fn move_tab(&mut self, id: &str, pane: TabPane, index: usize) {
         let Some(at) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;

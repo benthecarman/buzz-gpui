@@ -145,6 +145,8 @@ pub struct MainTab {
     pub label: SharedString,
     pub icon: IconName,
     pub close: PaneToggle,
+    /// The pointer can drag it to another place or pane.
+    pub drag: Option<super::tab_drag::TabDrag>,
 }
 
 /// Shows a main-pane tab: a thread, or with `None` the conversation.
@@ -159,6 +161,9 @@ pub struct MainTabs {
     pub selected: Option<SharedString>,
     pub content: Option<AnyView>,
     pub select: SelectMain,
+    /// Where the strip and its tabs are, for tab drags.
+    pub geometry: super::tab_drag::Geometry,
+    pub strip: ScrollHandle,
 }
 
 /// The header's "Toggle tab pane" button.
@@ -1056,10 +1061,24 @@ impl Render for ChannelPage {
                 Some(main) => header.leading(main_strip(main, icon, name)),
                 None => header.label(Some(icon), name),
             };
-            header
+            let header = header
                 .action(self.actions.clone())
                 .action(div().flex().gap(rems(0.375)).children(launchers))
-                .when_some(pane, |header, pane| header.action(pane))
+                .when_some(pane, |header, pane| header.action(pane));
+            // The header is where tab drags land in the main pane.
+            div()
+                .relative()
+                .child(header)
+                .when_some(self.main_tabs.as_ref(), |this, main| {
+                    this.child(super::tab_drag::record(
+                        &main.geometry,
+                        |geometry, bounds| {
+                            geometry
+                                .headers
+                                .insert(super::tab_drag::PaneKey::Main, bounds);
+                        },
+                    ))
+                })
         });
         // A thread selected in the main pane covers the conversation, whose
         // reading position and draft stay as they were.
@@ -1318,7 +1337,12 @@ fn main_strip(main: &MainTabs, icon: IconName, name: impl Into<SharedString>) ->
         Tab::new("main-tab-conversation", name)
             .icon(icon)
             .selected(main.selected.is_none())
-            .on_click(move |_, window, cx| select(None, window, cx)),
+            .on_click(move |_, window, cx| select(None, window, cx))
+            .extend(super::tab_drag::tab_handlers(
+                &main.geometry,
+                super::tab_drag::CONVERSATION.into(),
+                None,
+            )),
     );
     for tab in &main.tabs {
         let select = main.select.clone();
@@ -1332,7 +1356,13 @@ fn main_strip(main: &MainTabs, icon: IconName, name: impl Into<SharedString>) ->
             .icon(tab.icon)
             .selected(main.selected.as_ref() == Some(&tab.id))
             .on_click(move |_, window, cx| select(Some(id.clone()), window, cx))
-            .on_close(move |_, window, cx| close(window, cx)),
+            .on_close(move |_, window, cx| close(window, cx))
+            .draggable(tab.drag.is_some())
+            .extend(super::tab_drag::tab_handlers(
+                &main.geometry,
+                tab.id.to_string(),
+                tab.drag.clone(),
+            )),
         );
     }
     div()
@@ -1340,6 +1370,7 @@ fn main_strip(main: &MainTabs, icon: IconName, name: impl Into<SharedString>) ->
         .flex_1()
         .min_w_0()
         .overflow_x_scroll()
+        .track_scroll(&main.strip)
         .child(strip)
 }
 

@@ -57,6 +57,16 @@ pub struct Workspace {
     /// The open channel's tab views, made on this visit.
     tab_views: HashMap<String, crate::ui::channel_tab_views::TabView>,
     tab_strip: ScrollHandle,
+    /// The main pane's tab strip.
+    main_strip: ScrollHandle,
+    /// The main tab last scrolled into view.
+    revealed_main: Option<String>,
+    /// Where tabs were laid out, for dragging them.
+    tab_geometry: super::tab_drag::Geometry,
+    /// Where a tab being dragged would land.
+    drag_target: Option<super::tab_drag::DropTarget>,
+    /// Escape or a resize cancelled the drag in progress.
+    drag_cancelled: bool,
     /// A channel panel a header launcher opened, for this visit.
     drawer: Option<board::Drawer>,
     /// The tab last scrolled into view.
@@ -159,6 +169,11 @@ impl Workspace {
             tab_states: HashMap::new(),
             tab_views: HashMap::new(),
             tab_strip: ScrollHandle::new(),
+            main_strip: ScrollHandle::new(),
+            revealed_main: None,
+            tab_geometry: Default::default(),
+            drag_target: None,
+            drag_cancelled: false,
             drawer: None,
             revealed_tab: None,
             board_width: None,

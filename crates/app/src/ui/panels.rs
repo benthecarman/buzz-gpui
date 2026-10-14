@@ -3,12 +3,14 @@
 //! (ui.md §2.10).
 
 use super::resize_handle::{OnCommit, OnResize, ResizeHandle};
+use super::tab_drag::{self, Geometry, PaneKey, TabDrag};
 use super::workspace::layout::{DockMode, Split};
 use buzz_ui::tokens::{duration, easing, shadow};
 use buzz_ui::{
     ActiveTheme, IconButton, IconButtonSize, IconName, PanelHeader, Tab, TabVariant, Tabs,
     TypeStyled,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 
@@ -297,29 +299,22 @@ pub fn with_subview(base: AnyElement, subview: Option<Subview>, cx: &App) -> Any
         .into_any_element()
 }
 
-/// Each navigation tab is 12rem wide with a 0.25rem gap.
-const TAB_STRIDE: f32 = 12.25;
-
-/// Scrolls the tab strip so tab `index` shows, as buzz-app does when a
-/// tab is selected. False until the strip has been laid out.
-pub fn reveal_tab(strip: &ScrollHandle, index: usize, window: &Window) -> bool {
-    let rem = f32::from(window.rem_size());
-    let left = index as f32 * TAB_STRIDE * rem;
-    let right = left + 12. * rem;
-    let width = f32::from(strip.bounds().size.width);
-    if width <= 0. {
+/// Scrolls the tab strip so a tab laid out at `tab` shows, as buzz-app
+/// does when a tab is selected. False until both have been laid out.
+pub fn reveal_tab(strip: &ScrollHandle, tab: Option<Bounds<Pixels>>) -> bool {
+    let view = strip.bounds();
+    let Some(tab) = tab.filter(|_| view.size.width > px(0.)) else {
         return false;
-    }
+    };
     let offset = strip.offset();
-    let shown = -f32::from(offset.x);
-    let next = if left < shown {
-        left
-    } else if right > shown + width {
-        right - width
+    let shift = if tab.left() < view.left() {
+        view.left() - tab.left()
+    } else if tab.right() > view.right() {
+        view.right() - tab.right()
     } else {
         return true;
     };
-    strip.set_offset(point(px(-next.max(0.)), offset.y));
+    strip.set_offset(point((offset.x + shift).min(px(0.)), offset.y));
     true
 }
 
@@ -333,17 +328,21 @@ pub struct TabItem {
     pub icon: IconName,
     pub content: AnyElement,
     pub close: Close,
+    /// A thread tab the pointer can drag.
+    pub drag: Option<TabDrag>,
 }
 
 /// The channel's tabbed panel workspace (`PanelWorkspace`): navigation
 /// tabs with a close button each, then the selected tab's content. Tabs
 /// open from content; there is no blank tab to add. Escape closes the
-/// selected tab.
+/// selected tab. With `geometry`, its tabs and header record where they
+/// are, and its thread tabs can be dragged.
 pub fn tabs(
     items: Vec<TabItem>,
     selected: &str,
     strip_scroll: &ScrollHandle,
     on_select: SelectTab,
+    geometry: Option<&Geometry>,
     cx: &App,
 ) -> AnyElement {
     let c = cx.colors();
@@ -355,13 +354,21 @@ pub fn tabs(
         let select = on_select.clone();
         let id = item.id.clone();
         let close = item.close.clone();
-        strip = strip.tab(
-            Tab::new(SharedString::from(format!("tab-{}", item.id)), item.label)
-                .icon(item.icon)
-                .selected(is_selected)
-                .on_click(move |_, window, cx| select(id.clone(), window, cx))
-                .on_close(move |_, window, cx| close(window, cx)),
-        );
+        let mut tab = Tab::new(SharedString::from(format!("tab-{}", item.id)), item.label)
+            .icon(item.icon)
+            .selected(is_selected)
+            .on_click(move |_, window, cx| select(id.clone(), window, cx))
+            .on_close(move |_, window, cx| close(window, cx));
+        if let Some(geometry) = geometry {
+            tab = tab
+                .draggable(item.drag.is_some())
+                .extend(tab_drag::tab_handlers(
+                    geometry,
+                    item.id.to_string(),
+                    item.drag,
+                ));
+        }
+        strip = strip.tab(tab);
         if is_selected {
             content = Some(item.content);
             active_close = Some(item.close);
@@ -375,6 +382,12 @@ pub fn tabs(
         .child(
             div()
                 .id("panel-tab-header")
+                .relative()
+                .when_some(geometry, |header, geometry| {
+                    header.child(tab_drag::record(geometry, |geometry, bounds| {
+                        geometry.headers.insert(PaneKey::Side, bounds);
+                    }))
+                })
                 .flex()
                 .items_center()
                 .gap(rems(0.5))
