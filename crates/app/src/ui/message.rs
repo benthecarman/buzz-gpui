@@ -1,15 +1,18 @@
 //! One timeline row (ui.md §4.4–4.5, §4.7), after buzz-app's
 //! `MessageRow.tsx`, `MessageActionBar.tsx` and `MessageReactions.tsx`.
 
+use super::audience_address::{addressed_message, mention_parts};
 use super::emoji_picker::{self, EmojiPicker, QuickReaction};
 use super::identity::Names;
 use super::keys::npub;
+use super::link_preview::preview_text;
 use super::markdown::{self, Directory};
 use super::outbox_ops::{Ops, SharedOps};
 use super::{media, membership, navigation, renderers, time};
 use buzz_relay_client::fold::{CustomEmoji, Delivery, MessageRow, ReactionGroup};
 use buzz_relay_client::{
-    ChannelSummary, ChannelType, EventId, Manual, PresenceState, Profile, Profiles, ThreadUnread,
+    Audience, ChannelSummary, ChannelType, EventId, Manual, PresenceState, Profile, Profiles,
+    ThreadUnread,
 };
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
@@ -18,7 +21,7 @@ use buzz_ui::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,9 +43,9 @@ pub struct Item {
     pub group: Option<Arc<[Arc<MessageRow>]>>,
 }
 
-/// Groups rows as buzz-app's `continuesMessageGroup` does: same author, at
-/// most five minutes apart, same local day, and neither row a system,
-/// workflow or sent-from-thread message. Nearby membership rows merge
+/// Groups rows as buzz-app's `continuesMessageGroup` does: same author and
+/// audience, at most five minutes apart, same local day, and neither row a
+/// system, workflow or sent-from-thread message. Nearby membership rows merge
 /// first (`membershipRows`).
 pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
     let grouped = membership::group(rows);
@@ -68,6 +71,7 @@ pub fn items(rows: &[Arc<MessageRow>]) -> Vec<Item> {
 /// separately).
 pub fn continues(previous: &MessageRow, row: &MessageRow) -> bool {
     previous.author == row.author
+        && previous.audience == row.audience
         && row.created_at >= previous.created_at
         && row.created_at - previous.created_at <= 300
         && previous.membership.is_none()
@@ -371,7 +375,25 @@ fn presence_badge(state: Option<&PresenceState>) -> Option<Presence> {
     })
 }
 
+/// Coordination between agents reads as one quiet line in time order
+/// ([`quiet`]); every other row is a full message.
 pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
+    if item.row.audience == Some(Audience::Agents) && item.row.membership.is_none() {
+        return quiet(item, rows, cx);
+    }
+    full(layout, item, None, rows, cx)
+}
+
+/// A full message row. `quiet` is the message as an open quiet line shows
+/// it, which draws it as a continuation without its gutter, in the line's
+/// caption size and colour.
+fn full(
+    layout: Layout,
+    item: &Item,
+    quiet: Option<&Arc<MessageRow>>,
+    rows: &Rc<Rows>,
+    cx: &App,
+) -> AnyElement {
     let c = *cx.colors();
     let (gutter, gap, avatar_size) = match layout {
         Layout::Timeline => (40., 12., AvatarSize::Large),
@@ -510,15 +532,22 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         );
     }
     // The body, after a time chip for timecoded video replies.
-    if let Some(text) = media::text(row, rows, cx) {
-        body = body.child(
-            div()
-                .id(SharedString::from(format!("md-{id}")))
-                .when(item.head, |d| d.mt(px(4.)))
-                .text_message()
-                .text_color(c.text_standard)
-                .child(text),
-        );
+    let text = match quiet {
+        Some(shown) => markdown::subtle(|| media::text(shown, rows, cx)),
+        None => media::text(row, rows, cx),
+    };
+    if let Some(text) = text {
+        let frame = div()
+            .id(SharedString::from(format!("md-{id}")))
+            .when(item.head, |d| d.mt(px(4.)));
+        let frame = match quiet {
+            Some(_) => frame
+                .text_caption()
+                .text_color(c.text_subtle)
+                .on_click(fold_quiet((rows.in_thread, row.id))),
+            None => frame.text_message().text_color(c.text_standard),
+        };
+        body = body.child(frame.child(text));
     }
     if let Some(notice) = delivery_notice(row, rows, cx) {
         body = body.child(notice);
@@ -561,8 +590,13 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         .gap(px(gap))
         .pt(if item.head { px(14.) } else { px(2.) })
         .pb(px(2.))
+        // Open on a quiet line, its text folds the line (`fold_quiet`);
+        // its controls keep their clicks from the box around it.
+        .when(quiet.is_some(), |d| {
+            d.pr(px(4.)).on_click(|_, _, cx| cx.stop_propagation())
+        })
         .child(measure_width(width.clone()))
-        .child(left)
+        .when(quiet.is_none(), |d| d.child(left))
         .child(body);
     if let Some(on_hover) = rows.actions.on_hover.clone() {
         let target = row.id;
@@ -574,6 +608,211 @@ pub fn render_in(layout: Layout, item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyE
         line = line.child(action_bar(item, rows, width.get(), cx));
     }
     container.child(line).into_any_element()
+}
+
+thread_local! {
+    /// Quiet lines shown open, by panel and message.
+    static OPEN_QUIET: std::cell::RefCell<HashSet<(bool, EventId)>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+fn quiet_open(key: (bool, EventId)) -> bool {
+    OPEN_QUIET.with_borrow(|open| open.contains(&key))
+}
+
+fn set_quiet_open(key: (bool, EventId), open: bool, window: &mut Window) {
+    OPEN_QUIET.with_borrow_mut(|shown| {
+        if open {
+            if shown.len() > 1024 {
+                shown.clear();
+            }
+            shown.insert(key);
+        } else {
+            shown.remove(&key);
+        }
+    });
+    window.refresh();
+}
+
+/// Folds an open quiet line on a plain click, not on the drag or
+/// multi-click that ends a text selection. Links and controls take their
+/// clicks first.
+fn fold_quiet(key: (bool, EventId)) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        let selecting = match event {
+            ClickEvent::Mouse(click) => {
+                click.up.click_count > 1
+                    || (click.up.position - click.down.position).magnitude() > 2.
+            }
+            _ => false,
+        };
+        if selecting || !quiet_open(key) {
+            return;
+        }
+        cx.stop_propagation();
+        set_quiet_open(key, false, window);
+    }
+}
+
+/// Coordination between agents as one quiet line (`AgentsMessageRow`):
+/// who wrote it, who it is for, and its first paragraph, on a rail that
+/// joins adjacent lines. The mentions it opens with become the line's
+/// recipients, so its text does not repeat them. Opening the line shows
+/// the whole message beside the avatars; a click in the open box folds it.
+fn quiet(item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
+    let c = *cx.colors();
+    let row = &item.row;
+    let id = row.id.to_hex();
+    let key = (rows.in_thread, row.id);
+    let open = quiet_open(key);
+    let names = rows.names();
+    let profiles = &rows.directory.profiles;
+    let addressed = addressed_message(row, &mention_parts(row, profiles, names));
+    let preview = preview_text(&addressed.body.content);
+    let person = |pubkey: String| {
+        let profile = profiles.get(&pubkey);
+        let name: SharedString = names.display(&pubkey).into();
+        let agent = names.is_library_agent(&pubkey) || profile.is_some_and(|p| p.is_agent);
+        let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Px(QUIET_AVATAR));
+        if agent {
+            avatar = avatar.squircle().thinking(
+                SharedString::from(format!("quiet-thinking-{id}-{pubkey}")),
+                rows.working.contains(&pubkey),
+            );
+        }
+        if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
+            avatar = avatar.image(media::avatar(picture, &rows.directory.media));
+        }
+        let avatar = div()
+            .id(SharedString::from(format!("quiet-avatar-{id}-{pubkey}")))
+            .flex_none()
+            .size(px(QUIET_AVATAR))
+            .tooltip(Tooltip::text(name.clone()))
+            .child(avatar);
+        (name, avatar)
+    };
+    let (author, author_avatar) = person(row.author.to_hex());
+    let (to, to_avatars): (Vec<SharedString>, Vec<_>) = addressed
+        .recipients
+        .iter()
+        .map(|key| person(key.to_hex()))
+        .unzip();
+    let line = div()
+        .id(SharedString::from(format!("quiet-line-{id}")))
+        .track_focus(&bar_focus(rows, row.id, "quiet-line", cx))
+        .role(Role::Button)
+        .aria_label(quiet_label(&author, &to, &preview))
+        .aria_expanded(open)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .min_w_0()
+        .px(px(4.))
+        .py(px(2.))
+        .rounded(buzz_ui::tokens::radius::CONTROL)
+        .cursor_pointer()
+        .text_caption()
+        .text_color(c.text_subtle)
+        .map(|d| {
+            if open {
+                d.flex_none()
+            } else {
+                d.w_full().hover(|s| s.bg(c.affordance_subtle_hover))
+            }
+        })
+        .child(author_avatar)
+        .when(!to_avatars.is_empty(), |d| {
+            d.child(
+                Icon::new(IconName::ArrowRight)
+                    .size(12.)
+                    .color(c.text_subtle),
+            )
+            .children(to_avatars)
+        })
+        .when(!open, |d| {
+            d.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(preview),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("quiet-time-{id}")))
+                    .flex_none()
+                    .tooltip(time_tooltip(row.created_at))
+                    .child(time::byline(row.created_at)),
+            )
+        })
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            set_quiet_open(key, !open, window);
+        });
+    // Open, the message starts beside its addresses and the whole entry
+    // stays highlighted, so it reads as one box that folds back.
+    let entry = div()
+        .id(SharedString::from(format!("quiet-entry-{id}")))
+        .flex()
+        .items_start()
+        .rounded(buzz_ui::tokens::radius::CONTROL)
+        .child(line)
+        .when(open, |d| {
+            let body = Item {
+                row: row.clone(),
+                head: false,
+                day: None,
+                group: None,
+            };
+            // The text keeps the line's size and colour and starts level
+            // with its avatars, so opening only lets the preview run on.
+            d.cursor_pointer()
+                .bg(c.affordance_subtle)
+                .hover(|s| s.bg(c.affordance_subtle_hover))
+                .on_click(fold_quiet(key))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .pt(px((QUIET_AVATAR - 16.) / 2.))
+                        .text_color(c.text_subtle)
+                        .child(full(
+                            Layout::Timeline,
+                            &body,
+                            Some(&addressed.body),
+                            rows,
+                            cx,
+                        )),
+                )
+        });
+    let mut container = div().flex().flex_col().w_full();
+    if let Some(day) = &item.day {
+        container = container.child(day_divider(day.clone(), cx));
+    }
+    container
+        .child(
+            div()
+                .ml(px(16.))
+                .pl(px(8.))
+                .border_l_1()
+                .border_color(c.border_standard)
+                .child(entry),
+        )
+        .into_any_element()
+}
+
+/// Avatars on a quiet line: three quarters of a small control.
+const QUIET_AVATAR: f32 = 24.;
+
+/// The quiet line's accessible name: who wrote to whom, and the preview.
+fn quiet_label(author: &str, to: &[SharedString], preview: &str) -> String {
+    if to.is_empty() {
+        format!("{author}: {preview}")
+    } else {
+        format!("{author} to {}: {preview}", to.join(", "))
+    }
 }
 
 /// `buzz://message?channel&id=root&thread=root`.
@@ -2133,6 +2372,73 @@ mod tests {
     use super::*;
     use buzz_relay_client::fold::{LocalDelivery, Reaction};
     use core::prelude::v1::test;
+
+    /// The quiet line's label for `content` from Morgarita, which names
+    /// Rivet in a `p` tag.
+    fn quiet_line(content: &str) -> String {
+        let (morgarita, rivet) = (
+            buzz_identity::Identity::ephemeral().public_key(),
+            buzz_identity::Identity::ephemeral().public_key(),
+        );
+        let profiles: Profiles = Arc::new(
+            [(morgarita, "Morgarita"), (rivet, "Rivet")]
+                .into_iter()
+                .map(|(k, n)| {
+                    (
+                        k.to_hex(),
+                        Arc::new(Profile {
+                            name: n.into(),
+                            ..Default::default()
+                        }),
+                    )
+                })
+                .collect(),
+        );
+        let names = super::super::identity::names(
+            &profiles,
+            &super::super::identity::AgentLibrary::default(),
+            "",
+            None,
+            None,
+        );
+        let mut row = super::super::markdown::tests::row(content);
+        row.author = morgarita;
+        row.mentions = vec![rivet];
+        row.audience = Some(Audience::Agents);
+        let row = Arc::new(row);
+        let addressed = addressed_message(&row, &mention_parts(&row, &profiles, &names));
+        let to: Vec<SharedString> = addressed
+            .recipients
+            .iter()
+            .map(|key| names.display(&key.to_hex()).into())
+            .collect();
+        let author = names.display(&morgarita.to_hex());
+        quiet_label(&author, &to, &preview_text(&addressed.body.content))
+    }
+
+    #[test]
+    fn a_message_for_agents_is_one_line_from_its_author_to_whom_it_addresses() {
+        assert_eq!(
+            quiet_line("@Rivet, **run** the suite\n\nThen report back to @Rivet."),
+            "Morgarita to Rivet: **run** the suite…"
+        );
+        // One that opens with prose, or is only a mention, is as written.
+        assert_eq!(quiet_line("thanks @Rivet"), "Morgarita: thanks @Rivet");
+        assert_eq!(quiet_line("@Rivet"), "Morgarita: @Rivet");
+    }
+
+    #[test]
+    fn messages_for_agents_group_only_with_each_other() {
+        let mut first = super::super::markdown::tests::row("hi");
+        first.created_at = 100;
+        let mut second = first.clone();
+        second.created_at = 160;
+        assert!(continues(&first, &second));
+        second.audience = Some(Audience::Agents);
+        assert!(!continues(&first, &second));
+        first.audience = Some(Audience::Agents);
+        assert!(continues(&first, &second));
+    }
 
     #[test]
     fn delivery_waits_out_its_grace_period() {

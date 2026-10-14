@@ -6,6 +6,7 @@ pub mod agent_activity;
 pub(crate) mod agents;
 pub mod agents2;
 mod archives;
+mod audience_address;
 mod bestie;
 mod canvas;
 mod channel;

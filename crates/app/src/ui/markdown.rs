@@ -107,6 +107,29 @@ impl Directory {
     }
 }
 
+thread_local! {
+    /// Bodies rendered now take the subtle text colour.
+    static SUBTLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Renders the bodies `f` builds in the subtle text colour, as an open
+/// quiet line shows its message.
+pub(super) fn subtle<T>(f: impl FnOnce() -> T) -> T {
+    let was = SUBTLE.replace(true);
+    let out = f();
+    SUBTLE.set(was);
+    out
+}
+
+/// The colour of body text outside quotes.
+fn body_text(c: &buzz_ui::Colors) -> Hsla {
+    if SUBTLE.get() {
+        c.text_subtle
+    } else {
+        c.text_standard
+    }
+}
+
 /// Renders a row's body.
 pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElement {
     let document = prepared(row, directory);
@@ -123,8 +146,8 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
     };
     let content = match &document.body {
         Document::Plain(text) => div()
-            .text_message()
-            .text_color(c.text_standard)
+            .when(!SUBTLE.get(), |d| d.text_message())
+            .text_color(body_text(c))
             .child(SelectableText::new(
                 SharedString::from(format!("plain-{id}")),
                 SharedString::from(text.clone()),
@@ -1635,7 +1658,7 @@ fn render_block(block: &Block, path: &str, out: &mut Out) -> AnyElement {
     let text = if out.quote {
         c.text_subtle
     } else {
-        c.text_standard
+        body_text(&c)
     };
     match block {
         Block::Paragraph(source) => inline(source, path, text, true, out),
