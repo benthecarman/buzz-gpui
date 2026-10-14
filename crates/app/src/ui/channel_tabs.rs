@@ -251,6 +251,14 @@ impl TabState {
         self.pane_open && self.has_panel()
     }
 
+    /// `id` is the tab shown in its pane, and that pane is on screen.
+    pub fn is_shown(&self, id: &str) -> bool {
+        match self.tab(id).map(ConversationTab::pane) {
+            Some(TabPane::Main) => self.selected_main().as_deref() == Some(id),
+            _ => self.showing() && self.selected_tab().as_deref() == Some(id),
+        }
+    }
+
     pub fn select(&mut self, id: &str) {
         self.selected = id.to_string();
         if !id.is_empty() {

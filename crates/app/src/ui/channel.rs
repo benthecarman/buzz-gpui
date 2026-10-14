@@ -118,6 +118,8 @@ pub struct ChannelPage {
     /// The main pane's threads after this conversation, set by the
     /// workspace each frame.
     pub main_tabs: Option<MainTabs>,
+    /// The row painted as where a closed thread returned to.
+    returned: Option<(EventId, u64)>,
     /// A conversation on the Me page: "Message your agents", and only the
     /// viewer's own agents can be mentioned in.
     personal: bool,
@@ -322,6 +324,7 @@ impl ChannelPage {
             launchers: Vec::new(),
             menu_panels: Vec::new(),
             main_tabs: None,
+            returned: None,
             personal: false,
             selected_agent: None,
             jump: Jump::default(),
@@ -374,6 +377,30 @@ impl ChannelPage {
     pub fn set_presented(this: &Entity<Self>, presented: bool, cx: &mut App) {
         let actions = this.read(cx).message_actions.clone();
         actions.update(cx, |actions, cx| actions.set_presented(presented, cx));
+    }
+
+    /// A thread of this channel closed while shown: its root, when its
+    /// row is on screen, is painted once so the reader sees where they
+    /// returned (`useReturnHighlight`). It is a cue only, never a scroll.
+    pub fn highlight_return(&mut self, root: EventId, cx: &mut Context<Self>) {
+        if !self.watched.1.contains(&root) {
+            return;
+        }
+        let painting = self.returned.map_or(1, |(_, painting)| painting + 1);
+        self.returned = Some((root, painting));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(message::RETURN_HIGHLIGHT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.returned.is_some_and(|(_, shown)| shown == painting) {
+                    this.returned = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// The Markdown of a loaded message of this timeline.
@@ -1156,6 +1183,7 @@ impl Render for ChannelPage {
         rows.marks = Marks {
             threads: unread.threads.clone(),
             working,
+            returned: self.returned,
         };
         let rows = Rc::new(rows);
         let items = self.items.clone();

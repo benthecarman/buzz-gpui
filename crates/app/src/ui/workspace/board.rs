@@ -360,6 +360,12 @@ impl Workspace {
         let id = id.to_string();
         let state = self.tabs(cx);
         let closing = state.tab(&id).and_then(|tab| tab.thread().cloned());
+        let shown = state.is_shown(&id);
+        let loaded_root = self
+            .tab_views
+            .get(&id)
+            .and_then(TabView::thread)
+            .and_then(|panel| panel.read(cx).loaded_root());
         let remaining = self
             .update_tabs(cx, |state| {
                 if id == channel_tabs::SETTINGS {
@@ -387,8 +393,16 @@ impl Workspace {
         if addressed {
             self.visit_channel(cx);
         }
-        // Focus goes back to the conversation that opened it.
+        // Focus goes back to the conversation that opened it, and a
+        // thread closed in view shows where its root is.
         self.focus_composer(window, cx);
+        let root = loaded_root.or(thread.root);
+        if shown
+            && self.channel_id(cx).as_deref() == Some(thread.channel.as_str())
+            && let (Some(page), Some(root)) = (self.channel.clone(), root)
+        {
+            page.update(cx, |page, cx| page.highlight_return(root, cx));
+        }
     }
 
     /// The open channel again, as a new visit.

@@ -17,6 +17,7 @@ use buzz_relay_client::{
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
     MaterialStyled, Menu, MenuItem, Presence, Surface, TextRole, Tooltip, TypeStyled,
+    tokens::{easing, radius},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -254,6 +255,9 @@ pub struct Marks {
     pub threads: HashMap<EventId, ThreadUnread>,
     /// The viewer's own agents working in each thread, by root.
     pub working: HashMap<EventId, Vec<String>>,
+    /// A row whose thread just closed, painted once to show where the
+    /// reader returned, with the painting's number.
+    pub returned: Option<(EventId, u64)>,
 }
 
 impl Rows {
@@ -373,6 +377,39 @@ fn presence_badge(state: Option<&PresenceState>) -> Option<Presence> {
         PresenceState::Away => Presence::Away,
         PresenceState::Offline => Presence::Offline,
     })
+}
+
+/// How long the return highlight shows (`--duration-settle` × 5).
+pub const RETURN_HIGHLIGHT: Duration = Duration::from_millis(1100);
+
+/// The accent wash behind a row its closed thread came from: it holds for
+/// a third of the time, then fades. It reaches into the feed's inset
+/// without moving the row (`returnHighlight`). Reduced motion holds it,
+/// then drops it.
+fn return_highlight(painting: u64, cx: &App) -> AnyElement {
+    let reduce = cx.reduce_motion();
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(-8.))
+        .right(px(-8.))
+        .rounded(radius::ROW)
+        .bg(cx.colors().affordance_accent)
+        .with_animation(
+            ElementId::Name(format!("return-highlight-{painting}").into()),
+            Animation::new(RETURN_HIGHLIGHT),
+            move |wash, t| {
+                let fade = ((t - 0.35) / 0.65).clamp(0., 1.);
+                let opacity = match reduce {
+                    true if t < 1. => 1.,
+                    true => 0.,
+                    false => 1. - easing::cubic_bezier((0., 0., 0.58, 1.), fade),
+                };
+                wash.opacity(opacity)
+            },
+        )
+        .into_any_element()
 }
 
 /// Coordination between agents reads as one quiet line in time order
@@ -578,11 +615,17 @@ fn full(
         .absolute()
         .size_0()
         .track_focus(&row_focus(rows, row.id, cx));
+    let returned = rows
+        .marks
+        .returned
+        .filter(|(returned, _)| *returned == row.id)
+        .map(|(_, painting)| return_highlight(painting, cx));
     let mut line = div()
         .id(SharedString::from(format!("message-{id}")))
         .when(rows.interaction.focused == Some(row.id), |d| {
             d.bg(c.affordance_subtle)
         })
+        .children(returned)
         .child(stop)
         .relative()
         .flex()
