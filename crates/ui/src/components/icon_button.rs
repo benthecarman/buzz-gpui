@@ -14,11 +14,11 @@ use std::{rc::Rc, time::Duration};
 pub enum IconButtonSize {
     /// 20×20 box, 12px glyph.
     Xs,
-    /// 32×32 box, 16px glyph (aliases `compact`, `toolbar`; every header
-    /// button).
+    /// 32×32 box, 16px glyph (aliases `compact`, `toolbar`). The default:
+    /// icon actions are compact unless they ask for more.
+    #[default]
     Sm,
     /// 40×40 box, 24px glyph.
-    #[default]
     Md,
     /// 52×52 box, 24px glyph.
     Lg,

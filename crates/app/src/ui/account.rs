@@ -361,6 +361,7 @@ impl Account {
                 match self.on_profile.clone() {
                     Some(on_profile) => this.child(
                         IconButton::new("view-profile", IconName::User)
+                            .size(IconButtonSize::Md)
                             .variant(ButtonVariant::Avatar)
                             .shape(IconButtonShape::Round)
                             .tooltip("View your profile")

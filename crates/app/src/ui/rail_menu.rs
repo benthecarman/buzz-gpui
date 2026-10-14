@@ -16,8 +16,8 @@ use super::{moderation, notice};
 use crate::community::{AppState, Community};
 use buzz_relay_client::{SessionSnapshot, SessionStatus};
 use buzz_ui::{
-    ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, IconButton, IconName, Menu, MenuItem,
-    MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
+    ActiveTheme, AlertDialog, Avatar, AvatarSize, Button, IconButton, IconButtonSize, IconName,
+    Menu, MenuItem, MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
 };
 use gpui_kit::*;
 use std::sync::Arc;
@@ -48,6 +48,7 @@ pub fn rail(
         .py(rems(0.5))
         .child(
             IconButton::new("personal-space", IconName::Globe)
+                .size(IconButtonSize::Md)
                 .tooltip("Personal space")
                 .selected(selected.is_none())
                 .on_click(cx.listener(|this, _, window, cx| this.select_personal(window, cx))),
@@ -113,6 +114,7 @@ pub fn rail(
                     SharedString::from(format!("community-{index}")),
                     IconName::Globe,
                 )
+                .size(IconButtonSize::Md)
                 .tooltip(name)
                 .selected(selected == Some(index))
                 .child(avatar)
@@ -134,6 +136,7 @@ pub fn rail(
     }
     rail.children(render(&menu, cx)).child(
         IconButton::new("add-community", IconName::Plus)
+            .size(IconButtonSize::Md)
             .tooltip("Add a community")
             .on_click(cx.listener(|this, _, window, cx| this.open_add_community(window, cx))),
     )
