@@ -294,6 +294,35 @@ mod tests {
     }
 
     #[test]
+    fn the_agents2_switch_becomes_the_agents_switch() {
+        // A registry from before the rename: v1 Agents on, Agents2 off.
+        let home = tempfile_dir();
+        let profile = home.join("profiles/default");
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry = serde_json::json!({
+            "version": 1,
+            "bundledEnabled": true,
+            "bundledOverrides": { "buzz.agents": true, "buzz.agents2": false },
+            "installed": {},
+        });
+        std::fs::write(profile.join("registry.json"), registry.to_string()).unwrap();
+        let manager = Manager::open(Some(home.clone()), "default", false).unwrap();
+        let catalog = rows(manager.catalog().unwrap());
+        let agents = catalog.iter().find(|row| row.id == "buzz.agents").unwrap();
+        assert_eq!((agents.name.as_str(), agents.enabled), ("Agents", false));
+        assert!(!catalog.iter().any(|row| row.id == "buzz.agents2"));
+        // Once moved, a later change sticks.
+        manager.change("enable", "buzz.agents").unwrap();
+        let catalog = rows(manager.catalog().unwrap());
+        assert!(
+            catalog
+                .iter()
+                .any(|row| row.id == "buzz.agents" && row.enabled)
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn agent_types_are_bundled_and_on_and_keep_an_installed_copys_switch() {
         let home = tempfile_dir();
         let manager = Manager::open(Some(home.clone()), "default", false).unwrap();

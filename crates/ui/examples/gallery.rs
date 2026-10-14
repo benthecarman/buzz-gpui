@@ -857,7 +857,7 @@ fn shell(cx: &App) -> impl IntoElement {
                 .child(page_row("Reminders", IconName::Alarm))
                 .child(page_row("Projects", IconName::FolderSimple))
                 .child(page_row("Agents", IconName::Robot))
-                .child(page_row("Agents2", IconName::Browser))
+                .child(page_row("Agents", IconName::Robot))
                 .child(page_row("Workflows", IconName::Lightning)),
         )
         .child(section("Channels"))

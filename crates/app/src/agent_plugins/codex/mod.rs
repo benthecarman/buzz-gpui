@@ -175,6 +175,26 @@ impl AgentType for CodexType {
         }
     }
 
+    fn adopts(&self) -> bool {
+        true
+    }
+
+    /// A workspace Codex cannot use, such as `~/code`, stays behind.
+    fn adopt(&self, carry: &buzz_host::api::Carry, saved: serde_json::Value) -> serde_json::Value {
+        let mut config = Config::read(&saved);
+        if let Some(instructions) = &carry.instructions {
+            config.instructions = instructions.clone();
+        }
+        if let Some(workspace) = carry
+            .workspace
+            .as_ref()
+            .filter(|workspace| config::valid_workspace(workspace))
+        {
+            config.workspace = workspace.clone();
+        }
+        config.value()
+    }
+
     fn summary(&self, agent: &Agent) -> Option<String> {
         let model = Config::read(&agent.config).model;
         Some(if model.is_empty() {
@@ -260,5 +280,30 @@ impl AgentType for CodexType {
 
     fn timeout(&self) -> Duration {
         HANDOVER
+    }
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+    use crate::agents2::AgentType;
+    use buzz_host::api::Carry;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn only_a_workspace_codex_can_use_comes_along() {
+        let saved = Config::default().value();
+        let carry = |workspace: &str| Carry {
+            instructions: Some("Look around.".into()),
+            workspace: Some(workspace.into()),
+        };
+        let adopted = Config::read(&CodexType.adopt(&carry("/srv/code"), saved.clone()));
+        assert_eq!(
+            (adopted.instructions.as_str(), adopted.workspace.as_str()),
+            ("Look around.", "/srv/code")
+        );
+        let relative = Config::read(&CodexType.adopt(&carry("~/code"), saved));
+        assert_eq!(relative.workspace, config::DEFAULT_WORKSPACE);
+        assert_eq!(relative.instructions, "Look around.");
     }
 }

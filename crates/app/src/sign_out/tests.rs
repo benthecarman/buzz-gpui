@@ -30,7 +30,7 @@ fn paths_for(root: &Path) -> Paths {
 }
 
 const CONTROLLER: &str = "buzz-gpui/host/agent-controller";
-const AGENTS2: &str = "buzz-gpui/host/agents2";
+const AGENTS: &str = "buzz-gpui/host/agents";
 
 fn fixture() -> (Scratch, Paths) {
     let dir = Scratch::new();
@@ -38,7 +38,7 @@ fn fixture() -> (Scratch, Paths) {
     let controller = dir.path().join(CONTROLLER);
     fs::create_dir_all(&controller).unwrap();
     fs::write(controller.join("agents.json"), "agents").unwrap();
-    let agents = dir.path().join(AGENTS2);
+    let agents = dir.path().join(AGENTS);
     fs::create_dir_all(&agents).unwrap();
     fs::write(agents.join("identities.json"), "[]").unwrap();
     fs::write(agents.join("hosts.lock"), "").unwrap();
@@ -120,8 +120,8 @@ const KEPT_AGENTS: [&str; 9] = [
     "buzz-gpui/host/",
     "buzz-gpui/host/agent-controller/",
     "buzz-gpui/host/agent-controller/agents.json",
-    "buzz-gpui/host/agents2/",
-    "buzz-gpui/host/agents2/identities.json",
+    "buzz-gpui/host/agents/",
+    "buzz-gpui/host/agents/identities.json",
     "cache/",
 ];
 
@@ -206,7 +206,7 @@ fn wipe_keeps_agents_unless_they_are_removed_too() {
                 &paths,
                 |host| {
                     assert!(host.join("agent-controller/agents.json").exists());
-                    assert!(host.join("agents2/identities.json").exists());
+                    assert!(host.join("agents/identities.json").exists());
                     removed.set(true);
                     Ok(())
                 },
@@ -743,4 +743,35 @@ mod links {
         assert!(!paths.marker.exists());
         assert_eq!(listing(dir.path()), ["cache/"]);
     }
+}
+
+#[test]
+fn launch_moves_the_agents2_folder_unless_another_copy_runs() {
+    let (_dir, paths) = fixture();
+    let host = paths.app_data.join("host");
+    fs::rename(host.join("agents"), host.join("agents2")).unwrap();
+    // A running copy may still write the old folder: nothing moves.
+    let other = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&paths.lock)
+        .unwrap();
+    other.lock_shared().unwrap();
+    assert_eq!(
+        boot_with(&paths, no_agents, || panic!("no marker")).err(),
+        Some(
+            "Close other Buzz copies, then reopen Buzz to migrate agent storage. Nothing was \
+             moved."
+                .into()
+        )
+    );
+    assert!(host.join("agents2/identities.json").exists());
+    release(other);
+    let instance = boot_with(&paths, no_agents, || panic!("no marker")).unwrap();
+    assert!(host.join("agents/identities.json").exists());
+    assert!(!host.join("agents2").exists());
+    // The instance keeps only its shared lock, so another copy still starts.
+    assert!(boot_with(&paths, no_agents, || panic!("no marker")).is_ok());
+    drop(instance);
 }

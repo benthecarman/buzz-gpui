@@ -781,10 +781,14 @@ impl CodexRuntime {
         }
     }
 
-    /// Replies to the request in its thread, as the agent.
+    /// Replies to the request in its thread, as the agent. Tags the owner
+    /// even when a sibling asked.
     async fn publish(&self, request: &Request, content: &str) -> Result<(), String> {
-        let tags =
-            crate::agent_plugins::reply_tags(&request.conversation.channel_id, &request.event);
+        let tags = crate::agent_plugins::reply_tags(
+            &request.conversation.channel_id,
+            &request.event,
+            &request.agent.owner(),
+        );
         request
             .agent
             .publish(Template {

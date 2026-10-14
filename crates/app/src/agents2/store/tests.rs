@@ -208,3 +208,26 @@ fn reads_nothing_from_missing_or_malformed_storage() {
     storage.write(r#"{"version": 2, "agents": {}}"#).unwrap();
     assert!(read_records(&storage).is_empty());
 }
+
+#[test]
+fn the_agents2_records_move_to_the_agents_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("buzz.agents2.v1.json");
+    let new = dir.path().join("buzz.agents.v1.json");
+    // Nothing to move.
+    migrate_storage(dir.path());
+    assert!(!new.exists());
+    std::fs::write(&old, "{\"version\":1}").unwrap();
+    migrate_storage(dir.path());
+    assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"version\":1}");
+    assert!(!old.exists());
+    // The same data again: the old file goes.
+    std::fs::write(&old, "{\"version\":1}").unwrap();
+    migrate_storage(dir.path());
+    assert!(!old.exists());
+    // Different data: neither is touched.
+    std::fs::write(&old, "{\"other\":true}").unwrap();
+    migrate_storage(dir.path());
+    assert_eq!(std::fs::read_to_string(&old).unwrap(), "{\"other\":true}");
+    assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"version\":1}");
+}

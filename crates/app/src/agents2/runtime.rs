@@ -122,7 +122,7 @@ pub(crate) struct HostLink {
 }
 
 /// What hosts from before Agents2 answer.
-pub const UNSUPPORTED: &str = "This host does not support Agents2 agents yet; update it.";
+pub const UNSUPPORTED: &str = "This host does not support Agents yet; update it.";
 
 impl HostLink {
     pub(crate) async fn app_agent(

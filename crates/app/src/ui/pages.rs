@@ -18,7 +18,7 @@ pub struct Page(&'static str);
 impl Page {
     pub const ME: Page = Page("buzz.me/me");
     pub const MESSAGES: Page = Page("buzz.channels/channels");
-    pub const AGENTS: Page = Page("buzz.agents2/agents2");
+    pub const AGENTS: Page = Page("buzz.agents/agents");
     /// Settings is shell-owned: never a primary page, but a place.
     pub const SETTINGS: Page = Page("settings");
 

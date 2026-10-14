@@ -427,9 +427,6 @@ mod tests {
         };
         assert_eq!(visit_key(&channel), "channel:c1");
         assert_eq!(visit_key(&Place::Page(Page::SETTINGS)), "settings");
-        assert_eq!(
-            visit_key(&Place::Page(Page::AGENTS)),
-            "buzz.agents2/agents2"
-        );
+        assert_eq!(visit_key(&Place::Page(Page::AGENTS)), "buzz.agents/agents");
     }
 }

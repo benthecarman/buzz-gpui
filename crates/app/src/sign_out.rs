@@ -57,9 +57,11 @@ struct Keep {
     inside: Option<&'static [Keep]>,
 }
 
-/// The host's folders of the Agents list and of the earlier agent system,
-/// whose agents Agents can still bring over.
-const AGENTS: &str = "agents2";
+/// The host's folders of the Agents list, of that list before Agents2
+/// took the Agents name, and of the earlier agent system, whose agents
+/// Agents can still bring over.
+const AGENTS: &str = buzz_host::AGENTS;
+const LEGACY_AGENTS: &str = buzz_host::LEGACY_AGENTS;
 const OLD_AGENTS: &str = "agent-controller";
 
 /// What kept agents need to be identified and start again (buzz-app's
@@ -73,6 +75,13 @@ const KEEP: &[Keep] = &[
         inside: Some(&[
             Keep {
                 name: AGENTS,
+                inside: Some(&[Keep {
+                    name: "identities.json",
+                    inside: None,
+                }]),
+            },
+            Keep {
+                name: LEGACY_AGENTS,
                 inside: Some(&[Keep {
                     name: "identities.json",
                     inside: None,
@@ -195,7 +204,7 @@ impl Paths {
     fn unlinked(&self, choices: Choices) -> std::io::Result<()> {
         if choices.remove_agents {
             real_dir(&self.host())?;
-            for registry in [AGENTS, OLD_AGENTS] {
+            for registry in [AGENTS, LEGACY_AGENTS, OLD_AGENTS] {
                 real_dir(&self.host().join(registry))?;
             }
         }
@@ -453,6 +462,7 @@ fn boot_with(
         }
         locks.key.unlock().map_err(failed)?;
     }
+    migrate_agents(paths, &locks)?;
     Ok(Instance {
         locks: Mutex::new(locks),
         marker: paths.marker.clone(),
@@ -460,6 +470,33 @@ fn boot_with(
         seen: finished(&paths.finished).map_err(failed)?,
         started: AtomicBool::new(false),
     })
+}
+
+/// Moves the embedded host's Agents folder from its Agents2 name
+/// (buzz-app's `migrate_agents`). Another running copy may still write the
+/// old folder, so the move waits for Buzz's shared instance lock alone;
+/// the key lock stays shared so a sign-out cannot start meanwhile.
+fn migrate_agents(paths: &Paths, locks: &Locks) -> Result<(), String> {
+    let old = paths.host().join(LEGACY_AGENTS);
+    let failed = |error: std::io::Error| format!("Could not migrate agent storage: {error}");
+    if !real_dir(&old).map_err(failed)? {
+        return Ok(());
+    }
+    locks.all.unlock().map_err(failed)?;
+    if !wait_for(|| locks.all.try_lock()) {
+        return Err(
+            "Close other Buzz copies, then reopen Buzz to migrate agent storage. \
+                    Nothing was moved."
+                .into(),
+        );
+    }
+    // Another upgrading copy may have moved it while this one waited.
+    buzz_host::migrate_agents(&paths.host())?;
+    locks.all.unlock().map_err(failed)?;
+    if !wait_for(|| locks.all.try_lock_shared()) {
+        return Err(SIGNING_OUT.into());
+    }
+    Ok(())
 }
 
 /// An erase deletes storage agents use, so it waits until no supervisor
@@ -810,8 +847,11 @@ fn remove_agent_keys(app_data: &Path, host: &Path) -> Result<(), String> {
     {
         buzz_agent_controller::delete_local_agent_keys(old, &*credentials)?;
     }
-    buzz_agent_controller::AppAgents::open(host.join(AGENTS).join("identities.json"))
-        .delete_keys(&*credentials)
+    for folder in [AGENTS, LEGACY_AGENTS] {
+        buzz_agent_controller::AppAgents::open(host.join(folder).join("identities.json"))
+            .delete_keys(&*credentials)?;
+    }
+    Ok(())
 }
 
 /// Records the choices, closes signing, stops agent processes and

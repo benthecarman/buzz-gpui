@@ -182,6 +182,21 @@ impl AgentType for ClaudeCodeType {
         }
     }
 
+    fn adopts(&self) -> bool {
+        true
+    }
+
+    fn adopt(&self, carry: &buzz_host::api::Carry, saved: serde_json::Value) -> serde_json::Value {
+        let mut config = Config::read(&saved);
+        if let Some(instructions) = &carry.instructions {
+            config.instructions = instructions.clone();
+        }
+        if let Some(workspace) = &carry.workspace {
+            config.workspace = workspace.clone();
+        }
+        config.value()
+    }
+
     fn summary(&self, agent: &Agent) -> Option<String> {
         let model = Config::read(&agent.config).model;
         Some(if model.is_empty() {
@@ -269,5 +284,29 @@ impl AgentType for ClaudeCodeType {
 
     fn timeout(&self) -> Duration {
         HANDOVER
+    }
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+    use crate::agents2::AgentType;
+    use buzz_host::api::Carry;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn a_brought_over_agent_keeps_its_instructions_and_workspace() {
+        let saved = Config::default().value();
+        let carry = Carry {
+            instructions: Some("Look around.".into()),
+            workspace: Some("~/code".into()),
+        };
+        let adopted = Config::read(&ClaudeCodeType.adopt(&carry, saved.clone()));
+        assert_eq!(
+            (adopted.instructions.as_str(), adopted.workspace.as_str()),
+            ("Look around.", "~/code")
+        );
+        let kept = Config::read(&ClaudeCodeType.adopt(&Carry::default(), saved));
+        assert_eq!(kept, Config::default(), "nothing carried, nothing changed");
     }
 }

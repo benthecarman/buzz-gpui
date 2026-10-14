@@ -518,8 +518,10 @@ struct Agents2Global(Entity<Agents2>);
 impl Global for Agents2Global {}
 
 pub(super) fn init(cx: &mut App) {
+    let dir = crate::community::data_dir();
+    store::migrate_storage(&dir);
     let storage: Arc<dyn Storage> = Arc::new(FileStorage(
-        crate::community::data_dir().join(format!("{}.json", store::STORAGE_KEY)),
+        dir.join(format!("{}.json", store::STORAGE_KEY)),
     ));
     let service = cx.new(|cx| Agents2::new(storage, cx));
     cx.set_global(Agents2Global(service));
@@ -1648,8 +1650,8 @@ impl Agents2 {
     }
 
     /// Takes one over as an agent of `type_key` in the selected community,
-    /// keeping its key, name and picture. Its instructions and settings
-    /// stay behind.
+    /// keeping its key, name and picture, and the instructions and
+    /// workspace the type adopts. Its other settings stay behind.
     pub fn port(
         &mut self,
         portable: &Portable,
@@ -1673,8 +1675,8 @@ impl Agents2 {
     }
 
     /// Saves a new identity of `type_key` in the selected community with the
-    /// type's default settings: `prepare` asks its host for the key, which
-    /// the owner attests.
+    /// type's default settings, adopting what a brought-over one carried:
+    /// `prepare` asks its host for the key, which the owner attests.
     fn add(
         &mut self,
         type_key: &str,
@@ -1712,8 +1714,15 @@ impl Agents2 {
             type_key.to_owned(),
         );
         cx.spawn(async move |this, cx| {
-            let AppAgentResponse::Prepared { pubkey } = link.app_agent(request).await? else {
-                return Err("The host answered with something else".into());
+            // A brought-over agent's type adopts what it kept.
+            let (pubkey, settings) = match link.app_agent(request).await? {
+                AppAgentResponse::Prepared { pubkey } => (pubkey, settings),
+                AppAgentResponse::PortPrepared { pubkey, carry } if kind.kind.adopts() => {
+                    let config = kind.kind.adopt(&carry, settings.config.clone());
+                    (pubkey, AgentRecord { config, ..settings })
+                }
+                AppAgentResponse::PortPrepared { pubkey, .. } => (pubkey, settings),
+                _ => return Err("The host answered with something else".into()),
             };
             let auth = identity
                 .attest_agent(&pubkey)
@@ -1743,7 +1752,7 @@ impl Agents2 {
                 let record = this.record_of(&summary, cx);
                 Self::view(&summary, &record)
             })
-            .map_err(|_| "Agents2 stopped".to_string())
+            .map_err(|_| "Agents stopped".to_string())
         })
     }
 
@@ -1856,7 +1865,7 @@ impl Agents2 {
         cx: &mut App,
     ) -> Task<Result<(), String>> {
         let Some(service) = Self::global(cx) else {
-            return Task::ready(Err("Agents2 is not running".into()));
+            return Task::ready(Err("Agents is not running".into()));
         };
         service.update(cx, |this, cx| {
             this.save(

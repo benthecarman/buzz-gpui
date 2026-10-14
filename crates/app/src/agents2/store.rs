@@ -4,7 +4,7 @@
 //! run state. Which agents exist, their type and name, and their keys live
 //! on a host, never here; a record without an identity does nothing.
 //!
-//! buzz-app keeps this in `localStorage["buzz.agents2.v1"]`; here it is a
+//! buzz-app keeps this in `localStorage["buzz.agents.v1"]`; here it is a
 //! JSON file of the same shape in the data directory.
 
 use super::attention::{
@@ -17,7 +17,36 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub const STORAGE_KEY: &str = "buzz.agents2.v1";
+pub const STORAGE_KEY: &str = "buzz.agents.v1";
+/// Where the records were kept while Agents was called Agents2.
+const LEGACY_STORAGE_KEY: &str = "buzz.agents2.v1";
+
+/// Moves the records from their Agents2 file (buzz-app's
+/// `migrateAgentStorage`). A new file that already holds something else
+/// is left alone, and so is the old one; nothing is merged.
+pub fn migrate_storage(dir: &std::path::Path) {
+    let old = dir.join(format!("{LEGACY_STORAGE_KEY}.json"));
+    let new = dir.join(format!("{STORAGE_KEY}.json"));
+    let Ok(value) = std::fs::read(&old) else {
+        return;
+    };
+    match std::fs::read(&new) {
+        Ok(current) if current != value => {
+            return tracing::error!(
+                "Cannot migrate {LEGACY_STORAGE_KEY}: {STORAGE_KEY} already contains different data"
+            );
+        }
+        Ok(_) => {}
+        Err(_) => {
+            if crate::atomic_file::write(&new, &value).is_err() {
+                return tracing::error!("Cannot migrate {LEGACY_STORAGE_KEY}");
+            }
+        }
+    }
+    if std::fs::remove_file(&old).is_err() {
+        tracing::error!("Cannot migrate {LEGACY_STORAGE_KEY}");
+    }
+}
 
 /// An object a reader cannot apply, kept as it was stored so it can be
 /// fixed.

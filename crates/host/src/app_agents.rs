@@ -11,8 +11,8 @@ mod hosting;
 mod pictures;
 
 use crate::api::{
-    AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, HostProtocol, PortSource,
-    PortableAgent, PortableAgents,
+    AppAgentEvent, AppAgentRequest, AppAgentResponse, AppAgentSummary, Carry, HostProtocol,
+    PortSource, PortableAgent, PortableAgents,
 };
 use crate::blocking;
 use base64::Engine;
@@ -57,6 +57,8 @@ struct Creating {
     agent_type: String,
     name: String,
     prepared: NewAppAgent,
+    /// What a brought-over agent kept, for its new type.
+    carry: Carry,
 }
 
 struct Staged {
@@ -138,7 +140,7 @@ fn portable(agent: buzz_agent_controller::Portable) -> PortableAgent {
 }
 
 impl AppAgentHost {
-    /// `path` is the identity file, e.g. `<state>/agents2/identities.json`.
+    /// `path` is the identity file, e.g. `<state>/agents/identities.json`.
     /// Pictures saved beside it before identities held them move in.
     pub(crate) fn new(path: PathBuf, old: OldStores, credentials: Arc<dyn Credentials>) -> Self {
         let hosts = path.with_file_name("hosts");
@@ -279,7 +281,7 @@ impl AppAgentHost {
             } => self
                 .port(request_id, source, pubkey, destination, owner, agent_type)
                 .await
-                .map(|pubkey| A::Prepared { pubkey }),
+                .map(|(pubkey, carry)| A::PortPrepared { pubkey, carry }),
             R::Claim { .. } | R::Release { .. } => {
                 Err("Agents2 claims need a GUI connection".into())
             }
@@ -375,6 +377,7 @@ impl AppAgentHost {
             agent_type,
             name,
             prepared,
+            carry: Carry::default(),
         });
         Ok(pubkey)
     }
@@ -390,7 +393,7 @@ impl AppAgentHost {
         destination: String,
         owner: String,
         agent_type: String,
-    ) -> Result<String> {
+    ) -> Result<(String, Carry)> {
         if let Some(pending) = locked(&self.creating)
             .iter()
             .find(|c| c.request_id == request_id)
@@ -404,7 +407,7 @@ impl AppAgentHost {
             {
                 return Err("Create destination or owner changed".into());
             }
-            return Ok(pubkey);
+            return Ok((pubkey, pending.carry.clone()));
         }
         let (old, credentials) = (self.old.clone(), self.credentials.clone());
         let taken = pubkey.clone();
@@ -423,6 +426,10 @@ impl AppAgentHost {
         })
         .await?;
         let name = found.name.clone();
+        let carry = Carry {
+            instructions: found.carry.instructions.clone(),
+            workspace: found.carry.workspace.clone(),
+        };
         let prepared = AppAgents::adopt(
             &destination,
             &owner,
@@ -443,8 +450,9 @@ impl AppAgentHost {
             agent_type,
             name,
             prepared,
+            carry: carry.clone(),
         });
-        Ok(pubkey)
+        Ok((pubkey, carry))
     }
 
     /// Saves the prepared identity with the owner's attestation. Nothing is

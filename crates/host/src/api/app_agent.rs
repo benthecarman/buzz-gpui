@@ -111,9 +111,10 @@ pub enum AppAgentRequest {
     Portable,
     /// Takes over one of them as an agent of `agent_type` in `destination`,
     /// keeping its key, name, picture and description (`app_agent_port`).
-    /// As with [`Self::CreatePrepare`], the GUI then signs the owner
-    /// attestation for the returned pubkey and sends it in
-    /// [`Self::CreateCommit`]. The old store keeps the identity.
+    /// Answers [`AppAgentResponse::PortPrepared`]; as with
+    /// [`Self::CreatePrepare`], the GUI then signs the owner attestation for
+    /// its pubkey and sends it in [`Self::CreateCommit`]. The old store
+    /// keeps the identity.
     PortPrepare {
         request_id: String,
         source: PortSource,
@@ -142,6 +143,13 @@ pub enum AppAgentResponse {
     /// Whether the asking GUI runs the agent: see [`AppAgentRequest::Claim`].
     Claimed(bool),
     Portable(PortableAgents),
+    /// The key [`AppAgentRequest::PortPrepare`] took over, and what the
+    /// agent kept there that its new type may adopt.
+    PortPrepared {
+        pubkey: String,
+        #[serde(default)]
+        carry: Carry,
+    },
 }
 
 /// An Agents2 agent's identity; never its key.
@@ -185,6 +193,15 @@ pub struct PortableAgent {
     /// The community it was saved for there, if valid.
     #[serde(default)]
     pub relay: String,
+}
+
+/// What an agent kept in an earlier system that a new type may give it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Carry {
+    pub instructions: Option<String>,
+    /// Its working directory, absolute or `~/…`.
+    pub workspace: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

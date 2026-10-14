@@ -444,14 +444,15 @@ impl ClaudeRuntime {
         });
     }
 
-    /// Says in the thread that a turn failed, so nobody waits on it.
+    /// Says in the thread that a turn failed, so nobody waits on it. Tells
+    /// the owner even when a sibling asked.
     async fn report(
         agent: &dyn AgentActions,
         channel: &str,
         event: &BuzzEvent,
         error: &str,
     ) -> Result<(), String> {
-        let tags = crate::agent_plugins::reply_tags(channel, event);
+        let tags = crate::agent_plugins::reply_tags(channel, event, &agent.owner());
         let error: String = error.chars().take(500).collect();
         agent
             .publish(Template {

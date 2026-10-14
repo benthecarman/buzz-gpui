@@ -20,6 +20,49 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// The folder under a host's state that holds its Agents, and the one it
+/// had while Agents was called Agents2.
+pub const AGENTS: &str = "agents";
+pub const LEGACY_AGENTS: &str = "agents2";
+
+/// Moves the Agents folder from its old name (buzz-app's
+/// `migrate_agents`). Never replaces an existing folder or follows a link.
+/// A GUI moves it under its instance lock before its host starts; buzzd,
+/// alone on its state, when it starts.
+pub fn migrate_agents(state_dir: &std::path::Path) -> Result<(), String> {
+    let old = state_dir.join(LEGACY_AGENTS);
+    let new = state_dir.join(AGENTS);
+    let failed = |error: std::io::Error| format!("Could not migrate agent storage: {error}");
+    if !real_dir(&old).map_err(failed)? {
+        return Ok(());
+    }
+    if real_dir(&new).map_err(failed)? {
+        return Err(
+            "Both agents and agents2 storage exist. Resolve the conflicting folders \
+                    before reopening Buzz; nothing was moved."
+                .into(),
+        );
+    }
+    std::fs::rename(&old, &new).map_err(failed)
+}
+
+/// Whether `path` is a real folder: absent is not, and a link is an error.
+fn real_dir(path: &std::path::Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a link", path.display()),
+        )),
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a folder", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 pub struct HostConfig {
     pub info: HostInfo,
     /// Holds the Agents identities and which GUI runs each.
@@ -76,8 +119,9 @@ impl AgentHost {
                 .legacy_dir
                 .unwrap_or_else(|| config.state_dir.join("no-old-buzz")),
         };
+        migrate_agents(&config.state_dir)?;
         let app_agents = app_agents::AppAgentHost::new(
-            config.state_dir.join("agents2").join("identities.json"),
+            config.state_dir.join(AGENTS).join("identities.json"),
             old,
             config.credentials,
         );

@@ -108,6 +108,16 @@ pub trait AgentType: 'static {
     fn timeout(&self) -> Duration {
         DEFAULT_TIMEOUT
     }
+    /// Whether [`Self::adopt`] gives a brought-over agent anything it kept
+    /// in an earlier agent system.
+    fn adopts(&self) -> bool {
+        false
+    }
+    /// A brought-over agent's config: `config`, the type's defaults, with
+    /// what of `carry` the type has a place for.
+    fn adopt(&self, _carry: &buzz_host::api::Carry, config: Value) -> Value {
+        config
+    }
 }
 
 /// A registered type and its key.

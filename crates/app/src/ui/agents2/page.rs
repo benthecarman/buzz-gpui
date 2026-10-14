@@ -281,7 +281,7 @@ impl Agents2Page {
                     )
             }
             None => header
-                .title("Agents2")
+                .title("Agents")
                 .when(!types(cx).is_empty() && ready, |this| {
                     this.action(
                         Button::new("bring-over", "Bring over")
@@ -546,7 +546,7 @@ impl Render for Agents2Page {
                 .p(rems(1.5))
                 .child(empty_state(
                     "\u{2726}",
-                    "Agents2 runs in the desktop app",
+                    "Agents runs in the desktop app",
                     "Agent keys stay in the desktop app's native custody.",
                     None,
                     &c,
@@ -1194,7 +1194,7 @@ impl Build {
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
         let Some(service) = Agents2::global(cx) else {
-            return Task::ready(Err("Agents2 is not running".into()));
+            return Task::ready(Err("Agents is not running".into()));
         };
         let pubkey = self.pubkey.clone();
         service.update(cx, |service, cx| {

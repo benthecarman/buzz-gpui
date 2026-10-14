@@ -1,6 +1,7 @@
-//! Bring over agents (`BringOver` in `Agents2Page.tsx`): identities earlier
+//! Bring over agents (`BringOver` in `AgentsPage.tsx`): identities earlier
 //! agent systems saved on the hosts, each brought over with its key, name
-//! and picture as an agent of the chosen type. Shown in the peek slot, as
+//! and picture as an agent of the chosen type, which may adopt its
+//! instructions and workspace. Shown in the peek slot, as
 //! a new agent is.
 
 use super::page::{radio_dot, side_body};
@@ -114,6 +115,17 @@ impl Render for BringOver {
             .or(all.first())
             .map(|kind| kind.key.clone());
         let busy = self.pending.is_some();
+        let adopts = all
+            .iter()
+            .find(|kind| Some(&kind.key) == chosen.as_ref())
+            .is_some_and(|kind| kind.kind.adopts());
+        let keeps = if adopts {
+            "Keeps each agent's key, name, picture and instructions in this community. Its \
+             other settings stay behind."
+        } else {
+            "Keeps each agent's key, name and picture in this community. Its instructions and \
+             settings stay behind."
+        };
         let kinds = all.iter().map(|kind| {
             let checked = chosen.as_ref() == Some(&kind.key);
             let key = kind.key.clone();
@@ -236,11 +248,14 @@ impl Render for BringOver {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(BringOverEvent::Close))),
                     ),
             )
-            .child(div().text_body_sm().text_color(c.text_subtle).child(
-                "Keeps each agent's key, name and picture in this community. Its instructions \
-                 and settings stay behind. Stop it where it runs now first, or both will \
-                 answer.",
-            ))
+            .child(
+                div()
+                    .text_body_sm()
+                    .text_color(c.text_subtle)
+                    .child(format!(
+                        "{keeps} Stop it where it runs now first, or both will answer."
+                    )),
+            )
             .child(
                 div()
                     .flex()

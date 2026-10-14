@@ -26,7 +26,7 @@ pub fn register(cx: &mut App) {
         PageSpec {
             // Agents shares the channel sidebar and its collapse toggle.
             collapsible: true,
-            ..PageSpec::sidebar(PAGE, "Agents2", IconName::Robot, |window, cx| {
+            ..PageSpec::sidebar(PAGE, "Agents", IconName::Robot, |window, cx| {
                 cx.new(|cx| Agents2Page::new(window, cx)).into()
             })
         },

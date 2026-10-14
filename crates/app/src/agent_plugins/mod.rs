@@ -23,8 +23,10 @@ fn event_of(event: &EventData) -> BuzzEvent {
 }
 
 /// The tags of a reply to `event` in `channel`, in its thread: its root
-/// when that is another event, the event itself, and its author.
-fn reply_tags(channel: &str, event: &BuzzEvent) -> Vec<Vec<String>> {
+/// when that is another event, the event itself, and `to`, the agent's
+/// owner. Tagging whoever asked could be a sibling agent, which wakes it,
+/// and two agents failing alike would wake each other without end.
+fn reply_tags(channel: &str, event: &BuzzEvent, to: &str) -> Vec<Vec<String>> {
     let root = crate::buzz_mcp::tools::root_of(event);
     let mut tags = vec![vec!["h".to_string(), channel.to_string()]];
     if root != event.id {
@@ -36,6 +38,28 @@ fn reply_tags(channel: &str, event: &BuzzEvent) -> Vec<Vec<String>> {
         String::new(),
         "reply".into(),
     ]);
-    tags.push(vec!["p".into(), event.pubkey.clone()]);
+    tags.push(vec!["p".into(), to.to_owned()]);
     tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn a_reply_tags_the_owner_not_whoever_asked() {
+        let event = BuzzEvent {
+            id: "1".repeat(64),
+            pubkey: "a".repeat(64),
+            created_at: 1,
+            kind: 9,
+            tags: vec![vec!["h".into(), "c".into()]],
+            content: "hi".into(),
+            sig: String::new(),
+        };
+        let tags = reply_tags("c", &event, &"f".repeat(64));
+        assert_eq!(tags.last(), Some(&vec!["p".to_string(), "f".repeat(64)]));
+        assert!(!tags.iter().any(|tag| tag.get(1) == Some(&event.pubkey)));
+    }
 }

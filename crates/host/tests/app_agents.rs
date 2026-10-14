@@ -165,7 +165,7 @@ async fn custody_over_rpc() {
     );
     assert_eq!(list(&client).await, vec![created.clone()]);
     assert!(
-        state.path().join("state/agents2/identities.json").exists(),
+        state.path().join("state/agents/identities.json").exists(),
         "identities live under the host's state"
     );
 
@@ -563,10 +563,20 @@ async fn a_v1_agent_is_brought_over_with_its_key_name_and_picture() {
         owner: owner.pubkey_hex(),
         agent_type: "test/echo".into(),
     };
-    let AppAgentResponse::Prepared { pubkey } = ask(&client, port("port-1")).await.unwrap() else {
+    let AppAgentResponse::PortPrepared { pubkey, carry } =
+        ask(&client, port("port-1")).await.unwrap()
+    else {
         panic!("expected prepared");
     };
     assert_eq!(pubkey, key.pubkey(), "the agent keeps its key");
+    assert_eq!(
+        carry,
+        Carry {
+            instructions: Some("Look around.".into()),
+            workspace: None,
+        },
+        "what its new type may adopt"
+    );
     let AppAgentResponse::Created(created) = ask(
         &client,
         AppAgentRequest::CreateCommit {
@@ -596,7 +606,7 @@ async fn a_v1_agent_is_brought_over_with_its_key_name_and_picture() {
         panic!("expected portable agents");
     };
     assert_eq!(again.agents.len(), 1);
-    let AppAgentResponse::Prepared { .. } = ask(&client, port("port-2")).await.unwrap() else {
+    let AppAgentResponse::PortPrepared { .. } = ask(&client, port("port-2")).await.unwrap() else {
         panic!("expected prepared");
     };
     assert_eq!(
@@ -612,4 +622,25 @@ async fn a_v1_agent_is_brought_over_with_its_key_name_and_picture() {
         ),
         "That agent is already here"
     );
+}
+
+#[test]
+fn the_agents2_folder_moves_to_agents_once() {
+    let state = tempfile::tempdir().unwrap();
+    let old = state.path().join("agents2");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("identities.json"), "[]").unwrap();
+    buzz_host::migrate_agents(state.path()).unwrap();
+    assert!(!old.exists());
+    assert!(state.path().join("agents/identities.json").exists());
+    // Nothing to move the second time.
+    buzz_host::migrate_agents(state.path()).unwrap();
+    // Both folders are a conflict, and nothing moves.
+    std::fs::create_dir_all(&old).unwrap();
+    assert_eq!(
+        buzz_host::migrate_agents(state.path()).unwrap_err(),
+        "Both agents and agents2 storage exist. Resolve the conflicting folders before \
+         reopening Buzz; nothing was moved."
+    );
+    assert!(old.exists());
 }
