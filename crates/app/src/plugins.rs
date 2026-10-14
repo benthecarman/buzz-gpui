@@ -279,7 +279,7 @@ mod tests {
         let catalog = rows(manager.catalog().unwrap());
         let on = |id: &str| catalog.iter().find(|row| row.id == id).unwrap().enabled;
         assert!(on("buzz.inbox") && on("buzz.reminders") && on("buzz.identity-naming"));
-        assert!(!on("buzz.todos") && !on("buzz.bestie") && !on("buzz.channel-templates"));
+        assert!(!on("buzz.todos") && !on("buzz.bestie"));
         let changed = rows(manager.change("enable", "buzz.todos").unwrap());
         assert!(
             changed
@@ -301,7 +301,7 @@ mod tests {
         let row = |rows: &[PluginRow], id: &str| rows.iter().find(|row| row.id == id).cloned();
         assert_eq!(
             row(&catalog, "buzz.claude-code").map(|row| (row.name, row.enabled)),
-            Some(("Claude Code".into(), true))
+            Some(("Claude".into(), true))
         );
         assert_eq!(
             row(&catalog, "buzz.codex").map(|row| (row.name, row.enabled)),

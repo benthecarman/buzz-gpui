@@ -211,6 +211,8 @@ mod tests {
             auth: r#"["auth","owner","","sig"]"#.into(),
             agent_type: "p/t".into(),
             name: "Ada".into(),
+            picture: None,
+            about: None,
             profile,
             deleted: false,
         }
@@ -219,6 +221,8 @@ mod tests {
     fn published(name: &str, created_at: u64) -> Option<Published> {
         Some(Published {
             name: name.into(),
+            picture: None,
+            about: None,
             created_at,
         })
     }

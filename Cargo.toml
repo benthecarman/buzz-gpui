@@ -16,13 +16,13 @@ anyhow = "1"
 # buzz-app fork, branch `installed-runtime-tools`: the agent controller can
 # use tools installed on PATH instead of a packaged bundle, and buzz-desktop
 # holds the Tauri-free native services that src-tauri and this port share.
-buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "e56295c3792514caef90d2c3429e4954f8589190" }
-buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "e56295c3792514caef90d2c3429e4954f8589190" }
-buzz-desktop = { git = "https://github.com/benthecarman/buzz-app", rev = "e56295c3792514caef90d2c3429e4954f8589190" }
+buzz-agent-controller = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+buzz-credential-store = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
+buzz-desktop = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
 # The plugin enable switches, saved as buzz-app saves them.
-buzzodz-plugins = { git = "https://github.com/benthecarman/buzz-app", rev = "e56295c3792514caef90d2c3429e4954f8589190" }
+buzzodz-plugins = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
 # NIP-AB, the protocol Pair mobile speaks. It uses nostr 0.44.
-buzz-pairing = { git = "https://github.com/benthecarman/buzz-app", rev = "e56295c3792514caef90d2c3429e4954f8589190" }
+buzz-pairing = { git = "https://github.com/benthecarman/buzz-app", rev = "219fea82f81de49d370cd4cd6930ad4a35eb49c0" }
 gpui-kit = "=0.7.1"
 
 # GPUI's Linux platform and gpui-kit's base crate with this app's patches;

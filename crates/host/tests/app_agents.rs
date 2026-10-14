@@ -233,7 +233,7 @@ async fn custody_over_rpc() {
             )
             .await
         ),
-        "Agents can sign messages, edits, reactions and deletions only"
+        "Agents can sign messages, edits, reactions, deletions and channel changes only"
     );
     assert_eq!(
         failed(

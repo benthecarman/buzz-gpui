@@ -421,6 +421,8 @@ impl AppAgentHost {
                 &agent.pubkey,
                 Published {
                     name: agent.name,
+                    picture: None,
+                    about: None,
                     created_at,
                 },
             )?;
@@ -690,6 +692,8 @@ mod tests {
             auth: "[]".into(),
             agent_type: "p/t".into(),
             name: "Ada".into(),
+            picture: None,
+            about: None,
             profile: None,
             deleted: false,
         };

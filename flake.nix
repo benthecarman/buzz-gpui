@@ -37,24 +37,6 @@
           gst-libav
         ];
         craneLib = crane.mkLib pkgs;
-        # buzz-agent-controller reads two files from outside its crate
-        # directory, which cargo vendoring leaves behind; take them from the
-        # same pinned fork commit. Both fetches match the ones crane makes
-        # for Cargo.lock, so each repository is cloned once.
-        buzzApp = builtins.fetchGit {
-          url = "https://github.com/benthecarman/buzz-app";
-          rev = "e56295c3792514caef90d2c3429e4954f8589190";
-          allRefs = true;
-          submodules = true;
-        };
-        # buzz-agent likewise reads its model manifest from the buzz
-        # workspace's scripts directory.
-        buzz = builtins.fetchGit {
-          url = "https://github.com/block/buzz.git";
-          rev = "4f51b9e1010e086a16c099cd8d8218ca974a5e18";
-          allRefs = true;
-          submodules = true;
-        };
         buzzdArgs = {
           pname = "buzzd";
           version = "0.1.0";
@@ -70,29 +52,6 @@
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config cmake perl ];
           buildInputs = with pkgs; [ dbus openssl ];
-          # The vendored crates sit in the read-only store. Copy the git
-          # sources of those two crates into the build directory and put the
-          # files where they look. Store timestamps keep the dependency build
-          # fresh when the package build reuses it.
-          postConfigure = ''
-            vendor="$NIX_BUILD_TOP/vendor"
-            mkdir -p "$vendor/runtime" "$vendor/scripts"
-            for dir in $(sed -n 's/^directory = "\(.*\)"$/\1/p' "$CARGO_HOME/config.toml"); do
-              if ls -d "$dir"/buzz-agent-* >/dev/null 2>&1; then
-                copy="$vendor/$(basename "$dir")"
-                cp -rL --preserve=timestamps "$dir" "$copy"
-                chmod -R u+w "$copy"
-                cp --preserve=timestamps ${buzzApp}/crates/build_env.rs "$copy/"
-                substituteInPlace "$CARGO_HOME/config.toml" --replace-fail "\"$dir\"" "\"$copy\""
-              fi
-            done
-            cp --preserve=timestamps ${buzzApp}/runtime/agent-runtime.json "$vendor/runtime/"
-            cp --preserve=timestamps ${buzz}/scripts/model-capabilities.json "$vendor/scripts/"
-            # buzz-agent-controller's build script watches an optional
-            # .env.local, and a missing file reruns it on every build. An
-            # empty one sets nothing, the same as none.
-            touch -d @1 "$vendor/.env.local"
-          '';
         };
       in
       {
