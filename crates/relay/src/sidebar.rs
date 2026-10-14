@@ -14,7 +14,7 @@
 //!
 //! Ported from `src/bundled/channels/sidebar-sections.ts`,
 //! `useChannelLabels.ts`, `useHiddenDms.ts`,
-//! `src/features/relay/sidebar-{preferences,registers,edits,personal-groups}.ts`,
+//! `src/features/relay/sidebar-{preferences,registers,edits}.ts`,
 //! `native-sidebar.ts`, `channel-activity.ts`, and the sidebar commands of
 //! `src-tauri/src/identity.rs` (338-750).
 
@@ -217,10 +217,7 @@ pub fn needs_activity(preferences: &SidebarPreferences) -> bool {
 
 /// Removes channels placed in "Me" from the main sidebar
 /// (`ChannelSidebar.tsx:293-301`).
-pub fn without_me_channels(
-    channels: &[ChannelSummary],
-    me: &PersonalGroups,
-) -> Vec<ChannelSummary> {
+pub fn without_me_channels(channels: &[ChannelSummary], me: &MeGroups) -> Vec<ChannelSummary> {
     let me: HashSet<&str> = me.channels.iter().map(String::as_str).collect();
     channels
         .iter()
@@ -761,14 +758,6 @@ pub struct SidebarGroups {
     pub assignments: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum GroupSource {
-    #[default]
-    Legacy,
-    /// Groups come from the personal-groups kit record (§5a.8).
-    Personal,
-}
-
 /// Decoded sidebar preferences.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SidebarPreferences {
@@ -779,7 +768,6 @@ pub struct SidebarPreferences {
     /// Group key (`starred`, `channels`, `forums`, `dms`, `section:<id>`)
     /// to mode. Absent means alphabetical.
     pub sort: BTreeMap<String, SortMode>,
-    pub group_source: GroupSource,
 }
 
 impl SidebarPreferences {
@@ -793,39 +781,28 @@ impl SidebarPreferences {
             assignments: self.assignments.clone(),
         }
     }
-
-    /// A personal-groups kit record replaces the legacy groups; stars,
-    /// mutes and sort still come from 30078 (§5a.8). Never merged or
-    /// migrated.
-    pub fn with_personal_groups(mut self, personal: &PersonalGroups) -> Self {
-        let groups = personal.project();
-        self.sections = groups.sections;
-        self.assignments = groups.assignments;
-        self.group_source = GroupSource::Personal;
-        self
-    }
 }
 
-/// The `groups` value of a personal or Me kit record (§5a.8). Reading and
+/// The `groups` value of the Me kit record (§5a.8). Reading and
 /// writing the kit belongs to the templates feature; the sidebar only
 /// needs this shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PersonalGroups {
-    pub groups: Vec<PersonalGroup>,
+pub struct MeGroups {
+    pub groups: Vec<MeGroup>,
     pub assignments: BTreeMap<String, String>,
-    /// Me only: channels pulled out of the main sidebar.
+    /// Channels pulled out of the main sidebar.
     pub channels: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PersonalGroup {
+pub struct MeGroup {
     pub id: String,
     pub name: String,
     pub default_template_id: String,
 }
 
-impl PersonalGroups {
-    /// `sidebar-personal-groups.ts:12-17`: order is the list position.
+impl MeGroups {
+    /// `me-preferences.ts` `project`: order is the list position.
     pub fn project(&self) -> SidebarGroups {
         SidebarGroups {
             sections: self
@@ -2608,9 +2585,9 @@ mod tests {
     }
 
     #[test]
-    fn me_channels_leave_the_main_sidebar_and_personal_groups_replace_legacy() {
-        let me = PersonalGroups {
-            groups: vec![PersonalGroup {
+    fn me_channels_leave_the_main_sidebar() {
+        let me = MeGroups {
+            groups: vec![MeGroup {
                 id: "g".into(),
                 name: "Mine".into(),
                 default_template_id: String::new(),
@@ -2620,12 +2597,6 @@ mod tests {
         };
         let rest = without_me_channels(&[row("a"), row("b")], &me);
         assert_eq!(rest, vec![row("b")]);
-        let legacy = prefs(vec![section("old", "Old", 0.0)], &[("b", "old")], &["b"]);
-        let active = legacy.with_personal_groups(&me);
-        assert_eq!(active.group_source, GroupSource::Personal);
-        assert_eq!(active.sections, vec![section("g", "Mine", 0.0)]);
-        assert_eq!(active.assignments.get("b").map(String::as_str), Some("g"));
-        assert_eq!(active.starred, ["b"]);
     }
 
     #[test]

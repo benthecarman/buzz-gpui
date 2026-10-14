@@ -14,7 +14,6 @@ mod emoji;
 pub(crate) mod form;
 mod notifications;
 pub mod pairing;
-pub mod personal_groups;
 pub use pairing::close as close_pairing;
 mod plugins;
 mod profile;

@@ -13,7 +13,6 @@ use buzz_relay_client::kit::setup::{ChannelCreationInput, ChannelSetup, Creation
 use buzz_relay_client::lifecycle::{
     DEFAULT_TEMPORARY_TTL, DraftErrors, NewChannel, canonical_name, draft_errors,
 };
-use buzz_relay_client::sidebar::GroupSource;
 use buzz_relay_client::sidebar_store::PreferencesStatus;
 use buzz_ui::{ActiveTheme, Button, Dialog, Surface, Switch, ToastTone, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
@@ -284,11 +283,8 @@ impl NewChannelDialog {
                             cx.notify();
                             return;
                         }
-                        let personal =
-                            data.is_some_and(|d| d.group_source == GroupSource::Personal);
                         Some(ChannelSetup {
                             group_id: group.clone(),
-                            group_source: Some(if personal { "personal" } else { "legacy" }.into()),
                             ..Default::default()
                         })
                     }

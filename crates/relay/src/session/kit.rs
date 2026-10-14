@@ -457,7 +457,15 @@ async fn start(
         if setup.agents.iter().any(|key| !crate::members::is_key(key)) {
             return Err("Agent membership is unavailable".into());
         }
-        if !setup.group_id.is_empty() && setup.group_source.as_deref() != Some("legacy") {
+        let grouped = || {
+            let snapshot = session.snapshot().borrow().clone();
+            snapshot.sidebar.data.as_ref().is_some_and(|data| {
+                data.sections
+                    .iter()
+                    .any(|section| section.id == setup.group_id)
+            })
+        };
+        if !setup.group_id.is_empty() && !grouped() {
             return Err(
                 "The destination group is unavailable; refresh your sidebar before creating the channel"
                     .into(),

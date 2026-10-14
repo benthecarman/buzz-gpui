@@ -94,38 +94,67 @@ fn canvas_and_record_budgets_have_their_messages() {
 }
 
 #[test]
-fn groups_records_follow_the_personal_and_me_rules() {
+fn groups_records_follow_the_me_rules() {
     let channel = "11111111-1111-4111-8111-111111111111";
-    let personal = json!({"version": 1, "community": COMMUNITY, "deleted": false, "value": {
-        "type": "groups", "id": "personal",
+    let me = json!({"version": 1, "community": COMMUNITY, "deleted": false, "value": {
+        "type": "groups", "id": "me",
         "groups": [{"id": "g1", "name": "Work", "defaultTemplateId": "t-1"}],
-        "assignments": {channel: "g1"}
+        "assignments": {channel: "g1"},
+        "channels": [channel]
     }});
-    let record = parse_kit_record(&personal, COMMUNITY).unwrap();
-    assert_eq!(record.tag(), KIT_TAG);
-    let mut me = personal.clone();
-    me["value"]["id"] = json!("me");
-    me["value"]["channels"] = json!([channel]);
-    let me = parse_kit_record(&me, COMMUNITY).unwrap();
-    assert_eq!(me.tag(), ME_KIT_TAG);
-    let mut placed = personal.clone();
-    placed["value"]["channels"] = json!([channel]);
+    let record = parse_kit_record(&me, COMMUNITY).unwrap();
+    assert_eq!(record.tag(), ME_KIT_TAG);
+    // Personal groups are retired: such a record is no longer a recipe.
+    let mut personal = me.clone();
+    personal["value"]["id"] = json!("personal");
     assert_eq!(
-        parse_kit_record(&placed, COMMUNITY).unwrap_err(),
-        "Messages groups cannot contain Me placement"
+        parse_kit_record(&personal, COMMUNITY).unwrap_err(),
+        "Unsupported channel recipe type"
     );
-    let mut stray = personal.clone();
+    let mut stray = me.clone();
     stray["value"]["assignments"] = json!({channel: "missing"});
     assert_eq!(
         parse_kit_record(&stray, COMMUNITY).unwrap_err(),
-        "Invalid personal group placement"
+        "Invalid Me group placement"
     );
-    let entries = [KitEntry {
-        record,
-        event_id: EventId::from_hex(&"0".repeat(64)).unwrap(),
-        created_at: 1,
-    }];
-    assert_eq!(personal_groups(&entries).unwrap().1.groups[0].name, "Work");
+    let mut twice = me.clone();
+    twice["value"]["groups"] = json!([
+        {"id": "g1", "name": "Work", "defaultTemplateId": ""},
+        {"id": "g1", "name": "Again", "defaultTemplateId": ""}
+    ]);
+    assert_eq!(
+        parse_kit_record(&twice, COMMUNITY).unwrap_err(),
+        "Duplicate Me group"
+    );
+}
+
+#[test]
+fn catalog_heads_skip_retired_personal_groups() {
+    let alice = Identity::ephemeral();
+    let record = parse_kit_record(&template_value(), COMMUNITY).unwrap();
+    let template = signed(&alice, &record, vec![]);
+    let mut draft = draft(&alice, &record).unwrap();
+    for tag in &mut draft.tags {
+        if tag[0] == "d" {
+            tag[1] = format!("{KIT_TAG}:https%3A%2F%2Frelay.test:groups:personal");
+        }
+    }
+    let unsigned = alice
+        .template(
+            Purpose::AppData,
+            draft.kind,
+            1_700_000_000,
+            draft.tags,
+            draft.content,
+        )
+        .unwrap();
+    let personal = Verifier::default()
+        .verify(alice.sign(Purpose::AppData, unsigned).unwrap())
+        .unwrap();
+    let events = vec![template.clone(), personal];
+    let heads = catalog_heads(&events, COMMUNITY);
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads[0].id, template.id);
 }
 
 #[test]

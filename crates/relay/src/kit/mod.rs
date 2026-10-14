@@ -118,16 +118,14 @@ pub struct Group {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupsId {
-    /// The Messages sidebar's personal groups.
-    Personal,
-    /// Me's groups and placement.
+    /// Me's groups and placement, the only groups record since personal
+    /// groups were retired.
     Me,
 }
 
 impl GroupsId {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Personal => "personal",
             Self::Me => "me",
         }
     }
@@ -374,7 +372,6 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
         }
         Some("groups") => {
             let groups_id = match v.get("id").and_then(Value::as_str) {
-                Some("personal") => GroupsId::Personal,
                 Some("me") => GroupsId::Me,
                 _ => return Err("Unsupported channel recipe type".into()),
             };
@@ -382,7 +379,7 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
                 .get("groups")
                 .and_then(Value::as_array)
                 .filter(|list| list.len() <= 100)
-                .ok_or("Too many personal groups")?;
+                .ok_or("Too many Me groups")?;
             let mut groups: Vec<Group> = Vec::with_capacity(list.len());
             for raw in list {
                 let g = object(Some(raw))?;
@@ -396,7 +393,7 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
                     default_template_id: default,
                 };
                 if groups.iter().any(|seen| seen.id == group.id) {
-                    return Err("Duplicate personal group".into());
+                    return Err("Duplicate Me group".into());
                 }
                 groups.push(group);
             }
@@ -411,19 +408,13 @@ pub fn parse_kit_record(raw: &Value, community: &str) -> Result<KitRecord, Strin
                         .is_some_and(|group| groups.iter().any(|g| g.id == group))
             };
             if assignments.len() > 1000 || !assignments.iter().all(placed) {
-                return Err("Invalid personal group placement".into());
+                return Err("Invalid Me group placement".into());
             }
-            if groups_id == GroupsId::Personal && v.contains_key("channels") {
-                return Err("Messages groups cannot contain Me placement".into());
-            }
-            let channels = match groups_id {
-                GroupsId::Me => Some(keys(
-                    Some(v.get("channels").unwrap_or(&json!([]))),
-                    is_uuid,
-                    1000,
-                )?),
-                GroupsId::Personal => None,
-            };
+            let channels = Some(keys(
+                Some(v.get("channels").unwrap_or(&json!([]))),
+                is_uuid,
+                1000,
+            )?);
             KitValue::Groups(Groups {
                 id: groups_id,
                 groups,
@@ -706,10 +697,13 @@ pub fn catalog_heads<'a>(events: &'a [Verified], community: &str) -> Vec<&'a Ver
         .iter()
         .map(|tag| format!("{tag}:{encoded}:"))
         .collect();
+    let retired = format!("{KIT_TAG}:{encoded}:groups:personal");
     let mut heads: BTreeMap<&str, &Verified> = BTreeMap::new();
     for event in events {
         let Some(d) = event.tag("d") else { continue };
-        if !prefixes.iter().any(|prefix| d.starts_with(prefix.as_str())) {
+        // Retired personal groups: ignore saved records, never reject the
+        // catalog.
+        if !prefixes.iter().any(|prefix| d.starts_with(prefix.as_str())) || d == retired {
             continue;
         }
         match heads.get(d) {
@@ -763,17 +757,6 @@ pub fn teams(entries: &[KitEntry]) -> Vec<&Team> {
             _ => None,
         })
         .collect()
-}
-
-/// The live personal (Messages) groups record (`personalGroups`).
-#[cfg(test)]
-pub fn personal_groups(entries: &[KitEntry]) -> Option<(&KitEntry, &Groups)> {
-    entries.iter().find_map(|e| match &e.record.value {
-        KitValue::Groups(groups) if !e.record.deleted && groups.id == GroupsId::Personal => {
-            Some((e, groups))
-        }
-        _ => None,
-    })
 }
 
 /// `resolveLineup`: the distinct agents of the selected teams and agents,

@@ -1303,19 +1303,19 @@ at the head read (`docs/channels.md:207-255`).
 Mute = `channel-mutes` entry `muted:true`. `muted` list consumed by notifications/unread (not
 specified here). Mute never hides the row. Same write path as 5a.6.
 
-### 5a.8 Personal groups / Me groups override (channel kit, kind 30078)
+### 5a.8 Me groups (channel kit, kind 30078)
 
-`src/features/relay/sidebar-personal-groups.ts:12-172`, `src-tauri/src/relay/kit.rs:4-6,109-260`.
-If a "personal groups" kit record exists, its `groups/assignments` **replace** the legacy
-`channel-sections` (`groupSource:"personal"`); stars/mutes/sort still come from 30078 coords.
-Never migrated or merged. Kit records:
-- `d = "buzz-channel-kit-v1:" + encodeURIComponent(communityOrigin) + ":groups:personal"`,
-  `t = "buzz-channel-kit-v1"`; Me groups: `d = "buzz-me-kit-v1:<enc>:groups:me"`, `t="buzz-me-kit-v1"`.
+`src/features/relay/me-preferences.ts`, `src-tauri/src/relay/kit.rs:4-6,109-260`.
+Personal groups (a `groups:personal` kit record replacing the Messages sidebar sections) were
+retired in buzz-app #988: the sidebar sections always come from `channel-sections`. Saved
+`buzz-channel-kit-v1:<enc>:groups:personal` records are skipped before decode so they never
+reject the catalog. The only groups record left is Me's:
+- `d = "buzz-me-kit-v1:<enc>:groups:me"`, `t="buzz-me-kit-v1"`.
 - Content NIP-44 to self of `{"version":1,"community":origin,"deleted":bool,"value":Groups}`
-  (≤16 KiB), `Groups = {type:"groups", id:"personal"|"me", groups:[{id,name,defaultTemplateId}],
-  assignments:{channelId:groupId}, channels?:string[]}` (`src/features/channel-templates/model.ts:33-40`).
+  (≤16 KiB), `Groups = {type:"groups", id:"me", groups:[{id,name,defaultTemplateId}],
+  assignments:{channelId:groupId}, channels:string[]}` (`src/features/channel-templates/model.ts:33-40`).
 - Me `channels[]` = channels pulled out of the main sidebar into "Me" (`src/features/sessions/personal.ts:6-22`).
-Full kit spec belongs to the templates section; only the override rule matters here.
+Full kit spec belongs to the templates section.
 
 ### 5a.9 Labels
 
@@ -3532,7 +3532,7 @@ exposes only purpose-bound operations, mirroring the Tauri allowlist in §2.5 an
 | `relay::read_state` | journal; NIP-RS blob encode/parse; merge; retention and coverage; 5 s debounced publish with exact-bytes pending; snapshot capability | `read-state*.ts`, `src-tauri/src/identity.rs:573-880` | §5i.1–5i.6 |
 | `relay::unread` | evidence store; evidence repair (128-channel batches); unread predicate; snapshots; thread activity; conversation lookups; reading leases; mark actions; inbox projection and inbox feed | `unread.ts`, `inbox.ts`, `inbox-feed.ts`, `channel-activity.ts` | §5i.7–5i.11, §5l.5–5l.6 |
 | `relay::notifications` | incoming-message admission, eligibility (`wait`/true/false), dedupe for 120 s, preferences, text | `features/notifications/*` | §5l.1–5l.2 |
-| `relay::sidebar_prefs` | 30078 coordinates `channel-sections\|stars\|mutes\|sort`; register model; serialized write queue with strong readback; personal-groups kit override | `sidebar-*.ts`, `me-preferences.ts`, `native-sidebar.ts`, `src-tauri/src/identity.rs:338-750` | §5a.6–5a.8 |
+| `relay::sidebar_prefs` | 30078 coordinates `channel-sections\|stars\|mutes\|sort`; register model; serialized write queue with strong readback | `sidebar-*.ts`, `me-preferences.ts`, `native-sidebar.ts`, `src-tauri/src/identity.rs:338-750` | §5a.6–5a.8 |
 | `relay::dm` | 41010 open, confirmation, 30622 visibility, 41012 hide, local "Remove from Messages", people search | `direct-messages.ts`, `direct-message-policy.ts`, `bundled/channels/useHiddenDms.ts` | §5e |
 | `relay::lifecycle` | 9007 create (via outbox), 9021/9022/9008/9002-archive/41012 (direct publish and polling confirm), 9002 details edit with optimistic version | `channel-lifecycle*.ts`, `channel-details*.ts`, `work-sessions.ts` | §5m |
 | `relay::members` | channel roster/admin reads (strong), 9000/9001 administration, invite with mention preflight, 40099 grouping | `channel-members/*`, `messages/membership-rows.ts` | §5g |

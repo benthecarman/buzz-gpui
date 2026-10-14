@@ -1,6 +1,5 @@
 //! The session's recipe catalog and the preferences built on it
-//! (`channel-templates/capability.ts`, `relay/me-preferences.ts`,
-//! `relay/sidebar-personal-groups.ts`).
+//! (`channel-templates/capability.ts`, `relay/me-preferences.ts`).
 //!
 //! [`MeKit`] is the session's one reader of the viewer's private recipe
 //! records: templates and teams ([`Session::kit`]) are the same read,
@@ -10,8 +9,7 @@
 //! record must be the one the relay selects afterwards.
 //!
 //! On top of it sit the Me groups and placement (which conversations live
-//! in Me rather than Messages) and the Messages "personal groups" that
-//! replace the legacy sidebar sections once that record exists.
+//! in Me rather than Messages).
 
 use super::actions::{Context, Ops};
 use super::canvas::Canvas;
@@ -26,8 +24,7 @@ use crate::kit::{self as recipes, GroupsId};
 use crate::outbox::{Delivery, SendOptions};
 use crate::reader::ReadOptions;
 use crate::sidebar::{
-    AssignmentIntent, GroupSource, NewSection, PersonalGroup, PersonalGroups, SidebarGroups,
-    SidebarPreferences,
+    AssignmentIntent, MeGroup, MeGroups, NewSection, SidebarGroups, SidebarPreferences,
 };
 use crate::sidebar_store::{Destination, PreferencesStore, SidebarState};
 use crate::socket::Filter;
@@ -93,13 +90,8 @@ impl MeKitSnapshot {
     }
 
     /// The live Me groups, if the record exists.
-    pub fn me(&self) -> Option<PersonalGroups> {
+    pub fn me(&self) -> Option<MeGroups> {
         kit::groups(&self.entries, GroupsId::Me)
-    }
-
-    /// The live Messages personal groups, if the record exists.
-    pub fn personal(&self) -> Option<PersonalGroups> {
-        kit::groups(&self.entries, GroupsId::Personal)
     }
 }
 
@@ -469,7 +461,7 @@ impl MeKit {
     }
 
     /// The Me record now: its value (empty without one) and entry.
-    async fn current(&self, fresh: bool) -> Result<(PersonalGroups, Option<RawKitEntry>), String> {
+    async fn current(&self, fresh: bool) -> Result<(MeGroups, Option<RawKitEntry>), String> {
         if fresh || !self.snapshot().ready() {
             self.refresh().await;
         }
@@ -491,7 +483,7 @@ impl MeKit {
     /// Saves Me groups and checks the relay now has exactly them.
     async fn save_me(
         &self,
-        value: PersonalGroups,
+        value: MeGroups,
         entry: Option<&RawKitEntry>,
     ) -> Result<SidebarGroups, String> {
         kit::admit(&value, entry, &self.inner.community)?;
@@ -507,12 +499,11 @@ impl MeKit {
         Ok(value.project())
     }
 
-    fn me_preferences(groups: &PersonalGroups) -> SidebarPreferences {
+    fn me_preferences(groups: &MeGroups) -> SidebarPreferences {
         let projected = groups.project();
         SidebarPreferences {
             sections: projected.sections,
             assignments: projected.assignments,
-            group_source: GroupSource::Personal,
             ..Default::default()
         }
     }
@@ -727,189 +718,15 @@ impl MeKit {
         self.me_refresh();
         result
     }
-
-    // ----- Messages personal groups (`sidebar-personal-groups.ts`) -----
-
-    /// The legacy preferences with personal groups in place of their
-    /// sections when that record exists (`readActiveSidebarGroups`).
-    pub(super) async fn active_groups(
-        &self,
-        legacy: SidebarPreferences,
-    ) -> Result<SidebarPreferences, String> {
-        if self.snapshot().status == MeKitStatus::Unavailable {
-            return Ok(legacy);
-        }
-        if !self.snapshot().ready() {
-            self.refresh().await;
-        }
-        let snapshot = self.snapshot();
-        if !snapshot.ready() {
-            return Err(snapshot
-                .error()
-                .unwrap_or("Personal groups are unavailable")
-                .to_owned());
-        }
-        Ok(match snapshot.personal() {
-            Some(groups) => legacy.with_personal_groups(&groups),
-            None => legacy,
-        })
-    }
-
-    /// A Messages group move through the personal-groups record. `None`:
-    /// no such record, so the legacy writer saves it
-    /// (`activeSidebarAssignment`).
-    pub(super) async fn personal_assign(
-        &self,
-        intent: &AssignmentIntent,
-        source: GroupSource,
-    ) -> Result<Option<SidebarGroups>, String> {
-        if self.snapshot().status == MeKitStatus::Unavailable {
-            return if source == GroupSource::Personal {
-                Err("Personal groups are unavailable".into())
-            } else {
-                Ok(None)
-            };
-        }
-        self.refresh().await;
-        let snapshot = self.snapshot();
-        if !snapshot.ready() {
-            return Err(snapshot
-                .error()
-                .unwrap_or("Personal groups could not be refreshed")
-                .to_owned());
-        }
-        let entry = kit::groups_entry(&snapshot.entries, GroupsId::Personal);
-        let current = entry.and_then(RawKitEntry::groups);
-        if current.is_some() != (source == GroupSource::Personal) {
-            return Err(
-                "The active group source changed; refresh your sidebar before moving this channel"
-                    .into(),
-            );
-        }
-        let (Some(current), Some(entry)) = (current, entry) else {
-            return Ok(None);
-        };
-        let target = intent
-            .create_section
-            .as_ref()
-            .map(|new| new.id.clone())
-            .or_else(|| intent.section_id.clone());
-        let Some(next) = assign(
-            &current,
-            intent,
-            "The new section changed; refresh before retrying",
-            "The destination group is unavailable",
-        )?
-        else {
-            return Ok(Some(current.project()));
-        };
-        self.save(
-            kit::groups_value(GroupsId::Personal, &next),
-            Some(entry.event_id.clone()),
-            false,
-        )
-        .await?;
-        let confirmed = self.snapshot().personal();
-        match confirmed {
-            Some(groups) if groups.assignments.get(&intent.channel_id) == target.as_ref() => {
-                Ok(Some(groups.project()))
-            }
-            _ => Err("Personal group placement could not be confirmed".into()),
-        }
-    }
-
-    /// Removes a Messages personal group (`activeSidebarSectionRemoval`).
-    /// `None`: legacy groups are active.
-    pub(super) async fn personal_remove(
-        &self,
-        section: &str,
-        source: GroupSource,
-    ) -> Result<Option<SidebarGroups>, String> {
-        if self.snapshot().status == MeKitStatus::Unavailable {
-            return if source == GroupSource::Personal {
-                Err("Personal groups are unavailable".into())
-            } else {
-                Ok(None)
-            };
-        }
-        self.refresh().await;
-        let snapshot = self.snapshot();
-        if !snapshot.ready() {
-            return Err(snapshot
-                .error()
-                .unwrap_or("Personal groups could not be refreshed")
-                .to_owned());
-        }
-        let entry = kit::groups_entry(&snapshot.entries, GroupsId::Personal);
-        let current = entry.and_then(RawKitEntry::groups);
-        if current.is_some() != (source == GroupSource::Personal) {
-            return Err("The active group source changed; refresh your sidebar before removing this section".into());
-        }
-        if source == GroupSource::Legacy {
-            return Ok(None);
-        }
-        let (Some(current), Some(entry)) = (current, entry) else {
-            return Err("Personal group no longer exists".into());
-        };
-        if !current.groups.iter().any(|group| group.id == section) {
-            return Err("Personal group no longer exists".into());
-        }
-        let next = remove_group(&current, section);
-        if let Err(message) = self
-            .save(
-                kit::groups_value(GroupsId::Personal, &next),
-                Some(entry.event_id.clone()),
-                false,
-            )
-            .await
-        {
-            return Err(removal_error(&message));
-        }
-        match self.snapshot().personal() {
-            Some(groups)
-                if !groups.groups.iter().any(|group| group.id == section)
-                    && !groups.assignments.values().any(|id| id == section) =>
-            {
-                Ok(Some(groups.project()))
-            }
-            _ => Err("Personal section removal could not be confirmed".into()),
-        }
-    }
-
-    /// Saves the Messages personal groups as edited in the "Personal
-    /// groups" dialog (`ChannelGroupsDialog.tsx`).
-    pub async fn save_personal_groups(&self, groups: Vec<PersonalGroup>) -> Result<(), String> {
-        self.refresh().await;
-        let snapshot = self.snapshot();
-        if !snapshot.ready() {
-            return Err(snapshot
-                .error()
-                .unwrap_or("Personal groups could not be refreshed")
-                .to_owned());
-        }
-        let entry = kit::groups_entry(&snapshot.entries, GroupsId::Personal).cloned();
-        let current = entry
-            .as_ref()
-            .and_then(RawKitEntry::groups)
-            .unwrap_or_default();
-        let next = with_groups(&current, groups);
-        self.save(
-            kit::groups_value(GroupsId::Personal, &next),
-            entry.map(|entry| entry.event_id),
-            false,
-        )
-        .await
-        .map(drop)
-    }
 }
 
 /// The groups after an assignment, or `None` when nothing changes.
 fn assign(
-    current: &PersonalGroups,
+    current: &MeGroups,
     intent: &AssignmentIntent,
     changed: &str,
     unavailable: &str,
-) -> Result<Option<PersonalGroups>, String> {
+) -> Result<Option<MeGroups>, String> {
     let target = intent
         .create_section
         .as_ref()
@@ -921,7 +738,7 @@ fn assign(
         match next.groups.iter().find(|group| group.id == new.id) {
             Some(existing) if existing.name != name => return Err(changed.into()),
             Some(_) => {}
-            None => next.groups.push(PersonalGroup {
+            None => next.groups.push(MeGroup {
                 id: new.id.clone(),
                 name: name.into(),
                 default_template_id: String::new(),
@@ -942,34 +759,11 @@ fn assign(
     Ok((next != *current).then_some(next))
 }
 
-fn remove_group(current: &PersonalGroups, section: &str) -> PersonalGroups {
+fn remove_group(current: &MeGroups, section: &str) -> MeGroups {
     let mut next = current.clone();
     next.groups.retain(|group| group.id != section);
     next.assignments.retain(|_, group| group != section);
     next
-}
-
-/// Names, order and defaults from the dialog; assignments to removed
-/// groups go back to the default sections.
-fn with_groups(current: &PersonalGroups, groups: Vec<PersonalGroup>) -> PersonalGroups {
-    let mut next = current.clone();
-    next.groups = groups;
-    let ids: Vec<String> = next.groups.iter().map(|group| group.id.clone()).collect();
-    next.assignments.retain(|_, group| ids.contains(group));
-    next
-}
-
-/// The removal error copy (`activeSidebarSectionRemoval`).
-fn removal_error(message: &str) -> String {
-    if message == TOO_SOON {
-        "This section was just saved. Wait a second, then choose Remove section again.".into()
-    } else if message == UNRESOLVED {
-        "A section removal or other personal-group save is unresolved. Open Channel settings → Diagnostics → Outbox to inspect or retry the existing operation, then reload the app to check the result before removing this section again.".into()
-    } else {
-        format!(
-            "Section removal could not be confirmed: {message} Open Channel settings → Diagnostics → Outbox to inspect any pending operation before retrying."
-        )
-    }
 }
 
 /// Why a catalog read gave nothing.
@@ -1046,11 +840,11 @@ mod tests {
 
     const CHANNEL: &str = "11111111-1111-4111-8111-111111111111";
 
-    fn groups(ids: &[&str]) -> PersonalGroups {
-        PersonalGroups {
+    fn groups(ids: &[&str]) -> MeGroups {
+        MeGroups {
             groups: ids
                 .iter()
-                .map(|id| PersonalGroup {
+                .map(|id| MeGroup {
                     id: (*id).into(),
                     name: id.to_uppercase(),
                     default_template_id: String::new(),
@@ -1115,17 +909,5 @@ mod tests {
         let next = remove_group(&current, "a");
         assert_eq!(next.groups.len(), 1);
         assert!(next.assignments.is_empty());
-        let edited = with_groups(&current, groups(&["b"]).groups);
-        assert!(edited.assignments.is_empty());
-    }
-
-    #[test]
-    fn removal_errors_match_the_reference() {
-        assert!(removal_error(TOO_SOON).starts_with("This section was just saved."));
-        assert!(removal_error(UNRESOLVED).starts_with("A section removal or other"));
-        assert_eq!(
-            removal_error("Boom."),
-            "Section removal could not be confirmed: Boom. Open Channel settings → Diagnostics → Outbox to inspect any pending operation before retrying."
-        );
     }
 }

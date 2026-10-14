@@ -30,10 +30,9 @@ const RECEIPTS_BYTES: usize = 2 * 1024 * 1024;
 pub struct ChannelSetup {
     pub canvas: String,
     pub agents: Vec<String>,
+    /// A sidebar section. Receipts from before personal groups were
+    /// retired may still carry a `groupSource`; it is ignored.
     pub group_id: String,
-    /// Absent keeps the personal-group meaning of saved receipts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group_source: Option<String>,
     pub template_id: String,
 }
 
@@ -114,17 +113,8 @@ impl ChannelCreationInput {
             return Ok(());
         };
         parse_lineup(&json!({"teamIds": [], "agents": setup.agents, "canvas": setup.canvas}))?;
-        let legacy = match setup.group_source.as_deref() {
-            None => false,
-            Some("legacy") => true,
-            Some(_) => return Err("Invalid group source".into()),
-        };
         let group_ok = setup.group_id.is_empty()
-            || if legacy {
-                setup.group_id.len() <= 256 && !setup.group_id.trim().is_empty()
-            } else {
-                identifier(&setup.group_id)
-            };
+            || (setup.group_id.len() <= 256 && !setup.group_id.trim().is_empty());
         if !group_ok || (!setup.template_id.is_empty() && !identifier(&setup.template_id)) {
             return Err("Invalid template or group selection".into());
         }

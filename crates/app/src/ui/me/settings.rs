@@ -53,12 +53,11 @@ pub fn section_default(
     if let Some(own) = kit::template(entries, &section_template_id(section, personal)) {
         return Ok(Some(own.record["value"].clone()));
     }
-    let id = if personal {
-        GroupsId::Me
-    } else {
-        GroupsId::Personal
-    };
-    let default = kit::groups(entries, id).and_then(|groups| {
+    // Only Me groups carry defaults since personal groups were retired.
+    let groups = personal
+        .then(|| kit::groups(entries, GroupsId::Me))
+        .flatten();
+    let default = groups.and_then(|groups| {
         groups
             .groups
             .into_iter()

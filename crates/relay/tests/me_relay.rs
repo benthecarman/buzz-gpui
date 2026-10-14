@@ -1,12 +1,12 @@
-//! Work sessions, the recipe catalog, Me placement and personal groups
-//! against the local test relay. Skipped unless `BUZZ_TEST_RELAY` points
+//! Work sessions, the recipe catalog and Me placement against the local
+//! test relay. Skipped unless `BUZZ_TEST_RELAY` points
 //! at `.test-relay`. Every test signs in as throwaway members it invites
 //! itself, so no seeded identity's records change.
 
 use buzz_identity::Identity;
 use buzz_relay_client::session::{AgentRules, Expected};
-use buzz_relay_client::sidebar::{GroupSource, NewSection, PersonalGroup};
-use buzz_relay_client::sidebar_store::{Destination, PreferencesStatus};
+use buzz_relay_client::sidebar::NewSection;
+use buzz_relay_client::sidebar_store::PreferencesStatus;
 use buzz_relay_client::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -173,51 +173,6 @@ async fn places_conversations_in_me_and_groups_them() {
         .await
         .unwrap_err();
     assert!(error.starts_with("This saved recipe changed."), "{error}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn personal_groups_replace_the_legacy_sections() {
-    let Some(fixture) = fixture() else {
-        return;
-    };
-    let viewer = fixture.newcomer().await;
-    let session = fixture.session(viewer).await;
-    let channel = start_session(&session, "Grouped").await;
-    let group = uuid::Uuid::new_v4().to_string();
-    session
-        .me_kit()
-        .save_personal_groups(vec![PersonalGroup {
-            id: group.clone(),
-            name: "Projects".into(),
-            default_template_id: String::new(),
-        }])
-        .await
-        .unwrap();
-    session.refresh_sidebar();
-    let mut snapshot = session.snapshot();
-    let ready = until(&mut snapshot, "personal groups", |s| {
-        s.sidebar
-            .data
-            .as_ref()
-            .is_some_and(|d| d.group_source == GroupSource::Personal)
-    })
-    .await;
-    let data = ready.sidebar.data.as_ref().unwrap();
-    assert_eq!(data.sections.len(), 1);
-    assert_eq!(data.sections[0].name, "Projects");
-
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    session
-        .sidebar_move(&channel, Destination::Section(Some(group.clone())))
-        .await
-        .unwrap();
-    let groups = session.me_kit().snapshot().personal().unwrap();
-    assert_eq!(groups.assignments[&channel], group);
-
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    session.sidebar_remove_section(&group).await.unwrap();
-    let groups = session.me_kit().snapshot().personal().unwrap();
-    assert!(groups.groups.is_empty() && groups.assignments.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

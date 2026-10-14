@@ -1,8 +1,5 @@
-//! The Me and Messages group records of the recipe catalog
-//! (`relay/me-preferences.ts`, `relay/sidebar-personal-groups.ts`): the
-//! `personal` record (Messages groups that replace the legacy sidebar
-//! sections) and the `me` record (the Me page's groups and which
-//! conversations are placed in Me).
+//! The Me group record of the recipe catalog (`relay/me-preferences.ts`):
+//! the Me page's groups and which conversations are placed in Me.
 //!
 //! The catalog itself is read once, by the session's recipe reader, with
 //! [`super::catalog_filter`] and [`decode`]; these entries keep each
@@ -11,7 +8,7 @@
 use super::identifier;
 use crate::discovery::is_uuid;
 use crate::event::Verified;
-use crate::sidebar::{PersonalGroup, PersonalGroups};
+use crate::sidebar::{MeGroup, MeGroups};
 use buzz_desktop::relay::kit as native;
 use buzz_identity::Identity;
 use serde_json::{Map, Value, json};
@@ -49,15 +46,14 @@ impl RawKitEntry {
     }
 
     /// The groups value of a live `groups` record.
-    pub fn groups(&self) -> Option<PersonalGroups> {
+    pub fn groups(&self) -> Option<MeGroups> {
         (!self.deleted() && self.kind() == "groups")
             .then(|| parse_groups(&self.record["value"]).ok())
             .flatten()
     }
 }
 
-/// The `groups` record with this id, deleted or not (`meGroups`,
-/// `personalGroups`).
+/// The `groups` record with this id, deleted or not (`meGroups`).
 pub fn groups_entry(entries: &[RawKitEntry], id: GroupsId) -> Option<&RawKitEntry> {
     entries
         .iter()
@@ -65,7 +61,7 @@ pub fn groups_entry(entries: &[RawKitEntry], id: GroupsId) -> Option<&RawKitEntr
 }
 
 /// The live groups of that record, if any.
-pub fn groups(entries: &[RawKitEntry], id: GroupsId) -> Option<PersonalGroups> {
+pub fn groups(entries: &[RawKitEntry], id: GroupsId) -> Option<MeGroups> {
     groups_entry(entries, id).and_then(RawKitEntry::groups)
 }
 
@@ -77,11 +73,11 @@ pub fn template<'a>(entries: &'a [RawKitEntry], id: &str) -> Option<&'a RawKitEn
 }
 
 /// The `groups` value of a record (`parseKitRecord`).
-pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
+pub fn parse_groups(value: &Value) -> Result<MeGroups, String> {
     let invalid = || "Invalid channel recipe".to_owned();
     let list = value["groups"].as_array().ok_or_else(invalid)?;
     if list.len() > 100 {
-        return Err("Too many personal groups".into());
+        return Err("Too many Me groups".into());
     }
     let mut groups = Vec::with_capacity(list.len());
     for raw in list {
@@ -95,10 +91,10 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
         let (Some(id), Some(name), Some(default)) = (id, name, default) else {
             return Err(invalid());
         };
-        if groups.iter().any(|group: &PersonalGroup| group.id == id) {
-            return Err("Duplicate personal group".into());
+        if groups.iter().any(|group: &MeGroup| group.id == id) {
+            return Err("Duplicate Me group".into());
         }
-        groups.push(PersonalGroup {
+        groups.push(MeGroup {
             id: id.into(),
             name: name.into(),
             default_template_id: default.into(),
@@ -109,7 +105,7 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
     for (channel, group) in raw {
         let group = group.as_str().unwrap_or_default();
         if raw.len() > 1000 || !is_uuid(channel) || !groups.iter().any(|g| g.id == group) {
-            return Err("Invalid personal group placement".into());
+            return Err("Invalid Me group placement".into());
         }
         assignments.insert(channel.clone(), group.to_owned());
     }
@@ -132,7 +128,7 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
         }
         Some(_) => return Err("Invalid channel recipe selection".into()),
     };
-    Ok(PersonalGroups {
+    Ok(MeGroups {
         groups,
         assignments,
         channels,
@@ -140,8 +136,8 @@ pub fn parse_groups(value: &Value) -> Result<PersonalGroups, String> {
 }
 
 /// The `groups` value of a record.
-pub fn groups_value(id: GroupsId, groups: &PersonalGroups) -> Value {
-    let mut value = json!({
+pub fn groups_value(id: GroupsId, groups: &MeGroups) -> Value {
+    let value = json!({
         "type": "groups",
         "id": id.as_str(),
         "groups": groups.groups.iter().map(|group| json!({
@@ -152,10 +148,8 @@ pub fn groups_value(id: GroupsId, groups: &PersonalGroups) -> Value {
         "assignments": groups.assignments.iter()
             .map(|(channel, group)| (channel.clone(), json!(group)))
             .collect::<Map<_, _>>(),
+        "channels": groups.channels,
     });
-    if id == GroupsId::Me {
-        value["channels"] = json!(groups.channels);
-    }
     value
 }
 
@@ -241,11 +235,11 @@ pub fn prepare(
 /// Me placement after putting `id` in (or taking it out of) Me
 /// (`me-preferences.ts` `placed`).
 pub fn placed(
-    value: &PersonalGroups,
+    value: &MeGroups,
     id: &str,
     personal: bool,
     section: Option<&str>,
-) -> Result<PersonalGroups, String> {
+) -> Result<MeGroups, String> {
     if let Some(section) = section
         && !value.groups.iter().any(|group| group.id == section)
     {
@@ -268,11 +262,7 @@ pub fn placed(
 
 /// `admit`: with a saved record, the next value must still fit its
 /// envelope; with none, one placement always fits.
-pub fn admit(
-    value: &PersonalGroups,
-    entry: Option<&RawKitEntry>,
-    community: &str,
-) -> Result<(), String> {
+pub fn admit(value: &MeGroups, entry: Option<&RawKitEntry>, community: &str) -> Result<(), String> {
     if entry.is_some() && !fits(&record(community, groups_value(GroupsId::Me, value), false)) {
         return Err(ME_CAPACITY.into());
     }
@@ -287,11 +277,11 @@ mod tests {
     const COMMUNITY: &str = "https://community.test";
     const CHANNEL: &str = "11111111-1111-4111-8111-111111111111";
 
-    fn me(groups: &[(&str, &str)], channels: &[&str]) -> PersonalGroups {
-        PersonalGroups {
+    fn me(groups: &[(&str, &str)], channels: &[&str]) -> MeGroups {
+        MeGroups {
             groups: groups
                 .iter()
-                .map(|(id, name)| PersonalGroup {
+                .map(|(id, name)| MeGroup {
                     id: (*id).into(),
                     name: (*name).into(),
                     default_template_id: String::new(),
@@ -313,17 +303,6 @@ mod tests {
         assert_eq!(tag(&record), ME_KIT_TAG);
         let parsed = parse_groups(&record["value"]).unwrap();
         assert_eq!(parsed.channels, [CHANNEL]);
-    }
-
-    #[test]
-    fn personal_groups_never_carry_me_placement() {
-        let mut value = groups_value(GroupsId::Personal, &me(&[], &[]));
-        assert!(value.get("channels").is_none());
-        let record_ok = record(COMMUNITY, value.clone(), false);
-        assert_eq!(tag(&record_ok), KIT_TAG);
-        assert!(coordinate(&record_ok, COMMUNITY).is_ok());
-        value["channels"] = json!([CHANNEL]);
-        assert!(coordinate(&record(COMMUNITY, value, false), COMMUNITY).is_err());
     }
 
     #[test]
@@ -375,10 +354,7 @@ mod tests {
             {"id": "g1", "name": "A", "defaultTemplateId": ""},
             {"id": "g1", "name": "B", "defaultTemplateId": ""}
         ]);
-        assert_eq!(
-            parse_groups(&value).unwrap_err(),
-            "Duplicate personal group"
-        );
+        assert_eq!(parse_groups(&value).unwrap_err(), "Duplicate Me group");
     }
 
     #[test]

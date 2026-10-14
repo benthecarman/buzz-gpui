@@ -2225,7 +2225,7 @@ bundled plugins is `src/bundled/index.ts:60-140`.
 
 | Group (title) | Items (label: Tabler icon) | Condition |
 |---|---|---|
-| *Selected community name* | Profile: `IconUser`; Templates: `IconCopy` (plugin off by default); Custom emoji: `IconMoodSmile`; Personal groups: `IconFolder` | only when a community is selected |
+| *Selected community name* | Profile: `IconUser`; Templates: `IconCopy` (plugin off by default); Custom emoji: `IconMoodSmile` (Personal groups were removed in buzz-app #988) | only when a community is selected |
 | Administration | Membership: `IconUsers` | community selected and the viewer is owner/admin (card visibility) |
 | Integrations | Builderlab: `IconMessageCircle` (no icon declared) | Builderlab plugin enabled |
 | Account | Pair mobile: `IconMessageCircle` | Pairing plugin enabled |
@@ -2336,7 +2336,7 @@ Default section: Profile when a community is selected, otherwise Appearance.
    - Broker activity.
    - Runtime settings: Log level.
    - Caches.
-9. **Plugin cards** (Membership, Custom emoji, Personal groups, Templates, Builderlab,
+9. **Plugin cards** (Membership, Custom emoji, Templates, Builderlab,
    Pair mobile, Hosted communities) render their own components in the same detail pane.
    They use the same `Header`/`SettingsGroup` primitives. Their contents are outside the
    scope of this section.
