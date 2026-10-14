@@ -79,6 +79,8 @@ impl OwnerRelay for FakeRelay {
 
 #[derive(Default)]
 struct FakeAgent {
+    /// Another agent's pubkey and name; the fixture's own without one.
+    identity: Option<(String, String)>,
     published: Mutex<Vec<Template>>,
     /// Publishing fails this many more times.
     reject: Mutex<usize>,
@@ -107,13 +109,17 @@ fn matches(event: &BuzzEvent, filter: &Value) -> bool {
 
 impl AgentActions for FakeAgent {
     fn pubkey(&self) -> String {
-        agent_key()
+        self.identity
+            .as_ref()
+            .map_or_else(agent_key, |(pubkey, _)| pubkey.clone())
     }
     fn owner(&self) -> String {
         owner()
     }
     fn name(&self) -> String {
-        "Codex".into()
+        self.identity
+            .as_ref()
+            .map_or_else(|| "Codex".into(), |(_, name)| name.clone())
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
         locked(&self.published).push(template.clone());
@@ -124,7 +130,7 @@ impl AgentActions for FakeAgent {
         }
         let event = BuzzEvent {
             id: "d".repeat(64),
-            pubkey: agent_key(),
+            pubkey: self.pubkey(),
             kind: template.kind,
             content: template.content,
             tags: template.tags,
@@ -343,8 +349,13 @@ impl Fixture {
 
     /// Every turn the runtime is running.
     fn actives(&self) -> Vec<Arc<Active>> {
-        locked(&self.runtime.inner.entries)
+        // Entries first: the runtime locks a lane, then the entries.
+        let entries: Vec<Arc<Entry>> = locked(&self.runtime.inner.entries)
             .values()
+            .cloned()
+            .collect();
+        entries
+            .iter()
             .flat_map(|entry| {
                 locked(&entry.lanes)
                     .values()
@@ -525,11 +536,160 @@ async fn hands_over_promptly_and_runs_conversations_on_one_server() {
             .tags
             .contains(&vec!["e".into(), root(), String::new(), "reply".into()])
     );
-    // Its server starts in the agent's workspace.
+    // The shared server starts in the default workspace; each thread
+    // carries its agent's own.
     assert_eq!(
         f.fake.spawned("app-server")[0].cwd.as_deref(),
-        Some("/tmp/codex-test")
+        Some("~/.buzz")
     );
+    assert_eq!(started["cwd"], "/tmp/codex-test");
+}
+
+/// A second agent on the same runtime, with its own identity and
+/// publisher, both running.
+fn second(f: &Fixture) -> Arc<FakeAgent> {
+    let other = Arc::new(FakeAgent {
+        identity: Some(("9".repeat(64), "Other".into())),
+        ..Default::default()
+    });
+    f.runtime.set_relays(HashMap::from([
+        (
+            agent_key(),
+            (SCOPE.into(), f.relay.clone() as Arc<dyn OwnerRelay>),
+        ),
+        (
+            "9".repeat(64),
+            (SCOPE.into(), f.relay.clone() as Arc<dyn OwnerRelay>),
+        ),
+    ]));
+    f.runtime.sync(&[agent_key(), "9".repeat(64)]);
+    other
+}
+
+impl Fixture {
+    /// A delivery to `agent` in its own thread.
+    fn delivery_for(&self, agent: &Arc<FakeAgent>, content: &str) -> Run {
+        Run {
+            agent: agent.clone(),
+            ..self.delivery_in(content, &"7".repeat(64))
+        }
+    }
+
+    /// Where the last message with `method` for `thread` was sent, if one
+    /// was.
+    fn last_sent(&self, method: &str, thread: &Value) -> Option<usize> {
+        self.fake
+            .state()
+            .sent
+            .iter()
+            .rposition(|wire| wire["method"] == method && wire["params"]["threadId"] == *thread)
+    }
+}
+
+fn contents_of(agent: &FakeAgent) -> Vec<String> {
+    locked(&agent.published)
+        .iter()
+        .map(|template| template.content.clone())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serves_every_agent_from_one_server_and_routes_each_tool_call_to_its_own_agent() {
+    let f = fixture();
+    let other = second(&f);
+    f.run(f.delivery("@Codex first")).await;
+    f.starts_reach(1).await;
+    f.run(f.delivery_for(&other, "@Other second")).await;
+    f.starts_reach(2).await;
+    assert_eq!(f.fake.spawned("app-server").len(), 1);
+    assert!(
+        f.starts()[1]["params"]["additionalContext"]["buzz.instructions"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Other")
+    );
+    f.complete_turn(1, "FROM OTHER").await;
+    f.complete_turn(0, "FROM CODEX").await;
+    f.published_reach(1).await;
+    until(|| locked(&other.published).len() == 1).await;
+    assert_eq!(f.contents(), ["FROM CODEX"]);
+    assert_eq!(contents_of(&other), ["FROM OTHER"]);
+    until(|| {
+        f.runtime
+            .sessions(&"9".repeat(64))
+            .first()
+            .is_some_and(|view| view.status == "Idle")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stops_a_removed_agents_turn_without_ending_the_server_the_others_share() {
+    let f = fixture();
+    let other = second(&f);
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    f.run(f.delivery_for(&other, "other work")).await;
+    f.starts_reach(2).await;
+    let removed = f.thread_of(1);
+    f.runtime.sync(&[agent_key()]);
+    until(|| f.last_sent("thread/unsubscribe", &removed).is_some()).await;
+    for method in ["turn/interrupt", "thread/backgroundTerminals/clean"] {
+        assert_eq!(f.fake.calls(method)[0]["params"]["threadId"], removed);
+    }
+    assert_eq!(f.fake.state().ended, 0);
+    assert!(f.runtime.sessions(&"9".repeat(64)).is_empty());
+    f.complete_turn(0, "STILL HERE").await;
+    f.published_reach(1).await;
+    assert_eq!(f.contents(), ["STILL HERE"]);
+    assert!(locked(&other.published).is_empty());
+    f.runtime.sync(&[]);
+    until(|| f.fake.state().ended == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ends_a_stopped_agents_leftover_shells_and_lets_it_start_again_only_after_letting_go() {
+    let f = fixture();
+    let other = second(&f);
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    f.run(f.delivery_for(&other, "start a dev server")).await;
+    f.starts_reach(2).await;
+    let thread = f.thread_of(1);
+    f.complete_turn(1, "SERVER RUNNING").await;
+    until(|| locked(&other.published).len() == 1).await;
+    f.run(f.delivery_for(&other, "busy again")).await;
+    f.starts_reach(3).await;
+    let before = f.last_sent("thread/unsubscribe", &thread).unwrap();
+    f.runtime.sync(&[agent_key()]);
+    f.runtime.sync(&[agent_key(), "9".repeat(64)]);
+    f.run(f.delivery_for(&other, "back")).await;
+    f.starts_reach(4).await;
+    let unsubscribed = f.last_sent("thread/unsubscribe", &thread).unwrap();
+    let cleaned = f
+        .last_sent("thread/backgroundTerminals/clean", &thread)
+        .unwrap();
+    let resumed = f.last_sent("thread/resume", &thread).unwrap();
+    assert!(unsubscribed > before);
+    assert!(cleaned > unsubscribed);
+    assert!(resumed > cleaned);
+    assert_eq!(f.fake.state().ended, 0);
+    f.complete_turn(3, "BACK").await;
+    f.complete_turn(0, "STILL HERE").await;
+    f.published_reach(1).await;
+    until(|| locked(&other.published).len() == 2).await;
+    assert_eq!(contents_of(&other), ["SERVER RUNNING", "BACK"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reopens_the_shared_server_after_it_exits() {
+    let f = fixture();
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    f.fake.exit(Some(3), "");
+    f.published_reach(1).await;
+    f.run(f.delivery("again")).await;
+    until(|| f.fake.spawned("app-server").len() == 2).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,12 +1,14 @@
 //! Turns Agents2 deliveries into Codex turns, a port of buzz-app's
 //! `runtime.ts`. Agents2 owns admission and identity; this owns the work
-//! after hand-over. Each agent has one `codex app-server` on the host that
-//! holds it, and each conversation is its own Codex thread. A message that
+//! after hand-over. Every agent on one host shares one `codex app-server`
+//! there, and each conversation is its own Codex thread carrying its
+//! agent's workspace, instructions and tools; tool calls find their agent
+//! by thread and turn. A message that
 //! arrives while its conversation works steers the running turn; one that
 //! arrives while it is idle continues the saved thread. Codex answers with
 //! the shared Buzz tools, signed by the agent's host-held key.
 
-use super::config::{Config, absolute_workspace, valid_workspace};
+use super::config::{Config, DEFAULT_WORKSPACE, absolute_workspace, valid_workspace};
 use super::history::conversation_history;
 use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
 use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
@@ -22,7 +24,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
@@ -151,6 +153,8 @@ struct Saved {
 
 /// The turn a conversation is running.
 struct Active {
+    /// The server this turn runs on; steering must reach the same process.
+    rpc: AppServer,
     thread_id: Mutex<Option<String>>,
     turn_id: Mutex<Option<String>>,
     /// Settles once the turn has started, or failed to.
@@ -192,9 +196,10 @@ struct Lane {
 }
 
 impl Lane {
-    fn new() -> Self {
+    /// A lane whose first turn waits for `after`.
+    fn new(after: Shared<BoxFuture<'static, ()>>) -> Self {
         Self {
-            tail: Mutex::new((0, futures::future::ready(()).boxed().shared())),
+            tail: Mutex::new((0, after)),
             active: Mutex::default(),
         }
     }
@@ -203,13 +208,13 @@ impl Lane {
     }
 }
 
-/// One agent's server and conversations.
+/// One agent's conversations.
 struct Entry {
     pubkey: String,
     storage_key: String,
     abort: Signal,
-    rpc: AppServer,
-    opening: Shared<BoxFuture<'static, Result<(), String>>>,
+    /// Settles once the same agent's previous run has let go of its threads.
+    after: Shared<BoxFuture<'static, ()>>,
     lanes: Mutex<HashMap<String, Arc<Lane>>>,
     /// Bindings in the order they were first saved.
     saved: Mutex<Vec<(String, Saved)>>,
@@ -225,8 +230,20 @@ impl Entry {
     }
 }
 
+/// One host's `codex app-server`, shared by every agent there.
+struct Server {
+    rpc: AppServer,
+    opening: Shared<BoxFuture<'static, Result<(), String>>>,
+    /// Threads this process has loaded, and the agent each belongs to.
+    threads: Mutex<HashMap<String, String>>,
+}
+
 struct Inner {
     entries: Mutex<HashMap<String, Arc<Entry>>>,
+    /// By host: agents on one host share its server.
+    servers: Mutex<HashMap<usize, Arc<Server>>>,
+    /// Stopped agents still letting go of their threads.
+    stopping: Mutex<HashMap<String, Shared<BoxFuture<'static, ()>>>>,
     views: Mutex<HashMap<String, Vec<SessionView>>>,
     /// Each agent's own community, as its owner reads it, and its scope.
     relays: Mutex<HashMap<String, Scoped>>,
@@ -235,7 +252,8 @@ struct Inner {
     next_job: AtomicU64,
 }
 
-/// Every Codex agent's server and conversations. Cheap to clone.
+/// Every Codex agent's conversations, and each host's server. Cheap to
+/// clone.
 #[derive(Clone)]
 pub struct CodexRuntime {
     inner: Arc<Inner>,
@@ -299,6 +317,8 @@ impl CodexRuntime {
         Self {
             inner: Arc::new(Inner {
                 entries: Mutex::default(),
+                servers: Mutex::default(),
+                stopping: Mutex::default(),
                 views: Mutex::default(),
                 relays: Mutex::default(),
                 storage,
@@ -343,6 +363,10 @@ impl CodexRuntime {
     }
 
     fn status(&self, pubkey: &str, key: &str, status: &str, detail: &str) {
+        // A stopped agent's draining turns don't bring its sessions back.
+        if !locked(&self.inner.entries).contains_key(pubkey) {
+            return;
+        }
         {
             let mut views = locked(&self.inner.views);
             let views = views.entry(pubkey.into()).or_default();
@@ -358,8 +382,9 @@ impl CodexRuntime {
         self.notify();
     }
 
-    /// Keeps the servers of `pubkeys`, the agents still running whichever
-    /// community is selected; an agent no longer present ends its own.
+    /// Keeps the conversations of `pubkeys`, the agents still running
+    /// whichever community is selected. An agent no longer present stops
+    /// its turns; a host's server ends once none of its agents is left.
     /// Must run inside tokio.
     pub fn sync(&self, pubkeys: &[String]) {
         let gone: Vec<Arc<Entry>> = {
@@ -374,10 +399,87 @@ impl CodexRuntime {
         };
         for entry in gone {
             entry.abort.abort(ABORTED);
-            drop(entry.rpc.close());
             locked(&self.inner.views).remove(&entry.pubkey);
+            let server = locked(&self.inner.servers)
+                .get(&entry.spawn.host())
+                .cloned();
+            if let Some(server) = server {
+                self.stop(server, entry);
+            }
+        }
+        let hosts: Vec<usize> = locked(&self.inner.entries)
+            .values()
+            .map(|entry| entry.spawn.host())
+            .collect();
+        let idle: Vec<Arc<Server>> = {
+            let mut servers = locked(&self.inner.servers);
+            let idle = servers
+                .iter()
+                .filter(|(host, _)| !hosts.contains(host))
+                .map(|(_, server)| server.clone())
+                .collect();
+            servers.retain(|host, _| hosts.contains(host));
+            idle
+        };
+        for server in idle {
+            drop(server.rpc.close());
         }
         self.notify();
+    }
+
+    /// Other agents share the server, so a stopped agent's turns interrupt
+    /// themselves. Then the shells its finished turns left are ended,
+    /// which its own process used to do by exiting. Until then, the same
+    /// agent starting again waits rather than resuming a thread that is
+    /// still letting go.
+    fn stop(&self, server: Arc<Server>, entry: Arc<Entry>) {
+        let pubkey = entry.pubkey.clone();
+        let tails: Vec<Shared<BoxFuture<'static, ()>>> = locked(&entry.lanes)
+            .values()
+            .map(|lane| locked(&lane.tail).1.clone())
+            .collect();
+        let stopped = async move {
+            futures::future::join_all(tails).await;
+            let threads: Vec<String> = {
+                let mut threads = locked(&server.threads);
+                let owned: Vec<String> = threads
+                    .iter()
+                    .filter(|(_, owner)| **owner == entry.pubkey)
+                    .map(|(thread, _)| thread.clone())
+                    .collect();
+                threads.retain(|_, owner| *owner != entry.pubkey);
+                owned
+            };
+            for thread_id in threads {
+                let _ = server
+                    .rpc
+                    .request(
+                        "thread/backgroundTerminals/clean",
+                        json!({ "threadId": thread_id }),
+                    )
+                    .await;
+            }
+        };
+        let task = tokio::spawn(stopped);
+        let stopped = async move {
+            let _ = task.await;
+        }
+        .boxed()
+        .shared();
+        locked(&self.inner.stopping).insert(pubkey.clone(), stopped.clone());
+        let inner = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            stopped.clone().await;
+            if let Some(inner) = inner.upgrade() {
+                let mut stopping = locked(&inner.stopping);
+                if stopping
+                    .get(&pubkey)
+                    .is_some_and(|current| current.ptr_eq(&stopped))
+                {
+                    stopping.remove(&pubkey);
+                }
+            }
+        });
     }
 
     /// Ends every server. Must run inside tokio.
@@ -395,20 +497,97 @@ impl CodexRuntime {
     }
 
     fn close_all(&self) -> Vec<Shared<BoxFuture<'static, ()>>> {
-        let entries: Vec<Arc<Entry>> = locked(&self.inner.entries)
+        for (_, entry) in locked(&self.inner.entries).drain() {
+            entry.abort.abort(ABORTED);
+        }
+        locked(&self.inner.stopping).clear();
+        // Closing tells the server's listeners, which take this lock.
+        let servers: Vec<Arc<Server>> = locked(&self.inner.servers)
             .drain()
-            .map(|(_, entry)| entry)
+            .map(|(_, server)| server)
             .collect();
-        let closing = entries
-            .iter()
-            .map(|entry| {
-                entry.abort.abort(ABORTED);
-                entry.rpc.close()
-            })
-            .collect();
+        let closing = servers.iter().map(|server| server.rpc.close()).collect();
         locked(&self.inner.views).clear();
         self.notify();
         closing
+    }
+
+    /// The host's server, opened on first use. Threads set their own
+    /// working directory; the process just needs one that exists.
+    fn open(&self, spawn: &Spawner) -> Arc<Server> {
+        let host = spawn.host();
+        let mut servers = locked(&self.inner.servers);
+        if let Some(server) = servers.get(&host) {
+            return server.clone();
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let tool: ToolHandler = {
+            let runtime = weak.clone();
+            Arc::new(move |call: ToolCall| {
+                let runtime = runtime.upgrade();
+                async move {
+                    match runtime {
+                        Some(inner) => CodexRuntime { inner }.tool(call).await,
+                        None => Err("No active Buzz tool for this thread and turn".into()),
+                    }
+                }
+                .boxed()
+            })
+        };
+        let rpc = AppServer::new(Some(tool));
+        let opening = {
+            let (rpc, spawn) = (rpc.clone(), spawn.clone());
+            let task =
+                tokio::spawn(
+                    async move { rpc.open(&spawn, Some(DEFAULT_WORKSPACE.to_string())).await },
+                );
+            async move {
+                task.await
+                    .unwrap_or_else(|_| Err("Codex connection closed".into()))
+            }
+            .boxed()
+            .shared()
+        };
+        let server = Arc::new(Server {
+            rpc,
+            opening,
+            threads: Mutex::default(),
+        });
+        // An exit fails current work and lets the next mention reopen.
+        let closed: Listener = {
+            let (runtime, this) = (weak.clone(), Arc::downgrade(&server));
+            Arc::new(move |wire: &Value| {
+                if wire.get("method").and_then(Value::as_str) == Some("connection/closed")
+                    && let (Some(inner), Some(this)) = (runtime.upgrade(), this.upgrade())
+                {
+                    CodexRuntime { inner }.forget(host, &this);
+                }
+            })
+        };
+        server.rpc.on_message(closed);
+        let failed = {
+            let (runtime, this) = (self.clone(), server.clone());
+            async move {
+                if this.opening.clone().await.is_err() {
+                    runtime.forget(host, &this);
+                    this.rpc.close().await;
+                }
+            }
+        };
+        tokio::spawn(failed);
+        servers.insert(host, server.clone());
+        server
+    }
+
+    /// Drops `server` if it is still its host's.
+    fn forget(&self, host: usize, server: &Arc<Server>) {
+        let mut servers = locked(&self.inner.servers);
+        if servers
+            .get(&host)
+            .is_some_and(|current| Arc::ptr_eq(current, server))
+        {
+            servers.remove(&host);
+        }
     }
 
     fn storage_key(request: &Request) -> String {
@@ -436,86 +615,22 @@ impl CodexRuntime {
                 .collect(),
             _ => Vec::new(),
         };
-        let weak = Arc::downgrade(&self.inner);
-        let entry = Arc::new_cyclic(|this: &Weak<Entry>| {
-            let tool: ToolHandler = {
-                let (runtime, entry) = (weak.clone(), this.clone());
-                Arc::new(move |call: ToolCall| {
-                    let (runtime, entry) = (runtime.upgrade(), entry.upgrade());
-                    async move {
-                        match (runtime, entry) {
-                            (Some(inner), Some(entry)) => {
-                                CodexRuntime { inner }.tool(&entry, call).await
-                            }
-                            _ => Err("No active Buzz tool for this thread and turn".into()),
-                        }
-                    }
-                    .boxed()
-                })
-            };
-            let rpc = AppServer::new(Some(tool));
-            let opening = {
-                let (rpc, spawn, cwd) = (
-                    rpc.clone(),
-                    spawn.clone(),
-                    request.settings.workspace.clone(),
-                );
-                let task = tokio::spawn(async move { rpc.open(&spawn, Some(cwd)).await });
-                async move {
-                    task.await
-                        .unwrap_or_else(|_| Err("Codex connection closed".into()))
-                }
-                .boxed()
-                .shared()
-            };
-            Entry {
-                pubkey: pubkey.clone(),
-                storage_key,
-                abort: Signal::default(),
-                rpc,
-                opening,
-                lanes: Mutex::default(),
-                saved: Mutex::new(saved),
-                spawn: spawn.clone(),
-            }
+        let after = locked(&self.inner.stopping)
+            .get(&pubkey)
+            .cloned()
+            .unwrap_or_else(|| futures::future::ready(()).boxed().shared());
+        let entry = Arc::new(Entry {
+            pubkey: pubkey.clone(),
+            storage_key,
+            abort: Signal::default(),
+            after,
+            lanes: Mutex::default(),
+            saved: Mutex::new(saved),
+            spawn: spawn.clone(),
         });
-        // An exit fails current work and lets the next mention reopen.
-        let closed: Listener = {
-            let (runtime, this) = (weak.clone(), Arc::downgrade(&entry));
-            Arc::new(move |wire: &Value| {
-                if wire.get("method").and_then(Value::as_str) == Some("connection/closed")
-                    && let (Some(inner), Some(this)) = (runtime.upgrade(), this.upgrade())
-                {
-                    CodexRuntime { inner }.forget(&this);
-                }
-            })
-        };
-        entry.rpc.on_message(closed);
-        let failed = {
-            let (runtime, this) = (self.clone(), entry.clone());
-            async move {
-                if this.opening.clone().await.is_err() {
-                    runtime.forget(&this);
-                    this.rpc.close().await;
-                }
-            }
-        };
-        tokio::spawn(failed);
         entries.insert(pubkey, entry.clone());
         entry
     }
-
-    /// Drops `entry` if it is still its agent's.
-    fn forget(&self, entry: &Arc<Entry>) {
-        let mut entries = locked(&self.inner.entries);
-        if entries
-            .get(&entry.pubkey)
-            .is_some_and(|current| Arc::ptr_eq(current, entry))
-        {
-            entries.remove(&entry.pubkey);
-        }
-    }
-
     fn save(&self, request: &Request, entry: &Entry, key: &str, saved: Saved) {
         let value = {
             let mut bindings = locked(&entry.saved);
@@ -609,7 +724,7 @@ impl CodexRuntime {
         let mut lanes = locked(&entry.lanes);
         let lane = lanes
             .entry(key.clone())
-            .or_insert_with(|| Arc::new(Lane::new()))
+            .or_insert_with(|| Arc::new(Lane::new(entry.after.clone())))
             .clone();
         let entry = entry.clone();
         match lane.active() {
@@ -681,7 +796,7 @@ impl CodexRuntime {
             if let Some(turn) = active.turn_id() {
                 params["expectedTurnId"] = json!(turn);
             }
-            entry.rpc.request("turn/steer", params).await?;
+            active.rpc.request("turn/steer", params).await?;
             *locked(&active.reply) = request.clone();
             active.version.fetch_add(1, Ordering::SeqCst);
             Ok::<_, String>(Steered::Done)
@@ -714,7 +829,7 @@ impl CodexRuntime {
         let mut lanes = locked(&entry.lanes);
         let lane = lanes
             .entry(key.clone())
-            .or_insert_with(|| Arc::new(Lane::new()))
+            .or_insert_with(|| Arc::new(Lane::new(entry.after.clone())))
             .clone();
         self.start(request, text, key, lane, entry.clone());
     }
@@ -800,18 +915,24 @@ impl CodexRuntime {
             .map(drop)
     }
 
-    /// Runs one Buzz tool for the turn that called it.
-    async fn tool(&self, entry: &Entry, call: ToolCall) -> Result<String, String> {
-        let active = locked(&entry.lanes)
-            .values()
-            .filter_map(|lane| lane.active())
-            .find(|active| {
-                active.thread_id() == call.thread_id && active.turn_id() == call.turn_id
-            });
+    /// Runs one Buzz tool for the turn that called it, whichever agent's
+    /// it is.
+    async fn tool(&self, call: ToolCall) -> Result<String, String> {
+        let entries: Vec<Arc<Entry>> = locked(&self.inner.entries).values().cloned().collect();
+        let found = entries.into_iter().find_map(|entry| {
+            let active = locked(&entry.lanes)
+                .values()
+                .filter_map(|lane| lane.active())
+                .find(|active| {
+                    active.thread_id() == call.thread_id && active.turn_id() == call.turn_id
+                })?;
+            Some((entry, active))
+        });
         let known = tools()
             .iter()
             .any(|tool| tool.get("name").and_then(Value::as_str) == Some(call.tool.as_str()));
-        let Some(active) = active.filter(|_| call.namespace.as_deref() == Some("buzz") && known)
+        let Some((entry, active)) =
+            found.filter(|_| call.namespace.as_deref() == Some("buzz") && known)
         else {
             return Err("No active Buzz tool for this thread and turn".into());
         };
@@ -978,7 +1099,9 @@ impl CodexRuntime {
         };
         let (ready_sender, ready) = oneshot::channel::<Result<(), String>>();
         let ready_sender = Mutex::new(Some(ready_sender));
+        let server = self.open(&entry.spawn);
         let active = Arc::new(Active {
+            rpc: server.rpc.clone(),
             thread_id: Mutex::default(),
             turn_id: Mutex::default(),
             ready: async move { ready.await.unwrap_or_else(|_| Err(TURN_ENDED.into())) }
@@ -1067,10 +1190,10 @@ impl CodexRuntime {
                 }
             })
         };
-        let listening = entry.rpc.on_message(listener);
-        let rpc = entry.rpc.clone();
+        let listening = server.rpc.on_message(listener);
+        let rpc = server.rpc.clone();
         let outcome = async {
-            entry.opening.clone().await?;
+            server.opening.clone().await?;
             signal.check()?;
             // The host expands ~/.buzz and makes it; Codex needs an
             // absolute path rather than shell-style home notation.
@@ -1204,6 +1327,7 @@ impl CodexRuntime {
                 .ok_or("Codex did not start a thread")?
                 .to_string();
             *locked(&active.thread_id) = Some(thread_id.clone());
+            locked(&server.threads).insert(thread_id.clone(), pubkey.clone());
             signal.check()?;
             rpc.request(
                 "thread/name/set",
@@ -1289,17 +1413,19 @@ impl CodexRuntime {
         }
         .await;
         if let Err(error) = outcome {
-            active.finished.store(true, Ordering::SeqCst);
+            let ended = active.finished.swap(true, Ordering::SeqCst);
             if let Some(ready) = locked(&ready_sender).take() {
                 let _ = ready.send(Err(error.clone()));
             }
             let steering = locked(&active.steering).clone();
             steering.await;
-            if let (true, Some(thread_id), Some(turn_id), false) = (
+            // Other agents share the server, so even a stopped agent
+            // interrupts its turn rather than ending the process.
+            if let (true, false, Some(thread_id), Some(turn_id)) = (
                 signal.aborted(),
+                ended,
                 active.thread_id(),
                 active.turn_id(),
-                entry.abort.aborted(),
             ) {
                 let stopped = async {
                     rpc.request(
@@ -1330,7 +1456,6 @@ impl CodexRuntime {
         // ignores instruction and config overrides while a client is
         // subscribed.
         if let Some(thread_id) = active.thread_id()
-            && !entry.abort.aborted()
             && rpc
                 .request("thread/unsubscribe", json!({ "threadId": thread_id }))
                 .await

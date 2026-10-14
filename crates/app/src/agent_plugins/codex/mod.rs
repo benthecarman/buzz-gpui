@@ -1,7 +1,8 @@
 //! Codex agents, buzz-app's bundled `buzz.codex` plugin: an Agents2 type
 //! whose agents run Codex on the host that holds them, so they run on
-//! remote buzzd hosts as well as this computer. Each agent has one
-//! `codex app-server`; each conversation is one Codex thread, which keeps
+//! remote buzzd hosts as well as this computer. The agents on one host
+//! share one `codex app-server`; each conversation is one Codex thread,
+//! carrying its agent's workspace, instructions and tools, which keeps
 //! Codex's own coding prompt and tools. Codex acts in Buzz with the shared
 //! Buzz tools as dynamic tools. Compiled in: there is no plugin loading.
 
@@ -91,9 +92,9 @@ impl Codex {
             .map(|global| global.0.clone())
     }
 
-    /// Agents of this type that are running keep their servers: agents
-    /// that stop running end theirs; switching communities or a reconnect
-    /// does not.
+    /// Agents of this type that are running keep their conversations:
+    /// agents that stop running stop their turns, and a host's last one
+    /// ends its server; switching communities or a reconnect does not.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let _runtime = Runtime::handle(cx).enter();
         // Turning the plugin off ends every server, as unloading it does in
