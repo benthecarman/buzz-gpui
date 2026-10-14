@@ -308,6 +308,7 @@ fn creates_a_stream_in_relay_tag_order() {
             description: " Notes ".into(),
             private: true,
             ttl: None,
+            labels: Vec::new(),
         },
         CHANNEL,
     )
@@ -328,6 +329,7 @@ fn creates_a_stream_in_relay_tag_order() {
         description: String::new(),
         private: false,
         ttl: None,
+        labels: Vec::new(),
     };
     let draft = create(&bare, CHANNEL).unwrap();
     assert_eq!(draft.tags.len(), 4, "no empty about");
@@ -350,6 +352,7 @@ fn creates_a_stream_in_relay_tag_order() {
     let temporary = NewChannel {
         description: "Notes".into(),
         ttl: Some(DEFAULT_TEMPORARY_TTL),
+        labels: Vec::new(),
         ..bare.clone()
     };
     let draft = create(&temporary, CHANNEL).unwrap();
@@ -358,6 +361,7 @@ fn creates_a_stream_in_relay_tag_order() {
     for ttl in [0, 2_147_483_648] {
         let invalid = NewChannel {
             ttl: Some(ttl),
+            labels: Vec::new(),
             ..bare.clone()
         };
         assert!(create(&invalid, CHANNEL).is_err());
@@ -394,6 +398,7 @@ fn details_edits_send_only_changed_visibility_and_ttl() {
         description: "Chat".into(),
         private: false,
         ttl: None,
+        labels: None,
     };
     let renamed = DetailsDraft {
         name: "lobby".into(),
@@ -424,6 +429,64 @@ fn details_edits_send_only_changed_visibility_and_ttl() {
         ..base.clone()
     };
     assert!(edit_details(CHANNEL, &leading, &base, 1).is_err());
+}
+
+#[test]
+fn details_edits_replace_or_clear_labels_only_when_they_change() {
+    let mut channel = Channel::new();
+    channel.meta.push(vec!["t".into(), "for-you".into()]);
+    let state = channel.state().unwrap();
+    assert_eq!(state.labels, ["for-you"]);
+    let base = state.details(&channel.signer.viewer_hex()).unwrap().draft;
+    assert_eq!(base.labels.as_deref(), Some(&["for-you".to_owned()][..]));
+    // Unchanged (or unset) labels send no `t` tags: the relay keeps them.
+    let same = edit_details(CHANNEL, &base, &base, 1).unwrap();
+    assert!(same.tags.iter().all(|tag| tag[0] != "t"));
+    let unset = DetailsDraft {
+        labels: None,
+        ..base.clone()
+    };
+    assert!(details_confirmed(&state, &unset));
+    let relabeled = DetailsDraft {
+        labels: Some(vec!["b".into(), "a".into(), "b".into()]),
+        ..base.clone()
+    };
+    let event = edit_details(CHANNEL, &relabeled, &base, 1).unwrap();
+    assert_eq!(event.tags[3..], [vec!["t", "b"], vec!["t", "a"]]);
+    assert!(!details_confirmed(&state, &relabeled));
+    assert!(labels_unsupported(&relabeled, &base, false));
+    assert!(!labels_unsupported(&relabeled, &base, true));
+    assert!(!labels_unsupported(&base, &base, false));
+    let cleared = DetailsDraft {
+        labels: Some(Vec::new()),
+        ..base.clone()
+    };
+    let event = edit_details(CHANNEL, &cleared, &base, 1).unwrap();
+    assert_eq!(event.tags[3..], [vec!["t", ""]]);
+    let bad = DetailsDraft {
+        labels: Some(vec!["stream".into()]),
+        ..base
+    };
+    assert!(edit_details(CHANNEL, &bad, &unset, 1).is_err());
+}
+
+#[test]
+fn creation_appends_label_tags_last() {
+    let channel = NewChannel {
+        name: "ops".into(),
+        description: String::new(),
+        private: false,
+        ttl: Some(60),
+        labels: vec!["for-you".into(), "for-you".into()],
+    };
+    let draft = create(&channel, CHANNEL).unwrap();
+    assert_eq!(draft.tags[4], vec!["ttl", "60"]);
+    assert_eq!(draft.tags[5..], [vec!["t", "for-you"]]);
+    let reserved = NewChannel {
+        labels: vec!["dm".into()],
+        ..channel
+    };
+    assert!(create(&reserved, CHANNEL).is_err());
 }
 
 #[test]
@@ -472,6 +535,7 @@ fn sessions_rename_with_their_name_alone() {
         description: crate::discovery::SESSION_CHANNEL_DESCRIPTION.into(),
         private: true,
         ttl: None,
+        labels: None,
     };
     let renamed = DetailsDraft {
         name: "Fix the tests".into(),

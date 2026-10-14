@@ -62,6 +62,9 @@ pub struct ChannelCreationInput {
     pub visibility: CreationVisibility,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u64>,
+    /// NIP-CL labels to create the channel with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<ChannelSetup>,
 }
@@ -78,6 +81,13 @@ impl ChannelCreationInput {
                 CreationVisibility::Open
             },
             ttl_seconds: channel.ttl,
+            labels: channel
+                .labels
+                .iter()
+                .enumerate()
+                .filter(|(at, label)| !channel.labels[..*at].contains(label))
+                .map(|(_, label)| label.clone())
+                .collect(),
             setup: setup.filter(|setup| !setup.is_empty()),
         }
     }
@@ -88,6 +98,7 @@ impl ChannelCreationInput {
             description: self.description.clone().unwrap_or_default(),
             private: self.visibility == CreationVisibility::Private,
             ttl: self.ttl_seconds,
+            labels: self.labels.clone(),
         }
     }
 
@@ -109,6 +120,7 @@ impl ChannelCreationInput {
                     .into(),
             );
         }
+        crate::channel_labels::label_tags(&self.labels)?;
         let Some(setup) = &self.setup else {
             return Ok(());
         };
@@ -256,7 +268,28 @@ pub fn pending_creation(op: &Operation) -> Option<PendingCreation> {
     if pair(3, "channel_type")? != "stream" || !is_uuid(id) || canonical_name(name).is_empty() {
         return None;
     }
-    let optional = &tags[4..];
+    // Label `t` tags close the command.
+    let first_label = tags
+        .iter()
+        .position(|tag| tag.first().map(String::as_str) == Some("t"))
+        .unwrap_or(tags.len())
+        .max(4);
+    let (optional, label_tags) = tags[4..].split_at(first_label - 4);
+    let labels: Vec<String> = label_tags
+        .iter()
+        .map(|tag| tag.get(1).cloned().unwrap_or_default())
+        .collect();
+    if label_tags
+        .iter()
+        .any(|tag| tag.len() != 2 || tag[0] != "t" || !crate::channel_labels::valid_label(&tag[1]))
+        || labels.len() > crate::channel_labels::MAX_CHANNEL_LABELS
+        || labels
+            .iter()
+            .enumerate()
+            .any(|(at, label)| labels[..at].contains(label))
+    {
+        return None;
+    }
     let names: Vec<&str> = optional
         .iter()
         .map(|tag| tag.first().map_or("", String::as_str))
@@ -291,6 +324,7 @@ pub fn pending_creation(op: &Operation) -> Option<PendingCreation> {
             description: description.map(str::to_owned),
             visibility,
             ttl_seconds,
+            labels,
             setup: None,
         },
     })

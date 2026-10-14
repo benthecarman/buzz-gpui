@@ -108,6 +108,7 @@ async fn creates_edits_and_administers_a_channel() {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();
@@ -230,6 +231,7 @@ async fn previews_joins_and_leaves_a_public_channel() {
             description: String::new(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();
@@ -499,6 +501,7 @@ async fn owners_delete_a_channel() {
             description: String::new(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();
@@ -546,6 +549,7 @@ async fn an_agents_owner_removes_it_and_deletes_its_channel() {
             description: String::new(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();
@@ -570,6 +574,7 @@ async fn an_agents_owner_removes_it_and_deletes_its_channel() {
             description: String::new(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

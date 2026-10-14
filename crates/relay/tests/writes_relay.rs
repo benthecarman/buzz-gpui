@@ -92,6 +92,7 @@ async fn writes_follow_participation_provenance_and_reports() {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

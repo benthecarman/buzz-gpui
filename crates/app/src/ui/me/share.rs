@@ -1866,6 +1866,7 @@ mod tests {
                 description: buzz_relay_client::session::session_description(None),
                 private: true,
                 ttl: None,
+                labels: None,
             },
             can_edit: true,
         };

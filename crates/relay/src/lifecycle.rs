@@ -141,6 +141,8 @@ pub struct ChannelState {
     pub visibility: Option<Visibility>,
     /// Absent means the channel is permanent.
     pub ttl: Option<u64>,
+    /// NIP-CL labels: the `t` tags after the type.
+    pub labels: Vec<String>,
     /// Members and their 39002 roles.
     pub roles: BTreeMap<String, MemberRole>,
     /// The 39000 and 39002, for discovery.
@@ -334,6 +336,8 @@ impl ChannelState {
             about: exact_tag(metadata, "about")?.unwrap_or_default().to_owned(),
             visibility: channel_visibility(metadata),
             ttl: parse_ttl(exact_tag(metadata, "ttl")?)?,
+            labels: crate::channel_labels::identity(metadata.tags.iter().map(|tag| tag.as_slice()))
+                .labels,
             roles,
             metadata: metadata.clone(),
             roster: roster.clone(),
@@ -448,6 +452,7 @@ impl ChannelState {
                 description: self.about.clone(),
                 private: visibility == Visibility::Private,
                 ttl: self.ttl,
+                labels: Some(self.labels.clone()),
             },
             can_edit: self.channel_type != StateType::Dm
                 && !self.archived
@@ -739,10 +744,13 @@ pub struct NewChannel {
     /// Seconds without activity before the relay cleans the channel up;
     /// `None` is ongoing.
     pub ttl: Option<u64>,
+    /// NIP-CL labels to create the channel with.
+    pub labels: Vec<String>,
 }
 
 /// A 9007 stream for the outbox, with the client-chosen `id`. Tag order is
-/// enforced by the relay: `h, name, visibility, channel_type[, about][, ttl]`.
+/// enforced by the relay: `h, name, visibility, channel_type[, about][,
+/// ttl]`, then any label `t` tags.
 pub fn create(channel: &NewChannel, id: &str) -> Result<Draft, LifecycleError> {
     let id = channel_id(id)?;
     let name = canonical_name(&channel.name);
@@ -750,6 +758,7 @@ pub fn create(channel: &NewChannel, id: &str) -> Result<Draft, LifecycleError> {
     let about = channel.description.trim();
     validate_about(about)?;
     validate_ttl(channel.ttl)?;
+    let labels = crate::channel_labels::label_tags(&channel.labels).map_err(error)?;
     let mut tags = vec![
         vec!["h".to_owned(), id.to_owned()],
         vec!["name".to_owned(), name],
@@ -765,6 +774,7 @@ pub fn create(channel: &NewChannel, id: &str) -> Result<Draft, LifecycleError> {
     if let Some(ttl) = channel.ttl {
         tags.push(vec!["ttl".to_owned(), ttl.to_string()]);
     }
+    tags.extend(labels);
     Ok(Draft {
         kind: kinds::CREATE_CHANNEL,
         content: String::new(),
@@ -799,6 +809,18 @@ pub struct DetailsDraft {
     pub private: bool,
     /// `None` is permanent.
     pub ttl: Option<u64>,
+    /// NIP-CL labels. `None` leaves the relay's set unchanged; empty
+    /// clears it.
+    pub labels: Option<Vec<String>>,
+}
+
+impl DetailsDraft {
+    /// The labels change from `base`'s.
+    fn relabels(&self, base: &DetailsDraft) -> bool {
+        self.labels.as_ref().is_some_and(|labels| {
+            !crate::channel_labels::same_labels(labels, base.labels.as_deref().unwrap_or_default())
+        })
+    }
 }
 
 /// A details save the session owns (`DetailsAttempt`). It outlives the
@@ -838,6 +860,7 @@ pub fn validate_details(draft: &DetailsDraft, base: &DetailsDraft) -> Result<(),
         && !draft.description.is_empty()
     {
         if draft.description != base.description
+            || draft.relabels(base)
             || draft.private != base.private
             || draft.ttl != base.ttl
         {
@@ -846,10 +869,21 @@ pub fn validate_details(draft: &DetailsDraft, base: &DetailsDraft) -> Result<(),
         checked.description.clear();
     }
     let errors = draft_errors(&checked.name, &checked.description, checked.ttl);
-    match errors.name.or(errors.description).or(errors.lifetime) {
-        Some(message) => Err(error(message)),
+    if let Some(message) = errors.name.or(errors.description).or(errors.lifetime) {
+        return Err(error(message));
+    }
+    match &draft.labels {
+        Some(labels) => crate::channel_labels::label_tags(labels)
+            .map(drop)
+            .map_err(error),
         None => Ok(()),
     }
+}
+
+/// Saving these details changes the labels on a relay that would drop
+/// them (`channelIdentityUnsupported`).
+pub fn labels_unsupported(draft: &DetailsDraft, base: &DetailsDraft, supported: bool) -> bool {
+    !supported && draft.relabels(base)
 }
 
 /// `detailsTemplate`: name and about always; visibility and ttl only when
@@ -893,6 +927,15 @@ pub fn edit_details(
             draft.ttl.map(|ttl| ttl.to_string()).unwrap_or_default(),
         ]);
     }
+    // NIP-CL: `t` tags replace the set; one empty `t` clears it; none
+    // keeps it.
+    if let Some(labels) = draft.labels.as_ref().filter(|_| draft.relabels(base)) {
+        if labels.is_empty() {
+            tags.push(vec!["t".to_owned(), String::new()]);
+        } else {
+            tags.extend(crate::channel_labels::label_tags(labels).map_err(error)?);
+        }
+    }
     Ok(EventTemplate {
         kind: kinds::EDIT_CHANNEL,
         created_at: now,
@@ -912,6 +955,10 @@ pub fn details_confirmed(state: &ChannelState, draft: &DetailsDraft) -> bool {
                 Visibility::Public
             })
         && state.ttl == draft.ttl
+        && draft
+            .labels
+            .as_ref()
+            .is_none_or(|labels| crate::channel_labels::same_labels(labels, &state.labels))
 }
 
 // ---------------------------------------------------------------------------

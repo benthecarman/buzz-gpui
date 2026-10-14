@@ -450,6 +450,10 @@ async fn start(
     admitted: &mut Admitted,
 ) -> Result<Progress, String> {
     input.check()?;
+    // A relay without NIP-CL drops label tags: refuse before any write.
+    if !input.labels.is_empty() && !session.channel_labels() {
+        return Err(crate::channel_labels::UNSUPPORTED.into());
+    }
     if let Some(setup) = &input.setup {
         if !setup.canvas.is_empty() && crate::canvas::too_large(&setup.canvas) {
             return Err("Canvas writing is unavailable".into());

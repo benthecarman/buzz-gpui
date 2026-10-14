@@ -21,7 +21,7 @@ const NAME_LIMIT: usize = 256;
 
 pub(super) enum Dialog {
     CreateSection {
-        channel: ChannelSummary,
+        channel: Box<ChannelSummary>,
         input: Entity<InputState>,
         /// Chosen on the first submit and kept for retries.
         id: Option<String>,
@@ -63,7 +63,7 @@ impl Dialog {
                 },
             );
         Self::CreateSection {
-            channel,
+            channel: Box::new(channel),
             input,
             id: None,
             blocked: false,

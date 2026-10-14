@@ -97,6 +97,7 @@ async fn saves_lists_runs_and_deletes_a_workflow() {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

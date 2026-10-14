@@ -79,6 +79,7 @@ async fn shared_channel(alice: &Session, bob: &Session, name: &str) -> String {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

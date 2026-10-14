@@ -1500,6 +1500,7 @@ mod tests {
                 description: "Chat".into(),
                 private: false,
                 ttl: None,
+                labels: None,
             },
             can_edit,
         }

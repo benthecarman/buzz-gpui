@@ -55,6 +55,7 @@ impl Fixture {
                 description: "Created by a Canvas test".into(),
                 private: false,
                 ttl: None,
+                labels: Vec::new(),
             })
             .await
             .unwrap()

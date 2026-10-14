@@ -99,6 +99,13 @@ pub struct ChannelSummary {
     /// (`messagePreview`). Filled by the session from its windows, live
     /// tails and heads; discovery leaves it empty.
     pub preview: Option<String>,
+    /// Relay-published NIP-CL labels: grouping, never trust.
+    pub labels: Vec<String>,
+    /// Relay-written creator (NIP-CL `P`), the 9007 signer. Ownership can
+    /// move later.
+    pub creator: Option<String>,
+    /// Relay-written creation time in Unix seconds.
+    pub created_at: Option<u64>,
 }
 
 /// Which version of each channel's roster a pass started from, by event id.
@@ -685,6 +692,11 @@ impl DiscoveryState {
         let parent = event
             .and_then(|event| session_metadata(tag(event, "about")))
             .flatten();
+        let identity = event
+            .map(|event| {
+                crate::channel_labels::identity(event.tags.iter().map(|tag| tag.as_slice()))
+            })
+            .unwrap_or_default();
         Some(ChannelSummary {
             id: id.to_owned(),
             name: self.name(id),
@@ -708,6 +720,9 @@ impl DiscoveryState {
                 sorted_unique(roster_members(roster).filter(|member| *member != self.viewer))
             }),
             preview: None,
+            labels: identity.labels,
+            creator: identity.creator,
+            created_at: identity.created_at,
         })
     }
 

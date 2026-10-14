@@ -136,6 +136,9 @@ pub struct RelayInfo {
     /// The relay's own signing key (NIP-11 `self`).
     pub authority: String,
     pub supports_channel_creation: bool,
+    /// NIP-11 `supported_extensions` lists `nip-cl`: the relay keeps
+    /// channel labels and answers label lookups.
+    pub channel_labels: bool,
     /// NIP-11 `read_state_snapshot`: read state can be fetched completely.
     pub read_state_snapshot: Option<SnapshotDescriptor>,
 }
@@ -2878,6 +2881,14 @@ fn relay_info(info: &serde_json::Value) -> Result<RelayInfo, String> {
             .get("supported_nips")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|nips| nips.iter().any(|nip| nip.as_u64() == Some(29))),
+        channel_labels: info
+            .get("supported_extensions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|extensions| {
+                extensions
+                    .iter()
+                    .any(|extension| extension.as_str() == Some("nip-cl"))
+            }),
         read_state_snapshot: SnapshotDescriptor::from_nip11(info),
     })
 }

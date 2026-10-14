@@ -249,6 +249,7 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         },
         Some(ChannelSetup {
             agents: vec![bob.clone()],
@@ -302,6 +303,7 @@ async fn creates_a_channel_with_its_setup_and_retires_the_receipt() {
             description: String::new(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         },
         Some(ChannelSetup {
             canvas: "# Goal".into(),
@@ -347,6 +349,7 @@ async fn retries_a_creation_restored_after_a_restart() {
         description: String::new(),
         private: false,
         ttl: None,
+        labels: Vec::new(),
     };
     let mut progress = Progress::new(ChannelCreationInput::from_new(
         &channel,

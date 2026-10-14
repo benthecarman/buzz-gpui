@@ -458,6 +458,7 @@ impl Session {
                                     description: String::new(),
                                     private,
                                     ttl: None,
+                                    labels: Vec::new(),
                                 },
                                 id,
                             )

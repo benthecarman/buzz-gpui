@@ -232,6 +232,7 @@ async fn links_a_session_into_a_channel_for_selected_people() {
             description: String::new(),
             private: true,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

@@ -295,6 +295,7 @@ impl NewChannelDialog {
                     description: draft.description.trim().to_owned(),
                     private: self.private,
                     ttl: self.temporary.then_some(self.temporary_ttl),
+                    labels: Vec::new(),
                 };
                 ChannelCreationInput::from_new(&channel, setup)
             }

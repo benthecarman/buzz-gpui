@@ -102,6 +102,7 @@ async fn mentions_outsiders_as_references_or_invites_them() {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

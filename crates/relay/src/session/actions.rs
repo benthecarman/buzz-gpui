@@ -62,6 +62,8 @@ enum Need {
 
 /// Public channels read for a name search (`PUBLIC_CHANNEL_PAGE`).
 const PUBLIC_CHANNEL_PAGE: usize = 500;
+/// One creator's channels with one label: a small answer.
+const LABELED_CHANNEL_PAGE: usize = 100;
 /// Public channel matches kept per search.
 const PUBLIC_CHANNEL_MATCHES: usize = 8;
 
@@ -353,8 +355,14 @@ impl Session {
         let published = Arc::new(AtomicBool::new(false));
         let (ops, id, flag) = (self.ops(), channel.to_owned(), published.clone());
         let saving = draft.clone();
+        let labels = self
+            .snapshot()
+            .borrow()
+            .relay
+            .as_ref()
+            .is_some_and(|relay| relay.channel_labels);
         let result = self
-            .run(async move { ops.save_details(&id, version, saving, &flag).await })
+            .run(async move { ops.save_details(&id, version, saving, labels, &flag).await })
             .await;
         match result {
             Err(_) if published.load(Ordering::SeqCst) => {
@@ -440,6 +448,10 @@ impl Session {
     /// Creates a stream through the outbox and returns its id once the
     /// viewer is confirmed as its owner.
     pub async fn create_channel(&self, channel: NewChannel) -> Result<String, String> {
+        // A relay without NIP-CL drops label tags: refuse before any write.
+        if !channel.labels.is_empty() && !self.channel_labels() {
+            return Err(crate::channel_labels::UNSUPPORTED.into());
+        }
         let ops = self.ops();
         self.run(async move { ops.create(channel, None).await })
             .await
@@ -453,6 +465,9 @@ impl Session {
         channel: NewChannel,
         id: String,
     ) -> Result<String, String> {
+        if !channel.labels.is_empty() && !self.channel_labels() {
+            return Err(crate::channel_labels::UNSUPPORTED.into());
+        }
         let ops = self.ops();
         self.run(async move { ops.create(channel, Some(id)).await })
             .await
@@ -554,6 +569,82 @@ impl Session {
         self.run(async move {
             let ctx = ops.context().await?;
             ops.resolve(&ctx, ids).await
+        })
+        .await
+    }
+
+    /// The relay keeps channel labels (NIP-11 `nip-cl`).
+    pub(super) fn channel_labels(&self) -> bool {
+        self.snapshot()
+            .borrow()
+            .relay
+            .as_ref()
+            .is_some_and(|relay| relay.channel_labels)
+    }
+
+    /// The channels `creator` made with `label`, oldest first
+    /// (`findLabeled`, NIP-CL). Each match must be relay-signed and carry
+    /// that creator and label; matches are resolved but never join the
+    /// sidebar list. Refused on a relay without labels, which would ignore
+    /// the filter and make "none found" a guess.
+    pub async fn find_labeled(
+        &self,
+        creator: &str,
+        label: &str,
+    ) -> Result<Vec<ChannelSummary>, String> {
+        if !self.channel_labels() {
+            return Err(crate::channel_labels::UNSUPPORTED.into());
+        }
+        if creator.len() != 64
+            || !creator
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err("Choose a valid channel creator.".into());
+        }
+        crate::channel_labels::label_tags(&[label.to_owned()])?;
+        let (ops, creator, label) = (self.ops(), creator.to_owned(), label.to_owned());
+        self.run(async move {
+            let ctx = ops.context().await?;
+            let page = Filter::from_iter([
+                ("kinds".to_owned(), json!([kinds::CHANNEL_METADATA])),
+                ("authors".to_owned(), json!([ctx.relay])),
+                ("#P".to_owned(), json!([creator])),
+                ("#t".to_owned(), json!([label])),
+                ("limit".to_owned(), json!(LABELED_CHANNEL_PAGE)),
+            ]);
+            let events = read(&ctx, vec![page]).await?;
+            // A label alone proves nothing; the relay-written creator does.
+            let mut ids: Vec<String> = Vec::new();
+            for event in &events {
+                let identity =
+                    crate::channel_labels::identity(event.tags.iter().map(|tag| tag.as_slice()));
+                if let Some(id) = event.tag("d")
+                    && event.kind_u16() == kinds::CHANNEL_METADATA
+                    && event.pubkey_hex() == ctx.relay
+                    && identity.creator.as_deref() == Some(creator.as_str())
+                    && identity.labels.contains(&label)
+                    && !ids.iter().any(|seen| seen == id)
+                {
+                    ids.push(id.to_owned());
+                }
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut found: Vec<ChannelSummary> = ops
+                .resolve(&ctx, ids)
+                .await?
+                .into_iter()
+                .filter(|channel| {
+                    channel.creator.as_deref() == Some(creator.as_str())
+                        && channel.labels.contains(&label)
+                })
+                .collect();
+            found.sort_by(|a, b| {
+                crate::channel_labels::compare_age((&a.id, a.created_at), (&b.id, b.created_at))
+            });
+            Ok(found)
         })
         .await
     }
@@ -923,10 +1014,15 @@ impl Ops {
         channel: &str,
         version: EventId,
         draft: DetailsDraft,
+        labels: bool,
         published: &AtomicBool,
     ) -> Result<(), String> {
         let ctx = self.context().await?;
         let details = self.authorize_details(&ctx, channel, version).await?;
+        // A relay without NIP-CL drops label tags: refuse before signing.
+        if lifecycle::labels_unsupported(&draft, &details.draft, labels) {
+            return Err(crate::channel_labels::UNSUPPORTED.into());
+        }
         let template = lifecycle::edit_details(channel, &draft, &details.draft, now())
             .map_err(|error| error.to_string())?;
         let event = sign(&ctx.identity, template)?;

@@ -180,6 +180,7 @@ async fn converts_heic_and_video_and_sends_them() {
             description: "Created by a test".into(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         })
         .await
         .unwrap();

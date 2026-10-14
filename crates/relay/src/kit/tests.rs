@@ -335,6 +335,7 @@ fn creation_input_checks_details_and_setup() {
         description: " ".into(),
         private: true,
         ttl: Some(3600),
+        labels: Vec::new(),
     };
     let input = ChannelCreationInput::from_new(&channel, Some(ChannelSetup::default()));
     assert_eq!(input.name, "launch");
@@ -371,6 +372,7 @@ fn receipts_round_trip_within_their_budget() {
             description: String::new(),
             private: false,
             ttl: None,
+            labels: Vec::new(),
         },
         None,
     );
@@ -407,6 +409,7 @@ fn creations_restore_only_from_this_apps_command_shape() {
         description: "Plans".into(),
         private: false,
         ttl: Some(600),
+        labels: Vec::new(),
     };
     let draft = crate::lifecycle::create(&channel, id).unwrap();
     let mut tags = draft.tags;
@@ -429,9 +432,21 @@ fn creations_restore_only_from_this_apps_command_shape() {
     let mut reordered = tags.clone();
     reordered.swap(4, 5);
     assert!(pending_creation(&op(reordered)).is_none());
-    let mut session = tags;
+    let mut session = tags.clone();
     session[4][1] = "Buzz session (x)".into();
     assert!(pending_creation(&op(session)).is_none());
+    // Label tags close the command (#964).
+    let mut labeled = tags.clone();
+    labeled.push(vec!["t".into(), "for-you".into()]);
+    let pending = pending_creation(&op(labeled.clone())).unwrap();
+    assert_eq!(pending.input.labels, ["for-you"]);
+    assert_eq!(pending.input.ttl_seconds, Some(600));
+    let mut twice = labeled.clone();
+    twice.push(vec!["t".into(), "for-you".into()]);
+    assert!(pending_creation(&op(twice)).is_none());
+    let mut reserved = tags;
+    reserved.push(vec!["t".into(), "stream".into()]);
+    assert!(pending_creation(&op(reserved)).is_none());
 }
 
 fn text_head(owner: &str, bytes: u64) -> Value {
