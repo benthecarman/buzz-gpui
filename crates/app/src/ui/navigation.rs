@@ -19,8 +19,13 @@ actions!(
         GoForward,
         /// Mod+Shift+A : the Messages page.
         GoHome,
-        /// Mod+W : closes the channel's shown tab, else the window.
+        /// Mod+W : closes the shown tab of the pane holding focus; never
+        /// the window.
         CloseTab,
+        /// Ctrl+Tab : the next tab of the pane holding focus.
+        NextTab,
+        /// Ctrl+Shift+Tab : the previous tab.
+        PreviousTab,
         /// Mod+K : Search Buzz.
         SearchBuzz,
         /// Mod+F : Search this conversation.
@@ -256,7 +261,17 @@ pub fn init(cx: &mut App) -> UnboundedSender<Arrival> {
     cx.on_action(|_: &GoBack, cx| with_workspace(cx, Workspace::go_back));
     cx.on_action(|_: &GoForward, cx| with_workspace(cx, Workspace::go_forward));
     cx.on_action(|_: &GoHome, cx| with_workspace(cx, Workspace::go_home));
-    cx.on_action(|_: &CloseTab, cx| with_workspace(cx, Workspace::close_tab_or_window));
+    cx.on_action(|_: &CloseTab, cx| with_workspace(cx, Workspace::close_active_tab));
+    cx.on_action(|_: &NextTab, cx| {
+        with_workspace(cx, |workspace, window, cx| {
+            workspace.step_tab(1, window, cx)
+        })
+    });
+    cx.on_action(|_: &PreviousTab, cx| {
+        with_workspace(cx, |workspace, window, cx| {
+            workspace.step_tab(-1, window, cx)
+        })
+    });
     // Bound app-wide, so they work with nothing in the window focused.
     cx.on_action(|_: &SearchBuzz, cx| with_workspace(cx, Workspace::search_buzz));
     cx.on_action(|_: &SearchConversation, cx| with_workspace(cx, Workspace::search_conversation));

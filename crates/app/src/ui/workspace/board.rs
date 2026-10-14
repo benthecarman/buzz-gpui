@@ -346,10 +346,9 @@ impl Workspace {
         }
     }
 
-    /// Mod+W: the shown channel tab closes; with none, the window does.
-    /// Not while a dialog is open: the workspace's, a Settings dialog, or
+    /// A dialog owns the keyboard: the workspace's, a Settings dialog, or
     /// any dialog or media viewer holding focus.
-    pub fn close_tab_or_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn dialog_open(&self, window: &Window, cx: &App) -> bool {
         let settings_modal = self.page == Page::SETTINGS
             && self
                 .settings
@@ -358,13 +357,50 @@ impl Workspace {
         let focused_dialog = window.context_stack().iter().any(|context| {
             context.contains(buzz_ui::DIALOG_CONTEXT) || context.contains("MediaReview")
         });
-        if self.dialog.is_some() || settings_modal || focused_dialog {
+        self.dialog.is_some() || settings_modal || focused_dialog
+    }
+
+    /// Mod+W only ever closes a tab: with no tab to close, nothing
+    /// happens; the window stays.
+    pub fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) {
             return;
         }
-        let on_board = self.page == Page::MESSAGES && self.channel.is_some();
-        if !(on_board && self.close_selected_tab(window, cx)) {
-            crate::main_window::close(window, cx);
+        if self.page == Page::MESSAGES && self.channel.is_some() {
+            self.close_selected_tab(window, cx);
         }
+    }
+
+    /// Ctrl+Tab and Ctrl+Shift+Tab: the next or previous tab of the pane
+    /// that owns the focus, around its ends, landing in the tab's content
+    /// as a browser does. The main pane steps through the conversation
+    /// and its threads; a pane with one tab does nothing.
+    pub fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_open(window, cx) || self.page != Page::MESSAGES || self.channel.is_none() {
+            return;
+        }
+        let state = self.tabs(cx);
+        let step = |ids: &[String], selected: &str| {
+            let count = ids.len() as isize;
+            let index = ids.iter().position(|id| id == selected).unwrap_or(0) as isize;
+            ids[(index + delta).rem_euclid(count) as usize].clone()
+        };
+        if self.main_area.contains_focused(window, cx) {
+            let mut ids = vec![String::new()];
+            ids.extend(state.main_tabs().map(|tab| tab.id.clone()));
+            if ids.len() < 2 {
+                return;
+            }
+            let next = step(&ids, &state.selected_main().unwrap_or_default());
+            self.select_main_tab((!next.is_empty()).then_some(next), window, cx);
+            return;
+        }
+        let ids = state.root_ids();
+        if !state.showing() || ids.len() < 2 {
+            return;
+        }
+        let next = step(&ids, &state.selected_tab().unwrap_or_default());
+        self.select_tab(&next, window, cx);
     }
 
     fn close_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {

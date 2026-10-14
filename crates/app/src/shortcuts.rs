@@ -313,8 +313,22 @@ pub const HOST: &[HostShortcut] = &[
         action: || Box::new(crate::ui::settings::OpenSettings),
     },
     HostShortcut {
+        id: "next-tab",
+        title: "Show next tab",
+        order: 82,
+        defaults: &[Binding::primary("Tab")],
+        action: || Box::new(navigation::NextTab),
+    },
+    HostShortcut {
+        id: "previous-tab",
+        title: "Show previous tab",
+        order: 84,
+        defaults: &[Binding::new("Tab", true, true, false)],
+        action: || Box::new(navigation::PreviousTab),
+    },
+    HostShortcut {
         id: "close-tab",
-        title: "Close tab or window",
+        title: "Close tab",
         order: 85,
         defaults: &[Binding::primary("w")],
         action: || Box::new(navigation::CloseTab),
@@ -367,8 +381,13 @@ const CLIPBOARD_CHORDS: &[Binding] = &[
     Binding::primary("x"),
     Binding::primary("a"),
 ];
-/// Close tab or window, and quit: the desktop shell owns these.
-const DESKTOP_CHORDS: &[Binding] = &[Binding::primary("q"), Binding::primary("w")];
+/// Switch tab, close tab and quit: the desktop shell owns these.
+const DESKTOP_CHORDS: &[Binding] = &[
+    Binding::primary("q"),
+    Binding::primary("w"),
+    Binding::primary("Tab"),
+    Binding::new("Tab", true, true, false),
+];
 /// Chords the message editor handles itself: undo, redo and line or
 /// document jumps.
 const EDITOR_CHORDS: &[Binding] = &[
@@ -511,7 +530,7 @@ pub fn accept(
     }
     if desktop && includes(DESKTOP_CHORDS, binding) {
         return Err(format!(
-            "{chord} is reserved for closing tabs or the window and quitting Buzz. Try another."
+            "{chord} is reserved for switching or closing tabs and quitting Buzz. Try another."
         ));
     }
     if let Some(conflict) = rows.iter().find(|row| {
@@ -787,7 +806,9 @@ mod tests {
                 "Search Buzz",
                 "Search this conversation",
                 "Open Settings",
-                "Close tab or window",
+                "Show next tab",
+                "Show previous tab",
+                "Close tab",
                 "Open Mission control",
                 "Toggle channel terminal",
             ]
@@ -796,7 +817,7 @@ mod tests {
         assert_eq!(terminal.owner, "Terminal");
         assert_eq!(terminal.effective[0].text(false), "Ctrl+J");
         let read_only: Vec<_> = rows.iter().filter(|r| r.read_only).map(|r| r.key).collect();
-        assert_eq!(read_only, ["close-tab"]);
+        assert_eq!(read_only, ["next-tab", "previous-tab", "close-tab"]);
     }
 
     #[test]
@@ -824,7 +845,7 @@ mod tests {
         );
         assert_eq!(
             refuse(chord("q", true, false, false)).unwrap_err(),
-            "Ctrl+Q is reserved for closing tabs or the window and quitting Buzz. Try another."
+            "Ctrl+Q is reserved for switching or closing tabs and quitting Buzz. Try another."
         );
         assert_eq!(
             refuse(chord("k", true, false, false)).unwrap_err(),
@@ -1055,9 +1076,17 @@ mod tests {
             action(&defaults, "ctrl-shift-m"),
             Some("buzz_mission_control::OpenMissionControl")
         );
-        // The stale app-wide binding goes; the others stay, beside 13 host
+        assert_eq!(
+            action(&defaults, "ctrl-tab"),
+            Some("buzz_navigation::NextTab")
+        );
+        assert_eq!(
+            action(&defaults, "ctrl-shift-tab"),
+            Some("buzz_navigation::PreviousTab")
+        );
+        // The stale app-wide binding goes; the others stay, beside 15 host
         // chords, the terminal's and Mission control's.
-        assert_eq!(defaults.bindings().count(), 2 + 13 + 2);
+        assert_eq!(defaults.bindings().count(), 2 + 15 + 2);
         let mut overrides = Overrides::new();
         overrides.insert("settings".into(), Binding::primary(";"));
         let rebound = Keymap::new(keymap_bindings(defaults.bindings(), &overrides));
