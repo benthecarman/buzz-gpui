@@ -19,6 +19,14 @@ pub struct FakeState {
     pub received: Vec<Value>,
     /// User messages it has taken, in order.
     pub prompts: Vec<String>,
+    /// The session's effort, which `apply_flag_settings` changes.
+    pub effort: String,
+    /// The effort each user message was taken at.
+    pub efforts: Vec<String>,
+    /// The session's model, which `set_model` changes.
+    pub model: String,
+    /// The model each user message was taken on.
+    pub models: Vec<String>,
     /// When set, a turn stays open until `finish()`.
     pub hold: bool,
     pub killed: bool,
@@ -40,6 +48,37 @@ impl FakeState {
     }
 }
 
+/// The models the fake lists, as Claude Code's `initialize` answer does.
+pub fn listed_models() -> Value {
+    json!([
+        { "value": "default", "resolvedModel": "claude-opus-5-5" },
+        {
+            "value": "opus",
+            "resolvedModel": "claude-opus-5-5",
+            "supportsEffort": true,
+            "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        },
+        {
+            "value": "haiku",
+            "resolvedModel": "claude-haiku-5-5",
+            "supportsEffort": true,
+            "supportedEffortLevels": ["low", "high"],
+        },
+        { "value": "legacy", "resolvedModel": "claude-legacy-1", "supportsEffort": false },
+    ])
+}
+
+fn resolved(model: &str) -> String {
+    listed_models()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["value"] == model)
+        .and_then(|item| item["resolvedModel"].as_str())
+        .unwrap_or(model)
+        .to_string()
+}
+
 /// One fake process. Cheap to clone.
 #[derive(Clone)]
 pub struct FakeClaude(Arc<Mutex<FakeState>>, Arc<Mutex<HashSet<String>>>);
@@ -53,6 +92,29 @@ impl FakeClaude {
     }
     pub fn prompts(&self) -> Vec<String> {
         self.state().prompts.clone()
+    }
+    pub fn efforts(&self) -> Vec<String> {
+        self.state().efforts.clone()
+    }
+    pub fn models(&self) -> Vec<String> {
+        self.state().models.clone()
+    }
+    /// The control requests of `subtype` it was sent, in order.
+    pub fn requests(&self, subtype: &str) -> Vec<Value> {
+        self.state()
+            .received
+            .iter()
+            .filter(|message| {
+                message["type"] == "control_request" && message["request"]["subtype"] == subtype
+            })
+            .map(|message| message["request"].clone())
+            .collect()
+    }
+    fn flag(&self, name: &str) -> Option<String> {
+        let args = self.args();
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|index| args.get(index + 1).cloned())
     }
     pub fn killed(&self) -> bool {
         self.state().killed
@@ -122,10 +184,32 @@ impl FakeClaude {
     fn take(&self, message: Value) {
         self.state().received.push(message.clone());
         if message["type"] == "control_request" {
-            self.emit(json!({
-                "type": "control_response",
-                "response": { "subtype": "success", "request_id": message["request_id"] },
-            }));
+            let request = &message["request"];
+            let subtype = request["subtype"].as_str().unwrap_or_default();
+            if let (Some("apply_flag_settings"), Some(level)) =
+                (Some(subtype), request["settings"]["effortLevel"].as_str())
+            {
+                self.state().effort = level.into();
+            }
+            if subtype == "set_model" {
+                let model = request["model"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| self.flag("--model"))
+                    .unwrap_or_else(|| "default".into());
+                self.state().model = model;
+            }
+            let mut response = json!({ "subtype": "success", "request_id": message["request_id"] });
+            if subtype == "get_settings" {
+                let state = self.state();
+                response["response"] = json!({
+                    "applied": { "effort": state.effort, "model": resolved(&state.model) },
+                });
+            }
+            if subtype == "initialize" {
+                response["response"] = json!({ "models": listed_models() });
+            }
+            self.emit(json!({ "type": "control_response", "response": response }));
             return;
         }
         if message["type"] != "user" {
@@ -147,14 +231,17 @@ impl FakeClaude {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let (session, first, hold, starts) = {
+        let (session, first, hold, starts, model) = {
             let mut state = self.state();
             state.prompts.push(content.clone());
+            let (effort, model) = (state.effort.clone(), state.model.clone());
+            state.efforts.push(effort);
+            state.models.push(model.clone());
             let first = !state.started;
             state.started = true;
             let starts = state.open == 0 && state.reports_state();
             state.open += 1;
-            (state.session.clone(), first, state.hold, starts)
+            (state.session.clone(), first, state.hold, starts, model)
         };
         if starts {
             self.emit(json!({
@@ -164,7 +251,10 @@ impl FakeClaude {
         }
         if first {
             self.1.lock().unwrap().insert(session.clone());
-            self.emit(json!({ "type": "system", "subtype": "init", "session_id": session }));
+            self.emit(json!({
+                "type": "system", "subtype": "init", "session_id": session,
+                "model": resolved(&model),
+            }));
         }
         if self
             .args()
@@ -254,6 +344,7 @@ impl Spawn for FakeSpawn {
             .clone()
             .or_else(|| flag("--session-id"))
             .unwrap_or_else(|| "fresh".into());
+        let model = flag("--model").unwrap_or_else(|| "default".into());
         let (output, receiver) = mpsc::unbounded_channel();
         let fake = FakeClaude(
             Arc::new(Mutex::new(FakeState {
@@ -261,6 +352,10 @@ impl Spawn for FakeSpawn {
                 options,
                 received: Vec::new(),
                 prompts: Vec::new(),
+                effort: "high".into(),
+                efforts: Vec::new(),
+                model,
+                models: Vec::new(),
                 hold: self.hold,
                 killed: false,
                 session,

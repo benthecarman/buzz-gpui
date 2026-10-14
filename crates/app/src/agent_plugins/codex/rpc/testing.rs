@@ -87,12 +87,22 @@ impl Default for FakeCodex {
                 sent: Vec::new(),
                 spawns: Vec::new(),
                 reads: Vec::new(),
-                models: json!([{
-                    "model": "test-model",
-                    "displayName": "Test model",
-                    "isDefault": true,
-                    "defaultReasoningEffort": "medium",
-                }]),
+                models: json!([
+                    {
+                        "model": "test-model",
+                        "displayName": "Test Model",
+                        "isDefault": true,
+                        "defaultReasoningEffort": "medium",
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "low", "description": "" }, { "reasoningEffort": "medium", "description": "" }, { "reasoningEffort": "high", "description": "" }],
+                    },
+                    {
+                        "model": "deep-model",
+                        "displayName": "",
+                        "isDefault": false,
+                        "defaultReasoningEffort": "high",
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "high", "description": "" }, { "reasoningEffort": "xhigh", "description": "" }],
+                    },
+                ]),
                 account: json!({ "account": { "type": "chatgpt", "email": "test@example.com" } }),
                 config: json!({
                     "config": {

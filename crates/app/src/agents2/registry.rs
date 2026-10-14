@@ -67,6 +67,31 @@ pub struct AgentTab {
     pub build: BuildTab,
 }
 
+/// An effort level a model offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Effort {
+    pub id: String,
+    pub label: String,
+}
+
+/// A model with its effort levels, lowest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Model {
+    pub id: String,
+    pub label: String,
+    pub efforts: Vec<Effort>,
+    /// The effort a run on it uses without a pick, when known.
+    pub effort: Option<String>,
+}
+
+/// The models an owner can pick from, and the id of the one used without a
+/// pick.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Models {
+    pub current: String,
+    pub models: Vec<Model>,
+}
+
 /// A kind of Agents2 agent. Everything but `id`, `title` and `defaults`
 /// has a default.
 pub trait AgentType: 'static {
@@ -98,6 +123,13 @@ pub trait AgentType: 'static {
     /// run drop what wakes them.
     fn runs(&self) -> bool {
         false
+    }
+    /// Models and effort levels the owner can pick for the next run while
+    /// mentioning the agent. Discovery may take a while but must not start
+    /// a turn. The picks reach that run as [`Delivery::model`] and
+    /// [`Delivery::effort`]. `None` offers no choice.
+    fn models(&self, _agent: &Agent, _cx: &mut App) -> Option<Task<Result<Models, String>>> {
+        None
     }
     /// Handles one wake. Runs of one agent are serialized: the next starts
     /// when this task ends or its deadline passes, whichever is first.

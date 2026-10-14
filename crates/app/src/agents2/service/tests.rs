@@ -449,3 +449,90 @@ fn tries_a_failed_unselected_community_again_every_so_often_and_leaves_the_selec
     assert!(!retry_due(false, false, None, at(15)));
     assert_eq!(RETRY, Duration::from_secs(30));
 }
+
+#[test]
+fn passes_the_model_and_effort_its_owner_asked_for_and_no_other() {
+    use super::registry::{Effort, Model};
+    let viewer = "a".repeat(64);
+    let sibling = "d".repeat(64);
+    let level = |id: &str| Effort {
+        id: id.into(),
+        label: id.into(),
+    };
+    let offered = Models {
+        current: "fast".into(),
+        models: vec![
+            Model {
+                id: "fast".into(),
+                label: "Fast".into(),
+                efforts: vec![level("low"), level("high")],
+                effort: None,
+            },
+            Model {
+                id: "deep".into(),
+                label: "Deep".into(),
+                efforts: vec![level("max")],
+                effort: None,
+            },
+        ],
+    };
+    let asked_by = |pubkey: &str, extra: &[&[&str]]| {
+        let event = event("m", |event| {
+            event.pubkey = pubkey.into();
+            for tag in extra {
+                event
+                    .tags
+                    .push(tag.iter().map(|part| part.to_string()).collect());
+            }
+        });
+        let trigger = Trigger::Mention { event };
+        asked(&trigger, &bot(), &viewer).map(|asked| picked(asked, Some(&offered)))
+    };
+    let some = |model: Option<&str>, effort: Option<&str>| {
+        Some((model.map(str::to_string), effort.map(str::to_string)))
+    };
+    assert_eq!(
+        asked_by(&viewer, &[&["effort", &bot(), "high"]]),
+        some(None, Some("high"))
+    );
+    // Nobody else picks, and a pick for another agent is not this one's.
+    assert_eq!(
+        asked_by(
+            &"b".repeat(64),
+            &[&["effort", &bot(), "high"], &["model", &bot(), "deep"]]
+        ),
+        None
+    );
+    assert_eq!(asked_by(&viewer, &[&["effort", &sibling, "high"]]), None);
+    assert_eq!(
+        asked_by(&viewer, &[&["effort", &bot(), "max"]]),
+        some(None, None)
+    );
+    // An effort counts only for the model the run uses.
+    assert_eq!(
+        asked_by(
+            &viewer,
+            &[&["model", &bot(), "deep"], &["effort", &bot(), "max"]]
+        ),
+        some(Some("deep"), Some("max"))
+    );
+    assert_eq!(
+        asked_by(
+            &viewer,
+            &[&["model", &bot(), "deep"], &["effort", &bot(), "low"]]
+        ),
+        some(Some("deep"), None)
+    );
+    assert_eq!(
+        asked_by(
+            &viewer,
+            &[&["model", &bot(), "gone"], &["effort", &bot(), "low"]]
+        ),
+        some(None, Some("low"))
+    );
+    // A type that offers nothing gets nothing.
+    assert_eq!(
+        picked((Some("deep".into()), Some("max".into())), None),
+        (None, None)
+    );
+}

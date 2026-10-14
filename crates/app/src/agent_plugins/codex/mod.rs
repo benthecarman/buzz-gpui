@@ -17,7 +17,8 @@ pub mod tabs;
 
 use crate::agent_plugins::owner_relay;
 use crate::agents2::{
-    Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
+    Agent, AgentTab, AgentType, Agents2, Delivery, Models, Status, Trigger, TypeDefaults,
+    register_type,
 };
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
@@ -237,6 +238,21 @@ impl AgentType for CodexType {
         true
     }
 
+    fn models(&self, agent: &Agent, cx: &mut App) -> Option<Task<Result<Models, String>>> {
+        let state = Codex::global(cx)?;
+        let host = Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(&agent.pubkey))?;
+        let spawn = host.read(cx).spawner(PROCESS_OWNER);
+        let runtime = state.read(cx).runtime.clone();
+        let (pubkey, config) = (agent.pubkey.clone(), agent.config.clone());
+        let listed = Runtime::handle(cx)
+            .spawn(async move { runtime.preview(&pubkey, &config, &spawn).await });
+        Some(cx.background_spawn(async move {
+            listed
+                .await
+                .unwrap_or_else(|_| Err("Codex stopped".to_string()))
+        }))
+    }
+
     fn run(&self, delivery: Delivery, cx: &mut App) -> Task<Result<(), String>> {
         tracing::debug!(agent = %delivery.agent.pubkey, "Codex delivery");
         if delivery.cancel.is_cancelled() {
@@ -269,6 +285,8 @@ impl AgentType for CodexType {
             agent: Arc::new(delivery.agent),
             config: delivery.config,
             spawn,
+            model: delivery.model,
+            effort: delivery.effort,
         };
         let runtime = state.read(cx).runtime.clone();
         let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });

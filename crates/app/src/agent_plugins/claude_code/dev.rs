@@ -99,6 +99,8 @@ fn turns(pubkey: &str, cx: &mut App) {
                     agent: std::sync::Arc::new(handle.clone()),
                     config: config.clone(),
                     spawn: spawn.clone(),
+                    model: None,
+                    effort: None,
                 })
                 .await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;

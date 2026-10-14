@@ -378,6 +378,7 @@ impl NewSession {
                             Mentions {
                                 recipients: recipients.clone(),
                                 references: current.references.clone(),
+                                ..Default::default()
                             },
                             Vec::new(),
                             None,

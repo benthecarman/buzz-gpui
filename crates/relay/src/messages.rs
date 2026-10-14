@@ -21,7 +21,7 @@ use crate::outbox::Delivery;
 use nostr::prelude::{Event, EventId, PublicKey};
 use regex::Regex;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
 pub type Tag = Vec<String>;
@@ -420,13 +420,59 @@ pub fn attachment_message(
 // ---------------------------------------------------------------------------
 // Messages and replies (§5d.2-5d.4)
 
+/// `["model", agentPubkey, model]`: what a mentioned agent's owner asks
+/// of its next run. Only the owner is honoured.
+pub const MODEL_TAG: &str = "model";
+/// `["effort", agentPubkey, level]`, as [`MODEL_TAG`].
+pub const EFFORT_TAG: &str = "effort";
+
+/// The model and effort picked for a mentioned agent's next run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunPick {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 /// Chosen mention chips. Recipients are notified (`p`) and must be current
 /// channel members, which the caller checks. References only bind display
-/// names (`mention`).
+/// names (`mention`). Picks ask mentioned agents for a model or effort.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mentions {
     pub recipients: Vec<String>,
     pub references: Vec<String>,
+    /// The model and effort picked for each mentioned agent, by pubkey.
+    pub picks: BTreeMap<String, RunPick>,
+}
+
+static PICKED_MODEL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.:\[\]-]{1,64}$").expect("model pattern"));
+static PICKED_EFFORT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9-]{1,32}$").expect("effort pattern"));
+
+/// One `model` and one `effort` tag per pick; a pick applies only to a
+/// mentioned agent.
+fn pick_tags(mentions: &Mentions) -> Result<Vec<Tag>, MessageError> {
+    let mut tags = Vec::new();
+    for (key, pick) in &mentions.picks {
+        let valid = |value: &Option<String>, pattern: &Regex| {
+            value.as_deref().is_none_or(|value| pattern.is_match(value))
+        };
+        if !mentions.recipients.contains(key)
+            || !valid(&pick.model, &PICKED_MODEL)
+            || !valid(&pick.effort, &PICKED_EFFORT)
+        {
+            return Err(Invalid(
+                "A model or effort applies only to a mentioned agent",
+            ));
+        }
+        if let Some(model) = &pick.model {
+            tags.push(tag(&[MODEL_TAG, key, model]));
+        }
+        if let Some(effort) = &pick.effort {
+            tags.push(tag(&[EFFORT_TAG, key, effort]));
+        }
+    }
+    Ok(tags)
 }
 
 fn unique_keys(
@@ -479,6 +525,7 @@ fn compose(compose: &Compose<'_>, thread: Vec<Tag>) -> Result<Draft, MessageErro
     tags.extend(thread);
     tags.extend(recipient_tags(&compose.mentions.recipients)?);
     tags.extend(reference_tags(&compose.mentions.references)?);
+    tags.extend(pick_tags(compose.mentions)?);
     // Emoji come from the text the user typed, not attachment labels.
     tags.extend(emoji_tags(compose.content, compose.emoji)?);
     tags.extend(imeta);
@@ -1024,6 +1071,7 @@ mod tests {
         let mentions = Mentions {
             recipients: vec![key('a'), key('a')],
             references: vec![key('c')],
+            ..Default::default()
         };
         let attachments = [photo()];
         let draft = message(&Compose {
@@ -1064,6 +1112,47 @@ mod tests {
     }
 
     #[test]
+    fn asks_a_mentioned_agent_for_a_model_and_effort_and_only_a_mentioned_one() {
+        let origin = origin();
+        let picked = |pubkey: String, model: Option<&str>, effort: Option<&str>| Mentions {
+            recipients: vec![key('a')],
+            references: Vec::new(),
+            picks: [(
+                pubkey,
+                RunPick {
+                    model: model.map(str::to_owned),
+                    effort: effort.map(str::to_owned),
+                },
+            )]
+            .into(),
+        };
+        let asked = picked(key('a'), Some("claude-fable-5-1[1m]"), Some("xhigh"));
+        for draft in [
+            message(&compose("@Honey", &asked, &origin)).unwrap(),
+            reply(&compose("@Honey", &asked, &origin), &key('f'), &key('f')).unwrap(),
+        ] {
+            assert!(
+                draft
+                    .tags
+                    .contains(&tag(&["model", &key('a'), "claude-fable-5-1[1m]"]))
+            );
+            assert!(draft.tags.contains(&tag(&["effort", &key('a'), "xhigh"])));
+        }
+        for refused in [
+            picked(key('b'), None, Some("high")),
+            picked(key('a'), None, Some("High Effort")),
+            picked(key('a'), Some("two words"), None),
+        ] {
+            assert_eq!(
+                message(&compose("@Honey", &refused, &origin)),
+                Err(Invalid(
+                    "A model or effort applies only to a mentioned agent"
+                ))
+            );
+        }
+    }
+
+    #[test]
     fn empty_and_invalid_messages_are_refused() {
         let origin = origin();
         let none = Mentions::default();
@@ -1074,11 +1163,13 @@ mod tests {
         let too_many = Mentions {
             recipients: (0..33).map(|i| format!("{i:064x}")).collect(),
             references: Vec::new(),
+            ..Default::default()
         };
         assert!(message(&compose("hi", &too_many, &origin)).is_err());
         let upper = Mentions {
             recipients: vec!["A".repeat(64)],
             references: Vec::new(),
+            ..Default::default()
         };
         assert!(message(&compose("hi", &upper, &origin)).is_err());
         assert!(

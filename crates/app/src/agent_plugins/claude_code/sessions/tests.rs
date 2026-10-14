@@ -368,7 +368,7 @@ async fn steers_a_conversation_that_is_still_working_instead_of_queueing() {
         2,
         DeliverOptions {
             steer: Some("steer".into()),
-            fresh: None,
+            ..Default::default()
         },
     ));
     flush().await;
@@ -444,8 +444,8 @@ async fn starts_over_when_a_saved_session_no_longer_loads() {
             "hello".into(),
             9,
             DeliverOptions {
-                steer: None,
                 fresh: Some(Box::pin(async { "hello, with the thread so far".into() })),
+                ..Default::default()
             },
         )
         .await;

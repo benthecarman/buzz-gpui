@@ -269,6 +269,8 @@ impl Fixture {
             agent: self.agent.clone(),
             config,
             spawn: self.fake.spawner(),
+            model: None,
+            effort: None,
         }
     }
 
@@ -1450,4 +1452,164 @@ async fn conversations_report_commands_as_they_run() {
     assert_eq!(f.runtime.sessions(&agent_key())[0].key, key(&root()));
     f.complete().await;
     f.status_reaches("Idle").await;
+}
+
+fn picked(run: Run, model: Option<&str>, effort: Option<&str>) -> Run {
+    Run {
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
+        ..run
+    }
+}
+
+fn levels(ids: &[&str]) -> Vec<PickEffort> {
+    ids.iter()
+        .map(|id| PickEffort {
+            id: (*id).into(),
+            label: effort_name(id),
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn discovers_models_and_efforts_before_any_turn_sharing_one_read_only_lookup() {
+    let f = fixture();
+    let config = json!({ "workspace": "/tmp/codex-test" });
+    let spawn = f.fake.spawner();
+    let one = f.runtime.preview(&agent_key(), &config, &spawn);
+    let two = f.runtime.preview(&agent_key(), &config, &spawn);
+    assert!(one.ptr_eq(&two));
+    assert_eq!(
+        one.clone().await.unwrap(),
+        Models {
+            current: "test-model".into(),
+            models: vec![
+                PickModel {
+                    id: "test-model".into(),
+                    label: "Test Model".into(),
+                    efforts: levels(&["low", "medium", "high"]),
+                    effort: Some("medium".into()),
+                },
+                PickModel {
+                    id: "deep-model".into(),
+                    label: "deep-model".into(),
+                    efforts: levels(&["high", "xhigh"]),
+                    effort: Some("high".into()),
+                },
+            ],
+        }
+    );
+    let spawned = f.fake.spawned("app-server");
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].cwd.as_deref(), Some("~/.buzz"));
+    assert!(f.fake.calls("thread/start").is_empty());
+    assert_eq!(f.fake.state().ended, 0);
+    assert!(
+        f.runtime
+            .preview(&agent_key(), &config, &spawn)
+            .ptr_eq(&one)
+    );
+    // Its agent still runs, so its server stays; gone, both end.
+    f.runtime.sync(&[agent_key()]);
+    assert_eq!(f.fake.state().ended, 0);
+    f.runtime.sync(&[]);
+    until(|| f.fake.state().ended == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn still_offers_the_listed_models_when_the_configured_one_is_not_listed() {
+    let f = fixture();
+    let config = json!({ "workspace": "/tmp/codex-test", "model": "newer-model" });
+    let Models { current, models } = f
+        .runtime
+        .preview(&agent_key(), &config, &f.fake.spawner())
+        .await
+        .unwrap();
+    assert_eq!(current, "newer-model");
+    let shape: Vec<(String, usize)> = models
+        .iter()
+        .map(|model| (model.id.clone(), model.efforts.len()))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("newer-model".into(), 0),
+            ("test-model".into(), 3),
+            ("deep-model".into(), 2)
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_each_model_at_the_configured_effort_when_it_has_it() {
+    let f = fixture();
+    let config = json!({ "workspace": "/tmp/codex-test", "effort": "low" });
+    let Models { models, .. } = f
+        .runtime
+        .preview(&agent_key(), &config, &f.fake.spawner())
+        .await
+        .unwrap();
+    let efforts: Vec<Option<String>> = models.into_iter().map(|model| model.effort).collect();
+    assert_eq!(efforts, [Some("low".into()), Some("high".into())]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starts_a_turn_at_the_effort_its_owner_picked_when_the_model_supports_it() {
+    let f = fixture();
+    f.run(picked(f.delivery("@Codex hard"), None, Some("high")))
+        .await;
+    f.starts_reach(1).await;
+    f.run(picked(
+        f.delivery_in("@Codex other", &other_root()),
+        None,
+        Some("max"),
+    ))
+    .await;
+    f.starts_reach(2).await;
+    let efforts: Vec<Value> = f
+        .starts()
+        .iter()
+        .map(|start| start["params"]["effort"].clone())
+        .collect();
+    assert_eq!(efforts, [json!("high"), json!("low")]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starts_a_turn_on_the_model_its_owner_picked_at_an_effort_that_model_supports() {
+    let f = fixture();
+    let runs = [
+        ("a", Some("deep-model"), Some("xhigh")),
+        // The configured `low` is not one of its levels, so it runs at its
+        // default.
+        ("b", Some("deep-model"), None),
+        // A model Codex no longer lists falls back to the agent's own.
+        ("7", Some("gone-model"), None),
+    ];
+    for (index, (thread, model, effort)) in runs.into_iter().enumerate() {
+        f.run(picked(
+            f.delivery_in("@Codex", &thread.repeat(64)),
+            model,
+            effort,
+        ))
+        .await;
+        f.starts_reach(index + 1).await;
+    }
+    let shape: Vec<(Value, Value)> = f
+        .starts()
+        .iter()
+        .map(|start| {
+            (
+                start["params"]["model"].clone(),
+                start["params"]["effort"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            (json!("deep-model"), json!("xhigh")),
+            (json!("deep-model"), json!("high")),
+            (json!("test-model"), json!("low")),
+        ]
+    );
 }

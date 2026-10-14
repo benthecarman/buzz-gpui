@@ -155,6 +155,7 @@ async fn creates_edits_and_administers_a_channel() {
             messages::Mentions {
                 recipients: vec![bob.clone()],
                 references: Vec::new(),
+                ..Default::default()
             },
             Vec::new(),
             None,
@@ -169,6 +170,7 @@ async fn creates_edits_and_administers_a_channel() {
             messages::Mentions {
                 recipients: vec![stranger],
                 references: Vec::new(),
+                ..Default::default()
             },
             Vec::new(),
             None,

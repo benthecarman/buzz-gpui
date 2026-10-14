@@ -18,7 +18,8 @@ pub mod tabs;
 use crate::agent_plugins::owner_relay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::{
-    Agent, AgentTab, AgentType, Agents2, Delivery, Status, Trigger, TypeDefaults, register_type,
+    Agent, AgentTab, AgentType, Agents2, Delivery, Models, Status, Trigger, TypeDefaults,
+    register_type,
 };
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
@@ -237,6 +238,18 @@ impl AgentType for ClaudeCodeType {
         true
     }
 
+    fn models(&self, agent: &Agent, cx: &mut App) -> Option<Task<Result<Models, String>>> {
+        let state = ClaudeCode::global(cx)?;
+        let runtime = state.read(cx).runtime.clone();
+        let pubkey = agent.pubkey.clone();
+        let listed = Runtime::handle(cx).spawn(async move { runtime.models(&pubkey).await });
+        Some(cx.background_spawn(async move {
+            listed
+                .await
+                .unwrap_or_else(|_| Err("Claude Code stopped".to_string()))
+        }))
+    }
+
     fn run(&self, delivery: Delivery, cx: &mut App) -> Task<Result<(), String>> {
         tracing::debug!(agent = %delivery.agent.pubkey, "Claude Code delivery");
         let Some(state) = ClaudeCode::global(cx) else {
@@ -274,6 +287,8 @@ impl AgentType for ClaudeCodeType {
             agent: Arc::new(delivery.agent),
             config: delivery.config,
             spawn,
+            model: delivery.model,
+            effort: delivery.effort,
         };
         let runtime = state.read(cx).runtime.clone();
         let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });

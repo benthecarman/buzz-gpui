@@ -54,6 +54,12 @@ pub struct Delivery {
     pub agent: AgentHandle,
     /// The agent's config when this run started.
     pub config: Value,
+    /// The model the owner asked for in the triggering message: one of the
+    /// type's `models`. `None` means the agent's own model.
+    pub model: Option<String>,
+    /// The effort level the owner asked for in the triggering message: one
+    /// of that model's efforts. `None` means the agent's own default.
+    pub effort: Option<String>,
     /// Fires on the run's deadline, or when the agent is removed or its
     /// type is replaced. Advisory: the handle keeps working, so finishing
     /// up is harmless.

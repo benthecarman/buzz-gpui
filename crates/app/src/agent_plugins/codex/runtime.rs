@@ -8,12 +8,13 @@
 //! arrives while it is idle continues the saved thread. Codex answers with
 //! the shared Buzz tools, signed by the agent's host-held key.
 
-use super::config::{Config, DEFAULT_WORKSPACE, absolute_workspace, valid_workspace};
+use super::config::{Config, DEFAULT_WORKSPACE, absolute_workspace, effort_name, valid_workspace};
 use super::history::conversation_history;
 use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
 use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
 use crate::agent_plugins::owner_relay::{OwnerRelay, Scoped};
 use crate::agent_plugins::process::{SpawnOptions, Spawner, collect};
+use crate::agents2::{Effort as PickEffort, Model as PickModel, Models};
 use crate::buzz_mcp::app_client::{AgentActions, AppClient, Check, Memories, Signal};
 use crate::buzz_mcp::tools::{call_tool, tools};
 use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template};
@@ -68,6 +69,9 @@ pub struct Run {
     pub config: Value,
     /// Where the agent's processes run: the host that holds it.
     pub spawn: Spawner,
+    /// The model and effort the owner picked for this turn.
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// One conversation's state, for the Codex tab.
@@ -141,6 +145,9 @@ struct Request {
     /// DMs.
     tool_root: Option<String>,
     interest: String,
+    /// The model and effort the owner picked for this turn.
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 /// A conversation's Codex thread, saved across restarts.
@@ -230,6 +237,15 @@ impl Entry {
     }
 }
 
+type Listing = Shared<BoxFuture<'static, Result<Models, String>>>;
+
+/// Read-only model discovery for one agent, kept until its settings change.
+struct Preview {
+    key: String,
+    host: usize,
+    ready: Listing,
+}
+
 /// One host's `codex app-server`, shared by every agent there.
 struct Server {
     rpc: AppServer,
@@ -244,6 +260,8 @@ struct Inner {
     servers: Mutex<HashMap<usize, Arc<Server>>>,
     /// Stopped agents still letting go of their threads.
     stopping: Mutex<HashMap<String, Shared<BoxFuture<'static, ()>>>>,
+    /// By agent pubkey.
+    previews: Mutex<HashMap<String, Preview>>,
     views: Mutex<HashMap<String, Vec<SessionView>>>,
     /// Each agent's own community, as its owner reads it, and its scope.
     relays: Mutex<HashMap<String, Scoped>>,
@@ -261,6 +279,29 @@ pub struct CodexRuntime {
 
 fn input(text: String) -> Value {
     json!([{ "type": "text", "text": text, "text_elements": [] }])
+}
+
+/// The workspace as an absolute path. The host expands `~/.buzz` and makes
+/// it; Codex needs an absolute path rather than shell-style home notation.
+async fn workspace(spawn: &Spawner, path: &str) -> Result<String, String> {
+    if absolute_workspace(path) {
+        return Ok(path.to_string());
+    }
+    let mut spawned = spawn
+        .spawn(
+            "workspace",
+            SpawnOptions {
+                cwd: Some(path.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let (code, stdout, _) = collect(&mut spawned.output).await;
+    let workspace = stdout.trim().to_string();
+    if code != Some(0) || !absolute_workspace(&workspace) {
+        return Err("Could not resolve the default Codex workspace.".to_string());
+    }
+    Ok(workspace)
 }
 
 /// The request without the bot marker or the leading mention of the agent.
@@ -319,6 +360,7 @@ impl CodexRuntime {
                 entries: Mutex::default(),
                 servers: Mutex::default(),
                 stopping: Mutex::default(),
+                previews: Mutex::default(),
                 views: Mutex::default(),
                 relays: Mutex::default(),
                 storage,
@@ -354,6 +396,126 @@ impl CodexRuntime {
         self.inner.changes.send_modify(|count| *count += 1);
     }
 
+    /// The models an agent's next turn can run on, with their effort
+    /// levels, read from its host's server without starting a turn. Kept
+    /// until the agent's settings change. Must run inside tokio.
+    pub fn preview(&self, pubkey: &str, config: &Value, spawn: &Spawner) -> Listing {
+        let settings = Config::read(config);
+        let key = json!([settings.workspace, settings.model, settings.effort]).to_string();
+        let host = spawn.host();
+        if let Some(existing) = locked(&self.inner.previews)
+            .get(pubkey)
+            .filter(|preview| preview.key == key && preview.host == host)
+        {
+            return existing.ready.clone();
+        }
+        let server = self.open(spawn);
+        let spawn = spawn.clone();
+        let ready: Listing = async move {
+            let workspace = workspace(&spawn, &settings.workspace).await?;
+            server.opening.clone().await?;
+            let rpc = &server.rpc;
+            let normalized = rpc
+                .request("config/read", json!({ "cwd": workspace }))
+                .await?;
+            let models = list_models(rpc).await?;
+            let model = Some(settings.model.clone())
+                .filter(|model| !model.is_empty())
+                .or_else(|| {
+                    text_at(&normalized, &["config", "model"])
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    models
+                        .iter()
+                        .find(|row| row.is_default)
+                        .map(|row| row.model.clone())
+                });
+            let offered: Vec<PickModel> = models
+                .iter()
+                .map(|row| {
+                    let efforts: Vec<PickEffort> = row
+                        .supported_reasoning_efforts
+                        .iter()
+                        .map(|level| PickEffort {
+                            id: level.reasoning_effort.clone(),
+                            label: effort_name(&level.reasoning_effort),
+                        })
+                        .collect();
+                    // As a run picks it: the configured effort if the model
+                    // has it.
+                    let effort = if efforts.iter().any(|level| level.id == settings.effort) {
+                        settings.effort.clone()
+                    } else {
+                        row.default_reasoning_effort.clone()
+                    };
+                    PickModel {
+                        id: row.model.clone(),
+                        label: if row.display_name.is_empty() {
+                            row.model.clone()
+                        } else {
+                            row.display_name.clone()
+                        },
+                        efforts,
+                        effort: (!effort.is_empty()).then_some(effort),
+                    }
+                })
+                .collect();
+            // A configured model this Codex does not list still leaves the
+            // listed ones to pick, so the picker stays.
+            Ok(match model {
+                Some(model) if !models.iter().any(|row| row.model == model) => {
+                    let mut listed = vec![PickModel {
+                        id: model.clone(),
+                        label: model.clone(),
+                        efforts: Vec::new(),
+                        effort: None,
+                    }];
+                    listed.extend(offered);
+                    Models {
+                        current: model,
+                        models: listed,
+                    }
+                }
+                model => Models {
+                    current: model.unwrap_or_default(),
+                    models: offered,
+                },
+            })
+        }
+        .boxed()
+        .shared();
+        locked(&self.inner.previews).insert(
+            pubkey.to_string(),
+            Preview {
+                key,
+                host,
+                ready: ready.clone(),
+            },
+        );
+        // A failed read is not kept, so the next one tries again.
+        let (inner, pubkey, watched) = (
+            Arc::downgrade(&self.inner),
+            pubkey.to_string(),
+            ready.clone(),
+        );
+        tokio::spawn(async move {
+            if watched.clone().await.is_err()
+                && let Some(inner) = inner.upgrade()
+            {
+                let mut previews = locked(&inner.previews);
+                if previews
+                    .get(&pubkey)
+                    .is_some_and(|preview| preview.ready.ptr_eq(&watched))
+                {
+                    previews.remove(&pubkey);
+                }
+            }
+        });
+        ready
+    }
+
     /// Each conversation's status, for the agent's Codex tab.
     pub fn sessions(&self, pubkey: &str) -> Vec<SessionView> {
         locked(&self.inner.views)
@@ -384,9 +546,10 @@ impl CodexRuntime {
 
     /// Keeps the conversations of `pubkeys`, the agents still running
     /// whichever community is selected. An agent no longer present stops
-    /// its turns; a host's server ends once none of its agents is left.
-    /// Must run inside tokio.
+    /// its turns; a host's server ends once none of its agents that has
+    /// worked or listed models is left. Must run inside tokio.
     pub fn sync(&self, pubkeys: &[String]) {
+        locked(&self.inner.previews).retain(|pubkey, _| pubkeys.contains(pubkey));
         let gone: Vec<Arc<Entry>> = {
             let mut entries = locked(&self.inner.entries);
             let gone = entries
@@ -407,10 +570,15 @@ impl CodexRuntime {
                 self.stop(server, entry);
             }
         }
-        let hosts: Vec<usize> = locked(&self.inner.entries)
+        let mut hosts: Vec<usize> = locked(&self.inner.entries)
             .values()
             .map(|entry| entry.spawn.host())
             .collect();
+        hosts.extend(
+            locked(&self.inner.previews)
+                .values()
+                .map(|preview| preview.host),
+        );
         let idle: Vec<Arc<Server>> = {
             let mut servers = locked(&self.inner.servers);
             let idle = servers
@@ -497,6 +665,7 @@ impl CodexRuntime {
     }
 
     fn close_all(&self) -> Vec<Shared<BoxFuture<'static, ()>>> {
+        locked(&self.inner.previews).clear();
         for (_, entry) in locked(&self.inner.entries).drain() {
             entry.abort.abort(ABORTED);
         }
@@ -666,6 +835,8 @@ impl CodexRuntime {
             agent,
             config,
             spawn,
+            model,
+            effort,
         } = run;
         let (event, interest) = match wake {
             Wake::Timer => {
@@ -698,6 +869,8 @@ impl CodexRuntime {
             agent,
             settings,
             tool_root,
+            model,
+            effort,
             conversation: Conversation {
                 name: info
                     .and_then(|info| info.name)
@@ -1195,27 +1368,8 @@ impl CodexRuntime {
         let outcome = async {
             server.opening.clone().await?;
             signal.check()?;
-            // The host expands ~/.buzz and makes it; Codex needs an
-            // absolute path rather than shell-style home notation.
-            let mut workspace = request.settings.workspace.clone();
-            if !absolute_workspace(&workspace) {
-                let mut spawned = entry
-                    .spawn
-                    .spawn(
-                        "workspace",
-                        SpawnOptions {
-                            cwd: Some(workspace.clone()),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                let (code, stdout, _) = collect(&mut spawned.output).await;
-                workspace = stdout.trim().to_string();
-                if code != Some(0) || !absolute_workspace(&workspace) {
-                    return Err("Could not resolve the default Codex workspace.".to_string());
-                }
-                signal.check()?;
-            }
+            let workspace = workspace(&entry.spawn, &request.settings.workspace).await?;
+            signal.check()?;
             *locked(&active.workspace) = workspace.clone();
             let existing = entry.saved(&key);
             let normalized = rpc
@@ -1223,7 +1377,7 @@ impl CodexRuntime {
                 .await?;
             let models = list_models(&rpc).await?;
             let configured = text_at(&normalized, &["config", "model"]).filter(|m| !m.is_empty());
-            let model = Some(request.settings.model.as_str())
+            let own = Some(request.settings.model.as_str())
                 .filter(|model| !model.is_empty())
                 .or(configured)
                 .map(str::to_string)
@@ -1233,20 +1387,32 @@ impl CodexRuntime {
                         .find(|row| row.is_default)
                         .map(|row| row.model.clone())
                 });
-            let Some(selected) = models
+            // Model and effort are per turn, so a pick changes nothing
+            // after it.
+            let picked = models
                 .iter()
-                .find(|row| Some(&row.model) == model.as_ref())
+                .find(|row| Some(&row.model) == request.model.as_ref());
+            let Some(selected) =
+                picked.or_else(|| models.iter().find(|row| Some(&row.model) == own.as_ref()))
             else {
                 return Err(
                     "The selected Codex model is unavailable. Choose an available model in Settings."
                         .to_string(),
                 );
             };
-            let effort = if request.settings.effort.is_empty() {
-                selected.default_reasoning_effort.clone()
-            } else {
-                request.settings.effort.clone()
+            let model = Some(selected.model.clone());
+            // A picked model may not support the configured effort.
+            let supported = |level: &str| {
+                selected
+                    .supported_reasoning_efforts
+                    .iter()
+                    .any(|effort| effort.reasoning_effort == level)
             };
+            let effort = [request.effort.clone(), Some(request.settings.effort.clone())]
+                .into_iter()
+                .flatten()
+                .find(|level| !level.is_empty() && supported(level))
+                .unwrap_or_else(|| selected.default_reasoning_effort.clone());
             // CLI overrides replace this table; disabled servers still need
             // a transport.
             let mcp: Map<String, Value> = normalized

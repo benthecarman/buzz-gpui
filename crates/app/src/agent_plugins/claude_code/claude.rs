@@ -8,9 +8,11 @@
 
 use crate::agent_plugins::process::{Lines, Process, SpawnOptions, Spawner};
 use buzz_host::api::ProcessOutput;
-use futures::future::BoxFuture;
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -49,6 +51,27 @@ pub struct Launch {
     /// The in-process MCP server's tools.
     pub tools: Option<ToolServer>,
 }
+
+/// A model Claude Code lists as one a session can switch to.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeModel {
+    /// What `set_model` takes: an alias such as `opus`, or a model id.
+    pub value: String,
+    pub resolved_model: Option<String>,
+    pub display_name: Option<String>,
+    pub supports_effort: Option<bool>,
+    pub supported_effort_levels: Option<Vec<String>>,
+}
+
+/// What the next turn is asked to run with; `None` is the session's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnPick {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+type Listed = Shared<BoxFuture<'static, Vec<ClaudeModel>>>;
 
 /// How a burst of work ended: every message sent so far has been answered,
 /// or the process is gone.
@@ -163,10 +186,27 @@ struct State {
     /// result.
     reports_state: bool,
     requests: u64,
+    /// Control requests awaiting Claude Code's answer, by request id.
+    calls: HashMap<String, oneshot::Sender<Value>>,
+    /// The models Claude Code lists, from its answer to `initialize`.
+    listed: Listed,
+    /// The model the session reported when it began.
+    reported: Option<String>,
+    /// The model the next turn runs on; `None` is the session's own.
+    picked_model: Option<String>,
+    /// The effort the next turn runs at; `None` is the session's own.
+    effort: Option<String>,
+    /// The session's own effort, read before the first change to restore
+    /// it.
+    own_effort: Option<String>,
+    reading_effort: Option<Shared<BoxFuture<'static, ()>>>,
 }
 
 struct Inner {
     process: Process,
+    /// The session's own model, as launched; `None` is Claude Code's
+    /// default.
+    own_model: Option<String>,
     /// Replaced when a spare is given to the agent that takes it.
     tools: Mutex<Option<ToolServer>>,
     state: Mutex<State>,
@@ -207,6 +247,7 @@ impl ClaudeProcess {
             spawned.output,
             launch.resume.clone().or(launch.session_id.clone()),
             launch.tools.clone(),
+            launch.model.clone(),
         ))
     }
 
@@ -227,7 +268,26 @@ impl ClaudeProcess {
                 "PostToolUse": [{ "matcher": FINAL_TOOL, "hookCallbackIds": ["final"] }],
             });
         }
-        self.request(initialize).await
+        let (written, answer) = self.request(initialize);
+        written.await?;
+        self.state().listed = async move {
+            answer
+                .await
+                .ok()
+                .and_then(|response| {
+                    let models = response.get("response")?.get("models")?.as_array()?.clone();
+                    Some(
+                        models
+                            .into_iter()
+                            .filter_map(|model| serde_json::from_value::<ClaudeModel>(model).ok())
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default()
+        }
+        .boxed()
+        .shared();
+        Ok(())
     }
 
     /// Drives a spawned process: reads its output and writes its input.
@@ -236,11 +296,13 @@ impl ClaudeProcess {
         mut output: mpsc::UnboundedReceiver<ProcessOutput>,
         session_id: Option<String>,
         tools: Option<ToolServer>,
+        own_model: Option<String>,
     ) -> Self {
         let (writes, mut queue) =
             mpsc::unbounded_channel::<(String, oneshot::Sender<Result<(), String>>)>();
         let inner = Arc::new(Inner {
             process: process.clone(),
+            own_model,
             tools: Mutex::new(tools),
             state: Mutex::new(State {
                 session_id,
@@ -256,6 +318,13 @@ impl ClaudeProcess {
                 alive: true,
                 reports_state: false,
                 requests: 0,
+                calls: HashMap::new(),
+                listed: futures::future::ready(Vec::new()).boxed().shared(),
+                reported: None,
+                picked_model: None,
+                effort: None,
+                own_effort: None,
+                reading_effort: None,
             }),
             writes,
             exited: watch::Sender::new(None),
@@ -322,10 +391,72 @@ impl ClaudeProcess {
         }
     }
 
+    /// The models this session can switch to, without sending a turn.
+    pub fn models(&self) -> impl std::future::Future<Output = Vec<ClaudeModel>> + Send + 'static {
+        self.state().listed.clone()
+    }
+
+    /// The effort a turn without a pick runs at, when Claude Code reports
+    /// it.
+    pub async fn read_effort(&self) -> Option<String> {
+        self.read_own_effort().await;
+        self.state().own_effort.clone()
+    }
+
+    /// Settings resolve the default model without sending a paid user turn.
+    pub async fn read_model(&self) -> Option<String> {
+        {
+            let state = self.state();
+            // Settings report a picked model, which is not the session's
+            // own.
+            if state.reported.is_some() || state.picked_model.is_some() {
+                return state.reported.clone();
+            }
+        }
+        let answer = self.call(json!({ "subtype": "get_settings" })).await;
+        let mut state = self.state();
+        if let Some(model) = answer
+            .pointer("/response/applied/model")
+            .and_then(Value::as_str)
+        {
+            state.reported = Some(model.into());
+        }
+        state.reported.clone()
+    }
+
     /// Sends one user message. Resolves when it, and anything sent after
-    /// it, has been answered and the session is idle again.
-    pub fn send(&self, text: &str) -> impl std::future::Future<Output = Settled> + Send + 'static {
+    /// it, has been answered and the session is idle again. A new turn
+    /// runs with the picked model and effort, or the session's own without
+    /// them; a message folded into a running turn changes only what it
+    /// asks for.
+    pub fn send(
+        &self,
+        text: &str,
+        pick: TurnPick,
+    ) -> impl std::future::Future<Output = Settled> + Send + 'static {
         let (sender, receiver) = oneshot::channel();
+        let (alive, busy, picked_model, effort) = {
+            let state = self.state();
+            (
+                state.alive,
+                state.pending > 0,
+                state.picked_model.clone(),
+                state.effort.clone(),
+            )
+        };
+        if alive {
+            // The model first: effort applies to whichever model runs.
+            self.set_model(if pick.model.is_some() || !busy {
+                pick.model
+            } else {
+                picked_model
+            });
+            self.set_effort(if pick.effort.is_some() || !busy {
+                pick.effort
+            } else {
+                effort
+            });
+        }
         let alive = {
             let mut state = self.state();
             if state.alive {
@@ -377,18 +508,126 @@ impl ClaudeProcess {
         }
     }
 
-    async fn request(&self, request: Value) -> Result<(), String> {
+    /// Writes a control request: the first future settles with the write,
+    /// the second with Claude Code's response.
+    fn request(
+        &self,
+        request: Value,
+    ) -> (
+        impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+        oneshot::Receiver<Value>,
+    ) {
+        let (answer, answered) = oneshot::channel();
         let id = {
             let mut state = self.state();
             state.requests += 1;
-            state.requests
+            let id = format!("buzz-{}", state.requests);
+            if state.alive {
+                state.calls.insert(id.clone(), answer);
+            }
+            id
         };
-        self.write(json!({
+        let written = self.write(json!({
             "type": "control_request",
-            "request_id": format!("buzz-{id}"),
+            "request_id": id,
             "request": request,
-        }))
-        .await
+        }));
+        (written, answered)
+    }
+
+    /// Sends a control request and resolves with Claude Code's response.
+    fn call(&self, request: Value) -> impl std::future::Future<Output = Value> + Send + 'static {
+        let (written, answer) = self.request(request);
+        async move {
+            let failed = |error: String| json!({ "subtype": "error", "error": error });
+            if let Err(error) = written.await {
+                return failed(error);
+            }
+            answer
+                .await
+                .unwrap_or_else(|_| failed("Claude Code exited".into()))
+        }
+    }
+
+    /// Switches model without restarting, as the SDK's `setModel` does.
+    /// Back to the session's own is the model it was launched with, or the
+    /// default. A new model misses the prompt cache, which the owner
+    /// accepts by picking.
+    fn set_model(&self, model: Option<String>) {
+        {
+            let mut state = self.state();
+            if state.picked_model == model {
+                return;
+            }
+            state.picked_model = model.clone();
+        }
+        let mut request = json!({ "subtype": "set_model" });
+        if let Some(next) = model.or_else(|| self.inner.own_model.clone()) {
+            request["model"] = json!(next);
+        }
+        let answer = self.call(request);
+        tokio::spawn(async move {
+            let answer = answer.await;
+            if answer["subtype"] != "success" {
+                tracing::warn!(error = %answer["error"], "Claude Code did not change its model");
+            }
+        });
+    }
+
+    /// Changes effort without restarting, which keeps the prompt cache:
+    /// Claude Code sends effort per message. Clearing the flag setting
+    /// would not restore the session's own level, so that is read before
+    /// the first change and set back explicitly. Written ahead of the
+    /// message without waiting, as Claude Code takes its input in order, so
+    /// a turn never waits on it.
+    fn set_effort(&self, effort: Option<String>) {
+        if self.state().effort == effort {
+            return;
+        }
+        drop(self.read_own_effort());
+        let level = {
+            let mut state = self.state();
+            let Some(level) = effort.clone().or_else(|| state.own_effort.clone()) else {
+                tracing::warn!("Claude Code's own effort is unknown; keeping the last one");
+                return;
+            };
+            state.effort = effort;
+            level
+        };
+        let answer = self.call(json!({
+            "subtype": "apply_flag_settings",
+            "settings": { "effortLevel": level },
+        }));
+        tokio::spawn(async move {
+            let answer = answer.await;
+            if answer["subtype"] != "success" {
+                tracing::warn!(error = %answer["error"], "Claude Code did not change its effort");
+            }
+        });
+    }
+
+    /// Read once, ahead of the first change, so it is the session's own.
+    fn read_own_effort(&self) -> Shared<BoxFuture<'static, ()>> {
+        if let Some(reading) = self.state().reading_effort.clone() {
+            return reading;
+        }
+        let answer = self.call(json!({ "subtype": "get_settings" }));
+        let claude = self.clone();
+        let reading = async move {
+            let answer = answer.await;
+            if let Some(effort) = answer
+                .pointer("/response/applied/effort")
+                .and_then(Value::as_str)
+            {
+                claude.state().own_effort = Some(effort.into());
+            }
+        }
+        .boxed()
+        .shared();
+        // Started now, so its answer is read even before anyone waits.
+        tokio::spawn(reading.clone());
+        self.state().reading_effort = Some(reading.clone());
+        reading
     }
 
     fn settle(&self, settled: Settled) {
@@ -405,6 +644,11 @@ impl ClaudeProcess {
     }
 
     fn on_exit(&self, code: Option<i32>) {
+        let calls: Vec<oneshot::Sender<Value>> =
+            self.state().calls.drain().map(|(_, call)| call).collect();
+        for call in calls {
+            let _ = call.send(json!({ "subtype": "error", "error": "Claude Code exited" }));
+        }
         let error = {
             let mut state = self.state();
             state.alive = false;
@@ -465,10 +709,32 @@ impl ClaudeProcess {
             }
             if kind == Some("system") && subtype == Some("init") {
                 state.began = true;
+                // A picked model is not the session's own.
+                if let Some(model) = message.get("model").and_then(Value::as_str)
+                    && state.picked_model.is_none()
+                {
+                    state.reported = Some(model.into());
+                }
             }
         }
         if kind == Some("control_request") {
             self.answer(message);
+            return;
+        }
+        if kind == Some("control_response") {
+            let response = message
+                .get("response")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let id = match response.get("request_id") {
+                Some(Value::String(id)) => id.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            let call = self.state().calls.remove(&id);
+            if let Some(call) = call {
+                let _ = call.send(response);
+            }
             return;
         }
         if kind == Some("user") && message.get("isReplay") == Some(&Value::Bool(true)) {

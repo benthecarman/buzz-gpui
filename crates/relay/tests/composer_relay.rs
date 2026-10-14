@@ -117,6 +117,7 @@ async fn mentions_outsiders_as_references_or_invites_them() {
             Mentions {
                 recipients: Vec::new(),
                 references: vec![carol.clone()],
+                ..Default::default()
             },
             Vec::new(),
             None,
@@ -143,6 +144,7 @@ async fn mentions_outsiders_as_references_or_invites_them() {
             Mentions {
                 recipients: vec![carol.clone()],
                 references: Vec::new(),
+                ..Default::default()
             },
             Vec::new(),
             None,

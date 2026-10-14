@@ -6,7 +6,7 @@
 //! in-process Buzz tools, signed by the agent's host-held key; the runtime
 //! only reports a turn that fails.
 
-use super::claude::{Launch, Settled, ToolServer};
+use super::claude::{Launch, Settled, ToolServer, TurnPick};
 use super::prompt::{
     CONTEXT_LIMIT, Channel, Scope, Thread, steer_prompt, system_prompt, timer_prompt, turn_prompt,
 };
@@ -16,6 +16,7 @@ use super::sessions::{
 };
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
+use crate::agents2::{Effort, Model, Models};
 use crate::buzz_mcp::app_client::{self, AgentActions, AppClient};
 use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template, rpc, tools::hex};
 use futures::FutureExt;
@@ -118,6 +119,52 @@ const MEMORY_TIMEOUT: Duration = Duration::from_secs(5);
 const NAMES_TIMEOUT: Duration = Duration::from_secs(2);
 const CHAT: [u32; 2] = [9, 40002];
 
+/// What a session can switch to between turns. Claude Code runs `max` as
+/// `xhigh` in a stream-json session, so it is not offered.
+const EFFORTS: [(&str, &str); 4] = [
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+];
+
+fn efforts(supported: Option<&[String]>) -> Vec<Effort> {
+    EFFORTS
+        .iter()
+        .filter(|(id, _)| supported.is_none_or(|supported| supported.iter().any(|s| s == id)))
+        .map(|(id, label)| Effort {
+            id: (*id).into(),
+            label: (*label).into(),
+        })
+        .collect()
+}
+
+/// `claude-opus-5-5` reads as `Opus 5.5`, and an alias such as `opus` as
+/// `Opus`. Anything else is shown as it is.
+pub fn model_name(model: &str) -> String {
+    static ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[.*\])?$")
+            .expect("model id pattern")
+    });
+    let capitalized = |family: &str| {
+        let mut chars = family.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+            .unwrap_or_default()
+    };
+    if let Some(id) = ID.captures(model) {
+        let minor = id
+            .get(3)
+            .map_or(String::new(), |minor| format!(".{}", minor.as_str()));
+        return format!("{} {}{minor}", capitalized(&id[1]), &id[2]);
+    }
+    if !model.is_empty() && model.chars().all(|c| c.is_ascii_lowercase()) {
+        return capitalized(model);
+    }
+    model.to_string()
+}
+
 /// Why an agent woke, as this type needs it.
 #[derive(Clone, Debug)]
 pub enum Wake {
@@ -145,6 +192,9 @@ pub struct Run {
     pub config: Value,
     /// Where the agent's processes run: the host that holds it.
     pub spawn: Spawner,
+    /// The model and effort the owner picked for this turn.
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// One agent, as `sync` describes it.
@@ -290,6 +340,79 @@ impl ClaudeRuntime {
         self.notify();
     }
 
+    /// The models the agent's next turn can run on, with their effort
+    /// levels. Without a pick it uses its own: the configured one, or else
+    /// the one its sessions report. `default` duplicates a listed model, so
+    /// it is not offered.
+    pub async fn models(&self, pubkey: &str) -> Result<Models, String> {
+        let entry = locked(&self.inner.agents).get(pubkey).cloned();
+        let configured = entry
+            .as_ref()
+            .map(|entry| locked(&entry.state).config.model.trim().to_string())
+            .unwrap_or_default();
+        let metadata = match &entry {
+            Some(entry) => entry.sessions.metadata().await?,
+            None => Default::default(),
+        };
+        // A turn without a pick keeps the session's effort on any model.
+        let resting = |efforts: &[Effort]| {
+            metadata
+                .effort
+                .clone()
+                .filter(|effort| efforts.iter().any(|level| level.id == *effort))
+        };
+        let own = if configured.is_empty() {
+            metadata.model.clone().unwrap_or_default()
+        } else {
+            configured
+        };
+        let offered: Vec<_> = metadata
+            .models
+            .iter()
+            .filter(|model| model.value != "default")
+            .collect();
+        let models: Vec<Model> = offered
+            .iter()
+            .map(|model| {
+                let efforts = if model.supports_effort == Some(false) {
+                    Vec::new()
+                } else {
+                    efforts(model.supported_effort_levels.as_deref())
+                };
+                Model {
+                    id: model.value.clone(),
+                    label: model_name(model.resolved_model.as_deref().unwrap_or(&model.value)),
+                    effort: resting(&efforts),
+                    efforts,
+                }
+            })
+            .collect();
+        let current = offered
+            .iter()
+            .find(|model| own == model.value || Some(&own) == model.resolved_model.as_ref())
+            .map_or(own.clone(), |model| model.value.clone());
+        // An own model Claude Code does not list is still the one it runs.
+        if models.iter().any(|model| model.id == current) {
+            return Ok(Models { current, models });
+        }
+        let all = efforts(None);
+        let mut listed = vec![Model {
+            id: current.clone(),
+            label: if current.is_empty() {
+                "Claude Code".into()
+            } else {
+                model_name(&current)
+            },
+            effort: resting(&all),
+            efforts: all,
+        }];
+        listed.extend(models);
+        Ok(Models {
+            current,
+            models: listed,
+        })
+    }
+
     /// Conversations each agent has running, for its status view.
     pub fn sessions(&self, pubkey: &str) -> Vec<SessionView> {
         locked(&self.inner.agents)
@@ -419,6 +542,10 @@ impl ClaudeRuntime {
             DeliverOptions {
                 steer: Some(steer_prompt(&text)),
                 fresh: Some(fresh),
+                pick: TurnPick {
+                    model: run.model,
+                    effort: run.effort,
+                },
             },
         );
         self.notify();

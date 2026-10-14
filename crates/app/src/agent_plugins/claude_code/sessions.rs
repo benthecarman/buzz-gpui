@@ -5,7 +5,7 @@
 //! One spare process, shared by every agent, waits for the next new
 //! conversation, so that starts without a spawn.
 
-use super::claude::{ClaudeProcess, Launch, Settled, ToolServer};
+use super::claude::{ClaudeModel, ClaudeProcess, Launch, Settled, ToolServer, TurnPick};
 use crate::agent_plugins::process::Spawner;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -88,8 +88,27 @@ struct Live {
 
 type Starting = Shared<BoxFuture<'static, Option<Arc<Live>>>>;
 
+/// What a session runs with when nothing is picked, and what it can switch
+/// to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Metadata {
+    pub models: Vec<ClaudeModel>,
+    /// The model it runs, as Claude Code reports it.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// A process started only to read [`Metadata`] for one set of settings.
+struct Discovery {
+    id: u64,
+    fingerprint: String,
+    result: Shared<BoxFuture<'static, Result<Metadata, String>>>,
+    process: Arc<Mutex<Option<ClaudeProcess>>>,
+}
+
 #[derive(Default)]
 struct State {
+    discovery: Option<Discovery>,
     /// In the order they started, for the status view.
     live: Vec<(String, Arc<Live>)>,
     opening: BTreeMap<String, (u64, Starting)>,
@@ -161,6 +180,22 @@ pub struct DeliverOptions {
     pub steer: Option<String>,
     /// Builds the text again for a new session when the saved one is lost.
     pub fresh: Option<BoxFuture<'static, String>>,
+    /// The model and effort the turn was asked to run with.
+    pub pick: TurnPick,
+}
+
+/// What a process says it runs with, and can switch to.
+async fn read_metadata(process: &ClaudeProcess) -> Metadata {
+    let (models, model, effort) = futures::join!(
+        process.models(),
+        process.read_model(),
+        process.read_effort()
+    );
+    Metadata {
+        models,
+        model,
+        effort,
+    }
 }
 
 fn kill_later(live: Arc<Live>) {
@@ -215,6 +250,117 @@ impl AgentSessions {
             .collect()
     }
 
+    /// The defaults and models of a session with the current settings,
+    /// read without giving the shared spare to this agent: from a running
+    /// session when one has them, else from a process started only to
+    /// read them.
+    pub async fn metadata(&self) -> Result<Metadata, String> {
+        let fingerprint = self.fingerprint();
+        let running = self
+            .state()
+            .live
+            .iter()
+            .find(|(_, live)| live.fingerprint == fingerprint && live.process.running())
+            .map(|(_, live)| live.process.clone());
+        if let Some(process) = running {
+            let metadata = read_metadata(&process).await;
+            let discovered = {
+                let state = self.state();
+                state
+                    .discovery
+                    .as_ref()
+                    .filter(|discovery| discovery.fingerprint == fingerprint)
+                    .map(|discovery| discovery.result.clone())
+            };
+            let discovered = match discovered {
+                Some(result) => result.await.ok().and_then(|metadata| metadata.model),
+                None => None,
+            };
+            return Ok(Metadata {
+                model: metadata.model.or(discovered),
+                ..metadata
+            });
+        }
+        let result = {
+            let mut state = self.state();
+            if state.disposed {
+                return Ok(Metadata::default());
+            }
+            match &state.discovery {
+                Some(discovery) if discovery.fingerprint == fingerprint => discovery.result.clone(),
+                _ => {
+                    if let Some(old) = state.discovery.take() {
+                        stop_discovery(old);
+                    }
+                    let id = self.next_id();
+                    let process: Arc<Mutex<Option<ClaudeProcess>>> = Arc::default();
+                    let result = {
+                        let (this, holder) = (self.clone(), process.clone());
+                        async move {
+                            let stopped = || "Claude Code was stopped".to_string();
+                            let current = |this: &AgentSessions| {
+                                let state = this.state();
+                                !state.disposed
+                                    && state.discovery.as_ref().is_some_and(|d| d.id == id)
+                            };
+                            let launch = (this.options().launch)().await?;
+                            if !current(&this) {
+                                return Err(stopped());
+                            }
+                            let process = ClaudeProcess::start(
+                                &this.options().spawn,
+                                Launch {
+                                    cwd: launch.cwd,
+                                    model: launch.model,
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                            *locked(&holder) = Some(process.clone());
+                            let read = if current(&this) {
+                                Ok(read_metadata(&process).await)
+                            } else {
+                                Err(stopped())
+                            };
+                            process.kill().await;
+                            locked(&holder).take();
+                            read
+                        }
+                        .boxed()
+                        .shared()
+                    };
+                    state.discovery = Some(Discovery {
+                        id,
+                        fingerprint,
+                        result: result.clone(),
+                        process,
+                    });
+                    // A failed read is not kept, so the next one tries again.
+                    let this = Arc::downgrade(&self.inner);
+                    let watched = result.clone();
+                    tokio::spawn(async move {
+                        if watched.await.is_err()
+                            && let Some(sessions) = upgrade(&this)
+                        {
+                            let mut state = sessions.state();
+                            if state.discovery.as_ref().is_some_and(|d| d.id == id) {
+                                state.discovery = None;
+                            }
+                        }
+                    });
+                    result
+                }
+            }
+        };
+        result.await
+    }
+
+    fn clear_discovery(&self) {
+        if let Some(discovery) = self.state().discovery.take() {
+            stop_discovery(discovery);
+        }
+    }
+
     /// Sends `text` into the conversation `key`, and resolves when the
     /// session has answered it.
     pub fn deliver(
@@ -233,7 +379,7 @@ impl AgentSessions {
         key: String,
         text: String,
         seen: u64,
-        DeliverOptions { steer, fresh }: DeliverOptions,
+        DeliverOptions { steer, fresh, pick }: DeliverOptions,
     ) -> Settled {
         if self.state().disposed {
             return Settled::failed("Claude Code was stopped");
@@ -265,7 +411,7 @@ impl AgentSessions {
                 (true, Some(steer)) => steer,
                 _ => text,
             };
-            return self.answer(&key, &live, &text, place).await;
+            return self.answer(&key, &live, &text, pick, place).await;
         }
         let saved = self.options().store.get(&key);
         let id = self.next_id();
@@ -312,7 +458,7 @@ impl AgentSessions {
             live.process.kill().await;
             return Settled::failed("Claude Code was stopped");
         }
-        let delivered = self.answer(&key, &live, &text, place).await;
+        let delivered = self.answer(&key, &live, &text, pick.clone(), place).await;
         // A saved session that no longer loads starts over rather than
         // failing every message in the conversation, shown the
         // conversation so far.
@@ -324,7 +470,15 @@ impl AgentSessions {
                 None => text,
             };
             return self
-                .deliver(key, text, seen, DeliverOptions::default())
+                .deliver(
+                    key,
+                    text,
+                    seen,
+                    DeliverOptions {
+                        pick,
+                        ..Default::default()
+                    },
+                )
                 .await;
         }
         delivered
@@ -333,6 +487,7 @@ impl AgentSessions {
     /// Stops idle processes started with old settings; busy ones stop when
     /// they next fall idle.
     pub fn reconfigure(&self) {
+        self.clear_discovery();
         let fingerprint = self.fingerprint();
         let stale: Vec<(String, Arc<Live>)> = self
             .state()
@@ -356,6 +511,7 @@ impl AgentSessions {
     }
 
     pub fn dispose(&self) {
+        self.clear_discovery();
         let live = {
             let mut state = self.state();
             state.disposed = true;
@@ -455,8 +611,15 @@ impl AgentSessions {
 
     /// Hands the process `text`, then lets the next message in `key`'s
     /// queue go, and waits for the answer.
-    async fn answer(&self, key: &str, live: &Arc<Live>, text: &str, place: Place) -> Settled {
-        let settled = live.process.send(text);
+    async fn answer(
+        &self,
+        key: &str,
+        live: &Arc<Live>,
+        text: &str,
+        pick: TurnPick,
+        place: Place,
+    ) -> Settled {
+        let settled = live.process.send(text, pick);
         drop(place);
         let settled = settled.await;
         if self.state().holds(key, live) {
@@ -526,6 +689,17 @@ impl AgentSessions {
             .retain(|(other, held)| !(other == key && Arc::ptr_eq(held, live)));
         (self.options().on_change)();
         kill_later(live.clone());
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Kills a discovery's process, if it has one now.
+fn stop_discovery(discovery: Discovery) {
+    if let Some(process) = locked(&discovery.process).take() {
+        kill_process(process);
     }
 }
 

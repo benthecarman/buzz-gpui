@@ -781,6 +781,7 @@ impl NewMessagePage {
                         let mentions = Mentions {
                             recipients: draft.recipients.clone(),
                             references: Vec::new(),
+                            ..Default::default()
                         };
                         session
                             .send(&channel, &draft.text, mentions, Vec::new(), None)

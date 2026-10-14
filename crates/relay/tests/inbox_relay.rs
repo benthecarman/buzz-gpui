@@ -85,6 +85,7 @@ async fn mentions_reach_the_inbox_and_read_there() {
         Mentions {
             recipients: vec![alice_key.clone()],
             references: Vec::new(),
+            ..Default::default()
         },
         Vec::new(),
         None,

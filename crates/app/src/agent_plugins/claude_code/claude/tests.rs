@@ -73,10 +73,16 @@ async fn starts_claude_code_as_the_sdk_does_and_initializes_it() {
 async fn resolves_a_message_once_idle_and_keeps_the_process() {
     let fake = FakeSpawn::default();
     let claude = start(&fake, launch()).await;
-    assert_eq!(claude.send("hello").await, Settled::ok());
+    assert_eq!(
+        claude.send("hello", TurnPick::default()).await,
+        Settled::ok()
+    );
     assert!(claude.started());
     assert!(!claude.busy());
-    assert_eq!(claude.send("again").await, Settled::ok());
+    assert_eq!(
+        claude.send("again", TurnPick::default()).await,
+        Settled::ok()
+    );
     assert_eq!(fake.claudes().len(), 1);
     assert_eq!(fake.claudes()[0].prompts(), ["hello", "again"]);
 }
@@ -87,8 +93,8 @@ async fn answers_both_messages_of_a_turn_that_took_a_second_mid_way() {
     let claude = start(&fake, launch()).await;
     let process = fake.claudes()[0].clone();
     process.set_hold(true);
-    let first = tokio::spawn(claude.send("first"));
-    let second = tokio::spawn(claude.send("second"));
+    let first = tokio::spawn(claude.send("first", TurnPick::default()));
+    let second = tokio::spawn(claude.send("second", TurnPick::default()));
     assert!(claude.busy());
     flush().await;
     assert!(!first.is_finished());
@@ -140,10 +146,10 @@ async fn a_message_written_as_the_turn_ends_waits_for_its_own_turn() {
         .unwrap();
     let process = fake.claudes()[0].clone();
     process.set_hold(true);
-    let first = tokio::spawn(claude.send("first"));
+    let first = tokio::spawn(claude.send("first", TurnPick::default()));
     flush().await;
     process.emit(replay("first"));
-    let second = tokio::spawn(claude.send("second"));
+    let second = tokio::spawn(claude.send("second", TurnPick::default()));
     flush().await;
     process.finish(None);
     flush().await;
@@ -167,7 +173,7 @@ async fn a_message_claude_never_takes_is_settled_after_a_grace() {
     let claude = ClaudeProcess::start(&manual_replay(&fake), launch())
         .await
         .unwrap();
-    let sent = tokio::spawn(claude.send("lost"));
+    let sent = tokio::spawn(claude.send("lost", TurnPick::default()));
     flush().await;
     assert!(!sent.is_finished());
     tokio::time::sleep(UNREAD_GRACE * 2).await;
@@ -196,7 +202,10 @@ async fn settles_on_each_result_when_claude_code_does_not_report_idle() {
     let spawner: Spawner = Arc::new(NoIdle(fake.clone()));
     let claude = ClaudeProcess::start(&spawner, launch()).await.unwrap();
     assert!(fake.claudes()[0].state().options.env.is_empty());
-    assert_eq!(claude.send("hello").await, Settled::ok());
+    assert_eq!(
+        claude.send("hello", TurnPick::default()).await,
+        Settled::ok()
+    );
     assert!(!claude.busy());
 }
 
@@ -206,7 +215,7 @@ async fn reports_a_turn_that_ends_in_an_error_with_claudes_own_words() {
     let claude = start(&fake, launch()).await;
     let process = fake.claudes()[0].clone();
     process.set_hold(true);
-    let sent = tokio::spawn(claude.send("hello"));
+    let sent = tokio::spawn(claude.send("hello", TurnPick::default()));
     flush().await;
     process.finish(Some("Credit balance is too low"));
     assert_eq!(
@@ -229,12 +238,12 @@ async fn fails_what_is_waiting_when_the_process_exits() {
     .await;
     assert_eq!(claude.session_id().as_deref(), Some("gone"));
     assert_eq!(
-        claude.send("hello").await,
+        claude.send("hello", TurnPick::default()).await,
         Settled::failed("No conversation found with session ID: gone")
     );
     assert!(!claude.running());
     assert!(!claude.started());
-    assert!(!claude.send("more").await.ok);
+    assert!(!claude.send("more", TurnPick::default()).await.ok);
     assert_eq!(claude.exited().await, Some(1));
 }
 
@@ -315,7 +324,7 @@ async fn serves_the_buzz_tools_and_ends_a_turn_on_a_final_send() {
         json!({ "PostToolUse": [{ "matcher": "mcp__buzz__send", "hookCallbackIds": ["final"] }] })
     );
     process.set_hold(true);
-    let _turn = tokio::spawn(claude.send("hi"));
+    let _turn = tokio::spawn(claude.send("hi", TurnPick::default()));
     flush().await;
     let call = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call" });
     process.emit(json!({
@@ -378,8 +387,13 @@ impl ProcessControl for Silent {
 #[tokio::test]
 async fn reads_messages_split_across_output_chunks() {
     let (output, receiver) = mpsc::unbounded_channel();
-    let claude =
-        ClaudeProcess::attach(Process(Arc::new(Silent)), receiver, Some("s1".into()), None);
+    let claude = ClaudeProcess::attach(
+        Process(Arc::new(Silent)),
+        receiver,
+        Some("s1".into()),
+        None,
+        None,
+    );
     let line = json!({ "type": "system", "subtype": "init", "session_id": "s2" }).to_string();
     output
         .send(ProcessOutput::Stdout(line[..10].to_string()))
@@ -392,4 +406,88 @@ async fn reads_messages_split_across_output_chunks() {
     flush().await;
     assert!(claude.started());
     assert_eq!(claude.session_id().as_deref(), Some("s2"));
+}
+
+fn pick(model: Option<&str>, effort: Option<&str>) -> TurnPick {
+    TurnPick {
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn runs_a_turn_at_the_effort_asked_for_and_the_next_without_one_at_the_sessions_own() {
+    let fake = FakeSpawn::default();
+    let claude = start(&fake, launch()).await;
+    let process = fake.claudes()[0].clone();
+    claude.send("plain", TurnPick::default()).await;
+    let types: Vec<Value> = process
+        .state()
+        .received
+        .iter()
+        .map(|message| message["type"].clone())
+        .collect();
+    assert_eq!(types, ["control_request", "user"]);
+    claude.send("hard", pick(None, Some("xhigh"))).await;
+    process.set_hold(true);
+    let quick = tokio::spawn(claude.send("quick", pick(None, Some("low"))));
+    // Folded into the running turn, a message without an effort keeps it.
+    let steer = tokio::spawn(claude.send("also", TurnPick::default()));
+    flush().await;
+    process.finish(None);
+    quick.await.unwrap();
+    steer.await.unwrap();
+    process.set_hold(false);
+    claude.send("after", TurnPick::default()).await;
+    assert_eq!(
+        process.prompts(),
+        ["plain", "hard", "quick", "also", "after"]
+    );
+    assert_eq!(process.efforts(), ["high", "xhigh", "low", "low", "high"]);
+    // The session's own level is read once, before the first change.
+    assert_eq!(process.requests("get_settings").len(), 1);
+}
+
+#[tokio::test]
+async fn runs_a_turn_on_the_model_asked_for_and_the_next_without_one_on_the_sessions_own() {
+    let fake = FakeSpawn::default();
+    let claude = start(
+        &fake,
+        Launch {
+            model: Some("opus".into()),
+            ..launch()
+        },
+    )
+    .await;
+    let process = fake.claudes()[0].clone();
+    assert!(
+        claude
+            .models()
+            .await
+            .iter()
+            .any(|model| model.value == "haiku")
+    );
+    claude.send("plain", TurnPick::default()).await;
+    process.set_hold(true);
+    let quick = tokio::spawn(claude.send("quick", pick(Some("haiku"), None)));
+    // Folded into the running turn, a message without a model keeps it.
+    let steer = tokio::spawn(claude.send("also", TurnPick::default()));
+    flush().await;
+    process.finish(None);
+    quick.await.unwrap();
+    steer.await.unwrap();
+    process.set_hold(false);
+    claude.send("after", TurnPick::default()).await;
+    assert_eq!(process.models(), ["opus", "haiku", "haiku", "opus"]);
+    // The session reports its own model, not the picked one.
+    assert_eq!(
+        claude.read_model().await.as_deref(),
+        Some("claude-opus-5-5")
+    );
+    let set: Vec<Value> = process
+        .requests("set_model")
+        .iter()
+        .map(|request| request["model"].clone())
+        .collect();
+    assert_eq!(set, [json!("haiku"), json!("opus")]);
 }

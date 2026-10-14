@@ -206,6 +206,8 @@ async fn answers_a_mention_through_the_buzz_send_tool() {
                 "effort": "low",
             }),
             spawn,
+            model: None,
+            effort: None,
         })
         .await
         .unwrap();

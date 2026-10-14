@@ -329,6 +329,7 @@ fn admission(channel: Option<&ChannelSummary>, viewer: &str, recipients: Vec<Str
         return Admission::Send(Mentions {
             recipients,
             references: Vec::new(),
+            ..Default::default()
         });
     };
     let (members, missing): (Vec<String>, Vec<String>) = recipients
@@ -339,6 +340,7 @@ fn admission(channel: Option<&ChannelSummary>, viewer: &str, recipients: Vec<Str
         return Admission::Send(Mentions {
             recipients,
             references: Vec::new(),
+            ..Default::default()
         });
     }
     if matches!(
@@ -348,6 +350,7 @@ fn admission(channel: Option<&ChannelSummary>, viewer: &str, recipients: Vec<Str
         return Admission::Send(Mentions {
             recipients: members,
             references: missing,
+            ..Default::default()
         });
     }
     let member = channel.members.iter().any(|key| key == viewer);
@@ -888,6 +891,7 @@ impl Composer {
             mentions: Mentions {
                 recipients: mentioned,
                 references: Vec::new(),
+                ..Default::default()
             },
             upload: None,
             editing: self.editing.clone(),
@@ -5595,6 +5599,7 @@ mod tests {
             Admission::Send(Mentions {
                 recipients: keys(&["bob"]),
                 references: Vec::new(),
+                ..Default::default()
             })
         );
         assert_eq!(
@@ -5634,6 +5639,7 @@ mod tests {
             Admission::Send(Mentions {
                 recipients: keys(&["bob"]),
                 references: keys(&["carol"]),
+                ..Default::default()
             })
         );
         // An unknown roster leaves the decision to the writer's check.
@@ -5642,6 +5648,7 @@ mod tests {
             Admission::Send(Mentions {
                 recipients: keys(&["carol"]),
                 references: Vec::new(),
+                ..Default::default()
             })
         );
     }

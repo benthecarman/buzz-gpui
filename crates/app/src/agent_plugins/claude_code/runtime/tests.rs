@@ -158,6 +158,8 @@ impl Setup {
             agent: self.agent.clone(),
             config,
             spawn: self.fake.spawner(),
+            model: None,
+            effort: None,
         };
         async move { runtime.run(run).await }
     }
@@ -523,4 +525,118 @@ fn thread_references_follow_nip10() {
             parent_id: parent
         })
     );
+}
+
+fn levels(ids: &[&str]) -> Vec<Effort> {
+    efforts(None)
+        .into_iter()
+        .filter(|level| ids.contains(&level.id.as_str()))
+        .collect()
+}
+
+#[tokio::test]
+async fn knows_the_agents_own_model_once_one_of_its_sessions_has_begun() {
+    let setup = Setup::new(vec![]);
+    let mention = message("2", "@Claude can you look?", |event| {
+        event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
+    });
+    setup.mention(&mention).await;
+    flush().await;
+    assert_eq!(setup.runtime.models(&own()).await.unwrap().current, "opus");
+    setup.runtime.dispose();
+}
+
+#[tokio::test]
+async fn discovers_models_and_effort_without_a_turn_or_keeping_a_process_for_it() {
+    let setup = Setup::new(vec![]);
+    setup.sync(Config::default());
+    let all = levels(&["low", "medium", "high", "xhigh"]);
+    assert_eq!(
+        setup.runtime.models(&own()).await.unwrap(),
+        Models {
+            current: "opus".into(),
+            models: vec![
+                Model {
+                    id: "opus".into(),
+                    label: "Opus 5.5".into(),
+                    efforts: all,
+                    effort: Some("high".into()),
+                },
+                Model {
+                    id: "haiku".into(),
+                    label: "Haiku 5.5".into(),
+                    efforts: levels(&["low", "high"]),
+                    effort: Some("high".into()),
+                },
+                Model {
+                    id: "legacy".into(),
+                    label: "Legacy 1".into(),
+                    efforts: vec![],
+                    effort: None,
+                },
+            ],
+        }
+    );
+    // Only the shared spare stays; the lookup's process is gone.
+    flush().await;
+    assert_eq!(setup.fake.live().len(), 1);
+    assert!(
+        setup
+            .fake
+            .claudes()
+            .iter()
+            .all(|process| process.prompts().is_empty())
+    );
+    setup.runtime.dispose();
+}
+
+#[tokio::test]
+async fn still_offers_a_configured_model_claude_code_does_not_list() {
+    let setup = Setup::new(vec![]);
+    setup.sync(Config {
+        model: "claude-sonnet-9-9".into(),
+        ..Config::default()
+    });
+    let Models { current, models } = setup.runtime.models(&own()).await.unwrap();
+    assert_eq!(current, "claude-sonnet-9-9");
+    let labels: Vec<String> = models.into_iter().map(|model| model.label).collect();
+    assert_eq!(labels, ["Sonnet 9.9", "Opus 5.5", "Haiku 5.5", "Legacy 1"]);
+    setup.runtime.dispose();
+}
+
+#[tokio::test]
+async fn runs_a_mention_on_the_model_and_effort_its_delivery_picked() {
+    let setup = Setup::new(vec![]);
+    setup.sync(Config::default());
+    assert_eq!(setup.runtime.models(&own()).await.unwrap().current, "opus");
+    let mention = message("2", "@Claude think hard", |event| {
+        event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
+    });
+    setup
+        .runtime
+        .run(Run {
+            wake: Wake::Mention { event: mention },
+            channel: Some(CHANNEL.into()),
+            agent: setup.agent.clone(),
+            config: Config::default().value(),
+            spawn: setup.fake.spawner(),
+            model: Some("haiku".into()),
+            effort: Some("low".into()),
+        })
+        .await;
+    flush().await;
+    let used = setup.used();
+    assert_eq!(used[0].models(), ["haiku"]);
+    assert_eq!(used[0].efforts(), ["low"]);
+    assert_eq!(setup.runtime.models(&own()).await.unwrap().current, "opus");
+    setup.runtime.dispose();
+}
+
+#[test]
+fn reads_model_ids_and_aliases_as_names() {
+    assert_eq!(model_name("claude-opus-5-5"), "Opus 5.5");
+    assert_eq!(model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+    assert_eq!(model_name("claude-opus-4[1m]"), "Opus 4");
+    assert_eq!(model_name("opus"), "Opus");
+    assert_eq!(model_name("my-proxy/model"), "my-proxy/model");
 }

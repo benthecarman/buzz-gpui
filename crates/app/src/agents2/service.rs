@@ -15,7 +15,7 @@ use super::attention::{
     self, AttentionObject, AttentionValue, CHAT_KINDS, EventData, Predicate, TimerState,
     addressed_to, compile_filter, tags_agent, timer_spent, timer_state, watch_matches,
 };
-use super::registry::{self, AgentType, RegisteredType};
+use super::registry::{self, AgentType, Models, RegisteredType};
 use super::runtime::{
     AgentHandle, Bounded, CancelSource, Cancellation, Delivery, HostLink, Trigger, UNSUPPORTED,
 };
@@ -301,7 +301,7 @@ enum Start {
     /// a type reads the service (its agent's host) as it starts.
     Run(
         Arc<dyn AgentType>,
-        Box<Delivery>,
+        Box<(Delivery, Agent)>,
         Cancellation,
         CancelSource,
     ),
@@ -321,6 +321,62 @@ fn claimed(pubkey: &str, answer: Result<AppAgentResponse, String>) -> bool {
             true
         }
     }
+}
+
+/// The model and effort the triggering message asks of this agent, if
+/// any. Only the owner picks them, so nobody else in a channel can run the
+/// agent at their level.
+pub(crate) fn asked(
+    trigger: &Trigger,
+    agent: &str,
+    owner: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let event = match trigger {
+        Trigger::Mention { event } | Trigger::Watch { event, .. } => event,
+        Trigger::Timer { .. } => return None,
+    };
+    if event.pubkey != owner {
+        return None;
+    }
+    let tag = |name: &str| {
+        event
+            .tags
+            .iter()
+            .find(|tag| {
+                tag.first().map(String::as_str) == Some(name)
+                    && tag.get(1).map(String::as_str) == Some(agent)
+            })
+            .and_then(|tag| tag.get(2).cloned())
+            .filter(|value| !value.is_empty())
+    };
+    let model = tag(buzz_relay_client::messages::MODEL_TAG);
+    let effort = tag(buzz_relay_client::messages::EFFORT_TAG);
+    (model.is_some() || effort.is_some()).then_some((model, effort))
+}
+
+/// Of what was asked, only what the type offers: a listed model, and an
+/// effort of the model the run uses.
+pub(crate) fn picked(
+    (model, effort): (Option<String>, Option<String>),
+    offered: Option<&Models>,
+) -> (Option<String>, Option<String>) {
+    let Some(offered) = offered else {
+        return (None, None);
+    };
+    let picked = offered
+        .models
+        .iter()
+        .find(|item| Some(&item.id) == model.as_ref());
+    let runs = picked.or_else(|| {
+        offered
+            .models
+            .iter()
+            .find(|item| item.id == offered.current)
+    });
+    let effort = effort.filter(|effort| {
+        runs.is_some_and(|runs| runs.efforts.iter().any(|level| level.id == *effort))
+    });
+    (picked.map(|picked| picked.id.clone()), effort)
 }
 
 /// The per-minute admission window.
@@ -1427,7 +1483,30 @@ impl Agents2 {
                     Ok(Start::Idle) | Err(_) => break,
                 };
                 let timeout = kind.timeout();
-                let run = cx.update(|cx| kind.run(*delivery, cx));
+                let (mut delivery, agent) = *delivery;
+                let run = {
+                    let lifetime = lifetime.clone();
+                    cx.spawn(async move |cx| {
+                        let pubkey = delivery.agent.pubkey.clone();
+                        if let Some(asked) = asked(&delivery.trigger, &pubkey, &agent.owner) {
+                            let offered = match cx.update(|cx| kind.models(&agent, cx)) {
+                                Some(listing) => match listing.await {
+                                    Ok(models) => Some(models),
+                                    Err(error) => {
+                                        tracing::warn!(agent = %pubkey, %error, "agent type could not list its models");
+                                        None
+                                    }
+                                },
+                                None => None,
+                            };
+                            (delivery.model, delivery.effort) = picked(asked, offered.as_ref());
+                            if lifetime.is_cancelled() {
+                                return Ok(());
+                            }
+                        }
+                        cx.update(|cx| kind.run(delivery, cx)).await
+                    })
+                };
                 let deadline = cx.background_executor().timer(timeout);
                 let ended = futures::future::select(
                     run,
@@ -1563,9 +1642,11 @@ impl Agents2 {
             channel: job.channel,
             agent: handle,
             config: agent.config.clone(),
+            model: None,
+            effort: None,
             cancel,
         };
-        Start::Run(kind.kind, Box::new(delivery), lifetime, source)
+        Start::Run(kind.kind, Box::new((delivery, agent)), lifetime, source)
     }
 
     // ----- changes -----

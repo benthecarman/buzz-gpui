@@ -460,6 +460,7 @@ async fn uploads_an_image_and_sends_it_with_a_mention() {
     let mentions = Mentions {
         recipients: vec![bob.clone()],
         references: Vec::new(),
+        ..Default::default()
     };
     session
         .send(&random, &content, mentions, vec![attachment.clone()], None)

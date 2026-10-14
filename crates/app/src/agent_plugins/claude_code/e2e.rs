@@ -237,6 +237,8 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             agent: agent.clone(),
             config: config.value(),
             spawn: spawn.clone(),
+            model: None,
+            effort: None,
         })
         .await;
     wait_for("the reply", || !agent.published.lock().unwrap().is_empty()).await;
@@ -293,6 +295,8 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             agent: agent.clone(),
             config: config.value(),
             spawn,
+            model: None,
+            effort: None,
         })
         .await;
     wait_for("the file", || agent.published.lock().unwrap().len() == 2).await;
@@ -438,6 +442,8 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
             agent: Arc::new(handle),
             config: config.value(),
             spawn,
+            model: None,
+            effort: None,
         })
         .await;
     let filter = json!({ "kinds": [9], "authors": [pubkey], "#e": [event.id], "limit": 5 });
