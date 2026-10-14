@@ -769,6 +769,7 @@ fn render(bytes: &[u8], format: image::ImageFormat) -> Result<Vec<u8>, UploadErr
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95)
                 .encode_image(&rgb)
                 .map_err(|_| PREPARE_FAILED)?;
+            out = clean_encoded_jpeg(&out)?;
         }
         image::ImageFormat::WebP => {
             image::codecs::webp::WebPEncoder::new_lossless(&mut out)
@@ -787,6 +788,85 @@ fn render(bytes: &[u8], format: image::ImageFormat) -> Result<Vec<u8>, UploadErr
         }
     }
     Ok(out)
+}
+
+/// Strips encoder-added metadata from a JPEG this client just encoded
+/// (`cleanEncodedJpeg`): every APP and COM section except the canonical
+/// JFIF and Adobe ones the relay accepts, and anything after the end
+/// marker. Only for output whose pixels were already oriented and drawn
+/// in sRGB: on a source photo it would lose appearance. Entropy-coded
+/// data, stuffed bytes and restart markers stay as they are.
+fn clean_encoded_jpeg(bytes: &[u8]) -> Result<Vec<u8>, UploadError> {
+    let invalid = || MALFORMED;
+    if bytes.len() < 2 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return Err(invalid());
+    }
+    let mut out = bytes[..2].to_vec();
+    let mut offset = 2;
+    let mut scan = false;
+    while offset < bytes.len() {
+        let start = offset;
+        if scan {
+            while offset < bytes.len() {
+                if bytes[offset] != 0xff {
+                    offset += 1;
+                    continue;
+                }
+                match bytes.get(offset + 1) {
+                    Some(0) | Some(0xd0..=0xd7) => offset += 2,
+                    _ => break,
+                }
+            }
+            out.extend_from_slice(&bytes[start..offset.min(bytes.len())]);
+            offset = offset.min(bytes.len());
+            scan = false;
+            continue;
+        }
+        if bytes[offset] != 0xff {
+            return Err(invalid());
+        }
+        offset += 1;
+        while bytes.get(offset) == Some(&0xff) {
+            offset += 1;
+        }
+        let Some(&marker) = bytes.get(offset) else {
+            return Err(invalid());
+        };
+        offset += 1;
+        if marker == 0xd9 {
+            out.extend_from_slice(&[0xff, 0xd9]);
+            return Ok(out);
+        }
+        if marker == 0 || marker == 0xd8 {
+            return Err(invalid());
+        }
+        if marker == 1 || (0xd0..=0xd7).contains(&marker) {
+            out.extend_from_slice(&bytes[start..offset]);
+            continue;
+        }
+        if offset + 2 > bytes.len() {
+            return Err(invalid());
+        }
+        let length = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        let end = offset + length;
+        if length < 2 || end > bytes.len() {
+            return Err(invalid());
+        }
+        let payload = &bytes[offset + 2..end];
+        // The relay's canonical JFIF and Adobe exceptions; every other APP
+        // or COM section is metadata.
+        let canonical = (marker == 0xe0
+            && payload.len() >= 14
+            && payload.starts_with(b"JFIF\0")
+            && payload.len() == 14 + 3 * payload[12] as usize * payload[13] as usize)
+            || (marker == 0xee && payload.len() == 12 && payload.starts_with(b"Adobe"));
+        if canonical || !((0xe0..=0xef).contains(&marker) || marker == 0xfe) {
+            out.extend_from_slice(&bytes[start..end]);
+        }
+        offset = end;
+        scan = marker == 0xda;
+    }
+    Err(invalid())
 }
 
 fn sniffed_format(bytes: &[u8]) -> Option<image::ImageFormat> {
@@ -1321,6 +1401,82 @@ mod tests {
         out.extend_from_slice(&orientation.to_be_bytes());
         out.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
         out
+    }
+
+    /// A JPEG section: marker, big-endian length, payload.
+    fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let length = (payload.len() + 2) as u16;
+        let mut out = vec![0xff, marker];
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn jpeg_parts() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut jfif = b"JFIF\0".to_vec();
+        jfif.extend_from_slice(&[1, 1, 0, 0, 1, 0, 1, 0, 0]);
+        let mut adobe = b"Adobe".to_vec();
+        adobe.extend_from_slice(&[0, 100, 0, 0, 0, 0, 1]);
+        let mut scan = segment(0xda, &[1, 1, 0, 0, 63, 0]);
+        scan.extend_from_slice(&[42, 0xff, 0, 7, 0xff, 0xd0, 8]);
+        (segment(0xe0, &jfif), segment(0xee, &adobe), scan)
+    }
+
+    #[test]
+    fn encoded_jpegs_lose_metadata_between_scans_but_keep_their_pixels() {
+        let (jfif, adobe, scan) = jpeg_parts();
+        let mut pixels = vec![0xff, 0xd8];
+        for part in [&jfif, &adobe, &segment(0xdb, &[1, 2]), &scan, &scan] {
+            pixels.extend_from_slice(part);
+        }
+        pixels.extend_from_slice(&[0xff, 0xd9]);
+        let mut dirty = vec![0xff, 0xd8];
+        for part in [
+            jfif.clone(),
+            adobe.clone(),
+            segment(0xe1, b"Exif\0private"),
+            segment(0xe2, b"ICC_PROFILE\0private"),
+            segment(0xed, b"Photoshop 3.0\0private"),
+            segment(0xe0, b"noncanonical"),
+            segment(0xee, b"noncanonical"),
+            segment(0xdb, &[1, 2]),
+            scan.clone(),
+            segment(0xfe, b"private comment"),
+            scan.clone(),
+        ] {
+            dirty.extend_from_slice(&part);
+        }
+        dirty.extend_from_slice(&[0xff, 0xd9]);
+        dirty.extend_from_slice(b"trailing private data");
+        assert_eq!(clean_encoded_jpeg(&dirty).unwrap(), pixels);
+    }
+
+    #[test]
+    fn malformed_encoder_output_is_refused() {
+        let (_, _, scan) = jpeg_parts();
+        let mut unterminated = vec![0xff, 0xd8];
+        unterminated.extend_from_slice(&scan);
+        for bytes in [
+            vec![],
+            vec![0xff, 0xd8],
+            vec![0xff, 0xd8, 0xff],
+            vec![0xff, 0xd8, 0xff, 0xe1, 0, 1],
+            vec![0xff, 0xd8, 0xff, 0xe1, 0, 20, 1],
+            unterminated,
+        ] {
+            assert_eq!(clean_encoded_jpeg(&bytes), Err(MALFORMED), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn rendered_jpegs_carry_no_metadata() {
+        let image = image::RgbImage::from_pixel(4, 2, image::Rgb([200, 30, 30]));
+        let mut source = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut source, 90)
+            .encode_image(&image)
+            .unwrap();
+        let rendered = render(&source, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!(clean_encoded_jpeg(&rendered).unwrap(), rendered);
     }
 
     #[test]

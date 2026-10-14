@@ -3693,7 +3693,7 @@ impl Composer {
                 .flex()
                 .flex_none()
                 .when_some(tallest, |d, tallest| d.h(px(tallest + 10.)))
-                .gap(px(8.))
+                .gap(px(12.))
                 .min_w_0()
                 .pt(px(10.))
                 .pr(px(10.))
@@ -3879,7 +3879,8 @@ impl Composer {
                     div()
                         .absolute()
                         .top(px(-10.))
-                        .right(px(if error { -20. } else { -10. }))
+                        // The last control centres on the corner, even after Retry.
+                        .right(px(-10.))
                         .rounded_full()
                         .bg(c.surface_panel)
                         .when(quiet, |d| {
