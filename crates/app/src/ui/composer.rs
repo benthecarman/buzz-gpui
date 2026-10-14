@@ -154,6 +154,9 @@ pub struct Composer {
     editing: Option<Arc<MessageRow>>,
     /// The text the edit started from.
     edit_initial: Option<String>,
+    /// Counts the edits begun here, so late work for one edit (a deletion
+    /// asked for by emptying it) leaves a later edit alone.
+    edit_generation: u64,
     /// The edit's delivery, as the host reports it.
     edit_status: message_edit::EditStatus,
     /// The draft set aside while editing.
@@ -441,6 +444,7 @@ impl Composer {
             sending: false,
             can_send: true,
             editing: None,
+            edit_generation: 0,
             edit_initial: None,
             edit_status: message_edit::EditStatus::default(),
             stash: None,
@@ -553,6 +557,18 @@ impl Composer {
         }
     }
 
+    /// The edit in progress, if any, as `start_edit` numbered it.
+    pub fn edit_session(&self) -> Option<(EventId, u64)> {
+        self.editing
+            .as_ref()
+            .map(|row| (row.id, self.edit_generation))
+    }
+
+    /// The text box has keyboard focus.
+    pub fn input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
+    }
+
     /// The text the current edit started from.
     pub fn edit_initial(&self) -> Option<&str> {
         self.edit_initial.as_deref()
@@ -595,6 +611,7 @@ impl Composer {
         if self.editing.is_none() {
             self.write_draft(cx);
             self.stash = Some(self.input.read(cx).content());
+            self.edit_generation += 1;
         }
         let text = {
             let community = self.community.read(cx);

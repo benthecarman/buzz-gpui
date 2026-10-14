@@ -62,8 +62,20 @@ struct Deletion {
     awaiting: bool,
     error: Option<SharedString>,
     focus: FocusHandle,
-    /// Asked for by saving an empty edit: the edit ends with the deletion.
-    from_edit: bool,
+    /// Asked for by saving an empty edit: that edit (its composer
+    /// generation) ends once the deletion lands.
+    edit: Option<u64>,
+}
+
+/// A sent deletion an empty edit asked for. Only its receipt or echo ends
+/// the edit and brings the draft back; a discarded deletion keeps the
+/// correction (`MessageManagement`'s completions).
+struct EditDeletion {
+    row: EventId,
+    op: Option<EventId>,
+    edit: u64,
+    /// The dialog that sent it: focus still there may go to the composer.
+    dialog: FocusHandle,
 }
 
 pub struct MessageActions {
@@ -77,6 +89,7 @@ pub struct MessageActions {
     reaction_parents: HashMap<EventId, EventId>,
     outbox: Option<Outbox>,
     deleting: Option<Deletion>,
+    edit_deletions: Vec<EditDeletion>,
     editing: Option<Editing>,
     reporting: Option<(Entity<ReportDialog>, Subscription)>,
     /// The conversation stopped being shown while a report was sent or
@@ -155,6 +168,7 @@ impl MessageActions {
             reaction_parents: HashMap::new(),
             outbox: None,
             deleting: None,
+            edit_deletions: Vec::new(),
             editing: None,
             reporting: None,
             report_hidden: false,
@@ -241,20 +255,22 @@ impl MessageActions {
                     .is_none_or(|op| matches!(op.delivery, Delivery::Seen | Delivery::Accepted));
             }
         }
-        if close {
-            let from_edit = self.deleting.take().is_some_and(|d| d.from_edit);
+        let landed = self.settle_edit_deletions();
+        if close || !landed.is_empty() {
+            // The dialog was open, so focus goes back to the composer.
+            let dialog = close && self.deleting.take().is_some();
             let focus = self.hooks.focus_composer.clone();
             let composer = self.hooks.composer.clone();
             cx.defer(move |cx| {
                 if let Some(window) = cx.active_window() {
                     let _ = window.update(cx, |_, window, cx| {
-                        if from_edit {
-                            let _ = composer.update(cx, |composer, cx| {
-                                composer.set_edit_status(EditStatus::default(), cx);
-                                composer.cancel_edit(window, cx)
-                            });
+                        let mut refocus = dialog;
+                        for landed in &landed {
+                            refocus |= end_edit(&composer, landed, window, cx);
                         }
-                        focus(window, cx)
+                        if refocus {
+                            focus(window, cx)
+                        }
                     });
                 }
             });
@@ -299,9 +315,10 @@ impl MessageActions {
             Save::Close => composer.update(cx, |composer, cx| composer.sent(window, cx)),
             Save::Delete => {
                 composer.update(cx, |composer, cx| composer.set_notice(None, cx));
+                let edit = composer.read(cx).edit_session().map(|(_, edit)| edit);
                 self.open_delete(target, window, cx);
                 if let Some(deletion) = &mut self.deleting {
-                    deletion.from_edit = true;
+                    deletion.edit = edit;
                 }
             }
             Save::Error(error) => composer.update(cx, |composer, cx| {
@@ -419,9 +436,14 @@ impl MessageActions {
     /// The conversation is shown or not (`ConversationPresentation`). An
     /// unsent report is discarded as it hides; a sent or failed one stays,
     /// summed up in its row.
+    /// A delete confirmation goes too; a deletion it already sent still
+    /// completes.
     pub fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
         if presented {
             return;
+        }
+        if self.deleting.take().is_some() {
+            cx.notify();
         }
         let Some((dialog, _)) = &self.reporting else {
             return;
@@ -803,7 +825,7 @@ impl MessageActions {
             awaiting: false,
             error: None,
             focus,
-            from_edit: false,
+            edit: None,
         });
     }
 
@@ -819,6 +841,19 @@ impl MessageActions {
             deletion.error = Some("This conversation is no longer available for changes.".into());
             cx.notify();
             return;
+        }
+        if let Some(edit) = deletion.edit
+            && !self
+                .edit_deletions
+                .iter()
+                .any(|pending| pending.row == deletion.row.id)
+        {
+            self.edit_deletions.push(EditDeletion {
+                row: deletion.row.id,
+                op: deletion.op,
+                edit,
+                dialog: deletion.focus.clone(),
+            });
         }
         if let Some(op) = deletion.op {
             cx.foreground_executor()
@@ -841,6 +876,8 @@ impl MessageActions {
                         Err(error) => {
                             deletion.awaiting = false;
                             deletion.error = Some(error.into());
+                            this.edit_deletions
+                                .retain(|pending| pending.row != id || pending.op.is_some());
                         }
                         Ok(()) => this.read_ops(cx),
                     }
@@ -850,6 +887,35 @@ impl MessageActions {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Matches empty-edit deletions to their operations; returns those that
+    /// landed and forgets those discarded from the outbox.
+    fn settle_edit_deletions(&mut self) -> Vec<EditDeletion> {
+        let ops = &self.ops;
+        let mut landed = Vec::new();
+        self.edit_deletions.retain_mut(|pending| {
+            if pending.op.is_none() {
+                pending.op = ops.deletion(pending.row).map(|op| op.id);
+            }
+            let Some(op) = pending.op else {
+                return true;
+            };
+            match ops.get(op).map(|op| op.delivery) {
+                Some(Delivery::Seen | Delivery::Accepted) => {
+                    landed.push(EditDeletion {
+                        row: pending.row,
+                        op: pending.op,
+                        edit: pending.edit,
+                        dialog: pending.dialog.clone(),
+                    });
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            }
+        });
+        landed
     }
 
     fn close_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1109,4 +1175,29 @@ impl MessageActions {
             })
             .cloned()
     }
+}
+
+/// Ends the edit a landed deletion was asked for, bringing back the draft
+/// it set aside, unless another edit replaced it. Returns whether focus
+/// may go to the composer: it was nowhere, in the composer or in the
+/// dialog, never in another control.
+fn end_edit(
+    composer: &WeakEntity<Composer>,
+    landed: &EditDeletion,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    composer
+        .update(cx, |composer, cx| {
+            if composer.edit_session() != Some((landed.row, landed.edit)) {
+                return false;
+            }
+            let focus = window.focused(cx).is_none()
+                || composer.input_focused(window, cx)
+                || landed.dialog.is_focused(window);
+            composer.set_edit_status(EditStatus::default(), cx);
+            composer.cancel_edit(window, cx);
+            focus
+        })
+        .unwrap_or(false)
 }
