@@ -12,6 +12,7 @@ mod communities;
 pub(crate) use communities::left_text;
 mod emoji;
 pub(crate) mod form;
+pub mod messages;
 mod notifications;
 pub mod pairing;
 pub use pairing::close as close_pairing;

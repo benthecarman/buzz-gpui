@@ -136,10 +136,10 @@ impl Workspace {
         self.place = (None, None);
     }
 
-    /// Where a new thread opens. Already-open threads stay where they
-    /// were placed.
-    pub(super) fn thread_pane(_cx: &App) -> TabPane {
-        TabPane::Side
+    /// Where a new thread opens: this device's choice in Settings →
+    /// Messages. Already-open threads stay where they were placed.
+    pub(super) fn thread_pane(cx: &App) -> TabPane {
+        crate::ui::settings::messages::thread_placement(cx)
     }
 
     /// A header launcher: shows the panel's tab when one is open, else
