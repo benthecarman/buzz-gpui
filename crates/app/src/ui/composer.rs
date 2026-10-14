@@ -4099,7 +4099,7 @@ impl Composer {
                     IconButton::new("emoji", IconName::Smiley)
                         .size(IconButtonSize::Sm)
                         .selected(self.picker_open)
-                        .tooltip("Insert emoji")
+                        .tooltip("Emoji and GIFS")
                         .on_click(cx.listener(|this, _, window, cx| {
                             // The press outside that just closed it.
                             if this

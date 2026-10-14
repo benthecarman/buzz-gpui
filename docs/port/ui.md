@@ -1620,7 +1620,7 @@ Toolbar buttons, left to right (32×32, 16px glyph unless noted):
 |---|---|---|---|
 | 1 | "Mention a member" | `at` | Leading group (`.composerLeadingTools`: gap 2px). When explicit recipients exist, the group becomes a pill (fill `--affordance-subtle`, padding-inline 2px) and also shows recipient buttons: 28×28 with a 2px `--affordance-subtle` border, a 24px avatar inside, overlapping by -6px. Hovering one shows an X overlay on `--affordance-prominent`. |
 | 2 | "Attach files" | `paperclip` | Opens the file picker |
-| 3 | "Insert emoji" | `mood-smile` | Emoji or GIF picker |
+| 3 | "Emoji and GIFS" | `mood-smile` | Emoji or GIF picker |
 | 4 | "Issues and pull requests" | `git-pull-request` | Only when the channel is linked to a project |
 | 5 | "Record voice note" | `microphone`, **18px** | Plain 32px button, glyph `--text-subtle`, radius 10px, no hover fill, press scales to 0.96 |
 | 6 | "Toggle formatting" | `letter-case` | Ghost; `aria-pressed` while open |
