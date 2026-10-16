@@ -96,7 +96,6 @@ impl AgentRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Schedule {
     /// A new deadline from its `armed_at`, even when that is unchanged.
-    #[allow(dead_code)] // For the attention tools.
     Rearm,
     /// A new deadline and a fresh budget, as the owner's "Run again".
     Restart,

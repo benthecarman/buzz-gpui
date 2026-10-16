@@ -31,7 +31,7 @@ impl Reply {
     }
 }
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+pub(super) fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     let mut schema = json!({
         "type": "object",
         "properties": properties,
@@ -1152,4 +1152,4 @@ fn minute(seconds: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

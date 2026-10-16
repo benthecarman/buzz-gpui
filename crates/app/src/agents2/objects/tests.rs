@@ -59,6 +59,7 @@ fn write(
         &WriteOptions {
             expected,
             interest: scope.map(str::to_owned),
+            rearm: false,
         },
         NOW,
     )
@@ -95,7 +96,7 @@ fn refuses_a_write_without_a_token_with_a_stale_one_or_creating_over_an_object()
     let shown = show(&start, "watch/asks", NOW, None).unwrap();
     let options = |expected: &str| WriteOptions {
         expected: expected.into(),
-        interest: None,
+        ..Default::default()
     };
     assert!(
         refused(checked_write(&start, "watch/asks", None, &options(""), NOW))

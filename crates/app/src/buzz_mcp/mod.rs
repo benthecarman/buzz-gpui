@@ -5,6 +5,7 @@
 //! implements [`BuzzClient`], so the tools never see the key itself.
 
 pub mod app_client;
+pub mod attention;
 pub mod rpc;
 pub mod tools;
 

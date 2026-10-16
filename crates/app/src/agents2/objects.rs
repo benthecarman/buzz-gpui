@@ -10,7 +10,7 @@ use super::attention::{
     AttentionValue, EventWatch, Interest, Space, TimerWatch, interest_slug, parse_slug,
     timer_spent, timer_state, validate_object,
 };
-use super::store::{AgentRecord, set_attention};
+use super::store::{AgentRecord, Schedule, set_attention};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -161,7 +161,6 @@ pub struct Shown {
 }
 
 impl Shown {
-    #[allow(dead_code)] // For the attention tools.
     pub fn to_json(&self) -> Value {
         json!({
             "result": if self.object.is_some() { "found" } else { "not-found" },
@@ -202,6 +201,9 @@ pub struct WriteOptions {
     /// The Interest the caller works for. A watch of another, or another
     /// Interest, is `wrong-scope`.
     pub interest: Option<String>,
+    /// A timer rearm: its deadline is set from `armed_at` even when that
+    /// is unchanged, keeping the occurrences used.
+    pub rearm: bool,
 }
 
 fn timer_object(record: &AgentRecord, id: &str, timer: &TimerWatch, now: u64) -> ShownObject {
@@ -494,7 +496,8 @@ pub fn checked_write(
         }
     }
     let json = value.as_ref().map(AttentionValue::to_json);
-    let after = set_attention(record, slug, json.as_ref(), now, None)
+    let schedule = options.rearm.then_some(Schedule::Rearm);
+    let after = set_attention(record, slug, json.as_ref(), now, schedule)
         .map_err(|error| AttentionError::new(Invalid, error))?;
     if value.is_some() && stored_bytes(&after) > AGENT_BYTES {
         return fail(
