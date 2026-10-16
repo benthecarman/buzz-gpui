@@ -234,6 +234,12 @@ impl AppAgentHost {
                     .await
                     .map(|()| A::Done)
             }
+            R::SetType { pubkey, agent_type } => {
+                let agents = self.agents.clone();
+                blocking(move || agents.set_type(&pubkey, &agent_type))
+                    .await
+                    .map(|()| A::Done)
+            }
             R::Delete { pubkey } => self.delete(pubkey).await.map(|()| A::Done),
             R::Forget { pubkey } => {
                 let agents = self.agents.clone();

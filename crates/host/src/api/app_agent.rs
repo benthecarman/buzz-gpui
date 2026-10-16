@@ -18,7 +18,8 @@ pub enum AppAgentRequest {
         /// The community, as a relay URL; saved in canonical `wss://` form.
         destination: String,
         owner: String,
-        /// The agent type's key, fixed at create.
+        /// The agent type's key, set at create and changed by
+        /// [`Self::SetType`].
         agent_type: String,
         name: String,
     },
@@ -40,6 +41,15 @@ pub enum AppAgentRequest {
     SetPicture {
         pubkey: String,
         picture: String,
+    },
+    /// Makes it an agent of another type (`app_agent_set_type`): its key,
+    /// name, picture and communities stay. Answers
+    /// [`AppAgentResponse::Done`]. Hosts from before this answer that they
+    /// do not support it, so a GUI never believes the type changed when it
+    /// did not.
+    SetType {
+        pubkey: String,
+        agent_type: String,
     },
     /// Deletes the key and marks the identity deleted. The row stays until
     /// [`Self::Forget`], once its community is cleaned up.
@@ -170,7 +180,8 @@ pub struct AppAgentSummary {
     /// The canonical `wss://` community origin it was created for.
     pub relay: String,
     pub owner: String,
-    /// The agent type's key, fixed at create.
+    /// The agent type's key, set at create and changed by
+    /// [`AppAgentRequest::SetType`].
     pub agent_type: String,
     pub name: String,
     /// The picture its profile shows; empty for none. `None` from hosts
@@ -324,6 +335,21 @@ mod tests {
         assert!(matches!(
             rmp_serde::from_slice(&wire(&old::AppAgentRequest::List)).unwrap(),
             AppAgentRequest::List
+        ));
+    }
+
+    #[test]
+    fn older_hosts_refuse_set_type_and_newer_ones_read_it() {
+        let set = AppAgentRequest::SetType {
+            pubkey: "a".repeat(64),
+            agent_type: "codex/codex".into(),
+        };
+        // An older host cannot decode it, so it answers that it does not
+        // support the request and the GUI keeps the agent's old type.
+        assert!(rmp_serde::from_slice::<old::AppAgentRequest>(&wire(&set)).is_err());
+        assert!(matches!(
+            rmp_serde::from_slice(&wire(&set)).unwrap(),
+            AppAgentRequest::SetType { agent_type, .. } if agent_type == "codex/codex"
         ));
     }
 

@@ -218,6 +218,49 @@ async fn custody_over_rpc() {
         "No such agent on this device"
     );
 
+    // Another type keeps the identity, name and picture.
+    ask(
+        &client,
+        AppAgentRequest::SetType {
+            pubkey: pubkey.clone(),
+            agent_type: "test/other".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let retyped = &list(&client).await[0];
+    assert_eq!(
+        (retyped.agent_type.as_str(), retyped.name.as_str()),
+        ("test/other", "Ada Lovelace")
+    );
+    assert_eq!(retyped.picture.as_deref(), Some(picture));
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::SetType {
+                    pubkey: pubkey.clone(),
+                    agent_type: String::new(),
+                },
+            )
+            .await
+        ),
+        "Choose an agent type"
+    );
+    assert_eq!(
+        failed(
+            ask(
+                &client,
+                AppAgentRequest::SetType {
+                    pubkey: "d".repeat(64),
+                    agent_type: "test/echo".into(),
+                },
+            )
+            .await
+        ),
+        "No such agent on this device"
+    );
+
     // Bounds checked before anything is sent.
     assert_eq!(
         failed(
@@ -415,6 +458,12 @@ async fn old_hosts_answer_app_agent_requests_as_unsupported() {
         picture: "https://relay.example.com/media/ada.png".into(),
     };
     let message = failed(ask(&client, picture).await);
+    assert!(message.contains("does not support"), "{message}");
+    let retype = AppAgentRequest::SetType {
+        pubkey: "a".repeat(64),
+        agent_type: "test/other".into(),
+    };
+    let message = failed(ask(&client, retype).await);
     assert!(message.contains("does not support"), "{message}");
     // The connection survives.
     assert!(matches!(
