@@ -475,9 +475,13 @@ impl ThreadPanel {
                 // The session published the new fold before answering.
                 self.snapshot = self.view.snapshot.borrow().clone();
                 self.snapshot_changed();
-                self.revealing = Some(message);
-                self.reveal_target(cx);
-                window.focus(&self.focus, cx);
+                // The thread's own root is no exact target: the reader
+                // stays where they are, and so does the focus.
+                if self.loaded_root() != Some(message) {
+                    self.revealing = Some(message);
+                    self.reveal_target(cx);
+                    window.focus(&self.focus, cx);
+                }
             }
             Retarget::Different => self.selection_failure = None,
             outcome => {
