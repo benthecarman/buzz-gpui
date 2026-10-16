@@ -5,7 +5,7 @@ pub mod codex;
 mod opened;
 pub mod owner_relay;
 pub mod process;
-mod tabs;
+pub(crate) mod tabs;
 mod transcript_view;
 
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};

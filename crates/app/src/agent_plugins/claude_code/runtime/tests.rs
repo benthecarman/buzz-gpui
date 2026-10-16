@@ -622,6 +622,7 @@ async fn skips_a_waiting_turn_the_host_says_is_no_longer_current() {
         spawn: setup.fake.spawner(),
         model: None,
         effort: None,
+        team: String::new(),
         working: Arc::new(|_| {}),
         activity: None,
         current,

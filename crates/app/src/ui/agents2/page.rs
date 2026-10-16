@@ -1083,15 +1083,7 @@ impl Render for Build {
             .flex_col()
             .gap(rems(0.25))
             .text_body_sm()
-            .child(div().text_color(c.text_subtle).child("Type"))
-            .child(
-                div().min_w_0().child(
-                    kind.as_ref()
-                        .map(|kind| kind.kind.title().to_string())
-                        .unwrap_or_else(|| "Type unavailable".into()),
-                ),
-            )
-            .child(div().mt(rems(0.5)).text_color(c.text_subtle).child("Key"))
+            .child(div().text_color(c.text_subtle).child("Key"))
             .child(
                 div()
                     .flex()

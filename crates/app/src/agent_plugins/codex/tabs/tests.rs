@@ -38,17 +38,25 @@ fn labels(options: &Options) -> Vec<&str> {
 fn offers_codex_models_and_the_selected_models_thinking() {
     let models = models();
     let draft = Config::default();
+    let ids = |choices: Vec<ModelChoice>| -> Vec<String> {
+        choices.into_iter().map(|choice| choice.label).collect()
+    };
+    assert_eq!(ids(model_choices(&models)), ["Model A", "Model B"]);
     assert_eq!(
-        labels(&model_options(&draft, Some(&models))),
-        ["Codex default · Model A", "Model A", "Model B"]
+        model_choices(&models)[0].description.as_deref(),
+        Some("Fast")
+    );
+    assert_eq!(
+        default_model_label(Some(&models)),
+        "Codex default (Model A)"
     );
     // Before the catalog loads, the default has no name.
-    assert_eq!(labels(&model_options(&draft, None)), ["Codex default"]);
+    assert_eq!(default_model_label(None), "Codex default");
     let selected = selected_model(&draft, &models);
     assert_eq!(selected.map(|model| model.model.as_str()), Some("model-a"));
     assert_eq!(
         labels(&effort_options(&draft, selected)),
-        ["Model default", "Low", "High"]
+        ["Codex default (Low)", "Low", "High"]
     );
     let b = Config {
         model: "model-b".into(),
@@ -57,12 +65,8 @@ fn offers_codex_models_and_the_selected_models_thinking() {
     };
     let selected = selected_model(&b, &models);
     assert_eq!(
-        labels(&model_options(&b, Some(&models))),
-        ["Codex default", "Model A", "Model B"]
-    );
-    assert_eq!(
         labels(&effort_options(&b, selected)),
-        ["Model default", "Medium"]
+        ["Codex default (Medium)", "Medium"]
     );
 }
 
@@ -74,23 +78,12 @@ fn keeps_saved_choices_codex_no_longer_offers() {
         effort: "xhigh".into(),
         ..Config::default()
     };
-    let options = model_options(&retired, Some(&models));
-    assert_eq!(
-        labels(&options),
-        [
-            "Codex default",
-            "retired-model (unavailable)",
-            "Model A",
-            "Model B"
-        ]
-    );
-    assert_eq!(options[1].0, "retired-model");
     let selected = selected_model(&retired, &models);
     assert!(selected.is_none());
     // Without a model to offer efforts, the saved one still shows.
     assert_eq!(
         labels(&effort_options(&retired, selected)),
-        ["Model default", "Extra high (unavailable)"]
+        ["Codex default", "Extra high (unavailable)"]
     );
 }
 

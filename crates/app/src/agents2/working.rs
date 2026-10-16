@@ -6,6 +6,7 @@
 
 use super::attention::EventData;
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 type End = Box<dyn FnOnce() + Send>;
@@ -79,6 +80,21 @@ impl Working {
             let outcome = done.await;
             working.release_with(outcome);
         });
+    }
+
+    /// Counts the run in `working` until it stops, so a change of type
+    /// waits out work it handed off too.
+    pub(crate) fn counted(self, working: Arc<AtomicUsize>) -> Self {
+        {
+            let mut state = self.lock();
+            if state.holds > 0 {
+                working.fetch_add(1, Ordering::SeqCst);
+                state.ends.push(Box::new(move || {
+                    working.fetch_sub(1, Ordering::SeqCst);
+                }));
+            }
+        }
+        self
     }
 
     /// Lets go of one hold.

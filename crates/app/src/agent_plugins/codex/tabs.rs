@@ -9,15 +9,16 @@ use super::runtime::{CodexRuntime, SavedConversation, SessionView};
 use super::transcript::{Lookup, SharedNames, TURN_LIMIT, read_transcript};
 use crate::agent_plugins::opened::{self, CONVERSATION_LIMIT, CardSession, Found, Place, places};
 use crate::agent_plugins::process::Spawner;
-use crate::agent_plugins::tabs::{Options, Picking, choice, description_text, field, saved_config};
+use crate::agent_plugins::tabs::{
+    Options, Picking, choice, description_text, field, instructions_field, instructions_state,
+    model_picker, saved_config,
+};
 use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
-use crate::agents2::{AgentConversation, AgentView, Agents2};
+use crate::agents2::{AgentConversation, AgentView, Agents2, ModelChoice};
 use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
 use crate::ui::agent_activity::panel::date_time;
-use buzz_ui::{
-    ActiveTheme, Button, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
-};
+use buzz_ui::{ActiveTheme, Button, Colors, Surface, TextField, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -577,34 +578,51 @@ pub enum Picker {
     Scope,
 }
 
-/// The Model select: Codex's default, a saved model Codex no longer
-/// offers, then every model.
-pub fn model_options(draft: &Config, models: Option<&[Model]>) -> Options {
-    let models = models.unwrap_or_default();
-    let selected = selected_model(draft, models);
-    let default = match selected {
-        Some(model) if draft.model.is_empty() => format!("Codex default · {}", model.display_name),
-        _ => "Codex default".into(),
-    };
-    let mut options = vec![(String::new(), default)];
-    if !draft.model.is_empty() && !models.iter().any(|model| model.model == draft.model) {
-        options.push((
-            draft.model.clone(),
-            format!("{} (unavailable)", draft.model),
-        ));
-    }
-    options.extend(
-        models
-            .iter()
-            .map(|model| (model.model.clone(), model.display_name.clone())),
-    );
-    options
+/// The catalog's models, for the picker; it adds Codex's own default.
+pub fn model_choices(models: &[Model]) -> Vec<ModelChoice> {
+    models
+        .iter()
+        .map(|model| ModelChoice {
+            id: model.model.clone(),
+            label: model.display_name.clone(),
+            description: Some(model.description.clone()).filter(|text| !text.is_empty()),
+        })
+        .collect()
 }
 
-/// The Thinking select for the selected model.
+/// The picker's default row: Codex's default, named once the catalog says
+/// which model that is.
+pub fn default_model_label(models: Option<&[Model]>) -> String {
+    let native = models
+        .unwrap_or_default()
+        .iter()
+        .find(|model| model.is_default)
+        .map(|model| {
+            if model.display_name.is_empty() {
+                model.model.clone()
+            } else {
+                model.display_name.clone()
+            }
+        });
+    match native {
+        Some(name) => format!("Codex default ({name})"),
+        None => "Codex default".into(),
+    }
+}
+
+/// The Thinking select for the selected model: Codex's default, named
+/// after the model's default effort, a saved effort it no longer offers,
+/// then every effort it offers.
 pub fn effort_options(draft: &Config, selected: Option<&Model>) -> Options {
     let efforts = selected.map_or(&[][..], |model| &model.supported_reasoning_efforts);
-    let mut options = vec![(String::new(), "Model default".to_string())];
+    let default = match selected
+        .map(|model| model.default_reasoning_effort.as_str())
+        .filter(|effort| !effort.is_empty())
+    {
+        Some(effort) => format!("Codex default ({})", effort_name(effort)),
+        None => "Codex default".into(),
+    };
+    let mut options = vec![(String::new(), default)];
     if !draft.effort.is_empty()
         && !efforts
             .iter()
@@ -665,17 +683,14 @@ pub struct SettingsTab {
 
 impl SettingsTab {
     pub fn new(view: AgentView, host: Host, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let saved = Config::read(&view.agent.config);
+        let saved = Config::read(&saved_config(&view, cx));
         let check = cx.new(|cx| CatalogCheck::new(host, cx));
         let workspace = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(DEFAULT_WORKSPACE)
                 .default_value(saved.workspace.clone())
         });
-        let instructions = cx.new(|cx| TextareaState::new(window, cx));
-        instructions.update(cx, |state, cx| {
-            state.set_value(saved.instructions.clone(), window, cx)
-        });
+        let instructions = instructions_state(&saved.instructions, window, cx);
         let mut subscriptions = vec![
             cx.observe(&check, |_, _, cx| cx.notify()),
             cx.subscribe(&workspace, |_, _, event: &InputEvent, cx| {
@@ -770,6 +785,8 @@ impl Picking for SettingsTab {
 
     fn pick(&mut self, picker: Picker, value: String, cx: &mut Context<Self>) {
         match picker {
+            // A model's choice also resets the effort to that model's
+            // default.
             Picker::Model => {
                 let effort = self
                     .check
@@ -801,7 +818,8 @@ impl Render for SettingsTab {
             .as_deref()
             .and_then(|models| selected_model(&self.draft, models))
             .cloned();
-        let model_choices = model_options(&self.draft, models.as_deref());
+        let choices = model_choices(models.as_deref().unwrap_or_default());
+        let default_label = default_model_label(models.as_deref());
         let effort_choices = effort_options(&self.draft, selected.as_ref());
         let scope = if self.draft.scope == "channel" {
             "channel"
@@ -817,59 +835,63 @@ impl Render for SettingsTab {
             .flex()
             .flex_col()
             .gap(space::S4)
+            .children(self.view.type_control(changed, window, cx))
             .when(!catalog_error.is_empty(), |this| {
                 this.child(
                     div()
                         .flex()
                         .flex_col()
+                        .items_start()
                         .gap(space::S2)
                         .child(catalog_error)
                         .children(sign_in)
                         .child(
-                            div().flex().child(
-                                Button::new("codex-settings-check", "Check again")
-                                    .disabled(checking)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.check.update(cx, |check, cx| check.retry(cx));
-                                    })),
-                            ),
+                            Button::new("codex-settings-check", "Check again")
+                                .ghost()
+                                .disabled(checking)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.check.update(cx, |check, cx| check.retry(cx));
+                                })),
                         ),
                 )
             })
-            .child(field(
-                "Model",
-                choice(
-                    self.open,
-                    Picker::Model,
-                    "codex-model",
-                    &self.draft.model,
-                    model_choices,
-                    checking || saving,
-                    window,
-                    cx,
-                ),
-                selected
-                    .as_ref()
-                    .map(|model| model.description.clone())
-                    .filter(|description| !description.is_empty())
-                    .map(SharedString::from),
-                &c,
-            ))
-            .child(field(
-                "Thinking",
-                choice(
-                    self.open,
-                    Picker::Effort,
-                    "codex-effort",
-                    &self.draft.effort,
-                    effort_choices,
-                    checking || saving || selected.is_none(),
-                    window,
-                    cx,
-                ),
-                None,
-                &c,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(space::S4)
+                    .child(
+                        div().flex_1().min_w(rems(14.)).child(model_picker(
+                            self.open,
+                            Picker::Model,
+                            "codex-model",
+                            &choices,
+                            false,
+                            &self.draft.model,
+                            &default_label,
+                            Some("Following the provider's model default"),
+                            checking,
+                            saving,
+                            window,
+                            cx,
+                        )),
+                    )
+                    .child(div().flex_1().min_w(rems(14.)).child(field(
+                        "Thinking",
+                        choice(
+                            self.open,
+                            Picker::Effort,
+                            "codex-effort",
+                            &self.draft.effort,
+                            effort_choices,
+                            checking || saving || selected.is_none(),
+                            window,
+                            cx,
+                        ),
+                        None,
+                        &c,
+                    ))),
+            )
             .child(field(
                 "Workspace",
                 TextField::new(&self.workspace)
@@ -896,16 +918,10 @@ impl Render for SettingsTab {
                 Some("DMs always share one conversation.".into()),
                 &c,
             ))
-            .child(field(
-                "Instructions",
-                TextArea::new(&self.instructions)
-                    .rows(6)
-                    .surface(Surface::Floating)
-                    .disabled(saving),
-                Some(
-                    "Buzz guidance supplements Codex’s native instructions. Saved changes apply to the next turn. A workspace change starts a fresh session."
-                        .into(),
-                ),
+            .child(instructions_field(
+                &self.instructions,
+                saving,
+                "Buzz guidance supplements Codex’s native instructions. Saved changes apply to the next turn. A workspace change starts a fresh session.",
                 &c,
             ))
             .children(
@@ -917,7 +933,8 @@ impl Render for SettingsTab {
                 div().flex().child(
                     Button::new("codex-save", if saving { "Saving…" } else { "Save" })
                         .prominent()
-                        .disabled(saving || !changed)
+                        .loading(saving)
+                        .disabled(saving || !(changed || self.view.pending()))
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),
             )

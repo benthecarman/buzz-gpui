@@ -16,7 +16,7 @@ use super::attention::{
     addressed_to, compile_filter, tags_agent, timer_spent, timer_state, watch_matches,
 };
 use super::objects::{CLASSIFIER, ClassifierAvailability};
-use super::registry::{self, AgentType, Models, RegisteredType};
+use super::registry::{self, AgentType, CarryKey, Models, RegisteredType, RetypePreview};
 use super::runtime::{
     AgentAttention, AgentHandle, AttentionCall, Bounded, CancelSource, Cancellation,
     ClassifierSkip, Delivery, HostLink, Trigger, UNSUPPORTED,
@@ -39,6 +39,7 @@ use buzz_relay_client::{LiveBatch, RelayOrigin, Session, SessionStatus};
 use gpui_kit::{App, AppContext, Context, Entity, EntityId, Global, Subscription, Task};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,8 @@ pub(crate) const RETRY: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// What setting a picture on a host from before pictures answers.
 pub const PICTURES_UNSUPPORTED: &str = "Update the agent's host to change its picture.";
+/// What a host from before provider changes answers a change of type.
+pub const TYPES_UNSUPPORTED: &str = "Update the agent's host to change its provider.";
 
 /// Whether the agent list could be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,6 +243,12 @@ struct Runner {
     /// Advances each time attention is seen off, which voids queued watch
     /// work.
     epoch: u64,
+    /// Runs still counted as working, work they handed off included,
+    /// which a change of type waits out.
+    working: Arc<AtomicUsize>,
+    /// A change of type holds the idle runner: no run starts meanwhile,
+    /// and its queue resumes after.
+    transitioning: bool,
 }
 
 /// What a full queue says on the mention it could not take.
@@ -380,6 +389,30 @@ fn claimed(pubkey: &str, answer: Result<AppAgentResponse, String>) -> bool {
             }
             true
         }
+    }
+}
+
+fn answering(name: &str) -> String {
+    format!("{name} is answering; change its type when it finishes")
+}
+
+/// Why a change of type cannot start now, if it cannot: the agent is
+/// answering (`working` runs, handed-off work included), this app has no
+/// runner for it, or another change holds it.
+pub(crate) fn retype_refusal(
+    name: &str,
+    working: usize,
+    runs_here: bool,
+    transitioning: bool,
+) -> Option<String> {
+    if working > 0 {
+        Some(answering(name))
+    } else if !runs_here {
+        Some("Change its type on the device that runs it".into())
+    } else if transitioning {
+        Some(format!("{name}'s provider is already changing"))
+    } else {
+        None
     }
 }
 
@@ -1468,6 +1501,8 @@ impl Agents2 {
                             failed: None,
                             activity_claimed: false,
                             epoch: 0,
+                            working: Arc::default(),
+                            transitioning: false,
                         },
                     );
                 }
@@ -1807,6 +1842,9 @@ impl Agents2 {
         let Some(runner) = self.runners.get_mut(pubkey).filter(|r| r.serial == serial) else {
             return Step::Idle;
         };
+        if runner.transitioning {
+            return Step::Idle;
+        }
         if seen.agent.is_none() || seen.kind.is_none() {
             if seen.agent.is_some() {
                 cx.default_global::<LocalActivity>()
@@ -1848,6 +1886,11 @@ impl Agents2 {
             local.clear(None, Some(pubkey));
             runner.activity_claimed = false;
             runner.queue.clear();
+            return Start::Idle;
+        }
+        // A change of type may have taken the runner while the claim was
+        // pending.
+        if runner.transitioning {
             return Start::Idle;
         }
         if current != *seen {
@@ -1893,10 +1936,11 @@ impl Agents2 {
             wrote: runner.wrote.clone(),
             attention: self.attention(&agent.pubkey),
         };
+        let counted = runner.working.clone();
         if let Some(runner) = self.runners.get_mut(pubkey) {
             runner.working_since = Some(now_ms());
         }
-        let working = self.working(&handle, &job, &lifetime, cx);
+        let working = self.working(&handle, &job, &lifetime, cx).counted(counted);
         let current = {
             let (calls, pubkey, job, lifetime) = (
                 self.attention_calls.clone(),
@@ -2328,6 +2372,17 @@ impl Agents2 {
         let Some(identity) = self.live(pubkey) else {
             return Task::ready(Err("No such agent on this device".into()));
         };
+        if change.config.is_some()
+            && self
+                .runners
+                .get(pubkey)
+                .is_some_and(|runner| runner.transitioning)
+        {
+            return Task::ready(Err(format!(
+                "{}'s provider is already changing",
+                identity.summary.name
+            )));
+        }
         let name = change.name.as_deref().map(str::trim).map(str::to_owned);
         if name.as_deref() == Some("") {
             return Task::ready(Err("Name the agent".into()));
@@ -2404,6 +2459,170 @@ impl Agents2 {
                 refresh.await;
             }
             Ok(())
+        })
+    }
+
+    /// Previews what moving the agent to `type_key` does, from the same
+    /// migration [`Self::retype`] uses, without changing it. Works for an
+    /// agent whose type is no longer available, which carries nothing.
+    pub fn preview_retype(
+        &mut self,
+        pubkey: &str,
+        type_key: &str,
+        cx: &App,
+    ) -> Result<RetypePreview, String> {
+        let identity = self.live(pubkey).ok_or("No such agent on this device")?;
+        let kind = registry::type_of(type_key, cx).ok_or("That agent type is not available")?;
+        let record = self.record_of(&identity.summary, cx);
+        if type_key == identity.summary.agent_type {
+            return Ok(RetypePreview {
+                config: record.config,
+                moved: Vec::new(),
+                dropped: Vec::new(),
+                settings: Vec::new(),
+            });
+        }
+        let source = registry::type_of(&identity.summary.agent_type, cx);
+        Ok(registry::retype_plan(
+            source.as_ref().map(|source| source.kind.as_ref()),
+            &record.config,
+            kind.kind.as_ref(),
+        ))
+    }
+
+    /// Makes it an agent of `type_key`, keeping its key, name, picture,
+    /// communities and attention. Its new config is `config`, the reviewed
+    /// destination draft, or else the type's defaults with what the old
+    /// type carries and the new one adopts. Answers what of the old config
+    /// stayed behind. Refused while it is answering, work it handed off
+    /// included, and unless this app runs it.
+    pub fn retype(
+        &mut self,
+        pubkey: &str,
+        type_key: &str,
+        config: Option<Value>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<CarryKey>, String>> {
+        let Some(identity) = self.live(pubkey) else {
+            return Task::ready(Err("No such agent on this device".into()));
+        };
+        if registry::type_of(type_key, cx).is_none() {
+            return Task::ready(Err("That agent type is not available".into()));
+        }
+        let old_type = identity.summary.agent_type.clone();
+        if type_key == old_type {
+            return Task::ready(Ok(Vec::new()));
+        }
+        let name = identity.summary.name.clone();
+        let runner = self.runners.get_mut(pubkey);
+        let working = runner
+            .as_ref()
+            .map_or(0, |runner| runner.working.load(Ordering::SeqCst));
+        let transitioning = runner.as_ref().is_some_and(|runner| runner.transitioning);
+        if let Some(refused) = retype_refusal(&name, working, runner.is_some(), transitioning) {
+            return Task::ready(Err(refused));
+        }
+        if let Some(runner) = runner {
+            runner.transitioning = true;
+        }
+        let link = link(&identity.host, cx);
+        let (pubkey, type_key) = (pubkey.to_owned(), type_key.to_owned());
+        cx.spawn(async move |this, cx| {
+            let changed = async {
+                // Every copy of the app on this host hears the agent; only
+                // the one holding it may change what runs it.
+                let held = match link
+                    .app_agent(AppAgentRequest::Claim {
+                        pubkey: pubkey.clone(),
+                    })
+                    .await
+                {
+                    Ok(AppAgentResponse::Claimed(held)) => held,
+                    Ok(_) => true,
+                    Err(error) if error == UNSUPPORTED => true,
+                    Err(error) => return Err(error),
+                };
+                let plan = this
+                    .update(cx, |this, cx| {
+                        if let Some(runner) = this.runners.get_mut(&pubkey) {
+                            runner.may_hold = held;
+                        }
+                        if !held {
+                            return Err("Change its type on the device that runs it".to_string());
+                        }
+                        let working = this
+                            .runners
+                            .get(&pubkey)
+                            .map_or(0, |runner| runner.working.load(Ordering::SeqCst));
+                        if working > 0 {
+                            return Err(answering(&name));
+                        }
+                        this.preview_retype(&pubkey, &type_key, cx)
+                    })
+                    .map_err(|_| "Agents stopped".to_string())??;
+                link.app_agent(AppAgentRequest::SetType {
+                    pubkey: pubkey.clone(),
+                    agent_type: type_key.clone(),
+                })
+                .await
+                .map_err(|error| {
+                    if error == UNSUPPORTED {
+                        TYPES_UNSUPPORTED.to_string()
+                    } else {
+                        error
+                    }
+                })?;
+                let config = config.unwrap_or_else(|| plan.config.clone());
+                let saved = this
+                    .update(cx, |this, cx| {
+                        let identity = this.live(&pubkey).ok_or("No such agent on this device")?;
+                        let record = AgentRecord {
+                            config,
+                            ..this.record_of(&identity.summary, cx)
+                        };
+                        this.write(record)?;
+                        // Shown, and run by the new type, before the host
+                        // lists it again.
+                        for (_, list) in &mut this.lists {
+                            for summary in &mut list.agents {
+                                if summary.pubkey == pubkey {
+                                    summary.agent_type = type_key.clone();
+                                }
+                            }
+                        }
+                        this.update(cx);
+                        cx.notify();
+                        Ok::<(), String>(())
+                    })
+                    .map_err(|_| "Agents stopped".to_string())?;
+                if let Err(error) = saved {
+                    let restore = link
+                        .app_agent(AppAgentRequest::SetType {
+                            pubkey: pubkey.clone(),
+                            agent_type: old_type,
+                        })
+                        .await;
+                    if let Err(rollback) = restore {
+                        return Err(format!(
+                            "Could not save or restore {name}'s provider: {error}; {rollback}"
+                        ));
+                    }
+                    return Err(error);
+                }
+                Ok(plan.dropped)
+            }
+            .await;
+            let refresh = this.update(cx, |this, cx| {
+                if let Some(runner) = this.runners.get_mut(&pubkey) {
+                    runner.transitioning = false;
+                }
+                this.drain(&pubkey, cx);
+                changed.is_ok().then(|| this.refresh(cx))
+            });
+            if let Ok(Some(refresh)) = refresh {
+                refresh.await;
+            }
+            changed
         })
     }
 

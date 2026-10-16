@@ -710,3 +710,48 @@ fn passes_the_model_and_effort_its_owner_asked_for_and_no_other() {
         (None, None)
     );
 }
+
+#[test]
+fn a_type_changes_only_between_turns_and_where_the_agent_runs() {
+    // Not while a turn, or the work it handed off, is still going.
+    assert_eq!(
+        retype_refusal("Echo", 1, true, false).as_deref(),
+        Some("Echo is answering; change its type when it finishes")
+    );
+    assert_eq!(
+        retype_refusal("Echo", 0, false, false).as_deref(),
+        Some("Change its type on the device that runs it")
+    );
+    assert_eq!(
+        retype_refusal("Echo", 0, true, true).as_deref(),
+        Some("Echo's provider is already changing")
+    );
+    assert_eq!(retype_refusal("Echo", 0, true, false), None);
+}
+
+#[test]
+fn a_run_counts_as_working_until_its_handed_off_work_settles() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let working = Working::none(runtime.handle().clone()).counted(count.clone());
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let (done, handed) = futures::channel::oneshot::channel::<()>();
+    working.until(async move {
+        let _ = handed.await;
+        WorkOutcome::ok()
+    });
+    working.release();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "handed-off work still runs"
+    );
+    done.send(()).unwrap();
+    for _ in 0..100 {
+        if count.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+}

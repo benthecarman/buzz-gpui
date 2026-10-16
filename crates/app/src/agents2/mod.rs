@@ -35,8 +35,10 @@ use store::SkippedObject;
 
 #[allow(unused_imports)]
 pub use registry::{
-    AgentConversation, AgentTab, AgentType, AgentView, CreateModels, Effort, Model, ModelChoice,
-    Models, RegisteredType, TypeDefaults, register_type, type_of, types,
+    AgentConversation, AgentTab, AgentType, AgentView, CarryKey, CreateModels, Effort,
+    MigratedSetting, MigrationOutcome, MigrationSetting, Model, ModelChoice, Models,
+    RegisteredType, RetypePreview, SettingsHost, TypeDefaults, register_type, retype_plan, type_of,
+    types,
 };
 #[allow(unused_imports)]
 pub use runtime::{AgentHandle, Cancellation, Delivery, Trigger};

@@ -18,8 +18,8 @@ pub mod transcript;
 
 use crate::agent_plugins::owner_relay;
 use crate::agents2::{
-    Agent, AgentTab, AgentType, Agents2, Delivery, Models, Status, Trigger, TypeDefaults,
-    register_type,
+    Agent, AgentTab, AgentType, Agents2, Delivery, MigrationSetting, Models, Status, Trigger,
+    TypeDefaults, register_type,
 };
 use crate::hosts::HostConnection;
 use crate::runtime::Runtime;
@@ -206,6 +206,43 @@ impl AgentType for CodexType {
         config.value()
     }
 
+    fn carry(&self, saved: &serde_json::Value) -> buzz_host::api::Carry {
+        let config = Config::read(saved);
+        buzz_host::api::Carry {
+            instructions: Some(config.instructions).filter(|text| !text.trim().is_empty()),
+            workspace: Some(config.workspace)
+                .filter(|workspace| *workspace != Config::default().workspace),
+        }
+    }
+
+    fn describe_migration(&self, saved: &serde_json::Value) -> Vec<MigrationSetting> {
+        let config = Config::read(saved);
+        vec![
+            MigrationSetting {
+                id: "model",
+                label: "Model",
+                is_override: !config.model.trim().is_empty(),
+                unchanged_key: None,
+            },
+            MigrationSetting {
+                id: "thinking",
+                label: "Thinking",
+                is_override: !config.effort.is_empty(),
+                unchanged_key: None,
+            },
+            MigrationSetting {
+                id: "sessions",
+                label: "Sessions",
+                is_override: config.scope != Config::default().scope,
+                unchanged_key: Some(config.scope),
+            },
+        ]
+    }
+
+    fn migration_warning(&self) -> Option<&'static str> {
+        Some("Any commands Codex left running will stop.")
+    }
+
     fn summary(&self, agent: &Agent) -> Option<String> {
         let model = Config::read(&agent.config).model;
         Some(if model.is_empty() {
@@ -339,5 +376,57 @@ mod adopt_tests {
         let relative = Config::read(&CodexType.adopt(&carry("code"), saved));
         assert_eq!(relative.workspace, config::DEFAULT_WORKSPACE);
         assert_eq!(relative.instructions, "Look around.");
+    }
+
+    #[test]
+    fn carries_instructions_and_workspace_and_describes_its_overrides() {
+        let saved = Config::default().value();
+        let blank = Config {
+            model: "gpt".into(),
+            instructions: " ".into(),
+            ..Config::default()
+        };
+        assert_eq!(CodexType.carry(&blank.value()), Carry::default());
+        let set = serde_json::json!({ "instructions": "Triage.", "workspace": "/work/code" });
+        assert_eq!(
+            CodexType.carry(&set),
+            Carry {
+                instructions: Some("Triage.".into()),
+                workspace: Some("/work/code".into()),
+            }
+        );
+        let overrides = |config: &serde_json::Value| {
+            CodexType
+                .describe_migration(config)
+                .into_iter()
+                .map(|setting| (setting.id, setting.is_override, setting.unchanged_key))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            overrides(&saved),
+            [
+                ("model", false, None),
+                ("thinking", false, None),
+                ("sessions", false, Some("thread".into())),
+            ]
+        );
+        let custom = Config {
+            model: "gpt-5".into(),
+            effort: "high".into(),
+            scope: "channel".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            overrides(&custom.value()),
+            [
+                ("model", true, None),
+                ("thinking", true, None),
+                ("sessions", true, Some("channel".into())),
+            ]
+        );
+        assert_eq!(
+            CodexType.migration_warning(),
+            Some("Any commands Codex left running will stop.")
+        );
     }
 }

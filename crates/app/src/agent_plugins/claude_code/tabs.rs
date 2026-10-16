@@ -1,7 +1,7 @@
 //! The type's tabs (buzz-app's `tabs.ts`): Claude, with Claude's
 //! status on the agent's host, its setup and the agent's conversations,
 //! each with its session's transcript; and Settings, what the agent runs
-//! with.
+//! with, under the app's provider select.
 
 use super::runtime::{ClaudeRuntime, Config, SavedConversation};
 use super::sessions::SessionView;
@@ -9,14 +9,18 @@ use super::setup::{ClaudeSetup, ClaudeStatus, SetupState, Step};
 use super::transcript::{TURN_LIMIT, read_transcript};
 use crate::agent_plugins::opened::{self, CONVERSATION_LIMIT, CardSession, Found, Place, places};
 use crate::agent_plugins::process::Spawner;
-use crate::agent_plugins::tabs::{Picking, choice, description_text, field, options, saved_config};
+use crate::agent_plugins::tabs::{
+    CUSTOM_MODEL, Picking, choice, custom_model_dialog, custom_model_input, description_text,
+    field, instructions_field, instructions_state, listed_model, model_picker, options,
+    saved_config,
+};
 use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
 use crate::agents2::{AgentConversation, AgentView, Agents2};
 use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
 use crate::ui::agent_activity::panel::date_time;
 use buzz_ui::{
-    ActiveTheme, Button, Colors, Surface, TextArea, TextField, TypeStyled,
+    ActiveTheme, Button, Colors, Surface, TextField, TypeStyled,
     tokens::{font, space},
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
@@ -583,6 +587,10 @@ pub struct SettingsTab {
     workspace: Entity<InputState>,
     instructions: Entity<TextareaState>,
     open: Option<Picker>,
+    /// The custom-model form, once asked for: its initial id until render
+    /// makes its field.
+    custom_asked: Option<String>,
+    custom: Option<Entity<InputState>>,
     saving: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -590,13 +598,10 @@ pub struct SettingsTab {
 
 impl SettingsTab {
     pub fn new(view: AgentView, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let saved = Config::read(&view.agent.config);
+        let saved = Config::read(&saved_config(&view, cx));
         let workspace =
             cx.new(|cx| InputState::new(window, cx).default_value(saved.workspace.clone()));
-        let instructions = cx.new(|cx| TextareaState::new(window, cx));
-        instructions.update(cx, |state, cx| {
-            state.set_value(saved.instructions.clone(), window, cx)
-        });
+        let instructions = instructions_state(&saved.instructions, window, cx);
         let mut subscriptions = vec![
             cx.subscribe(&workspace, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -625,6 +630,8 @@ impl SettingsTab {
             workspace,
             instructions,
             open: None,
+            custom_asked: None,
+            custom: None,
             saving: false,
             error: None,
             _subscriptions: subscriptions,
@@ -687,6 +694,15 @@ impl Picking for SettingsTab {
 
     fn pick(&mut self, picker: Picker, value: String, _: &mut Context<Self>) {
         match picker {
+            Picker::Model if value == CUSTOM_MODEL => {
+                let models = create_models().models;
+                let listed = listed_model(&models, &self.draft.model);
+                self.custom_asked = Some(if listed {
+                    String::new()
+                } else {
+                    self.draft.model.clone()
+                });
+            }
             Picker::Model => self.draft.model = value,
             Picker::Scope => self.draft.scope = value,
         }
@@ -696,37 +712,47 @@ impl Picking for SettingsTab {
 impl Render for SettingsTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        if let Some(initial) = self.custom_asked.take() {
+            self.custom = Some(custom_model_input(&initial, window, cx));
+        }
         let current = self.current(cx);
         let changed = current != self.saved(cx);
-        // A model not offered here shows as the default.
-        let model = if MODELS.iter().any(|(value, _)| *value == self.draft.model) {
-            self.draft.model.clone()
-        } else {
-            String::new()
-        };
         let scope = if self.draft.scope == "channel" {
             "channel"
         } else {
             "thread"
         };
+        let models = create_models();
+        let custom = self.custom.as_ref().map(|input| {
+            custom_model_dialog(
+                input,
+                window,
+                cx,
+                |this: &mut Self, model, _| {
+                    this.draft.model = model;
+                    this.custom = None;
+                },
+                |this: &mut Self| this.custom = None,
+            )
+        });
         div()
             .flex()
             .flex_col()
             .gap(space::S4)
-            .child(field(
-                "Model",
-                choice(
-                    self.open,
-                    Picker::Model,
-                    "claude-code-model",
-                    &model,
-                    options(&MODELS),
-                    self.saving,
-                    window,
-                    cx,
-                ),
-                None,
-                &c,
+            .children(self.view.type_control(changed, window, cx))
+            .child(model_picker(
+                self.open,
+                Picker::Model,
+                "claude-code-model",
+                &models.models,
+                models.allow_custom,
+                &self.draft.model,
+                &models.default_label,
+                models.default_description.as_deref(),
+                false,
+                self.saving,
+                window,
+                cx,
             ))
             .child(field(
                 "Workspace",
@@ -751,13 +777,10 @@ impl Render for SettingsTab {
                 None,
                 &c,
             ))
-            .child(field(
-                "Instructions",
-                TextArea::new(&self.instructions)
-                    .rows(6)
-                    .surface(Surface::Floating)
-                    .disabled(self.saving),
-                Some("Added to every session's system prompt, after Buzz's own.".into()),
+            .child(instructions_field(
+                &self.instructions,
+                self.saving,
+                "Added to every session's system prompt, after Buzz's own.",
                 &c,
             ))
             .children(
@@ -770,9 +793,10 @@ impl Render for SettingsTab {
                     Button::new("claude-code-save", "Save")
                         .prominent()
                         .loading(self.saving)
-                        .disabled(!changed || self.saving)
+                        .disabled(!(changed || self.view.pending()) || self.saving)
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),
             )
+            .children(custom)
     }
 }
