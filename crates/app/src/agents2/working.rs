@@ -1,15 +1,14 @@
 //! How long a run counts as working (buzz-app's `working` in
 //! `service.ts`), and what shows it meanwhile: the request's local work
 //! row (`local-activity.ts`), and the agent typing in the mention's
-//! thread on this device (`local-typing.ts`, a STOPGAP). Nothing public
-//! is published while an agent works.
+//! thread to everyone (`typing.rs`).
 
 use super::attention::EventData;
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-type End = Box<dyn FnOnce() + Send>;
+pub(crate) type End = Box<dyn FnOnce() + Send>;
 
 struct State {
     /// Work still holding the run: the run itself and what it handed off.
@@ -18,6 +17,8 @@ struct State {
     /// The first failure any hold reported.
     outcome: WorkOutcome,
     ends: Vec<End>,
+    /// Started on the first hand-off, then ended with the rest.
+    begin: Option<Box<dyn FnOnce() -> End + Send>>,
 }
 
 /// Keeps a run counted as working until it and everything it handed to
@@ -48,6 +49,7 @@ impl Working {
                 holds: 1,
                 outcome: WorkOutcome::ok(),
                 ends,
+                begin: None,
             })),
             work,
             runtime,
@@ -59,6 +61,14 @@ impl Working {
         self.work.clone()
     }
 
+    /// Starts `begin` when the run first hands work off with
+    /// [`Working::until`], and ends what it started with the rest: a
+    /// runtime that ignores the mention never shows it.
+    pub(crate) fn on_first_hold(self, begin: impl FnOnce() -> End + Send + 'static) -> Self {
+        self.lock().begin = Some(Box::new(begin));
+        self
+    }
+
     /// A run with nothing to show.
     pub fn none(runtime: tokio::runtime::Handle) -> Self {
         Self::new(Vec::new(), None, runtime)
@@ -68,12 +78,23 @@ impl Working {
     /// settles, for a type that hands its work off and returns early. A
     /// failed outcome shows the request failed.
     pub fn until(&self, done: impl std::future::Future<Output = WorkOutcome> + Send + 'static) {
-        {
+        let begin = {
             let mut state = self.lock();
             if state.holds <= 0 {
                 return;
             }
             state.holds += 1;
+            state.begin.take()
+        };
+        if let Some(begin) = begin {
+            let end = begin();
+            let mut state = self.lock();
+            if state.holds < 0 {
+                drop(state);
+                end();
+            } else {
+                state.ends.push(end);
+            }
         }
         let working = self.clone();
         self.runtime.spawn(async move {
@@ -153,11 +174,6 @@ impl Working {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
-
-// STOPGAP(agent-local-typing): DELETE once agents' typing pulses reach the
-// relay, with `Session::type_locally`.
-/// Clients show a pulse for 8 s, so one every 3 s keeps it steady.
-pub(crate) const PULSE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The thread an agent answering `event` works in: its root, or the event
 /// itself when it starts one (NIP-10, the last marked tags winning).

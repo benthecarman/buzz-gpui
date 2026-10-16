@@ -562,8 +562,9 @@ impl AppAgentHost {
         }
         let (agent, key) = self.keyed(pubkey).await?;
         let bytes = serde_json::to_vec(&filters).map_err(|_| "Could not encode agent read")?;
-        let response = client(20)?
+        let response = client()?
             .post(agent.query_url())
+            .timeout(Duration::from_secs(20))
             .header("Content-Type", "application/json")
             .header(
                 "Authorization",
@@ -649,8 +650,9 @@ impl AppAgentHost {
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         let auth = serde_json::to_vec(&agent.upload_auth(&key, &sha256)?)
             .map_err(|_| "Could not authorize upload")?;
-        let response = client(120)?
+        let response = client()?
             .put(agent.upload_url())
+            .timeout(Duration::from_secs(120))
             .header("Content-Type", &mime)
             .header("X-SHA-256", &sha256)
             .header(
@@ -702,12 +704,23 @@ fn authorization(event: Value) -> Result<String> {
     ))
 }
 
-fn client(seconds: u64) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(seconds))
-        .build()
-        .map_err(|_| "Agent client unavailable".into())
+/// One client for every agent request, so frequent small posts such as
+/// typing pulses reuse a connection instead of opening a new one each
+/// time. Each request sets its own timeout.
+fn client() -> Result<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(10))
+                // A connection idle across sleep may be dead; open a new one.
+                .pool_idle_timeout(Duration::from_secs(30))
+                .build()
+                .ok()
+        })
+        .as_ref()
+        .ok_or_else(|| "Agent client unavailable".into())
 }
 
 async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -740,8 +753,9 @@ async fn post(agent: &AppAgent, key: &Secret, signed: Value) -> Result<Value> {
         .ok_or("Invalid agent event")?
         .to_owned();
     let bytes = serde_json::to_vec(&signed).map_err(|_| "Could not encode agent event")?;
-    let response = client(20)?
+    let response = client()?
         .post(agent.events_url())
+        .timeout(Duration::from_secs(20))
         .header("Content-Type", "application/json")
         .header(
             "Authorization",

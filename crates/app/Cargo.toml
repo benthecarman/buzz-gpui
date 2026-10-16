@@ -73,6 +73,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
+[dev-dependencies]
+# Paused time for timing tests.
+tokio = { version = "1", features = ["test-util"] }
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 # GPUI's Linux platform, for raising the window with a handed-over
 # activation token (third_party/README.md).

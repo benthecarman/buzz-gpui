@@ -26,6 +26,7 @@ use super::store::{
     write_records, write_teams,
 };
 use super::teams::{self, Team, TeamChange};
+use super::typing;
 use super::working::{self, Working};
 use super::{Agent, AgentChange, Made};
 use crate::agent_activity::local::{self, Begin, LocalActivity, WorkHandle, WorkOutcome};
@@ -36,6 +37,7 @@ use buzz_host::api::{AppAgentRequest, AppAgentResponse, AppAgentSummary, Portabl
 use buzz_host_rpc::ConnectionState;
 use buzz_identity::Identity;
 use buzz_relay_client::{LiveBatch, RelayOrigin, Session, SessionStatus};
+use futures::FutureExt as _;
 use gpui_kit::{App, AppContext, Context, Entity, EntityId, Global, Subscription, Task};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -249,6 +251,8 @@ struct Runner {
     /// A change of type holds the idle runner: no run starts meanwhile,
     /// and its queue resumes after.
     transitioning: bool,
+    /// Its typing pulses, one per conversation it is working in.
+    typing: typing::Pulses,
 }
 
 /// What a full queue says on the mention it could not take.
@@ -1497,6 +1501,7 @@ impl Agents2 {
                             compiled: None,
                             serial: self.serial,
                             may_hold: true,
+                            typing: typing::Pulses::default(),
                             working_since: None,
                             failed: None,
                             activity_claimed: false,
@@ -1988,8 +1993,9 @@ impl Agents2 {
 
     /// Counts a run as working until it and everything it handed to
     /// [`Working::until`] have settled, however long that takes. A mention
-    /// run shows as local work and typing on this device meanwhile; nothing
-    /// public is published. Retiring the agent takes its work away.
+    /// run shows as local work meanwhile, and as typing in its thread to
+    /// everyone from its first `until`: a runtime that ignores the mention
+    /// never shows typing. Retiring the agent takes its work away.
     fn working(
         &self,
         agent: &AgentHandle,
@@ -2002,17 +2008,40 @@ impl Agents2 {
             return Working::none(runtime);
         };
         let (stopped, ended) = futures::channel::oneshot::channel::<()>();
-        let mut ends: Vec<Box<dyn FnOnce() + Send>> = vec![Box::new(move || {
+        let ends: Vec<Box<dyn FnOnce() + Send>> = vec![Box::new(move || {
             let _ = stopped.send(());
         })];
         let channel = job
             .channel
             .clone()
             .or_else(|| event.tag("h").map(str::to_owned));
+        let mut working = Working::new(ends, job.work.clone(), runtime.clone());
         if let Some(channel) = channel {
-            ends.push(self.type_while_working(agent, event, channel, cx));
+            // Typing to everyone in the channel, from its first hand-off,
+            // where its turn answers, read the same way: in a Me chat, the
+            // channel.
+            let pulses = self
+                .runners
+                .get(&agent.pubkey)
+                .map(|runner| runner.typing.clone())
+                .unwrap_or_default();
+            let top_level = match self
+                .relay(&agent.pubkey)
+                .and_then(|community| crate::agent_plugins::owner_relay::of(&community, cx))
+            {
+                Some((_, relay)) => relay.me_chat(&agent.owner, &channel),
+                None => async { Ok(false) }.boxed(),
+            };
+            let (signer, event, pulse_runtime) = (agent.clone(), event.clone(), runtime);
+            working = working.on_first_hold(move || {
+                // Straight to the host, so pulses stay out of what it wrote.
+                let publish: typing::Publish = Arc::new(move |pulse| {
+                    let signer = signer.clone();
+                    async move { signer.signal(pulse).await }.boxed()
+                });
+                typing::pulse_typing(publish, top_level, &event, &channel, pulses, &pulse_runtime)
+            });
         }
-        let working = Working::new(ends, job.work.clone(), runtime);
         let (aborted, lifetime) = (working.clone(), lifetime.clone());
         cx.background_spawn(async move {
             let cancelled = std::pin::pin!(lifetime.cancelled());
@@ -2024,59 +2053,6 @@ impl Agents2 {
         })
         .detach();
         working
-    }
-
-    /// Shows the agent typing in the mention's thread until the returned
-    /// end runs.
-    fn type_while_working(
-        &self,
-        agent: &AgentHandle,
-        event: &EventData,
-        channel: String,
-        cx: &mut Context<Self>,
-    ) -> Box<dyn FnOnce() + Send> {
-        // STOPGAP(agent-local-typing): delete with `Session::type_locally`.
-        let (stop, stopped) = futures::channel::oneshot::channel::<()>();
-        let (pubkey, root) = (agent.pubkey.clone(), working::thread_root(event));
-        cx.spawn(async move |this, cx| {
-            let mut stopped = stopped;
-            loop {
-                let shown = this.update(cx, |this, cx| {
-                    this.type_locally(&pubkey, &channel, &root, true, cx)
-                });
-                if shown.is_err() {
-                    return;
-                }
-                let pulse = cx.background_executor().timer(working::PULSE);
-                if let futures::future::Either::Left(_) =
-                    futures::future::select(&mut stopped, pulse).await
-                {
-                    break;
-                }
-            }
-            // Ends it now rather than when the last pulse would expire.
-            let _ = this.update(cx, |this, cx| {
-                this.type_locally(&pubkey, &channel, &root, false, cx)
-            });
-        })
-        .detach();
-        Box::new(move || {
-            let _ = stop.send(());
-        })
-    }
-
-    /// Shows a running agent typing in its own community, while that is
-    /// ready, on this device only.
-    fn type_locally(&self, pubkey: &str, channel: &str, root: &str, typing: bool, cx: &App) {
-        let Some(community) = self.relay(pubkey) else {
-            return;
-        };
-        let community = community.read(cx);
-        if community.snapshot.status == SessionStatus::Ready {
-            community
-                .session
-                .type_locally(pubkey, channel, Some(root.to_owned()), typing);
-        }
     }
 
     // ----- changes -----

@@ -118,8 +118,9 @@ pub(crate) async fn fetch(agent: &AppAgent, key: &Secret, url: &str) -> Result<S
         .as_secs();
     let auth = serde_json::to_vec(&media_auth(agent, key, now)?)
         .map_err(|_| "Could not authorize media")?;
-    let response = client(120)?
+    let response = client()?
         .get(&url)
+        .timeout(std::time::Duration::from_secs(120))
         .header(
             "Authorization",
             format!(

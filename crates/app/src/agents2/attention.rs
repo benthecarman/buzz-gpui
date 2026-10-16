@@ -489,7 +489,7 @@ pub fn validate_object(slug: &str, value: &Value) -> Option<String> {
 }
 
 /// The parts of an event attention reads.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventData {
     pub id: String,
     pub pubkey: String,

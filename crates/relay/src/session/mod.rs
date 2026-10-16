@@ -744,31 +744,6 @@ impl Session {
         })));
     }
 
-    // STOPGAP(agent-local-typing): DELETE once agents' typing pulses reach
-    // the relay, with `Typing::local`.
-    /// Shows `agent`, which this app runs, typing in `channel` (in the
-    /// thread `root`, if any) on this device only; `typing: false` ends it
-    /// at once. Its own posts leave it typing until that end.
-    pub fn type_locally(&self, agent: &str, channel: &str, root: Option<String>, typing: bool) {
-        let (agent, channel) = (agent.to_owned(), channel.to_owned());
-        let at = unread::now_ms() / 1000;
-        let _ = self.commands.send(Message::With(Box::new(move |actor| {
-            let discovery = &actor.discovery;
-            let can_access = |id: &str| discovery.as_ref().is_some_and(|d| d.can_access(id));
-            if actor.typing.local(
-                &agent,
-                &channel,
-                root,
-                typing,
-                at,
-                can_access,
-                unread::now_ms(),
-            ) {
-                actor.publish_activity();
-            }
-        })));
-    }
-
     /// The events among `ids` this session retains (`retainedEvent`):
     /// open windows and threads, recent traffic or the outbox. Nothing is
     /// fetched.
@@ -792,7 +767,6 @@ impl Session {
             }
         }
     }
-
     /// New messages from others that should notify: mentions, direct
     /// messages and replies in the viewer's conversations, still unread and
     /// not in view, each sent once. Lagging receivers lose old items.

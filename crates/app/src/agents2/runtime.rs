@@ -348,6 +348,17 @@ impl AgentHandle {
         Ok(signed)
     }
 
+    /// Signs and posts one event as the agent without counting it among
+    /// what it wrote, such as a typing pulse.
+    pub(crate) async fn signal(&self, event: AppAgentEvent) -> Result<(), String> {
+        self.event(AppAgentRequest::Publish {
+            pubkey: self.pubkey.clone(),
+            event,
+        })
+        .await
+        .map(drop)
+    }
+
     /// Reads the community as the agent, seeing only what it may see: one
     /// to eight filters.
     pub async fn query(&self, filters: &[Value]) -> Result<Vec<Value>, String> {

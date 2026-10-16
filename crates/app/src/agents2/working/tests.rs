@@ -129,3 +129,30 @@ fn types_in_the_thread_the_mention_belongs_to() {
         "m".repeat(64)
     );
 }
+
+#[tokio::test]
+async fn shows_typing_from_the_first_hand_off_only() {
+    let runtime = tokio::runtime::Handle::current();
+    let begun = Arc::new(AtomicUsize::new(0));
+    let (ended, end) = counted();
+    let begin = {
+        let begun = begun.clone();
+        move || {
+            begun.fetch_add(1, Ordering::SeqCst);
+            end
+        }
+    };
+    let working = Working::new(Vec::new(), None, runtime.clone()).on_first_hold(begin);
+    working.until(async { WorkOutcome::ok() });
+    working.until(async { WorkOutcome::ok() });
+    working.release();
+    settle().await;
+    assert_eq!(begun.load(Ordering::SeqCst), 1);
+    assert_eq!(ended.load(Ordering::SeqCst), 1);
+    // A run that never hands off never shows it.
+    let (never, end) = counted();
+    let ignored = Working::new(Vec::new(), None, runtime).on_first_hold(move || end);
+    ignored.release();
+    settle().await;
+    assert_eq!(never.load(Ordering::SeqCst), 0);
+}

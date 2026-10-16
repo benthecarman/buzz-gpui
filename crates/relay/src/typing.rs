@@ -43,9 +43,6 @@ struct Record {
     last_message: Option<u64>,
     visible_until: u64,
     quiet_until: u64,
-    // STOPGAP(agent-local-typing): delete with `Typing::local`.
-    /// Driven by this app's own pulses, which end only with a local end.
-    local: bool,
 }
 
 impl Record {
@@ -139,35 +136,6 @@ impl Typing {
         self.publish(now)
     }
 
-    // STOPGAP(agent-local-typing): DELETE once agents' typing pulses reach
-    // the relay, with `local` on `Record` and its use in `receive_at`.
-    /// Takes a pulse (`typing`) this app made for an agent it runs, or the
-    /// end of its turn, on this device only, as if it came live. Until that
-    /// end, the agent's own posts leave it typing. `root` is the thread it
-    /// works in. Returns whether the snapshot changed.
-    #[allow(clippy::too_many_arguments)]
-    pub fn local(
-        &mut self,
-        author: &str,
-        channel: &str,
-        root: Option<String>,
-        typing: bool,
-        created_at_secs: u64,
-        can_access: impl Fn(&str) -> bool,
-        now: u64,
-    ) -> bool {
-        self.expire_silence(now);
-        if author != self.viewer && valid_channel(channel) && can_access(channel) {
-            let key = Key {
-                channel: channel.to_owned(),
-                root,
-                author: author.to_owned(),
-            };
-            self.receive_at(key, created_at_secs.saturating_mul(1000), typing, true, now);
-        }
-        self.publish(now)
-    }
-
     /// Hides pulses whose lifetime ended. Returns whether the snapshot
     /// changed.
     pub fn tick(&mut self, now: u64) -> bool {
@@ -229,10 +197,10 @@ impl Typing {
             root: thread_reference(event).map(|reference| reference.root_id),
             author,
         };
-        self.receive_at(key, at, typing, false, now);
+        self.receive_at(key, at, typing, now);
     }
 
-    fn receive_at(&mut self, key: Key, at: u64, typing: bool, local: bool, now: u64) {
+    fn receive_at(&mut self, key: Key, at: u64, typing: bool, now: u64) {
         if at > now || at + ACTIVITY_LIFETIME_MS <= now {
             return;
         }
@@ -249,19 +217,10 @@ impl Typing {
                     last_message: None,
                     visible_until: 0,
                     quiet_until: 0,
-                    local: false,
                 },
             );
         }
         let record = self.records.get_mut(&key).expect("inserted");
-        // STOPGAP(agent-local-typing): an agent's progress posts would hide
-        // its typing between pulses; the local end says when the turn is
-        // over.
-        if local {
-            record.local = typing;
-        } else if !typing && record.local {
-            return;
-        }
         if typing {
             if record.last_activity.is_some_and(|last| at <= last)
                 || record.last_message.is_some_and(|last| at <= last)
@@ -452,46 +411,6 @@ mod tests {
         let order: Vec<String> = people.iter().map(hex).collect();
         assert_eq!(typing.snapshot().channels["room"], order);
         assert!(typing.clear());
-        assert!(typing.snapshot().channels.is_empty());
-    }
-
-    // STOPGAP(agent-local-typing): delete with `Typing::local`.
-    #[test]
-    fn a_local_pulse_shows_through_the_agents_posts_until_a_local_end() {
-        let (viewer, agent) = (Keys::generate(), Keys::generate());
-        let mut typing = Typing::new(hex(&viewer));
-        let at = NOW - 1_000;
-        let local = |typing: &mut Typing, typing_now: bool, at_ms: u64, now: u64| {
-            typing.local(&hex(&agent), "a", None, typing_now, at_ms / 1000, any, now)
-        };
-        assert!(local(&mut typing, true, at, NOW));
-        assert_eq!(typing.snapshot().channels["a"], vec![hex(&agent)]);
-        // A progress post leaves it typing, and the next pulse still counts.
-        typing.accept(
-            &[event(&agent, kinds::CHAT, at, vec![vec!["h", "a"]])],
-            any,
-            NOW,
-        );
-        assert_eq!(typing.snapshot().channels["a"], vec![hex(&agent)]);
-        local(&mut typing, true, at + 3_000, NOW + 3_000);
-        typing.tick(NOW + 9_000);
-        assert_eq!(typing.snapshot().channels["a"], vec![hex(&agent)]);
-        // The local end hides it at once, and the agent's posts end it as
-        // usual once this app has stopped driving it.
-        local(&mut typing, false, at + 9_000, NOW + 9_000);
-        assert!(typing.snapshot().channels.is_empty());
-        typing.accept(&[pulse(&agent, at + 12_000, "a")], any, NOW + 12_000);
-        assert_eq!(typing.snapshot().channels["a"], vec![hex(&agent)]);
-        typing.accept(
-            &[event(
-                &agent,
-                kinds::CHAT,
-                at + 12_000,
-                vec![vec!["h", "a"]],
-            )],
-            any,
-            NOW + 12_000,
-        );
         assert!(typing.snapshot().channels.is_empty());
     }
 }
