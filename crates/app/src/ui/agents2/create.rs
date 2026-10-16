@@ -142,6 +142,8 @@ impl CreateAgent {
                     cx.notify();
                 }
             }),
+            // A provider's catalog or defaults change its model menu.
+            cx.observe_global::<crate::agents2::ProviderChanges>(|_, cx| cx.notify()),
         ];
         let kind = types(cx).into_iter().next();
         let examples = cx.spawn(async move |this, cx| {
@@ -246,7 +248,7 @@ impl CreateAgent {
         } else {
             starting_config(Some(kind))
         };
-        self.config = kind.kind.with_model(config, &model);
+        self.config = kind.kind.with_model(config, &model, cx);
         self.type_key = Some(key);
         self.sync_instructions(window, cx);
         self.dirty = true;

@@ -303,6 +303,78 @@ pub fn retype_plan(
     }
 }
 
+/// How a type's provider stands on this device (`AgentProviderSnapshot`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    Checking,
+    Ready,
+    Attention,
+}
+
+impl Readiness {
+    /// The state as buzz-app names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Checking => "checking",
+            Self::Ready => "ready",
+            Self::Attention => "attention",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderSnapshot {
+    pub readiness: Readiness,
+    /// Action-oriented menu copy for direct recovery or recovery guidance.
+    pub attention_label: Option<String>,
+    /// Installation and sign-in work must be cancelled before its dialog
+    /// closes.
+    pub blocking: bool,
+}
+
+impl ProviderSnapshot {
+    pub const CHECKING: Self = Self {
+        readiness: Readiness::Checking,
+        attention_label: None,
+        blocking: false,
+    };
+}
+
+/// Closes the provider dialog a body is shown in.
+pub type CloseProvider = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Recovery a provider runs straight from its menu row, such as an install.
+pub type AttentionAction = Box<dyn FnOnce(&mut App)>;
+
+/// A type's device-wide readiness and management (`AgentProvider`). The
+/// Agents page supplies the menu row, the type's mark and the dialog
+/// framing. A provider calls [`providers_changed`] whenever its snapshot,
+/// catalog or defaults change.
+pub trait AgentProvider {
+    fn snapshot(&self, cx: &App) -> ProviderSnapshot;
+    /// Refreshes device-wide readiness without changing installation or
+    /// sign-in.
+    fn check(&self, cx: &mut App);
+    /// Handles the current attention state directly; `None` opens the
+    /// dialog.
+    fn attention_action(&self, _cx: &App) -> Option<AttentionAction> {
+        None
+    }
+    /// Recovery and progress controls, and optional saved defaults.
+    fn dialog_body(&self, close: CloseProvider, window: &mut Window, cx: &mut App) -> AnyView;
+}
+
+/// Bumped on every provider change, for views to observe.
+#[derive(Default)]
+pub struct ProviderChanges(u64);
+
+impl Global for ProviderChanges {}
+
+/// Tells observers of [`ProviderChanges`] that a provider changed.
+pub fn providers_changed(cx: &mut App) {
+    cx.default_global::<ProviderChanges>().0 += 1;
+}
+
 /// A kind of Agents2 agent. Everything but `id`, `title` and `defaults`
 /// has a default.
 pub trait AgentType: 'static {
@@ -333,7 +405,7 @@ pub trait AgentType: 'static {
         None
     }
     /// `config` with `model` chosen; a type resets what depends on it.
-    fn with_model(&self, config: Value, model: &str) -> Value {
+    fn with_model(&self, config: Value, model: &str, _cx: &App) -> Value {
         let mut config = config;
         if let Value::Object(fields) = &mut config {
             fields.insert("model".into(), Value::from(model));
@@ -359,6 +431,11 @@ pub trait AgentType: 'static {
                 })
                 .unwrap_or_else(|| model.to_owned()),
         )
+    }
+    /// Device-wide readiness and management, under Provider settings on
+    /// the Agents page; `None` lists the type there as unavailable.
+    fn provider(&self, _cx: &App) -> Option<Rc<dyn AgentProvider>> {
+        None
     }
     /// One short line under the agent's name, such as its model. `None` or
     /// blank shows the title.
