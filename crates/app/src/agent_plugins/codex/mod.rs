@@ -171,11 +171,19 @@ impl AgentType for CodexType {
         Some("Codex on this computer, using its native coding tools and your account.".into())
     }
 
+    fn mark(&self) -> Option<buzz_ui::BrandMark> {
+        Some(buzz_ui::BrandMark::Codex)
+    }
+
     fn defaults(&self) -> TypeDefaults {
         TypeDefaults {
             config: Config::default().value(),
             attention: Default::default(),
         }
+    }
+
+    fn create_instructions(&self) -> bool {
+        true
     }
 
     fn adopts(&self) -> bool {

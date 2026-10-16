@@ -1,57 +1,60 @@
-//! The Agents2 page (buzz-app's `Agents2Page.tsx`). Three frames, one at a
-//! time:
-//! - Inventory: every agent as a tile. Selecting one (click, or arrow keys)
-//!   opens its peek beside the grid without leaving it; Enter or a
-//!   double-click builds.
-//! - Peek: identity, the type's own read-only glance, and what wakes it.
-//! - Build: the identity rail on the left, the type's tabs and the app's
-//!   Attention tab on the right.
+//! The Agents page (buzz-app's `AgentsPage.tsx`), in three tabs: Your
+//! agents, Import and Browse.
+//! - Your agents: every agent as a card. Selecting one (click, or arrow
+//!   keys) opens its peek beside the grid without leaving it; Enter or a
+//!   double-click builds: the identity rail on the left, the type's tabs
+//!   and the app's Attention tab on the right. The New agent tile opens
+//!   the create dialog. Agents the owner's agent list (kind 30177) names
+//!   that run on another device show too, read-only.
+//! - Import: identities earlier agent systems saved on the hosts.
+//! - Browse: agents shared in the community.
 //!
-//! New agents are made in the peek slot, so making one never covers the
-//! grid, and so are agents brought over from an earlier agent system.
+//! The header's More menu opens Teams in the side panel.
 
 use super::attention::summary as attention_summary;
 use super::bring_over::{BringOver, BringOverEvent};
+use super::card::{self, AgentCard};
+use super::create::{CreateAgent, CreateEvent, type_icon};
+use super::teams::{CloseTeams, TeamsPanel};
 use super::{AgentDelete, AgentTabs, Removed, empty_state, problem};
+use crate::agents2::listings::Elsewhere;
 use crate::agents2::{Agent, AgentChange, Agents2, RegisteredType, Status, type_of, types};
-use crate::hosts::HostConnection;
-use crate::ui::agents::form::field;
 use crate::ui::overlay::{self, Align, Dismiss};
 use crate::ui::settings::avatar::{
     AvatarDismissed, AvatarDone, AvatarEditor, Preview, popover as avatar_popover,
 };
-use buzz_host_rpc::ConnectionState;
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, Button, ButtonSize, Colors, IconButton, IconButtonSize,
-    IconName, Menu, MenuItem, PanelHeader, Select, Surface, TextField, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, Button, Colors, IconButton, IconButtonSize, IconName, Menu,
+    MenuItem, PanelHeader, Tab, TabVariant, Tabs, TextField, TypeStyled,
     tokens::{duration, easing, radius},
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use nostr::nips::nip19::ToBech32;
-use std::cell::Cell;
 use std::rc::Rc;
 
-/// Tiles are a fixed 10rem, so opening the side panel never resizes one.
-const TILE_REM: f32 = 10.;
-const GAP_REM: f32 = 0.75;
-const GRID_PADDING_REM: f32 = 1.5;
 /// Below this viewport width the side panel narrows and Build stacks.
 const NARROW_REM: f32 = 52.;
 
-/// What the peek slot shows instead of a selected agent's peek.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Side {
-    Creating,
-    Porting,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabId {
+    Yours,
+    Import,
+    Browse,
 }
+
+const TABS: [(TabId, &str); 3] = [
+    (TabId::Yours, "Your agents"),
+    (TabId::Import, "Import"),
+    (TabId::Browse, "Browse"),
+];
 
 #[derive(Clone, Debug, PartialEq)]
 enum Frame {
     Browse {
         selected: Option<String>,
-        side: Option<Side>,
+        teams: bool,
     },
     Build {
         pubkey: String,
@@ -76,6 +79,38 @@ fn summary_of(agent: &Agent, kind: Option<&RegisteredType>) -> String {
         Some(kind) => kind.summary_of(agent),
         None => "Type unavailable".into(),
     }
+}
+
+/// One card of Your agents: an agent here, or one on another device.
+#[derive(Clone)]
+enum Shown {
+    Here(Agent),
+    Elsewhere(Elsewhere),
+}
+
+impl Shown {
+    fn pubkey(&self) -> &str {
+        match self {
+            Shown::Here(agent) => &agent.pubkey,
+            Shown::Elsewhere(agent) => &agent.pubkey,
+        }
+    }
+}
+
+/// The selected community's agents here, then those on the owner's other
+/// devices.
+fn shown(cx: &App) -> Vec<Shown> {
+    let Some(service) = Agents2::global(cx) else {
+        return Vec::new();
+    };
+    let service = service.read(cx);
+    service
+        .agents()
+        .iter()
+        .cloned()
+        .map(Shown::Here)
+        .chain(service.elsewhere(cx).into_iter().map(Shown::Elsewhere))
+        .collect()
 }
 
 /// The next selection for a key in the listbox: arrows move by one or by
@@ -112,15 +147,17 @@ pub(crate) fn step(key: &str, from: Option<usize>, count: usize, columns: usize)
 }
 
 pub struct Agents2Page {
+    tab: TabId,
     frame: Frame,
     grid: FocusHandle,
-    new_agent: Option<Entity<NewAgent>>,
-    bring_over: Option<Entity<BringOver>>,
+    create: Option<Entity<CreateAgent>>,
+    import: Option<Entity<BringOver>>,
+    teams: Option<Entity<TeamsPanel>>,
     build: Option<Entity<Build>>,
+    more_open: bool,
     /// Counts side panel openings, so each one animates in.
     side_opened: usize,
     side_key: Option<String>,
-    width: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -132,17 +169,19 @@ impl Agents2Page {
             subscriptions.push(cx.observe(&service, |_, _, cx| cx.notify()));
         }
         Self {
+            tab: TabId::Yours,
             frame: Frame::Browse {
                 selected: None,
-                side: None,
+                teams: false,
             },
             grid: cx.focus_handle(),
-            new_agent: None,
-            bring_over: None,
+            create: None,
+            import: None,
+            teams: None,
             build: None,
+            more_open: false,
             side_opened: 0,
             side_key: None,
-            width: Rc::new(Cell::new(px(0.))),
             _subscriptions: subscriptions,
         }
     }
@@ -150,78 +189,97 @@ impl Agents2Page {
     fn browse(&mut self, selected: Option<String>, cx: &mut Context<Self>) {
         self.frame = Frame::Browse {
             selected,
-            side: None,
+            teams: false,
         };
-        self.new_agent = None;
-        self.bring_over = None;
+        self.teams = None;
         self.build = None;
         cx.notify();
     }
 
+    /// Opens an agent's Build view; a just-made agent may not be shown
+    /// yet, and one on another device has none.
     fn build(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
+        if shown(cx)
+            .iter()
+            .any(|agent| matches!(agent, Shown::Elsewhere(a) if a.pubkey == pubkey))
+        {
+            return;
+        }
         let view = cx.new(|cx| Build::new(pubkey.clone(), window, cx));
         cx.subscribe(&view, |this, _, _: &Removed, cx| this.browse(None, cx))
             .detach();
         self.build = Some(view);
-        self.new_agent = None;
-        self.bring_over = None;
+        self.teams = None;
         self.frame = Frame::Build { pubkey };
         cx.notify();
     }
 
+    /// Opens the agent at `pubkey`, as the agent route does.
+    pub fn open_agent(&mut self, pubkey: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = TabId::Yours;
+        self.create = None;
+        self.build(pubkey, window, cx);
+    }
+
     fn new_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let form = cx.new(|cx| NewAgent::new(window, cx));
+        let dialog = cx.new(|cx| CreateAgent::new(window, cx));
         cx.subscribe_in(
-            &form,
+            &dialog,
             window,
-            |this, _, event: &NewAgentEvent, window, cx| match event {
-                NewAgentEvent::Close => this.browse(None, cx),
-                NewAgentEvent::Created(pubkey) => this.build(pubkey.clone(), window, cx),
+            |this, _, event: &CreateEvent, window, cx| match event {
+                CreateEvent::Close => {
+                    this.create = None;
+                    cx.notify();
+                }
+                CreateEvent::Created(pubkey) => {
+                    this.create = None;
+                    this.tab = TabId::Yours;
+                    this.build(pubkey.clone(), window, cx);
+                }
             },
         )
         .detach();
-        self.new_agent = Some(form);
-        self.bring_over = None;
+        self.create = Some(dialog);
+        cx.notify();
+    }
+
+    fn open_teams(&mut self, cx: &mut Context<Self>) {
+        self.more_open = false;
+        let panel = cx.new(TeamsPanel::new);
+        cx.subscribe(&panel, |this, _, _: &CloseTeams, cx| this.browse(None, cx))
+            .detach();
+        self.teams = Some(panel);
         self.frame = Frame::Browse {
             selected: None,
-            side: Some(Side::Creating),
+            teams: true,
         };
         cx.notify();
     }
 
-    fn bring_over(&mut self, cx: &mut Context<Self>) {
-        let view = cx.new(BringOver::new);
-        cx.subscribe(&view, |this, _, event: &BringOverEvent, cx| match event {
-            BringOverEvent::Close => this.browse(None, cx),
-        })
-        .detach();
-        self.bring_over = Some(view);
-        self.new_agent = None;
-        self.frame = Frame::Browse {
-            selected: None,
-            side: Some(Side::Porting),
-        };
+    fn set_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        self.tab = tab;
+        if tab == TabId::Import && self.import.is_none() {
+            let view = cx.new(BringOver::new);
+            cx.subscribe(&view, |this, _, event: &BringOverEvent, cx| match event {
+                BringOverEvent::Imported => this.set_tab(TabId::Yours, cx),
+            })
+            .detach();
+            self.import = Some(view);
+        }
+        if tab != TabId::Import {
+            // Looks again the next time Import opens.
+            self.import = None;
+        }
         cx.notify();
-    }
-
-    fn columns(&self, window: &Window) -> usize {
-        let rem = f32::from(window.rem_size());
-        let inner = f32::from(self.width.get()) - 2. * GRID_PADDING_REM * rem;
-        (((inner + GAP_REM * rem) / ((TILE_REM + GAP_REM) * rem)).floor() as usize).max(1)
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Frame::Browse { selected, .. } = &self.frame else {
             return;
         };
-        let Some(service) = Agents2::global(cx) else {
-            return;
-        };
-        let agents: Vec<String> = service
-            .read(cx)
-            .agents()
+        let agents: Vec<String> = shown(cx)
             .iter()
-            .map(|agent| agent.pubkey.clone())
+            .map(|agent| agent.pubkey().to_owned())
             .collect();
         let index = selected
             .as_ref()
@@ -241,7 +299,7 @@ impl Agents2Page {
                 }
             }
             _ => {
-                if let Some(next) = step(key, index, agents.len(), self.columns(window)) {
+                if let Some(next) = step(key, index, agents.len(), card::columns(window)) {
                     cx.stop_propagation();
                     self.browse(agents.get(next).cloned(), cx);
                 }
@@ -252,7 +310,7 @@ impl Agents2Page {
     fn header(
         &self,
         building: Option<&Agent>,
-        side: Option<Side>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> PanelHeader {
         let service = Agents2::global(cx);
@@ -280,106 +338,211 @@ impl Agents2Page {
                             .child(agent.name.clone()),
                     )
             }
-            None => header
-                .title("Agents")
-                .when(!types(cx).is_empty() && ready, |this| {
-                    this.action(
-                        Button::new("bring-over", "Bring over")
-                            .size(ButtonSize::Sm)
-                            .disabled(side == Some(Side::Porting))
-                            .on_click(cx.listener(|this, _, _, cx| this.bring_over(cx))),
-                    )
-                    .action(
-                        Button::new("new-agent", "New agent")
-                            .size(ButtonSize::Sm)
-                            .icon(IconName::Plus)
-                            .disabled(side == Some(Side::Creating))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.new_agent(window, cx)),
-                            ),
-                    )
-                }),
+            None => {
+                let teams_open = matches!(self.frame, Frame::Browse { teams: true, .. });
+                header.label(Some(IconName::Robot), "Agents").when(
+                    self.tab == TabId::Yours && ready && !types(cx).is_empty(),
+                    |this| this.action(self.more(teams_open, window, cx)),
+                )
+            }
         }
     }
 
-    /// One agent's tile, built while the service's agents are borrowed.
-    fn tile(agent: &Agent, active: bool, page: &WeakEntity<Self>, cx: &App) -> AnyElement {
-        let c = *cx.colors();
-        let page = page.clone();
-        let kind = type_of(&agent.agent_type, cx);
-        let pubkey = agent.pubkey.clone();
+    /// "More agent actions" and its menu.
+    fn more(&self, teams_open: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let trigger = IconButton::new("more-agent-actions", IconName::DotsThree)
+            .size(IconButtonSize::Sm)
+            .tooltip("More agent actions")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.more_open = !this.more_open;
+                cx.notify();
+            }));
+        let menu = self.more_open.then(|| {
+            Menu::new().child(
+                MenuItem::new("agents-teams", "Teams")
+                    .disabled(teams_open)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_teams(cx))),
+            )
+        });
+        let weak = cx.entity().downgrade();
+        let dismiss: Dismiss = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.more_open = false;
+                cx.notify();
+            });
+        });
         div()
-            .id(SharedString::from(format!("agent2-{}", agent.pubkey)))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(rems(0.25))
-            .w(rems(TILE_REM))
-            .min_w_0()
-            .pt(rems(1.25))
-            .px(rems(0.75))
-            .pb(rems(1.))
-            .border_1()
-            .border_color(if active {
-                c.border_focus
-            } else {
-                c.border_standard
-            })
-            .rounded(radius::CONTAINER)
-            .bg(if active {
-                c.affordance_selected
-            } else {
-                c.surface_panel
-            })
-            .text_center()
-            .cursor_pointer()
-            .when(!active, |this| {
-                this.hover(|this| this.bg(c.affordance_panel_hover))
-            })
-            .child(
-                div()
-                    .size(rems(4.5))
-                    .mb(rems(0.5))
-                    .when(kind.is_none(), |this| this.opacity(0.5))
-                    .child(
-                        Avatar::new(agent.name.clone())
-                            .size(AvatarSize::Px(72.))
-                            .squircle()
-                            .when_some(agent_picture(agent, cx), |avatar, picture| {
-                                avatar.image(picture)
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .max_w_full()
-                    .truncate()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(agent.name.clone()),
-            )
-            .child(
-                div()
-                    .max_w_full()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .line_clamp(2)
-                    .child(summary_of(agent, kind.as_ref())),
-            )
-            .on_click(move |event: &ClickEvent, window, cx| {
-                let _ = page.update(cx, |this, cx| {
-                    window.focus(&this.grid, cx);
-                    if event.click_count() >= 2 {
-                        this.build(pubkey.clone(), window, cx);
-                    } else {
-                        this.browse((!active).then(|| pubkey.clone()), cx);
-                    }
-                });
-            })
+            .relative()
+            .child(trigger)
+            .children(menu.map(|menu| overlay::dropdown(window, Align::End, menu, dismiss)))
             .into_any_element()
     }
 
-    fn peek(&self, agent: &Agent, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    /// One agent's card in the listbox.
+    fn card(agent: &Shown, active: bool, page: &WeakEntity<Self>, cx: &App) -> AnyElement {
+        let pubkey = agent.pubkey().to_owned();
+        let page = page.clone();
+        let (name, picture, relay, kind) = match agent {
+            Shown::Here(agent) => (
+                agent.name.clone(),
+                agent_picture_url(agent, cx),
+                agent.relay.clone(),
+                type_of(&agent.agent_type, cx),
+            ),
+            Shown::Elsewhere(agent) => (
+                agent.name.clone(),
+                agent.picture.clone(),
+                agent.relay.clone(),
+                type_of(&agent.agent_type, cx),
+            ),
+        };
+        let detail = match agent {
+            Shown::Here(agent) => summary_of(agent, kind.as_ref()),
+            Shown::Elsewhere(_) => "On another device".into(),
+        };
+        AgentCard::new(
+            SharedString::from(format!("agent2-{pubkey}")),
+            name,
+            picture,
+            relay,
+        )
+        .selected(active)
+        .unavailable(kind.is_none())
+        .icon(type_icon(kind.as_ref(), 16., cx))
+        .detail(detail)
+        .on_click(move |event: &ClickEvent, window, cx| {
+            let _ = page.update(cx, |this, cx| {
+                window.focus(&this.grid, cx);
+                if event.click_count() >= 2 {
+                    this.build(pubkey.clone(), window, cx);
+                } else {
+                    this.browse((!active).then(|| pubkey.clone()), cx);
+                }
+            });
+        })
+        .into_any_element()
+    }
+
+    /// Your agents: the states before the grid, or the grid.
+    fn yours(&self, selected: Option<&str>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let c = *cx.colors();
+        let Some(service) = Agents2::global(cx) else {
+            return div().into_any_element();
+        };
+        let status = service.read(cx).status().clone();
+        let agents = shown(cx);
+        let has_types = !types(cx).is_empty();
+        match status {
+            Status::Unavailable => {
+                return empty_state(
+                    "\u{2726}",
+                    "Agents runs in the desktop app",
+                    "Agent keys stay in the desktop app's native custody.",
+                    None,
+                    &c,
+                )
+                .into_any_element();
+            }
+            Status::Error(error) => {
+                return empty_state(
+                    "!",
+                    "Agents could not load",
+                    if error.is_empty() {
+                        "Try again.".to_string()
+                    } else {
+                        error
+                    },
+                    None,
+                    &c,
+                )
+                .into_any_element();
+            }
+            Status::Ready if !has_types && agents.is_empty() => {
+                return empty_state(
+                    "\u{2726}",
+                    "No agents yet",
+                    "Enable an agent type plugin to make one.",
+                    None,
+                    &c,
+                )
+                .into_any_element();
+            }
+            _ => {}
+        }
+        let page = cx.entity().downgrade();
+        let cards: Vec<AnyElement> = agents
+            .iter()
+            .map(|agent| Self::card(agent, Some(agent.pubkey()) == selected, &page, cx))
+            .collect();
+        let tile = has_types.then(|| {
+            card::new_agent_tile(
+                status != Status::Ready,
+                cx.listener(|this, _, window, cx| this.new_agent(window, cx)),
+                cx,
+            )
+        });
+        card::grid(window)
+            .id("agents2-grid")
+            .track_focus(&self.grid)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.key_down(event, window, cx)
+            }))
+            .children(tile)
+            .children(cards)
+            .into_any_element()
+    }
+
+    fn peek(&self, agent: &Shown, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let c = *cx.colors();
+        let identity = |name: String,
+                        picture: Option<String>,
+                        relay: String,
+                        line: String,
+                        cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .items_start()
+                .gap(rems(0.75))
+                .child(div().flex_none().size(rems(4.)).child(card::portrait(
+                    &name,
+                    picture.as_deref(),
+                    &relay,
+                    4.,
+                    cx,
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(rems(0.125))
+                        .child(div().text_heading().truncate().child(name))
+                        .child(div().text_body_sm().text_color(c.text_subtle).child(line)),
+                )
+                .child(
+                    IconButton::new("peek-close", IconName::X)
+                        .size(IconButtonSize::Sm)
+                        .tooltip("Close")
+                        .on_click(cx.listener(|this, _, _, cx| this.browse(None, cx))),
+                )
+        };
+        let agent = match agent {
+            Shown::Elsewhere(agent) => {
+                return side_body()
+                    .child(identity(
+                        agent.name.clone(),
+                        agent.picture.clone(),
+                        agent.relay.clone(),
+                        "On another device".into(),
+                        cx,
+                    ))
+                    .child(div().text_body_sm().text_color(c.text_subtle).child(
+                        "Its key is on another of your devices, which runs it. Open Agents there to change or delete it.",
+                    ));
+            }
+            Shown::Here(agent) => agent,
+        };
         let kind = type_of(&agent.agent_type, cx);
         let summary = summary_of(agent, kind.as_ref());
         let peek = kind
@@ -401,38 +564,13 @@ impl Agents2Page {
             .unwrap_or_default();
         let pubkey = agent.pubkey.clone();
         side_body()
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(rems(0.75))
-                    .child(
-                        div().flex_none().size(rems(4.)).child(
-                            Avatar::new(agent.name.clone())
-                                .size(AvatarSize::Px(64.))
-                                .squircle()
-                                .when_some(agent_picture(agent, cx), |avatar, picture| {
-                                    avatar.image(picture)
-                                }),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(rems(0.125))
-                            .child(div().text_heading().truncate().child(agent.name.clone()))
-                            .child(div().text_body_sm().text_color(c.text_subtle).child(line)),
-                    )
-                    .child(
-                        IconButton::new("peek-close", IconName::X)
-                            .size(IconButtonSize::Sm)
-                            .tooltip("Close")
-                            .on_click(cx.listener(|this, _, _, cx| this.browse(None, cx))),
-                    ),
-            )
+            .child(identity(
+                agent.name.clone(),
+                agent_picture_url(agent, cx),
+                agent.relay.clone(),
+                line,
+                cx,
+            ))
             .child(
                 Button::new("peek-open", "Open")
                     .prominent()
@@ -473,22 +611,27 @@ fn agent_community(agent: &Agent, cx: &App) -> Option<Entity<crate::community::C
         .cloned()
 }
 
-/// The agent's profile picture: the one its host saved, so a change shows
+/// The agent's picture URL: the one its host saved, so a change shows
 /// before its community has the new profile, else (a host from before
 /// pictures) the one its community's profiles have.
-fn agent_picture(agent: &Agent, cx: &App) -> Option<ImageSource> {
-    let community = agent_community(agent, cx)?;
-    let community = community.read(cx);
+fn agent_picture_url(agent: &Agent, cx: &App) -> Option<String> {
     let picture = match &agent.picture {
         Some(picture) => picture.clone(),
-        None => community
+        None => agent_community(agent, cx)?
+            .read(cx)
             .snapshot
             .profiles
             .get(&agent.pubkey)?
             .picture
             .clone()?,
     };
-    (!picture.is_empty()).then(|| crate::ui::media::avatar(&picture, community.session.media()))
+    (!picture.is_empty()).then_some(picture)
+}
+
+/// The agent's profile picture, through its community's media access.
+pub(crate) fn agent_picture(agent: &Agent, cx: &App) -> Option<ImageSource> {
+    let picture = agent_picture_url(agent, cx)?;
+    card::picture_source(&picture, &agent.relay, cx)
 }
 
 pub(super) fn side_body() -> Div {
@@ -516,62 +659,38 @@ impl Render for Agents2Page {
         let Some(service) = Agents2::global(cx) else {
             return div();
         };
-        let status = service.read(cx).status().clone();
-        // Only the shown agent is copied; the grid borrows the rest.
-        let find = |pubkey: Option<&String>, cx: &App| {
-            pubkey.and_then(|pubkey| service.read(cx).find(pubkey).cloned())
-        };
         // A deleted or out-of-scope agent's Build falls back to the grid.
         let building = match &self.frame {
-            Frame::Build { pubkey } => find(Some(pubkey), cx),
+            Frame::Build { pubkey } => service.read(cx).find(pubkey).cloned(),
             _ => None,
         };
         if building.is_none() && self.build.is_some() {
             self.build = None;
             self.frame = Frame::Browse {
                 selected: None,
-                side: None,
+                teams: false,
             };
         }
-        let (selected, side_shown) = match &self.frame {
-            Frame::Browse { selected, side } => (find(selected.as_ref(), cx), *side),
-            Frame::Build { .. } => (None, None),
+        let (selected, teams_open) = match &self.frame {
+            Frame::Browse { selected, teams } => (
+                selected
+                    .as_ref()
+                    .and_then(|pubkey| shown(cx).into_iter().find(|a| a.pubkey() == pubkey)),
+                *teams,
+            ),
+            Frame::Build { .. } => (None, false),
         };
-        let has_types = !types(cx).is_empty();
         let narrow =
             f32::from(window.viewport_size().width) < NARROW_REM * f32::from(window.rem_size());
 
-        let body: AnyElement = match (&status, &building, &self.build) {
-            (Status::Unavailable, ..) => div()
-                .p(rems(1.5))
-                .child(empty_state(
-                    "\u{2726}",
-                    "Agents runs in the desktop app",
-                    "Agent keys stay in the desktop app's native custody.",
-                    None,
-                    &c,
-                ))
-                .into_any_element(),
-            (Status::Error(error), ..) => div()
-                .p(rems(1.5))
-                .child(empty_state(
-                    "!",
-                    "Agents could not load",
-                    if error.is_empty() {
-                        "Try again.".to_string()
-                    } else {
-                        error.clone()
-                    },
-                    None,
-                    &c,
-                ))
-                .into_any_element(),
-            (_, Some(_), Some(view)) => view.clone().into_any_element(),
+        let body: AnyElement = match (&building, &self.build) {
+            (Some(_), Some(view)) => view.clone().into_any_element(),
             _ => {
-                let side_key = match side_shown {
-                    Some(Side::Creating) => Some("new".to_string()),
-                    Some(Side::Porting) => Some("port".to_string()),
-                    None => selected.as_ref().map(|agent| agent.pubkey.clone()),
+                let yours = self.tab == TabId::Yours;
+                let side_key = match (yours, teams_open) {
+                    (false, _) => None,
+                    (true, true) => Some("teams".to_string()),
+                    (true, false) => selected.as_ref().map(|agent| agent.pubkey().to_owned()),
                 };
                 if side_key != self.side_key {
                     if side_key.is_some() {
@@ -579,77 +698,59 @@ impl Render for Agents2Page {
                     }
                     self.side_key = side_key.clone();
                 }
-                let side: Option<AnyElement> = match side_shown {
-                    Some(Side::Creating) => {
-                        self.new_agent.clone().map(|form| form.into_any_element())
-                    }
-                    Some(Side::Porting) => {
-                        self.bring_over.clone().map(|view| view.into_any_element())
-                    }
-                    None => selected
+                let side: Option<AnyElement> = match (yours, teams_open) {
+                    (false, _) => None,
+                    (true, true) => self.teams.clone().map(|panel| panel.into_any_element()),
+                    (true, false) => selected
                         .as_ref()
                         .map(|agent| self.peek(agent, window, cx).into_any_element()),
                 };
-                let inventory: AnyElement = if !service.read(cx).agents().is_empty() {
-                    let index_selected = selected.as_ref().map(|a| a.pubkey.as_str());
-                    let page = cx.entity().downgrade();
-                    let tiles: Vec<AnyElement> = service
-                        .read(cx)
-                        .agents()
-                        .iter()
-                        .map(|agent| {
-                            let active = index_selected == Some(agent.pubkey.as_str());
-                            Self::tile(agent, active, &page, cx)
-                        })
-                        .collect();
-                    let width = self.width.clone();
-                    let page = cx.entity().downgrade();
-                    let measure = canvas(
-                        move |bounds, _, cx| {
-                            if width.replace(bounds.size.width) != bounds.size.width {
-                                let _ = page.update(cx, |_, cx| cx.notify());
-                            }
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .size_full();
-                    div()
-                        .id("agents2-grid")
-                        .relative()
-                        .track_focus(&self.grid)
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            this.key_down(event, window, cx)
-                        }))
-                        .flex()
-                        .flex_wrap()
-                        .content_start()
-                        .gap(rems(GAP_REM))
-                        .p(rems(GRID_PADDING_REM))
-                        .child(measure)
-                        .children(tiles)
-                        .into_any_element()
-                } else if status == Status::Ready && side_shown.is_none() {
-                    empty_state(
-                        "\u{2726}",
-                        "No agents yet",
-                        if has_types {
-                            "An agent has its own key and wakes when it is mentioned or something it watches happens."
-                        } else {
-                            "Enable an agent type plugin to make one."
-                        },
-                        has_types.then(|| {
-                            Button::new("empty-new-agent", "New agent")
-                                .prominent()
-                                .on_click(cx.listener(|this, _, window, cx| this.new_agent(window, cx)))
-                                .into_any_element()
-                        }),
-                        &c,
-                    )
-                    .into_any_element()
-                } else {
-                    div().into_any_element()
+                let tab = self.tab;
+                let tabs = TABS
+                    .iter()
+                    .fold(Tabs::new(TabVariant::Panel), |tabs, (id, label)| {
+                        let id = *id;
+                        tabs.tab(
+                            Tab::new(SharedString::from(format!("agents-tab-{label}")), *label)
+                                .selected(tab == id)
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(id, cx))),
+                        )
+                    });
+                let content: AnyElement = match tab {
+                    TabId::Yours => {
+                        self.yours(selected.as_ref().map(|agent| agent.pubkey()), window, cx)
+                    }
+                    TabId::Import => self
+                        .import
+                        .clone()
+                        .map(|view| view.into_any_element())
+                        .unwrap_or_else(|| div().into_any_element()),
+                    TabId::Browse => super::browse_tab(cx),
                 };
+                let viewport = f32::from(window.viewport_size().height);
+                let rem = f32::from(window.rem_size());
+                // `clamp(space-4, 6vh, space-16 + space-4)`.
+                let top = (viewport * 0.06).clamp(rem, 5. * rem);
+                let inventory = div()
+                    .id("agents2-inventory")
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(rems(1.5))
+                            .w_full()
+                            .max_w(rems(48.))
+                            .mx_auto()
+                            .pt(px(top))
+                            .px(rems(1.5))
+                            .pb(rems(2.))
+                            .child(tabs)
+                            .child(content),
+                    );
                 let reduce = cx.reduce_motion();
                 let side = side.map(|side| {
                     let panel = div()
@@ -682,15 +783,7 @@ impl Render for Agents2Page {
                     .flex()
                     .size_full()
                     .min_h_0()
-                    .child(
-                        div()
-                            .id("agents2-inventory")
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(inventory),
-                    )
+                    .child(inventory)
                     .children(side)
                     .into_any_element()
             }
@@ -703,309 +796,10 @@ impl Render for Agents2Page {
             .h_full()
             .text_color(c.text_standard)
             .text_body()
-            .child(self.header(building.as_ref(), side_shown, cx))
+            .child(self.header(building.as_ref(), window, cx))
             .child(div().flex_1().min_h_0().child(body))
+            .children(self.create.clone())
     }
-}
-
-// ----- New agent -----
-
-pub enum NewAgentEvent {
-    Close,
-    Created(String),
-}
-
-pub struct NewAgent {
-    name: Entity<InputState>,
-    kind: Option<SharedString>,
-    host: Option<Entity<HostConnection>>,
-    host_open: bool,
-    pending: bool,
-    error: Option<SharedString>,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl EventEmitter<NewAgentEvent> for NewAgent {}
-
-impl NewAgent {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name = cx.new(|cx| InputState::new(window, cx));
-        name.update(cx, |state, cx| state.focus(window, cx));
-        let subscriptions =
-            vec![
-                cx.subscribe_in(
-                    &name,
-                    window,
-                    |this, _, event: &InputEvent, window, cx| match event {
-                        InputEvent::PressEnter { .. } => this.create(window, cx),
-                        InputEvent::Change => cx.notify(),
-                        _ => {}
-                    },
-                ),
-            ];
-        Self {
-            name,
-            kind: types(cx).first().map(|kind| kind.key.clone()),
-            host: None,
-            host_open: false,
-            pending: false,
-            error: None,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    fn create(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let all = types(cx);
-        let chosen = self
-            .kind
-            .as_ref()
-            .and_then(|key| all.iter().find(|kind| &kind.key == key))
-            .or(all.first())
-            .cloned();
-        let name = self.name.read(cx).value().trim().to_string();
-        let (Some(chosen), Some(service)) = (chosen, Agents2::global(cx)) else {
-            return;
-        };
-        if name.is_empty() || self.pending {
-            return;
-        }
-        self.pending = true;
-        self.error = None;
-        let host = self.host.clone();
-        let task = service.update(cx, |service, cx| {
-            service.create(
-                &chosen.key,
-                &name,
-                crate::agents2::Made::default(),
-                host,
-                cx,
-            )
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(agent) => cx.emit(NewAgentEvent::Created(agent.pubkey)),
-                    Err(error) => {
-                        this.error = Some(error.into());
-                        this.pending = false;
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// The Host field, when more than one host can hold the key (as the
-    /// Add agent dialog's).
-    fn host_field(
-        &self,
-        hosts: &[Entity<HostConnection>],
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let c = *cx.colors();
-        let selected = self
-            .host
-            .clone()
-            .or_else(|| {
-                hosts
-                    .iter()
-                    .find(|host| host.read(cx).remote.is_none())
-                    .cloned()
-            })
-            .or_else(|| hosts.first().cloned());
-        let label = selected.as_ref().map(|host| host.read(cx).label.clone());
-        let mut menu = Menu::new();
-        for (index, host) in hosts.iter().enumerate() {
-            let checked = selected.as_ref().map(Entity::entity_id) == Some(host.entity_id());
-            let online = matches!(host.read(cx).state, ConnectionState::Connected { .. });
-            let pick = host.clone();
-            menu = menu.child(
-                MenuItem::new(("agents2-host", index), host.read(cx).label.clone())
-                    .checked(checked)
-                    .disabled(!online)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.host = Some(pick.clone());
-                        this.host_open = false;
-                        cx.notify();
-                    })),
-            );
-        }
-        let weak = cx.entity().downgrade();
-        let dismiss: Dismiss = Rc::new(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.host_open = false;
-                cx.notify();
-            });
-        });
-        let select = Select::new("agents2-host-select")
-            .placeholder("Choose where it runs")
-            .when_some(label, |this, label| this.value(label))
-            .surface(Surface::Floating)
-            .disabled(self.pending)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.host_open = !this.host_open;
-                cx.notify();
-            }));
-        field(
-            "Host",
-            Some("The machine that keeps this agent's key.".into()),
-            overlay::select_menu(
-                select,
-                self.host_open,
-                Align::Start,
-                Some(rems(16.)),
-                || menu.into_any_element(),
-                dismiss,
-                window,
-            )
-            .w_full(),
-            &c,
-        )
-    }
-}
-
-impl Render for NewAgent {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let c = *cx.colors();
-        let all = types(cx);
-        let chosen = self
-            .kind
-            .as_ref()
-            .and_then(|key| all.iter().find(|kind| &kind.key == key))
-            .or(all.first())
-            .map(|kind| kind.key.clone());
-        let name_empty = self.name.read(cx).value().trim().is_empty();
-        let hosts = Agents2::global(cx)
-            .map(|service| service.read(cx).hosts(cx))
-            .unwrap_or_default();
-        let cards: Vec<AnyElement> = all
-            .iter()
-            .map(|kind| {
-                let checked = chosen.as_ref() == Some(&kind.key);
-                let key = kind.key.clone();
-                let pending = self.pending;
-                div()
-                    .id(SharedString::from(format!("type-{}", kind.key)))
-                    .flex()
-                    .items_start()
-                    .gap(rems(0.75))
-                    .p(rems(0.75))
-                    .border_1()
-                    .border_color(if checked {
-                        c.border_focus
-                    } else {
-                        c.border_standard
-                    })
-                    .rounded(radius::CONTROL)
-                    .when(!pending, |this| this.cursor_pointer())
-                    .child(radio_dot(checked, &c))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap(rems(0.125))
-                            .child(div().text_label_sm().child(kind.kind.title()))
-                            .children(kind.kind.description().map(|description| {
-                                div()
-                                    .text_body_sm()
-                                    .text_color(c.text_subtle)
-                                    .child(description)
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.pending {
-                            this.kind = Some(key.clone());
-                            cx.notify();
-                        }
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        side_body()
-            .key_context("Agents2NewAgent")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && !this.pending {
-                    cx.stop_propagation();
-                    cx.emit(NewAgentEvent::Close);
-                }
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(rems(0.5))
-                    .child(div().min_w_0().text_heading().child("New agent"))
-                    .child(
-                        IconButton::new("new-agent-close", IconName::X)
-                            .size(IconButtonSize::Sm)
-                            .tooltip("Close")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(NewAgentEvent::Close))),
-                    ),
-            )
-            .child(field(
-                "Name",
-                None,
-                TextField::new(&self.name)
-                    .surface(Surface::Floating)
-                    .disabled(self.pending),
-                &c,
-            ))
-            .when(hosts.len() > 1, |this| {
-                this.child(self.host_field(&hosts, window, cx))
-            })
-            .child(field(
-                "Type",
-                None,
-                div().flex().flex_col().gap(rems(0.75)).children(cards),
-                &c,
-            ))
-            .child(
-                div()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child("It gets its own key on this device and runs while the app is open."),
-            )
-            .children(problem(self.error.as_ref(), &c))
-            .child(
-                Button::new("create-agent", "Create and set up")
-                    .prominent()
-                    .full_width()
-                    .loading(self.pending)
-                    .disabled(name_empty || chosen.is_none())
-                    .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
-            )
-    }
-}
-
-pub(super) fn radio_dot(checked: bool, c: &Colors) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .mt(rems(0.125))
-        .size(rems(1.25))
-        .rounded_full()
-        .border_1()
-        .border_color(if checked {
-            c.affordance_prominent
-        } else {
-            c.border_prominent
-        })
-        .when(checked, |this| {
-            this.child(
-                div()
-                    .size(rems(0.5))
-                    .rounded_full()
-                    .bg(c.affordance_prominent),
-            )
-        })
 }
 
 // ----- Build -----

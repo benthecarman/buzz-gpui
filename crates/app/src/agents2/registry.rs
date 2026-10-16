@@ -104,6 +104,28 @@ pub struct Models {
     pub models: Vec<Model>,
 }
 
+/// One model a type offers (`ModelChoice`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// The model id saved in the type's config.
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// A type's model choices for a new agent (`ModelPicker` as a menu): its
+/// default row first, then `models`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreateModels {
+    pub models: Vec<ModelChoice>,
+    pub default_label: String,
+    pub default_description: Option<String>,
+    /// Whether an id absent from `models` may be entered.
+    pub allow_custom: bool,
+    /// The catalog is still loading.
+    pub loading: bool,
+}
+
 /// A kind of Agents2 agent. Everything but `id`, `title` and `defaults`
 /// has a default.
 pub trait AgentType: 'static {
@@ -115,8 +137,52 @@ pub trait AgentType: 'static {
     fn description(&self) -> Option<SharedString> {
         None
     }
+    /// The type's mark, shown with it in the app's own choices; the robot
+    /// without one.
+    fn mark(&self) -> Option<buzz_ui::BrandMark> {
+        None
+    }
     /// A new agent's starting config and attention objects.
     fn defaults(&self) -> TypeDefaults;
+    /// Whether the New agent dialog's card offers the agent's instructions
+    /// (its config's `instructions`), as Claude's and Codex's `Create` do.
+    fn create_instructions(&self) -> bool {
+        false
+    }
+    /// The model rows of this type's submenu in the New agent dialog
+    /// (`CreateModelMenu`); `None` offers no model choice. Their ids are
+    /// saved as the config's `model`, through [`Self::with_model`].
+    fn create_models(&self, _cx: &mut App) -> Option<CreateModels> {
+        None
+    }
+    /// `config` with `model` chosen; a type resets what depends on it.
+    fn with_model(&self, config: Value, model: &str) -> Value {
+        let mut config = config;
+        if let Value::Object(fields) = &mut config {
+            fields.insert("model".into(), Value::from(model));
+        }
+        config
+    }
+    /// The non-default model a New agent's config names, for the type
+    /// selector (`createModelLabel`).
+    fn create_model_label(&self, config: &Value, cx: &mut App) -> Option<String> {
+        let model = config.get("model")?.as_str()?.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let models = self.create_models(cx);
+        Some(
+            models
+                .and_then(|models| {
+                    models
+                        .models
+                        .into_iter()
+                        .find(|choice| choice.id == model)
+                        .map(|choice| choice.label)
+                })
+                .unwrap_or_else(|| model.to_owned()),
+        )
+    }
     /// One short line under the agent's name, such as its model. `None` or
     /// blank shows the title.
     fn summary(&self, _agent: &Agent) -> Option<String> {

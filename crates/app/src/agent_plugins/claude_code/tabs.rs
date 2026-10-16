@@ -31,6 +31,24 @@ const MODELS: [(&str, &str); 4] = [
     ("sonnet", "Sonnet"),
     ("haiku", "Haiku"),
 ];
+/// Claude's models for the New agent dialog's model menu.
+pub fn create_models() -> crate::agents2::CreateModels {
+    crate::agents2::CreateModels {
+        models: MODELS[1..]
+            .iter()
+            .map(|(id, label)| crate::agents2::ModelChoice {
+                id: (*id).into(),
+                label: (*label).into(),
+                description: None,
+            })
+            .collect(),
+        default_label: MODELS[0].1.into(),
+        default_description: Some("Following the provider's model default".into()),
+        allow_custom: true,
+        loading: false,
+    }
+}
+
 const SCOPES: [(&str, &str); 2] = [
     ("thread", "One session per thread"),
     ("channel", "One session per channel"),

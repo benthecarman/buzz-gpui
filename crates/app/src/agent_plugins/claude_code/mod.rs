@@ -180,11 +180,23 @@ impl AgentType for ClaudeCodeType {
         )
     }
 
+    fn mark(&self) -> Option<buzz_ui::BrandMark> {
+        Some(buzz_ui::BrandMark::Claude)
+    }
+
     fn defaults(&self) -> TypeDefaults {
         TypeDefaults {
             config: Config::default().value(),
             attention: Default::default(),
         }
+    }
+
+    fn create_instructions(&self) -> bool {
+        true
+    }
+
+    fn create_models(&self, _: &mut App) -> Option<crate::agents2::CreateModels> {
+        Some(tabs::create_models())
     }
 
     fn adopts(&self) -> bool {

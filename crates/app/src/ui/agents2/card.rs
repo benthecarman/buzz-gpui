@@ -4,7 +4,7 @@
 //! picture shows through its community's media access.
 
 use super::packs;
-use buzz_ui::{ActiveTheme, Avatar, AvatarSize, Icon, IconName, TypeStyled, tokens::radius};
+use buzz_ui::{ActiveTheme, Avatar, AvatarSize, TypeStyled, tokens::radius};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
@@ -45,11 +45,11 @@ pub fn picture_source(picture: &str, relay: &str, cx: &App) -> Option<ImageSourc
     if picture.is_empty() {
         return None;
     }
-    let community = community(relay, cx)?;
-    Some(crate::ui::media::avatar(
-        picture,
-        community.read(cx).session.media(),
-    ))
+    // One from a community not added here (an import's) loads as is.
+    Some(match community(relay, cx) {
+        Some(community) => crate::ui::media::avatar(picture, community.read(cx).session.media()),
+        None => crate::ui::media::any_avatar(picture),
+    })
 }
 
 /// An agent's picture filling `size` rems: a pack avatar's poster, or any
@@ -84,7 +84,7 @@ pub struct AgentCard {
     picture: Option<String>,
     relay: String,
     detail: Option<AnyElement>,
-    icon: Option<IconName>,
+    icon: Option<AnyElement>,
     actions: Vec<AnyElement>,
     selected: Option<bool>,
     unavailable: bool,
@@ -118,8 +118,9 @@ impl AgentCard {
         self
     }
 
-    pub fn icon(mut self, icon: Option<IconName>) -> Self {
-        self.icon = icon;
+    /// A mark before the detail, such as the type's or the model's.
+    pub fn icon(mut self, icon: impl IntoElement) -> Self {
+        self.icon = Some(icon.into_any_element());
         self
     }
 
@@ -202,9 +203,7 @@ impl RenderOnce for AgentCard {
                         .max_w_full()
                         .text_body_sm()
                         .text_color(c.text_subtle)
-                        .when_some(self.icon, |this, icon| {
-                            this.child(Icon::new(icon).size(16.).color(c.text_subtle))
-                        })
+                        .when_some(self.icon, |this, icon| this.child(icon))
                         .child(div().min_w_0().truncate().child(detail)),
                 )
             })
