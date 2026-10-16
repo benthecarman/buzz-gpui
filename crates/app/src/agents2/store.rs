@@ -419,5 +419,61 @@ fn rearmed(timer: &TimerWatch, state: TimerState, schedule: Option<Schedule>) ->
     }
 }
 
+/// A group of the owner's agents and the text its members share
+/// (buzz-app's `Team`). Membership lives only here: an agent records
+/// nothing about its teams.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Team {
+    pub id: String,
+    pub name: String,
+    pub instructions: String,
+    /// Agent pubkeys, in the order shown.
+    pub members: Vec<String>,
+}
+
+/// buzz-app keeps teams in `localStorage["buzz.agents.teams.v1"]`; here
+/// it is a JSON file of the same shape beside the records.
+pub const TEAMS_KEY: &str = "buzz.agents.teams.v1";
+
+/// Reads every team, skipping any that is not one.
+pub fn read_teams(storage: &dyn Storage) -> Vec<Team> {
+    let Some(stored) = storage
+        .read()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return Vec::new();
+    };
+    if stored.get("version") != Some(&Value::from(1)) {
+        return Vec::new();
+    }
+    let Some(teams) = stored.get("teams").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    teams
+        .iter()
+        .filter_map(|team| {
+            let text = |key: &str| team.get(key)?.as_str().map(str::to_owned);
+            Some(Team {
+                id: text("id")?,
+                name: text("name")?,
+                instructions: text("instructions")?,
+                members: team
+                    .get("members")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|member| is_pubkey(member))
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+pub fn write_teams(storage: &dyn Storage, teams: &[Team]) -> Result<(), String> {
+    let text = serde_json::json!({ "version": 1, "teams": teams }).to_string();
+    storage.write(&text)
+}
+
 #[cfg(test)]
 mod tests;

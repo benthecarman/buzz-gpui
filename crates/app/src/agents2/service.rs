@@ -22,8 +22,10 @@ use super::runtime::{
     ClassifierSkip, Delivery, HostLink, Trigger, UNSUPPORTED,
 };
 use super::store::{
-    self, AgentRecord, FileStorage, Schedule, Storage, read_records, set_attention, write_records,
+    self, AgentRecord, FileStorage, Schedule, Storage, read_records, read_teams, set_attention,
+    write_records, write_teams,
 };
+use super::teams::{self, Team, TeamChange};
 use super::working::{self, Working};
 use super::{Agent, AgentChange};
 use crate::agent_activity::local::{self, Begin, LocalActivity, WorkHandle, WorkOutcome};
@@ -689,13 +691,18 @@ pub(super) fn init(cx: &mut App) {
     let storage: Arc<dyn Storage> = Arc::new(FileStorage(
         dir.join(format!("{}.json", store::STORAGE_KEY)),
     ));
-    let service = cx.new(|cx| Agents2::new(storage, cx));
+    let team_storage: Arc<dyn Storage> =
+        Arc::new(FileStorage(dir.join(format!("{}.json", store::TEAMS_KEY))));
+    let service = cx.new(|cx| Agents2::new(storage, team_storage, cx));
     cx.set_global(Agents2Global(service));
 }
 
 pub struct Agents2 {
     storage: Arc<dyn Storage>,
     records: BTreeMap<String, AgentRecord>,
+    team_storage: Arc<dyn Storage>,
+    /// The owner's teams on this device, in any community.
+    teams: Vec<Team>,
     lists: Vec<(EntityId, HostList)>,
     status: Status,
     /// The selected community's agents, while it is ready.
@@ -722,8 +729,13 @@ pub struct Agents2 {
 }
 
 impl Agents2 {
-    fn new(storage: Arc<dyn Storage>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        storage: Arc<dyn Storage>,
+        team_storage: Arc<dyn Storage>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let records = read_records(storage.as_ref());
+        let teams = read_teams(team_storage.as_ref());
         let subscriptions = vec![
             cx.observe_global::<registry::AgentTypes>(|this, cx| {
                 this.update(cx);
@@ -768,6 +780,8 @@ impl Agents2 {
         let mut this = Self {
             storage,
             records,
+            team_storage,
+            teams,
             lists: Vec::new(),
             status: Status::Unavailable,
             agents: Vec::new(),
@@ -795,6 +809,11 @@ impl Agents2 {
 
     pub fn status(&self) -> &Status {
         &self.status
+    }
+
+    /// The owner's teams on this device, in any community.
+    pub fn teams(&self) -> &[Team] {
+        &self.teams
     }
 
     /// The selected community's agents, while it is ready.
@@ -1062,6 +1081,29 @@ impl Agents2 {
             self.records.retain(|pubkey, _| live.contains(pubkey));
             if let Err(error) = write_records(self.storage.as_ref(), &self.records) {
                 tracing::warn!(%error, "agent settings were not saved");
+            }
+        }
+        // A deleted agent leaves its teams; the teams stay.
+        if self
+            .teams
+            .iter()
+            .any(|team| team.members.iter().any(|pubkey| !live.contains(pubkey)))
+        {
+            let teams: Vec<Team> = self
+                .teams
+                .iter()
+                .map(|team| Team {
+                    members: team
+                        .members
+                        .iter()
+                        .filter(|pubkey| live.contains(pubkey))
+                        .cloned()
+                        .collect(),
+                    ..team.clone()
+                })
+                .collect();
+            if let Err(error) = self.write_teams(teams) {
+                tracing::warn!(%error, "teams were not saved");
             }
         }
     }
@@ -1867,6 +1909,7 @@ impl Agents2 {
                 Box::pin(async move { asked.is_ok() && answer.await.unwrap_or(false) })
             }) as super::runtime::Current
         };
+        let team = teams::team_prompt(&self.teams, |pubkey| self.live_name(pubkey), &agent.pubkey);
         let delivery = Delivery {
             trigger: job.trigger,
             channel: job.channel,
@@ -1874,6 +1917,7 @@ impl Agents2 {
             config: agent.config.clone(),
             model: None,
             effort: None,
+            team: (!team.is_empty()).then_some(team),
             working,
             cancel,
             current,
@@ -1984,6 +2028,52 @@ impl Agents2 {
     }
 
     // ----- changes -----
+
+    /// Creates a team, or replaces the one with `change.id`. Members must
+    /// be agents on this device.
+    pub fn save_team(
+        &mut self,
+        change: TeamChange,
+        cx: &mut Context<Self>,
+    ) -> Result<Team, String> {
+        if self.lists.is_empty() {
+            return Err(super::runtime::UNSUPPORTED.into());
+        }
+        let team = teams::validate(change, &self.teams, |pubkey| self.live(pubkey).is_some())?;
+        self.write_teams(teams::with(&self.teams, team.clone()))?;
+        cx.notify();
+        Ok(team)
+    }
+
+    /// Deletes the team; its agents are untouched.
+    pub fn remove_team(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let teams: Vec<Team> = self
+            .teams
+            .iter()
+            .filter(|team| team.id != id)
+            .cloned()
+            .collect();
+        self.write_teams(teams)?;
+        cx.notify();
+        Ok(())
+    }
+
+    /// Saves the teams; memory changes only once storage has taken them.
+    fn write_teams(&mut self, teams: Vec<Team>) -> Result<(), String> {
+        write_teams(self.team_storage.as_ref(), &teams)?;
+        self.teams = teams;
+        Ok(())
+    }
+
+    /// An existing agent's name, on any host.
+    fn live_name(&self, pubkey: &str) -> Option<&str> {
+        self.lists.iter().find_map(|(_, list)| {
+            list.agents
+                .iter()
+                .find(|summary| summary.pubkey == pubkey && !summary.deleted)
+                .map(|summary| summary.name.as_str())
+        })
+    }
 
     /// Saves one record; memory changes only once storage has taken it.
     fn write(&mut self, record: AgentRecord) -> Result<(), String> {

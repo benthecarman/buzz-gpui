@@ -286,6 +286,7 @@ impl Fixture {
             spawn: self.fake.spawner(),
             model: None,
             effort: None,
+            team: String::new(),
             working: {
                 let holds = self.holds.clone();
                 Arc::new(move |done| locked(&holds).push(done.shared()))

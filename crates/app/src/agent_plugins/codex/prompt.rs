@@ -27,10 +27,20 @@ pub fn quoted(value: &impl Serialize) -> String {
 pub(crate) use crate::buzz_mcp::tools::root_of;
 
 /// The Buzz guidance; with `settings`, the agent's custom instructions too.
-pub fn developer_instructions(name: &str, pubkey: &str, settings: Option<&Config>) -> String {
-    let custom = settings.map_or_else(String::new, |settings| {
+/// `settings` comes with the agent's team sections, empty for none.
+pub fn developer_instructions(
+    name: &str,
+    pubkey: &str,
+    settings: Option<(&Config, &str)>,
+) -> String {
+    let custom = settings.map_or_else(String::new, |(settings, team)| {
+        let team = if team.is_empty() {
+            String::new()
+        } else {
+            format!("\n{team}")
+        };
         format!(
-            "Current Buzz custom instructions replace all prior Buzz custom instructions. An empty section means no custom instructions apply.\n<agent-instructions>\n{}\n</agent-instructions>",
+            "Current Buzz custom instructions replace all prior Buzz custom instructions. An empty section means no custom instructions apply.\n<agent-instructions>\n{}\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team.{team}",
             settings.instructions
         )
     });
@@ -237,8 +247,13 @@ mod tests {
             ..Config::default()
         };
         assert!(
-            developer_instructions("Codex", "b", Some(&settings))
-                .ends_with("<agent-instructions>\nUse a marker\n</agent-instructions>")
+            developer_instructions("Codex", "b", Some((&settings, ""))).ends_with(
+                "<agent-instructions>\nUse a marker\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team."
+            )
+        );
+        assert!(
+            developer_instructions("Codex", "b", Some((&settings, "<team>\nT\n</team>")))
+                .ends_with("None means you are on no team.\n<team>\nT\n</team>")
         );
     }
 }

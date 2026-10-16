@@ -290,6 +290,7 @@ impl AgentType for CodexType {
             model: delivery.model,
             effort: delivery.effort,
             activity,
+            team: delivery.team.unwrap_or_default(),
             working: super::hold_until(delivery.working),
         };
         let runtime = state.read(cx).runtime.clone();

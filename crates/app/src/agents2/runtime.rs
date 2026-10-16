@@ -73,6 +73,10 @@ pub struct Delivery {
     /// The effort level the owner asked for in the triggering message: one
     /// of that model's efforts. `None` means the agent's own default.
     pub effort: Option<String>,
+    /// A section for each team the agent is on, with the team's name,
+    /// roster and instructions, to follow the agent's own instructions.
+    /// `None` without one.
+    pub team: Option<String>,
     /// Counts the run as working after `run` returns, for a type that
     /// hands its work off and returns early: see [`Working::until`].
     pub working: Working,

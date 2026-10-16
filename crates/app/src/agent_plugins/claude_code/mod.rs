@@ -301,6 +301,7 @@ impl AgentType for ClaudeCodeType {
             model: delivery.model,
             effort: delivery.effort,
             activity,
+            team: delivery.team.unwrap_or_default(),
             working: super::hold_until(delivery.working),
             current: delivery.current,
         };

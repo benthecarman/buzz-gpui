@@ -32,7 +32,7 @@ pub mod github;
 mod identity;
 mod inbox;
 mod jump;
-mod keys;
+pub(crate) mod keys;
 pub mod launch;
 mod link_preview;
 mod links;

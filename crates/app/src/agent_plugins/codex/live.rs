@@ -208,6 +208,7 @@ async fn answers_a_mention_through_the_buzz_send_tool() {
             spawn,
             model: None,
             effort: None,
+            team: String::new(),
             working: std::sync::Arc::new(|_| {}),
             activity: None,
         })

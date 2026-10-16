@@ -23,6 +23,7 @@ pub mod registry;
 pub mod runtime;
 mod service;
 pub mod store;
+pub mod teams;
 mod working;
 
 use attention::{AttentionObject, TimerState};

@@ -205,6 +205,8 @@ pub struct Run {
     /// The model and effort the owner picked for this turn.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The agent's team sections; empty when it is on no team.
+    pub team: String,
     /// Told when the turn this run hands over settles.
     pub working: crate::agent_plugins::HoldUntil,
     /// Whether a watch's or timer's wake should still run.
@@ -269,6 +271,9 @@ struct EntryState {
     /// Whether the owner has attention on: new sessions get its tools, its
     /// guidance and the end-of-turn review.
     attention: bool,
+    /// The team sections of the latest run; a change restarts idle
+    /// sessions.
+    team: String,
     /// The core memory and when it was read: `None` when it could not be.
     memory: Option<(Option<Option<String>>, Instant)>,
     /// The agent's handle from its latest delivery, for the tools to act
@@ -624,7 +629,11 @@ impl ClaudeRuntime {
             None => false,
         };
         let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone(), attention);
-        locked(&entry.state).handle = Some(run.agent.clone());
+        {
+            let mut state = locked(&entry.state);
+            state.handle = Some(run.agent.clone());
+            state.team = run.team;
+        }
         // Read while the turn's prompt is built, not after: a new session's
         // prompt needs it, and a spare is only faster if nothing else is
         // awaited.
@@ -988,6 +997,7 @@ impl ClaudeRuntime {
             config: initial,
             name: None,
             attention,
+            team: String::new(),
             memory: None,
             handle: None,
             contexts: HashMap::new(),
@@ -1003,9 +1013,14 @@ impl ClaudeRuntime {
                 let (this, state, pubkey, spawn) =
                     (this.clone(), state.clone(), pubkey.clone(), spawn.clone());
                 async move {
-                    let (config, name, attention) = {
+                    let (config, name, attention, team) = {
                         let state = locked(&state);
-                        (state.config.clone(), state.name.clone(), state.attention)
+                        (
+                            state.config.clone(),
+                            state.name.clone(),
+                            state.attention,
+                            state.team.clone(),
+                        )
                     };
                     let memory = this.memory(&pubkey, &state).await;
                     let Where { cwd, model, .. } = config.at(&spawn);
@@ -1024,6 +1039,7 @@ impl ClaudeRuntime {
                             &config.workspace,
                             name.as_deref().map(|name| (name, pubkey.as_str())),
                             &config.instructions,
+                            &team,
                             memory.as_ref().map(|memory| memory.as_deref()),
                             attention,
                         ),
@@ -1037,7 +1053,13 @@ impl ClaudeRuntime {
             let state = state.clone();
             Arc::new(move || {
                 let state = locked(&state);
-                json!([state.config.fingerprint(), state.name, state.attention]).to_string()
+                json!([
+                    state.config.fingerprint(),
+                    state.name,
+                    state.attention,
+                    state.team
+                ])
+                .to_string()
             })
         };
         let mut options =

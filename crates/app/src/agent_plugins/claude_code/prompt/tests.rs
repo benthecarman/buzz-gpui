@@ -70,6 +70,7 @@ fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
         "~/.buzz",
         None,
         "Be terse.",
+        "<team>\nCrew\n</team>",
         Some(Some("I am Claude.")),
         false,
     );
@@ -77,14 +78,19 @@ fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
     assert!(prompt.contains("## Session Model"));
     assert!(prompt.contains("<workspace>\nCurrent working directory: ~/.buzz\n</workspace>"));
     assert!(prompt.contains("<agent-instructions>\nBe terse.\n</agent-instructions>"));
-    assert!(prompt.contains("<core-memory>\nI am Claude.\n</core-memory>"));
+    assert!(prompt.contains(
+        "<agent-instructions>\nBe terse.\n</agent-instructions>\n\n<team>\nCrew\n</team>\n\n<core-memory>\nI am Claude.\n</core-memory>"
+    ));
     assert!(
-        system_prompt(Scope::Thread, "/w", None, "", Some(None), false)
+        system_prompt(Scope::Thread, "/w", None, "", "", Some(None), false)
             .contains("No core memory found.")
     );
-    assert!(!system_prompt(Scope::Channel, "/w", None, "", None, false).contains("<core-memory>"));
     assert!(
-        system_prompt(Scope::Channel, "/w", None, "", None, false).contains("per-channel session")
+        !system_prompt(Scope::Channel, "/w", None, "", "", None, false).contains("<core-memory>")
+    );
+    assert!(
+        system_prompt(Scope::Channel, "/w", None, "", "", None, false)
+            .contains("per-channel session")
     );
 }
 
@@ -95,6 +101,7 @@ fn names_the_agent_first_when_it_is_known() {
         Scope::Thread,
         "/w",
         Some(("Claude", &agent)),
+        "",
         "",
         None,
         false,
@@ -278,8 +285,10 @@ fn wraps_a_message_that_arrives_mid_turn_and_frames_a_timer() {
 
 #[test]
 fn adds_attention_guidance_only_for_a_session_with_attention_tools() {
-    assert!(system_prompt(Scope::Thread, "/w", None, "", None, true).contains("## Attention"));
-    assert!(!system_prompt(Scope::Thread, "/w", None, "", None, false).contains("## Attention"));
+    assert!(system_prompt(Scope::Thread, "/w", None, "", "", None, true).contains("## Attention"));
+    assert!(
+        !system_prompt(Scope::Thread, "/w", None, "", "", None, false).contains("## Attention")
+    );
 }
 
 #[test]

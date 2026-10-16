@@ -76,6 +76,8 @@ pub struct Run {
     /// The model and effort the owner picked for this turn.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The agent's team sections; empty when it is on no team.
+    pub team: String,
     /// Told when the request this run hands over is answered.
     pub working: crate::agent_plugins::HoldUntil,
     /// A mention's local work row.
@@ -153,6 +155,8 @@ struct Request {
     /// DMs.
     tool_root: Option<String>,
     interest: String,
+    /// The agent's team sections, if it is on a team.
+    team: String,
     /// The model and effort the owner picked for this turn.
     model: Option<String>,
     effort: Option<String>,
@@ -1026,6 +1030,7 @@ impl CodexRuntime {
             spawn,
             model,
             effort,
+            team,
             working,
             activity,
         } = run;
@@ -1089,6 +1094,7 @@ impl CodexRuntime {
                 root: root.clone(),
             },
             interest,
+            team,
         };
         if !valid_workspace(&request.settings.workspace) {
             answered.fail("Choose an absolute workspace path or ~/.buzz in Codex settings first.");
@@ -1784,7 +1790,7 @@ impl CodexRuntime {
                         "additionalContext": {
                             "buzz.instructions": {
                                 "kind": "application",
-                                "value": developer_instructions(&name, &agent, Some(&request.settings)),
+                                "value": developer_instructions(&name, &agent, Some((&request.settings, &request.team))),
                             },
                         },
                     }),

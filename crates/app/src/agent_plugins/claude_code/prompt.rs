@@ -48,6 +48,8 @@ pub fn system_prompt(
     // the session viewer can too.
     agent: Option<(&str, &str)>,
     instructions: &str,
+    // A section for each team the agent is on, from the host.
+    team: &str,
     // The agent's `core` memory: `Some(None)` when it has none yet, `None`
     // when it could not be read.
     memory: Option<Option<&str>>,
@@ -81,6 +83,9 @@ pub fn system_prompt(
     ]);
     if !instructions.trim().is_empty() {
         parts.push(section("agent-instructions", instructions, ""));
+    }
+    if !team.trim().is_empty() {
+        parts.push(team.trim().to_owned());
     }
     match memory {
         Some(None) => parts.push(section(

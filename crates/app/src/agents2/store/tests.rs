@@ -288,3 +288,33 @@ fn the_agents2_records_move_to_the_agents_file() {
     assert_eq!(std::fs::read_to_string(&old).unwrap(), "{\"other\":true}");
     assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"version\":1}");
 }
+
+#[test]
+fn teams_round_trip_and_skip_what_is_not_one() {
+    let storage = MemoryStorage::default();
+    let team = Team {
+        id: "t1".into(),
+        name: "Crew".into(),
+        instructions: "Ship it".into(),
+        members: vec![pubkey()],
+    };
+    write_teams(&storage, std::slice::from_ref(&team)).unwrap();
+    assert_eq!(read_teams(&storage), vec![team]);
+    storage
+        .write(
+            &json!({"version": 1, "teams": [
+                {"id": "a", "name": "A", "instructions": "", "members": ["nope", pubkey()]},
+                {"id": "b", "name": 3, "instructions": "", "members": []},
+                null,
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+    let teams = read_teams(&storage);
+    assert_eq!(teams.len(), 1);
+    assert_eq!(teams[0].members, vec![pubkey()]);
+    storage
+        .write(&json!({"version": 2, "teams": []}).to_string())
+        .unwrap();
+    assert!(read_teams(&storage).is_empty());
+}

@@ -105,6 +105,7 @@ fn turns(pubkey: &str, cx: &mut App) {
                     model: None,
                     effort: None,
                     current: crate::agents2::runtime::always_current(),
+                    team: String::new(),
                     working: std::sync::Arc::new(|_| {}),
                     activity: None,
                 })
