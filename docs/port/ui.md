@@ -859,7 +859,7 @@ desktop.
 | Reminders | `buzz.reminders/reminders` | `IconAlarm`; trailing badge with due count in `text-navigation-unread`, weight 600 (`src/bundled/reminders/Reminders.module.css:59-62`) | yes |
 | Bestie | `buzz.bestie/bestie` | custom Bestie mark | no |
 | Projects | `buzz.projects/projects` | `IconFolder` | yes |
-| Agents | `buzz.agents/agents` | `IconRobotFace` (lifted 1px for optical alignment) | yes |
+| Agents | `buzz.agents/agents` | `RobotIcon` (custom Soft & wide mark, no optical lift) | yes |
 | Workflows | `buzz.workflows/workflows` | `IconBolt` | yes |
 | Agents2 / unknown plugin | any | `IconBrowser`, or the plugin's image | yes |
 | Settings | `settings` | `IconSettings` | n/a |
@@ -1511,7 +1511,7 @@ Sources: `MessageMarkdown.tsx` (react-markdown with remark-gfm and remark-breaks
 **Mentions in messages** (`MessageMarkdown.tsx:502-542`, `ReferenceText.tsx:150-180`)
 
 - Shown as link-coloured text, **not a filled chip**: `--text-link`, radius 4px, padding 2px, hover fill `--affordance-link-hover`.
-- **Icon:** `at` (people, no gap before the name) or `robot-face` (agents, 3px gap), sized 1em.
+- **Icon:** `at` (people, no gap before the name) or `RobotIcon` (agents, 3px gap), sized 1em.
 - **Label:** the resolved display name without "@", since the icon stands in for the sigil.
 - **Self-mention:** there is **no** highlight of the mention or the whole row.
 
@@ -1795,7 +1795,7 @@ Source: `src/bundled/agents/index.tsx`, `src/bundled/agents/AgentsPage.tsx`.
 
 - Page id `agents`, title `Agents`, `layout: "workspace"`, `companion: true`,
   `primary: true` (`index.tsx:16-25`). The shell nav icon is `RobotIcon`
-  (Tabler `robot-face`), registered in `src/app/shell/presentation.ts`.
+  (the custom Soft & wide mark, `icons/Robot.tsx`), registered in `src/app/shell/presentation.ts`.
 - `AgentsPage` picks one of four bodies (`AgentsPage.tsx:300-480`):
 
 | Condition | Body |
@@ -2713,7 +2713,6 @@ Sources: `DS/styles/chips.css`, `DS/ui/InlineChip.tsx`, `shared/InlineReference.
 | Stroke width | Tabler default `2` on a 24x24 viewBox, `stroke-linecap/linejoin: round`, `fill:none`, `stroke: currentColor`. Overrides: `strokeWidth={2.5}` in sidebar section headers (`src/bundled/channels/SidebarSection.tsx`, sizes 15), `src/app/shell/PageNavigation.tsx:40`, and session sections; `1.5` in `src/features/communities/CommunityRail.tsx:199` (globe 22) |
 | Color | `currentColor` |
 | Button override | Inside `.buzz-button-label`, CSS forces SVG children to 24px (md), 16px (sm/compact/xs), or 12px (`data-icon-size="xs"`) (`components.css:44-74,197-200`). Empty-state icons are 32px (`empty-state.css:23-26`) |
-| Optical nudge | `.tabler-icon-robot-face { translate: 0 -1px; }` (`components.css:4-6`) |
 
 Most common call-site sizes, counted over all `Icon … size={n}` occurrences: 16 (127), 14 (79), 18 (34), 20 (27), 17 (16), 15 (12), 24 (8), 32 (7), 22 (5), 12 (4), 48 (3).
 
@@ -2841,7 +2840,7 @@ Two more indirect uses: channel rows get `hash` / `lock` via `src/features/chann
 | `PresentationIcon` | `outline/presentation.svg` | outline | other: bundled/links/InlineLink.tsx |
 | `QuestionIcon` | `outline/help-circle.svg` | outline | settings (AgentSettings.tsx) |
 | `QuotesIcon` | `outline/blockquote.svg` | outline | messages (ComposerFormattingTools.tsx) |
-| `RobotIcon` | `outline/robot-face.svg` | outline | shell (presentation.ts); messages (MessageMarkdown.tsx, ReferenceText.tsx); settings (AgentSettings.tsx, settings-sections.ts); other: features/sessions/AgentChoice.tsx |
+| `RobotIcon` | `custom/robot.svg` (Soft & wide mark, `icons/Robot.tsx`) | outline | shell (presentation.ts); messages (MessageMarkdown.tsx, ReferenceText.tsx); settings (AgentSettings.tsx, settings-sections.ts); other: features/sessions/AgentChoice.tsx |
 | `ShieldIcon` | `outline/shield.svg` | outline | other: bundled/agent-activity/ActivityTranscript.tsx, bundled/moderation/CommunityAdmin.tsx |
 | `SidebarIcon` | `outline/layout-sidebar.svg` | outline | shell (AppShell.tsx, PanelLaunchers.tsx); messages (MediaReviewViewer.tsx) |
 | `SidebarRightIcon` | `outline/layout-sidebar-right.svg` | outline | channels (ChannelsPage.tsx); other: bundled/sessions/SessionsPage.tsx |

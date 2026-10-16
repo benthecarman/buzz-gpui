@@ -1,4 +1,4 @@
-//! Icons: the Tabler glyphs buzz-app's icon gateway exports, buzz-app's two
+//! Icons: the Tabler glyphs buzz-app's icon gateway exports, buzz-app's
 //! custom glyphs, and the harness brand marks on the Agents page.
 
 use gpui_kit::{
@@ -27,6 +27,8 @@ macro_rules! tabler_icons {
             GitHubIssue,
             /// Bestie's raster mark (`BestieIcon`), drawn as an image.
             Bestie,
+            /// buzz-app's agent mark (`RobotIcon`): the Soft & wide robot.
+            Robot,
         }
 
         impl IconName {
@@ -40,6 +42,7 @@ macro_rules! tabler_icons {
                 IconName::OneDriveLogo,
                 IconName::GitHubIssue,
                 IconName::Bestie,
+                IconName::Robot,
             ];
 
             /// The embedded asset path.
@@ -53,6 +56,7 @@ macro_rules! tabler_icons {
                     IconName::OneDriveLogo => "icons/custom/onedrive-logo.svg",
                     IconName::GitHubIssue => "icons/custom/github-issue.svg",
                     IconName::Bestie => "icons/custom/bestie.png",
+                    IconName::Robot => "icons/custom/robot.svg",
                 }
             }
 
@@ -67,6 +71,7 @@ macro_rules! tabler_icons {
                     IconName::OneDriveLogo => "OneDriveLogo",
                     IconName::GitHubIssue => "GitHubIssue",
                     IconName::Bestie => "Bestie",
+                    IconName::Robot => "Robot",
                 }
             }
         }
@@ -183,7 +188,6 @@ tabler_icons! {
     Presentation => "outline/presentation",
     Question => "outline/help-circle",
     Quotes => "outline/blockquote",
-    Robot => "outline/robot-face",
     Shield => "outline/shield",
     Sidebar => "outline/layout-sidebar",
     SidebarRight => "outline/layout-sidebar-right",
@@ -225,7 +229,8 @@ impl IconName {
     /// Whether the glyph is drawn with strokes, so [`Icon::stroke_width`]
     /// applies.
     pub fn is_stroked(self) -> bool {
-        self.path().starts_with("icons/tabler/outline/") || self == IconName::HashArrowIn
+        self.path().starts_with("icons/tabler/outline/")
+            || matches!(self, IconName::HashArrowIn | IconName::Robot)
     }
 }
 
