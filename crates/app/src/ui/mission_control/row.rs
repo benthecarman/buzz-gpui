@@ -103,11 +103,11 @@ impl AgentRow {
             .child(MenuSeparator::new());
         let agent = pubkey.clone();
         menu = menu.child(
-            item("mc-profile", "View profile", IconName::User)
+            item("mc-open-agent", "Open agent", IconName::Robot)
                 .disabled(pubkey.is_empty())
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, _, _, cx| {
                     this.close_menu(cx);
-                    navigation::show_profile(agent.clone(), event.position(), window, cx);
+                    open_agent(&agent, cx);
                 })),
         );
         let weak = cx.entity().downgrade();
@@ -316,6 +316,14 @@ fn picture(entry: &Entry, cx: &App) -> Option<ImageSource> {
     // Fetched through the community the picture belongs to, which signs
     // for its media.
     Some(crate::ui::media::any_avatar(&url))
+}
+
+/// Opens the agent's Build view on the Agents page, through its route.
+fn open_agent(pubkey: &str, cx: &mut App) {
+    let target = crate::ui::agents2::agent_target(pubkey, cx);
+    navigation::with_workspace(cx, move |workspace, window, cx| {
+        workspace.navigate(target, window, cx)
+    });
 }
 
 fn open_channel(origin: String, channel: String, window: &mut Window, cx: &mut App) {
