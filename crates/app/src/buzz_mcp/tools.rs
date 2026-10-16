@@ -950,12 +950,10 @@ impl Tools {
             Some(_) => return Err("type must be stream or forum.".into()),
         };
         // Looked for first, so a wrong name creates nothing.
-        if args.contains_key("template") {
-            required(args, "template")?;
-            return Err(
-                "Channel templates are kept in Buzz Desktop and are unavailable here.".into(),
-            );
-        }
+        let template = match args.contains_key("template") {
+            true => Some(self.template(&required(args, "template")?).await?),
+            false => None,
+        };
         let id = uuid::Uuid::new_v4().to_string();
         let mut tags = vec![
             vec!["h".to_string(), id.clone()],
@@ -977,13 +975,97 @@ impl Tools {
             })
             .await?;
         let shown = until(|| self.metadata(&id), Option::is_some).await;
-        Ok(match shown {
-            Ok(Some(_)) => format!("created {id}"),
-            Ok(None) => format!("The community accepted channel {id} but does not show it yet."),
-            Err(error) => format!(
-                "The community accepted channel {id} but {}.",
-                unread(&error)
-            ),
+        let unapplied = if template.is_some() {
+            "; the template was not applied"
+        } else {
+            ""
+        };
+        match shown {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Ok(format!(
+                    "The community accepted channel {id} but does not show it yet{unapplied}."
+                ));
+            }
+            Err(error) => {
+                return Ok(format!(
+                    "The community accepted channel {id} but {}{unapplied}.",
+                    unread(&error)
+                ));
+            }
+        }
+        let mut lines = vec![format!("created {id}")];
+        let Some(template) = template else {
+            return Ok(lines.join("\n"));
+        };
+        // The template's own agents, as Buzz adds them; each is tried.
+        let me = self.client.pubkey();
+        let agents: Vec<String> = template
+            .agents
+            .into_iter()
+            .filter(|key| *key != me)
+            .collect();
+        if !template.canvas.trim().is_empty() {
+            let started = self
+                .client
+                .publish(Template {
+                    kind: 40100,
+                    content: template.canvas,
+                    tags: vec![
+                        vec!["h".into(), id.clone()],
+                        vec!["expected-revision".into(), "none".into()],
+                    ],
+                })
+                .await;
+            match started {
+                Ok(_) => lines.push("started the Canvas".into()),
+                Err(error) => {
+                    // As in Buzz, agents join only once the template's Canvas
+                    // is started.
+                    let skipped = if agents.is_empty() {
+                        ""
+                    } else {
+                        ", so no agents were added"
+                    };
+                    lines.push(format!("Canvas not started{skipped}: {error}"));
+                    return Ok(lines.join("\n"));
+                }
+            }
+        }
+        if !agents.is_empty() {
+            lines.extend(self.change(&id, &agents, &[], None).await.0);
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// The owner's template named `name`, as one, without guessing.
+    async fn template(&self, name: &str) -> Result<super::ChannelTemplate, String> {
+        let Some(templates) = self.client.templates() else {
+            return Err(
+                "Channel templates are kept in Buzz Desktop and are unavailable here.".into(),
+            );
+        };
+        let templates = templates.await?;
+        let wanted = name.trim().to_lowercase();
+        let mut found: Vec<super::ChannelTemplate> = templates
+            .iter()
+            .filter(|template| template.name.to_lowercase() == wanted)
+            .cloned()
+            .collect();
+        if found.len() > 1 {
+            return Err(format!(
+                "{} templates are named {name}; your owner should rename one.",
+                found.len()
+            ));
+        }
+        found.pop().ok_or_else(|| {
+            let known = if templates.is_empty() {
+                "Your owner has none.".to_string()
+            } else {
+                let names: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
+                format!("Templates: {}.", names.join(", "))
+            };
+            format!("No template named {name}. {known}")
         })
     }
 

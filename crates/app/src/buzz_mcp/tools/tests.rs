@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::buzz_mcp::rpc::respond;
-use crate::buzz_mcp::{ClientResult, Memory};
+use crate::buzz_mcp::{ChannelTemplate, ClientResult, Memory};
 use futures::future::BoxFuture;
 use std::sync::Mutex;
 
@@ -52,6 +52,12 @@ pub(crate) struct Fake {
     pub published: Mutex<Vec<Template>>,
     pub remembered: Mutex<Vec<(String, String, u64)>>,
     pub media: Mutex<Vec<String>>,
+    /// The owner's channel templates, where the host has them.
+    pub templates: Option<Vec<ChannelTemplate>>,
+    /// Shows each channel it was asked to create.
+    pub shows_created: bool,
+    /// An event kind the community refuses.
+    pub refuses: Option<u32>,
 }
 
 fn matches(filter: &Value, item: &BuzzEvent) -> bool {
@@ -90,15 +96,30 @@ impl BuzzClient for Fake {
         me()
     }
     fn query(&self, filters: Vec<Value>) -> BoxFuture<'static, ClientResult<Vec<BuzzEvent>>> {
+        let created: Vec<BuzzEvent> = match self.shows_created {
+            true => self
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|template| template.kind == 9007)
+                .map(|template| metadata(&template.tags[0][1], &[]))
+                .collect(),
+            false => Vec::new(),
+        };
         let found = self
             .events
             .iter()
+            .chain(&created)
             .filter(|item| filters.iter().any(|filter| matches(filter, item)))
             .cloned()
             .collect();
         Box::pin(async move { Ok(found) })
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
+        if self.refuses == Some(template.kind) {
+            return Box::pin(async { Err("refused".to_string()) });
+        }
         self.published.lock().unwrap().push(template.clone());
         let published = event(|event| {
             event.kind = template.kind;
@@ -158,6 +179,10 @@ impl BuzzClient for Fake {
     ) -> BoxFuture<'static, ClientResult<()>> {
         self.remembered.lock().unwrap().push((slug, body, after));
         Box::pin(async { Ok(()) })
+    }
+    fn templates(&self) -> Option<BoxFuture<'static, ClientResult<Vec<ChannelTemplate>>>> {
+        let templates = self.templates.clone()?;
+        Some(Box::pin(async move { Ok(templates) }))
     }
 }
 
@@ -831,6 +856,120 @@ async fn creates_a_channel_and_reports_only_what_the_community_shows() {
         answer,
         format!("The community accepted channel {id} but does not show it yet.")
     );
+}
+
+fn launch(agents: Vec<String>) -> ChannelTemplate {
+    ChannelTemplate {
+        name: "Launch".into(),
+        canvas: "# Plan".into(),
+        agents,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn creates_a_channel_from_its_owners_template_trying_each_agent() {
+    let client = Arc::new(Fake {
+        templates: Some(vec![launch(vec![alice(), me(), bob()])]),
+        shows_created: true,
+        ..Default::default()
+    });
+    let answer = call(
+        &client,
+        &in_thread(),
+        "channel",
+        json!({ "action": "create", "name": "x", "visibility": "open", "template": " launch " }),
+    )
+    .await
+    .unwrap();
+    let published = client.published.lock().unwrap().clone();
+    let kinds: Vec<u32> = published.iter().map(|template| template.kind).collect();
+    assert_eq!(kinds, [9007, 40100, 9000, 9000]);
+    let id = published[0].tags[0][1].clone();
+    assert_eq!(published[1].content, "# Plan");
+    assert_eq!(
+        published[1].tags,
+        tags(&[&["h", &id], &["expected-revision", "none"]])
+    );
+    assert_eq!(
+        answer,
+        format!(
+            "created {id}\nstarted the Canvas\n{}: the community accepted it but does not show it yet\n{}: the community accepted it but does not show it yet",
+            alice(),
+            bob()
+        )
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn adds_no_template_agents_when_it_cannot_start_the_canvas() {
+    let client = Arc::new(Fake {
+        templates: Some(vec![launch(vec![alice()])]),
+        shows_created: true,
+        refuses: Some(40100),
+        ..Default::default()
+    });
+    let answer = call(
+        &client,
+        &in_thread(),
+        "channel",
+        json!({ "action": "create", "name": "x", "visibility": "open", "template": "Launch" }),
+    )
+    .await
+    .unwrap();
+    let published = client.published.lock().unwrap().clone();
+    assert_eq!(published.len(), 1);
+    let id = published[0].tags[0][1].clone();
+    assert_eq!(
+        answer,
+        format!("created {id}\nCanvas not started, so no agents were added: refused")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn creates_nothing_from_a_template_it_cannot_name_exactly() {
+    let named = |name: &str| ChannelTemplate {
+        name: name.into(),
+        ..ChannelTemplate::default()
+    };
+    let client = Arc::new(Fake {
+        templates: Some(vec![named("Team"), named("team")]),
+        ..Default::default()
+    });
+    let create = |template: &'static str| {
+        let client = client.clone();
+        async move {
+            call(
+                &client,
+                &in_thread(),
+                "channel",
+                json!({ "action": "create", "name": "x", "visibility": "open", "template": template }),
+            )
+            .await
+            .unwrap_err()
+        }
+    };
+    assert_eq!(
+        create("TEAM").await,
+        "2 templates are named TEAM; your owner should rename one."
+    );
+    assert_eq!(
+        create("other").await,
+        "No template named other. Templates: Team, team."
+    );
+    assert!(client.published.lock().unwrap().is_empty());
+    let none = Arc::new(Fake {
+        templates: Some(Vec::new()),
+        ..Default::default()
+    });
+    let error = call(
+        &none,
+        &in_thread(),
+        "channel",
+        json!({ "action": "create", "name": "x", "visibility": "open", "template": "Launch" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "No template named Launch. Your owner has none.");
 }
 
 #[tokio::test]

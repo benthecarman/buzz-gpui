@@ -42,6 +42,10 @@ pub trait AgentActions: Send + Sync {
     fn attention(&self) -> Option<Arc<dyn super::attention::Attention>> {
         None
     }
+    /// Its owner's channel templates, where this app keeps them.
+    fn templates(&self) -> Option<BoxFuture<'static, ClientResult<Vec<super::ChannelTemplate>>>> {
+        None
+    }
 }
 
 fn event(value: Value) -> ClientResult<BuzzEvent> {
@@ -60,6 +64,10 @@ impl AgentActions for AgentHandle {
     }
     fn attention(&self) -> Option<Arc<dyn super::attention::Attention>> {
         Some(Arc::new(self.attention.clone()))
+    }
+    fn templates(&self) -> Option<BoxFuture<'static, ClientResult<Vec<super::ChannelTemplate>>>> {
+        let attention = self.attention.clone();
+        Some(Box::pin(async move { attention.templates().await }))
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
         let handle = self.clone();
@@ -244,6 +252,13 @@ impl BuzzClient for AppClient {
             write.await?;
             remembered(&slug);
             Ok(())
+        })
+    }
+    fn templates(&self) -> Option<BoxFuture<'static, ClientResult<Vec<super::ChannelTemplate>>>> {
+        let templates = self.agent.templates()?;
+        Some(match self.checked() {
+            Ok(()) => templates,
+            Err(error) => refused(error),
         })
     }
 }

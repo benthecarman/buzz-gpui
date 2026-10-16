@@ -68,6 +68,16 @@ pub struct Memory {
 /// A failed client call, worded for the agent.
 pub type ClientResult<T> = Result<T, String>;
 
+/// One of the owner's channel templates, as a channel made from it starts
+/// (buzz-app's `ChannelTemplate`): its Canvas and the owner's agents it
+/// adds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChannelTemplate {
+    pub name: String,
+    pub canvas: String,
+    pub agents: Vec<String>,
+}
+
 /// What the Buzz tools need from whoever holds the agent's key.
 pub trait BuzzClient: Send + Sync {
     fn pubkey(&self) -> String;
@@ -92,6 +102,10 @@ pub trait BuzzClient: Send + Sync {
         body: String,
         after: u64,
     ) -> BoxFuture<'static, ClientResult<()>>;
+    /// The owner's channel templates, where the host has them.
+    fn templates(&self) -> Option<BoxFuture<'static, ClientResult<Vec<ChannelTemplate>>>> {
+        None
+    }
 }
 
 /// Where the agent is working, so tools can default to it. `top_level`

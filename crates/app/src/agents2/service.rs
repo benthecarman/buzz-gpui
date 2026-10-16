@@ -2157,6 +2157,44 @@ impl Agents2 {
         working
     }
 
+    /// The owner's channel templates on this device, each with the agents
+    /// it adds that are the owner's agents in `pubkey`'s community, as the
+    /// create dialog offers a template's.
+    pub(crate) fn channel_templates(
+        &self,
+        pubkey: &str,
+        cx: &App,
+    ) -> Vec<crate::buzz_mcp::ChannelTemplate> {
+        let Some(templates) = crate::channel_templates::ChannelTemplates::global(cx) else {
+            return Vec::new();
+        };
+        let relay = self
+            .running
+            .iter()
+            .chain(&self.agents)
+            .find(|agent| agent.pubkey == pubkey)
+            .map(|agent| agent.relay.clone());
+        let here: HashSet<&str> = self
+            .running
+            .iter()
+            .chain(&self.agents)
+            .filter(|agent| Some(&agent.relay) == relay.as_ref())
+            .map(|agent| agent.pubkey.as_str())
+            .collect();
+        templates
+            .read(cx)
+            .templates()
+            .iter()
+            .map(|template| crate::buzz_mcp::ChannelTemplate {
+                name: template.name.clone(),
+                canvas: template.canvas.clone(),
+                agents: crate::channel_templates::template_agents(template, &self.teams, |key| {
+                    here.contains(key)
+                }),
+            })
+            .collect()
+    }
+
     // ----- changes -----
 
     /// Creates a team, or replaces the one with `change.id`. Members must

@@ -285,6 +285,12 @@ impl AgentAttention {
             .await?
     }
 
+    /// The owner's channel templates, each with the agents it adds.
+    pub async fn templates(&self) -> Result<Vec<crate::buzz_mcp::ChannelTemplate>, String> {
+        self.ask(|this, pubkey, cx| this.channel_templates(pubkey, cx))
+            .await
+    }
+
     /// Whether a watch's classifier can run now. Classifiers can be saved
     /// either way; one that cannot run lets every event pass.
     pub fn classifier(&self) -> ClassifierAvailability {
