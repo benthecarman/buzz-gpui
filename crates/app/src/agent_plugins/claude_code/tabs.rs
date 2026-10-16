@@ -7,9 +7,12 @@ use super::runtime::{ClaudeRuntime, Config, SavedConversation};
 use super::sessions::SessionView;
 use super::setup::{ClaudeSetup, ClaudeStatus, SetupState, Step};
 use super::transcript::{TURN_LIMIT, read_transcript};
+use crate::agent_plugins::opened::{self, CONVERSATION_LIMIT, CardSession, Found, Place, places};
+use crate::agent_plugins::process::Spawner;
 use crate::agent_plugins::tabs::{Picking, choice, description_text, field, options, saved_config};
 use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
-use crate::agents2::{AgentView, Agents2};
+use crate::agents2::{AgentConversation, AgentView, Agents2};
+use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
 use crate::ui::agent_activity::panel::date_time;
 use buzz_ui::{
@@ -63,16 +66,26 @@ fn label(conversation: &SavedConversation) -> String {
     )
 }
 
-/// Claude on the agent's host, and this agent's conversations.
+/// Claude on the agent's host, and this agent's conversations: the one
+/// its profile was opened from set apart, then the recent ones.
 pub struct ClaudeTab {
     pubkey: String,
     setup: ClaudeSetup,
     state: SetupState,
     runtime: ClaudeRuntime,
     sessions: Vec<SessionView>,
-    /// The conversation whose transcript is shown, by key.
-    open: Option<(String, Entity<TranscriptView>)>,
+    /// The conversation the agent's profile was opened from.
+    conversation: Option<AgentConversation>,
+    /// Its session as a lookup in the agent's Claude history found it;
+    /// `None` while looking.
+    found: Option<Found<SavedConversation>>,
+    looking: bool,
+    /// The transcript shown over the tab: its key, title and view.
+    open: Option<(String, String, Entity<TranscriptView>)>,
+    focus: FocusHandle,
     code: Entity<InputState>,
+    _lookup: Option<Task<()>>,
+    lookup_signal: Signal,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -80,6 +93,7 @@ pub struct ClaudeTab {
 impl ClaudeTab {
     pub fn new(
         pubkey: String,
+        conversation: Option<AgentConversation>,
         setup: ClaudeSetup,
         runtime: ClaudeRuntime,
         window: &mut Window,
@@ -107,7 +121,7 @@ impl ClaudeTab {
                 if this
                     .update(cx, |this, cx| {
                         this.sessions = this.runtime.sessions(&this.pubkey);
-                        if let Some((key, view)) = &this.open {
+                        if let Some((key, _, view)) = &this.open {
                             let working = this.busy(key).unwrap_or(false);
                             view.update(cx, |view, cx| view.set_working(working, cx));
                         }
@@ -132,8 +146,14 @@ impl ClaudeTab {
             pubkey,
             setup,
             runtime,
+            conversation,
+            found: None,
+            looking: false,
             open: None,
+            focus: cx.focus_handle(),
             code,
+            _lookup: None,
+            lookup_signal: Signal::default(),
             _tasks: vec![follow_setup, follow_sessions],
             _subscriptions: subscriptions,
         }
@@ -148,8 +168,8 @@ impl ClaudeTab {
             .map(|session| session.busy)
     }
 
-    /// Shows the conversation's transcript in place of the tab.
-    fn show(&mut self, conversation: SavedConversation, cx: &mut Context<Self>) {
+    /// The agent's host and workspace, where its sessions are.
+    fn place(&self, cx: &App) -> (Option<Spawner>, String) {
         let agents = Agents2::global(cx);
         let spawn = agents.as_ref().and_then(|agents| {
             let host = agents.read(cx).host_of(&self.pubkey)?;
@@ -161,7 +181,84 @@ impl ClaudeTab {
                 Some(Config::read(&agent.config).workspace)
             })
             .unwrap_or_else(|| Config::default().workspace);
-        let session = conversation.conversation();
+        (spawn, workspace)
+    }
+
+    /// The opened conversation's session: this app's saved one for its
+    /// thread, else one found for the thread or then its channel, saved
+    /// here or started by another copy of the app. `None` while looking.
+    fn here(
+        &mut self,
+        saved: &[SavedConversation],
+        cx: &mut Context<Self>,
+    ) -> Option<Found<SavedConversation>> {
+        let places = places(self.conversation.as_ref()?);
+        let bound = |place: &Place| {
+            saved
+                .iter()
+                .find(|row| row.channel_id == place.channel_id && row.root == place.root)
+                .cloned()
+        };
+        if let Some(exact) = bound(&places[0]) {
+            return Some(Ok(Some(exact)));
+        }
+        if self.found.is_none() && !self.looking {
+            self.look(
+                places
+                    .into_iter()
+                    .map(|place| (bound(&place), place))
+                    .collect(),
+                cx,
+            );
+        }
+        self.found.clone()
+    }
+
+    fn look(&mut self, places: Vec<(Option<SavedConversation>, Place)>, cx: &mut Context<Self>) {
+        self.looking = true;
+        let (spawn, workspace) = self.place(cx);
+        let (runtime, pubkey, signal) = (
+            self.runtime.clone(),
+            self.pubkey.clone(),
+            self.lookup_signal.clone(),
+        );
+        let search = Runtime::handle(cx).spawn(async move {
+            for (bound, place) in places {
+                if bound.is_some() {
+                    return Ok(bound);
+                }
+                let Some(spawn) = &spawn else {
+                    return Err("The agent's host is not connected".to_string());
+                };
+                let found = runtime
+                    .find(spawn, &pubkey, &place, &workspace, &signal)
+                    .await?;
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+            Ok(None)
+        });
+        self._lookup = Some(cx.spawn(async move |this, cx| {
+            let found = search
+                .await
+                .unwrap_or_else(|_| Err("The search stopped".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.found = Some(found);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Shows the conversation's transcript over the tab.
+    fn show(
+        &mut self,
+        conversation: SavedConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (spawn, workspace) = self.place(cx);
+        let session = conversation.conversation(&self.pubkey);
         let reader: Reader = Arc::new(move |working, signal| {
             let (spawn, workspace, session) = (spawn.clone(), workspace.clone(), session.clone());
             Box::pin(async move {
@@ -176,19 +273,11 @@ impl ClaudeTab {
                 }))
             })
         });
-        let weak = cx.entity().downgrade();
-        let back: Back = Rc::new(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.open = None;
-                cx.notify();
-            });
-        });
         let working = self.busy(&conversation.key).unwrap_or(false);
         let pubkey = self.pubkey.clone();
-        let title = label(&conversation).into();
-        let view =
-            cx.new(|cx| TranscriptView::new(pubkey, title, TEXTS, reader, working, back, cx));
-        self.open = Some((conversation.key, view));
+        let view = cx.new(|cx| TranscriptView::new(pubkey, TEXTS, reader, working, cx));
+        self.open = Some((conversation.key.clone(), label(&conversation), view));
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -246,10 +335,30 @@ fn installer_note(c: &Colors) -> Div {
 
 impl Render for ClaudeTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some((_, view)) = &self.open {
-            return div().child(view.clone());
+        if let Some((_, title, view)) = &self.open {
+            let weak = cx.entity().downgrade();
+            let back: Back = Rc::new(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.open = None;
+                    cx.notify();
+                });
+            });
+            return div().child(opened::subview(
+                title.clone(),
+                &self.focus,
+                back,
+                view.clone(),
+            ));
         }
         let c = *cx.colors();
+        // Read on each render: bindings change as turns start, which also
+        // changes the session list this tab follows.
+        let conversations = self.runtime.conversations(&self.pubkey);
+        let here = self.here(&conversations, cx);
+        let here_key = match &here {
+            Some(Ok(Some(session))) => Some(session.key.clone()),
+            _ => None,
+        };
         let state = &self.state;
         let status = state.status.clone();
         let running = state.running;
@@ -334,10 +443,40 @@ impl Render for ClaudeTab {
                         ),
                 )
             });
-        // Read on each render: bindings change as turns start, which also
-        // changes the session list this tab follows.
-        let conversations = self.runtime.conversations(&self.pubkey);
-        let list = if conversations.is_empty() {
+        let card = self.conversation.as_ref().map(|conversation| {
+            let shown = here.clone().map(|found| {
+                found.map(|session| {
+                    session.map(|session| CardSession {
+                        status: self
+                            .busy(&session.key)
+                            .map(|busy| if busy { "Working" } else { "Idle" }.to_string()),
+                        channel_id: session.channel_id,
+                        name: session.name,
+                        root: session.root,
+                        at: Some(session.at),
+                    })
+                })
+            });
+            let (weak, session) = (cx.entity().downgrade(), here.clone());
+            opened::card(
+                "claude-here",
+                conversation,
+                "Claude",
+                shown,
+                move |window, cx| {
+                    if let Some(Ok(Some(session))) = session.clone() {
+                        let _ = weak.update(cx, |this, cx| this.show(session, window, cx));
+                    }
+                },
+                &c,
+            )
+        });
+        let recent: Vec<SavedConversation> = conversations
+            .into_iter()
+            .filter(|row| Some(&row.key) != here_key.as_ref())
+            .take(CONVERSATION_LIMIT)
+            .collect();
+        let list = if recent.is_empty() {
             description_text(
                 "None. A conversation's session starts when the agent is mentioned.",
                 &c,
@@ -347,7 +486,7 @@ impl Render for ClaudeTab {
                 .flex()
                 .flex_col()
                 .gap(space::S2)
-                .children(conversations.into_iter().map(|conversation| {
+                .children(recent.into_iter().map(|conversation| {
                     let activity = self
                         .busy(&conversation.key)
                         .map(|busy| if busy { "Working" } else { "Idle" }.to_string());
@@ -383,7 +522,9 @@ impl Render for ClaudeTab {
                             )
                             .ghost()
                             .on_click(cx.listener(
-                                move |this, _, _, cx| this.show(conversation.clone(), cx),
+                                move |this, _, window, cx| {
+                                    this.show(conversation.clone(), window, cx)
+                                },
                             )),
                         )
                 }))
@@ -395,12 +536,13 @@ impl Render for ClaudeTab {
             .gap(space::S4)
             .text_body()
             .child(setup)
+            .children(card)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(space::S1)
-                    .child(div().font_weight(FontWeight::BOLD).child("Conversations"))
+                    .child(opened::heading("Recent conversations"))
                     .child(list),
             )
     }

@@ -18,13 +18,15 @@ use super::sessions::{
     AgentSessions, DeliverOptions, FileSessions, ONCE_DEADLINE, SessionStore, SessionView,
     SessionsOptions, Spare, Where,
 };
-use super::transcript::Conversation;
+use super::transcript::{Conversation, read_transcript};
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
+use crate::agent_plugins::opened::Place;
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::objects::ShownObject;
 use crate::agents2::runtime::Current;
 use crate::agents2::{Effort, Model, Models};
+use crate::buzz_mcp::app_client::Signal;
 use crate::buzz_mcp::app_client::{self, AgentActions, AppClient};
 use crate::buzz_mcp::rpc::AttentionTools;
 use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template, rpc, tools::hex};
@@ -244,17 +246,16 @@ pub struct SavedConversation {
 }
 
 impl SavedConversation {
-    pub fn conversation(&self) -> Conversation {
+    /// What reads the conversation's sessions, for `agent`.
+    pub fn conversation(&self, agent: &str) -> Conversation {
         Conversation {
-            session_id: self.session_id.clone(),
+            agent: agent.into(),
+            session_id: Some(self.session_id.clone()),
             channel_id: self.channel_id.clone(),
             root: self.root.clone(),
         }
     }
 }
-
-/// Saved sessions listed for the owner.
-const CONVERSATION_LIMIT: usize = 30;
 
 /// Where an agent's saved sessions are kept, by agent pubkey.
 pub type StoreFn = Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>;
@@ -499,7 +500,6 @@ impl ClaudeRuntime {
         (self.inner.store)(pubkey)
             .list()
             .into_iter()
-            .take(CONVERSATION_LIMIT)
             .map(|(key, saved)| {
                 let (channel_id, root) = match key.split_once('/') {
                     Some((channel, root)) => (channel.to_string(), Some(root.to_string())),
@@ -518,6 +518,46 @@ impl ClaudeRuntime {
                 }
             })
             .collect()
+    }
+
+    /// The agent's latest session for a conversation that another copy of
+    /// the app started, found in the Claude history of its workspace on
+    /// the host `spawn` runs on.
+    pub async fn find(
+        &self,
+        spawn: &Spawner,
+        pubkey: &str,
+        place: &Place,
+        workspace: &str,
+        signal: &Signal,
+    ) -> Result<Option<SavedConversation>, String> {
+        let conversation = Conversation {
+            agent: pubkey.into(),
+            session_id: None,
+            channel_id: place.channel_id.clone(),
+            root: place.root.clone(),
+        };
+        let read = read_transcript(spawn, workspace, &conversation, false, signal).await?;
+        let Some(last) = read.and_then(|read| read.transcript.turns.last().cloned()) else {
+            return Ok(None);
+        };
+        let Some(session_id) = last.session_id else {
+            return Ok(None);
+        };
+        let name = self
+            .relay(pubkey)
+            .and_then(|relay| relay.channel(&place.channel_id)?.name);
+        Ok(Some(SavedConversation {
+            key: match &place.root {
+                Some(root) => format!("{}/{root}", place.channel_id),
+                None => place.channel_id.clone(),
+            },
+            session_id,
+            channel_id: place.channel_id.clone(),
+            root: place.root.clone(),
+            name,
+            at: last.ended_at.unwrap_or(last.started_at),
+        }))
     }
 
     /// [`Self::dispose`], resolving once the processes it stops have
@@ -926,6 +966,7 @@ impl ClaudeRuntime {
         };
         let name = |pubkey: &str| names.get(pubkey).cloned();
         let text = turn_prompt(&super::prompt::TurnInput {
+            agent: own,
             event,
             channel: &channel,
             scope,

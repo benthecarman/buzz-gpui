@@ -6,11 +6,12 @@
 use super::config::{Config, DEFAULT_WORKSPACE, Model, effort_name, valid_workspace};
 use super::rpc::{AppServer, list_models};
 use super::runtime::{CodexRuntime, SavedConversation, SessionView};
-use super::transcript::{Place, TURN_LIMIT, read_transcript};
+use super::transcript::{Lookup, SharedNames, TURN_LIMIT, read_transcript};
+use crate::agent_plugins::opened::{self, CONVERSATION_LIMIT, CardSession, Found, Place, places};
 use crate::agent_plugins::process::Spawner;
 use crate::agent_plugins::tabs::{Options, Picking, choice, description_text, field, saved_config};
 use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
-use crate::agents2::{AgentView, Agents2};
+use crate::agents2::{AgentConversation, AgentView, Agents2};
 use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
 use crate::ui::agent_activity::panel::date_time;
@@ -207,21 +208,37 @@ fn label(conversation: &SavedConversation) -> String {
     )
 }
 
-/// Codex on the agent's host, and this agent's conversations.
+/// Codex on the agent's host, and this agent's conversations: the one its
+/// profile was opened from set apart, then the recent ones.
 pub struct CodexTab {
     pubkey: String,
     check: Entity<CatalogCheck>,
     runtime: CodexRuntime,
     sessions: Vec<SessionView>,
     spawn: Option<Spawner>,
-    /// The conversation whose transcript is shown.
-    open: Option<Entity<TranscriptView>>,
+    /// The conversation the agent's profile was opened from.
+    conversation: Option<AgentConversation>,
+    /// Its thread as a lookup in Codex's history found it; `None` while
+    /// looking.
+    found: Option<Found<SavedConversation>>,
+    looking: bool,
+    /// The transcript shown over the tab: its title and view.
+    open: Option<(String, Entity<TranscriptView>)>,
+    focus: FocusHandle,
+    lookup_signal: Signal,
+    _lookup: Option<Task<()>>,
     _task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl CodexTab {
-    pub fn new(pubkey: String, host: Host, runtime: CodexRuntime, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        pubkey: String,
+        conversation: Option<AgentConversation>,
+        host: Host,
+        runtime: CodexRuntime,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let spawn = host.spawn.clone();
         let check = cx.new(|cx| CatalogCheck::new(host, cx));
         let mut changes = runtime.subscribe();
@@ -245,28 +262,127 @@ impl CodexTab {
             check,
             runtime,
             spawn,
+            conversation,
+            found: None,
+            looking: false,
             open: None,
+            focus: cx.focus_handle(),
+            lookup_signal: Signal::default(),
+            _lookup: None,
             _task: follow,
         }
     }
 
-    /// Shows the conversation's transcript in place of the tab.
-    fn show(&mut self, conversation: SavedConversation, cx: &mut Context<Self>) {
-        let spawn = self.spawn.clone();
-        let (thread, place) = (
-            conversation.thread_id.clone(),
-            Place {
-                channel_id: conversation.channel_id.clone(),
-                root: conversation.root.clone(),
-            },
+    /// The agent's name, which its threads are named with.
+    fn agent_name(&self, cx: &App) -> String {
+        Agents2::global(cx)
+            .and_then(|agents| {
+                agents
+                    .read(cx)
+                    .find(&self.pubkey)
+                    .map(|agent| agent.name.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    /// The opened conversation's thread: this app's saved one for its
+    /// thread, else one found for the thread or then its channel, saved
+    /// here or started by another copy of the app. `None` while looking.
+    fn here(
+        &mut self,
+        saved: &[SavedConversation],
+        cx: &mut Context<Self>,
+    ) -> Option<Found<SavedConversation>> {
+        let places = places(self.conversation.as_ref()?);
+        let bound = |place: &Place| {
+            saved
+                .iter()
+                .find(|row| row.channel_id == place.channel_id && row.root == place.root)
+                .cloned()
+        };
+        if let Some(exact) = bound(&places[0]) {
+            return Some(Ok(Some(exact)));
+        }
+        if self.found.is_none() && !self.looking {
+            self.look(
+                places
+                    .into_iter()
+                    .map(|place| (bound(&place), place))
+                    .collect(),
+                cx,
+            );
+        }
+        self.found.clone()
+    }
+
+    fn look(&mut self, places: Vec<(Option<SavedConversation>, Place)>, cx: &mut Context<Self>) {
+        self.looking = true;
+        let (runtime, spawn, pubkey, name, signal) = (
+            self.runtime.clone(),
+            self.spawn.clone(),
+            self.pubkey.clone(),
+            self.agent_name(cx),
+            self.lookup_signal.clone(),
         );
+        let search = Runtime::handle(cx).spawn(async move {
+            for (bound, place) in places {
+                if bound.is_some() {
+                    return Ok(bound);
+                }
+                let Some(spawn) = &spawn else {
+                    return Err("The agent's host is not connected".to_string());
+                };
+                let found = runtime
+                    .find(spawn, (&pubkey, &name), &place, &signal)
+                    .await?;
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+            Ok(None)
+        });
+        self._lookup = Some(cx.spawn(async move |this, cx| {
+            let found = search
+                .await
+                .unwrap_or_else(|_| Err("The search stopped".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.found = Some(found);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Shows the conversation's transcript over the tab.
+    fn show(
+        &mut self,
+        conversation: SavedConversation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let spawn = self.spawn.clone();
+        let lookup = Lookup {
+            agent_pubkey: self.pubkey.clone(),
+            agent_name: self.agent_name(cx),
+            channel_id: conversation.channel_id.clone(),
+            name: conversation.name.clone(),
+            root: conversation.root.clone(),
+            thread_id: Some(conversation.thread_id.clone()),
+        };
+        // Prompts name their senders as the agent's community knows them.
+        let profiles = Agents2::global(cx)
+            .and_then(|agents| agents.read(cx).relay(&self.pubkey))
+            .map(|community| community.read(cx).snapshot.profiles.clone());
+        let names: SharedNames = Arc::new(move |pubkey| {
+            let profile = profiles.as_ref()?.get(pubkey)?;
+            (!profile.name_is_fallback).then(|| profile.name.clone())
+        });
         let reader: Reader = Arc::new(move |_, signal| {
-            let (spawn, thread, place) = (spawn.clone(), thread.clone(), place.clone());
+            let (spawn, lookup, names) = (spawn.clone(), lookup.clone(), names.clone());
             Box::pin(async move {
                 let Some(spawn) = spawn else {
                     return Err("The agent's host is not connected".into());
                 };
-                let read = read_transcript(&spawn, &thread, &place, &signal).await?;
+                let read = read_transcript(&spawn, &lookup, &signal, &*names).await?;
                 Ok(read.map(|read| Loaded {
                     transcript: read.transcript,
                     more: read.more,
@@ -274,16 +390,10 @@ impl CodexTab {
                 }))
             })
         });
-        let weak = cx.entity().downgrade();
-        let back: Back = Rc::new(move |_, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.open = None;
-                cx.notify();
-            });
-        });
-        let (pubkey, title) = (self.pubkey.clone(), label(&conversation).into());
-        self.open =
-            Some(cx.new(|cx| TranscriptView::new(pubkey, title, TEXTS, reader, false, back, cx)));
+        let pubkey = self.pubkey.clone();
+        let view = cx.new(|cx| TranscriptView::new(pubkey, TEXTS, reader, false, cx));
+        self.open = Some((label(&conversation), view));
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 }
@@ -302,13 +412,60 @@ fn detail(key: &str, text: &str) -> Stateful<Div> {
 
 impl Render for CodexTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(view) = &self.open {
-            return div().child(view.clone());
+        if let Some((title, view)) = &self.open {
+            let weak = cx.entity().downgrade();
+            let back: Back = Rc::new(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.open = None;
+                    cx.notify();
+                });
+            });
+            return div().child(opened::subview(
+                title.clone(),
+                &self.focus,
+                back,
+                view.clone(),
+            ));
         }
         let c = *cx.colors();
         // Read on each render: bindings change as turns start, which also
         // changes the session list this tab follows.
         let saved = self.runtime.conversations(&self.pubkey);
+        let here = self.here(&saved, cx);
+        let here_key = match &here {
+            Some(Ok(Some(session))) => Some(session.key.clone()),
+            _ => None,
+        };
+        let card = self.conversation.as_ref().map(|conversation| {
+            let shown = here.clone().map(|found| {
+                found.map(|session| {
+                    session.map(|session| CardSession {
+                        status: self
+                            .sessions
+                            .iter()
+                            .find(|view| view.key == session.key)
+                            .map(|view| view.status.clone()),
+                        channel_id: session.channel_id,
+                        name: session.name,
+                        root: session.root,
+                        at: session.at,
+                    })
+                })
+            });
+            let (weak, session) = (cx.entity().downgrade(), here.clone());
+            opened::card(
+                "codex-here",
+                conversation,
+                "Codex",
+                shown,
+                move |window, cx| {
+                    if let Some(Ok(Some(session))) = session.clone() {
+                        let _ = weak.update(cx, |this, cx| this.show(session, window, cx));
+                    }
+                },
+                &c,
+            )
+        });
         let check = self.check.read(cx);
         let checking = check.checking;
         // Work that failed before Codex started a thread has no binding.
@@ -317,7 +474,12 @@ impl Render for CodexTab {
             .iter()
             .filter(|view| !saved.iter().any(|row| row.key == view.key))
             .collect();
-        let conversations = if saved.is_empty() && unbound.is_empty() {
+        let recent: Vec<SavedConversation> = saved
+            .into_iter()
+            .filter(|row| Some(&row.key) != here_key.as_ref())
+            .take(CONVERSATION_LIMIT)
+            .collect();
+        let conversations = if recent.is_empty() && unbound.is_empty() {
             description_text(
                 "Mention this agent in a channel to start a conversation.",
                 &c,
@@ -340,7 +502,7 @@ impl Render for CodexTab {
                         this.child(detail(&session.key, &session.detail))
                     })
             });
-            let bound = saved.into_iter().map(|row| {
+            let bound = recent.into_iter().map(|row| {
                 let view = self.sessions.iter().find(|view| view.key == row.key);
                 let line: String = std::iter::once(label(&row))
                     .chain(view.map(|view| view.status.clone()))
@@ -357,11 +519,15 @@ impl Render for CodexTab {
                     .when_some(view.filter(|view| !view.detail.is_empty()), |this, view| {
                         this.child(detail(&view.key, &view.detail))
                     })
-                    .child(div().flex().child(
-                        Button::new(id, "View transcript").ghost().on_click(
-                            cx.listener(move |this, _, _, cx| this.show(row.clone(), cx)),
-                        ),
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .child(Button::new(id, "View transcript").ghost().on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.show(row.clone(), window, cx)
+                                }),
+                            )),
+                    )
             });
             div()
                 .flex()
@@ -393,11 +559,8 @@ impl Render for CodexTab {
                 "Uses your existing Codex sign-in. Install Codex and run codex login in a terminal if needed.",
                 &c,
             ))
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .child("Conversations"),
-            )
+            .children(card)
+            .child(opened::heading("Recent conversations"))
             .child(conversations)
             .child(description_text(
                 "Only your messages trigger this agent. New mentions steer active work and continue the same session when idle. Event watches work for your messages; timers are not supported yet.",

@@ -220,12 +220,14 @@ impl AgentType for ClaudeCodeType {
                     let Some(state) = ClaudeCode::global(cx) else {
                         return cx.new(|_| Unavailable).into();
                     };
-                    let pubkey = view.agent.pubkey.clone();
+                    let (pubkey, conversation) = (view.agent.pubkey.clone(), view.conversation);
                     let (setup, runtime) = state.update(cx, |state, cx| {
                         (state.setup_for(&pubkey, cx), state.runtime.clone())
                     });
-                    cx.new(|cx| tabs::ClaudeTab::new(pubkey, setup, runtime, window, cx))
-                        .into()
+                    cx.new(|cx| {
+                        tabs::ClaudeTab::new(pubkey, conversation, setup, runtime, window, cx)
+                    })
+                    .into()
                 }),
             },
             AgentTab {

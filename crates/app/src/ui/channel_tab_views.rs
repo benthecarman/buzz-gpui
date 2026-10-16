@@ -60,13 +60,15 @@ pub trait TabHost: Sized + 'static {
     /// Where a thread opened from another conversation's tab goes: the
     /// side pane, unless this host has a main pane for threads.
     fn thread_pane(&self, cx: &App) -> TabPane;
-    /// Makes a registered panel's view, opened from `channel` to show
-    /// `target` and closed through `close`.
+    /// Makes a registered panel's view, opened from `channel` (and the
+    /// thread `root` there) to show `target` and closed through `close`.
+    #[allow(clippy::too_many_arguments)]
     fn panel_view(
         &self,
         panel: &ChannelPanel,
         channel: String,
         target: String,
+        root: Option<String>,
         close: channel_panels::Close,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -172,6 +174,7 @@ pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Cont
             &panel,
             opening.channel.clone(),
             opening.target.clone(),
+            opening.root.clone(),
             close,
             window,
             cx,

@@ -216,10 +216,10 @@ impl AgentType for CodexType {
                     let Some(state) = Codex::global(cx) else {
                         return cx.new(|_| Unavailable).into();
                     };
-                    let pubkey = view.agent.pubkey.clone();
+                    let (pubkey, conversation) = (view.agent.pubkey.clone(), view.conversation);
                     let host = host_of(&pubkey, cx);
                     let runtime = state.read(cx).runtime.clone();
-                    cx.new(|cx| tabs::CodexTab::new(pubkey, host, runtime, cx))
+                    cx.new(|cx| tabs::CodexTab::new(pubkey, conversation, host, runtime, cx))
                         .into()
                 }),
             },

@@ -51,6 +51,7 @@ fn turn(
     total: usize,
 ) -> String {
     turn_prompt(&TurnInput {
+        agent: &"b".repeat(64),
         event,
         channel,
         scope: Scope::Thread,
@@ -115,6 +116,11 @@ fn frames_a_new_top_level_mention_as_the_root_of_its_thread() {
         dm: false,
     };
     let prompt = turn(&mention, &channel, None, &[], 1);
+    assert!(prompt.contains(&format!(
+        "Thread root: {}\nAgent: {}\n",
+        mention.id,
+        "b".repeat(64)
+    )));
     assert!(prompt.contains("Scope: thread\nSession scope: thread\nChannel: general (#chan)"));
     assert!(prompt.contains(&format!("Thread root: {}", mention.id)));
     assert!(

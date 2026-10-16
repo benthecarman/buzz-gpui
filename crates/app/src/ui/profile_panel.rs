@@ -13,6 +13,7 @@ use super::channel_panels::{self, ChannelPanel, Opening};
 use super::keys::npub;
 use super::media;
 use super::message::channel_icon;
+use crate::agents2::AgentConversation;
 use crate::community::Community;
 use buzz_relay_client::{ChannelType, PresenceState, RosterStatus, StatusWatch};
 use buzz_ui::{
@@ -118,6 +119,8 @@ pub struct ProfilePanel {
     agent_hint: bool,
     /// The conversation the panel was opened from.
     context: Option<String>,
+    /// The thread root of the message the panel was opened from.
+    root: Option<String>,
     close: Option<channel_panels::Close>,
     tab: Section,
     /// Opened for activity and no tab picked since: an Agents agent shows
@@ -143,6 +146,7 @@ impl ProfilePanel {
         let (pubkey, agent_hint) = parse_target(&opening.target).unwrap_or_default();
         let mut panel = Self::new(opening.community, pubkey, agent_hint, window, cx);
         panel.context = Some(opening.channel);
+        panel.root = opening.root;
         panel.close = Some(opening.close);
         if parse_activity_target(&opening.target).is_some() {
             panel.tab = Section::Activity;
@@ -186,6 +190,7 @@ impl ProfilePanel {
             pubkey,
             agent_hint,
             context: None,
+            root: None,
             close: None,
             tab: Section::Info,
             activity_requested: false,
@@ -298,6 +303,7 @@ impl ProfilePanel {
                     ),
                     close,
                     thread: None,
+                    root: self.root.clone(),
                 };
                 let view: AnyView = cx
                     .new(|cx| {
@@ -454,8 +460,13 @@ impl ProfilePanel {
         }
         // An Agents2 agent's sections and Delete, then a known agent's
         // latest activity (`ProfileActivity`).
+        let conversation = self.context.clone().map(|channel_id| AgentConversation {
+            channel_id,
+            root_id: self.root.clone(),
+        });
         items.extend(crate::ui::agents2::profile_sections(
             &self.pubkey,
+            conversation,
             window,
             cx,
         ));

@@ -141,6 +141,7 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
         directory: directory.clone(),
         emoji: row.emoji.clone().into(),
         row: id.clone().into(),
+        origin: navigation::LinkOrigin::of(row),
         spoilers: document.spoilers.clone(),
         max_width: (width.get() < f32::MAX).then(|| px(width.get())),
     };
@@ -1877,6 +1878,8 @@ struct Objects {
     directory: Directory,
     emoji: Arc<[CustomEmoji]>,
     row: SharedString,
+    /// The message a mention in it opens a profile from.
+    origin: navigation::LinkOrigin,
     spoilers: Arc<[SharedString]>,
     /// The body's width, for chips and spoilers that must wrap inside it.
     max_width: Option<Pixels>,
@@ -2128,6 +2131,7 @@ impl Objects {
                 (IconName::At, 0.)
             };
             let tooltip = format!("{}: {name}\n{key}", if agent { "Agent" } else { "Person" });
+            let origin = self.origin.clone();
             return Some(
                 div()
                     .id(SharedString::from(format!("mention-{id}-{key}")))
@@ -2147,7 +2151,14 @@ impl Objects {
                     .child(name)
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
-                        navigation::show_profile(key.clone(), event.position(), window, cx)
+                        let origin = Some(origin.clone());
+                        navigation::show_profile_from(
+                            key.clone(),
+                            event.position(),
+                            origin,
+                            window,
+                            cx,
+                        )
                     })
                     .into_any_element(),
             );

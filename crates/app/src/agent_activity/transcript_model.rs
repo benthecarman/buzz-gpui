@@ -71,6 +71,8 @@ pub enum ItemKind {
     Message {
         text: String,
         message_id: Option<String>,
+        /// Posted to Buzz, rather than said only in the session.
+        posted: bool,
     },
     Thought {
         text: String,
@@ -445,7 +447,11 @@ fn chunk(draft: &mut Draft, thought: bool, text: &str, message: &str, id: &str, 
         kind: if thought {
             ItemKind::Thought { text, message_id }
         } else {
-            ItemKind::Message { text, message_id }
+            ItemKind::Message {
+                text,
+                message_id,
+                posted: false,
+            }
         },
     });
 }

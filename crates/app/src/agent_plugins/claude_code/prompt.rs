@@ -121,6 +121,9 @@ pub struct Thread {
 }
 
 pub struct TurnInput<'a> {
+    /// The agent's pubkey, which finds its sessions among others' in a
+    /// shared workspace.
+    pub agent: &'a str,
     pub event: &'a BuzzEvent,
     pub channel: &'a Channel,
     pub scope: Scope,
@@ -215,6 +218,7 @@ pub fn turn_prompt(input: &TurnInput) -> String {
             format!("Channel: {channel_label}"),
         ]
     };
+    lines.push(format!("Agent: {}", input.agent));
     lines.push(hint);
     lines.push(reply);
     let mut parts = vec![section("context", &lines.join("\n"), "")];

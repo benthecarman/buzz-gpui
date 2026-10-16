@@ -44,6 +44,18 @@ pub struct TypeDefaults {
 #[derive(Clone)]
 pub struct AgentView {
     pub agent: Agent,
+    /// Where the agent was opened from, when it was opened from a
+    /// conversation.
+    pub conversation: Option<AgentConversation>,
+}
+
+/// The conversation of the message a profile was opened from: its
+/// channel, and the message's thread root (the message itself when it is
+/// not a reply). Which session that is stays the type's own rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentConversation {
+    pub channel_id: String,
+    pub root_id: Option<String>,
 }
 
 impl AgentView {

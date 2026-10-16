@@ -102,6 +102,8 @@ pub struct PanelTab {
     pub channel: String,
     /// What it shows: the channel id for tools, else the link.
     pub target: String,
+    /// The thread root of the message whose link opened it, as hex.
+    pub root: Option<String>,
 }
 
 impl PanelTab {
@@ -111,6 +113,7 @@ impl PanelTab {
             panel,
             channel: channel.to_string(),
             target: channel.to_string(),
+            root: None,
         }
     }
 
@@ -329,12 +332,21 @@ impl TabState {
         self.after_close(id, &ids, shown.as_deref());
     }
 
-    pub fn open_panel(&mut self, panel: PanelTab) {
+    /// Opens a panel tab, or selects the one showing the same target. A
+    /// link from another conversation retargets that tab to it: true
+    /// when it did.
+    pub fn open_panel(&mut self, panel: PanelTab) -> bool {
         let id = panel.id();
-        if !self.panels.contains(&panel) {
-            self.panels.push(panel);
+        let mut retargeted = false;
+        match self.panels.iter_mut().find(|open| open.id() == id) {
+            Some(open) => {
+                retargeted = *open != panel;
+                *open = panel;
+            }
+            None => self.panels.push(panel),
         }
         self.select(&id);
+        retargeted
     }
 
     /// A timeline action replaces the details links opened, never the
@@ -785,6 +797,7 @@ mod tests {
             panel: "buzz.github/github",
             channel: "alpha".into(),
             target: "https://github.com/block/buzz".into(),
+            root: None,
         });
         state.pane_open = false;
         state.retire_details();

@@ -4,7 +4,7 @@
 //! the agent (buzz-app's `tabs.tsx` and `AgentTabs.tsx`).
 
 use super::AttentionPanel;
-use crate::agents2::{AgentView, Agents2, type_of};
+use crate::agents2::{AgentConversation, AgentView, Agents2, type_of};
 use buzz_ui::{Tab, TabVariant, Tabs};
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -18,6 +18,9 @@ pub struct AgentTabs {
     attention: Entity<AttentionPanel>,
     /// Type tab views, built when first shown.
     views: HashMap<SharedString, AnyView>,
+    /// The conversation the agent was opened from, which type tabs set
+    /// apart.
+    conversation: Option<AgentConversation>,
     _observe: Option<Subscription>,
 }
 
@@ -31,7 +34,22 @@ impl AgentTabs {
             selected: None,
             attention,
             views: HashMap::new(),
+            conversation: None,
             _observe: observe,
+        }
+    }
+
+    /// Opened from another conversation, the type tabs start over with it,
+    /// closing a transcript they showed.
+    pub fn set_conversation(
+        &mut self,
+        conversation: Option<AgentConversation>,
+        cx: &mut Context<Self>,
+    ) {
+        if conversation != self.conversation {
+            self.conversation = conversation;
+            self.views.clear();
+            cx.notify();
         }
     }
 }
@@ -98,6 +116,7 @@ impl Render for AgentTabs {
                             let view = (tab.build)(
                                 AgentView {
                                     agent: agent.clone(),
+                                    conversation: self.conversation.clone(),
                                 },
                                 window,
                                 cx,

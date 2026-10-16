@@ -57,6 +57,14 @@ const DECLARED: &[Declared] = &[
     ("claude-code", "read", "base64", &["-i"]),
     // Prints the agent's workspace, which names its Claude project folder.
     ("claude-code", "workspace", "pwd", &[]),
+    // Lists the session files that mention a conversation. A fixed search,
+    // where `find` would also allow `-exec` or `-delete`.
+    (
+        "claude-code",
+        "find",
+        "grep",
+        &["-rlF", "--include=*.jsonl", "-e"],
+    ),
     // Prints the default workspace once the host has expanded and made it.
     ("codex", "workspace", "pwd", &[]),
     ("codex", "app-server", "codex", &["app-server"]),

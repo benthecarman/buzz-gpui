@@ -97,8 +97,36 @@ pub fn turn_input(
 }
 
 /// The Codex thread's name, so a session started in Buzz is easy to find:
-/// `Buzz #<channel> · thread <root prefix> · <agent>`.
-pub fn session_name(agent: &str, conversation: &Conversation) -> String {
+/// its [`session_title`], then its [`session_tag`].
+pub fn session_name(agent: &str, pubkey: &str, conversation: &Conversation) -> String {
+    format!(
+        "{} · {}",
+        session_title(agent, conversation),
+        session_tag(
+            pubkey,
+            &conversation.channel_id,
+            conversation.root.as_deref()
+        )
+    )
+}
+
+/// Names the agent's conversation in its thread names, so its threads can
+/// be found from any copy of the app, each of which saves its own
+/// bindings: `buzz:` and a 64-bit FNV-1a hash of the agent and the
+/// conversation.
+pub fn session_tag(pubkey: &str, channel_id: &str, root: Option<&str>) -> String {
+    let key =
+        serde_json::to_string(&[pubkey, channel_id, root.unwrap_or("channel")]).unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("buzz:{hash:016x}")
+}
+
+/// The readable part of a conversation's thread name, which earlier
+/// versions used alone: `Buzz #<channel> · thread <root prefix> · <agent>`.
+pub fn session_title(agent: &str, conversation: &Conversation) -> String {
     // Each run of whitespace becomes one space, as `/\s+/g` does.
     let mut channel = String::new();
     for char in conversation.name.chars() {
@@ -174,8 +202,13 @@ mod tests {
             root: Some("abcdef0123456789".into()),
         };
         assert_eq!(
-            session_name("Codex Test", &conversation),
+            session_title("Codex Test", &conversation),
             "Buzz # team chat  · thread abcdef01 · Codex Test"
+        );
+        let tag = session_tag("b", "chan", Some("abcdef0123456789"));
+        assert_eq!(
+            session_name("Codex Test", "b", &conversation),
+            format!("Buzz # team chat  · thread abcdef01 · Codex Test · {tag}")
         );
         let channel = Conversation {
             root: None,
@@ -183,9 +216,19 @@ mod tests {
             ..conversation
         };
         assert_eq!(
-            session_name("C", &channel),
+            session_title("C", &channel),
             format!("Buzz #{} · C", "x".repeat(100))
         );
+        // Stable across copies of the app, and apart per agent and place.
+        assert_eq!(tag, session_tag("b", "chan", Some("abcdef0123456789")));
+        assert!(tag.starts_with("buzz:") && tag.len() == 21);
+        assert_ne!(tag, session_tag("c", "chan", Some("abcdef0123456789")));
+        assert_ne!(
+            session_tag("b", "chan", None),
+            session_tag("b", "chan", Some("channel2"))
+        );
+        // FNV-1a over the JSON key, as buzz-app hashes it.
+        assert_eq!(tag, "buzz:118714305d2147cb");
         let base = developer_instructions("Codex", "b", None);
         assert!(base.starts_with("You are Codex (pubkey b), a coding agent in Buzz."));
         assert!(!base.contains("<agent-instructions>"));

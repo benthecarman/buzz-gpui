@@ -12,7 +12,7 @@ use super::account::Account;
 use super::channel::{ChannelClosed, ChannelPage, Reveal};
 use super::channel_states::{self, Failed, Reason};
 use super::channel_tabs::{Routed, TabState};
-use super::navigation::{Beside, ChannelRoute, History, Place, Request, Target};
+use super::navigation::{Beside, ChannelRoute, History, LinkOrigin, Place, Request, Target};
 use super::onboarding::{Onboarding, Step};
 use super::pages::{self, Page};
 use super::settings::{
@@ -1340,13 +1340,14 @@ impl Workspace {
         &mut self,
         pubkey: String,
         _: Point<Pixels>,
+        origin: Option<LinkOrigin>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(target) = super::profile_panel::target(&pubkey, false) else {
             return;
         };
-        if !self.route_link_to_tab(&target, window, cx) {
+        if !self.route_link_from(&target, origin, window, cx) {
             self.open_profile(pubkey, window, cx);
         }
     }

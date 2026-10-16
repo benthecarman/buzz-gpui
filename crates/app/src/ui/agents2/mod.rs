@@ -13,7 +13,7 @@ pub use page::Agents2Page;
 pub use tabs::AgentTabs;
 
 use super::pages::{self, Page, PageSpec};
-use crate::agents2::Agents2;
+use crate::agents2::{AgentConversation, Agents2};
 use buzz_ui::{ActiveTheme, Button, ButtonSize, Colors, IconName, TypeStyled, tokens::radius};
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -99,8 +99,14 @@ impl Global for ProfileSections {}
 
 /// What the profile panel adds for an Agents2 agent
 /// (`ProfilePanel.tsx`): its type's tabs and Attention, then "Delete
-/// agent". `None` for anyone else.
-pub fn profile_sections(pubkey: &str, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+/// agent". `conversation` is the one the panel was opened from. `None`
+/// for anyone else.
+pub fn profile_sections(
+    pubkey: &str,
+    conversation: Option<AgentConversation>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
     let service = Agents2::global(cx)?;
     service.read(cx).find(pubkey)?;
     let existing = cx
@@ -126,6 +132,8 @@ pub fn profile_sections(pubkey: &str, window: &mut Window, cx: &mut App) -> Opti
     cx.default_global::<ProfileSections>()
         .0
         .retain(|key, _| live.contains(key));
+    let tabs = view.read(cx).tabs.clone();
+    tabs.update(cx, |tabs, cx| tabs.set_conversation(conversation, cx));
     Some(view.into_any_element())
 }
 

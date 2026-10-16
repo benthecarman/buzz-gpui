@@ -1,7 +1,8 @@
 //! One conversation's session transcript in an agent type's tab
 //! (buzz-app's `TranscriptView` in the Claude and Codex tabs): read on
 //! open and on Refresh, shown with the Agent Activity transcript. A
-//! refresh keeps the last result in place until the new one arrives.
+//! refresh keeps the last result in place until the new one arrives. The
+//! tab shows it over itself, with the way back.
 
 use crate::agent_activity::transcript_model::Transcript;
 use crate::agent_activity::turns::TurnState;
@@ -69,10 +70,8 @@ enum Read {
 
 pub struct TranscriptView {
     pubkey: String,
-    label: SharedString,
     texts: Texts,
     reader: Reader,
-    on_back: Back,
     read: Option<Read>,
     loading: bool,
     /// The session is working: given by the tab, or found by the read.
@@ -85,19 +84,15 @@ pub struct TranscriptView {
 impl TranscriptView {
     pub fn new(
         pubkey: String,
-        label: SharedString,
         texts: Texts,
         reader: Reader,
         working: bool,
-        on_back: Back,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
             pubkey,
-            label,
             texts,
             reader,
-            on_back,
             read: None,
             loading: true,
             working,
@@ -169,7 +164,6 @@ impl Render for TranscriptView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let harness = self.texts.harness;
-        let back = self.on_back.clone();
         let ready = match &self.read {
             Some(Read::Ready(transcript, more)) => Some((transcript.clone(), *more)),
             _ => None,
@@ -229,22 +223,13 @@ impl Render for TranscriptView {
             .min_w_0()
             .text_body()
             .child(
-                div()
-                    .flex()
-                    .gap(space::S2)
-                    .child(
-                        Button::new("transcript-back", "Back")
-                            .ghost()
-                            .on_click(move |_, window, cx| back(window, cx)),
-                    )
-                    .child(
-                        Button::new("transcript-refresh", "Refresh")
-                            .ghost()
-                            .loading(self.loading)
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
+                div().flex().child(
+                    Button::new("transcript-refresh", "Refresh")
+                        .ghost()
+                        .loading(self.loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                ),
             )
-            .child(div().text_body().child(self.label.clone()))
             .child(content)
     }
 }

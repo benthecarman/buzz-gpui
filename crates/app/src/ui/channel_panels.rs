@@ -26,6 +26,8 @@ pub struct Opening {
     pub close: Close,
     /// The root of the thread showing beside the conversation, as hex.
     pub thread: Option<String>,
+    /// The thread root of the message the opening link was in, as hex.
+    pub root: Option<String>,
 }
 
 /// Where a header launcher shows its panel (`channelPlacement`).

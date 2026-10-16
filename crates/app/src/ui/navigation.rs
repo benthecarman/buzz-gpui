@@ -369,9 +369,38 @@ pub fn try_open_url(url: &str, window: &mut Window, cx: &mut App) -> bool {
 /// A mention clicked inside the window: shows the person's card at the
 /// pointer.
 pub fn show_profile(pubkey: String, at: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    show_profile_from(pubkey, at, None, window, cx)
+}
+
+/// The message a link was opened from: its conversation, and its thread
+/// root, which is the message itself when it is not a reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkOrigin {
+    pub channel: String,
+    pub root: String,
+}
+
+impl LinkOrigin {
+    pub fn of(row: &buzz_relay_client::fold::MessageRow) -> Self {
+        Self {
+            channel: row.channel.to_string(),
+            root: row.thread_root_id.unwrap_or(row.id).to_hex(),
+        }
+    }
+}
+
+/// [`show_profile`] from a message, which the profile's agent tabs
+/// treat as the conversation it was opened from.
+pub fn show_profile_from(
+    pubkey: String,
+    at: Point<Pixels>,
+    origin: Option<LinkOrigin>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if let Some(workspace) = workspace(cx) {
         workspace.update(cx, |workspace, cx| {
-            workspace.show_profile(pubkey, at, window, cx)
+            workspace.show_profile(pubkey, at, origin, window, cx)
         });
     }
 }

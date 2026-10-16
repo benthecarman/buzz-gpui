@@ -3,10 +3,12 @@
 //! (buzz-app's `transcript.ts`). Codex owns the history; nothing here is
 //! saved.
 
+use super::prompt::{Conversation, session_tag, session_title};
 use super::rpc::AppServer;
 use crate::agent_activity::transcript_model::{
     Item, ItemKind, ToolItem, Transcript, TranscriptTurn, prompt_sections,
 };
+pub use crate::agent_plugins::opened::Place;
 use crate::agent_plugins::process::Spawner;
 use crate::buzz_mcp::app_client::Signal;
 use serde_json::{Map, Value, json};
@@ -23,11 +25,71 @@ pub struct CodexRead {
     pub working: bool,
 }
 
-/// The conversation a thread is for.
+/// A display name for a pubkey, if known.
+pub type Names<'a> = &'a (dyn Fn(&str) -> Option<String> + Send + Sync);
+/// [`Names`] that a reader keeps.
+pub type SharedNames = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// A conversation to read: its saved thread, if this app has one, and
+/// what finds the threads other copies of the app started for it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Place {
+pub struct Lookup {
+    pub agent_pubkey: String,
+    pub agent_name: String,
     pub channel_id: String,
+    /// The channel's name, as the agent named threads with it.
+    pub name: Option<String>,
     pub root: Option<String>,
+    pub thread_id: Option<String>,
+}
+
+impl Lookup {
+    fn place(&self) -> Place {
+        Place {
+            channel_id: self.channel_id.clone(),
+            root: self.root.clone(),
+        }
+    }
+}
+
+/// Codex runs each command through the login shell, as
+/// `/bin/zsh -lc '…'`; the command the model wrote is the quoted part.
+pub fn shell_command(command: &str) -> String {
+    let quoted = command.split_once(" -lc ").and_then(|(shell, rest)| {
+        let login = shell.ends_with("sh") && !shell.contains(char::is_whitespace);
+        (login && rest.len() >= 2).then_some(rest)
+    });
+    let Some(rest) = quoted else {
+        return command.to_string();
+    };
+    let inner = &rest[1..rest.len() - 1];
+    if rest.starts_with('\'') && rest.ends_with('\'') {
+        return inner.replace(r#"'"'"'"#, "'").replace(r"'\''", "'");
+    }
+    if rest.starts_with('"') && rest.ends_with('"') {
+        let mut out = String::new();
+        let mut chars = inner.chars().peekable();
+        while let Some(c) = chars.next() {
+            match (c, chars.peek()) {
+                ('\\', Some(&next)) if matches!(next, '\\' | '"' | '$' | '`') => {
+                    out.push(next);
+                    chars.next();
+                }
+                _ => out.push(c),
+            }
+        }
+        return out;
+    }
+    command.to_string()
+}
+
+/// Who sent a Buzz turn input: its event, the first line of a section.
+fn sender(sections: &[crate::agent_activity::transcript_model::Section]) -> Option<String> {
+    sections.iter().find_map(|section| {
+        let first = section.body.split('\n').next().unwrap_or("");
+        let event: Value = serde_json::from_str(first).ok()?;
+        event.get("pubkey")?.as_str().map(str::to_string)
+    })
 }
 
 fn str_of(value: Option<&Value>) -> &str {
@@ -77,7 +139,7 @@ fn user_text(value: &Map<String, Value>) -> String {
         .join("\n")
 }
 
-fn item(value: &Map<String, Value>, at: u64, steer: bool) -> Option<Item> {
+fn item(value: &Map<String, Value>, at: u64, steer: bool, name: Names) -> Option<Item> {
     let id = str_of(value.get("id")).to_string();
     let tool = |patch: ToolItem| ToolItem {
         tool_call_id: id.clone(),
@@ -108,16 +170,20 @@ fn item(value: &Map<String, Value>, at: u64, steer: bool) -> Option<Item> {
     let kind = match str_of(value.get("type")) {
         "userMessage" => {
             let raw = user_text(value);
+            let sections = prompt_sections(&raw);
             ItemKind::Prompt {
                 text: request(&raw),
-                author: None,
-                sections: prompt_sections(&raw),
+                author: sender(&sections).and_then(|pubkey| name(&pubkey)),
+                sections,
                 steer,
             }
         }
+        // A turn's final answer is often empty: the reply went through send.
+        "agentMessage" if str_of(value.get("text")).trim().is_empty() => return None,
         "agentMessage" => ItemKind::Message {
             text: str_of(value.get("text")).into(),
             message_id: None,
+            posted: false,
         },
         "reasoning" => {
             let text = array(value.get("summary"))
@@ -135,7 +201,7 @@ fn item(value: &Map<String, Value>, at: u64, steer: bool) -> Option<Item> {
         }
         "plan" => ItemKind::Status(str_of(value.get("text")).into()),
         "commandExecution" => ItemKind::Tool(tool(ToolItem {
-            title: str_of(value.get("command")).into(),
+            title: shell_command(str_of(value.get("command"))),
             kind: "execute".into(),
             output: str_of(value.get("aggregatedOutput")).into(),
             ..blank
@@ -172,6 +238,29 @@ fn item(value: &Map<String, Value>, at: u64, steer: bool) -> Option<Item> {
             ),
             ..blank
         })),
+        "dynamicToolCall"
+            if str_of(value.get("namespace")) == "buzz"
+                && str_of(value.get("tool")) == "send"
+                && value.get("success") == Some(&Value::Bool(true))
+                && !str_of(
+                    value
+                        .get("arguments")
+                        .and_then(|arguments| arguments.get("text")),
+                )
+                .trim()
+                .is_empty() =>
+        {
+            ItemKind::Message {
+                text: str_of(
+                    value
+                        .get("arguments")
+                        .and_then(|arguments| arguments.get("text")),
+                )
+                .into(),
+                message_id: None,
+                posted: true,
+            }
+        }
         "dynamicToolCall" => ItemKind::Tool(tool(ToolItem {
             title: [value.get("namespace"), value.get("tool")]
                 .into_iter()
@@ -204,7 +293,7 @@ fn item(value: &Map<String, Value>, at: u64, steer: bool) -> Option<Item> {
 }
 
 /// Codex turns, oldest first, as transcript turns for one conversation.
-pub fn codex_turns(turns: &[Value], place: &Place) -> Vec<TranscriptTurn> {
+pub fn codex_turns(turns: &[Value], place: &Place, name: Names) -> Vec<TranscriptTurn> {
     turns
         .iter()
         .map(|turn| {
@@ -222,7 +311,7 @@ pub fn codex_turns(turns: &[Value], place: &Place) -> Vec<TranscriptTurn> {
                     if prompt {
                         prompts += 1;
                     }
-                    item(value, started_at, steer)
+                    item(value, started_at, steer, name)
                 })
                 .collect();
             TranscriptTurn {
@@ -260,15 +349,137 @@ fn missing(error: &str) -> bool {
         .any(|text| error.contains(text))
 }
 
-/// The thread's latest turns from a short-lived app-server, or `None`
-/// when Codex has no history for it on the agent's host. Must run inside
-/// tokio.
-pub async fn read_transcript(
-    spawn: &Spawner,
+/// A thread the conversation's name finds. `legacy` threads were named
+/// without the tag, so their name alone does not tell same-named channels
+/// apart.
+struct Found {
+    id: String,
+    updated_at: f64,
+    legacy: bool,
+}
+
+/// Whether `turns` were for the conversation, as their prompts' context
+/// says.
+fn started_for(turns: &[Value], lookup: &Lookup) -> bool {
+    turns.iter().any(|turn| {
+        array(turn.get("items")).iter().any(|value| {
+            let Some(value) = value.as_object() else {
+                return false;
+            };
+            if str_of(value.get("type")) != "userMessage" {
+                return false;
+            }
+            let body = prompt_sections(&user_text(value))
+                .into_iter()
+                .find(|section| section.tag == "context")
+                .map(|section| section.body)
+                .unwrap_or_default();
+            let Ok(Value::Object(context)) = serde_json::from_str::<Value>(&body) else {
+                return false;
+            };
+            context.get("channel_id").and_then(Value::as_str) == Some(lookup.channel_id.as_str())
+                && context.get("session_thread").and_then(Value::as_str) == lookup.root.as_deref()
+        })
+    })
+}
+
+/// The conversation's threads, newest first: named with its tag, or with
+/// the readable name alone that earlier versions used.
+async fn find_threads(rpc: &AppServer, lookup: &Lookup) -> Result<Vec<Found>, String> {
+    let conversation = Conversation {
+        channel_id: lookup.channel_id.clone(),
+        name: lookup
+            .name
+            .clone()
+            .unwrap_or_else(|| lookup.channel_id.clone()),
+        root: lookup.root.clone(),
+    };
+    let tag = session_tag(
+        &lookup.agent_pubkey,
+        &lookup.channel_id,
+        lookup.root.as_deref(),
+    );
+    let title = session_title(&lookup.agent_name, &conversation);
+    let tagged = format!(" · {tag}");
+    let mut found: Vec<Found> = Vec::new();
+    for (term, legacy) in [(&tag, false), (&title, true)] {
+        let page = rpc
+            .request("thread/list", json!({ "searchTerm": term, "limit": 50 }))
+            .await?;
+        for thread in array(page.get("data")) {
+            let id = str_of(thread.get("id"));
+            let name = str_of(thread.get("name"));
+            let named = if legacy {
+                name == title
+            } else {
+                name.ends_with(&tagged)
+            };
+            if !name.is_empty() && named && !found.iter().any(|other| other.id == id) {
+                found.push(Found {
+                    id: id.into(),
+                    updated_at: thread
+                        .get("updatedAt")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.),
+                    legacy,
+                });
+            }
+        }
+    }
+    found.sort_by(|a, b| b.updated_at.total_cmp(&a.updated_at));
+    Ok(found)
+}
+
+/// A thread's latest `limit` turns, newest first, and whether it has
+/// earlier ones, or `None` when Codex no longer has it. One turn per
+/// request: app-server's output frame bounds one full turn, not a page of
+/// them.
+async fn page(
+    rpc: &AppServer,
     thread_id: &str,
-    place: &Place,
+    limit: usize,
+) -> Result<Option<(Vec<Value>, bool)>, String> {
+    let mut data = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut params = json!({
+            "threadId": thread_id,
+            "limit": 1,
+            "sortDirection": "desc",
+            "itemsView": "full",
+        });
+        if let Some(cursor) = &cursor {
+            params["cursor"] = json!(cursor);
+        }
+        let next = match rpc.request("thread/turns/list", params).await {
+            Ok(next) => next,
+            Err(error) if missing(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let turns = array(next.get("data"));
+        data.extend(turns.iter().cloned());
+        cursor = (!turns.is_empty())
+            .then(|| {
+                next.get("nextCursor")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .flatten();
+        if cursor.is_none() || data.len() >= limit {
+            break;
+        }
+    }
+    data.truncate(limit);
+    Ok(Some((data, cursor.is_some())))
+}
+
+/// Runs `using` with a short-lived app-server of its own, closed when done
+/// or when `signal` aborts. Must run inside tokio.
+async fn with_server<T>(
+    spawn: &Spawner,
     signal: &Signal,
-) -> Result<Option<CodexRead>, String> {
+    using: impl AsyncFnOnce(&AppServer) -> Result<T, String>,
+) -> Result<T, String> {
     let rpc = AppServer::new(None);
     let closer = {
         let (rpc, signal) = (rpc.clone(), signal.clone());
@@ -281,43 +492,96 @@ pub async fn read_transcript(
         signal.check()?;
         rpc.open(spawn, None).await?;
         signal.check()?;
-        let page = match rpc
-            .request(
-                "thread/turns/list",
-                json!({
-                    "threadId": thread_id,
-                    "limit": TURN_LIMIT,
-                    "sortDirection": "desc",
-                    "itemsView": "full",
-                }),
-            )
-            .await
-        {
-            Ok(page) => page,
-            Err(error) if missing(&error) => return Ok(None),
-            Err(error) => return Err(error),
-        };
+        let result = using(&rpc).await?;
         signal.check()?;
-        let mut turns = array(page.get("data")).to_vec();
-        turns.reverse();
-        let working = turns
-            .last()
-            .is_some_and(|turn| str_of(turn.get("status")) == "inProgress");
-        Ok(Some(CodexRead {
-            transcript: Transcript {
-                turns: codex_turns(&turns, place),
-                unknown_thread: 0,
-            },
-            more: page
-                .get("nextCursor")
-                .is_some_and(|cursor| !cursor.is_null()),
-            working,
-        }))
+        Ok(result)
     }
     .await;
     closer.abort();
     rpc.close().await;
     result
+}
+
+/// The conversation's newest thread and when it was last used, in
+/// milliseconds, or `None` when Codex has no thread for it on the agent's
+/// host.
+pub async fn find_conversation(
+    spawn: &Spawner,
+    lookup: &Lookup,
+    signal: &Signal,
+) -> Result<Option<(String, u64)>, String> {
+    with_server(spawn, signal, async |rpc| {
+        for thread in find_threads(rpc, lookup).await? {
+            let ours = !thread.legacy || {
+                let turns = page(rpc, &thread.id, 1).await?.unwrap_or_default().0;
+                started_for(&turns, lookup)
+            };
+            if ours {
+                return Ok(Some((thread.id, (thread.updated_at * 1000.) as u64)));
+            }
+        }
+        Ok(None)
+    })
+    .await
+}
+
+/// The latest turns of all the conversation's threads, oldest first, from
+/// a short-lived app-server, or `None` when Codex has no history for it on
+/// the agent's host. Must run inside tokio.
+pub async fn read_transcript(
+    spawn: &Spawner,
+    lookup: &Lookup,
+    signal: &Signal,
+    name: Names<'_>,
+) -> Result<Option<CodexRead>, String> {
+    with_server(spawn, signal, async |rpc| {
+        // The saved thread is the conversation's; one found by name may
+        // need its context checked.
+        let mut threads: Vec<(String, bool)> = lookup
+            .thread_id
+            .iter()
+            .map(|id| (id.clone(), false))
+            .collect();
+        for thread in find_threads(rpc, lookup).await? {
+            if !threads.iter().any(|(id, _)| *id == thread.id) {
+                threads.push((thread.id, thread.legacy));
+            }
+        }
+        let mut all: Vec<Value> = Vec::new();
+        let (mut found, mut more, mut working) = (false, false, false);
+        for (thread, legacy) in threads {
+            let Some((turns, earlier)) = page(rpc, &thread, TURN_LIMIT).await? else {
+                continue;
+            };
+            if legacy && !started_for(&turns, lookup) {
+                continue;
+            }
+            found = true;
+            more |= earlier;
+            if lookup.thread_id.as_ref() == Some(&thread) {
+                working = turns
+                    .first()
+                    .is_some_and(|turn| str_of(turn.get("status")) == "inProgress");
+            }
+            all.extend(turns.into_iter().rev());
+        }
+        if !found {
+            return Ok(None);
+        }
+        let started = |turn: &Value| turn.get("startedAt").and_then(Value::as_f64).unwrap_or(0.);
+        all.sort_by(|a, b| started(a).total_cmp(&started(b)));
+        more |= all.len() > TURN_LIMIT;
+        let latest = &all[all.len().saturating_sub(TURN_LIMIT)..];
+        Ok(Some(CodexRead {
+            transcript: Transcript {
+                turns: codex_turns(latest, &lookup.place(), name),
+                unknown_thread: 0,
+            },
+            more,
+            working,
+        }))
+    })
+    .await
 }
 
 #[cfg(test)]

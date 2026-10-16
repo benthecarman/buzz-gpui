@@ -11,10 +11,20 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 const ROOT: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const AGENT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn session() -> Session {
+    Session {
+        session_id: "session-1".into(),
+        channel_id: "channel".into(),
+        root: Some(ROOT.into()),
+    }
+}
 
 fn conversation() -> Conversation {
     Conversation {
-        session_id: "session-1".into(),
+        agent: AGENT.into(),
+        session_id: Some("session-1".into()),
         channel_id: "channel".into(),
         root: Some(ROOT.into()),
     }
@@ -146,7 +156,7 @@ fn prompt_of(item: &Item) -> (&str, Option<&str>, bool) {
 
 #[test]
 fn groups_a_session_file_into_prompted_turns_with_steering_tools_and_replies() {
-    let turns = claude_turns(&file(), &conversation(), false);
+    let turns = claude_turns(&file(), &session(), false);
     assert_eq!(
         turns.iter().map(kinds).collect::<Vec<_>>(),
         [
@@ -190,8 +200,66 @@ fn groups_a_session_file_into_prompted_turns_with_steering_tools_and_replies() {
     assert_eq!(second.turn_id, "u9");
     assert_eq!((second.started_at, second.ended_at), (9000, Some(10_000)));
     // A working session's last turn has not ended.
-    let working = claude_turns(&file(), &conversation(), true);
+    let working = claude_turns(&file(), &session(), true);
     assert_eq!(working.last().unwrap().ended_at, None);
+}
+
+#[test]
+fn shows_what_the_agent_posted_as_its_reply_once_sent_and_names_buzz_tools_as_codex_does() {
+    let mut l = Lines::new(0);
+    let send = |l: &mut Lines, id: &str, text: &str| {
+        l.line(
+            "assistant",
+            json!([{ "type": "tool_use", "id": id, "name": "mcp__buzz__send", "input": { "text": text } }]),
+            json!({}),
+        )
+    };
+    let result = |l: &mut Lines, id: &str, content: &str, is_error: bool| {
+        l.line(
+            "user",
+            json!([{ "type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error }]),
+            json!({}),
+        )
+    };
+    let lines = [
+        l.line("user", json!(prompt_text("review it")), json!({})),
+        l.line(
+            "assistant",
+            json!([{ "type": "tool_use", "id": "r", "name": "mcp__buzz__read", "input": { "thread": ROOT } }]),
+            json!({}),
+        ),
+        result(&mut l, "r", "3 messages", false),
+        send(&mut l, "s1", "Looks good."),
+        result(&mut l, "s1", "sent", false),
+        send(&mut l, "s2", "One more thing."),
+        result(&mut l, "s2", "channel not found", true),
+        // Not finished when the session was read, or never: it ended
+        // mid-send.
+        send(&mut l, "s3", "Still sending."),
+    ];
+    let turns = claude_turns(&lines.join("\n"), &session(), false);
+    let items: Vec<String> = turns[0]
+        .items
+        .iter()
+        .map(|item| match &item.kind {
+            ItemKind::Prompt { text, .. } => format!("prompt {text}"),
+            ItemKind::Tool(tool) => format!("tool {}", tool.title),
+            ItemKind::Message { text, posted, .. } => format!("message {text} {posted}"),
+            ItemKind::Status(text) => format!("status {text}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            "prompt review it",
+            "tool buzz.read",
+            "message Looks good. true",
+            "message One more thing. false",
+            "status The message above was not posted: channel not found",
+            "message Still sending. false",
+        ]
+    );
 }
 
 #[test]
@@ -203,7 +271,7 @@ fn keeps_steps_before_the_first_loaded_prompt_as_a_partial_turn() {
     );
     let turns = claude_turns(
         &line,
-        &Conversation {
+        &Session {
             session_id: "s".into(),
             channel_id: "dm".into(),
             root: None,
@@ -221,7 +289,8 @@ fn names_projects_as_claude_does() {
 }
 
 /// `workspace` prints the resolved folder; `read` serves `files` as
-/// base64.
+/// base64, and `find` lists those in the project folder that contain its
+/// pattern.
 #[derive(Clone, Default)]
 struct Host {
     files: Arc<Mutex<HashMap<String, String>>>,
@@ -279,6 +348,25 @@ impl Spawn for Host {
             "workspace" => {
                 let _ = output.send(ProcessOutput::Stdout("/Users/me/.buzz\n".into()));
                 0
+            }
+            "find" => {
+                let project = options.cwd.as_deref().unwrap_or("").rsplit('/').next();
+                let prefix = format!("./{}/", project.unwrap_or(""));
+                let mut matches: Vec<String> = self
+                    .files
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(file, content)| file.starts_with(&prefix) && content.contains(&path))
+                    .map(|(file, _)| format!("./{}\n", file.rsplit('/').next().unwrap()))
+                    .collect();
+                matches.sort();
+                if matches.is_empty() {
+                    1
+                } else {
+                    let _ = output.send(ProcessOutput::Stdout(matches.concat()));
+                    0
+                }
             }
             "read" => match self.files.lock().unwrap().get(&path) {
                 Some(content) => {
@@ -339,6 +427,115 @@ async fn treats_a_missing_session_file_as_no_transcript_not_a_failure() {
     )
     .await;
     assert_eq!(read, Ok(None));
+}
+
+#[tokio::test]
+async fn merges_the_agents_other_sessions_for_the_thread_oldest_turn_first() {
+    let session = |start: u64, context: &str, content: &str| {
+        let mut l = Lines::new(start);
+        [
+            l.line(
+                "user",
+                json!(
+                    prompt_text(content)
+                        .replace("Scope: thread", &format!("Scope: thread\n{context}"))
+                ),
+                json!({}),
+            ),
+            l.line(
+                "assistant",
+                json!([{ "type": "text", "text": format!("re: {content}") }]),
+                json!({}),
+            ),
+        ]
+        .join("\n")
+    };
+    let thread = format!("Session scope: thread\nChannel: dev (#channel)\nThread root: {ROOT}");
+    let host = Host::with(&[
+        (
+            "./-Users-me--buzz/session-1.jsonl",
+            session(20, &thread, "latest"),
+        ),
+        (
+            "./-Users-me--buzz/earlier.jsonl",
+            session(10, &format!("{thread}\nAgent: {AGENT}"), "first"),
+        ),
+        // Started before agents were named.
+        (
+            "./-Users-me--buzz/unnamed.jsonl",
+            session(15, &thread, "second"),
+        ),
+        (
+            "./-Users-me--buzz/other-agent.jsonl",
+            session(
+                12,
+                &format!("{thread}\nAgent: {}", "b".repeat(64)),
+                "not ours",
+            ),
+        ),
+        (
+            "./-Users-me--buzz/channel.jsonl",
+            session(
+                13,
+                &format!("Session scope: channel\nChannel: dev (#channel)\nThread root: {ROOT}"),
+                "shared",
+            ),
+        ),
+    ]);
+    let read = read_transcript(
+        &host.spawner(),
+        "~/.buzz",
+        &conversation(),
+        false,
+        &Signal::default(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let turns: Vec<_> = read
+        .transcript
+        .turns
+        .iter()
+        .map(|turn| {
+            let (text, _, _) = prompt_of(&turn.items[0]);
+            (turn.session_id.clone().unwrap(), text.to_string())
+        })
+        .collect();
+    assert_eq!(
+        turns,
+        [
+            ("earlier".to_string(), "first".to_string()),
+            ("unnamed".into(), "second".into()),
+            ("session-1".into(), "latest".into()),
+        ]
+    );
+    let find = &host.spawned("find")[0];
+    assert_eq!(find.args, [ROOT, "."]);
+    assert_eq!(
+        find.cwd.as_deref(),
+        Some("~/.claude/projects/-Users-me--buzz")
+    );
+    // Without a saved session, the found ones are the conversation's.
+    let found = read_transcript(
+        &host.spawner(),
+        "~/.buzz",
+        &Conversation {
+            session_id: None,
+            ..conversation()
+        },
+        false,
+        &Signal::default(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let sessions: Vec<_> = found
+        .transcript
+        .turns
+        .iter()
+        .map(|turn| turn.session_id.clone().unwrap())
+        .collect();
+    assert_eq!(sessions, ["earlier", "unnamed", "session-1"]);
 }
 
 /// The path the reader gets is one `base64 -i` reads as a file, not an

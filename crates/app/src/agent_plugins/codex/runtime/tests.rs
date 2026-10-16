@@ -596,7 +596,13 @@ async fn hands_over_promptly_and_runs_conversations_on_one_server() {
             .contains("TEST_INSTRUCTIONS")
     );
     let named = &f.fake.calls("thread/name/set")[0]["params"];
-    assert_eq!(named["name"], "Buzz #test · thread cccccccc · Codex");
+    assert_eq!(
+        named["name"],
+        format!(
+            "Buzz #test · thread cccccccc · Codex · {}",
+            super::super::prompt::session_tag(&agent_key(), CHANNEL, Some(&root()))
+        )
+    );
     let input = start["input"][0]["text"].as_str().unwrap();
     assert!(input.contains(&format!("\"session_thread\":\"{}\"", root())));
     let first = &f.published()[0];

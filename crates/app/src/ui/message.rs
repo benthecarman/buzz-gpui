@@ -568,7 +568,7 @@ fn full(
         if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
             avatar = avatar.image(media::avatar(picture, &rows.directory.media));
         }
-        let target = author.clone();
+        let (target, origin) = (author.clone(), navigation::LinkOrigin::of(row));
         div()
             .flex_none()
             .w(px(gutter))
@@ -583,7 +583,8 @@ fn full(
                     .child(avatar)
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
-                        navigation::show_profile(target.clone(), event.position(), window, cx)
+                        let (target, origin) = (target.clone(), Some(origin.clone()));
+                        navigation::show_profile_from(target, event.position(), origin, window, cx)
                     }),
             )
             .into_any_element()
@@ -961,7 +962,7 @@ fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App)
             let owner_hex = owner.to_hex();
             let fallback: String = owner_hex.chars().take(10).collect::<String>() + "…";
             let owner_name = rows.names().name(&owner_hex, &fallback);
-            let target = owner_hex.clone();
+            let (target, origin) = (owner_hex.clone(), navigation::LinkOrigin::of(row));
             line = line
                 .child(
                     div()
@@ -985,9 +986,10 @@ fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App)
                                 .hover(|s| s.underline())
                                 .child(owner_name.clone())
                                 .on_click(move |event, window, cx| {
-                                    navigation::show_profile(
+                                    navigation::show_profile_from(
                                         target.clone(),
                                         event.position(),
+                                        Some(origin.clone()),
                                         window,
                                         cx,
                                     )

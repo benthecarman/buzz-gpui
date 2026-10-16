@@ -103,12 +103,13 @@ impl TabHost for SessionWork {
         panel: &ChannelPanel,
         channel: String,
         target: String,
+        root: Option<String>,
         close: channel_panels::Close,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyView> {
         Some(SessionWork::panel_view(
-            self, panel, channel, target, close, window, cx,
+            self, panel, channel, target, root, close, window, cx,
         ))
     }
 }
@@ -348,11 +349,13 @@ impl SessionWork {
 
     /// Makes a registered panel's view, opened from `channel` to show
     /// `target` and closed through `close`.
+    #[allow(clippy::too_many_arguments)]
     fn panel_view(
         &self,
         panel: &ChannelPanel,
         channel: String,
         target: String,
+        root: Option<String>,
         close: channel_panels::Close,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -364,6 +367,7 @@ impl SessionWork {
                 target,
                 close,
                 thread: self.tabs(cx).thread.map(|thread| thread.root.to_hex()),
+                root,
             },
             window,
             cx,
@@ -407,7 +411,7 @@ impl SessionWork {
             });
         });
         let channel = self.channel.id.clone();
-        let view = self.panel_view(&panel, channel.clone(), channel, close, window, cx);
+        let view = self.panel_view(&panel, channel.clone(), channel, None, close, window, cx);
         self.update_tabs(cx, |state| state.pane_open = true);
         self.drawer = Some(Drawer {
             key,

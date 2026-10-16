@@ -12,6 +12,7 @@ use super::config::{Config, DEFAULT_WORKSPACE, absolute_workspace, effort_name, 
 use super::history::conversation_history;
 use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
 use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
+use super::transcript::{Lookup, Place, find_conversation};
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agent_plugins::owner_relay::{OwnerRelay, Scoped};
 use crate::agent_plugins::process::{SpawnOptions, Spawner, collect};
@@ -224,9 +225,6 @@ pub struct SavedConversation {
     pub thread_id: String,
     pub at: Option<u64>,
 }
-
-/// Bindings listed for the owner.
-const CONVERSATION_LIMIT: usize = 30;
 
 /// The turn a conversation is running.
 struct Active {
@@ -931,8 +929,40 @@ impl CodexRuntime {
             })
             .collect();
         conversations.sort_by_key(|row| std::cmp::Reverse(row.at.unwrap_or(0)));
-        conversations.truncate(CONVERSATION_LIMIT);
         conversations
+    }
+
+    /// The agent's latest thread for a conversation that another copy of
+    /// the app started, found by the name the agent gave it, on the host
+    /// `spawn` runs on. Must run inside tokio.
+    pub async fn find(
+        &self,
+        spawn: &Spawner,
+        agent: (&str, &str),
+        place: &Place,
+        signal: &Signal,
+    ) -> Result<Option<SavedConversation>, String> {
+        let (pubkey, agent_name) = agent;
+        let name = self
+            .relay(pubkey)
+            .and_then(|(_, relay)| relay.channel(&place.channel_id)?.name);
+        let lookup = Lookup {
+            agent_pubkey: pubkey.into(),
+            agent_name: agent_name.into(),
+            channel_id: place.channel_id.clone(),
+            name: name.clone(),
+            root: place.root.clone(),
+            thread_id: None,
+        };
+        let found = find_conversation(spawn, &lookup, signal).await?;
+        Ok(found.map(|(thread_id, at)| SavedConversation {
+            key: json!([place.channel_id, place.root.as_deref().unwrap_or("channel")]).to_string(),
+            channel_id: place.channel_id.clone(),
+            name,
+            root: place.root.clone(),
+            thread_id,
+            at: Some(at),
+        }))
     }
 
     fn entry(&self, request: &Request, spawn: &Spawner) -> Arc<Entry> {
@@ -1728,7 +1758,7 @@ impl CodexRuntime {
                 "thread/name/set",
                 json!({
                     "threadId": thread_id,
-                    "name": session_name(&name, &request.conversation),
+                    "name": session_name(&name, &agent, &request.conversation),
                 }),
             )
             .await?;

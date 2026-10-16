@@ -423,7 +423,7 @@ fn item_view<T: TranscriptHost>(
             div().text_color(c.text_subtle).child(text.clone()),
         )
         .into_any_element(),
-        ItemKind::Message { text, .. } => {
+        ItemKind::Message { text, posted, .. } => {
             let body = reply_view(this, text, &key, cx);
             row(
                 IconName::ChatCircle,
@@ -434,8 +434,22 @@ fn item_view<T: TranscriptHost>(
                     .min_w_0()
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(agent_name.to_string()),
+                            .flex()
+                            .items_baseline()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(agent_name.to_string()),
+                            )
+                            .when(*posted, |this| {
+                                this.child(
+                                    div()
+                                        .text_body_sm()
+                                        .text_color(c.text_subtle)
+                                        .ml(rems(0.25))
+                                        .child("· Posted"),
+                                )
+                            }),
                     )
                     .child(body),
             )

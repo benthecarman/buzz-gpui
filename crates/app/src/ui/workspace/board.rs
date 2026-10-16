@@ -17,6 +17,7 @@ use crate::ui::channel_tab_views::{
     self, TabHost, TabView, root_content, tab_icon, thread_channel, thread_label, usable,
 };
 use crate::ui::channel_tabs::{self, PanelTab, Routed, TabKind, TabPane, TabState};
+use crate::ui::navigation::LinkOrigin;
 use crate::ui::pages::Page;
 use crate::ui::panels::{self, Close, Dock, TabItem};
 use crate::ui::tab_drag::{self, PaneOrder, Rules, TabDrag, TabGeometry};
@@ -78,11 +79,12 @@ impl TabHost for Workspace {
         panel: &ChannelPanel,
         channel: String,
         target: String,
+        root: Option<String>,
         close: channel_panels::Close,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyView> {
-        Workspace::panel_view(self, panel, channel, target, close, window, cx)
+        Workspace::panel_view(self, panel, channel, target, root, close, window, cx)
     }
 }
 
@@ -190,7 +192,7 @@ impl Workspace {
                 }
             });
         });
-        let Some(view) = self.panel_view(&panel, channel.clone(), channel, close, window, cx)
+        let Some(view) = self.panel_view(&panel, channel.clone(), channel, None, close, window, cx)
         else {
             return;
         };
@@ -599,11 +601,13 @@ impl Workspace {
 
     /// Makes a registered panel's view for `opening`, closed through
     /// `close`.
+    #[allow(clippy::too_many_arguments)]
     fn panel_view(
         &self,
         panel: &ChannelPanel,
         channel: String,
         target: String,
+        root: Option<String>,
         close: channel_panels::Close,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -617,6 +621,7 @@ impl Workspace {
                 target,
                 close,
                 thread,
+                root,
             },
             window,
             cx,
@@ -1206,6 +1211,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.route_link_from(url, None, window, cx)
+    }
+
+    /// [`Self::route_link_to_tab`] for a link in a message: the panel
+    /// opens with the message's conversation and thread, and one already
+    /// open from elsewhere is retargeted to them.
+    pub(super) fn route_link_from(
+        &mut self,
+        url: &str,
+        origin: Option<LinkOrigin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.page != Page::MESSAGES {
             return false;
         }
@@ -1213,13 +1231,25 @@ impl Workspace {
             return false;
         };
         if let Some(panel) = channel_panels::resolve(url, cx) {
+            let (channel, root) = match origin {
+                Some(origin) => (origin.channel, Some(origin.root)),
+                None => (current, None),
+            };
             let tab = PanelTab {
                 panel: panel.key,
-                channel: current,
+                channel,
                 target: url.to_string(),
+                root,
             };
             let id = tab.id();
-            self.update_tabs(cx, |state| state.open_panel(tab));
+            // A retargeted panel is made again with its new opening.
+            if self
+                .update_tabs(cx, |state| state.open_panel(tab))
+                .unwrap_or(false)
+            {
+                self.tab_views.remove(&id);
+                self.ensure_tab_views(window, cx);
+            }
             self.focus_tab(&id, window, cx);
             return true;
         }
