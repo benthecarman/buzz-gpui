@@ -773,7 +773,13 @@ impl NewAgent {
         self.error = None;
         let host = self.host.clone();
         let task = service.update(cx, |service, cx| {
-            service.create(&chosen.key, &name, host, cx)
+            service.create(
+                &chosen.key,
+                &name,
+                crate::agents2::Made::default(),
+                host,
+                cx,
+            )
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;

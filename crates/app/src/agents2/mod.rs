@@ -66,6 +66,17 @@ pub struct Agent {
     pub config: Value,
 }
 
+/// What a new agent is made with besides its type and name.
+#[derive(Clone, Debug, Default)]
+pub struct Made {
+    /// Replaces the type's starting config.
+    pub config: Option<Value>,
+    /// An uploaded or pack picture's URL.
+    pub picture: Option<String>,
+    /// What it carries from where it came from, for its type to adopt.
+    pub carry: Option<buzz_host::api::Carry>,
+}
+
 /// A change to an agent. `attention` maps slugs to new values; `None`
 /// deletes the object.
 #[derive(Clone, Debug, Default)]

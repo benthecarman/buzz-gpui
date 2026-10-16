@@ -27,7 +27,7 @@ use super::store::{
 };
 use super::teams::{self, Team, TeamChange};
 use super::working::{self, Working};
-use super::{Agent, AgentChange};
+use super::{Agent, AgentChange, Made};
 use crate::agent_activity::local::{self, Begin, LocalActivity, WorkHandle, WorkOutcome};
 use crate::community::{AppState, Community, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
@@ -2093,11 +2093,14 @@ impl Agents2 {
     }
 
     /// Makes an agent of `type_key` named `name` for the selected
-    /// community, with its key on `host` (the embedded host by default).
+    /// community, with its key on `host` (the embedded host by default),
+    /// and the picture and config it was made with. A picture that fails
+    /// to save does not fail the create.
     pub fn create(
         &mut self,
         type_key: &str,
         name: &str,
+        made: Made,
         host: Option<Entity<HostConnection>>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Agent, String>> {
@@ -2108,6 +2111,7 @@ impl Agents2 {
         self.add(
             type_key,
             host,
+            made,
             cx,
             |request_id, destination, owner, agent_type| AppAgentRequest::CreatePrepare {
                 request_id,
@@ -2117,6 +2121,28 @@ impl Agents2 {
                 name,
             },
         )
+    }
+
+    /// Makes a new agent from one shared in the community: a new identity
+    /// that carries what was shared, as a brought-over one does.
+    pub fn port_shared(
+        &mut self,
+        type_key: &str,
+        name: &str,
+        picture: Option<String>,
+        instructions: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Agent, String>> {
+        let carry = (!instructions.trim().is_empty()).then(|| buzz_host::api::Carry {
+            instructions: Some(instructions.to_owned()),
+            workspace: None,
+        });
+        let made = Made {
+            picture,
+            carry,
+            ..Made::default()
+        };
+        self.create(type_key, name, made, None, cx)
     }
 
     /// Identities earlier agent systems saved on the connected hosts that
@@ -2175,6 +2201,7 @@ impl Agents2 {
         self.add(
             type_key,
             Some(portable.host.clone()),
+            Made::default(),
             cx,
             move |request_id, destination, owner, agent_type| AppAgentRequest::PortPrepare {
                 request_id,
@@ -2194,6 +2221,7 @@ impl Agents2 {
         &mut self,
         type_key: &str,
         host: Option<Entity<HostConnection>>,
+        made: Made,
         cx: &mut Context<Self>,
         prepare: impl FnOnce(String, String, String, String) -> AppAgentRequest + 'static,
     ) -> Task<Result<Agent, String>> {
@@ -2213,10 +2241,13 @@ impl Agents2 {
         let Some(host) = host else {
             return Task::ready(Err("Agents run only in the desktop app".into()));
         };
-        let settings = match defaults("", &kind) {
+        let mut settings = match defaults("", &kind) {
             Ok(settings) => settings,
             Err(error) => return Task::ready(Err(error)),
         };
+        if let Some(config) = made.config {
+            settings.config = config;
+        }
         let link = link(&host, cx);
         let identity = binding.identity.clone();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -2229,7 +2260,13 @@ impl Agents2 {
         cx.spawn(async move |this, cx| {
             // A brought-over agent's type adopts what it kept.
             let (pubkey, settings) = match link.app_agent(request).await? {
-                AppAgentResponse::Prepared { pubkey } => (pubkey, settings),
+                AppAgentResponse::Prepared { pubkey } => match &made.carry {
+                    Some(carry) if kind.kind.adopts() => {
+                        let config = kind.kind.adopt(carry, settings.config.clone());
+                        (pubkey, AgentRecord { config, ..settings })
+                    }
+                    _ => (pubkey, settings),
+                },
                 AppAgentResponse::PortPrepared { pubkey, carry } if kind.kind.adopts() => {
                     let config = kind.kind.adopt(&carry, settings.config.clone());
                     (pubkey, AgentRecord { config, ..settings })
@@ -2246,6 +2283,18 @@ impl Agents2 {
             else {
                 return Err("The host answered with something else".into());
             };
+            // Before the refresh, which publishes its profile with the
+            // picture. The agent exists either way; its picture can be set
+            // again later.
+            if let Some(picture) = made.picture.filter(|picture| !picture.is_empty()) {
+                let pubkey = summary.pubkey.clone();
+                if let Err(error) = link
+                    .app_agent(AppAgentRequest::SetPicture { pubkey, picture })
+                    .await
+                {
+                    tracing::warn!(agent = %summary.name, %error, "agent picture was not saved");
+                }
+            }
             let refresh = this.update(cx, |this, cx| {
                 let record = AgentRecord {
                     pubkey: summary.pubkey.clone(),

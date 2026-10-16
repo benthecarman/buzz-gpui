@@ -11,6 +11,7 @@ use std::borrow::Cow;
 #[include = "icons/custom/*.png"]
 #[include = "icons/brand/*.svg"]
 #[include = "icons/brand/*.png"]
+#[include = "avatar-packs/*.png"]
 struct Embedded;
 
 /// Pass to `Application::with_assets`.

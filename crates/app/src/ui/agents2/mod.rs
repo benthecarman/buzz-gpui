@@ -3,7 +3,9 @@
 
 mod attention;
 mod bring_over;
+pub(crate) mod card;
 mod manage;
+mod packs;
 mod page;
 mod tabs;
 
