@@ -61,6 +61,7 @@ pub struct ClaudeModel {
     pub value: String,
     pub resolved_model: Option<String>,
     pub display_name: Option<String>,
+    pub description: Option<String>,
     pub supports_effort: Option<bool>,
     pub supported_effort_levels: Option<Vec<String>>,
 }

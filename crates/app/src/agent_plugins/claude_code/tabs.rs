@@ -3,9 +3,10 @@
 //! each with its session's transcript; and Settings, what the agent runs
 //! with, under the app's provider select.
 
+use super::provider::SetupControls;
 use super::runtime::{ClaudeRuntime, Config, SavedConversation};
 use super::sessions::SessionView;
-use super::setup::{ClaudeSetup, ClaudeStatus, SetupState, Step};
+use super::setup::ClaudeSetup;
 use super::transcript::{TURN_LIMIT, read_transcript};
 use crate::agent_plugins::opened::{self, CONVERSATION_LIMIT, CardSession, Found, Place, places};
 use crate::agent_plugins::process::Spawner;
@@ -19,60 +20,16 @@ use crate::agents2::{AgentConversation, AgentView, Agents2};
 use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
 use crate::ui::agent_activity::panel::date_time;
-use buzz_ui::{
-    ActiveTheme, Button, Colors, Surface, TextField, TypeStyled,
-    tokens::{font, space},
-};
+use buzz_ui::{ActiveTheme, Button, Surface, TextField, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
 use std::sync::Arc;
-
-const MODELS: [(&str, &str); 4] = [
-    ("", "Claude default"),
-    ("opus", "Opus"),
-    ("sonnet", "Sonnet"),
-    ("haiku", "Haiku"),
-];
-/// Claude's models for the New agent dialog's model menu.
-pub fn create_models() -> crate::agents2::CreateModels {
-    crate::agents2::CreateModels {
-        models: MODELS[1..]
-            .iter()
-            .map(|(id, label)| crate::agents2::ModelChoice {
-                id: (*id).into(),
-                label: (*label).into(),
-                description: None,
-            })
-            .collect(),
-        default_label: MODELS[0].1.into(),
-        default_description: Some("Following the provider's model default".into()),
-        allow_custom: true,
-        loading: false,
-    }
-}
 
 const SCOPES: [(&str, &str); 2] = [
     ("thread", "One session per thread"),
     ("channel", "One session per channel"),
 ];
-
-/// The line that says where Claude stands.
-pub fn status_line(state: &SetupState) -> String {
-    match (&state.status, state.checking) {
-        (None, _) | (_, true) => "Checking Claude…".into(),
-        (Some(ClaudeStatus::Missing), _) => "Claude is not installed.".into(),
-        (Some(ClaudeStatus::SignedOut { version }), _) => {
-            format!("Claude {version} needs you to sign in.")
-        }
-        (Some(ClaudeStatus::Ready { version, account }), _) => match account {
-            Some(account) => format!("Claude {version} is ready ({account})."),
-            None => format!("Claude {version} is ready."),
-        },
-        (Some(ClaudeStatus::Error { message }), _) => message.clone(),
-    }
-}
 
 const TEXTS: Texts = Texts {
     harness: "Claude",
@@ -92,8 +49,6 @@ fn label(conversation: &SavedConversation) -> String {
 /// its profile was opened from set apart, then the recent ones.
 pub struct ClaudeTab {
     pubkey: String,
-    setup: ClaudeSetup,
-    state: SetupState,
     runtime: ClaudeRuntime,
     sessions: Vec<SessionView>,
     /// The conversation the agent's profile was opened from.
@@ -105,11 +60,10 @@ pub struct ClaudeTab {
     /// The transcript shown over the tab: its key, title and view.
     open: Option<(String, String, Entity<TranscriptView>)>,
     focus: FocusHandle,
-    code: Entity<InputState>,
     _lookup: Option<Task<()>>,
     lookup_signal: Signal,
-    _tasks: Vec<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    setup: Entity<SetupControls>,
+    _task: Task<()>,
 }
 
 impl ClaudeTab {
@@ -121,22 +75,6 @@ impl ClaudeTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let code = cx.new(|cx| InputState::new(window, cx));
-        let mut setup_changes = setup.subscribe();
-        let follow_setup = cx.spawn(async move |this, cx| {
-            while setup_changes.changed().await.is_ok() {
-                let state = setup_changes.borrow_and_update().clone();
-                if this
-                    .update(cx, |this, cx| {
-                        this.state = state;
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
         let mut runtime_changes = runtime.subscribe();
         let follow_sessions = cx.spawn(async move |this, cx| {
             while runtime_changes.changed().await.is_ok() {
@@ -155,29 +93,21 @@ impl ClaudeTab {
                 }
             }
         });
-        let subscriptions = vec![cx.subscribe(&code, |_, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        })];
         let check = setup.clone();
         Runtime::handle(cx).spawn(async move { check.check().await });
         Self {
             sessions: runtime.sessions(&pubkey),
-            state: setup.snapshot(),
+            setup: cx.new(|cx| SetupControls::new(setup, true, window, cx)),
             pubkey,
-            setup,
             runtime,
             conversation,
             found: None,
             looking: false,
             open: None,
             focus: cx.focus_handle(),
-            code,
             _lookup: None,
             lookup_signal: Signal::default(),
-            _tasks: vec![follow_setup, follow_sessions],
-            _subscriptions: subscriptions,
+            _task: follow_sessions,
         }
     }
 
@@ -302,61 +232,10 @@ impl ClaudeTab {
         window.focus(&self.focus, cx);
         cx.notify();
     }
-
-    fn run(&self, step: Step, cx: &mut Context<Self>) {
-        let setup = self.setup.clone();
-        Runtime::handle(cx).spawn(async move { setup.run(step).await });
-    }
-
-    fn send_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let code = self.code.read(cx).value().to_string();
-        if code.trim().is_empty() {
-            return;
-        }
-        let setup = self.setup.clone();
-        Runtime::handle(cx).spawn(async move { setup.answer(&code).await });
-        self.code
-            .update(cx, |state, cx| state.set_value("", window, cx));
-    }
-}
-
-/// `curl … | bash`, `claude` and `~/.local/bin` in code type.
-fn installer_note(c: &Colors) -> Div {
-    // Words wrap one at a time; punctuation stays with the word before it.
-    // `true` marks code.
-    const WORDS: &[&[(&str, bool)]] = &[
-        &[("Runs", false)],
-        &[("the", false)],
-        &[("official", false)],
-        &[("installer,", false)],
-        &[("curl", true)],
-        &[("-fsSL", true)],
-        &[("https://claude.ai/install.sh", true)],
-        &[("|", true)],
-        &[("bash", true), (",", false)],
-        &[("which", false)],
-        &[("puts", false)],
-        &[("claude", true)],
-        &[("in", false)],
-        &[("~/.local/bin", true), (".", false)],
-    ];
-    div()
-        .flex()
-        .flex_wrap()
-        .gap_x(rems(0.25))
-        .text_body_sm()
-        .text_color(c.text_subtle)
-        .children(WORDS.iter().map(|word| {
-            div().flex().children(word.iter().map(|(text, code)| {
-                div()
-                    .when(*code, |this| this.font_family(font::MONO))
-                    .child(*text)
-            }))
-        }))
 }
 
 impl Render for ClaudeTab {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((_, title, view)) = &self.open {
             let weak = cx.entity().downgrade();
             let back: Back = Rc::new(move |_, cx| {
@@ -381,90 +260,7 @@ impl Render for ClaudeTab {
             Some(Ok(Some(session))) => Some(session.key.clone()),
             _ => None,
         };
-        let state = &self.state;
-        let status = state.status.clone();
-        let running = state.running;
-        let mut buttons = div().flex().flex_wrap().gap(space::S2);
-        if matches!(status, Some(ClaudeStatus::Missing)) {
-            buttons = buttons.child(
-                Button::new("claude-code-install", "Install Claude")
-                    .prominent()
-                    .loading(running == Some(Step::Install))
-                    .disabled(running.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.run(Step::Install, cx))),
-            );
-        }
-        if matches!(status, Some(ClaudeStatus::SignedOut { .. })) {
-            buttons = buttons.child(
-                Button::new("claude-code-sign-in", "Sign in")
-                    .prominent()
-                    .loading(running == Some(Step::Login))
-                    .disabled(running.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.run(Step::Login, cx))),
-            );
-        }
-        buttons = buttons.child(if running.is_some() {
-            Button::new("claude-code-cancel", "Cancel")
-                .ghost()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let setup = this.setup.clone();
-                    Runtime::handle(cx).spawn(async move { setup.cancel().await });
-                }))
-        } else {
-            Button::new("claude-code-check", "Check again")
-                .ghost()
-                .disabled(state.checking)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let setup = this.setup.clone();
-                    Runtime::handle(cx).spawn(async move { setup.check().await });
-                }))
-        });
-        let has_code = !self.code.read(cx).value().trim().is_empty();
-        let setup = div()
-            .flex()
-            .flex_col()
-            .gap(space::S2)
-            .child(div().text_body().child(status_line(state)))
-            .child(buttons)
-            .when(matches!(status, Some(ClaudeStatus::Missing)), |this| {
-                this.child(installer_note(&c))
-            })
-            .when(!state.output.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id("claude-code-setup-output")
-                        .max_h(rems(15.))
-                        .overflow_y_scroll()
-                        .text_caption()
-                        .text_mono()
-                        .whitespace_normal()
-                        .child(state.output.clone()),
-                )
-            })
-            .when(running == Some(Step::Login), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .items_end()
-                        .gap(space::S2)
-                        .child(
-                            field(
-                                "Sign-in code",
-                                TextField::new(&self.code).surface(Surface::Floating),
-                                Some("If the browser shows a code to paste, enter it here.".into()),
-                                &c,
-                            )
-                            .flex_1(),
-                        )
-                        .child(
-                            Button::new("claude-code-send-code", "Send")
-                                .disabled(!has_code)
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.send_code(window, cx)),
-                                ),
-                        ),
-                )
-            });
+        let setup = self.setup.clone();
         let card = self.conversation.as_ref().map(|conversation| {
             let shown = here.clone().map(|found| {
                 found.map(|session| {
@@ -551,7 +347,6 @@ impl Render for ClaudeTab {
                         )
                 }))
         };
-        let _ = window;
         div()
             .flex()
             .flex_col()
@@ -692,10 +487,10 @@ impl Picking for SettingsTab {
         &mut self.open
     }
 
-    fn pick(&mut self, picker: Picker, value: String, _: &mut Context<Self>) {
+    fn pick(&mut self, picker: Picker, value: String, cx: &mut Context<Self>) {
         match picker {
             Picker::Model if value == CUSTOM_MODEL => {
-                let models = create_models().models;
+                let models = create_models(cx).models;
                 let listed = listed_model(&models, &self.draft.model);
                 self.custom_asked = Some(if listed {
                     String::new()
@@ -707,6 +502,13 @@ impl Picking for SettingsTab {
             Picker::Scope => self.draft.scope = value,
         }
     }
+}
+
+/// Claude's models and its default row, which follows the device default.
+fn create_models(cx: &App) -> crate::agents2::CreateModels {
+    super::ClaudeCode::global(cx)
+        .map(|state| state.read(cx).provider.read(cx).create_models())
+        .unwrap_or_default()
 }
 
 impl Render for SettingsTab {
@@ -722,7 +524,7 @@ impl Render for SettingsTab {
         } else {
             "thread"
         };
-        let models = create_models();
+        let models = create_models(cx);
         let custom = self.custom.as_ref().map(|input| {
             custom_model_dialog(
                 input,

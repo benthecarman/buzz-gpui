@@ -5,12 +5,14 @@
 //! with the in-process Buzz tools. Compiled in: there is no plugin loading.
 
 pub mod claude;
+pub mod defaults;
 #[cfg(debug_assertions)]
 mod dev;
 #[cfg(test)]
 mod e2e;
 pub mod lanes;
 pub mod prompt;
+pub mod provider;
 pub mod runtime;
 pub mod sessions;
 pub mod setup;
@@ -23,9 +25,10 @@ use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, MigrationSetting, Models, Status, Trigger,
     TypeDefaults, register_type,
 };
-use crate::hosts::HostConnection;
+use crate::hosts::{HostConnection, Hosts};
 use crate::runtime::Runtime;
 use gpui_kit::*;
+use provider::{ClaudeProvider, DefaultsChanged};
 use runtime::{ClaudeRuntime, Config, Run, Synced, Wake};
 use setup::ClaudeSetup;
 use std::collections::HashMap;
@@ -46,6 +49,9 @@ pub struct ClaudeCode {
     runtime: ClaudeRuntime,
     /// Claude's setup on each host, by host entity.
     setups: HashMap<EntityId, ClaudeSetup>,
+    /// Claude on this computer, for the Agents page's provider settings,
+    /// and the device-wide defaults agents inherit.
+    provider: Entity<ClaudeProvider>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -73,9 +79,33 @@ pub fn init(cx: &mut App) {
             let _runtime = Runtime::handle(cx).enter();
             this.runtime.dispose_and_wait()
         }));
+        // The provider is Claude on the embedded host, sharing that host's
+        // setup with its agents' Claude tabs.
+        let mut setups = HashMap::new();
+        let embedded = cx.try_global::<Hosts>().and_then(|hosts| {
+            hosts
+                .hosts
+                .iter()
+                .find(|host| host.read(cx).remote.is_none())
+                .cloned()
+        });
+        let spawn = embedded
+            .as_ref()
+            .map(|host| host.read(cx).spawner(PROCESS_OWNER));
+        let setup = ClaudeSetup::new(spawn.clone());
+        if let Some(host) = &embedded {
+            setups.insert(host.entity_id(), setup.clone());
+        }
+        let provider = cx.new(|cx| ClaudeProvider::new(setup, spawn, cx));
+        // Agents with a blank model follow a changed default.
+        subscriptions.push(cx.subscribe(
+            &provider,
+            |this: &mut ClaudeCode, _, _: &DefaultsChanged, cx| this.sync(cx),
+        ));
         let mut this = ClaudeCode {
             runtime: ClaudeRuntime::new(None),
-            setups: HashMap::new(),
+            setups,
+            provider,
             _subscriptions: subscriptions,
         };
         this.sync(cx);
@@ -115,6 +145,7 @@ impl ClaudeCode {
             return;
         }
         let key = key();
+        let defaults = &self.provider.read(cx).defaults;
         let synced: Vec<Synced> = agents
             .running()
             .iter()
@@ -124,7 +155,7 @@ impl ClaudeCode {
                 Some(Synced {
                     pubkey: agent.pubkey.clone(),
                     name: agent.name.clone(),
-                    config: agent.config.clone(),
+                    config: defaults.resolve(&agent.config),
                     spawn: host.read(cx).spawner(PROCESS_OWNER),
                     attention: agent.attention_enabled,
                 })
@@ -195,8 +226,15 @@ impl AgentType for ClaudeCodeType {
         true
     }
 
-    fn create_models(&self, _: &mut App) -> Option<crate::agents2::CreateModels> {
-        Some(tabs::create_models())
+    fn create_models(&self, cx: &mut App) -> Option<crate::agents2::CreateModels> {
+        let provider = ClaudeCode::global(cx)?.read(cx).provider.clone();
+        provider.update(cx, |provider, cx| provider.ensure_catalog(cx));
+        Some(provider.read(cx).create_models())
+    }
+
+    fn provider(&self, cx: &App) -> Option<std::rc::Rc<dyn crate::agents2::AgentProvider>> {
+        let provider = ClaudeCode::global(cx)?.read(cx).provider.clone();
+        Some(std::rc::Rc::new(provider::Provider(provider)))
     }
 
     fn adopts(&self) -> bool {
@@ -331,11 +369,19 @@ impl AgentType for ClaudeCodeType {
                 spent,
             },
         };
+        // A blank model inherits the device default.
+        let config = state
+            .read(cx)
+            .provider
+            .read(cx)
+            .defaults
+            .resolve(&delivery.config);
         let run = Run {
             wake,
             channel: delivery.channel,
             agent: Arc::new(delivery.agent),
-            config: delivery.config,
+            config,
+
             spawn,
             model: delivery.model,
             effort: delivery.effort,

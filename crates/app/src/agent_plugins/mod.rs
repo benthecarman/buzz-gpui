@@ -5,6 +5,7 @@ pub mod codex;
 mod opened;
 pub mod owner_relay;
 pub mod process;
+mod provider;
 pub(crate) mod tabs;
 mod transcript_view;
 
