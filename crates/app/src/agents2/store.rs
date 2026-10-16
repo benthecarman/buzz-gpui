@@ -72,9 +72,10 @@ pub struct AgentRecord {
     /// Run state of its timers, by slug. Not config, so it never leaves the
     /// device; kept here so removing a timer or the agent removes its state.
     pub timers: Arc<BTreeMap<String, TimerState>>,
-    /// `Some(false)` when the owner turned attention off: its watches and
-    /// timers stay stored but wake nothing, and the agent is not offered
-    /// attention tools. Absent means on.
+    /// `Some(true)` when the owner turned attention on. Off, its watches
+    /// and timers stay stored but wake nothing, and the agent is not
+    /// offered attention tools. Absent means off, so an agent has no
+    /// attention until its owner turns it on.
     pub attention_enabled: Option<bool>,
 }
 
@@ -88,7 +89,7 @@ impl AgentRecord {
 
     /// Whether its watches and timers wake it.
     pub fn attention_on(&self) -> bool {
-        self.attention_enabled != Some(false)
+        self.attention_enabled == Some(true)
     }
 }
 
@@ -287,8 +288,8 @@ pub fn read_records(storage: &dyn Storage) -> BTreeMap<String, AgentRecord> {
                 skipped: Arc::new(skipped),
                 config: record.get("config").cloned().unwrap_or(Value::Null),
                 timers: Arc::new(timers),
-                attention_enabled: (record.get("attentionEnabled") == Some(&Value::Bool(false)))
-                    .then_some(false),
+                attention_enabled: (record.get("attentionEnabled") == Some(&Value::Bool(true)))
+                    .then_some(true),
             },
         );
     }

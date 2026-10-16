@@ -177,31 +177,44 @@ fn keeps_a_timer_budget_across_edits_and_only_a_rearm_moves_its_deadline() {
 }
 
 #[test]
-fn saves_attention_only_as_off() {
+fn saves_attention_only_as_on_and_reads_anything_else_as_off() {
     let storage = MemoryStorage::default();
-    let other = "b".repeat(64);
+    let (off, older) = ("b".repeat(64), "c".repeat(64));
     let records = BTreeMap::from([
         (
             pubkey(),
             AgentRecord {
-                attention_enabled: Some(false),
+                attention_enabled: Some(true),
                 ..record()
             },
         ),
+        (off.clone(), AgentRecord::blank(&off)),
         (
-            other.clone(),
+            older.clone(),
             AgentRecord {
-                attention_enabled: Some(true),
-                ..AgentRecord::blank(&other)
+                attention_enabled: Some(false),
+                ..AgentRecord::blank(&older)
             },
         ),
     ]);
     write_records(&storage, &records).unwrap();
+    assert!(
+        stored(&storage)["agents"][&off]
+            .get("attentionEnabled")
+            .is_none()
+    );
+    assert!(
+        stored(&storage)["agents"][&older]
+            .get("attentionEnabled")
+            .is_some()
+    );
     let read = read_records(&storage);
-    assert_eq!(read[&pubkey()].attention_enabled, Some(false));
-    assert!(!read[&pubkey()].attention_on());
-    assert_eq!(read[&other].attention_enabled, None);
-    assert!(read[&other].attention_on());
+    assert_eq!(read[&pubkey()].attention_enabled, Some(true));
+    assert!(read[&pubkey()].attention_on());
+    for other in [&off, &older] {
+        assert_eq!(read[other].attention_enabled, None);
+        assert!(!read[other].attention_on());
+    }
 }
 
 #[test]

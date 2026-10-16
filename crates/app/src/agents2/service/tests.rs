@@ -440,6 +440,8 @@ fn type_defaults_become_the_first_record() {
     let record = defaults(&bot(), &kind).unwrap();
     assert_eq!(record.config, json!({"model": "x"}));
     assert!(record.attention.contains_key("interest/default"));
+    // A new agent has no attention until its owner turns it on.
+    assert!(!record.attention_on());
     assert!(registry::validate("p", &Kind).is_ok());
     assert!(registry::validate("P!", &Kind).is_err());
 }

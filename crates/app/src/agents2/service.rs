@@ -1386,7 +1386,7 @@ impl Agents2 {
                 && !self
                     .records
                     .get(&summary.pubkey)
-                    .is_none_or(AgentRecord::attention_on)
+                    .is_some_and(AgentRecord::attention_on)
             {
                 runner.epoch += 1;
                 runner
@@ -2190,7 +2190,7 @@ impl Agents2 {
             record.config = config;
         }
         if let Some(enabled) = change.attention_enabled {
-            record.attention_enabled = (!enabled).then_some(false);
+            record.attention_enabled = enabled.then_some(true);
         }
         let now = now_secs();
         for (slug, value) in &change.attention {
