@@ -1,21 +1,26 @@
 //! An Agents2 agent's sections as tabs, wherever they are shown (its Build
 //! view and its profile panel): the type's own tabs, then the app's
-//! Attention tab, which every type shares because the app is what wakes
-//! the agent (buzz-app's `tabs.tsx` and `AgentTabs.tsx`).
+//! Attention and Memory tabs, which every type shares: the app is what
+//! wakes the agent, and every type keeps its memory the same way
+//! (buzz-app's `tabs.tsx` and `AgentTabs.tsx`).
 
 use super::AttentionPanel;
+use super::memory::MemoryPanel;
 use crate::agents2::{AgentConversation, AgentView, Agents2, type_of};
 use buzz_ui::{Tab, TabVariant, Tabs};
 use gpui_kit::*;
 use std::collections::HashMap;
 
 const ATTENTION: &str = "agent:attention";
+const MEMORY: &str = "agent:memory";
 
 pub struct AgentTabs {
     pubkey: String,
     /// The chosen section; the first when unset.
     selected: Option<SharedString>,
     attention: Entity<AttentionPanel>,
+    /// Built when first shown, so a closed tab reads no memory.
+    memory: Option<Entity<MemoryPanel>>,
     /// Type tab views, built when first shown.
     views: HashMap<SharedString, AnyView>,
     /// The conversation the agent was opened from, which type tabs set
@@ -33,6 +38,7 @@ impl AgentTabs {
             pubkey,
             selected: None,
             attention,
+            memory: None,
             views: HashMap::new(),
             conversation: None,
             _observe: observe,
@@ -71,6 +77,7 @@ impl Render for AgentTabs {
             .map(|tab| (format!("agent:type:{}", tab.id).into(), tab.title.clone()))
             .collect();
         sections.push((ATTENTION.into(), "Attention".into()));
+        sections.push((MEMORY.into(), "Memory".into()));
         // A tab that went away (its type was replaced) falls back to the last.
         let selected = self
             .selected
@@ -78,11 +85,7 @@ impl Render for AgentTabs {
             .filter(|value| sections.iter().any(|(v, _)| v == value))
             .unwrap_or_else(|| {
                 if self.selected.is_some() {
-                    sections
-                        .last()
-                        .expect("Attention is always there")
-                        .0
-                        .clone()
+                    sections.last().expect("Memory is always there").0.clone()
                 } else {
                     sections[0].0.clone()
                 }
@@ -104,6 +107,12 @@ impl Render for AgentTabs {
         }
         let panel: AnyElement = if selected.as_ref() == ATTENTION {
             self.attention.clone().into_any_element()
+        } else if selected.as_ref() == MEMORY {
+            let pubkey = self.pubkey.clone();
+            self.memory
+                .get_or_insert_with(|| cx.new(|cx| MemoryPanel::new(pubkey, cx)))
+                .clone()
+                .into_any_element()
         } else {
             let tab = type_tabs
                 .iter()

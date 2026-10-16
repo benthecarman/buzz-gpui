@@ -6,6 +6,7 @@ mod bring_over;
 pub(crate) mod card;
 mod create;
 mod manage;
+mod memory;
 mod packs;
 mod page;
 mod tabs;
@@ -141,7 +142,8 @@ struct ProfileSections(HashMap<String, Entity<ProfileAgent>>);
 impl Global for ProfileSections {}
 
 /// What the profile panel adds for an Agents2 agent
-/// (`ProfilePanel.tsx`): its type's tabs and Attention, then "Delete
+/// (`ProfilePanel.tsx`): its type's tabs, Attention and Memory,
+/// then "Delete
 /// agent". `conversation` is the one the panel was opened from. `None`
 /// for anyone else.
 pub fn profile_sections(
