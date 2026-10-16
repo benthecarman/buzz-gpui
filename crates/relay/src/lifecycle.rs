@@ -67,7 +67,8 @@ fn error(message: impl Into<String>) -> LifecycleError {
     LifecycleError(message.into())
 }
 
-fn channel_id(value: &str) -> Result<&str, LifecycleError> {
+/// `lifecycleChannelId`: a channel ID, which is a UUID.
+pub fn channel_id(value: &str) -> Result<&str, LifecycleError> {
     if is_uuid(value) {
         Ok(value)
     } else {

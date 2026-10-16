@@ -560,7 +560,7 @@ async fn lists_its_tools_before_it_can_call_them() {
         &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
     )
     .await;
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
     let call = respond(
         None,
         &context,
@@ -665,4 +665,295 @@ async fn shows_a_media_image_to_the_agent_and_nothing_else() {
     .await
     .unwrap_err();
     assert!(error.contains("Only JPEG, PNG, GIF and WebP"), "{error}");
+}
+
+const CHANNEL: &str = "6f0c3a4e-6d55-4a8f-9a55-2f1d2c3b4a5e";
+
+fn metadata(id: &str, extra: &[&[&str]]) -> BuzzEvent {
+    event(|event| {
+        event.kind = 39000;
+        let mut list = vec![vec!["d".to_string(), id.to_string()]];
+        list.extend(tags(extra));
+        event.tags = list;
+    })
+}
+
+fn roster(id: &str, members: &[(&str, &str)]) -> BuzzEvent {
+    event(|event| {
+        event.kind = 39002;
+        let mut list = vec![vec!["d".to_string(), id.to_string()]];
+        list.extend(members.iter().map(|(key, role)| {
+            vec![
+                "p".to_string(),
+                key.to_string(),
+                String::new(),
+                role.to_string(),
+            ]
+        }));
+        event.tags = list;
+    })
+}
+
+fn in_channel() -> Context {
+    Context {
+        channel: Some(CHANNEL.into()),
+        ..Context::default()
+    }
+}
+
+#[tokio::test]
+async fn lists_every_channel_it_can_see_with_all() {
+    let me = me();
+    let client = fake(vec![
+        roster("chan", &[(&me, "member")]),
+        metadata("chan", &[&["name", "general"], &["t", "stream"]]),
+        metadata(
+            "other",
+            &[&["name", "ideas"], &["t", "forum"], &["private"]],
+        ),
+    ]);
+    let joined = call(&client, &in_thread(), "channels", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(joined, "chan general");
+    let all = call(&client, &in_thread(), "channels", json!({ "all": true }))
+        .await
+        .unwrap();
+    assert_eq!(
+        all,
+        "chan general\nother ideas (forum, private, not joined)"
+    );
+}
+
+#[tokio::test]
+async fn shows_a_channels_details_and_refuses_what_an_action_does_not_take() {
+    let me = me();
+    let client = fake(vec![
+        metadata(
+            CHANNEL,
+            &[
+                &["name", "general"],
+                &["t", "stream"],
+                &["about", "Talk"],
+                &["ttl", "3600"],
+            ],
+        ),
+        roster(CHANNEL, &[(&me, "admin")]),
+    ]);
+    assert_eq!(
+        call(&client, &in_channel(), "channel", json!({}))
+            .await
+            .unwrap(),
+        format!(
+            "{CHANNEL} general (stream, open, archives after 3600s idle)\nabout: Talk\nyou: admin"
+        )
+    );
+    let refused = |value: Value| {
+        let client = client.clone();
+        async move {
+            call(&client, &in_channel(), "channel", value)
+                .await
+                .unwrap_err()
+        }
+    };
+    assert_eq!(
+        refused(json!({ "action": "rename" })).await,
+        "action must be one of details, create, update, join, leave, archive, unarchive, delete."
+    );
+    assert_eq!(
+        refused(json!({ "action": "join", "name": "x" })).await,
+        "name cannot be used with join."
+    );
+    assert_eq!(
+        refused(
+            json!({ "action": "create", "channel": CHANNEL, "name": "x", "visibility": "open" })
+        )
+        .await,
+        "create makes a new channel; leave out channel."
+    );
+    assert_eq!(
+        refused(json!({ "channel": "  " })).await,
+        "channel must be a channel ID."
+    );
+    assert!(client.published.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn creates_a_channel_and_reports_only_what_the_community_shows() {
+    let client = fake(vec![]);
+    let error = call(
+        &client,
+        &in_thread(),
+        "channel",
+        json!({ "action": "create", "name": "x" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "visibility must be open or private.");
+    let error = call(
+        &client,
+        &in_thread(),
+        "channel",
+        json!({ "action": "create", "name": "x", "visibility": "open", "template": "Launch" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Channel templates are kept in Buzz Desktop and are unavailable here."
+    );
+    assert!(client.published.lock().unwrap().is_empty());
+    let answer = call(
+        &client,
+        &in_thread(),
+        "channel",
+        json!({
+            "action": "create", "name": "#launch ", "visibility": "private",
+            "about": "Ship it", "ttl": 60,
+        }),
+    )
+    .await
+    .unwrap();
+    let published = client.published.lock().unwrap()[0].clone();
+    assert_eq!(published.kind, 9007);
+    let id = published.tags[0][1].clone();
+    assert_eq!(
+        published.tags[1..],
+        tags(&[
+            &["name", "launch"],
+            &["visibility", "private"],
+            &["channel_type", "stream"],
+            &["about", "Ship it"],
+            &["ttl", "60"],
+        ])
+    );
+    assert_eq!(
+        answer,
+        format!("The community accepted channel {id} but does not show it yet.")
+    );
+}
+
+#[tokio::test]
+async fn changes_only_the_name_of_a_session() {
+    let about = buzz_relay_client::discovery::SESSION_CHANNEL_DESCRIPTION;
+    let client = fake(vec![metadata(
+        CHANNEL,
+        &[&["name", "s"], &["about", about]],
+    )]);
+    let error = call(
+        &client,
+        &in_channel(),
+        "channel",
+        json!({ "action": "update", "topic": "x" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "Only the name of a session can be changed.");
+}
+
+#[tokio::test(start_paused = true)]
+async fn joins_and_confirms_from_the_roster() {
+    let me = me();
+    let client = fake(vec![roster(CHANNEL, &[(&me, "member")])]);
+    let answer = call(
+        &client,
+        &in_channel(),
+        "channel",
+        json!({ "action": "join" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer, format!("joined {CHANNEL}"));
+    assert_eq!(
+        client.published.lock().unwrap()[0],
+        Template {
+            kind: 9021,
+            content: String::new(),
+            tags: tags(&[&["h", CHANNEL]]),
+        }
+    );
+    let answer = call(
+        &client,
+        &in_channel(),
+        "channel",
+        json!({ "action": "leave" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answer,
+        "The community accepted leave but does not show it yet."
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn adds_and_removes_members_one_at_a_time() {
+    let mut events = community();
+    events.push(roster(CHANNEL, &[(&alice(), "member")]));
+    let client = fake(events);
+    let refused = |value: Value| {
+        let client = client.clone();
+        async move {
+            call(&client, &in_channel(), "members", value)
+                .await
+                .unwrap_err()
+        }
+    };
+    assert_eq!(
+        refused(json!({ "add": [me()] })).await,
+        "For yourself, use channel with action join or leave."
+    );
+    assert_eq!(
+        refused(json!({ "add": [bob()], "remove": [bob()] })).await,
+        "Add or remove someone, not both."
+    );
+    assert_eq!(
+        refused(json!({ "role": "admin" })).await,
+        "role is for the members you add."
+    );
+    assert_eq!(
+        refused(json!({ "add": [bob()], "role": "king" })).await,
+        "role must be one of owner, admin, member, guest, bot."
+    );
+    assert_eq!(
+        refused(json!({ "add": "x" })).await,
+        "add must be a list of pubkeys."
+    );
+    let many: Vec<String> = (0..51).map(|n| format!("{n:064x}")).collect();
+    assert_eq!(
+        refused(json!({ "add": many })).await,
+        "Change at most 50 members at a time."
+    );
+    assert!(client.published.lock().unwrap().is_empty());
+    let answer = call(
+        &client,
+        &in_channel(),
+        "members",
+        json!({ "add": [bob(), bob()], "remove": [alice()], "role": "guest" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *client.published.lock().unwrap(),
+        vec![
+            Template {
+                kind: 9000,
+                content: String::new(),
+                tags: tags(&[&["h", CHANNEL], &["p", &bob()], &["role", "guest"]]),
+            },
+            Template {
+                kind: 9001,
+                content: String::new(),
+                tags: tags(&[&["h", CHANNEL], &["p", &alice()]]),
+            },
+        ]
+    );
+    assert_eq!(
+        answer,
+        format!(
+            "{} Bob: the community accepted it but does not show it yet\n{} Alice Smith: the community accepted it but does not show it yet",
+            bob(),
+            alice()
+        )
+    );
 }

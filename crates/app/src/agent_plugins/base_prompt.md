@@ -7,7 +7,7 @@ Buzz wraps each incoming turn in semantic sections. The current request is the m
 
 ## Buzz Tools
 
-The `buzz` tools are your interface to Buzz: `send`, `edit`, `react`, `read`, `channels`, `members`, `users`, `dm`, `mem_get`, `mem_set`, `canvas` and `media_get`. Without `channel`, `send` and `read` work in the current thread. `path` posts or saves a local file's text; `files` attaches images or video; `media_get` shows you an image from a Buzz media URL.
+The `buzz` tools are your interface to Buzz. Without `channel`, `send` and `read` work in the current thread. `path` posts or saves a local file's text; `files` attaches images or video; `media_get` shows you an image from a Buzz media URL.
 
 Set `final: true` on your last `send` of a turn, then finish without repeating the reply. If a newer request arrived while you were working, answer it before your final `send`. Leave `final` off when you still have work to do. Your assistant text is not published to Buzz; use `send` to post progress and answers.
 

@@ -1077,7 +1077,7 @@ async fn restores_a_saved_binding_and_starts_fresh_in_another_workspace() {
     until(|| !f.fake.calls("thread/unsubscribe").is_empty()).await;
     let mut stored = locked(&f.storage.0).clone();
     let binding = &mut stored
-        .get_mut(&format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key()))
+        .get_mut(&format!("buzz.codex.sessions.v5:{SCOPE}:{}", agent_key()))
         .unwrap()[key(&root())];
     // When it last started a turn.
     assert!(binding["at"].as_u64().is_some_and(|at| at > 0));
@@ -1085,7 +1085,7 @@ async fn restores_a_saved_binding_and_starts_fresh_in_another_workspace() {
     assert_eq!(
         stored,
         HashMap::from([(
-            format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key()),
+            format!("buzz.codex.sessions.v5:{SCOPE}:{}", agent_key()),
             json!({ key(&root()): { "threadId": "thread-1", "workspace": "/tmp/codex-test" } }),
         )])
     );
@@ -1293,7 +1293,7 @@ async fn slash_commands_are_ordinary_steering_text() {
 #[tokio::test(flavor = "multi_thread")]
 async fn lists_saved_conversations_newest_first_and_moves_a_started_one_to_the_front() {
     let storage = Arc::new(MemoryStorage::default());
-    let storage_key = format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key());
+    let storage_key = format!("buzz.codex.sessions.v5:{SCOPE}:{}", agent_key());
     let thread = key(&root());
     let channel = key("channel");
     let elsewhere = json!(["unlisted", root()]).to_string();

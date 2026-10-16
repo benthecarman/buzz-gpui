@@ -923,8 +923,9 @@ impl CodexRuntime {
 
     fn key_of(scope: &str, pubkey: &str) -> String {
         // Resume restores the persisted tool schema, so a binding from
-        // before a tool change starts fresh. v4 added media_get.
-        format!("buzz.codex.sessions.v4:{scope}:{pubkey}")
+        // before a tool change starts fresh. v5 added channel and member
+        // management.
+        format!("buzz.codex.sessions.v5:{scope}:{pubkey}")
     }
 
     /// Saved bindings, in the order they were saved. Malformed local data

@@ -4,6 +4,7 @@
 //! context. Each tool answers in plain text.
 
 use super::{BuzzClient, BuzzEvent, Context, Template, Upload};
+use buzz_relay_client::lifecycle::{self, Action};
 use nostr::nips::nip19::FromBech32;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
@@ -12,6 +13,8 @@ use std::time::Duration;
 
 type Args = Map<String, Value>;
 type ToolResult = Result<String, String>;
+/// Whether a roster shows a member change to a key.
+type Shown<'a> = dyn Fn(&[(String, String)], &str) -> bool + 'a;
 
 /// A tool's answer: text, or an image (base64 `data`) for the agent to see.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,11 +88,44 @@ pub fn tools() -> Vec<Value> {
             json!({ "channel": str, "thread": str, "q": str, "limit": int, "before": int }),
             &[],
         ),
-        tool("channels", "Channels you are in.", json!({ "q": str }), &[]),
+        tool(
+            "channels",
+            "Channels you are in; with all, every one you can see.",
+            json!({ "q": str, "all": { "type": "boolean" } }),
+            &[],
+        ),
+        tool(
+            "channel",
+            "Channel details (default: current), or an action on it. create may use your owner's template, by name. delete is permanent.",
+            json!({
+                "channel": str,
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "update", "join", "leave", "archive", "unarchive", "delete"],
+                },
+                "name": str,
+                "about": str,
+                "visibility": { "type": "string", "enum": ["open", "private"] },
+                "type": { "type": "string", "enum": ["stream", "forum"] },
+                "ttl": {
+                    "type": "integer",
+                    "description": "Seconds without a message before it archives; 0: never.",
+                },
+                "topic": str,
+                "purpose": str,
+                "template": str,
+            }),
+            &[],
+        ),
         tool(
             "members",
-            "A channel's members.",
-            json!({ "channel": str }),
+            "A channel's members; add or remove pubkeys or npubs, giving those added a role.",
+            json!({
+                "channel": str,
+                "add": strs,
+                "remove": strs,
+                "role": { "type": "string", "enum": ROLES },
+            }),
             &[],
         ),
         tool(
@@ -131,6 +167,25 @@ pub fn tools() -> Vec<Value> {
     ]
 }
 
+const ROLES: [&str; 5] = ["owner", "admin", "member", "guest", "bot"];
+/// The `channel` arguments each action takes.
+const ACTIONS: [(&str, &[&str]); 8] = [
+    ("details", &[]),
+    (
+        "create",
+        &["name", "about", "visibility", "type", "ttl", "template"],
+    ),
+    (
+        "update",
+        &["name", "about", "visibility", "ttl", "topic", "purpose"],
+    ),
+    ("join", &[]),
+    ("leave", &[]),
+    ("archive", &[]),
+    ("unarchive", &[]),
+    ("delete", &[]),
+];
+
 /// Message kinds as the CLI reads them.
 const MESSAGES: [u32; 5] = [9, 40002, 40008, 45001, 45003];
 const THREAD: [u32; 4] = [9, 40002, 40008, 45003];
@@ -171,6 +226,7 @@ pub async fn call_tool(
         "react" => tools.react(args).await,
         "read" => tools.read(args).await,
         "channels" => tools.channels(args).await,
+        "channel" => tools.channel(args).await,
         "members" => tools.members_tool(args).await,
         "users" => tools.users(args).await,
         "dm" => tools.dm(args).await,
@@ -415,28 +471,34 @@ impl Tools {
                 ids.push(id);
             }
         }
-        if ids.is_empty() {
+        let all = args.get("all") == Some(&Value::Bool(true));
+        if ids.is_empty() && !all {
             return Ok("No channels.".into());
         }
         let channels = self
-            .query(vec![
-                json!({ "kinds": [39000], "#d": ids, "limit": ids.len() }),
-            ])
+            .query(vec![if all {
+                json!({ "kinds": [39000], "limit": 500 })
+            } else {
+                json!({ "kinds": [39000], "#d": ids, "limit": ids.len() })
+            }])
             .await?;
         let q = text(args.get("q")).map(|q| q.to_lowercase());
         let rows: Vec<String> = channels
             .iter()
             .map(|event| {
                 let mut flags = Vec::new();
-                if tag(event, "t").as_deref() == Some("dm") {
-                    flags.push("dm");
+                match tag(event, "t") {
+                    Some(kind) if kind != "stream" && !kind.is_empty() => flags.push(kind),
+                    _ => {}
                 }
-                if event
-                    .tags
-                    .iter()
-                    .any(|t| t.first().map(String::as_str) == Some("archived"))
-                {
-                    flags.push("archived");
+                if has(event, "private") {
+                    flags.push("private".into());
+                }
+                if has(event, "archived") {
+                    flags.push("archived".into());
+                }
+                if !ids.contains(&tag(event, "d").unwrap_or_default()) {
+                    flags.push("not joined".into());
                 }
                 format!(
                     "{} {}{}",
@@ -454,10 +516,131 @@ impl Tools {
         Ok(or(rows.join("\n"), "No channels."))
     }
 
+    async fn channel(&self, args: &Args) -> ToolResult {
+        let action = match args.get("action") {
+            None => "details",
+            Some(Value::String(action)) => action.as_str(),
+            Some(_) => "",
+        };
+        let Some((_, fields)) = ACTIONS.iter().find(|(name, _)| *name == action) else {
+            let names: Vec<&str> = ACTIONS.iter().map(|(name, _)| *name).collect();
+            return Err(format!("action must be one of {}.", names.join(", ")));
+        };
+        let extra: Vec<&str> = args
+            .keys()
+            .map(String::as_str)
+            .filter(|key| *key != "channel" && *key != "action" && !fields.contains(key))
+            .collect();
+        if !extra.is_empty() {
+            return Err(format!(
+                "{} cannot be used with {action}.",
+                extra.join(", ")
+            ));
+        }
+        if action == "create" {
+            if args.contains_key("channel") {
+                return Err("create makes a new channel; leave out channel.".into());
+            }
+            return self.create(args).await;
+        }
+        let channel = self.target(args)?;
+        let lifecycle = match action {
+            "details" => return self.details(&channel).await,
+            "update" => return self.update(&channel, args).await,
+            "join" => Action::Join,
+            "leave" => Action::Leave,
+            "archive" => Action::Archive,
+            "unarchive" => Action::Unarchive,
+            _ => Action::Delete,
+        };
+        let template = lifecycle::template(lifecycle, &channel, 0).map_err(|error| error.0)?;
+        self.client
+            .publish(Template {
+                kind: u32::from(template.kind),
+                content: template.content,
+                tags: template.tags,
+            })
+            .await?;
+        // The relay can accept a change it then fails to make, so it is
+        // reported only once the channel shows it.
+        let me = self.client.pubkey();
+        let shown = until(
+            || async {
+                Ok::<_, String>(match lifecycle {
+                    Action::Join | Action::Leave => {
+                        self.roster(&channel)
+                            .await?
+                            .iter()
+                            .any(|(pubkey, _)| *pubkey == me)
+                            == (lifecycle == Action::Join)
+                    }
+                    Action::Delete => self.metadata(&channel).await?.is_none(),
+                    _ => self.metadata(&channel).await?.is_some_and(|metadata| {
+                        has(&metadata, "archived") == (lifecycle == Action::Archive)
+                    }),
+                })
+            },
+            |shown| *shown,
+        )
+        .await;
+        let done = match lifecycle {
+            Action::Join => "joined",
+            Action::Leave => "left",
+            Action::Archive => "archived",
+            Action::Unarchive => "unarchived",
+            _ => "deleted",
+        };
+        Ok(match shown {
+            Ok(true) => format!("{done} {channel}"),
+            Ok(false) => format!("The community accepted {action} but does not show it yet."),
+            Err(error) => format!("The community accepted {action} but {}.", unread(&error)),
+        })
+    }
+
+    /// The `channel` argument, or the current channel only when it is left
+    /// out.
+    fn target(&self, args: &Args) -> Result<String, String> {
+        match args.get("channel") {
+            None => self
+                .context
+                .channel
+                .clone()
+                .ok_or_else(|| "channel is required here.".to_string()),
+            value => text(value).ok_or_else(|| "channel must be a channel ID.".to_string()),
+        }
+    }
+
     async fn members_tool(&self, args: &Args) -> ToolResult {
-        let channel = text(args.get("channel"))
-            .or_else(|| self.context.channel.clone())
-            .ok_or("channel is required here.")?;
+        let channel = self.target(args)?;
+        let add = keys(args, "add")?;
+        let remove = keys(args, "remove")?;
+        let role = match args.get("role") {
+            None => None,
+            Some(Value::String(role)) if ROLES.contains(&role.as_str()) => Some(role.clone()),
+            Some(_) => return Err(format!("role must be one of {}.", ROLES.join(", "))),
+        };
+        if role.is_some() && add.is_empty() {
+            return Err("role is for the members you add.".into());
+        }
+        if !add.is_empty() || !remove.is_empty() {
+            lifecycle::channel_id(&channel).map_err(|error| error.0)?;
+            let me = self.client.pubkey();
+            if add.iter().chain(&remove).any(|key| *key == me) {
+                return Err("For yourself, use channel with action join or leave.".into());
+            }
+            if add.iter().any(|key| remove.contains(key)) {
+                return Err("Add or remove someone, not both.".into());
+            }
+            if add.len() + remove.len() > 50 {
+                return Err("Change at most 50 members at a time.".into());
+            }
+            let (lines, changed) = self.change(&channel, &add, &remove, role.as_deref()).await;
+            return if changed {
+                Ok(lines.join("\n"))
+            } else {
+                Err(lines.join("\n"))
+            };
+        }
         let members = self.members(&channel).await?;
         let names = self
             .names(members.iter().map(|(pubkey, _)| pubkey.clone()).collect())
@@ -683,11 +866,306 @@ impl Tools {
         Ok(vec![vec!["e".into(), root, String::new(), "reply".into()]])
     }
 
-    /// The channel's members and their roles.
+    /// The channel's members and their roles, read once per call.
     async fn members(&self, channel: &str) -> Result<Vec<(String, String)>, String> {
         if let Some(members) = self.members.lock().await.get(channel) {
             return Ok(members.clone());
         }
+        let members = self.roster(channel).await?;
+        self.members
+            .lock()
+            .await
+            .insert(channel.into(), members.clone());
+        Ok(members)
+    }
+
+    /// The channel's metadata now, if the agent can see it.
+    async fn metadata(&self, channel: &str) -> Result<Option<BuzzEvent>, String> {
+        Ok(self
+            .query(vec![
+                json!({ "kinds": [39000], "#d": [channel], "limit": 1 }),
+            ])
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn details(&self, channel: &str) -> ToolResult {
+        let metadata = self
+            .metadata(channel)
+            .await?
+            .ok_or_else(|| format!("No channel {channel} that you can see."))?;
+        let me = self.client.pubkey();
+        let role = self
+            .roster(channel)
+            .await?
+            .into_iter()
+            .find(|(pubkey, _)| *pubkey == me)
+            .map(|(_, role)| role);
+        let mut flags = vec![tag(&metadata, "t").unwrap_or_default()];
+        flags.push(
+            if has(&metadata, "private") {
+                "private"
+            } else {
+                "open"
+            }
+            .into(),
+        );
+        if has(&metadata, "archived") {
+            flags.push("archived".into());
+        }
+        if let Some(ttl) = tag(&metadata, "ttl").filter(|ttl| !ttl.is_empty()) {
+            flags.push(format!("archives after {ttl}s idle"));
+        }
+        flags.retain(|flag| !flag.is_empty());
+        let mut lines = vec![format!(
+            "{channel} {} ({})",
+            tag(&metadata, "name").unwrap_or_default(),
+            flags.join(", ")
+        )];
+        for key in ["about", "topic", "purpose"] {
+            if let Some(value) = tag(&metadata, key).filter(|value| !value.is_empty()) {
+                lines.push(format!("{key}: {value}"));
+            }
+        }
+        lines.push(format!(
+            "you: {}",
+            role.as_deref().unwrap_or("not a member")
+        ));
+        Ok(lines.join("\n"))
+    }
+
+    async fn create(&self, args: &Args) -> ToolResult {
+        let name = lifecycle::canonical_name(&required(args, "name")?);
+        let about = optional(args, "about")?.filter(|about| !about.is_empty());
+        let ttl = seconds(args.get("ttl"))?;
+        check_details(Some(&name), about.as_deref(), ttl)?;
+        let visibility = match args.get("visibility").and_then(Value::as_str) {
+            Some(visibility @ ("open" | "private")) => visibility,
+            _ => return Err("visibility must be open or private.".into()),
+        };
+        let kind = match args.get("type") {
+            None => "stream",
+            Some(Value::String(kind)) if kind == "stream" || kind == "forum" => kind.as_str(),
+            Some(_) => return Err("type must be stream or forum.".into()),
+        };
+        // Looked for first, so a wrong name creates nothing.
+        if args.contains_key("template") {
+            required(args, "template")?;
+            return Err(
+                "Channel templates are kept in Buzz Desktop and are unavailable here.".into(),
+            );
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut tags = vec![
+            vec!["h".to_string(), id.clone()],
+            vec!["name".into(), name],
+            vec!["visibility".into(), visibility.into()],
+            vec!["channel_type".into(), kind.into()],
+        ];
+        if let Some(about) = about {
+            tags.push(vec!["about".into(), about]);
+        }
+        if let Some(ttl) = ttl {
+            tags.push(vec!["ttl".into(), ttl.to_string()]);
+        }
+        self.client
+            .publish(Template {
+                kind: 9007,
+                content: String::new(),
+                tags,
+            })
+            .await?;
+        let shown = until(|| self.metadata(&id), Option::is_some).await;
+        Ok(match shown {
+            Ok(Some(_)) => format!("created {id}"),
+            Ok(None) => format!("The community accepted channel {id} but does not show it yet."),
+            Err(error) => format!(
+                "The community accepted channel {id} but {}.",
+                unread(&error)
+            ),
+        })
+    }
+
+    async fn update(&self, channel: &str, args: &Args) -> ToolResult {
+        let metadata = self
+            .metadata(channel)
+            .await?
+            .ok_or_else(|| format!("No channel {channel} that you can see."))?;
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        if args.contains_key("name") {
+            wanted.push((
+                "name".into(),
+                lifecycle::canonical_name(&required(args, "name")?),
+            ));
+        }
+        for key in ["about", "topic", "purpose"] {
+            if let Some(value) = optional(args, key)? {
+                wanted.push((key.into(), value));
+            }
+        }
+        if let Some(visibility) = args.get("visibility") {
+            match visibility.as_str() {
+                Some(visibility @ ("open" | "private")) => {
+                    wanted.push(("visibility".into(), visibility.into()))
+                }
+                _ => return Err("visibility must be open or private.".into()),
+            }
+        }
+        if args.contains_key("ttl") {
+            let ttl = seconds(args.get("ttl"))?;
+            wanted.push((
+                "ttl".into(),
+                ttl.map(|ttl| ttl.to_string()).unwrap_or_default(),
+            ));
+        }
+        if wanted.is_empty() {
+            return Err("Give name, about, visibility, ttl, topic or purpose.".into());
+        }
+        let value = |key: &str| {
+            wanted
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        check_details(
+            value("name").as_deref(),
+            value("about").as_deref(),
+            value("ttl")
+                .and_then(|ttl| ttl.parse().ok())
+                .filter(|ttl| *ttl > 0),
+        )?;
+        if buzz_relay_client::discovery::session_metadata(tag(&metadata, "about").as_deref())
+            .is_some()
+            && wanted.iter().any(|(key, _)| key != "name")
+        {
+            return Err("Only the name of a session can be changed.".into());
+        }
+        let id = lifecycle::channel_id(channel).map_err(|error| error.0)?;
+        let mut tags = vec![vec!["h".to_string(), id.to_string()]];
+        tags.extend(
+            wanted
+                .iter()
+                .map(|(key, value)| vec![key.clone(), value.clone()]),
+        );
+        self.client
+            .publish(Template {
+                kind: 9002,
+                content: String::new(),
+                tags,
+            })
+            .await?;
+        let shows = |now: &Option<BuzzEvent>| {
+            now.as_ref().is_some_and(|now| {
+                wanted.iter().all(|(key, value)| {
+                    if key == "visibility" {
+                        has(now, "private") == (value == "private")
+                    } else {
+                        tag(now, key).unwrap_or_default() == *value
+                    }
+                })
+            })
+        };
+        Ok(match until(|| self.metadata(channel), shows).await {
+            Ok(now) if shows(&now) => format!("updated {channel}"),
+            Ok(_) => "The community accepted the update but does not show it yet.".into(),
+            Err(error) => format!("The community accepted the update but {}.", unread(&error)),
+        })
+    }
+
+    /// Adds and removes members, each tried on its own, and reports each as
+    /// the roster shows it, and whether any was accepted.
+    async fn change(
+        &self,
+        channel: &str,
+        add: &[String],
+        remove: &[String],
+        role: Option<&str>,
+    ) -> (Vec<String>, bool) {
+        let mut refused: HashMap<String, String> = HashMap::new();
+        for (targets, kind) in [(add, 9000), (remove, 9001)] {
+            for key in targets {
+                let mut tags = vec![
+                    vec!["h".to_string(), channel.to_string()],
+                    vec!["p".into(), key.clone()],
+                ];
+                if let (9000, Some(role)) = (kind, role) {
+                    tags.push(vec!["role".into(), role.into()]);
+                }
+                let published = self
+                    .client
+                    .publish(Template {
+                        kind,
+                        content: String::new(),
+                        tags,
+                    })
+                    .await;
+                if let Err(error) = published {
+                    refused.insert(key.clone(), error);
+                }
+            }
+        }
+        let added = |roster: &[(String, String)], key: &str| {
+            roster
+                .iter()
+                .any(|(pubkey, held)| pubkey == key && role.is_none_or(|role| held == role))
+        };
+        let removed = |roster: &[(String, String)], key: &str| {
+            !roster.iter().any(|(pubkey, _)| pubkey == key)
+        };
+        let roster = until(
+            || self.roster(channel),
+            |now: &Vec<(String, String)>| {
+                add.iter()
+                    .all(|key| refused.contains_key(key) || added(now, key))
+                    && remove
+                        .iter()
+                        .all(|key| refused.contains_key(key) || removed(now, key))
+            },
+        )
+        .await;
+        let names = self
+            .names(add.iter().chain(remove).cloned().collect())
+            .await
+            .unwrap_or_default();
+        let who = |key: &str| match names.get(key) {
+            Some(name) => format!("{key} {name}"),
+            None => key.to_string(),
+        };
+        let report = |key: &str, verb: &str, done: &Shown<'_>| {
+            if let Some(reason) = refused.get(key) {
+                return format!("not {verb} {}: {reason}", who(key));
+            }
+            match &roster {
+                Err(error) => format!(
+                    "{}: the community accepted it but {}",
+                    who(key),
+                    unread(error)
+                ),
+                Ok(now) if done(now, key) => format!(
+                    "{verb} {}{}",
+                    who(key),
+                    match role {
+                        Some(role) if verb == "added" => format!(" as {role}"),
+                        _ => String::new(),
+                    }
+                ),
+                Ok(_) => format!(
+                    "{}: the community accepted it but does not show it yet",
+                    who(key)
+                ),
+            }
+        };
+        let lines = add
+            .iter()
+            .map(|key| report(key, "added", &added))
+            .chain(remove.iter().map(|key| report(key, "removed", &removed)))
+            .collect();
+        (lines, refused.len() < add.len() + remove.len())
+    }
+
+    /// The channel's members now, uncached.
+    async fn roster(&self, channel: &str) -> Result<Vec<(String, String)>, String> {
         let list = self
             .query(vec![
                 json!({ "kinds": [39002], "#d": [channel], "limit": 1 }),
@@ -711,10 +1189,6 @@ impl Tools {
                     .collect()
             })
             .unwrap_or_default();
-        self.members
-            .lock()
-            .await
-            .insert(channel.into(), members.clone());
         Ok(members)
     }
 
@@ -1096,6 +1570,86 @@ pub(crate) fn tag(event: &BuzzEvent, name: &str) -> Option<String> {
         .iter()
         .find(|t| t.first().map(String::as_str) == Some(name))
         .and_then(|t| t.get(1).cloned())
+}
+
+fn has(event: &BuzzEvent, name: &str) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|t| t.first().map(String::as_str) == Some(name))
+}
+
+/// Loads until `done` holds, a few times, and returns the last load: the
+/// relay updates a channel's state just after answering.
+async fn until<T, F, L>(load: L, done: impl Fn(&T) -> bool) -> Result<T, String>
+where
+    L: Fn() -> F,
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    let mut value = load().await?;
+    for _ in 1..5 {
+        if done(&value) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        value = load().await?;
+    }
+    Ok(value)
+}
+
+/// A failed read after a write, as the reason the write is not confirmed.
+fn unread(error: &str) -> String {
+    format!("its state could not be read back: {error}")
+}
+
+/// A list of pubkeys or npubs, each once; any other entry is refused, not
+/// dropped.
+fn keys(args: &Args, name: &str) -> Result<Vec<String>, String> {
+    let Some(value) = args.get(name) else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .filter(|items| items.iter().all(Value::is_string))
+        .ok_or_else(|| format!("{name} must be a list of pubkeys."))?;
+    let mut keys: Vec<String> = Vec::new();
+    for item in items {
+        let key = pubkey(item.as_str().unwrap_or_default())?;
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// An optional text argument, trimmed; refused when it is not text.
+fn optional(args: &Args, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim().to_string())),
+        Some(_) => Err(format!("{key} must be text.")),
+    }
+}
+
+/// A `ttl` argument: `None` when absent or 0, which means never.
+fn seconds(value: Option<&Value>) -> Result<Option<u64>, String> {
+    match value {
+        None => Ok(None),
+        Some(value) => match value.as_u64() {
+            Some(0) => Ok(None),
+            Some(ttl) => Ok(Some(ttl)),
+            None => Err("ttl must be a whole number of seconds.".into()),
+        },
+    }
+}
+
+/// The checks Buzz makes on a channel's name, description and lifetime.
+fn check_details(name: Option<&str>, about: Option<&str>, ttl: Option<u64>) -> Result<(), String> {
+    let errors = lifecycle::draft_errors(name.unwrap_or("-"), about.unwrap_or(""), ttl);
+    match errors.name.or(errors.description).or(errors.lifetime) {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
 }
 
 fn text(value: Option<&Value>) -> Option<String> {
