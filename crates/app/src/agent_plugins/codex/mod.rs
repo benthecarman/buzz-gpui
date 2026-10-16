@@ -7,10 +7,12 @@
 //! Buzz tools as dynamic tools. Compiled in: there is no plugin loading.
 
 pub mod config;
+pub mod defaults;
 pub mod history;
 #[cfg(test)]
 mod live;
 pub mod prompt;
+pub mod provider;
 pub mod rpc;
 pub mod runtime;
 pub mod tabs;
@@ -21,10 +23,11 @@ use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, MigrationSetting, Models, Status, Trigger,
     TypeDefaults, register_type,
 };
-use crate::hosts::HostConnection;
+use crate::hosts::{HostConnection, Hosts};
 use crate::runtime::Runtime;
 use config::Config;
 use gpui_kit::*;
+use provider::CodexProvider;
 use runtime::{CodexRuntime, Run, Wake};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +45,9 @@ const HANDOVER: Duration = Duration::from_secs(2 * 60);
 /// The runtime, kept for the app's lifetime.
 pub struct Codex {
     runtime: CodexRuntime,
+    /// Codex on this computer, for the Agents page's provider settings,
+    /// and the device-wide defaults agents inherit.
+    provider: Entity<CodexProvider>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,8 +80,16 @@ pub fn init(cx: &mut App) {
             let _runtime = Runtime::handle(cx).enter();
             this.runtime.dispose_and_wait()
         }));
+        let spawn = cx.try_global::<Hosts>().and_then(|hosts| {
+            hosts
+                .hosts
+                .iter()
+                .find(|host| host.read(cx).remote.is_none())
+                .map(|host| host.read(cx).spawner(PROCESS_OWNER))
+        });
         let mut this = Codex {
             runtime: CodexRuntime::new(None),
+            provider: cx.new(|_| CodexProvider::new(spawn)),
             _subscriptions: subscriptions,
         };
         this.sync(cx);
@@ -184,6 +198,24 @@ impl AgentType for CodexType {
 
     fn create_instructions(&self) -> bool {
         true
+    }
+
+    fn create_models(&self, cx: &mut App) -> Option<crate::agents2::CreateModels> {
+        let provider = Codex::global(cx)?.read(cx).provider.clone();
+        provider.update(cx, |provider, cx| provider.ensure_checked(cx));
+        Some(provider.read(cx).create_models())
+    }
+
+    fn with_model(&self, config: serde_json::Value, model: &str, cx: &App) -> serde_json::Value {
+        match Codex::global(cx) {
+            Some(state) => state.read(cx).provider.read(cx).with_model(config, model),
+            None => config,
+        }
+    }
+
+    fn provider(&self, cx: &App) -> Option<std::rc::Rc<dyn crate::agents2::AgentProvider>> {
+        let provider = Codex::global(cx)?.read(cx).provider.clone();
+        Some(std::rc::Rc::new(provider::Provider(provider)))
     }
 
     fn adopts(&self) -> bool {
@@ -326,11 +358,14 @@ impl AgentType for CodexType {
             },
             Trigger::Timer { .. } => Wake::Timer,
         };
+        // Blank choices inherit the device defaults.
+        let config = state.read(cx).provider.read(cx).resolve(&delivery.config);
         let run = Run {
             wake,
             channel: delivery.channel,
             agent: Arc::new(delivery.agent),
-            config: delivery.config,
+            config,
+
             spawn,
             model: delivery.model,
             effort: delivery.effort,

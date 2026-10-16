@@ -590,26 +590,6 @@ pub fn model_choices(models: &[Model]) -> Vec<ModelChoice> {
         .collect()
 }
 
-/// The picker's default row: Codex's default, named once the catalog says
-/// which model that is.
-pub fn default_model_label(models: Option<&[Model]>) -> String {
-    let native = models
-        .unwrap_or_default()
-        .iter()
-        .find(|model| model.is_default)
-        .map(|model| {
-            if model.display_name.is_empty() {
-                model.model.clone()
-            } else {
-                model.display_name.clone()
-            }
-        });
-    match native {
-        Some(name) => format!("Codex default ({name})"),
-        None => "Codex default".into(),
-    }
-}
-
 /// The Thinking select for the selected model: Codex's default, named
 /// after the model's default effort, a saved effort it no longer offers,
 /// then every effort it offers.
@@ -819,8 +799,12 @@ impl Render for SettingsTab {
             .and_then(|models| selected_model(&self.draft, models))
             .cloned();
         let choices = model_choices(models.as_deref().unwrap_or_default());
-        let default_label = default_model_label(models.as_deref());
-        let effort_choices = effort_options(&self.draft, selected.as_ref());
+        // The default rows follow the device defaults (`providerDefaultLabel`).
+        let default_label = super::provider::default_model_label(cx);
+        let mut effort_choices = effort_options(&self.draft, selected.as_ref());
+        if let Some((_, label)) = effort_choices.first_mut() {
+            *label = super::provider::default_effort_label_for(&self.draft.model, cx);
+        }
         let scope = if self.draft.scope == "channel" {
             "channel"
         } else {

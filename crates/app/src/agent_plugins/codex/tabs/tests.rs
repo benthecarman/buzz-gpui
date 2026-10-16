@@ -47,11 +47,11 @@ fn offers_codex_models_and_the_selected_models_thinking() {
         Some("Fast")
     );
     assert_eq!(
-        default_model_label(Some(&models)),
+        super::super::defaults::native_label(Some(&models)),
         "Codex default (Model A)"
     );
     // Before the catalog loads, the default has no name.
-    assert_eq!(default_model_label(None), "Codex default");
+    assert_eq!(super::super::defaults::native_label(None), "Codex default");
     let selected = selected_model(&draft, &models);
     assert_eq!(selected.map(|model| model.model.as_str()), Some("model-a"));
     assert_eq!(
