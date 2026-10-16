@@ -160,15 +160,7 @@ pub enum Purpose {
     AppData,
     /// Presence over the live socket.
     Presence,
-    /// NIP-AP community catalog heads (kinds 30175 and 30178): the owner's
-    /// public agent and team definitions. Only the owner-to-self envelope
-    /// buzz-app's signer admits is signed, and secrets are refused.
-    Catalog,
 }
-
-/// Largest catalog event (`MAX_EVENT_BYTES` in `catalog-envelope.ts`):
-/// catalog content may be up to 64 KiB of JSON.
-pub const MAX_CATALOG_EVENT_BYTES: usize = buzz_desktop::relay::catalog::MAX_EVENT_BYTES;
 
 /// Kinds the app writes as ordinary content.
 const CONTENT_KINDS: &[u16] = &[
@@ -227,9 +219,6 @@ impl Identity {
         content: String,
     ) -> Result<UnsignedEvent, IdentityError> {
         check_kind(purpose, kind)?;
-        if purpose == Purpose::Catalog {
-            check_catalog(kind, created_at, &tags, &content)?;
-        }
         let tags = tags
             .into_iter()
             .map(|tag| Tag::parse(tag).map_err(|error| IdentityError::Signing(error.to_string())))
@@ -242,11 +231,7 @@ impl Identity {
             content,
         );
         unsigned.ensure_id();
-        let limit = match purpose {
-            Purpose::Catalog => MAX_CATALOG_EVENT_BYTES,
-            _ => MAX_EVENT_BYTES,
-        };
-        if unsigned.as_json().len() > limit {
+        if unsigned.as_json().len() > MAX_EVENT_BYTES {
             return Err(IdentityError::TooLarge);
         }
         Ok(unsigned)
@@ -255,19 +240,6 @@ impl Identity {
     /// Signs an event built by [`Self::template`], keeping its ID.
     pub fn sign(&self, purpose: Purpose, unsigned: UnsignedEvent) -> Result<Event, IdentityError> {
         check_kind(purpose, unsigned.kind.as_u16())?;
-        if purpose == Purpose::Catalog {
-            let tags: Vec<Vec<String>> = unsigned
-                .tags
-                .iter()
-                .map(|tag| tag.as_slice().to_vec())
-                .collect();
-            check_catalog(
-                unsigned.kind.as_u16(),
-                unsigned.created_at.as_secs(),
-                &tags,
-                &unsigned.content,
-            )?;
-        }
         if unsigned.pubkey != self.keys.public_key() {
             return Err(IdentityError::NotAllowed);
         }
@@ -597,31 +569,12 @@ fn check_kind(purpose: Purpose, kind: u16) -> Result<(), IdentityError> {
         Purpose::Content => CONTENT_KINDS.contains(&kind),
         Purpose::AppData => kind == 30078,
         Purpose::Presence => kind == 20001,
-        Purpose::Catalog => buzz_desktop::relay::catalog::is_catalog(kind),
     };
     if allowed {
         Ok(())
     } else {
         Err(IdentityError::NotAllowed)
     }
-}
-
-/// buzz-app's signer admission for catalog envelopes. The rules do not
-/// depend on the community, so any HTTPS origin selects them.
-fn check_catalog(
-    kind: u16,
-    created_at: u64,
-    tags: &[Vec<String>],
-    content: &str,
-) -> Result<(), IdentityError> {
-    let template = buzz_desktop::EventTemplate {
-        created_at,
-        kind,
-        tags: tags.to_vec(),
-        content: content.to_owned(),
-    };
-    buzz_desktop::relay::events::validate_event("https://catalog.invalid", &template)
-        .map_err(|_| IdentityError::NotAllowed)
 }
 
 /// A canonical Buzz Git repository URL, `https://<host>/git/<owner>/<name>`
@@ -763,55 +716,6 @@ mod tests {
                 "{purpose:?} {kind}"
             );
         }
-    }
-
-    #[test]
-    fn catalog_envelopes_are_purpose_bound() {
-        let identity = Identity::ephemeral();
-        let tags = |d: &str| {
-            vec![
-                vec!["d".to_string(), d.to_string()],
-                vec!["shared".to_string(), "true".to_string()],
-            ]
-        };
-        let agent = r#"{"display_name":"Scout","system_prompt":"Find"}"#.to_string();
-        let unsigned = identity
-            .template(Purpose::Catalog, 30175, 1, tags("scout"), agent.clone())
-            .unwrap();
-        identity.sign(Purpose::Catalog, unsigned).unwrap();
-        // Content purposes never sign catalog kinds.
-        assert_eq!(
-            identity
-                .template(Purpose::Content, 30175, 1, tags("scout"), agent.clone())
-                .unwrap_err(),
-            IdentityError::NotAllowed
-        );
-        for (kind, tags, content) in [
-            // A bad slug, environment secrets, a team without members.
-            (30175, tags("Scout"), agent.clone()),
-            (
-                30175,
-                tags("scout"),
-                r#"{"display_name":"S","env_vars":{}}"#.to_string(),
-            ),
-            (30178, tags("crew"), r#"{"name":"Crew"}"#.to_string()),
-            (9, tags("scout"), agent.clone()),
-        ] {
-            assert_eq!(
-                identity
-                    .template(Purpose::Catalog, kind, 1, tags, content)
-                    .unwrap_err(),
-                IdentityError::NotAllowed
-            );
-        }
-        // Catalog content may exceed the ordinary event bound.
-        let large = format!(
-            r#"{{"display_name":"Scout","system_prompt":"{}"}}"#,
-            "a".repeat(60_000)
-        );
-        identity
-            .template(Purpose::Catalog, 30175, 1, tags("scout"), large)
-            .unwrap();
     }
 
     #[test]

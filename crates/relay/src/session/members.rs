@@ -438,7 +438,6 @@ impl Ops {
                     .send(
                         draft,
                         SendOptions {
-                            supersedes: None,
                             recovery: Some(recovery),
                             gate: None,
                         },

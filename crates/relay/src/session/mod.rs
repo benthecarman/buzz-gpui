@@ -18,7 +18,6 @@ mod actions;
 mod activity;
 mod admins;
 mod canvas;
-mod catalog;
 mod channels;
 mod delivery;
 mod disk;
@@ -50,7 +49,6 @@ mod work_sessions;
 mod workflows;
 
 pub use actions::{DmVisibilityStatus, MessageSearch, PeoplePage, PublicChannels, SearchOutcome};
-pub use catalog::CommunityCatalog;
 pub use feedback::{FeedbackState, PendingFeedback};
 pub use inbox::{EXPIRED as INBOX_EXPIRED, InboxFeed, InboxFeedStatus, InboxState};
 pub use incoming::IncomingMessage;

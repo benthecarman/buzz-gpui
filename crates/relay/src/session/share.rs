@@ -755,7 +755,6 @@ impl Session {
                     .send(
                         draft,
                         SendOptions {
-                            supersedes: None,
                             recovery: Some(recovery),
                             gate: None,
                         },

@@ -202,8 +202,6 @@ pub fn is_workflow_operation(event: &UnsignedEvent) -> bool {
 fn purpose(kind: u16) -> Purpose {
     if kind == kinds::APP_DATA {
         Purpose::AppData
-    } else if crate::catalog::is_catalog_kind(kind) {
-        Purpose::Catalog
     } else {
         Purpose::Content
     }
@@ -491,9 +489,6 @@ impl Default for OutboxOptions {
 #[derive(Clone, Default)]
 pub struct SendOptions {
     pub recovery: Option<Recovery>,
-    /// A catalog head's `created_at` this replacement must outrank
-    /// (NIP-AP `supersedes`).
-    pub supersedes: Option<u64>,
     /// Makes the operation guarded: checked now, before signing and at
     /// publisher entry, and required again for any retry.
     pub gate: Option<Gate>,
@@ -804,13 +799,7 @@ impl Outbox {
                 return Err(OutboxError::Refused(RECOVER_FIRST.into()));
             }
         }
-        // NIP-AP admits larger public definitions than ordinary input.
-        let too_large = if crate::catalog::is_catalog_kind(draft.kind) {
-            draft.content.len() > crate::catalog::MAX_CONTENT_BYTES
-                || input_bytes(&draft) > crate::catalog::MAX_EVENT_BYTES
-        } else {
-            input_bytes(&draft) > MAX_INPUT_BYTES
-        };
+        let too_large = input_bytes(&draft) > MAX_INPUT_BYTES;
         if (draft.kind == kinds::CHAT && draft.content.trim().is_empty()) || too_large {
             return Err(OutboxError::Refused("Message is empty or too large".into()));
         }
@@ -861,30 +850,6 @@ impl Outbox {
             if created_at > ms / 1000 + MAX_EDIT_LEAD_SECS {
                 return Err(OutboxError::Refused(
                     "Edits are arriving too quickly or your clock changed. Wait a moment and try again."
-                        .into(),
-                ));
-            }
-        }
-        if crate::catalog::is_catalog_kind(draft.kind) {
-            // NIP-AP: max(now, head + 1) over the observed relay head and
-            // this device's retained writes, so a replacement never loses
-            // or ties.
-            if let Some(head) = options.supersedes {
-                created_at = created_at.max(head + 1);
-            }
-            if let Some(d) = tag("d") {
-                for op in state.visible() {
-                    if op.kind() == draft.kind
-                        && op.event.pubkey == inner.viewer
-                        && op.has_tag("d", &d)
-                    {
-                        created_at = created_at.max(op.created_at() + 1);
-                    }
-                }
-            }
-            if created_at > ms / 1000 + MAX_EDIT_LEAD_SECS {
-                return Err(OutboxError::Refused(
-                    "Sharing is changing too quickly or your clock changed. Wait a moment and try again."
                         .into(),
                 ));
             }

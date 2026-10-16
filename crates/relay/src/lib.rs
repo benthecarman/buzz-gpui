@@ -5,7 +5,6 @@ pub mod archive;
 pub mod audience;
 pub mod budget;
 pub mod canvas;
-pub mod catalog;
 pub mod channel_labels;
 pub mod community;
 pub mod community_icon;
