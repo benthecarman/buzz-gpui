@@ -8,6 +8,7 @@
 //! here they are a JSON file of the same shape in the data directory.
 
 use crate::agents2::store::Storage;
+use crate::agents2::teams::Team;
 use buzz_relay_client::kit::CANVAS_BYTES;
 use gpui_kit::{App, AppContext, Context, Entity, Global};
 use serde::Serialize;
@@ -125,6 +126,27 @@ fn saved_with(
         None => next.push(template.clone()),
     }
     Ok((template, next))
+}
+
+/// The agents a template adds: its own agents and each member of its
+/// teams, once, that is one of the owner's agents in this community
+/// (`is_agent`).
+pub fn template_agents(
+    template: &ChannelTemplate,
+    teams: &[Team],
+    is_agent: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let members = template.teams.iter().flat_map(|id| {
+        teams
+            .iter()
+            .find(|team| &team.id == id)
+            .map(|team| team.members.clone())
+            .unwrap_or_default()
+    });
+    unique(template.agents.iter().cloned().chain(members).collect())
+        .into_iter()
+        .filter(|pubkey| is_agent(pubkey))
+        .collect()
 }
 
 /// A JSON file, replaced atomically.
@@ -337,5 +359,28 @@ mod tests {
         assert!(parse(Some(r#"{"version":2,"templates":[]}"#)).is_empty());
         assert!(parse(Some("not json")).is_empty());
         assert!(parse(None).is_empty());
+    }
+
+    #[test]
+    fn adds_its_agents_and_each_team_member_once_if_one_of_the_owners() {
+        let team = |id: &str, members: &[&str]| Team {
+            id: id.into(),
+            name: id.into(),
+            instructions: String::new(),
+            members: strings(members),
+        };
+        let teams = [team("t1", &["a", "b"]), team("t2", &["b", "c"])];
+        let template = ChannelTemplate {
+            id: "x".into(),
+            name: "X".into(),
+            teams: strings(&["t2", "t1", "gone"]),
+            agents: strings(&["elsewhere", "d", "a"]),
+            canvas: String::new(),
+        };
+        let mine = ["a", "b", "d"];
+        assert_eq!(
+            template_agents(&template, &teams, |pubkey| mine.contains(&pubkey)),
+            ["d", "a", "b"]
+        );
     }
 }

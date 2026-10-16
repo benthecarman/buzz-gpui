@@ -1,11 +1,16 @@
 //! "Create a channel" (`CreateChannelDialog.tsx`): name, description,
-//! duration and privacy, with the privacy confirmation and "Discard
+//! template, duration and privacy, with the privacy confirmation and "Discard
 //! changes?" as steps of the same dialog. The relay creates the channel
 //! with an id chosen here; it opens once the viewer is confirmed as its
 //! owner.
 
 use super::form_fields::{self, Bounded, TextKind};
 use super::modal::{Dismissed, OpenChannel, error};
+use super::overlay::{self, Align, Dismiss};
+use super::settings::form;
+use crate::agents2::Agents2;
+use crate::agents2::teams::Team;
+use crate::channel_templates::{ChannelTemplate, ChannelTemplates, template_agents};
 use crate::community::AppState;
 use crate::community::Community;
 use crate::ui::toasts;
@@ -14,7 +19,10 @@ use buzz_relay_client::lifecycle::{
     DEFAULT_TEMPORARY_TTL, DraftErrors, NewChannel, canonical_name, draft_errors,
 };
 use buzz_relay_client::sidebar_store::PreferencesStatus;
-use buzz_ui::{ActiveTheme, Button, Dialog, Surface, Switch, ToastTone, TypeStyled, tokens::space};
+use buzz_ui::{
+    ActiveTheme, Button, Dialog, Menu, MenuItem, Select, Surface, Switch, ToastTone, TypeStyled,
+    tokens::space,
+};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -39,10 +47,83 @@ pub struct NewChannelDialog {
     group: Option<String>,
     /// A creation awaiting "Retry channel"; the form shows it frozen.
     pending: Option<ChannelCreationInput>,
+    /// The chosen channel template's id; empty for none.
+    template: String,
+    template_menu: bool,
     /// Holds focus on the privacy and discard steps, so Escape steps back.
     step_focus: FocusHandle,
     _bounds: [Bounded; 2],
     _subscriptions: Vec<Subscription>,
+}
+
+/// What a chosen template sends as channel setup.
+struct TemplateSetup {
+    id: String,
+    /// The owner's agents here among its agents and its teams' members.
+    agents: Vec<String>,
+    names: Vec<String>,
+    canvas: String,
+}
+
+impl TemplateSetup {
+    /// `mine` names the owner's agents in this community.
+    fn new(template: ChannelTemplate, mine: &[(String, String)], teams: &[Team]) -> Self {
+        let name = |pubkey: &str| {
+            mine.iter()
+                .find(|(key, _)| key == pubkey)
+                .map(|(_, name)| name.clone())
+        };
+        let agents = template_agents(&template, teams, |pubkey| name(pubkey).is_some());
+        Self {
+            id: template.id,
+            names: agents.iter().filter_map(|pubkey| name(pubkey)).collect(),
+            agents,
+            canvas: template.canvas,
+        }
+    }
+}
+
+/// The setup a new channel sends: its sidebar group and what its template
+/// adds. A template that would add nothing makes a plain channel.
+fn channel_setup(group_id: String, template: Option<TemplateSetup>) -> Option<ChannelSetup> {
+    let setup = match template {
+        Some(template) => ChannelSetup {
+            agents: template.agents,
+            canvas: template.canvas,
+            group_id,
+            template_id: template.id,
+        },
+        None => ChannelSetup {
+            group_id,
+            ..Default::default()
+        },
+    };
+    (!setup.group_id.is_empty() || !setup.agents.is_empty() || !setup.canvas.is_empty())
+        .then_some(setup)
+}
+
+/// The line under the Template select: what the template adds here.
+fn template_note(names: &[String], canvas: &str) -> String {
+    let parts: Vec<String> = [
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!("Adds {}", names.join(", "))
+        },
+        if canvas.trim().is_empty() {
+            String::new()
+        } else {
+            "Starts the Canvas".into()
+        },
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect();
+    if parts.is_empty() {
+        "None of its agents are in this community, and it has no Canvas.".into()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 impl EventEmitter<Dismissed> for NewChannelDialog {}
@@ -61,6 +142,8 @@ struct Draft {
     description: String,
     private: bool,
     temporary: bool,
+    /// The chosen template, while it still exists.
+    template: String,
 }
 
 impl Draft {
@@ -70,7 +153,11 @@ impl Draft {
 
     /// Anything typed or chosen asks before it is thrown away.
     fn dirty(&self) -> bool {
-        !self.name.is_empty() || !self.description.is_empty() || self.private || self.temporary
+        !self.name.is_empty()
+            || !self.description.is_empty()
+            || self.private
+            || self.temporary
+            || !self.template.is_empty()
     }
 }
 
@@ -92,7 +179,7 @@ impl NewChannelDialog {
             Bounded::new(&name, TextKind::Name.limit(), window, cx),
             Bounded::new(&description, TextKind::Description.limit(), window, cx),
         ];
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe_in(
                 &name,
                 window,
@@ -112,6 +199,13 @@ impl NewChannelDialog {
                 }
             }),
         ];
+        // The template choices and what they add follow both stores.
+        if let Some(templates) = ChannelTemplates::global(cx) {
+            subscriptions.push(cx.observe(&templates, |_, _, cx| cx.notify()));
+        }
+        if let Some(agents) = Agents2::global(cx) {
+            subscriptions.push(cx.observe(&agents, |_, _, cx| cx.notify()));
+        }
         let group = cx
             .try_global::<CreateIn>()
             .and_then(|create| create.0.clone());
@@ -127,6 +221,8 @@ impl NewChannelDialog {
         Self {
             group,
             pending: None,
+            template: String::new(),
+            template_menu: false,
             community,
             name,
             description,
@@ -172,7 +268,107 @@ impl NewChannelDialog {
             description: self.description.read(cx).value().to_string(),
             private: self.private,
             temporary: self.temporary,
+            template: self
+                .template_setup(cx)
+                .map(|setup| setup.id)
+                .unwrap_or_default(),
         }
+    }
+
+    /// The chosen template's setup. A template deleted meanwhile is no
+    /// choice, and a team deleted since adds nobody.
+    fn template_setup(&self, cx: &App) -> Option<TemplateSetup> {
+        let templates = ChannelTemplates::global(cx)?;
+        let template = templates
+            .read(cx)
+            .templates()
+            .iter()
+            .find(|item| item.id == self.template)?
+            .clone();
+        let agents2 = Agents2::global(cx);
+        let agents2 = agents2.as_ref().map(|agents| agents.read(cx));
+        let mine: Vec<(String, String)> = agents2
+            .map(|agents| agents.agents())
+            .unwrap_or_default()
+            .iter()
+            .map(|agent| (agent.pubkey.clone(), agent.name.clone()))
+            .collect();
+        let teams = agents2.map(|agents| agents.teams()).unwrap_or_default();
+        Some(TemplateSetup::new(template, &mine, teams))
+    }
+
+    fn set_template(&mut self, id: String, cx: &mut Context<Self>) {
+        self.template_menu = false;
+        if self.editing() {
+            self.template = id;
+            self.error = None;
+        }
+        cx.notify();
+    }
+
+    /// The Template select, when any template exists and the form is not
+    /// a frozen retry.
+    fn template_field(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+        let templates = ChannelTemplates::global(cx)?.read(cx).templates().to_vec();
+        if templates.is_empty() || self.pending.is_some() {
+            return None;
+        }
+        let setup = self.template_setup(cx);
+        let chosen = setup
+            .as_ref()
+            .map(|setup| setup.id.clone())
+            .unwrap_or_default();
+        let value = templates
+            .iter()
+            .find(|item| item.id == chosen)
+            .map(|item| SharedString::from(item.name.clone()))
+            .unwrap_or_else(|| "None".into());
+        let mut select = div().relative().w_full().child(
+            Select::new("create-channel-template")
+                .value(value)
+                .open(self.template_menu)
+                .surface(Surface::Floating)
+                .disabled(!self.editing())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.template_menu = !this.template_menu && this.editing();
+                    cx.notify();
+                })),
+        );
+        if self.template_menu {
+            let options = std::iter::once((String::new(), "None".to_owned()))
+                .chain(templates.into_iter().map(|item| (item.id, item.name)))
+                .enumerate()
+                .map(|(index, (id, label))| {
+                    MenuItem::new(
+                        SharedString::from(format!("channel-template-{index}")),
+                        label,
+                    )
+                    .checked(id == chosen)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_template(id.clone(), cx)))
+                });
+            let weak = cx.entity().downgrade();
+            let dismiss: Dismiss = Rc::new(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.template_menu = false;
+                    cx.notify();
+                });
+            });
+            select = select.child(overlay::dropdown(
+                window,
+                Align::Start,
+                div().w(px(448.)).child(Menu::new().children(options)),
+                dismiss,
+            ));
+        }
+        let note = setup.map(|setup| template_note(&setup.names, &setup.canvas).into());
+        Some(form::field(
+            "Template",
+            note,
+            None,
+            select,
+            form::FieldStyle::default(),
+            cx,
+        ))
     }
 
     /// The form takes edits only on its own step and while idle.
@@ -263,7 +459,7 @@ impl NewChannelDialog {
             Some(pending) => pending.clone(),
             None => {
                 // A channel created from a sidebar group goes into it.
-                let setup = match &self.group {
+                let group_id = match &self.group {
                     Some(group) => {
                         let sidebar = self.community.read(cx).snapshot.sidebar.clone();
                         let ready = sidebar.status == PreferencesStatus::Ready;
@@ -283,13 +479,11 @@ impl NewChannelDialog {
                             cx.notify();
                             return;
                         }
-                        Some(ChannelSetup {
-                            group_id: group.clone(),
-                            ..Default::default()
-                        })
+                        group.clone()
                     }
-                    None => None,
+                    None => String::new(),
                 };
+                let setup = channel_setup(group_id, self.template_setup(cx));
                 let channel = NewChannel {
                     name: canonical_name(&draft.name),
                     description: draft.description.trim().to_owned(),
@@ -348,7 +542,7 @@ impl NewChannelDialog {
         cx.notify();
     }
 
-    fn dialog(&self, cx: &mut Context<Self>) -> Dialog {
+    fn dialog(&self, window: &Window, cx: &mut Context<Self>) -> Dialog {
         let close = cx.listener(|this, _: &ClickEvent, window, cx| this.request_close(window, cx));
         if self.confirm_discard {
             return Dialog::new("create-channel", "Discard changes?")
@@ -458,6 +652,7 @@ impl NewChannelDialog {
                         pending,
                         cx,
                     ))
+                    .children(self.template_field(window, cx))
                     .child(form_fields::duration_field(
                         self.temporary,
                         self.temporary_ttl,
@@ -519,7 +714,7 @@ impl Render for NewChannelDialog {
                             this.request_close(window, cx);
                         }
                     }))
-                    .child(self.dialog(cx)),
+                    .child(self.dialog(window, cx)),
             )
     }
 }
@@ -654,8 +849,86 @@ mod tests {
                 temporary: true,
                 ..Draft::default()
             },
+            Draft {
+                template: "t".into(),
+                ..Draft::default()
+            },
         ] {
             assert!(draft.dirty());
         }
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn a_template_adds_its_agents_and_teams_agents_here_and_its_canvas() {
+        let (ada, bo, elsewhere) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        // Agents in this community; `elsewhere` is in another one.
+        let mine = [(ada.clone(), "Ada".into()), (bo.clone(), "Bo".into())];
+        let team = |id: &str, members: &[&str]| Team {
+            id: id.into(),
+            name: id.into(),
+            instructions: String::new(),
+            members: strings(members),
+        };
+        let teams = [team("t1", &[&ada, &elsewhere]), team("t2", &[&bo, &ada])];
+        let template = ChannelTemplate {
+            id: "launch".into(),
+            name: "Launch".into(),
+            teams: strings(&["t1", "t2", "gone"]),
+            agents: vec![elsewhere.clone(), bo.clone()],
+            canvas: "# Goal".into(),
+        };
+        let setup = TemplateSetup::new(template, &mine, &teams);
+        assert_eq!(
+            template_note(&setup.names, &setup.canvas),
+            "Adds Bo, Ada · Starts the Canvas"
+        );
+        assert_eq!(
+            channel_setup(String::new(), Some(setup)),
+            Some(ChannelSetup {
+                agents: vec![bo, ada],
+                canvas: "# Goal".into(),
+                group_id: String::new(),
+                template_id: "launch".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_template_that_adds_nothing_here_makes_a_plain_channel() {
+        let template = ChannelTemplate {
+            id: "empty".into(),
+            name: "Empty".into(),
+            teams: strings(&["gone"]),
+            agents: Vec::new(),
+            canvas: String::new(),
+        };
+        let setup = TemplateSetup::new(template, &[], &[]);
+        assert_eq!(
+            template_note(&setup.names, &setup.canvas),
+            "None of its agents are in this community, and it has no Canvas."
+        );
+        assert_eq!(channel_setup(String::new(), Some(setup)), None);
+        assert_eq!(channel_setup(String::new(), None), None);
+        // A sidebar group still sends setup, naming the template.
+        let template = ChannelTemplate {
+            id: "empty".into(),
+            name: "Empty".into(),
+            teams: Vec::new(),
+            agents: Vec::new(),
+            canvas: String::new(),
+        };
+        let setup = TemplateSetup::new(template, &[], &[]);
+        assert_eq!(
+            channel_setup("g".into(), Some(setup)),
+            Some(ChannelSetup {
+                group_id: "g".into(),
+                template_id: "empty".into(),
+                ..Default::default()
+            })
+        );
     }
 }
