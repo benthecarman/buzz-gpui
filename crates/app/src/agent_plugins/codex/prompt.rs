@@ -27,11 +27,14 @@ pub fn quoted(value: &impl Serialize) -> String {
 pub(crate) use crate::buzz_mcp::tools::root_of;
 
 /// The Buzz guidance; with `settings`, the agent's custom instructions too.
-/// `settings` comes with the agent's team sections, empty for none.
+/// `settings` comes with the agent's team sections, empty for none, and
+/// its `core` memory goes with them: `Some(None)` when it has none, `None`
+/// when it was not read.
 pub fn developer_instructions(
     name: &str,
     pubkey: &str,
     settings: Option<(&Config, &str)>,
+    memory: Option<Option<&str>>,
 ) -> String {
     let custom = settings.map_or_else(String::new, |(settings, team)| {
         let team = if team.is_empty() {
@@ -39,8 +42,14 @@ pub fn developer_instructions(
         } else {
             format!("\n{team}")
         };
+        let core = crate::buzz_mcp::core_memory(memory);
+        let core = if core.is_empty() {
+            core
+        } else {
+            format!("\n\nCurrent core memory replaces all prior core memory.\n{core}")
+        };
         format!(
-            "Current Buzz custom instructions replace all prior Buzz custom instructions. An empty section means no custom instructions apply.\n<agent-instructions>\n{}\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team.{team}",
+            "Current Buzz custom instructions replace all prior Buzz custom instructions. An empty section means no custom instructions apply.\n<agent-instructions>\n{}\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team.{team}{core}",
             settings.instructions
         )
     });
@@ -239,7 +248,7 @@ mod tests {
         );
         // FNV-1a over the JSON key, as buzz-app hashes it.
         assert_eq!(tag, "buzz:118714305d2147cb");
-        let base = developer_instructions("Codex", "b", None);
+        let base = developer_instructions("Codex", "b", None, None);
         assert!(base.starts_with("You are Codex (pubkey b), a coding agent in Buzz."));
         assert!(!base.contains("<agent-instructions>"));
         let settings = Config {
@@ -247,13 +256,31 @@ mod tests {
             ..Config::default()
         };
         assert!(
-            developer_instructions("Codex", "b", Some((&settings, ""))).ends_with(
+            developer_instructions("Codex", "b", Some((&settings, "")), None).ends_with(
                 "<agent-instructions>\nUse a marker\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team."
             )
         );
         assert!(
-            developer_instructions("Codex", "b", Some((&settings, "<team>\nT\n</team>")))
+            developer_instructions("Codex", "b", Some((&settings, "<team>\nT\n</team>")), None)
                 .ends_with("None means you are on no team.\n<team>\nT\n</team>")
+        );
+    }
+
+    #[test]
+    fn core_memory_follows_the_custom_instructions() {
+        let settings = Config::default();
+        let with = |memory| developer_instructions("Codex", "b", Some((&settings, "")), memory);
+        assert!(with(Some(Some(" I am Codex. "))).ends_with(
+            "None means you are on no team.\n\nCurrent core memory replaces all prior core memory.\n<core-memory>\nI am Codex.\n</core-memory>"
+        ));
+        assert!(with(Some(None)).contains(
+            "Current core memory replaces all prior core memory.\n<core-memory>\nNo core memory found."
+        ));
+        assert!(!with(None).contains("<core-memory>"));
+        assert!(!with(Some(Some("  "))).contains("<core-memory>"));
+        // Without settings, as when a thread starts, nothing is added.
+        assert!(
+            !developer_instructions("Codex", "b", None, Some(Some("x"))).contains("<core-memory>")
         );
     }
 }

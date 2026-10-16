@@ -75,7 +75,7 @@ Do not discover, fetch, load, read, or use relay-backed skills unless the author
 
 ## Agent Memory
 
-Read your `core` memory with `mem_get` at the start of a session; it is not auto-injected into your context. It holds identity, durable rules, and goals across sessions. If no core memory exists, ask your user about yourself before creating one with `mem_set` and slug `core`.
+Your `core` memory is auto-injected into your context every turn. It holds identity, durable rules, and goals across sessions. If no core memory exists, ask your user about yourself before creating one with `mem_set` and slug `core`.
 
 - **Keep `core` small.** A line earns a permanent slot only if it matters across most sessions or prevents a sharp repeat mistake. Treat the 65,535-byte hard limit as a wall to stay far from, not a budget to fill — aim to keep `core` under ~10 KB (roughly your healthy baseline).
 - **Turn mistakes into durable lessons.** When a mistake exposes a repeatable mechanism, record the invariant in the same session. Keep only the load-bearing rule in `core`; put detailed evidence and procedures in cold memory with `mem_set`. If the lesson improves a shared workflow, update the team's shared guidance so others do not have to re-earn it.

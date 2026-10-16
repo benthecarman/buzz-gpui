@@ -87,16 +87,9 @@ pub fn system_prompt(
     if !team.trim().is_empty() {
         parts.push(team.trim().to_owned());
     }
-    match memory {
-        Some(None) => parts.push(section(
-            "core-memory",
-            "No core memory found. Use `mem_set` with slug `core` to create one (it will hold your identity, rules, and goals across sessions). Ask your user about yourself.",
-            "",
-        )),
-        Some(Some(memory)) if !memory.trim().is_empty() => {
-            parts.push(section("core-memory", memory, ""))
-        }
-        _ => {}
+    let core = crate::buzz_mcp::core_memory(memory);
+    if !core.is_empty() {
+        parts.push(core);
     }
     parts.join("\n\n")
 }

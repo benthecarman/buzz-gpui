@@ -1708,7 +1708,7 @@ impl CodexRuntime {
             let params = json!({
                 "model": model,
                 "cwd": workspace,
-                "developerInstructions": developer_instructions(&name, &agent, None),
+                "developerInstructions": developer_instructions(&name, &agent, None, None),
                 "approvalPolicy": "never",
                 // Matches Claude's bypassPermissions; only the owner
                 // can start work.
@@ -1790,7 +1790,7 @@ impl CodexRuntime {
                         "additionalContext": {
                             "buzz.instructions": {
                                 "kind": "application",
-                                "value": developer_instructions(&name, &agent, Some((&request.settings, &request.team))),
+                                "value": developer_instructions(&name, &agent, Some((&request.settings, &request.team)), None),
                             },
                         },
                     }),

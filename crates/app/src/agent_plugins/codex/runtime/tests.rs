@@ -569,7 +569,7 @@ async fn hands_over_promptly_and_runs_conversations_on_one_server() {
         f.starts()[1]["params"]["additionalContext"]["buzz.instructions"]["value"]
             .as_str()
             .unwrap()
-            .contains("Read your `core` memory with `mem_get` at the start of a session")
+            .contains("Your `core` memory is auto-injected into your context every turn")
     );
     assert_eq!(
         started["config"],
