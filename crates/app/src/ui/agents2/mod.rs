@@ -3,6 +3,7 @@
 
 mod attention;
 mod bring_over;
+mod browse;
 pub(crate) mod card;
 mod create;
 mod manage;
@@ -13,6 +14,7 @@ mod tabs;
 mod teams;
 
 pub use attention::AttentionPanel;
+pub(crate) use browse::model_icon;
 pub use manage::{AgentDelete, Removed};
 pub use page::Agents2Page;
 pub(crate) use page::agent_picture;
@@ -91,44 +93,6 @@ pub(crate) fn problem(error: Option<&SharedString>, c: &Colors) -> Option<Div> {
             .text_color(c.text_danger)
             .child(error.clone())
     })
-}
-
-/// The vendor's mark for a model, from its id or name (`ModelIcon`).
-pub(crate) fn model_icon(model: &str, size: f32, cx: &App) -> AnyElement {
-    let name = model.to_lowercase();
-    let words: Vec<&str> = name
-        .split(|c: char| c.is_whitespace() || "/._-".contains(c))
-        .collect();
-    let claude = ["claude", "anthropic", "opus", "sonnet", "haiku"]
-        .iter()
-        .any(|word| name.contains(word));
-    let openai = name.contains("openai")
-        || words.iter().any(|word| {
-            word.starts_with("gpt")
-                || word.starts_with("codex")
-                || ["o1", "o3", "o4"].contains(word)
-        });
-    match (claude, openai) {
-        (true, _) => buzz_ui::Brand::new(buzz_ui::BrandMark::Claude)
-            .size(size)
-            .into_any_element(),
-        (false, true) => buzz_ui::Brand::new(buzz_ui::BrandMark::Codex)
-            .size(size)
-            .into_any_element(),
-        _ => buzz_ui::Icon::new(IconName::Robot)
-            .size(size)
-            .color(cx.colors().text_standard)
-            .into_any_element(),
-    }
-}
-
-/// The Browse tab, until it is ported.
-pub(crate) fn browse_tab(cx: &App) -> AnyElement {
-    div()
-        .text_body_sm()
-        .text_color(cx.colors().text_subtle)
-        .child("Connect to a community to browse shared agents.")
-        .into_any_element()
 }
 
 /// A compact button with a leading icon.

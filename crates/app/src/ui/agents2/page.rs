@@ -13,6 +13,7 @@
 
 use super::attention::summary as attention_summary;
 use super::bring_over::{BringOver, BringOverEvent};
+use super::browse::{AgentBrowse, BrowseEvent};
 use super::card::{self, AgentCard};
 use super::create::{CreateAgent, CreateEvent, type_icon};
 use super::teams::{CloseTeams, TeamsPanel};
@@ -152,6 +153,7 @@ pub struct Agents2Page {
     grid: FocusHandle,
     create: Option<Entity<CreateAgent>>,
     import: Option<Entity<BringOver>>,
+    browse: Option<Entity<AgentBrowse>>,
     teams: Option<Entity<TeamsPanel>>,
     build: Option<Entity<Build>>,
     more_open: bool,
@@ -177,6 +179,7 @@ impl Agents2Page {
             grid: cx.focus_handle(),
             create: None,
             import: None,
+            browse: None,
             teams: None,
             build: None,
             more_open: false,
@@ -256,13 +259,29 @@ impl Agents2Page {
         cx.notify();
     }
 
-    fn set_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+    fn set_tab(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
+        if tab == TabId::Browse && self.browse.is_none() {
+            let view = cx.new(|cx| AgentBrowse::new(window, cx));
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &BrowseEvent, window, cx| match event {
+                    BrowseEvent::Imported => this.set_tab(TabId::Yours, window, cx),
+                },
+            )
+            .detach();
+            self.browse = Some(view);
+        }
         if tab == TabId::Import && self.import.is_none() {
             let view = cx.new(BringOver::new);
-            cx.subscribe(&view, |this, _, event: &BringOverEvent, cx| match event {
-                BringOverEvent::Imported => this.set_tab(TabId::Yours, cx),
-            })
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &BringOverEvent, window, cx| match event {
+                    BringOverEvent::Imported => this.set_tab(TabId::Yours, window, cx),
+                },
+            )
             .detach();
             self.import = Some(view);
         }
@@ -713,7 +732,9 @@ impl Render for Agents2Page {
                         tabs.tab(
                             Tab::new(SharedString::from(format!("agents-tab-{label}")), *label)
                                 .selected(tab == id)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(id, cx))),
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.set_tab(id, window, cx)
+                                })),
                         )
                     });
                 let content: AnyElement = match tab {
@@ -725,7 +746,11 @@ impl Render for Agents2Page {
                         .clone()
                         .map(|view| view.into_any_element())
                         .unwrap_or_else(|| div().into_any_element()),
-                    TabId::Browse => super::browse_tab(cx),
+                    TabId::Browse => self
+                        .browse
+                        .clone()
+                        .map(|view| view.into_any_element())
+                        .unwrap_or_else(|| div().into_any_element()),
                 };
                 let viewport = f32::from(window.viewport_size().height);
                 let rem = f32::from(window.rem_size());
