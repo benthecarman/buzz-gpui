@@ -898,10 +898,28 @@ fn thread_references_follow_nip10() {
 }
 
 fn levels(ids: &[&str]) -> Vec<Effort> {
-    efforts(None)
+    efforts(&ids.iter().map(|id| id.to_string()).collect::<Vec<_>>())
+}
+
+#[test]
+fn offers_the_effort_levels_claude_lists_but_max() {
+    let listed: Vec<String> = ["low", "high", "max", "xhigh", "low", "turbo"]
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    let offered: Vec<(String, String)> = efforts(&listed)
         .into_iter()
-        .filter(|level| ids.contains(&level.id.as_str()))
-        .collect()
+        .map(|effort| (effort.id, effort.label))
+        .collect();
+    assert_eq!(
+        offered,
+        [
+            ("low".to_string(), "Low".to_string()),
+            ("high".into(), "High".into()),
+            ("xhigh".into(), "Extra high".into()),
+            ("turbo".into(), "Turbo".into()),
+        ]
+    );
 }
 
 #[tokio::test]

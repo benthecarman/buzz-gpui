@@ -8,7 +8,7 @@
 //! in-process Buzz tools, signed by the agent's host-held key; the runtime
 //! only reports a turn that fails.
 
-use super::claude::{Launch, Receipt, Settled, ToolServer, TurnPick};
+use super::claude::{ClaudeModel, Launch, Receipt, Settled, ToolServer, TurnPick};
 use super::lanes::{Added, Lanes};
 use super::prompt::{
     CONTEXT_LIMIT, Channel, Scope, Thread, attention_review, steer_prompt, system_prompt,
@@ -121,22 +121,30 @@ const CHAT: [u32; 2] = [9, 40002];
 
 /// What a session can switch to between turns. Claude runs `max` as
 /// `xhigh` in a stream-json session, so it is not offered.
-const EFFORTS: [(&str, &str); 4] = [
-    ("low", "Low"),
-    ("medium", "Medium"),
-    ("high", "High"),
-    ("xhigh", "Extra high"),
-];
-
-fn efforts(supported: Option<&[String]>) -> Vec<Effort> {
-    EFFORTS
-        .iter()
-        .filter(|(id, _)| supported.is_none_or(|supported| supported.iter().any(|s| s == id)))
-        .map(|(id, label)| Effort {
-            id: (*id).into(),
-            label: (*label).into(),
-        })
-        .collect()
+/// The effort levels Claude lists, which a session can switch to between
+/// turns, each once. Claude runs `max` as `xhigh` in a stream-json session,
+/// so it is not offered.
+fn efforts<'a>(levels: impl IntoIterator<Item = &'a String>) -> Vec<Effort> {
+    let mut efforts: Vec<Effort> = Vec::new();
+    for id in levels {
+        if id == "max" || efforts.iter().any(|effort| effort.id == *id) {
+            continue;
+        }
+        let label = if id == "xhigh" {
+            "Extra high".to_string()
+        } else {
+            let mut chars = id.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        };
+        efforts.push(Effort {
+            id: id.clone(),
+            label,
+        });
+    }
+    efforts
 }
 
 /// `claude-opus-5-5` reads as `Opus 5.5`, and an alias such as `opus` as
@@ -456,14 +464,17 @@ impl ClaudeRuntime {
             .iter()
             .filter(|model| model.value != "default")
             .collect();
+        let levels = |model: &ClaudeModel| -> Vec<String> {
+            if model.supports_effort == Some(false) {
+                Vec::new()
+            } else {
+                model.supported_effort_levels.clone().unwrap_or_default()
+            }
+        };
         let models: Vec<Model> = offered
             .iter()
             .map(|model| {
-                let efforts = if model.supports_effort == Some(false) {
-                    Vec::new()
-                } else {
-                    efforts(model.supported_effort_levels.as_deref())
-                };
+                let efforts = efforts(&levels(model));
                 Model {
                     id: model.value.clone(),
                     label: model_name(model.resolved_model.as_deref().unwrap_or(&model.value)),
@@ -476,11 +487,17 @@ impl ClaudeRuntime {
             .iter()
             .find(|model| own == model.value || Some(&own) == model.resolved_model.as_ref())
             .map_or(own.clone(), |model| model.value.clone());
-        // An own model Claude does not list is still the one it runs.
         if models.iter().any(|model| model.id == current) {
             return Ok(Models { current, models });
         }
-        let all = efforts(None);
+        // An own model Claude does not list is still the one it runs, at
+        // any effort a listed model has.
+        let all = efforts(
+            &offered
+                .iter()
+                .flat_map(|model| levels(model))
+                .collect::<Vec<_>>(),
+        );
         let mut listed = vec![Model {
             id: current.clone(),
             label: if current.is_empty() {
