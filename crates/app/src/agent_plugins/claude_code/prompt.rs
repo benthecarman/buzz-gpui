@@ -3,10 +3,10 @@
 //! the same base prompt as a harness agent. The Markdown files are
 //! buzz-app's, copied unchanged.
 
+use crate::agent_plugins::harness::{base_prompt, core_memory_section};
 use crate::buzz_mcp::{BuzzEvent, TOP_LEVEL_PROMPT};
 
 const ATTENTION_PROMPT: &str = include_str!("attention_prompt.md");
-const BASE_PROMPT: &str = include_str!("base_prompt.md");
 const THREAD_MODEL: &str = include_str!("session_model_thread.md");
 const CHANNEL_MODEL: &str = include_str!("session_model_channel.md");
 
@@ -60,7 +60,7 @@ pub fn system_prompt(
         Scope::Thread => THREAD_MODEL,
         Scope::Channel => CHANNEL_MODEL,
     };
-    let mut base = vec![BASE_PROMPT, crate::buzz_mcp::BUZZ_PROMPT, model];
+    let mut base = vec![base_prompt(), crate::buzz_mcp::BUZZ_PROMPT, model];
     if attention {
         base.push(ATTENTION_PROMPT);
     }
@@ -87,7 +87,7 @@ pub fn system_prompt(
     if !team.trim().is_empty() {
         parts.push(team.trim().to_owned());
     }
-    let core = crate::buzz_mcp::core_memory(memory);
+    let core = core_memory_section(memory);
     if !core.is_empty() {
         parts.push(core);
     }

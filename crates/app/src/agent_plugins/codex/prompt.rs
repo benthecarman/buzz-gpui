@@ -1,14 +1,12 @@
 //! What Codex is told (buzz-app's `prompt.ts`): the Buzz base prompt as
 //! developer instructions, which keep Codex's own coding prompt, and each
-//! request as quoted event data. `base_prompt.md` is buzz-app's, copied
-//! unchanged.
+//! request as quoted event data.
 
 use super::config::Config;
 use crate::agent_plugins::claude_code::prompt::escaped;
+use crate::agent_plugins::harness::{base_prompt, core_memory_section};
 use crate::buzz_mcp::BuzzEvent;
 use serde::Serialize;
-
-const BASE_PROMPT: &str = include_str!("base_prompt.md");
 
 /// Where a request belongs: a channel, and the thread when each thread is
 /// its own session.
@@ -45,7 +43,7 @@ pub fn developer_instructions(
         } else {
             format!("\n{team}")
         };
-        let core = crate::buzz_mcp::core_memory(memory);
+        let core = core_memory_section(memory);
         let core = if core.is_empty() {
             core
         } else {
@@ -65,7 +63,7 @@ The buzz namespace provides the shared Buzz tools, including messages, reactions
 {buzz}
 
 {custom}",
-        base = BASE_PROMPT.trim(),
+        base = base_prompt(),
         buzz = crate::buzz_mcp::BUZZ_PROMPT.trim(),
     )
 }

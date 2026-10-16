@@ -9,27 +9,9 @@ pub mod attention;
 pub mod rpc;
 pub mod tools;
 
-/// The Buzz system prompt every agent type starts from; each appends its
-/// harness's own instructions after it (buzz-app's `prompt.md`).
+/// The Buzz tools' posting conventions, which every agent type gives its
+/// agents after the shared base prompt (buzz-app's `prompt.md`).
 pub const BUZZ_PROMPT: &str = include_str!("prompt.md");
-
-/// The agent's `core` memory as the section the prompt above promises
-/// (buzz-app's `coreMemory`): its text, a prompt to create one when it
-/// has none (`Some(None)`), or nothing when it is unread (`None`) or blank.
-pub fn core_memory(memory: Option<Option<&str>>) -> String {
-    let body = match memory {
-        Some(None) => {
-            "No core memory found. Use `mem_set` with slug `core` to create one (it will hold your identity, rules, and goals across sessions). Ask your user about yourself."
-        }
-        Some(Some(memory)) => memory.trim(),
-        None => "",
-    };
-    if body.is_empty() {
-        String::new()
-    } else {
-        format!("<core-memory>\n{body}\n</core-memory>")
-    }
-}
 
 /// The turn instruction for a conversation whose messages stay at the
 /// channel's top level; the tools refuse a reply into a thread there.
@@ -119,22 +101,4 @@ pub struct Context {
     pub channel: Option<String>,
     pub root: Option<String>,
     pub top_level: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn core_memory_is_a_section_only_when_known() {
-        assert_eq!(
-            core_memory(Some(Some("\n I am Ada.\n"))),
-            "<core-memory>\nI am Ada.\n</core-memory>"
-        );
-        assert!(core_memory(Some(None)).starts_with("<core-memory>\nNo core memory found."));
-        assert_eq!(core_memory(Some(Some(" \n"))), "");
-        assert_eq!(core_memory(None), "");
-        // The shared contract promises it to every agent type.
-        assert!(BUZZ_PROMPT.contains("Your `core` memory is auto-injected"));
-    }
 }

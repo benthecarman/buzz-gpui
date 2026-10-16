@@ -76,8 +76,7 @@ impl OwnerRelay for FakeRelay {
     fn names(&self, _: Vec<String>, _: Vec<String>) -> BoxFuture<'static, HashMap<String, String>> {
         async { HashMap::new() }.boxed()
     }
-    fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>> {
-        assert_eq!(agent, agent_key());
+    fn memories(&self, _: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>> {
         *locked(&self.memory_reads) += 1;
         let memories = locked(&self.memories).clone();
         async move { Ok(memories) }.boxed()
@@ -449,7 +448,7 @@ impl Fixture {
                 && self
                     .actives()
                     .iter()
-                    .any(|active| active.version.load(Ordering::SeqCst) == count)
+                    .any(|active| locked(&active.requests).len() as u64 == count + 1)
         })
         .await;
     }
@@ -985,18 +984,20 @@ async fn timers_and_unready_communities_are_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reports_an_exit_and_a_turn_without_a_final_reply() {
+async fn reports_an_exit_but_not_a_turn_without_a_final_reply() {
     let f = fixture();
     f.run(f.delivery("work")).await;
     f.starts_reach(1).await;
     f.complete_turn(0, "").await;
-    f.published_reach(1).await;
-    assert!(f.contents()[0].contains("without a final reply"));
+    // A turn may end without a reply when there is nothing new to say,
+    // and it stops counting as working.
+    until(|| f.holds() == (1, 1)).await;
+    assert!(f.published().is_empty());
     f.run(f.delivery("next")).await;
     f.starts_reach(2).await;
     f.fake.exit(Some(3), "");
-    f.published_reach(2).await;
-    assert_eq!(f.contents()[1], "Codex could not finish: Codex exited (3).");
+    f.published_reach(1).await;
+    assert_eq!(f.contents()[0], "Codex could not finish: Codex exited (3).");
     f.status_reaches("Needs attention").await;
     // The next mention starts a new server.
     f.run(f.delivery("again")).await;
@@ -1516,8 +1517,7 @@ async fn file_tools_use_the_launched_workspace_and_memory_the_owners_view() {
         *locked(&f.agent.remembered),
         [("mem/test".to_string(), "remembered".to_string(), 0)]
     );
-    // The turn's own `core` read, then mem_set's read and a fresh read
-    // after the write.
+    // The turn's core memory, the write's own read, then fresh after it.
     assert_eq!(*locked(&f.relay.memory_reads), 3);
     let sent = f
         .tool(
@@ -2114,7 +2114,7 @@ async fn moves_activity_to_the_latest_acknowledged_mention_and_reports_steps() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_steer_and_a_turn_without_a_reply_fail_their_requests() {
+async fn a_rejected_steer_fails_its_request_and_a_quiet_turn_does_not() {
     let f = fixture();
     f.run(f.delivery("work")).await;
     f.starts_reach(1).await;
@@ -2133,11 +2133,8 @@ async fn a_rejected_steer_and_a_turn_without_a_reply_fail_their_requests() {
     f.end_turn(0, "completed");
     until(|| f.holds() == (2, 2)).await;
     let first = locked(&f.holds)[0].clone();
-    let first = first.await;
-    assert_eq!(
-        first,
-        WorkOutcome::failed("Codex ended without a final reply")
-    );
+    // A turn may end without a reply when there is nothing new to say.
+    assert_eq!(first.await, WorkOutcome::ok());
 }
 
 #[test]

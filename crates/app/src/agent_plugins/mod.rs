@@ -2,6 +2,7 @@
 
 pub mod claude_code;
 pub mod codex;
+pub mod harness;
 pub mod managed;
 mod opened;
 pub mod owner_relay;

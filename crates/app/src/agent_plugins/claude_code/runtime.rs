@@ -20,6 +20,7 @@ use super::sessions::{
 };
 use super::transcript::{Conversation, read_transcript};
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
+use crate::agent_plugins::harness::{self, MemoryReads};
 use crate::agent_plugins::opened::Place;
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
@@ -37,7 +38,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
 
 /// The type's config, as buzz-app saves it.
@@ -114,11 +115,6 @@ impl Config {
     }
 }
 
-/// How long a read of the agent's core memory is reused.
-const MEMORY_TTL: Duration = Duration::from_secs(5 * 60);
-/// How long a failed read stands before sessions try again: long enough
-/// that a relay that is down doesn't slow every start by the timeout.
-const FAILED_MEMORY_TTL: Duration = Duration::from_secs(30);
 const MEMORY_TIMEOUT: Duration = Duration::from_secs(5);
 const NAMES_TIMEOUT: Duration = Duration::from_secs(2);
 const CHAT: [u32; 2] = [9, 40002];
@@ -262,8 +258,6 @@ impl SavedConversation {
 /// Where an agent's saved sessions are kept, by agent pubkey.
 pub type StoreFn = Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>;
 
-type MemoryRead = Shared<BoxFuture<'static, Result<Vec<Memory>, String>>>;
-
 struct EntryState {
     config: Config,
     /// The agent's name, for its prompt; a rename restarts idle sessions.
@@ -274,8 +268,6 @@ struct EntryState {
     /// The team sections of the latest run; a change restarts idle
     /// sessions.
     team: String,
-    /// The core memory and when it was read: `None` when it could not be.
-    memory: Option<(Option<Option<String>>, Instant)>,
     /// The agent's handle from its latest delivery, for the tools to act
     /// with.
     handle: Option<Arc<dyn AgentActions>>,
@@ -313,7 +305,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 struct Inner {
     agents: Mutex<HashMap<String, Arc<Entry>>>,
-    reading: Mutex<HashMap<String, MemoryRead>>,
+    memory_reads: MemoryReads,
     /// The owner's connection to each agent's own community, by agent
     /// pubkey.
     relays: Mutex<HashMap<String, Arc<dyn OwnerRelay>>>,
@@ -347,7 +339,7 @@ impl ClaudeRuntime {
         Self {
             inner: Arc::new(Inner {
                 agents: Mutex::default(),
-                reading: Mutex::default(),
+                memory_reads: MemoryReads::default(),
                 relays: Mutex::default(),
                 spare: Spare::new(Arc::new(|_, message: Value| {
                     async move { Ok(rpc::respond(None, &Context::default(), &message).await) }
@@ -650,13 +642,6 @@ impl ClaudeRuntime {
             let mut state = locked(&entry.state);
             state.handle = Some(run.agent.clone());
             state.team = run.team;
-        }
-        // Read while the turn's prompt is built, not after: a new session's
-        // prompt needs it, and a spare is only faster if nothing else is
-        // awaited.
-        {
-            let (this, pubkey, state) = (self.clone(), pubkey.clone(), entry.state.clone());
-            tokio::spawn(async move { this.memory(&pubkey, &state).await });
         }
         let event = match run.wake {
             Wake::Mention { event } => event,
@@ -1157,7 +1142,6 @@ impl ClaudeRuntime {
             name: None,
             attention,
             team: String::new(),
-            memory: None,
             handle: None,
             contexts: HashMap::new(),
             policies: HashMap::new(),
@@ -1182,7 +1166,7 @@ impl ClaudeRuntime {
                             state.team.clone(),
                         )
                     };
-                    let memory = this.memory(&pubkey, &state).await;
+                    let memory = this.core(&pubkey).await;
                     let Where { cwd, model, .. } = config.at(&spawn);
                     Ok(Launch {
                         cwd,
@@ -1270,15 +1254,15 @@ impl ClaudeRuntime {
             let client: Option<Arc<dyn BuzzClient>> = handle.map(|agent| {
                 let memories = {
                     let (this, pubkey) = (this.clone(), pubkey.clone());
-                    Arc::new(move || this.memories(&pubkey).boxed()) as app_client::Memories
+                    Arc::new(move || {
+                        this.memories(&pubkey)
+                            .map(|read| read.map(|(memories, _)| memories))
+                            .boxed()
+                    }) as app_client::Memories
                 };
                 let remembered = {
-                    let state = state.clone();
-                    Arc::new(move |slug: &str| {
-                        if slug == "core" {
-                            locked(&state).memory = None;
-                        }
-                    }) as app_client::Remembered
+                    let (this, pubkey) = (this.clone(), pubkey.clone());
+                    Arc::new(move |_: &str| this.forget(&pubkey)) as app_client::Remembered
                 };
                 Arc::new(AppClient {
                     agent,
@@ -1295,33 +1279,17 @@ impl ClaudeRuntime {
         })
     }
 
-    /// The agent's `core` memory, as the harness injects it into a new
-    /// session: its text, `Some(None)` when it has none, or `None` when it
-    /// could not be read.
-    async fn memory(&self, pubkey: &str, state: &Arc<Mutex<EntryState>>) -> Option<Option<String>> {
-        if let Some((value, at)) = &locked(state).memory {
-            let ttl = match value {
-                Some(_) => MEMORY_TTL,
-                None => FAILED_MEMORY_TTL,
-            };
-            if at.elapsed() < ttl {
-                return value.clone();
-            }
-        }
-        let value = match self.memories(pubkey).await {
-            Ok(memories) => Some(
-                memories
-                    .into_iter()
-                    .find(|memory| memory.slug == "core")
-                    .map(|memory| memory.body),
-            ),
+    /// The agent's `core` memory for a new session's prompt: its text,
+    /// `Some(None)` when it has none, or `None` when it could not be read,
+    /// so the session starts without it.
+    async fn core(&self, pubkey: &str) -> Option<Option<String>> {
+        match self.memories(pubkey).await {
+            Ok((memories, partial)) => harness::core_of(&memories, partial),
             Err(error) => {
                 tracing::warn!(%error, "Claude could not read the agent's memory");
                 None
             }
-        };
-        locked(state).memory = Some((value.clone(), Instant::now()));
-        value
+        }
     }
 
     /// The agent's memory, read back by the owner in the agent's own
@@ -1329,27 +1297,24 @@ impl ClaudeRuntime {
     fn memories(
         &self,
         pubkey: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<Memory>, String>> + Send + 'static {
-        locked(&self.inner.reading)
-            .entry(pubkey.to_string())
-            .or_insert_with(|| {
-                let (this, pubkey) = (self.clone(), pubkey.to_string());
-                async move {
-                    let result = match this.relay(&pubkey) {
-                        Some(relay) => {
-                            tokio::time::timeout(MEMORY_TIMEOUT, relay.memories(&pubkey))
-                                .await
-                                .unwrap_or_else(|_| Err("Memory read timed out".into()))
-                        }
-                        None => Err("Buzz is not connected".into()),
-                    };
-                    locked(&this.inner.reading).remove(&pubkey);
-                    result
-                }
-                .boxed()
-                .shared()
-            })
-            .clone()
+    ) -> impl std::future::Future<Output = Result<(Vec<Memory>, bool), String>> + Send + 'static
+    {
+        let read = self
+            .relay(pubkey)
+            .map(|relay| self.inner.memory_reads.read(&relay, pubkey));
+        async move {
+            let read = read.ok_or("Buzz is not connected")?;
+            tokio::time::timeout(MEMORY_TIMEOUT, read)
+                .await
+                .unwrap_or_else(|_| Err("Memory read timed out".into()))
+        }
+    }
+
+    /// After a memory write, later reads start afresh.
+    fn forget(&self, pubkey: &str) {
+        if let Some(relay) = self.relay(pubkey) {
+            self.inner.memory_reads.forget(&relay, pubkey);
+        }
     }
 }
 
