@@ -1678,11 +1678,17 @@ impl Composer {
             .map(|c| c.members.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let library = crate::ui::identity::AgentLibrary::from_hosts(cx);
-        let agents: std::collections::HashSet<&str> = library
-            .agents
-            .iter()
-            .map(|(key, _, _)| key.as_str())
-            .collect();
+        // Only agents the `@` choices offer here (`mentionCandidates`).
+        let agents: std::collections::HashSet<&str> =
+            if mentions::offers_agents(channel, !community.snapshot.cached) {
+                library
+                    .agents
+                    .iter()
+                    .map(|(key, _, _)| key.as_str())
+                    .collect()
+            } else {
+                Default::default()
+            };
         // Saved keys grant nothing: each agent must still be one this
         // draft can address (`mentionCandidates`).
         let rows = mentions::team_rows(
@@ -1829,6 +1835,8 @@ impl Composer {
             presence: &snapshot.presence,
             history: &history,
             teams,
+            // Offline resume has no outbox to add members with.
+            can_invite: !snapshot.cached,
         };
         let mut completion = mentions::complete(&inputs, text, directory);
         // Archived identities leave the choices (`archiveHides`).

@@ -59,11 +59,25 @@ pub struct Inputs<'a> {
     pub history: &'a HashMap<String, u64>,
     /// Saved team names, which also make a query a search.
     pub teams: &'a [String],
+    /// The session can write member additions (`outbox.supports(9000)`).
+    pub can_invite: bool,
 }
 
 /// Whether people outside the channel can be found: not in sessions.
 pub fn searches_directory(channel: Option<&ChannelSummary>) -> bool {
     channel.is_none_or(|c| c.channel_type != Some(ChannelType::Session))
+}
+
+/// Whether the viewer's own agents are offered beyond the members
+/// (`mentionCandidates`): all of them in a session, which invites them;
+/// in a stream or forum only when the viewer can add members, since a
+/// send asks to add them; never in a DM or elsewhere.
+pub fn offers_agents(channel: Option<&ChannelSummary>, can_invite: bool) -> bool {
+    match channel.and_then(|c| c.channel_type) {
+        Some(ChannelType::Session) => true,
+        Some(ChannelType::Stream | ChannelType::Forum) => can_invite,
+        _ => false,
+    }
 }
 
 /// The `@query` popup (`MentionCompletion`).
@@ -83,9 +97,11 @@ pub fn complete(inputs: &Inputs, query: &str, directory: Directory) -> Completio
     let member_set: HashSet<&str> = members.iter().map(String::as_str).collect();
     let mut keys: Vec<String> = members.clone();
     let mut seen: HashSet<String> = keys.iter().cloned().collect();
-    for (key, _, _) in &inputs.library.agents {
-        if seen.insert(key.clone()) {
-            keys.push(key.clone());
+    if offers_agents(channel, inputs.can_invite) {
+        for (key, _, _) in &inputs.library.agents {
+            if seen.insert(key.clone()) {
+                keys.push(key.clone());
+            }
         }
     }
     // Keys known without the directory search.
@@ -435,6 +451,7 @@ mod tests {
             presence: &presence,
             history: &history,
             teams: &[],
+            can_invite: true,
         };
         let found = vec![alice.clone()];
         let done = complete(
@@ -510,6 +527,7 @@ mod tests {
                 presence: &presence,
                 history: &history,
                 teams: &[],
+                can_invite: true,
             };
             complete(&inputs, query, directory).space
         };
@@ -633,6 +651,7 @@ mod tests {
             presence: &presence,
             history: &history,
             teams: &[],
+            can_invite: true,
         };
         let found = [aaron.clone()];
         let done = complete(
@@ -645,6 +664,53 @@ mod tests {
         );
         let labels: Vec<&str> = done.people.iter().map(|p| p.label.as_str()).collect();
         assert_eq!(labels, ["Me", "Member", "Outside agent", "Aaron"]);
+    }
+
+    /// `mentionCandidates`: outside agents only where a send can add them.
+    #[test]
+    fn offers_outside_agents_only_in_streams_and_forums_the_viewer_can_add_to() {
+        let (viewer, member, agent) = (key(1), key(2), key(3));
+        let profiles = profiles(&[(viewer.clone(), "Me"), (member.clone(), "Member")]);
+        let library = AgentLibrary {
+            agents: vec![(agent.clone(), "Scout".into(), "wss://relay.example".into())],
+        };
+        let (presence, history) = (HashMap::new(), HashMap::new());
+        let labels = |channel_type, can_invite| {
+            let channel = ChannelSummary {
+                id: "c".into(),
+                channel_type: Some(channel_type),
+                members: vec![viewer.clone(), member.clone()],
+                ..Default::default()
+            };
+            let inputs = Inputs {
+                channel: Some(&channel),
+                roster_ready: true,
+                profiles: &profiles,
+                library: &library,
+                viewer: &viewer,
+                origin: None,
+                presence: &presence,
+                history: &history,
+                teams: &[],
+                can_invite,
+            };
+            complete(&inputs, "", Directory::Idle)
+                .people
+                .into_iter()
+                .map(|p| p.label)
+                .collect::<Vec<_>>()
+        };
+        for channel_type in [ChannelType::Stream, ChannelType::Forum] {
+            assert_eq!(labels(channel_type, true), ["Me", "Member", "Scout"]);
+            assert_eq!(labels(channel_type, false), ["Me", "Member"]);
+        }
+        assert_eq!(labels(ChannelType::Dm, true), ["Me", "Member"]);
+        // A session invites the viewer's agents.
+        assert_eq!(
+            labels(ChannelType::Session, false),
+            ["Me", "Member", "Scout"]
+        );
+        assert!(!offers_agents(None, true));
     }
 
     #[test]
