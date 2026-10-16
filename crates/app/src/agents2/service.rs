@@ -723,6 +723,8 @@ pub struct Agents2 {
     cleaning: HashMap<String, bool>,
     /// Where agents' attention handles send their reads and writes.
     attention_calls: futures::channel::mpsc::UnboundedSender<AttentionCall>,
+    /// The owner's agent list in each bound community.
+    listed: listed::Listed,
     _subscriptions: Vec<Subscription>,
     _tick: Task<()>,
     _attention: Task<()>,
@@ -793,6 +795,7 @@ impl Agents2 {
             serial: 0,
             cleaning: HashMap::new(),
             attention_calls,
+            listed: listed::Listed::default(),
             _subscriptions: subscriptions,
             _tick: tick,
             _attention: attention,
@@ -1198,6 +1201,7 @@ impl Agents2 {
     }
 
     fn unbind(&mut self, origin: &str, cx: &mut Context<Self>) {
+        self.listed.forget(origin);
         if self.bound.remove(origin).is_some() {
             self.update(cx);
             cx.notify();
@@ -1233,6 +1237,7 @@ impl Agents2 {
         }
         self.generation += 1;
         let generation = self.generation;
+        self.listed.forget(origin);
         let binding = next.map(|(identity, live)| {
             let (session, destination) = {
                 let read = bound.community.read(cx);
@@ -1263,6 +1268,8 @@ impl Agents2 {
     /// name its community lacks, and finishes Delete where connected. Each step is safe to repeat; what fails is tried again on
     /// the next refresh or reconnect.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // Its sync reads the community's agent records too.
+        self.sync_listings(cx);
         let saved: Vec<Saved> = self.saved().collect();
         for identity in saved {
             if !identity.summary.deleted {
@@ -1330,6 +1337,7 @@ impl Agents2 {
                     .is_some_and(|binding| binding.generation == generation);
                 match outcome {
                     Ok(()) => {
+                        this.unlist(&pubkey);
                         this.refresh(cx).detach();
                     }
                     Err(error) if current => {
@@ -2477,5 +2485,6 @@ fn listen(session: &Arc<Session>, origin: &str, cx: &mut Context<Agents2>) -> Ta
 }
 
 mod attention_calls;
+mod listed;
 #[cfg(test)]
 mod tests;

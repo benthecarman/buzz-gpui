@@ -59,7 +59,7 @@ pub(super) async fn clean(
     if let Some(authority) = authority {
         archive(&http, owner, &authority, agent).await?;
     }
-    Ok(())
+    super::listings::delete(&http, owner, agent).await
 }
 
 /// The relay's rosters naming the agent, plus the viewer's loaded channels
