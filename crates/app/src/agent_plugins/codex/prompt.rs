@@ -27,45 +27,87 @@ pub fn quoted(value: &impl Serialize) -> String {
 
 pub(crate) use crate::buzz_mcp::tools::root_of;
 
-/// The Buzz guidance; with `settings`, the agent's custom instructions too.
-/// `settings` comes with the agent's team sections, empty for none, and
-/// its `core` memory goes with them: `Some(None)` when it has none, `None`
-/// when it was not read.
-pub fn developer_instructions(
-    name: &str,
-    pubkey: &str,
-    settings: Option<(&Config, &str)>,
-    memory: Option<Option<&str>>,
-) -> String {
-    let custom = settings.map_or_else(String::new, |(settings, team)| {
-        let team = if team.is_empty() {
-            String::new()
-        } else {
-            format!("\n{team}")
-        };
-        let core = core_memory_section(memory);
-        let core = if core.is_empty() {
-            core
-        } else {
-            format!("\n\nCurrent core memory replaces all prior core memory.\n{core}")
-        };
-        format!(
-            "Current Buzz custom instructions replace all prior Buzz custom instructions. An empty section means no custom instructions apply.\n<agent-instructions>\n{}\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team.{team}{core}",
-            settings.instructions
-        )
-    });
+/// The Buzz guidance a Codex thread starts with.
+pub fn developer_instructions(name: &str, pubkey: &str) -> String {
     format!(
         "You are {name} (pubkey {pubkey}), a coding agent in Buzz.
 The buzz namespace provides the shared Buzz tools, including messages, reactions, reads, uploads, canvas, and encrypted memory. Buzz access and signing are handled by the host. Do not invoke the buzz CLI or look for credentials. Use Codex's native coding tools in the workspace.
 
 {base}
 
-{buzz}
-
-{custom}",
+{buzz}",
         base = base_prompt(),
         buzz = crate::buzz_mcp::BUZZ_PROMPT.trim(),
     )
+}
+
+/// Codex truncates the middle of any additional-context value over 1,000
+/// tokens, which it estimates as 4 UTF-8 bytes each.
+const CONTEXT_VALUE_BYTES: usize = 4_000;
+
+/// The agent's current identity, instructions, team sections (empty for
+/// none) and core memory (`Some(None)` when it has none, `None` if unread)
+/// as turn context: a resumed Codex
+/// thread keeps its original developer instructions. Codex orders values
+/// by key, so text over its per-value limit continues in
+/// `buzz.instructions.001` onward, split at line breaks where possible.
+pub fn turn_context(
+    name: &str,
+    pubkey: &str,
+    settings: &Config,
+    team: &str,
+    memory: Option<Option<&str>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let core = core_memory_section(memory);
+    let text = format!(
+        "You are {name} (pubkey {pubkey}).\nCurrent Buzz custom instructions replace all prior Buzz custom instructions. An empty section means no custom instructions apply.\n<agent-instructions>\n{}\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team.{}{}",
+        settings.instructions,
+        if team.is_empty() {
+            String::new()
+        } else {
+            format!("\n{team}")
+        },
+        if core.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nCurrent core memory replaces all prior core memory.\n{core}")
+        }
+    );
+    let mut values = vec![String::new()];
+    let mut size = 0;
+    for line in text.split_inclusive('\n') {
+        // A line over the limit splits by character.
+        let pieces: Vec<&str> = if line.len() > CONTEXT_VALUE_BYTES {
+            line.char_indices()
+                .map(|(at, char)| &line[at..at + char.len_utf8()])
+                .collect()
+        } else {
+            vec![line]
+        };
+        for piece in pieces {
+            if size + piece.len() > CONTEXT_VALUE_BYTES {
+                values.push(String::new());
+                size = 0;
+            }
+            values.last_mut().expect("one value").push_str(piece);
+            size += piece.len();
+        }
+    }
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let key = if index == 0 {
+                "buzz.instructions".to_string()
+            } else {
+                format!("buzz.instructions.{index:03}")
+            };
+            (
+                key,
+                serde_json::json!({ "kind": "application", "value": value }),
+            )
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -263,28 +305,37 @@ mod tests {
         );
         // FNV-1a over the JSON key, as buzz-app hashes it.
         assert_eq!(tag, "buzz:118714305d2147cb");
-        let base = developer_instructions("Codex", "b", None, None);
+        let base = developer_instructions("Codex", "b");
         assert!(base.starts_with("You are Codex (pubkey b), a coding agent in Buzz."));
         assert!(!base.contains("<agent-instructions>"));
         let settings = Config {
             instructions: "Use a marker".into(),
             ..Config::default()
         };
+        let context = turn_context("Codex", "b", &settings, "", None);
+        assert_eq!(context.len(), 1);
+        assert_eq!(context["buzz.instructions"]["kind"], "application");
+        assert!(value(&context).starts_with("You are Codex (pubkey b).\n"));
         assert!(
-            developer_instructions("Codex", "b", Some((&settings, "")), None).ends_with(
-                "<agent-instructions>\nUse a marker\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team."
-            )
+            value(&context)
+                .ends_with("<agent-instructions>\nUse a marker\n</agent-instructions>\n\nCurrent team sections replace all prior team sections. None means you are on no team.")
         );
         assert!(
-            developer_instructions("Codex", "b", Some((&settings, "<team>\nT\n</team>")), None)
-                .ends_with("None means you are on no team.\n<team>\nT\n</team>")
+            value(&turn_context(
+                "Codex",
+                "b",
+                &settings,
+                "<team>\nT\n</team>",
+                None
+            ))
+            .ends_with("None means you are on no team.\n<team>\nT\n</team>")
         );
     }
 
     #[test]
     fn core_memory_follows_the_custom_instructions() {
         let settings = Config::default();
-        let with = |memory| developer_instructions("Codex", "b", Some((&settings, "")), memory);
+        let with = |memory| value(&turn_context("Codex", "b", &settings, "", memory));
         assert!(with(Some(Some(" I am Codex. "))).ends_with(
             "None means you are on no team.\n\nCurrent core memory replaces all prior core memory.\n<core-memory>\nI am Codex.\n</core-memory>"
         ));
@@ -293,9 +344,46 @@ mod tests {
         ));
         assert!(!with(None).contains("<core-memory>"));
         assert!(!with(Some(Some("  "))).contains("<core-memory>"));
-        // Without settings, as when a thread starts, nothing is added.
-        assert!(
-            !developer_instructions("Codex", "b", None, Some(Some("x"))).contains("<core-memory>")
+        // A thread's developer instructions carry none.
+        assert!(!developer_instructions("Codex", "b").contains("<core-memory>"));
+    }
+
+    #[test]
+    fn splits_long_instructions_so_codex_truncates_none() {
+        // Lines of 100 bytes, one far over the limit, and wide characters.
+        let lines = "x".repeat(99) + "\n";
+        let instructions = format!(
+            "{}{}\n{}",
+            lines.repeat(60),
+            "y".repeat(9_000),
+            "é".repeat(3_000)
         );
+        let settings = Config {
+            instructions: instructions.clone(),
+            ..Config::default()
+        };
+        let context = turn_context("Codex", "b", &settings, "", None);
+        let keys: Vec<&String> = context.keys().collect();
+        assert_eq!(keys[0], "buzz.instructions");
+        assert_eq!(keys[1], "buzz.instructions.001");
+        let joined: String = context
+            .values()
+            .map(|value| value["value"].as_str().unwrap())
+            .collect();
+        assert!(joined.contains(&instructions), "nothing is lost");
+        for value in context.values() {
+            assert!(value["value"].as_str().unwrap().len() <= CONTEXT_VALUE_BYTES);
+        }
+        // Whole lines stay together where they fit.
+        let first = context["buzz.instructions"]["value"].as_str().unwrap();
+        assert!(first.ends_with('\n'));
+    }
+
+    /// The first turn-context value's text.
+    fn value(context: &serde_json::Map<String, serde_json::Value>) -> String {
+        context["buzz.instructions"]["value"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 }

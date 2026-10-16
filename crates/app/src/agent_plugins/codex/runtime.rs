@@ -10,7 +10,9 @@
 
 use super::config::{Config, DEFAULT_WORKSPACE, absolute_workspace, effort_name, valid_workspace};
 use super::history::conversation_history;
-use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
+use super::prompt::{
+    Conversation, developer_instructions, root_of, session_name, turn_context, turn_input,
+};
 use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
 use super::transcript::{Lookup, Place, find_conversation};
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
@@ -1759,7 +1761,7 @@ impl CodexRuntime {
             let params = json!({
                 "model": model,
                 "cwd": workspace,
-                "developerInstructions": developer_instructions(&name, &agent, None, None),
+                "developerInstructions": developer_instructions(&name, &agent),
                 "approvalPolicy": "never",
                 // Matches Claude's bypassPermissions; only the owner
                 // can start work.
@@ -1840,12 +1842,13 @@ impl CodexRuntime {
                         "effort": effort,
                         // Application context is a developer message that
                         // updates on each turn.
-                        "additionalContext": {
-                            "buzz.instructions": {
-                                "kind": "application",
-                                "value": developer_instructions(&name, &agent, Some((&request.settings, &request.team)), memory.as_ref().map(Option::as_deref)),
-                            },
-                        },
+                        "additionalContext": turn_context(
+                            &name,
+                            &agent,
+                            &request.settings,
+                            &request.team,
+                            memory.as_ref().map(Option::as_deref),
+                        ),
                     }),
                 )
                 .await?;

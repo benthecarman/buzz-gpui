@@ -638,7 +638,7 @@ async fn hands_over_promptly_and_runs_conversations_on_one_server() {
             .contains("Never publish a bare acknowledgement.")
     );
     assert!(
-        f.starts()[1]["params"]["additionalContext"]["buzz.instructions"]["value"]
+        started["developerInstructions"]
             .as_str()
             .unwrap()
             .contains("Your `core` memory is auto-injected into your context every turn")
