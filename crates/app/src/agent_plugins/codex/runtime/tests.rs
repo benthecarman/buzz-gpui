@@ -39,6 +39,8 @@ struct FakeRelay {
     memory_reads: Mutex<usize>,
     /// Answers for the next memory reads; later reads list `memories`.
     memory_answers: Mutex<VecDeque<PendingMemories>>,
+    /// Whether the channel is in the owner's Me; `None` is no.
+    me: Mutex<Option<Result<bool, String>>>,
 }
 
 impl FakeRelay {
@@ -87,6 +89,10 @@ impl OwnerRelay for FakeRelay {
         }
         let memories = locked(&self.memories).clone();
         async move { Ok((memories, false)) }.boxed()
+    }
+    fn me_chat(&self, _: &str, _: &str) -> BoxFuture<'static, Result<bool, String>> {
+        let me = locked(&self.me).clone().unwrap_or(Ok(false));
+        async move { me }.boxed()
     }
 }
 
@@ -544,6 +550,62 @@ fn held() -> (Held, oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (started, began) = oneshot::channel();
     let (release, open) = gate();
     (Held { started, release }, began, open)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continues_a_me_chat_as_one_top_level_conversation() {
+    let f = fixture();
+    *locked(&f.relay.me) = Some(Ok(true));
+    f.run(f.delivery("@Codex remember kiwi")).await;
+    f.starts_reach(1).await;
+    let start = f.starts()[0]["params"]["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(start.contains(&format!(
+        "<context>\n{{\"channel_id\":\"{CHANNEL}\",\"channel_name\":\"test\",\"session_scope\":\"channel\",\"posting\":\"top-level\"}}\n</context>\n{}\n<buzz-event>",
+        crate::buzz_mcp::TOP_LEVEL_PROMPT
+    )), "{start}");
+    // A mention in another thread steers the same conversation.
+    f.run(f.delivery_in("@Codex what word?", &other_root()))
+        .await;
+    until(|| !f.fake.calls("turn/steer").is_empty()).await;
+    assert_eq!(f.starts().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queues_a_request_under_the_other_posting_policy() {
+    let f = fixture();
+    f.run(f.delivery_with(
+        "@Codex first",
+        &root(),
+        json!({ "workspace": "/tmp/codex-test", "scope": "channel" }),
+    ))
+    .await;
+    f.starts_reach(1).await;
+    // The chat moved to Me while the turn runs: the next waits for it.
+    *locked(&f.relay.me) = Some(Ok(true));
+    f.run(f.delivery_with(
+        "@Codex second",
+        &root(),
+        json!({ "workspace": "/tmp/codex-test", "scope": "channel" }),
+    ))
+    .await;
+    flush().await;
+    assert!(f.fake.calls("turn/steer").is_empty());
+    assert_eq!(f.starts().len(), 1);
+    f.complete_turn(0, "FIRST").await;
+    f.starts_reach(2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fails_a_mention_when_it_cannot_tell_where_to_answer() {
+    let f = fixture();
+    let error = "Couldn't read your Me chats to tell where to answer (offline). Try again.";
+    *locked(&f.relay.me) = Some(Err(error.into()));
+    let result = f.runtime.run(f.delivery("@Codex hi")).await;
+    assert_eq!(result, Err(error.to_string()));
+    assert!(f.fake.spawned("app-server").is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

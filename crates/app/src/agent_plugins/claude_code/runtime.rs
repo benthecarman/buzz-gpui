@@ -282,7 +282,23 @@ struct EntryState {
     /// Where each conversation's tools default to: its latest turn's
     /// thread.
     contexts: HashMap<String, Context>,
+    /// Each conversation's latest posting policy: when its turns were
+    /// handed over, and when all of them settled.
+    policies: HashMap<String, Policy>,
 }
+
+/// A conversation's posting policy while its turns run: a Me chat posts
+/// at the channel's top level.
+#[derive(Clone)]
+struct Policy {
+    top_level: bool,
+    handed: Shared<BoxFuture<'static, ()>>,
+    settled: Shared<BoxFuture<'static, ()>>,
+    /// Tells this policy from a later one for the same conversation.
+    id: u64,
+}
+
+static POLICIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct Entry {
     sessions: AgentSessions,
@@ -600,8 +616,9 @@ impl ClaudeRuntime {
     }
 
     /// Hands one delivery to its conversation's session. Resolves once it
-    /// is handed over, not when Claude has answered.
-    pub async fn run(&self, run: Run) {
+    /// is handed over, not when Claude has answered; fails when it cannot
+    /// tell where to answer.
+    pub async fn run(&self, run: Run) -> Result<(), String> {
         let settings = Config::read(&run.config);
         let pubkey = run.agent.pubkey();
         // Claude runs commands as you; mentions need owner or delegated
@@ -622,7 +639,7 @@ impl ClaudeRuntime {
             if let Some(work) = &run.activity {
                 work.remove();
             }
-            return;
+            return Ok(());
         }
         let attention = match run.agent.attention() {
             Some(attention) => attention.enabled().await.unwrap_or(false),
@@ -649,51 +666,160 @@ impl ClaudeRuntime {
                         .map(|()| WorkOutcome::ok())
                         .boxed(),
                 );
-                return;
+                return Ok(());
             }
         };
         let Some(channel) = run.channel.or_else(|| tag(&event, "h")) else {
-            return;
+            return Ok(());
         };
-        let (key, text) = self.prompt(&entry, &pubkey, &event, &channel, false).await;
-        // A conversation's tools default to its thread; a session shared by
-        // several threads is told which to reply in instead.
-        let root = thread_reference(&event).map_or(event.id.clone(), |thread| thread.root_id);
-        locked(&entry.state).contexts.insert(
+        // A mention in the owner's Me chat posts at the channel's top level.
+        let top_level = match self.relay(&pubkey) {
+            Some(relay) => relay.me_chat(&owner, &channel).await?,
+            None => false,
+        };
+        // Frozen with the policy: a scope change while this waits must not
+        // move its prompt to another conversation than the one it is
+        // delivered to.
+        let key = self.key(&entry, &pubkey, &event, &channel, top_level);
+        let prompt = {
+            let (this, entry, event, channel, key) = (
+                self.clone(),
+                entry.clone(),
+                event.clone(),
+                channel.clone(),
+                key.clone(),
+            );
+            move |fresh: bool| {
+                let (this, entry, event, channel, key, pubkey) = (
+                    this.clone(),
+                    entry.clone(),
+                    event.clone(),
+                    channel.clone(),
+                    key.clone(),
+                    pubkey.clone(),
+                );
+                async move {
+                    this.prompt(&entry, &pubkey, &event, &channel, &key, top_level, fresh)
+                        .await
+                }
+                .boxed()
+            }
+        };
+        // A turn keeps the posting policy it was admitted with: a request
+        // under the other policy waits for the conversation's turns to
+        // settle rather than steering into them and changing their tools'
+        // context.
+        let prior = locked(&entry.state).policies.get(&key).cloned();
+        let same = prior
+            .as_ref()
+            .is_some_and(|prior| prior.top_level == top_level);
+        let wait = prior.as_ref().map(|prior| {
+            if same {
+                prior.handed.clone()
+            } else {
+                prior.settled.clone()
+            }
+        });
+        let waits = wait.is_some();
+        let (handed_tx, handed_rx) = futures::channel::oneshot::channel::<()>();
+        let done: Shared<BoxFuture<'static, Settled>> = {
+            let (entry, channel, event, key) =
+                (entry.clone(), channel.clone(), event.clone(), key.clone());
+            let pick = TurnPick {
+                model: run.model,
+                effort: run.effort,
+            };
+            let activity = run.activity;
+            async move {
+                if let Some(wait) = wait {
+                    wait.await;
+                }
+                let text = prompt(false).await;
+                // A conversation's tools default to its thread; a session
+                // shared by several threads is told which to reply in
+                // instead.
+                let root =
+                    thread_reference(&event).map_or(event.id.clone(), |thread| thread.root_id);
+                locked(&entry.state).contexts.insert(
+                    key.clone(),
+                    Context {
+                        channel: Some(channel.clone()),
+                        root: (key != channel && !top_level).then_some(root.clone()),
+                        top_level,
+                    },
+                );
+                let delivered = entry
+                    .sessions
+                    .deliver(
+                        key,
+                        text.clone(),
+                        event.created_at,
+                        DeliverOptions {
+                            steer: Some(steer_prompt(&text)),
+                            fresh: Some(prompt(true)),
+                            pick,
+                            receipt: activity.map(|work| Receipt { scope: root, work }),
+                        },
+                    )
+                    .shared();
+                // Queued in its conversation once first polled.
+                let _ = delivered.clone().now_or_never();
+                let _ = handed_tx.send(());
+                delivered.await
+            }
+            .boxed()
+            .shared()
+        };
+        tokio::spawn(done.clone());
+        let handed = handed_rx.map(drop).boxed().shared();
+        let settled = {
+            let earlier = prior.filter(|_| same).map(|prior| prior.settled);
+            let done = done.clone();
+            async move {
+                if let Some(earlier) = earlier {
+                    earlier.await;
+                }
+                done.await;
+            }
+            .boxed()
+            .shared()
+        };
+        let id = POLICIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        locked(&entry.state).policies.insert(
             key.clone(),
-            Context {
-                channel: Some(channel.clone()),
-                root: (key != channel).then_some(root.clone()),
+            Policy {
+                top_level,
+                handed: handed.clone(),
+                settled: settled.clone(),
+                id,
             },
         );
-        let fresh = {
-            let (this, entry, event, channel) =
-                (self.clone(), entry.clone(), event.clone(), channel.clone());
-            async move { this.prompt(&entry, &pubkey, &event, &channel, true).await.1 }.boxed()
-        };
-        let done = entry.sessions.deliver(
-            key,
-            text.clone(),
-            event.created_at,
-            DeliverOptions {
-                steer: Some(steer_prompt(&text)),
-                fresh: Some(fresh),
-                pick: TurnPick {
-                    model: run.model,
-                    effort: run.effort,
-                },
-                receipt: run.activity.map(|work| Receipt {
-                    scope: root.clone(),
-                    work,
-                }),
-            },
-        );
+        {
+            let state = entry.state.clone();
+            tokio::spawn(async move {
+                settled.await;
+                let mut state = locked(&state);
+                if state
+                    .policies
+                    .get(&key)
+                    .is_some_and(|policy| policy.id == id)
+                {
+                    state.policies.remove(&key);
+                }
+            });
+        }
+        // Deliveries keep their order: a later one waits on this handover,
+        // and one with nothing to wait for is handed over before `run`
+        // returns.
+        if !waits {
+            handed.clone().await;
+        }
         // The turn outlives `run`, which the host is told so it shows it as
         // working.
-        let done = done.shared();
         (run.working)(done.clone().map(outcome).boxed());
         self.notify();
-        self.watch(done.boxed(), Some((run.agent, channel, event)));
+        self.watch(done.boxed(), Some((run.agent, channel, event, top_level)));
+        Ok(())
     }
 
     /// A watch or timer wake: a one-off turn in its Interest's lane, as in
@@ -844,14 +970,16 @@ impl ClaudeRuntime {
     fn watch(
         &self,
         done: BoxFuture<'static, Settled>,
-        report: Option<(Arc<dyn AgentActions>, String, BuzzEvent)>,
+        report: Option<(Arc<dyn AgentActions>, String, BuzzEvent, bool)>,
     ) {
         let this = self.clone();
         tokio::spawn(async move {
             let settled = done.await;
-            if let (false, Some((agent, channel, event))) = (settled.ok, report) {
+            if let (false, Some((agent, channel, event, top_level))) = (settled.ok, report) {
                 let error = settled.error.unwrap_or_default();
-                if let Err(failure) = Self::report(agent.as_ref(), &channel, &event, &error).await {
+                if let Err(failure) =
+                    Self::report(agent.as_ref(), &channel, &event, &error, top_level).await
+                {
                     tracing::warn!(%failure, "Claude could not report a failed turn");
                 }
             }
@@ -859,15 +987,20 @@ impl ClaudeRuntime {
         });
     }
 
-    /// Says in the thread that a turn failed, so nobody waits on it. Tells
-    /// the owner even when a sibling asked.
+    /// Says in the thread that a turn failed, so nobody waits on it, or at
+    /// the top level of a Me chat. Tells the owner even when a sibling
+    /// asked.
     async fn report(
         agent: &dyn AgentActions,
         channel: &str,
         event: &BuzzEvent,
         error: &str,
+        top_level: bool,
     ) -> Result<(), String> {
-        let tags = crate::agent_plugins::reply_tags(channel, event, &agent.owner());
+        let mut tags = crate::agent_plugins::reply_tags(channel, event, &agent.owner());
+        if top_level {
+            tags.retain(|tag| tag.first().map(String::as_str) != Some("e"));
+        }
         let error: String = error.chars().take(500).collect();
         agent
             .publish(Template {
@@ -879,16 +1012,41 @@ impl ClaudeRuntime {
             .map(drop)
     }
 
-    /// Where the event's turn goes, and its prompt. `fresh` is for a
-    /// session that has been shown nothing yet.
+    /// The conversation the event's turn goes to: a Me chat or DM is one
+    /// conversation, as is a channel for an agent with channel scope.
+    fn key(
+        &self,
+        entry: &Entry,
+        own: &str,
+        event: &BuzzEvent,
+        channel_id: &str,
+        top_level: bool,
+    ) -> String {
+        let dm = self
+            .relay(own)
+            .and_then(|relay| relay.channel(channel_id))
+            .is_some_and(|summary| summary.dm);
+        if top_level || dm || locked(&entry.state).config.scope() == Scope::Channel {
+            channel_id.to_string()
+        } else {
+            let root = thread_reference(event).map_or(event.id.clone(), |thread| thread.root_id);
+            format!("{channel_id}/{root}")
+        }
+    }
+
+    /// The prompt for the event's turn in conversation `key`. `fresh` is
+    /// for a session that has been shown nothing yet.
+    #[allow(clippy::too_many_arguments)]
     async fn prompt(
         &self,
         entry: &Entry,
         own: &str,
         event: &BuzzEvent,
         channel_id: &str,
+        key: &str,
+        top_level: bool,
         fresh: bool,
-    ) -> (String, String) {
+    ) -> String {
         let relay = self.relay(own);
         let summary = relay.as_ref().and_then(|relay| relay.channel(channel_id));
         let dm = summary.as_ref().is_some_and(|summary| summary.dm);
@@ -896,18 +1054,18 @@ impl ClaudeRuntime {
         let root_id = thread
             .as_ref()
             .map_or(event.id.clone(), |thread| thread.root_id.clone());
-        let scope = locked(&entry.state).config.scope();
-        let key = if dm || scope == Scope::Channel {
-            channel_id.to_string()
+        // The conversation it was admitted to, not the scope as it is now.
+        let scope = if key == channel_id {
+            Scope::Channel
         } else {
-            format!("{channel_id}/{root_id}")
+            Scope::Thread
         };
-        let seen = if fresh { 0 } else { entry.sessions.seen(&key) };
+        let seen = if fresh { 0 } else { entry.sessions.seen(key) };
         let mut earlier: Vec<BuzzEvent> = Vec::new();
         if let Some(relay) = &relay
-            && (thread.is_some() || dm)
+            && (thread.is_some() || dm || top_level)
         {
-            let filters = if thread.is_some() {
+            let filters = if thread.is_some() && !top_level {
                 vec![
                     json!({ "ids": [root_id], "limit": 1 }),
                     json!({ "kinds": CHAT, "#h": [channel_id], "#e": [root_id], "limit": 200 }),
@@ -979,13 +1137,14 @@ impl ClaudeRuntime {
             event,
             channel: &channel,
             scope,
+            top_level,
             thread: thread.as_ref(),
             context: &unseen,
             total: earlier.len() + 1,
             label: "@mention",
             name: &name,
         });
-        (key, Self::review(entry, text))
+        Self::review(entry, text)
     }
 
     fn entry(&self, pubkey: &str, initial: Config, spawn: Spawner, attention: bool) -> Arc<Entry> {
@@ -1001,6 +1160,7 @@ impl ClaudeRuntime {
             memory: None,
             handle: None,
             contexts: HashMap::new(),
+            policies: HashMap::new(),
         }));
         let launch = {
             let (this, state, pubkey, spawn) = (

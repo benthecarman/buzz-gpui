@@ -7,7 +7,7 @@ use crate::buzz_mcp::{BuzzEvent, Memory};
 use crate::community::{AppState, Community, IdentityState};
 use crate::runtime::Runtime;
 use buzz_identity::Identity;
-use buzz_relay_client::session::SessionSnapshot;
+use buzz_relay_client::session::{MeKitStatus, SessionSnapshot};
 use buzz_relay_client::{ChannelType, RelayHttp, Session};
 use futures::future::BoxFuture;
 use gpui_kit::{App, Entity, EntityId};
@@ -58,6 +58,14 @@ pub trait OwnerRelay: Send + Sync {
     fn profile_owner(&self, _pubkey: &str) -> BoxFuture<'static, Option<String>> {
         Box::pin(async { None })
     }
+    /// Whether a mention of an agent `owner` owns continues its Me chat in
+    /// `channel` (buzz-app's `meChat`): one channel conversation that posts
+    /// at the channel's top level. Only the owner's own placement counts,
+    /// and DMs keep their routing. A placement that cannot be read is no
+    /// answer: the turn fails rather than guess where to post.
+    fn me_chat(&self, _owner: &str, _channel: &str) -> BoxFuture<'static, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// A community, read with the owner's key: conversations for
@@ -68,6 +76,8 @@ pub struct AppRelay {
     /// The session's view: channels and profiles. `None` reads only
     /// over HTTP.
     pub(crate) snapshot: Option<tokio::sync::watch::Receiver<Arc<SessionSnapshot>>>,
+    /// The session, for its Me placement. `None` reads only over HTTP.
+    pub(crate) session: Option<Weak<Session>>,
 }
 
 fn filters(values: Vec<Value>) -> Vec<buzz_relay_client::socket::Filter> {
@@ -198,6 +208,40 @@ impl OwnerRelay for AppRelay {
         })
     }
 
+    fn me_chat(&self, owner: &str, channel: &str) -> BoxFuture<'static, Result<bool, String>> {
+        let session = self.session.as_ref().and_then(Weak::upgrade);
+        let dm = self.channel(channel).is_some_and(|info| info.dm);
+        let (Some(session), false, false) = (session, dm, self.identity.pubkey_hex() != owner)
+        else {
+            return Box::pin(async { Ok(false) });
+        };
+        let (kit, weak, channel) = (
+            session.me_kit().clone(),
+            Arc::downgrade(&session),
+            channel.to_string(),
+        );
+        Box::pin(async move {
+            let status = || kit.snapshot().status.clone();
+            if status() == MeKitStatus::Unavailable {
+                return Ok(false);
+            }
+            if status() != MeKitStatus::Ready {
+                kit.refresh().await;
+            }
+            if weak.upgrade().is_none() {
+                return Err("The community changed before this was answered. Try again.".into());
+            }
+            if status() != MeKitStatus::Ready {
+                let snapshot = kit.snapshot();
+                return Err(format!(
+                    "Couldn't read your Me chats to tell where to answer ({}). Try again.",
+                    snapshot.error().unwrap_or("not loaded")
+                ));
+            }
+            Ok(kit.placed(&channel))
+        })
+    }
+
     fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>> {
         let read = self.memory_listing(agent);
         Box::pin(async move { read.await.map(|(memories, _)| memories) })
@@ -277,6 +321,7 @@ pub fn of(community: &Entity<Community>, cx: &App) -> Option<Scoped> {
         http: RelayHttp::new(community.origin.clone(), identity.clone()),
         identity: identity.clone(),
         snapshot: Some(community.session.snapshot()),
+        session: Some(Arc::downgrade(&community.session)),
     });
     let scoped = (format!("{}:{}", partition.origin, partition.viewer), relay);
     cache.insert(

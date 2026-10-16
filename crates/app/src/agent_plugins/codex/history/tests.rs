@@ -91,6 +91,7 @@ async fn cuts_history_off_before_the_request_including_same_second_messages_and_
         channel_id: CHANNEL.into(),
         name: "test".into(),
         root: Some(root.clone()),
+        top_level: false,
     };
     let text = conversation_history(&request, &conversation, &read)
         .await
@@ -139,6 +140,7 @@ async fn channel_sessions_read_the_channel_and_drop_deleted_and_forged_messages(
         channel_id: CHANNEL.into(),
         name: "test".into(),
         root: None,
+        top_level: false,
     };
     let text = conversation_history(&request, &conversation, &read)
         .await
@@ -162,6 +164,7 @@ async fn nothing_earlier_reads_once() {
         channel_id: CHANNEL.into(),
         name: "test".into(),
         root: None,
+        top_level: false,
     };
     let text = conversation_history(&request, &conversation, &read)
         .await

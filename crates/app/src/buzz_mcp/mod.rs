@@ -31,6 +31,10 @@ pub fn core_memory(memory: Option<Option<&str>>) -> String {
     }
 }
 
+/// The turn instruction for a conversation whose messages stay at the
+/// channel's top level; the tools refuse a reply into a thread there.
+pub const TOP_LEVEL_PROMPT: &str = "This is a continuous personal chat in the current channel. Continue this channel's conversation. Post progress, results and failures at the channel top level: use the current channel and omit `reply`; do not start or continue a thread here. Destinations you are explicitly asked to use elsewhere keep their own routing.";
+
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -108,11 +112,13 @@ pub trait BuzzClient: Send + Sync {
     ) -> BoxFuture<'static, ClientResult<()>>;
 }
 
-/// Where the agent is working, so tools can default to it.
+/// Where the agent is working, so tools can default to it. `top_level`
+/// keeps this channel's messages out of threads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Context {
     pub channel: Option<String>,
     pub root: Option<String>,
+    pub top_level: bool,
 }
 
 #[cfg(test)]

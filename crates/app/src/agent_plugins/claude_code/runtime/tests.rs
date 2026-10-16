@@ -38,6 +38,8 @@ fn tags(list: &[&[&str]]) -> Vec<Vec<String>> {
 #[derive(Default)]
 struct FakeRelay {
     thread: Mutex<Vec<BuzzEvent>>,
+    /// Whether the channel is in the owner's Me; `None` is no.
+    me: Mutex<Option<Result<bool, String>>>,
 }
 
 impl OwnerRelay for FakeRelay {
@@ -66,6 +68,10 @@ impl OwnerRelay for FakeRelay {
     }
     fn memories(&self, _: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>> {
         Box::pin(async { Ok(vec![]) })
+    }
+    fn me_chat(&self, _: &str, _: &str) -> BoxFuture<'static, Result<bool, String>> {
+        let me = locked(&self.me).clone().unwrap_or(Ok(false));
+        Box::pin(async move { me })
     }
 }
 
@@ -144,6 +150,7 @@ impl Setup {
             }));
         let relay = Arc::new(FakeRelay {
             thread: Mutex::new(thread),
+            ..FakeRelay::default()
         });
         runtime.set_relays(HashMap::from([
             (own(), relay.clone() as Arc<dyn OwnerRelay>),
@@ -172,7 +179,7 @@ impl Setup {
             activity: None,
             current: crate::agents2::runtime::always_current(),
         };
-        async move { runtime.run(run).await }
+        async move { runtime.run(run).await.unwrap() }
     }
     async fn mention(&self, event: &BuzzEvent) {
         self.deliver(
@@ -353,6 +360,91 @@ async fn shows_a_threads_later_turns_only_what_the_session_has_not_seen() {
     let second = used[0].prompts()[1].clone();
     assert!(!second.contains("<thread-context"));
     assert!(second.contains("Earlier context is already available in this session."));
+}
+
+#[tokio::test]
+async fn continues_a_me_chat_as_one_top_level_conversation() {
+    let (root, mention) = thread_root_and_mention();
+    let setup = Setup::new(vec![root.clone(), mention.clone()]);
+    *locked(&setup.relay.me) = Some(Ok(true));
+    setup.mention(&mention).await;
+    flush().await;
+    let claude = setup.used()[0].clone();
+    let prompt = claude.prompts()[0].clone();
+    // A mention in an older thread still continues the channel's chat.
+    assert!(
+        prompt.contains("Scope: channel\nSession scope: channel\n"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("Thread root:"), "{prompt}");
+    assert!(prompt.contains(crate::buzz_mcp::TOP_LEVEL_PROMPT));
+    assert!(prompt.contains("<conversation-context"), "{prompt}");
+    claude.finish(None);
+    flush().await;
+    // A top-level follow-up reaches the same session.
+    let follow_up = message("3", "@Claude and now?", |event| {
+        event.created_at = 120;
+        event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
+    });
+    setup.mention(&follow_up).await;
+    flush().await;
+    assert_eq!(setup.used().len(), 1);
+    assert_eq!(claude.prompts().len(), 2);
+    // Its tools keep it out of threads.
+    claude.emit(tool_call("t1", json!({ "text": "hi", "reply": root.id })));
+    flush().await;
+    assert!(
+        setup.published().iter().all(|event| event.kind != 9),
+        "a reply into a thread was refused"
+    );
+}
+
+#[tokio::test]
+async fn fails_a_mention_when_it_cannot_tell_where_to_answer() {
+    let (root, mention) = thread_root_and_mention();
+    let setup = Setup::new(vec![root, mention.clone()]);
+    let error = "Couldn't read your Me chats to tell where to answer (offline). Try again.";
+    *locked(&setup.relay.me) = Some(Err(error.into()));
+    let run = Run {
+        wake: Wake::Mention { event: mention },
+        channel: Some(CHANNEL.into()),
+        agent: setup.agent.clone(),
+        config: Config::default().value(),
+        spawn: setup.fake.spawner(),
+        model: None,
+        effort: None,
+        team: String::new(),
+        working: std::sync::Arc::new(|_| {}),
+        current: crate::agents2::runtime::always_current(),
+        activity: None,
+    };
+    assert_eq!(setup.runtime.run(run).await, Err(error.to_string()));
+    flush().await;
+    assert!(setup.used().is_empty());
+    assert!(setup.published().is_empty());
+}
+
+#[tokio::test]
+async fn reports_a_failed_me_chat_turn_at_the_top_level() {
+    let mention = message("2", "@Claude hi", |event| {
+        event.tags = tags(&[&["h", CHANNEL], &["p", &own()]]);
+    });
+    let setup = Setup::new(vec![]);
+    *locked(&setup.relay.me) = Some(Ok(true));
+    setup.sync(Config::default());
+    flush().await;
+    let spare = setup.fake.claudes()[0].clone();
+    spare.set_hold(true);
+    setup.mention(&mention).await;
+    flush().await;
+    spare.exit(Some(1), Some("Error: Invalid API key\n"));
+    flush().await;
+    let report = setup
+        .published()
+        .into_iter()
+        .find(|event| event.kind == 9)
+        .unwrap();
+    assert_eq!(report.tags, tags(&[&["h", CHANNEL], &["p", &alice()]]));
 }
 
 #[tokio::test]
@@ -627,7 +719,7 @@ async fn skips_a_waiting_turn_the_host_says_is_no_longer_current() {
         activity: None,
         current,
     };
-    setup.runtime.run(run).await;
+    setup.runtime.run(run).await.unwrap();
     flush().await;
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(setup.used().is_empty());
@@ -905,7 +997,8 @@ async fn runs_a_mention_on_the_model_and_effort_its_delivery_picked() {
             activity: None,
             current: crate::agents2::runtime::always_current(),
         })
-        .await;
+        .await
+        .unwrap();
     flush().await;
     let used = setup.used();
     assert_eq!(used[0].models(), ["haiku"]);

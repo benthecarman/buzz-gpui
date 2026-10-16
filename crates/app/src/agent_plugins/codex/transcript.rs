@@ -393,6 +393,7 @@ async fn find_threads(rpc: &AppServer, lookup: &Lookup) -> Result<Vec<Found>, St
             .clone()
             .unwrap_or_else(|| lookup.channel_id.clone()),
         root: lookup.root.clone(),
+        top_level: false,
     };
     let tag = session_tag(
         &lookup.agent_pubkey,

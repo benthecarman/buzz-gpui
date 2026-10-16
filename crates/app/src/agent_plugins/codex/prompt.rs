@@ -17,6 +17,9 @@ pub struct Conversation {
     pub channel_id: String,
     pub name: String,
     pub root: Option<String>,
+    /// An owner's Me chat: one channel conversation, posted at its top
+    /// level.
+    pub top_level: bool,
 }
 
 /// JSON with `<` and `>` escaped, so quoted data cannot close a section.
@@ -74,7 +77,10 @@ struct Context<'a> {
     session_scope: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_thread: Option<&'a str>,
-    reply_to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    posting: Option<&'a str>,
 }
 
 /// One request as Codex reads it; `steering` marks a follow-up to work in
@@ -99,8 +105,17 @@ pub fn turn_input(
         } else {
             "channel"
         },
-        session_thread: conversation.root.as_deref(),
-        reply_to: root_of(event),
+        session_thread: conversation
+            .root
+            .as_deref()
+            .filter(|_| !conversation.top_level),
+        reply_to: (!conversation.top_level).then(|| root_of(event)),
+        posting: conversation.top_level.then_some("top-level"),
+    };
+    let top_level = if conversation.top_level {
+        format!("{}\n", crate::buzz_mcp::TOP_LEVEL_PROMPT)
+    } else {
+        String::new()
     };
     let interest = if interest.is_empty() {
         String::new()
@@ -108,7 +123,7 @@ pub fn turn_input(
         format!("\n<interest>\n{}\n</interest>", quoted(&interest))
     };
     format!(
-        "<context>\n{}\n</context>\n<{section}>\n{}\nRequest: {}\n</{section}>{interest}",
+        "<context>\n{}\n</context>\n{top_level}<{section}>\n{}\nRequest: {}\n</{section}>{interest}",
         quoted(&context),
         quoted(event),
         quoted(&text),
@@ -189,6 +204,7 @@ mod tests {
             channel_id: "chan".into(),
             name: "general".into(),
             root: Some(root.clone()),
+            top_level: false,
         };
         let input = turn_input(&reply, &thread, "<b>hi</b>", "", false);
         assert!(input.starts_with(&format!(
@@ -219,6 +235,7 @@ mod tests {
             channel_id: "chan".into(),
             name: " team\n  chat ".into(),
             root: Some("abcdef0123456789".into()),
+            top_level: false,
         };
         assert_eq!(
             session_title("Codex Test", &conversation),

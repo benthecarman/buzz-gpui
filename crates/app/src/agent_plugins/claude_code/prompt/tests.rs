@@ -55,12 +55,59 @@ fn turn(
         event,
         channel,
         scope: Scope::Thread,
+        top_level: false,
         thread,
         context,
         total,
         label: "@mention",
         name: &name,
     })
+}
+
+#[test]
+fn a_me_chat_turn_posts_at_the_channel_top_level() {
+    let event = BuzzEvent {
+        id: "e1".into(),
+        pubkey: "a".repeat(64),
+        content: "what word?".into(),
+        ..Default::default()
+    };
+    let earlier = BuzzEvent {
+        id: "e0".into(),
+        pubkey: "a".repeat(64),
+        content: "remember kiwi".into(),
+        ..Default::default()
+    };
+    let channel = Channel {
+        id: "chan".into(),
+        name: Some("chat".into()),
+        dm: false,
+    };
+    // Even a message in an older thread continues the one conversation.
+    let thread = Thread {
+        root_id: "root".into(),
+        parent_id: "root".into(),
+    };
+    let text = turn_prompt(&TurnInput {
+        event: &event,
+        channel: &channel,
+        scope: Scope::Channel,
+        top_level: true,
+        thread: Some(&thread),
+        context: std::slice::from_ref(&earlier),
+        total: 2,
+        label: "@mention",
+        agent: &"b".repeat(64),
+        name: &name,
+    });
+    assert!(
+        text.contains("Scope: channel\nSession scope: channel\n"),
+        "{text}"
+    );
+    assert!(!text.contains("Thread root:"), "{text}");
+    assert!(text.contains(&format!("IMPORTANT: {}", crate::buzz_mcp::TOP_LEVEL_PROMPT)));
+    assert!(text.contains("Use `read` for recent messages if needed."));
+    assert!(text.contains("<conversation-context"), "{text}");
 }
 
 #[test]

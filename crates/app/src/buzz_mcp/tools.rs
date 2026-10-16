@@ -212,6 +212,9 @@ impl Tools {
         let channel = channel
             .or_else(|| context.channel.clone())
             .ok_or("channel is required here.")?;
+        if reply.is_some() && context.top_level && Some(&channel) == context.channel.as_ref() {
+            return Err("This chat stays at the top level: send again without reply.".into());
+        }
         let audience = args.get("audience").and_then(Value::as_str);
         if !matches!(audience, Some("everyone" | "agents")) {
             return Err("audience must be everyone or agents.".into());

@@ -1047,6 +1047,7 @@ impl CodexRuntime {
             working,
             activity,
         } = run;
+        let mention = matches!(wake, Wake::Mention { .. });
         let (event, interest) = match wake {
             Wake::Timer => {
                 return Err(
@@ -1081,9 +1082,12 @@ impl CodexRuntime {
         let (answered, replied) = Answered::new();
         working(replied);
         let settings = Config::read(&config);
+        // Watches keep their routing; a mention in the owner's Me chat posts
+        // at the channel's top level.
+        let top_level = mention && relay.me_chat(&agent.owner(), &channel_id).await?;
         let info = relay.channel(&channel_id);
         let dm = info.as_ref().is_some_and(|info| info.dm);
-        let tool_root = (!dm).then(|| root_of(&event));
+        let tool_root = (!dm && !top_level).then(|| root_of(&event));
         let root = if settings.channel_scope() {
             None
         } else {
@@ -1105,6 +1109,7 @@ impl CodexRuntime {
                     .unwrap_or_else(|| channel_id.clone()),
                 channel_id: channel_id.clone(),
                 root: root.clone(),
+                top_level,
             },
             interest,
             team,
@@ -1130,7 +1135,13 @@ impl CodexRuntime {
             .or_insert_with(|| Arc::new(Lane::new(entry.after.clone())))
             .clone();
         let entry = entry.clone();
-        match lane.active() {
+        // A turn keeps the posting policy it was admitted with, so a
+        // request under the other policy waits for it rather than steering
+        // into it.
+        let active = lane.active().filter(|active| {
+            locked(&active.reply).conversation.top_level == request.conversation.top_level
+        });
+        match active {
             Some(active) => {
                 // Startup and history reads stay ordered without holding the
                 // delivery.
@@ -1399,14 +1410,17 @@ impl CodexRuntime {
         }
     }
 
-    /// Replies to the request in its thread, as the agent. Tags the owner
-    /// even when a sibling asked.
+    /// Replies to the request in its thread, or at the top level of a Me
+    /// chat, as the agent. Tags the owner even when a sibling asked.
     async fn publish(&self, request: &Request, content: &str) -> Result<(), String> {
-        let tags = crate::agent_plugins::reply_tags(
+        let mut tags = crate::agent_plugins::reply_tags(
             &request.conversation.channel_id,
             &request.event,
             &request.agent.owner(),
         );
+        if request.conversation.top_level {
+            tags.retain(|tag| tag.first().map(String::as_str) != Some("e"));
+        }
         request
             .agent
             .publish(Template {
@@ -1494,6 +1508,7 @@ impl CodexRuntime {
         let context = Context {
             channel: Some(request.conversation.channel_id.clone()),
             root: request.tool_root.clone(),
+            top_level: request.conversation.top_level,
         };
         let text = call_tool(
             Arc::new(client) as Arc<dyn BuzzClient>,

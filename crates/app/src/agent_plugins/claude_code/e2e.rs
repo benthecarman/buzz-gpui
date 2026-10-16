@@ -267,7 +267,8 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             activity: None,
             current: crate::agents2::runtime::always_current(),
         })
-        .await;
+        .await
+        .unwrap();
     wait_for("the reply", || !agent.published.lock().unwrap().is_empty()).await;
     let key = format!("{CHANNEL}/{}", mention.id);
     assert_eq!(
@@ -329,7 +330,8 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             activity: None,
             current: crate::agents2::runtime::always_current(),
         })
-        .await;
+        .await
+        .unwrap();
     wait_for("the file", || agent.published.lock().unwrap().len() == 2).await;
     assert_eq!(agent.published.lock().unwrap()[1].content, "from a file");
     runtime.dispose();
@@ -436,6 +438,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
         http: http.clone(),
         identity: alice.clone(),
         snapshot: None,
+        session: None,
     });
     let memories = owner.memories(&pubkey).await.unwrap();
     assert!(
@@ -481,7 +484,8 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
             activity: None,
             current: crate::agents2::runtime::always_current(),
         })
-        .await;
+        .await
+        .unwrap();
     let filter = json!({ "kinds": [9], "authors": [pubkey], "#e": [event.id], "limit": 5 });
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {

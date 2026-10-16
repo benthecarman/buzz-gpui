@@ -3,7 +3,7 @@
 //! the same base prompt as a harness agent. The Markdown files are
 //! buzz-app's, copied unchanged.
 
-use crate::buzz_mcp::BuzzEvent;
+use crate::buzz_mcp::{BuzzEvent, TOP_LEVEL_PROMPT};
 
 const ATTENTION_PROMPT: &str = include_str!("attention_prompt.md");
 const BASE_PROMPT: &str = include_str!("base_prompt.md");
@@ -125,6 +125,9 @@ pub struct TurnInput<'a> {
     pub event: &'a BuzzEvent,
     pub channel: &'a Channel,
     pub scope: Scope,
+    /// An owner's Me chat: one channel conversation, posted at its top
+    /// level.
+    pub top_level: bool,
     /// Absent for a top-level message.
     pub thread: Option<&'a Thread>,
     /// Earlier messages of the conversation the session has not been shown.
@@ -165,7 +168,9 @@ pub fn turn_prompt(input: &TurnInput) -> String {
     // thread a reply is for, so it names the thread itself.
     let root = thread.map_or(event.id.as_str(), |thread| thread.root_id.as_str());
     let shared = channel.dm || input.scope == Scope::Channel;
-    let reply = if shared {
+    let reply = if input.top_level {
+        format!("IMPORTANT: {TOP_LEVEL_PROMPT}")
+    } else if shared {
         format!(
             "IMPORTANT: For ordinary replies in this turn, pass `reply: \"{root}\"` to `send` so the conversation stays threaded. Do NOT reply into any other (older) thread. If the human explicitly asks for a channel-root, top-level, or broadcast post, leave out `reply`."
         )
@@ -175,6 +180,7 @@ pub fn turn_prompt(input: &TurnInput) -> String {
         "IMPORTANT: This is a new top-level message. `send` replies in its thread by default — the triggering message is the thread root. Do NOT reply into any other (older) thread. If the human explicitly asks for a channel-root, top-level, or broadcast post, pass `channel`.".into()
     };
     let fetch = match (shared, thread.is_some()) {
+        _ if input.top_level => "Use `read` for recent messages if needed.".into(),
         (true, true) => {
             format!("Use `read` with `thread: \"{root}\"` for full history if truncated.")
         }
@@ -196,7 +202,7 @@ pub fn turn_prompt(input: &TurnInput) -> String {
             "Session scope: dm conversation".into(),
             format!("Channel: {channel_label}"),
         ]
-    } else if thread.is_some() || input.scope == Scope::Thread {
+    } else if !input.top_level && (thread.is_some() || input.scope == Scope::Thread) {
         let mut lines = vec![
             "Scope: thread".into(),
             format!("Session scope: {}", input.scope.as_str()),
@@ -221,7 +227,7 @@ pub fn turn_prompt(input: &TurnInput) -> String {
     lines.push(reply);
     let mut parts = vec![section("context", &lines.join("\n"), "")];
     if !context.is_empty() {
-        let tag = if channel.dm && thread.is_none() {
+        let tag = if (channel.dm && thread.is_none()) || input.top_level {
             "conversation-context"
         } else {
             "thread-context"

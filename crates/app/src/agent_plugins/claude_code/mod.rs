@@ -396,8 +396,7 @@ impl AgentType for ClaudeCodeType {
                 () = setup.installed() => {}
                 () = cancel.cancelled() => return Err("The run was cancelled".to_string()),
             }
-            runtime.run(run).await;
-            Ok(())
+            runtime.run(run).await
         });
         cx.background_spawn(async move {
             handed

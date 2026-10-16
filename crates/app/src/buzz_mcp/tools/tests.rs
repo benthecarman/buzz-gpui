@@ -201,7 +201,42 @@ fn in_thread() -> Context {
     Context {
         channel: Some("chan".into()),
         root: Some(root()),
+        ..Context::default()
     }
+}
+
+#[tokio::test]
+async fn a_top_level_chat_refuses_replies_into_its_threads() {
+    let client = fake(community());
+    let chat = Context {
+        channel: Some("chan".into()),
+        root: None,
+        top_level: true,
+    };
+    for value in [
+        json!({ "audience": "everyone", "text": "hi", "reply": root() }),
+        json!({ "audience": "everyone", "text": "hi", "reply": nested() }),
+        json!({ "audience": "everyone", "text": "hi", "channel": "chan", "reply": root() }),
+    ] {
+        let error = call(&client, &chat, "send", value).await.unwrap_err();
+        assert_eq!(
+            error,
+            "This chat stays at the top level: send again without reply."
+        );
+    }
+    assert!(client.published.lock().unwrap().is_empty());
+    call(
+        &client,
+        &chat,
+        "send",
+        json!({ "audience": "everyone", "text": "hi" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        client.published.lock().unwrap()[0].tags,
+        tags(&[&["h", "chan"]])
+    );
 }
 
 fn args(value: Value) -> Args {
