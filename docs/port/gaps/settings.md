@@ -191,6 +191,7 @@ manager (`crates/app/src/plugins.rs`); external plugins are skipped.
 | Pair mobile: "Copy pairing code" under the QR copies the code's text and reads "Copied" until a new code shows; its slot is kept in every phase (#1003) | src/bundled/pairing/PairingSettings.tsx; src/features/pairing/client.ts; src-tauri/src/pairing/mod.rs | DONE (app/src/ui/settings/pairing/mod.rs `copy_slot`; pair-mobile/src/lib.rs `Status::Qr::uri`) | DIFFERENT: no "Couldn’t copy. Try again" state, since GPUI's clipboard write reports no failure | S |
 | Settings → Personal groups removed with personal groups (#988) | src/bundled/channels/index.tsx | DONE (app/src/ui/settings/personal_groups.rs deleted) | — | S |
 | Native nsec backup HTTP client (#995) | crates/nsec-backup | N/A (library crate only; nothing in buzz-app's src/ or src-tauri uses it yet) | — | — |
+| Settings → Messages, first under the community: "Open threads in" the side pane or the main pane, this device's default for new thread tabs (timeline, routes and links, another conversation's tab); open threads stay where placed; a failed save stays active with "Thread preference wasn’t saved" and Retry saving (`55b71bf1`) | src/bundled/channels/MessageSettings.tsx; src/features/messages/thread-preferences.ts | DONE (app/src/ui/settings/messages.rs, ui/settings/mod.rs, ui/workspace/board.rs, main.rs) | — | S |
 
 ## Not applicable: macOS/Windows only
 
