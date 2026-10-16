@@ -41,6 +41,30 @@ pub struct ActivityTurn {
     /// The latest evidence, ms.
     pub timestamp: u64,
     pub state: TurnState,
+    /// The messages that started it, with their threads: from retained
+    /// signed messages its start named, never from typing. `None` when the
+    /// start named none.
+    pub requests: Option<Vec<TurnRequest>>,
+}
+
+/// A message a turn handles, and the thread it sits in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnRequest {
+    pub message_id: String,
+    pub thread_root_id: String,
+}
+
+/// What association needs to know of a retained message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerMessage {
+    pub id: String,
+    pub kind: u16,
+    /// Its `h` tags.
+    pub channels: Vec<String>,
+    /// It has `e` tags.
+    pub references: bool,
+    /// Its thread root, when it is a reply.
+    pub root: Option<String>,
 }
 
 /// Working typing evidence (`Typing`).
@@ -61,6 +85,50 @@ struct Turn {
     timestamp: u64,
     ended: bool,
     epoch: u64,
+    triggering_event_ids: Option<Vec<String>>,
+    requests: Vec<TurnRequest>,
+    unresolved: Vec<String>,
+}
+
+impl Turn {
+    /// Moves the triggers `find` now knows into requests (`associate`).
+    fn associate(&mut self, find: &dyn Fn(&str) -> Option<TriggerMessage>) {
+        let mut unresolved = Vec::new();
+        for id in std::mem::take(&mut self.unresolved) {
+            let Some(event) = find(&id) else {
+                unresolved.push(id);
+                continue;
+            };
+            if ![9, 40002, 40008].contains(&event.kind)
+                || event.channels.len() != 1
+                || Some(&event.channels[0]) != self.channel_id.as_ref()
+                || (event.references && event.root.is_none())
+            {
+                continue;
+            }
+            self.requests.push(TurnRequest {
+                thread_root_id: event.root.unwrap_or_else(|| event.id.clone()),
+                message_id: id,
+            });
+        }
+        self.unresolved = unresolved;
+    }
+}
+
+/// A start's `triggeringEventIds`, when it is a list of at most 64 event
+/// ids.
+fn triggers(item: &Value) -> Option<Vec<String>> {
+    let ids = item.get("payload")?.get("triggeringEventIds")?.as_array()?;
+    if ids.len() > 64 {
+        return None;
+    }
+    ids.iter()
+        .map(|id| {
+            id.as_str()
+                .filter(|id| super::hex64(id))
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -106,6 +174,7 @@ impl Turns {
         item: &Value,
         now: u64,
         can_access: &dyn Fn(&str) -> bool,
+        find: &dyn Fn(&str) -> Option<TriggerMessage>,
     ) -> usize {
         let Some(kind) = text(item.get("kind")) else {
             return 0;
@@ -144,17 +213,30 @@ impl Turns {
             return 0;
         }
         let highest = previous.map_or(timestamp, |p| p.timestamp.max(timestamp));
-        self.turns.insert(
-            key,
-            Turn {
-                agent: agent.to_string(),
-                turn_id: turn_id.to_string(),
-                channel_id: channel.map(str::to_string),
-                timestamp: highest,
-                ended: ends,
-                epoch: self.epoch,
-            },
-        );
+        let triggering_event_ids = match kind {
+            "turn_started" => triggers(item),
+            _ => previous.and_then(|p| p.triggering_event_ids.clone()),
+        };
+        let (requests, unresolved) = match (&triggering_event_ids, previous) {
+            (None, _) => (Vec::new(), Vec::new()),
+            (Some(_), Some(p)) if p.triggering_event_ids.is_some() => {
+                (p.requests.clone(), p.unresolved.clone())
+            }
+            (Some(ids), _) => (Vec::new(), ids.clone()),
+        };
+        let mut turn = Turn {
+            agent: agent.to_string(),
+            turn_id: turn_id.to_string(),
+            channel_id: channel.map(str::to_string),
+            timestamp: highest,
+            ended: ends,
+            epoch: self.epoch,
+            triggering_event_ids,
+            requests,
+            unresolved,
+        };
+        turn.associate(find);
+        self.turns.insert(key, turn);
         if self.turns.len() > TURN_LIMIT
             && let Some((key, oldest)) = self
                 .turns
@@ -179,6 +261,10 @@ impl Turns {
                 turn_id: turn.turn_id.clone(),
                 channel_id: turn.channel_id.clone(),
                 timestamp: turn.timestamp,
+                requests: turn
+                    .triggering_event_ids
+                    .as_ref()
+                    .map(|_| turn.requests.clone()),
                 state: if turn.ended {
                     TurnState::Ended
                 } else if listening
@@ -228,6 +314,31 @@ impl Turns {
     pub fn expire_typing(&mut self, now: u64, live_agents: &HashSet<String>) {
         self.typing
             .retain(|t| now < t.expires_at && live_agents.contains(&t.agent));
+    }
+
+    /// Trigger ids no retained message has answered yet.
+    pub fn unresolved(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .turns
+            .values()
+            .flat_map(|turn| turn.unresolved.iter().cloned())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Associates triggers with messages that arrived after their
+    /// telemetry (`messagesChanged`). True when any turn changed.
+    pub fn resolve(&mut self, find: &dyn Fn(&str) -> Option<TriggerMessage>) -> bool {
+        let mut changed = false;
+        for turn in self.turns.values_mut() {
+            if turn.unresolved.iter().any(|id| find(id).is_some()) {
+                turn.associate(find);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn working_typing(&self) -> Vec<Typing> {

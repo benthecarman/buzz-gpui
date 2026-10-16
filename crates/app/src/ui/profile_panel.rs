@@ -1,7 +1,7 @@
 //! The profile panel (`bundled/profiles/ProfilePanel.tsx`): a person or
 //! agent beside the conversation, opened from a mention, an avatar or the
 //! members list, or as the viewer's own profile from the account menu.
-//! Tabs: Info and Channels.
+//! Tabs: Info, Channels and, for an agent, Activity.
 //!
 //! It is a channel panel for profile links (`nostr:npub…` and the app's
 //! `buzz:agent-profile:<hex>`), so a profile opens as a tab in the
@@ -24,6 +24,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::prelude::PublicKey;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// The panel's key among channel panels.
@@ -42,9 +43,28 @@ pub fn target(pubkey: &str, agent: bool) -> Option<String> {
     })
 }
 
+/// The app-local link that opens an agent's profile on its activity
+/// (`profileActivityViewTarget`); never a public identity claim.
+pub fn activity_target(pubkey: &str) -> Option<String> {
+    let key = PublicKey::from_hex(pubkey).ok()?;
+    Some(format!("buzz:profile?agent={}&tab=activity", key.to_hex()))
+}
+
+/// The agent an [`activity_target`] names (`profileActivityViewKey`).
+pub fn parse_activity_target(target: &str) -> Option<String> {
+    let hex = target
+        .strip_prefix("buzz:profile?agent=")?
+        .strip_suffix("&tab=activity")?;
+    (activity_target(hex).as_deref() == Some(target)).then(|| hex.to_string())
+}
+
 /// The key a profile link names and whether it carries the agent hint
-/// (`profilePanelKey`, `profileAgentHint`).
+/// (`profilePanelKey`, `profileAgentHint`). An activity link is an
+/// agent's.
 pub fn parse_target(target: &str) -> Option<(String, bool)> {
+    if let Some(agent) = parse_activity_target(target) {
+        return Some((agent, true));
+    }
     if let Some(hex) = target.strip_prefix("buzz:agent-profile:") {
         let valid = hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         return valid.then(|| (hex.to_string(), true));
@@ -87,6 +107,8 @@ pub fn init(cx: &mut App) {
 enum Section {
     Info,
     Channels,
+    /// The agent's activity, embedded (`PanelView` of Agent Activity).
+    Activity,
 }
 
 pub struct ProfilePanel {
@@ -98,6 +120,11 @@ pub struct ProfilePanel {
     context: Option<String>,
     close: Option<channel_panels::Close>,
     tab: Section,
+    /// Opened for activity and no tab picked since: an Agents agent shows
+    /// Info, where its type's sessions are.
+    activity_requested: bool,
+    /// The embedded Agent Activity panel, once shown.
+    activity: Option<AnyView>,
     /// The profile read has had its chance to answer.
     settled: bool,
     copy_status: Option<SharedString>,
@@ -117,6 +144,10 @@ impl ProfilePanel {
         let mut panel = Self::new(opening.community, pubkey, agent_hint, window, cx);
         panel.context = Some(opening.channel);
         panel.close = Some(opening.close);
+        if parse_activity_target(&opening.target).is_some() {
+            panel.tab = Section::Activity;
+            panel.activity_requested = true;
+        }
         panel
     }
 
@@ -157,6 +188,8 @@ impl ProfilePanel {
             context: None,
             close: None,
             tab: Section::Info,
+            activity_requested: false,
+            activity: None,
             settled: false,
             copy_status: None,
             copied: None,
@@ -224,10 +257,19 @@ impl ProfilePanel {
     }
 
     /// The tabs shown, and the one selected: a tab that went away falls
-    /// back to Info.
-    fn sections(&self) -> (Vec<Section>, Section) {
-        let sections = vec![Section::Info, Section::Channels];
+    /// back to Info. Opened for activity, an Agents agent shows Info,
+    /// where its type's sessions are, until the reader picks a tab.
+    fn sections(&self, cx: &App) -> (Vec<Section>, Section) {
+        let mut sections = vec![Section::Info, Section::Channels];
+        if self.known_agent(cx) || self.agent_hint {
+            sections.push(Section::Activity);
+        }
+        let plugin = crate::agents2::Agents2::global(cx)
+            .is_some_and(|agents| agents.read(cx).find(&self.pubkey).is_some());
         let selected = match sections.contains(&self.tab) {
+            _ if self.activity_requested && self.tab == Section::Activity && plugin => {
+                Section::Info
+            }
             true => self.tab,
             false => Section::Info,
         };
@@ -235,8 +277,38 @@ impl ProfilePanel {
     }
 
     fn select(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.activity_requested = false;
         self.tab = section;
         cx.notify();
+    }
+
+    /// The agent's activity in the conversation the panel opened from.
+    fn activity(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let view = match &self.activity {
+            Some(view) => view.clone(),
+            None => {
+                let close = self.close.clone().unwrap_or_else(|| Rc::new(|_, _| {}));
+                let opening = channel_panels::Opening {
+                    community: self.community.clone(),
+                    channel: self.context.clone().unwrap_or_default(),
+                    target: crate::agent_activity::target(
+                        &self.pubkey,
+                        self.context.as_deref(),
+                        None,
+                    ),
+                    close,
+                    thread: None,
+                };
+                let view: AnyView = cx
+                    .new(|cx| {
+                        crate::ui::agent_activity::panel::ActivityPanel::new(opening, window, cx)
+                    })
+                    .into();
+                self.activity = Some(view.clone());
+                view
+            }
+        };
+        vec![div().h(rems(36.)).min_w_0().child(view).into_any_element()]
     }
 
     // ----- actions -----
@@ -388,10 +460,14 @@ impl ProfilePanel {
             cx,
         ));
         if self.known_agent(cx) {
+            let this = cx.entity().downgrade();
             items.extend(crate::ui::agent_activity::profile::latest_activity(
                 &self.community,
                 &self.pubkey,
                 self.context.as_deref(),
+                Some(Rc::new(move |_, cx| {
+                    let _ = this.update(cx, |this, cx| this.select(Section::Activity, cx));
+                })),
                 cx,
             ));
         }
@@ -610,12 +686,13 @@ impl Focusable for ProfilePanel {
 impl Render for ProfilePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        let (sections, selected) = self.sections();
+        let (sections, selected) = self.sections(cx);
         let mut tabs = Tabs::new(TabVariant::Panel);
         for section in sections {
             let (id, label) = match section {
                 Section::Info => ("profile-tab-info", "Info"),
                 Section::Channels => ("profile-tab-channels", "Channels"),
+                Section::Activity => ("profile-tab-activity", "Activity"),
             };
             tabs = tabs.tab(
                 Tab::new(id, label)
@@ -626,6 +703,7 @@ impl Render for ProfilePanel {
         let content = match selected {
             Section::Info => self.info(window, cx),
             Section::Channels => self.channels(cx),
+            Section::Activity => self.activity(window, cx),
         };
         let close = self.close.clone();
         div()
@@ -716,6 +794,14 @@ mod tests {
         assert_eq!(parse_target("buzz:agent-profile:XYZ"), None);
         assert_eq!(parse_target("https://example.com"), None);
         assert_eq!(target("nothex", false), None);
+        let activity = activity_target(&key).unwrap();
+        assert_eq!(activity, format!("buzz:profile?agent={key}&tab=activity"));
+        assert_eq!(parse_target(&activity), Some((key.clone(), true)));
+        assert_eq!(parse_activity_target(&activity), Some(key.clone()));
+        assert_eq!(
+            parse_activity_target(&format!("buzz:profile?agent={key}&tab=info")),
+            None
+        );
     }
 
     #[test]

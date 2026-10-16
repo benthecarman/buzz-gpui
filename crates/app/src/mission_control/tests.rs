@@ -49,6 +49,7 @@ fn snapshot(events: Vec<Value>, state: TurnState, evidence: u64) -> Snapshot {
             channel_id: Some("c1".into()),
             timestamp: evidence,
             state,
+            requests: None,
         }]
         .into(),
         ..Default::default()

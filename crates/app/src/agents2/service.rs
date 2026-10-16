@@ -24,6 +24,7 @@ use super::store::{
 };
 use super::working::{self, Working};
 use super::{Agent, AgentChange};
+use crate::agent_activity::local::{self, Begin, LocalActivity, WorkHandle, WorkOutcome};
 use crate::community::{AppState, Community, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
 use crate::runtime::Runtime;
@@ -175,6 +176,8 @@ pub(crate) fn retry_due(
 struct Job {
     trigger: Trigger,
     channel: Option<String>,
+    /// A mention's local work row, once the runner holds the agent.
+    work: Option<WorkHandle>,
 }
 
 pub(crate) struct CompiledWatch {
@@ -217,6 +220,44 @@ struct Runner {
     working_since: Option<u64>,
     /// The last run's failure: when it ended, Unix ms, and why.
     failed: Option<(u64, String)>,
+    /// The host lets this GUI hold the agent, so its mentions show here
+    /// as local work.
+    activity_claimed: bool,
+}
+
+/// What a full queue says on the mention it could not take.
+const BUSY: &str = "Agent is busy and could not queue this request. Try again when it finishes.";
+
+/// Starts showing a queued mention as received, in its community.
+fn show_work(local: &LocalActivity, scope: &str, agent: &str, job: &mut Job) {
+    if job.work.is_some() {
+        return;
+    }
+    let Trigger::Mention { event } = &job.trigger else {
+        return;
+    };
+    let Some(channel) = job
+        .channel
+        .clone()
+        .or_else(|| event.tag("h").map(str::to_owned))
+    else {
+        return;
+    };
+    job.work = Some(local.begin(
+        Begin {
+            scope: scope.to_owned(),
+            agent: agent.to_owned(),
+            channel_id: channel,
+            message_id: event.id.clone(),
+            thread_root_id: working::thread_root(event),
+        },
+        now_ms(),
+    ));
+}
+
+/// The local work scope of an agent's community.
+fn work_scope(agent: &Agent) -> Option<String> {
+    Some(local::scope(&http_origin(&agent.relay)?, &agent.owner))
 }
 
 /// One saved identity as the rest of the app knows the viewer's agents
@@ -1246,8 +1287,14 @@ impl Agents2 {
             .filter(|agent| shown(&agent.owner, &agent.relay, selected.as_deref(), &sessions))
             .cloned()
             .collect();
-        self.runners
-            .retain(|pubkey, _| live.iter().any(|summary| &summary.pubkey == pubkey));
+        let local = cx.default_global::<LocalActivity>().clone();
+        self.runners.retain(|pubkey, _| {
+            let kept = live.iter().any(|summary| &summary.pubkey == pubkey);
+            if !kept {
+                local.clear(None, Some(pubkey));
+            }
+            kept
+        });
         let mut drains = Vec::new();
         for summary in &live {
             let kind = registry::type_of(&summary.agent_type, cx);
@@ -1274,6 +1321,7 @@ impl Agents2 {
                             may_hold: true,
                             working_since: None,
                             failed: None,
+                            activity_claimed: false,
                         },
                     );
                 }
@@ -1332,6 +1380,7 @@ impl Agents2 {
         let mut drains = Vec::new();
         let now = Instant::now();
         let sessions = self.sessions();
+        let local = cx.default_global::<LocalActivity>().clone();
         for agent in &self.running {
             if !hears(&agent.owner, &agent.relay, origin, &sessions) {
                 continue;
@@ -1370,12 +1419,21 @@ impl Agents2 {
                 let wrote =
                     move |id: &str| wrote.lock().unwrap_or_else(|p| p.into_inner()).contains(id);
                 for trigger in heard(&agent.pubkey, &agent.owner, event, &wrote, &watches) {
+                    let mut job = Job {
+                        trigger,
+                        channel: batch.channel.clone(),
+                        work: None,
+                    };
+                    let scope = work_scope(agent).filter(|_| runner.activity_claimed);
+                    if let Some(scope) = &scope {
+                        show_work(&local, scope, &agent.pubkey, &mut job);
+                    }
                     if admit(&mut runner.window, runner.queue.len(), now) {
-                        runner.queue.push_back(Job {
-                            trigger,
-                            channel: batch.channel.clone(),
-                        });
+                        runner.queue.push_back(job);
                     } else {
+                        if let Some(work) = job.work {
+                            work.finish(WorkOutcome::failed(BUSY));
+                        }
                         tracing::warn!(agent = %agent.name, "agent dropped an event");
                     }
                 }
@@ -1418,6 +1476,7 @@ impl Agents2 {
                 interest,
             },
             channel: None,
+            work: None,
         })
     }
 
@@ -1483,6 +1542,7 @@ impl Agents2 {
                 let (mut delivery, agent) = *delivery;
                 let working = delivery.working.clone();
                 let run = {
+                    let working = working.clone();
                     let lifetime = lifetime.clone();
                     cx.spawn(async move |cx| {
                         let pubkey = delivery.agent.pubkey.clone();
@@ -1502,7 +1562,14 @@ impl Agents2 {
                                 return Ok(());
                             }
                         }
-                        cx.update(|cx| kind.run(delivery, cx)).await
+                        let result = cx.update(|cx| kind.run(delivery, cx)).await;
+                        // The run's own end settles its hold; a handover
+                        // deadline only moves the queue on.
+                        match &result {
+                            Ok(()) => working.release(),
+                            Err(error) => working.release_with(WorkOutcome::failed(error.to_string())),
+                        }
+                        result
                     })
                 };
                 let deadline = cx.background_executor().timer(timeout);
@@ -1515,7 +1582,6 @@ impl Agents2 {
                 )
                 .await;
                 source.cancel();
-                working.release();
                 let failed = match ended {
                     futures::future::Either::Left((Err(error), _)) => {
                         tracing::error!(agent = %pubkey, %error, "agent run failed");
@@ -1569,6 +1635,8 @@ impl Agents2 {
         };
         if seen.agent.is_none() || seen.kind.is_none() {
             if seen.agent.is_some() {
+                cx.default_global::<LocalActivity>()
+                    .clear(None, Some(pubkey));
                 runner.queue.clear();
             }
             if !std::mem::replace(&mut runner.may_hold, false) {
@@ -1600,8 +1668,11 @@ impl Agents2 {
             return Start::Idle;
         };
         runner.may_hold = claimed;
+        let local = cx.default_global::<LocalActivity>().clone();
         // Another GUI or copy of the app holds it and runs these.
         if !claimed {
+            local.clear(None, Some(pubkey));
+            runner.activity_claimed = false;
             runner.queue.clear();
             return Start::Idle;
         }
@@ -1611,6 +1682,12 @@ impl Agents2 {
         let (Some(agent), Some(kind)) = (current.agent, current.kind) else {
             return Start::Idle;
         };
+        runner.activity_claimed = true;
+        if let Some(scope) = work_scope(&agent) {
+            for queued in runner.queue.iter_mut() {
+                show_work(&local, &scope, pubkey, queued);
+            }
+        }
         let lifetime = runner.lifetime_signal.clone();
         let job = match runner.queue.pop_front() {
             Some(job) => Some(job),
@@ -1636,7 +1713,7 @@ impl Agents2 {
         if let Some(runner) = self.runners.get_mut(pubkey) {
             runner.working_since = Some(now_ms());
         }
-        let working = self.working(&handle, &job, cx);
+        let working = self.working(&handle, &job, &lifetime, cx);
         let delivery = Delivery {
             trigger: job.trigger,
             channel: job.channel,
@@ -1651,25 +1728,54 @@ impl Agents2 {
     }
 
     /// Counts a run as working until it and everything it handed to
-    /// [`Working::until`] have settled, however long that takes. A mention run is reacted to, and shown typing here,
-    /// meanwhile: both are STOPGAPs, and nothing shows without them.
-    fn working(&self, agent: &AgentHandle, job: &Job, cx: &mut Context<Self>) -> Working {
+    /// [`Working::until`] have settled, however long that takes. A mention
+    /// run shows as local work and typing on this device meanwhile; nothing
+    /// public is published. Retiring the agent takes its work away.
+    fn working(
+        &self,
+        agent: &AgentHandle,
+        job: &Job,
+        lifetime: &Cancellation,
+        cx: &mut Context<Self>,
+    ) -> Working {
         let runtime = Runtime::handle(cx);
         let Trigger::Mention { event } = &job.trigger else {
             return Working::none(runtime);
         };
-        let Some(channel) = job
+        let (stopped, ended) = futures::channel::oneshot::channel::<()>();
+        let mut ends: Vec<Box<dyn FnOnce() + Send>> = vec![Box::new(move || {
+            let _ = stopped.send(());
+        })];
+        let channel = job
             .channel
             .clone()
-            .or_else(|| event.tag("h").map(str::to_owned))
-        else {
-            return Working::none(runtime);
-        };
-        let mut ends = Vec::new();
-        // STOPGAP(agent-working-reactions): delete with working.rs's.
-        ends.push(working::react_while_working(
-            agent, event, &channel, &runtime,
-        ));
+            .or_else(|| event.tag("h").map(str::to_owned));
+        if let Some(channel) = channel {
+            ends.push(self.type_while_working(agent, event, channel, cx));
+        }
+        let working = Working::new(ends, job.work.clone(), runtime);
+        let (aborted, lifetime) = (working.clone(), lifetime.clone());
+        cx.background_spawn(async move {
+            let cancelled = std::pin::pin!(lifetime.cancelled());
+            if let futures::future::Either::Left(_) =
+                futures::future::select(cancelled, ended).await
+            {
+                aborted.abort();
+            }
+        })
+        .detach();
+        working
+    }
+
+    /// Shows the agent typing in the mention's thread until the returned
+    /// end runs.
+    fn type_while_working(
+        &self,
+        agent: &AgentHandle,
+        event: &EventData,
+        channel: String,
+        cx: &mut Context<Self>,
+    ) -> Box<dyn FnOnce() + Send> {
         // STOPGAP(agent-local-typing): delete with `Session::type_locally`.
         let (stop, stopped) = futures::channel::oneshot::channel::<()>();
         let (pubkey, root) = (agent.pubkey.clone(), working::thread_root(event));
@@ -1695,10 +1801,9 @@ impl Agents2 {
             });
         })
         .detach();
-        ends.push(Box::new(move || {
+        Box::new(move || {
             let _ = stop.send(());
-        }));
-        Working::new(ends, runtime)
+        })
     }
 
     /// Shows a running agent typing in its own community, while that is

@@ -75,27 +75,34 @@ pub(crate) fn working_agents(
     agents
 }
 
-/// The working indicator (`WorkingAgentsBadge`): a pill of pulsing dots
-/// naming the agents working in the conversation, in a tooltip where
-/// nothing covers it.
+/// The working indicator (`WorkingAgentsBadge`): a pill of dots that
+/// breathe while every agent is only starting and pulse once one works,
+/// naming them in a tooltip where nothing covers it.
 pub(crate) fn working_badge(
     id: &str,
-    agents: &[String],
+    working: &crate::ui::agent_activity::Working,
     profiles: &buzz_relay_client::Profiles,
     channel_name: &str,
     tooltip: bool,
     cx: &App,
 ) -> Option<AnyElement> {
-    if agents.is_empty() {
+    if working.agents.is_empty() {
         return None;
     }
     let c = cx.colors();
-    let names = agents
+    let names = working
+        .agents
         .iter()
         .map(|agent| display_name(profiles, agent).to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    Some(
+    let verb = if working.waiting {
+        "waiting"
+    } else {
+        "working"
+    };
+    Some(buzz_ui::arrive(
+        SharedString::from(format!("working-arrive-{id}")),
         div()
             .id(SharedString::from(format!("working-{id}")))
             .flex()
@@ -107,19 +114,17 @@ pub(crate) fn working_badge(
             .rounded(radius::PILL)
             .bg(c.affordance_subtle_hover)
             .when(tooltip, |this| {
-                this.tooltip(Tooltip::text(format!("{names} working in {channel_name}")))
+                this.tooltip(Tooltip::text(format!("{names} {verb} in {channel_name}")))
             })
-            .child(pulsing_dots(
-                "working",
-                3.,
+            .child(buzz_ui::typing_dots(
+                SharedString::from(format!("working-dots-{id}")),
+                working.waiting,
                 c.text_standard,
-                Duration::from_millis(1200),
-                0.08,
-                0.45,
-                2.,
-            ))
-            .into_any_element(),
-    )
+                cx,
+            )),
+        buzz_ui::Arrive::Fade,
+        cx,
+    ))
 }
 
 /// Three dots pulsing in sequence: `period`, per-dot `delay`, opacity from
@@ -516,7 +521,7 @@ impl ChannelSidebar {
                 .into_iter()
                 .flatten()
                 .filter(|person| {
-                    !agents.contains(person)
+                    !agents.agents.contains(person)
                         && !profiles
                             .get(*person)
                             .is_some_and(|profile| profile.is_agent)
@@ -815,7 +820,7 @@ impl ChannelSidebar {
         crate::ui::channel_activity::ActivityRow::new(&channel.id, row)
             .activity(
                 activity,
-                popover_agents,
+                popover_agents.agents,
                 std::sync::Arc::new(own_agents.clone()),
             )
             .directory(snapshot.profiles.clone(), Some(media), Some(community))

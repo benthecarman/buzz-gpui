@@ -262,6 +262,7 @@ impl AgentType for ClaudeCodeType {
             return Task::ready(Err("The agent's host is not connected".into()));
         };
         let spawn: Spawner = host.read(cx).spawner(PROCESS_OWNER);
+        let activity = super::activity(&delivery);
         let wake = match delivery.trigger {
             Trigger::Mention { event } => Wake::Mention {
                 event: super::event_of(&event),
@@ -290,6 +291,7 @@ impl AgentType for ClaudeCodeType {
             spawn,
             model: delivery.model,
             effort: delivery.effort,
+            activity,
             working: super::hold_until(delivery.working),
         };
         let runtime = state.read(cx).runtime.clone();

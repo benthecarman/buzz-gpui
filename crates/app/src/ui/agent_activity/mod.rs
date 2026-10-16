@@ -3,6 +3,7 @@
 //! the composer's working indicator and "Working now" popover, the
 //! sidebar's working popover and the profile's latest activity.
 
+pub mod bubble;
 pub mod panel;
 pub mod profile;
 pub mod row;
@@ -128,21 +129,40 @@ pub fn agent_label(
     directory.names.name(key, &fallback)
 }
 
-/// The sidebar's working agents in `channel`: the viewer's agents typing
-/// there, and agents with observed working turns or typing there.
+/// Who works in a conversation, for its working badge.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Working {
+    pub agents: Vec<String>,
+    /// Every one of them is still only starting: received or handed
+    /// over, with no step yet.
+    pub waiting: bool,
+}
+
+/// The sidebar's working agents in `channel` (`useWorkingAgents`): the
+/// viewer's agents typing there, unless this app tracks their work, and
+/// agents with local work, observed working turns or typing there.
 pub fn with_observed(
-    mut agents: Vec<String>,
+    typing: Vec<String>,
     community: &Entity<Community>,
     channel: &str,
     cx: &App,
-) -> Vec<String> {
+) -> Working {
     let snapshot = crate::agent_activity::observer::snapshot(community, cx);
+    let local = crate::agent_activity::local::local_activity(&snapshot.local, channel, None);
+    let mut agents: Vec<String> = typing
+        .into_iter()
+        .filter(|agent| !local.contains_key(agent.as_str()))
+        .collect();
     agents.extend(crate::agent_activity::current::working_agents(
         &snapshot, channel,
     ));
     agents.sort();
     agents.dedup();
-    agents
+    let waiting = !agents.is_empty()
+        && agents.iter().all(|agent| {
+            crate::agent_activity::local::breathing(local.get(agent.as_str()).copied())
+        });
+    Working { agents, waiting }
 }
 
 /// The viewer's agents in `community` (`agentChoices`).

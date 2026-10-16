@@ -1077,7 +1077,7 @@ impl Render for ThreadPanel {
             .root
             .as_ref()
             .map_or_else(|| self.root_id.to_hex(), |root| root.id.to_hex());
-        let activity = Activity::thread(
+        let mut activity = Activity::thread(
             community
                 .snapshot
                 .thread_typing
@@ -1092,6 +1092,13 @@ impl Render for ThreadPanel {
             &self.channel,
             Some(&root_hex),
             cx,
+        ));
+        // Message bubbles stand in for the composer's line
+        // (`ActivityTypingReplacement`).
+        activity.replace(&crate::agent_activity::request::bubbled_agents(
+            &crate::agent_activity::observer::snapshot(&self.community, cx),
+            &self.channel,
+            Some(&root_hex),
         ));
         let members = community
             .snapshot

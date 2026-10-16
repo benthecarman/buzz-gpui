@@ -241,6 +241,7 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             model: None,
             effort: None,
             working: std::sync::Arc::new(|_| {}),
+            activity: None,
         })
         .await;
     wait_for("the reply", || !agent.published.lock().unwrap().is_empty()).await;
@@ -300,6 +301,7 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             model: None,
             effort: None,
             working: std::sync::Arc::new(|_| {}),
+            activity: None,
         })
         .await;
     wait_for("the file", || agent.published.lock().unwrap().len() == 2).await;
@@ -448,6 +450,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
             model: None,
             effort: None,
             working: std::sync::Arc::new(|_| {}),
+            activity: None,
         })
         .await;
     let filter = json!({ "kinds": [9], "authors": [pubkey], "#e": [event.id], "limit": 5 });

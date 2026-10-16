@@ -348,6 +348,13 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
             // trigger gives a destination (`workingAgentDetails`).
             let details = working_details(&activity, &row.channel, agent);
             let message = details.as_ref().and_then(|d| d.message_id.clone());
+            // Local work has its own line and no telemetry to open.
+            let local = details.as_ref().is_some_and(|d| d.local);
+            let status: SharedString = details
+                .as_ref()
+                .and_then(|d| d.label.clone())
+                .unwrap_or_else(|| "Working".into())
+                .into();
             let (open, open_state, view_state) = (open.clone(), state.clone(), state.clone());
             let (agent_key, channel) = (agent.clone(), row.channel.clone());
             let opened = message.clone();
@@ -361,7 +368,7 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
                     (Some(picture), Some(media)) => Some(media::avatar(&picture, media)),
                     _ => None,
                 },
-                status: "Working".into(),
+                status,
                 meta: Some(
                     details
                         .as_ref()
@@ -389,14 +396,16 @@ fn popover(row: &ActivityRow, state: &Entity<State>, cx: &mut App) -> impl IntoE
                     }
                 })),
                 // Activity opens beside the channel it is about.
-                on_open_activity: Some(Rc::new(move |window, cx| {
-                    view_state.update(cx, |state, cx| state.close(cx));
-                    if let Some(opens) = &activity_opens {
-                        return (opens.activity)(&channel, &agent_key, window, cx);
-                    }
-                    navigation::open_url(&format!("buzz://channel/{channel}"), window, cx);
-                    super::agent_activity::open(&agent_key, Some(&channel), None, window, cx);
-                })),
+                on_open_activity: (!local).then(|| -> super::agent_activity::row::Action {
+                    Rc::new(move |window, cx| {
+                        view_state.update(cx, |state, cx| state.close(cx));
+                        if let Some(opens) = &activity_opens {
+                            return (opens.activity)(&channel, &agent_key, window, cx);
+                        }
+                        navigation::open_url(&format!("buzz://channel/{channel}"), window, cx);
+                        super::agent_activity::open(&agent_key, Some(&channel), None, window, cx);
+                    })
+                }),
             });
         }
     }

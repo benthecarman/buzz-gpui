@@ -8,14 +8,17 @@
 //! memory: the archive keeps only the encrypted envelopes.
 
 pub mod current;
+pub mod local;
 pub mod observer;
+pub mod request;
 pub mod transcript_model;
 pub mod turns;
 
+use local::LocalWork;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
-use turns::{ActivityTurn, Turns, Typing};
+use turns::{ActivityTurn, TriggerMessage, Turns, Typing};
 
 /// Frames older than this leave the display (`ACTIVITY_HISTORY_AGE_MS`).
 pub const HISTORY_AGE_MS: u64 = 90 * 24 * 60 * 60 * 1000;
@@ -133,6 +136,9 @@ pub struct Snapshot {
     pub status: FeedStatus,
     pub records: Arc<[Arc<Record>]>,
     pub turns: Arc<[ActivityTurn]>,
+    /// This app's own agents' requests in this community, in channels the
+    /// viewer can read ([`local`]).
+    pub local: Arc<[LocalWork]>,
     /// Working typing evidence only.
     pub typing: Arc<[Typing]>,
     /// Records and turn states that left the live window.
@@ -146,6 +152,9 @@ pub struct Snapshot {
     pub capture: Capture,
     /// Channels with working evidence, sorted.
     pub working_channels: Arc<[String]>,
+    /// `(channel, message)` pairs live turn starts name as their triggers:
+    /// the messages telemetry may tie work to.
+    pub requested: Arc<[(String, String)]>,
 }
 
 /// One page read from the archive, decrypted.
@@ -248,6 +257,7 @@ pub struct Activity {
     history_agents: Arc<[String]>,
     history_page: Option<Page>,
     capture: Capture,
+    local: Arc<[LocalWork]>,
     snapshot: Snapshot,
 }
 
@@ -285,6 +295,7 @@ impl Activity {
             history_agents: Arc::new([]),
             history_page: None,
             capture: Capture::Unknown,
+            local: Arc::new([]),
             snapshot: Snapshot {
                 status,
                 history: history_status,
@@ -411,7 +422,9 @@ impl Activity {
         if !historical {
             self.live_agents.insert(frame.agent.clone());
             for item in children(raw) {
-                self.trimmed += self.turns.fold(&frame.agent, item, now, can_access);
+                self.trimmed += self
+                    .turns
+                    .fold(&frame.agent, item, now, can_access, &|_| None);
             }
         }
         if let Some(index) = self.records.iter().position(|r| r.id == frame.id) {
@@ -595,6 +608,26 @@ impl Activity {
         read
     }
 
+    /// This scope's local work, already filtered to readable channels.
+    pub fn set_local(&mut self, local: Arc<[LocalWork]>, now: u64) -> bool {
+        if *local == *self.local {
+            return false;
+        }
+        self.local = local;
+        self.publish(now)
+    }
+
+    /// Trigger ids still waiting for their message.
+    pub fn unresolved(&self) -> Vec<String> {
+        self.turns.unresolved()
+    }
+
+    /// Messages the session found for unresolved triggers.
+    pub fn messages_found(&mut self, found: &[TriggerMessage], now: u64) -> bool {
+        let find = |id: &str| found.iter().find(|event| event.id == id).cloned();
+        self.turns.resolve(&find) && self.publish(now)
+    }
+
     /// Recomputes the snapshot: drops records past the age limit and
     /// expired typing, and re-evaluates turn states (`publish`). True
     /// when anything visible changed.
@@ -623,8 +656,17 @@ impl Activity {
         let listening = self.status == FeedStatus::Listening;
         let turns = self.turns.states(now, listening);
         let typing = self.turns.working_typing();
-        let working = turns::working_channels(&turns, &typing);
-        let records: Arc<[Arc<Record>]> = if self.snapshot.records.len() == self.records.len()
+        let mut working = turns::working_channels(&turns, &typing);
+        working.extend(
+            self.local
+                .iter()
+                .filter(|row| row.state.active())
+                .map(|row| row.channel_id.clone()),
+        );
+        working.sort();
+        working.dedup();
+        let (records, requested): (Arc<[Arc<Record>]>, _) = if self.snapshot.records.len()
+            == self.records.len()
             && self
                 .snapshot
                 .records
@@ -632,14 +674,18 @@ impl Activity {
                 .zip(&self.records)
                 .all(|(a, b)| Arc::ptr_eq(a, b))
         {
-            self.snapshot.records.clone()
+            (
+                self.snapshot.records.clone(),
+                self.snapshot.requested.clone(),
+            )
         } else {
-            self.records.clone().into()
+            (self.records.clone().into(), requested(&self.records).into())
         };
         let next = Snapshot {
             status: self.status,
             records,
             turns: turns.into(),
+            local: self.local.clone(),
             typing: typing.into(),
             trimmed: self.trimmed,
             history: self.history,
@@ -649,6 +695,7 @@ impl Activity {
             history_agents: self.history_agents.clone(),
             capture: self.capture,
             working_channels: working.into(),
+            requested,
         };
         if next == self.snapshot {
             return false;
@@ -656,6 +703,42 @@ impl Activity {
         self.snapshot = next;
         true
     }
+}
+
+/// The `(channel, message)` pairs live turn starts name as triggers.
+fn requested(records: &[Arc<Record>]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for record in records.iter().filter(|r| !r.historical) {
+        if record.kind != "turn_started" && record.kind != "batch" {
+            continue;
+        }
+        let Ok(raw) = serde_json::from_str::<Value>(&record.plaintext) else {
+            continue;
+        };
+        let mut values = vec![&raw];
+        if record.kind == "batch" {
+            values.extend(children(&raw));
+        }
+        for value in values {
+            if value.get("kind").and_then(Value::as_str) != Some("turn_started") {
+                continue;
+            }
+            let Some(channel) = text(value.get("channelId")) else {
+                continue;
+            };
+            let ids = value
+                .get("payload")
+                .and_then(|p| p.get("triggeringEventIds"))
+                .and_then(Value::as_array);
+            for id in ids.into_iter().flatten().filter_map(Value::as_str) {
+                let pair = (channel.to_string(), id.to_string());
+                if hex64(id) && !pairs.contains(&pair) {
+                    pairs.push(pair);
+                }
+            }
+        }
+    }
+    pairs
 }
 
 /// An open activity panel's subject (`ActivitySelection`).

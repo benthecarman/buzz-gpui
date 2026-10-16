@@ -773,6 +773,30 @@ impl Session {
         })));
     }
 
+    /// The events among `ids` this session retains (`retainedEvent`):
+    /// open windows and threads, recent traffic or the outbox. Nothing is
+    /// fetched.
+    pub fn retained_events(
+        &self,
+        ids: Vec<EventId>,
+    ) -> impl Future<Output = Vec<nostr::prelude::Event>> + use<> {
+        let (reply, answer) = oneshot::channel();
+        let queued = self.commands.send(Message::With(Box::new(move |actor| {
+            let found = ids
+                .iter()
+                .filter_map(|id| actor.find_event(id))
+                .map(|event| event.event().clone())
+                .collect();
+            let _ = reply.send(found);
+        })));
+        async move {
+            match queued {
+                Ok(()) => answer.await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        }
+    }
+
     /// New messages from others that should notify: mentions, direct
     /// messages and replies in the viewer's conversations, still unread and
     /// not in view, each sent once. Lagging receivers lose old items.

@@ -5,7 +5,7 @@
 //! One spare process, shared by every agent, waits for the next new
 //! conversation, so that starts without a spawn.
 
-use super::claude::{ClaudeModel, ClaudeProcess, Launch, Settled, ToolServer, TurnPick};
+use super::claude::{ClaudeModel, ClaudeProcess, Launch, Receipt, Settled, ToolServer, TurnPick};
 use crate::agent_plugins::process::Spawner;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -182,6 +182,8 @@ pub struct DeliverOptions {
     pub fresh: Option<BoxFuture<'static, String>>,
     /// The model and effort the turn was asked to run with.
     pub pick: TurnPick,
+    /// A mention's work row, for Claude's acknowledgement and steps.
+    pub receipt: Option<Receipt>,
 }
 
 /// What a process says it runs with, and can switch to.
@@ -379,7 +381,12 @@ impl AgentSessions {
         key: String,
         text: String,
         seen: u64,
-        DeliverOptions { steer, fresh, pick }: DeliverOptions,
+        DeliverOptions {
+            steer,
+            fresh,
+            pick,
+            receipt,
+        }: DeliverOptions,
     ) -> Settled {
         if self.state().disposed {
             return Settled::failed("Claude was stopped");
@@ -411,7 +418,7 @@ impl AgentSessions {
                 (true, Some(steer)) => steer,
                 _ => text,
             };
-            return self.answer(&key, &live, &text, pick, place).await;
+            return self.answer(&key, &live, &text, pick, receipt, place).await;
         }
         let saved = self.options().store.get(&key);
         let id = self.next_id();
@@ -458,7 +465,9 @@ impl AgentSessions {
             live.process.kill().await;
             return Settled::failed("Claude was stopped");
         }
-        let delivered = self.answer(&key, &live, &text, pick.clone(), place).await;
+        let delivered = self
+            .answer(&key, &live, &text, pick.clone(), receipt.clone(), place)
+            .await;
         // A saved session that no longer loads starts over rather than
         // failing every message in the conversation, shown the
         // conversation so far.
@@ -476,6 +485,7 @@ impl AgentSessions {
                     seen,
                     DeliverOptions {
                         pick,
+                        receipt,
                         ..Default::default()
                     },
                 )
@@ -617,9 +627,10 @@ impl AgentSessions {
         live: &Arc<Live>,
         text: &str,
         pick: TurnPick,
+        receipt: Option<Receipt>,
         place: Place,
     ) -> Settled {
-        let settled = live.process.send(text, pick);
+        let settled = live.process.send_with(text, pick, receipt);
         drop(place);
         let settled = settled.await;
         if self.state().holds(key, live) {

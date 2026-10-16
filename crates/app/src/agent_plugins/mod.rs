@@ -6,18 +6,30 @@ pub mod owner_relay;
 pub mod process;
 mod tabs;
 
+use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agents2::attention::EventData;
 use crate::buzz_mcp::BuzzEvent;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
-/// Keeps a delivery counted as working until the future settles: its
-/// turn outlives `run`, which returns once the turn is handed over.
-pub type HoldUntil = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
+/// Keeps a delivery counted as working until the future settles with the
+/// request's outcome: its turn outlives `run`, which returns once the turn
+/// is handed over.
+pub type HoldUntil = Arc<dyn Fn(BoxFuture<'static, WorkOutcome>) + Send + Sync>;
 
 /// A delivery's [`HoldUntil`], from its working hold.
 fn hold_until(working: crate::agents2::runtime::Working) -> HoldUntil {
     Arc::new(move |done| working.until(done))
+}
+
+/// A mention's local work row, which the harness moves along: declined,
+/// acknowledged, superseded and its steps (`Delivery`'s `ignored`,
+/// `acknowledged`, `superseded` and `step`). Watches and timers have none.
+fn activity(delivery: &crate::agents2::runtime::Delivery) -> Option<WorkHandle> {
+    match delivery.trigger {
+        crate::agents2::runtime::Trigger::Mention { .. } => delivery.working.work(),
+        _ => None,
+    }
 }
 
 /// The event an agent was woken for, as the Buzz tools take it.

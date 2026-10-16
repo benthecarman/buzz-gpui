@@ -491,3 +491,94 @@ async fn runs_a_turn_on_the_model_asked_for_and_the_next_without_one_on_the_sess
         .collect();
     assert_eq!(set, [json!("haiku"), json!("opus")]);
 }
+
+fn receipt(
+    store: &crate::agent_activity::local::LocalActivity,
+    message: &str,
+    scope: &str,
+) -> Receipt {
+    Receipt {
+        scope: scope.into(),
+        work: store.begin(
+            crate::agent_activity::local::Begin {
+                scope: "s".into(),
+                agent: "a".into(),
+                channel_id: "c".into(),
+                message_id: message.into(),
+                thread_root_id: scope.into(),
+            },
+            0,
+        ),
+    }
+}
+
+#[tokio::test]
+async fn moves_activity_to_the_echoed_follow_up_in_its_thread_only() {
+    use crate::agent_activity::local::{LocalActivity, LocalWorkState};
+    let store = LocalActivity::default();
+    let fake = FakeSpawn::default();
+    let claude = start(&fake, launch()).await;
+    let process = fake.claudes()[0].clone();
+    process.set_hold(true);
+    let first = tokio::spawn(claude.send_with(
+        "first",
+        TurnPick::default(),
+        Some(receipt(&store, "m1", "root")),
+    ));
+    flush().await;
+    let state = |n: usize| store.work()[n].state;
+    assert_eq!(state(0), LocalWorkState::Working);
+    // The fake answers each message with text: Claude is writing.
+    assert_eq!(
+        store.work()[0].step.as_ref().map(|step| step.tool.as_str()),
+        Some("Writing reply")
+    );
+    let other = tokio::spawn(claude.send_with(
+        "elsewhere",
+        TurnPick::default(),
+        Some(receipt(&store, "m2", "other")),
+    ));
+    let follow_up = tokio::spawn(claude.send_with(
+        "follow up",
+        TurnPick::default(),
+        Some(receipt(&store, "m3", "root")),
+    ));
+    flush().await;
+    assert_eq!(state(0), LocalWorkState::Superseded);
+    assert_eq!(state(1), LocalWorkState::Working);
+    assert_eq!(state(2), LocalWorkState::Working);
+    process.set_hold(false);
+    process.finish(None);
+    for sent in [first, other, follow_up] {
+        assert!(sent.await.unwrap().ok);
+    }
+}
+
+#[test]
+fn names_the_last_block_as_a_step() {
+    let message = |block: Value| json!({ "type": "assistant", "message": { "content": [block] } });
+    assert_eq!(
+        step_label(&message(json!({
+            "type": "tool_use", "name": "mcp__buzz__send", "input": { "text": "hi" },
+        }))),
+        Some(("send".into(), None))
+    );
+    assert_eq!(
+        step_label(&message(json!({
+            "type": "tool_use", "name": "Read", "input": { "file_path": "/home/me/notes.md" },
+        }))),
+        Some(("Read".into(), Some("notes.md".into())))
+    );
+    assert_eq!(
+        step_label(&message(json!({
+            "type": "tool_use", "name": "Bash",
+            "input": { "description": "List files", "command": "ls" },
+        }))),
+        Some(("Bash".into(), Some("List files".into())))
+    );
+    assert_eq!(
+        step_label(&message(json!({ "type": "thinking" }))),
+        Some(("Thinking".into(), None))
+    );
+    assert_eq!(step_label(&message(json!({ "type": "image" }))), None);
+}

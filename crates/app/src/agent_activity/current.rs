@@ -3,6 +3,7 @@
 //! labels for the composer's working popover, the sidebar's working
 //! badge and "Working now" rows, and the profile's latest activity.
 
+use super::local::{local_activity, local_work_label};
 use super::transcript_model::{ItemKind, Scope, ToolItem, TranscriptTurn, transcript};
 use super::turns::{TurnState, parse_time};
 use super::{Record, Snapshot, raw_records};
@@ -111,7 +112,11 @@ const READ_LIMIT: usize = 32;
 /// `agent`'s turns in `channel` from the snapshot's live records, read
 /// once per set of records: views ask on every render, and the records
 /// can hold megabytes of JSON.
-fn live_turns(snapshot: &Snapshot, agent: &str, channel: &str) -> Arc<Vec<TranscriptTurn>> {
+pub(crate) fn live_turns(
+    snapshot: &Snapshot,
+    agent: &str,
+    channel: &str,
+) -> Arc<Vec<TranscriptTurn>> {
     let records = Arc::downgrade(&snapshot.records);
     let found = READ.with_borrow(|read| {
         read.iter()
@@ -208,7 +213,10 @@ pub fn current_activity(
         }
     }
     let Some(snapshot) = listening else {
-        return agents;
+        return match snapshot {
+            Some(snapshot) => with_local(agents, snapshot, channel, thread),
+            None => agents,
+        };
     };
     let mut seen: Vec<&str> = working.iter().map(|t| t.agent.as_str()).collect();
     seen.sort();
@@ -249,28 +257,79 @@ pub fn current_activity(
             };
         }
     }
+    with_local(agents, snapshot, channel, thread)
+}
+
+/// This app's own agents' work replaces their other evidence here: shown
+/// with its own label while to come or going on, and not at all once
+/// settled.
+fn with_local(
+    mut agents: BTreeMap<String, CurrentActivity>,
+    snapshot: &Snapshot,
+    channel: &str,
+    thread: Option<&str>,
+) -> BTreeMap<String, CurrentActivity> {
+    for (agent, work) in local_activity(&snapshot.local, channel, thread) {
+        agents.remove(agent);
+        if !work.state.active() {
+            continue;
+        }
+        let mut roots: Vec<Root> = Vec::new();
+        for row in snapshot.local.iter().filter(|row| {
+            row.agent == agent
+                && row.channel_id == channel
+                && thread.is_none_or(|root| row.thread_root_id == root)
+                && row.state.active()
+        }) {
+            let root = Some(Some(row.thread_root_id.clone()));
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        agents.insert(
+            agent.to_string(),
+            CurrentActivity {
+                label: local_work_label(work.state, work.error.as_deref(), work.step.as_ref()),
+                roots,
+            },
+        );
+    }
     agents
 }
 
 /// Agents working in `channel` at its top level or by observed turns
 /// (`workingAgents`). A thread typing signal stays in its thread.
 pub fn working_agents(snapshot: &Snapshot, channel: &str) -> Vec<String> {
-    if snapshot.status != super::FeedStatus::Listening {
-        return Vec::new();
-    }
-    let mut agents: Vec<String> = snapshot
-        .turns
-        .iter()
-        .filter(|t| t.channel_id.as_deref() == Some(channel) && t.state == TurnState::Working)
-        .map(|t| t.agent.clone())
-        .chain(
-            snapshot
-                .typing
-                .iter()
-                .filter(|t| t.channel_id == channel && t.thread_root.is_none())
-                .map(|t| t.agent.clone()),
-        )
+    let local = local_activity(&snapshot.local, channel, None);
+    let mut agents: Vec<String> = local
+        .values()
+        .filter(|row| row.state.active())
+        .map(|row| row.agent.clone())
         .collect();
+    if snapshot.status == super::FeedStatus::Listening {
+        agents.extend(
+            snapshot
+                .turns
+                .iter()
+                .filter(|t| {
+                    t.channel_id.as_deref() == Some(channel)
+                        && t.state == TurnState::Working
+                        && !local.contains_key(t.agent.as_str())
+                })
+                .map(|t| t.agent.clone())
+                .chain(
+                    snapshot
+                        .typing
+                        .iter()
+                        .filter(|t| {
+                            t.channel_id == channel
+                                && t.thread_root.is_none()
+                                && !local.contains_key(t.agent.as_str())
+                        })
+                        .map(|t| t.agent.clone()),
+                ),
+        );
+    }
     agents.sort();
     agents.dedup();
     agents
@@ -282,9 +341,37 @@ pub fn working_agents(snapshot: &Snapshot, channel: &str) -> Vec<String> {
 pub struct WorkingDetails {
     pub started_at: u64,
     pub message_id: Option<String>,
+    /// Local work's own line ("Starting", "Reading main.rs").
+    pub label: Option<String>,
+    /// Reported by this app's runtime: no telemetry to open.
+    pub local: bool,
 }
 
 pub fn working_details(snapshot: &Snapshot, channel: &str, agent: &str) -> Option<WorkingDetails> {
+    if let Some(work) = local_activity(&snapshot.local, channel, None).get(agent) {
+        if !work.state.active() {
+            return None;
+        }
+        let active: Vec<_> = snapshot
+            .local
+            .iter()
+            .filter(|row| row.channel_id == channel && row.agent == agent && row.state.active())
+            .collect();
+        return Some(WorkingDetails {
+            started_at: active
+                .iter()
+                .map(|row| row.started_at)
+                .min()
+                .unwrap_or(work.started_at),
+            message_id: (active.len() == 1).then(|| work.message_id.clone()),
+            label: Some(local_work_label(
+                work.state,
+                work.error.as_deref(),
+                work.step.as_ref(),
+            )),
+            local: true,
+        });
+    }
     if snapshot.status != super::FeedStatus::Listening {
         return None;
     }
@@ -295,6 +382,8 @@ pub fn working_details(snapshot: &Snapshot, channel: &str, agent: &str) -> Optio
         .map(|t| WorkingDetails {
             started_at: t.started_at,
             message_id: None,
+            label: None,
+            local: false,
         });
     let mut turns: Vec<_> = snapshot
         .turns
@@ -344,6 +433,8 @@ pub fn working_details(snapshot: &Snapshot, channel: &str, agent: &str) -> Optio
         [(_, started_at, message_id)] => Some(WorkingDetails {
             started_at: *started_at,
             message_id: message_id.clone(),
+            label: None,
+            local: false,
         }),
         _ => typing,
     }
@@ -640,6 +731,7 @@ mod tests {
             channel_id: Some("c1".into()),
             timestamp: NOW,
             state: TurnState::Working,
+            requests: None,
         }
     }
 

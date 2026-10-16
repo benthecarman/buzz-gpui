@@ -125,6 +125,13 @@ impl Activity {
         self
     }
 
+    /// Leaves out agents whose work shows on its message's bubble
+    /// instead (`useReplacedTypers`).
+    pub fn replace(&mut self, bubbled: &[String]) {
+        self.agents.retain(|agent, _| !bubbled.contains(agent));
+        self.humans.retain(|person| !bubbled.contains(person));
+    }
+
     fn add(&mut self, agent: &str, root: Root) {
         let activity = self
             .agents

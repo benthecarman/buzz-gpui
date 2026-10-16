@@ -1,14 +1,11 @@
 //! How long a run counts as working (buzz-app's `working` in
-//! `service.ts`), and what shows it meanwhile: 👀 and 💬 reactions on the
-//! mention (`working-reactions.ts`) and the agent typing in the mention's
-//! thread on this device (`local-typing.ts`). Both are STOPGAPs; the
-//! working hold stays.
+//! `service.ts`), and what shows it meanwhile: the request's local work
+//! row (`local-activity.ts`), and the agent typing in the mention's
+//! thread on this device (`local-typing.ts`, a STOPGAP). Nothing public
+//! is published while an agent works.
 
 use super::attention::EventData;
-use super::runtime::AgentHandle;
-use buzz_host::api::AppAgentEvent;
-use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
+use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use std::sync::{Arc, Mutex, PoisonError};
 
 type End = Box<dyn FnOnce() + Send>;
@@ -17,6 +14,8 @@ struct State {
     /// Work still holding the run: the run itself and what it handed off.
     /// Below zero once stopped.
     holds: i64,
+    /// The first failure any hold reported.
+    outcome: WorkOutcome,
     ends: Vec<End>,
 }
 
@@ -25,28 +24,49 @@ struct State {
 #[derive(Clone)]
 pub struct Working {
     state: Arc<Mutex<State>>,
+    /// The mention's local work row, if the run has one.
+    work: Option<WorkHandle>,
     runtime: tokio::runtime::Handle,
 }
 
 impl Working {
     /// A hold held by the run itself, which ends what `ends` started once
     /// every hold is released, however long that takes: the harness, not
-    /// Buzz, decides how long an agent works.
-    pub(crate) fn new(ends: Vec<End>, runtime: tokio::runtime::Handle) -> Self {
+    /// Buzz, decides how long an agent works. Its work row is working from
+    /// now on, and settles with the outcome the holds report.
+    pub(crate) fn new(
+        ends: Vec<End>,
+        work: Option<WorkHandle>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        if let Some(work) = &work {
+            work.started();
+        }
         Self {
-            state: Arc::new(Mutex::new(State { holds: 1, ends })),
+            state: Arc::new(Mutex::new(State {
+                holds: 1,
+                outcome: WorkOutcome::ok(),
+                ends,
+            })),
+            work,
             runtime,
         }
     }
 
+    /// The run's local work row, if it has one.
+    pub fn work(&self) -> Option<WorkHandle> {
+        self.work.clone()
+    }
+
     /// A run with nothing to show.
     pub fn none(runtime: tokio::runtime::Handle) -> Self {
-        Self::new(Vec::new(), runtime)
+        Self::new(Vec::new(), None, runtime)
     }
 
     /// Keeps the run counted as working after `run` returns, until `done`
-    /// settles, for a type that hands its work off and returns early.
-    pub fn until(&self, done: impl std::future::Future<Output = ()> + Send + 'static) {
+    /// settles, for a type that hands its work off and returns early. A
+    /// failed outcome shows the request failed.
+    pub fn until(&self, done: impl std::future::Future<Output = WorkOutcome> + Send + 'static) {
         {
             let mut state = self.lock();
             if state.holds <= 0 {
@@ -56,24 +76,47 @@ impl Working {
         }
         let working = self.clone();
         self.runtime.spawn(async move {
-            done.await;
-            working.release();
+            let outcome = done.await;
+            working.release_with(outcome);
         });
     }
 
     /// Lets go of one hold.
     pub(crate) fn release(&self) {
+        self.release_with(WorkOutcome::ok());
+    }
+
+    /// Lets go of one hold that ended with `outcome`.
+    pub(crate) fn release_with(&self, outcome: WorkOutcome) {
         let ended = {
             let mut state = self.lock();
             if state.holds <= 0 {
                 return;
             }
+            if !outcome.ok && state.outcome.ok {
+                state.outcome = WorkOutcome::failed(
+                    outcome
+                        .error
+                        .unwrap_or_else(|| "Could not finish this request".into()),
+                );
+            }
             state.holds -= 1;
-            state.holds == 0
+            (state.holds == 0).then(|| state.outcome.clone())
         };
-        if ended {
+        if let Some(outcome) = ended {
+            if let Some(work) = &self.work {
+                work.finish(outcome);
+            }
             self.stop();
         }
+    }
+
+    /// The agent went away mid-run: nothing is left to show.
+    pub(crate) fn abort(&self) {
+        if let Some(work) = &self.work {
+            work.remove();
+        }
+        self.stop();
     }
 
     fn stop(&self) {
@@ -93,74 +136,6 @@ impl Working {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
-}
-
-// STOPGAP(agent-working-reactions): DELETE once agents show as typing
-// through the relay. Keep `Working`, which typing indicators need too.
-const EMOJI: [&str; 2] = ["👀", "💬"];
-
-/// Reacts to `event` as the agent now with 👀 and 💬; the returned end
-/// takes the reactions back once they have been published.
-pub(crate) fn react_while_working(
-    agent: &AgentHandle,
-    event: &EventData,
-    channel: &str,
-    runtime: &tokio::runtime::Handle,
-) -> End {
-    let reactions: Shared<BoxFuture<'static, Vec<Result<String, String>>>> = {
-        let (agent, id, channel) = (agent.clone(), event.id.clone(), channel.to_owned());
-        let published = runtime.spawn(async move {
-            futures::future::join_all(EMOJI.map(|emoji| {
-                let agent = agent.clone();
-                let event = AppAgentEvent {
-                    kind: 7,
-                    content: emoji.into(),
-                    tags: vec![
-                        vec!["h".into(), channel.clone()],
-                        vec!["e".into(), id.clone()],
-                    ],
-                };
-                async move {
-                    let signed = agent.publish(event).await?;
-                    signed
-                        .get("id")
-                        .and_then(|id| id.as_str())
-                        .map(str::to_owned)
-                        .ok_or_else(|| "Invalid agent event".to_string())
-                }
-            }))
-            .await
-        });
-        async move { published.await.unwrap_or_default() }
-            .boxed()
-            .shared()
-    };
-    let (agent, channel, runtime) = (agent.clone(), channel.to_owned(), runtime.clone());
-    Box::new(move || {
-        runtime.spawn(async move {
-            let results = reactions.await;
-            let ids: Vec<String> = results.iter().filter_map(|r| r.clone().ok()).collect();
-            if ids.len() < EMOJI.len() {
-                tracing::warn!("agent working reactions were not all published");
-            }
-            // The relay takes one target per deletion.
-            let removed = futures::future::join_all(ids.into_iter().map(|id| {
-                agent.publish(AppAgentEvent {
-                    kind: 5,
-                    content: String::new(),
-                    tags: vec![
-                        vec!["h".into(), channel.clone()],
-                        vec!["e".into(), id],
-                        vec!["k".into(), "7".into()],
-                    ],
-                })
-            }))
-            .await;
-            if let Some(Err(error)) = removed.into_iter().find(Result::is_err) {
-                tracing::warn!(%error, "agent working reactions were not removed");
-            }
-        });
-    })
 }
 
 // STOPGAP(agent-local-typing): DELETE once agents' typing pulses reach the

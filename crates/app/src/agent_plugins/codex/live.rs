@@ -209,6 +209,7 @@ async fn answers_a_mention_through_the_buzz_send_tool() {
             model: None,
             effort: None,
             working: std::sync::Arc::new(|_| {}),
+            activity: None,
         })
         .await
         .unwrap();

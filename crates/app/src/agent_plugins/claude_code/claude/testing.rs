@@ -263,6 +263,7 @@ impl FakeClaude {
         {
             self.emit(json!({
                 "type": "user", "isReplay": true, "session_id": session,
+                "uuid": message["uuid"],
                 "message": { "role": "user", "content": content },
             }));
         }

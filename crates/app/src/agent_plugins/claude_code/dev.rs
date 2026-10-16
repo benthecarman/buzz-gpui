@@ -102,6 +102,7 @@ fn turns(pubkey: &str, cx: &mut App) {
                     model: None,
                     effort: None,
                     working: std::sync::Arc::new(|_| {}),
+                    activity: None,
                 })
                 .await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;

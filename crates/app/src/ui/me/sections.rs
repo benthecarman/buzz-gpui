@@ -721,7 +721,7 @@ impl MeSidebar {
         crate::ui::channel_activity::ActivityRow::new(&id, row)
             .activity(
                 snapshot.unread.activity.get(&id).cloned(),
-                agents,
+                agents.agents,
                 shared.own.clone(),
             )
             .directory(

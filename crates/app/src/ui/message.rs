@@ -16,7 +16,8 @@ use buzz_relay_client::{
 };
 use buzz_ui::{
     ActiveTheme, Avatar, AvatarSize, Icon, IconButton, IconButtonShape, IconButtonSize, IconName,
-    MaterialStyled, Menu, MenuItem, Presence, Surface, TextRole, Tooltip, TypeStyled,
+    MaterialStyled, Menu, MenuItem, MenuSeparator, Presence, Surface, TextRole, Tooltip,
+    TypeStyled,
     tokens::{easing, radius},
 };
 use gpui_kit::prelude::FluentBuilder;
@@ -180,6 +181,8 @@ pub enum Command {
     Edit,
     Delete,
     Follow(bool),
+    /// Opens the author agent's profile on its activity.
+    ViewActivity,
     Report,
     /// Reply in the thread: the thread root, with reply intent.
     Reply,
@@ -285,8 +288,8 @@ pub struct Rows {
     pub menu: MenuFacts,
     /// Observed presence, for agent avatars.
     pub presence: Arc<HashMap<String, PresenceState>>,
-    /// Agents working (typing) in this conversation.
-    pub working: Vec<String>,
+    /// Agent work tied to the rows' messages, for their activity bubbles.
+    pub bubbles: Option<crate::ui::agent_activity::bubble::Bubbles>,
     /// The rows sit in a thread panel.
     pub in_thread: bool,
     /// Focus for the open more menu's keyboard.
@@ -312,6 +315,8 @@ pub struct Marks {
     pub threads: HashMap<EventId, ThreadUnread>,
     /// The viewer's own agents working in each thread, by root.
     pub working: HashMap<EventId, Vec<String>>,
+    /// Threads whose working agents are all still starting.
+    pub waiting: std::collections::HashSet<EventId>,
     /// A row whose thread just closed, painted once to show where the
     /// reader returned, with the painting's number.
     pub returned: Option<(EventId, u64)>,
@@ -331,7 +336,7 @@ impl Rows {
             ops: Arc::new(Ops::default()),
             menu: MenuFacts::default(),
             presence: Arc::default(),
-            working: Vec::new(),
+            bubbles: None,
             in_thread: false,
             menu_focus: None,
             report: None,
@@ -558,10 +563,6 @@ fn full(
             avatar = avatar
                 .squircle()
                 .presence(presence_badge(rows.presence.get(&author)))
-                .thinking(
-                    SharedString::from(format!("thinking-{id}")),
-                    rows.working.contains(&author),
-                )
                 .alt(name.clone());
         }
         if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
@@ -651,6 +652,24 @@ fn full(
     }
     if !row.attachments.is_empty() {
         body = body.child(media::attachments(row, rows, cx));
+    }
+    // Agent work on this exact message sits beside its reactions.
+    if let Some(bubbles) = &rows.bubbles
+        && let Some(works) = bubbles.works.get(&row.id)
+    {
+        let open = rows.actions.on_open_thread.clone().map(|open| {
+            let target = row.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| open(&target, window, cx))
+                as crate::ui::agent_activity::row::Action
+        });
+        body = body.child(crate::ui::agent_activity::bubble::bubble(
+            row.id,
+            works,
+            bubbles,
+            &rows.directory,
+            open,
+            cx,
+        ));
     }
     if let Some(reactions) = reactions(row, rows, cx) {
         body = body.child(reactions);
@@ -775,10 +794,7 @@ fn quiet(item: &Item, rows: &Rc<Rows>, cx: &App) -> AnyElement {
         let agent = names.is_library_agent(&pubkey) || profile.is_some_and(|p| p.is_agent);
         let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Px(QUIET_AVATAR));
         if agent {
-            avatar = avatar.squircle().thinking(
-                SharedString::from(format!("quiet-thinking-{id}-{pubkey}")),
-                rows.working.contains(&pubkey),
-            );
+            avatar = avatar.squircle();
         }
         if let Some(picture) = profile.and_then(|p| p.picture.as_deref()) {
             avatar = avatar.image(media::avatar(picture, &rows.directory.media));
@@ -1515,10 +1531,13 @@ struct Entry {
     icon_size: f32,
     command: Command,
     disabled: bool,
+    /// A separator goes above it.
+    separated: bool,
 }
 
 /// `MessageActionBar`'s menu, in its order: read state, Copy message,
-/// Send to channel, Edit, Delete, Follow, then Report.
+/// Send to channel, Edit, Delete, Follow, registered actions, View
+/// activity, then Report under a separator.
 fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
     let mut entries = Vec::new();
     let managed = rows.managed(row) && rows.actions.on_command.is_some();
@@ -1540,6 +1559,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
                 Command::MarkUnread
             },
             disabled: false,
+            separated: false,
         });
     }
     entries.push(Entry {
@@ -1549,6 +1569,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         icon_size: 16.,
         command: Command::CopyMessage,
         disabled: false,
+        separated: false,
     });
     let writable = rows.listed() && !rows.archived() && !rows.read_only();
     if writable
@@ -1565,6 +1586,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
             icon_size: 16.,
             command: Command::SendToChannel,
             disabled: false,
+            separated: false,
         });
     }
     if managed {
@@ -1578,6 +1600,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
                 icon_size: 14.,
                 command: Command::Edit,
                 disabled: busy || rows.ops.deleting(row.id),
+                separated: false,
             });
         }
         if own || rows.owns_agent(row) {
@@ -1588,6 +1611,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
                 icon_size: 14.,
                 command: Command::Delete,
                 disabled: busy || rows.ops.editing(row.id),
+                separated: false,
             });
         }
         if !rows.dm() {
@@ -1607,6 +1631,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
                 icon_size: 16.,
                 command: Command::Follow(!following),
                 disabled: false,
+                separated: false,
             });
         }
     }
@@ -1619,8 +1644,24 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
                 icon_size: 16.,
                 command: Command::Action(action.key().to_string()),
                 disabled: false,
+                separated: false,
             });
         }
+    }
+    // An agent's message opens its profile on its activity.
+    let author = row.author.to_hex();
+    if rows.actions.on_command.is_some()
+        && (row.is_agent_envelope() || rows.names().is_agent(&author))
+    {
+        entries.push(Entry {
+            name: "view-activity".into(),
+            label: "View activity".into(),
+            icon: IconName::ListBullets,
+            icon_size: 16.,
+            command: Command::ViewActivity,
+            disabled: false,
+            separated: false,
+        });
     }
     if row.membership.is_none() && delivered && rows.actions.on_command.is_some() {
         entries.push(Entry {
@@ -1630,6 +1671,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
             icon_size: 16.,
             command: Command::Report,
             disabled: false,
+            separated: true,
         });
     }
     entries
@@ -1647,6 +1689,9 @@ fn more_menu(row: &Arc<MessageRow>, rows: &Rc<Rows>, _cx: &App) -> AnyElement {
     let mut menu = Menu::new();
     for (index, entry) in entries.iter().enumerate() {
         let (rows2, target, command) = (rows.clone(), row.clone(), entry.command.clone());
+        if entry.separated {
+            menu = menu.child(MenuSeparator::new());
+        }
         menu = menu.child(
             MenuItem::new(
                 SharedString::from(format!("{}-{id}", entry.name)),
@@ -2343,11 +2388,12 @@ fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Into
         .threads
         .get(&row.id)
         .and_then(|thread| thread_unread_label(*thread));
-    let working = rows
+    let agents = rows
         .marks
         .working
         .get(&row.id)
-        .is_some_and(|agents| !agents.is_empty());
+        .filter(|agents| !agents.is_empty());
+    let working = agents.is_some();
     let replies = row.reply_count > 0;
     let mut summary = div()
         .id(SharedString::from(format!("thread-{}", row.id.to_hex())))
@@ -2380,7 +2426,9 @@ fn thread_summary(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> impl Into
                     .tooltip(Tooltip::text(unread)),
             )
         })
-        .when(working, |d| d.child(working_dots(&row.id.to_hex(), cx)))
+        .when_some(agents, |d, agents| {
+            d.child(thread_working(row, agents, rows, cx))
+        })
         .when(working && !replies, |d| d.child("View thread"));
     if let Some(open) = rows.actions.on_open_thread.clone() {
         let target = row.clone();
@@ -2407,55 +2455,52 @@ pub fn thread_unread_label(thread: ThreadUnread) -> Option<String> {
     }
 }
 
-/// Three dots hopping in turn while an agent works in a thread
-/// (`.threadWorking`: 1.2s, 80ms apart).
-pub fn working_dots(id: &str, cx: &App) -> AnyElement {
-    const PERIOD: f32 = 1.2;
+/// The agents working in a thread, by their avatars (two, then "+N"),
+/// and dots that breathe while all of them are still starting.
+fn thread_working(
+    row: &Arc<MessageRow>,
+    agents: &[String],
+    rows: &Rc<Rows>,
+    cx: &App,
+) -> AnyElement {
     let c = *cx.colors();
-    let dots = div()
+    let id = row.id.to_hex();
+    let names = rows.names();
+    let mut indicator = div()
         .flex()
         .flex_none()
         .items_center()
-        .justify_center()
-        .gap(px(2.))
-        .w(px(26.))
-        .h(px(15.))
-        .rounded_full()
-        .bg(c.affordance_subtle_hover);
-    let color = c.text_standard;
-    let dot = move |opacity: f32, rise: f32| {
-        div()
-            .relative()
-            .top(px(-rise))
-            .size(px(3.))
-            .rounded_full()
-            .bg(color)
-            .opacity(opacity)
-    };
-    if cx.reduce_motion() {
-        return dots
-            .children((0..3).map(|_| dot(1., 0.)))
-            .into_any_element();
+        .gap(px(4.))
+        .ml(px(4.))
+        .text_color(c.text_standard);
+    for agent in agents.iter().take(2) {
+        let name = names.display(agent);
+        let mut avatar = Avatar::new(name).size(AvatarSize::Px(21.)).squircle();
+        if let Some(picture) = rows
+            .directory
+            .profiles
+            .get(agent)
+            .and_then(|p| p.picture.as_deref())
+        {
+            avatar = avatar.image(media::avatar(picture, &rows.directory.media));
+        }
+        indicator = indicator.child(avatar);
     }
-    dots.with_animation(
+    if agents.len() > 2 {
+        indicator = indicator.child(format!("+{}", agents.len() - 2));
+    }
+    indicator = indicator.child(buzz_ui::typing_dots(
         SharedString::from(format!("thread-working-{id}")),
-        Animation::new(Duration::from_millis(1200)).repeat(),
-        move |dots, delta| {
-            dots.children((0..3).map(|n| {
-                let phase = (delta - n as f32 * 0.08 / PERIOD).rem_euclid(1.);
-                // Up at 20%, down by 40%, resting to 100%.
-                let lift = if phase < 0.2 {
-                    phase / 0.2
-                } else if phase < 0.4 {
-                    1. - (phase - 0.2) / 0.2
-                } else {
-                    0.
-                };
-                dot(0.45 + 0.55 * lift, 2. * lift)
-            }))
-        },
+        rows.marks.waiting.contains(&row.id),
+        c.text_standard,
+        cx,
+    ));
+    buzz_ui::arrive(
+        SharedString::from(format!("thread-working-arrive-{id}")),
+        indicator,
+        buzz_ui::Arrive::Fade,
+        cx,
     )
-    .into_any_element()
 }
 
 /// Icon for a channel in headers and the sidebar.

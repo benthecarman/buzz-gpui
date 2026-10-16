@@ -120,6 +120,9 @@ pub struct ChannelPage {
     pub main_tabs: Option<MainTabs>,
     /// The row painted as where a closed thread returned to.
     returned: Option<(EventId, u64)>,
+    /// Rows showing agent work (a bubble or a working thread summary),
+    /// remeasured when that changes so the tail stays in view.
+    working_rows: HashSet<EventId>,
     /// A conversation on the Me page: "Message your agents", and only the
     /// viewer's own agents can be mentioned in.
     personal: bool,
@@ -384,6 +387,7 @@ impl ChannelPage {
             menu_panels: Vec::new(),
             main_tabs: None,
             returned: None,
+            working_rows: HashSet::new(),
             personal: false,
             selected_agent: None,
             jump: Jump::default(),
@@ -1097,7 +1101,7 @@ impl Render for ChannelPage {
 
         // Who is typing, and which of the viewer's agents work here.
         let roots: HashSet<String> = self.items.iter().map(|item| item.row.id.to_hex()).collect();
-        let activity = Activity::channel(
+        let mut activity = Activity::channel(
             community
                 .snapshot
                 .typing
@@ -1114,14 +1118,21 @@ impl Render for ChannelPage {
             None,
             cx,
         ));
-        let mut working: HashMap<EventId, Vec<String>> = HashMap::new();
-        for (agent, places) in &activity.agents {
-            for root in places.roots.iter().flatten().flatten() {
-                if let Ok(root) = EventId::from_hex(root) {
-                    working.entry(root).or_default().push(agent.clone());
-                }
-            }
-        }
+        let observed = crate::agent_activity::observer::snapshot(&self.community, cx);
+        // Message bubbles stand in for the composer's line
+        // (`ActivityTypingReplacement`).
+        activity.replace(&crate::agent_activity::request::bubbled_agents(
+            &observed,
+            &self.channel.id,
+            None,
+        ));
+        let (working, waiting) = thread_work(
+            &observed,
+            &self.channel.id,
+            &community.snapshot.thread_typing,
+            &roots,
+            &owned,
+        );
         let profiles = community.snapshot.profiles.clone();
         let media = community.session.media().clone();
         let pane = self.pane.clone().map(|pane| {
@@ -1270,9 +1281,24 @@ impl Render for ChannelPage {
                 }
             }
         }
+        let working_rows: HashSet<EventId> = rows
+            .bubbles
+            .iter()
+            .flat_map(|bubbles| bubbles.works.keys().copied())
+            .chain(working.keys().copied())
+            .collect();
+        if working_rows != self.working_rows {
+            for id in working_rows.symmetric_difference(&self.working_rows) {
+                if let Some(index) = self.items.iter().position(|item| item.row.id == *id) {
+                    self.list.splice(index + 1..index + 2, 1);
+                }
+            }
+            self.working_rows = working_rows;
+        }
         rows.marks = Marks {
             threads: unread.threads.clone(),
             working,
+            waiting,
             returned: self.returned,
         };
         let rows = Rc::new(rows);
@@ -1555,6 +1581,56 @@ fn probe_send(items: &[message::Item], viewer: &str) {
     } else if logged(SEND, "optimistic") {
         shown(SEND, "confirmed");
     }
+}
+
+/// The viewer's agents working in each shown thread, by root, and the
+/// threads where all of them are still starting (`useThreadAgents`): the
+/// same request state as the bubbles, with a root's own bubble standing
+/// for the agents it shows. Typing counts for agents with no known
+/// request there.
+fn thread_work(
+    observed: &crate::agent_activity::Snapshot,
+    channel: &str,
+    thread_typing: &HashMap<String, Vec<String>>,
+    shown: &HashSet<String>,
+    owned: &HashSet<String>,
+) -> (HashMap<EventId, Vec<String>>, HashSet<EventId>) {
+    use crate::agent_activity::request::{
+        message_activity, thread_candidates, thread_waiting, thread_working_agents,
+    };
+    let mut threads = thread_candidates(observed, channel);
+    threads.extend(thread_typing.keys().cloned());
+    let (mut working, mut waiting) = (HashMap::new(), HashSet::new());
+    for root in threads.iter().filter(|root| shown.contains(*root)) {
+        let Ok(id) = EventId::from_hex(root) else {
+            continue;
+        };
+        let typing: Vec<String> = thread_typing
+            .get(root)
+            .into_iter()
+            .flatten()
+            .filter(|person| owned.contains(*person))
+            .cloned()
+            .collect();
+        let bubble: HashSet<String> = message_activity(observed, channel, root)
+            .into_iter()
+            .map(|work| work.agent)
+            .collect();
+        let represented = Some((root.as_str(), &bubble));
+        let agents: Vec<String> =
+            thread_working_agents(observed, &typing, channel, root, represented)
+                .into_iter()
+                .filter(|agent| owned.contains(agent))
+                .collect();
+        if agents.is_empty() {
+            continue;
+        }
+        if thread_waiting(observed, &agents, channel, root, represented) {
+            waiting.insert(id);
+        }
+        working.insert(id, agents);
+    }
+    (working, waiting)
 }
 
 #[cfg(test)]

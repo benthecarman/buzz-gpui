@@ -7,6 +7,8 @@
 //! and the 100-record page size match it exactly; the port's
 //! `buzz_relay_client::archive` only writes and configures.
 
+use super::local::{self, LocalActivity, LocalWork};
+use super::turns::TriggerMessage;
 use super::{Activity, Capture, FeedStatus, Frame, HistoryRead, Page, Snapshot, current};
 use crate::community::{Community, data_dir};
 use crate::runtime::Runtime;
@@ -16,7 +18,7 @@ use buzz_identity::Identity;
 use buzz_relay_client::session::{ActivityFeed, FeedStatus as RouteFeed};
 use buzz_relay_client::{RelayOrigin, archive::community_key};
 use gpui_kit::*;
-use nostr::prelude::Event;
+use nostr::prelude::{Event, EventId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,31 +106,6 @@ fn working_key(snapshot: &Snapshot) -> WorkingKey {
     (snapshot.status, turns, snapshot.working_channels.to_vec())
 }
 
-/// Agents thinking in `channel` (`AgentAvatar`): a working turn there,
-/// or typing there while they send telemetry.
-pub fn thinking(community: &Entity<Community>, channel: &str, cx: &App) -> Vec<String> {
-    let snapshot = snapshot(community, cx);
-    let mut agents: Vec<String> = snapshot
-        .turns
-        .iter()
-        .filter(|turn| {
-            turn.state == super::turns::TurnState::Working
-                && turn.channel_id.as_deref() == Some(channel)
-        })
-        .map(|turn| turn.agent.clone())
-        .chain(
-            snapshot
-                .typing
-                .iter()
-                .filter(|t| t.channel_id == channel)
-                .map(|t| t.agent.clone()),
-        )
-        .collect();
-    agents.sort();
-    agents.dedup();
-    agents
-}
-
 /// Who works in `channel` (or one thread of it) by observed evidence:
 /// working turns with their live labels, and typing from agents that
 /// send telemetry (`currentActivity` without the owned-typing part,
@@ -154,6 +131,9 @@ pub struct AgentActivity {
     /// Channels the viewer can read, as last seen.
     access: HashSet<String>,
     ticks: u64,
+    /// A lookup of trigger messages is out.
+    looking_up: bool,
+    _local: Task<()>,
     _feed: Option<Task<()>>,
     _tick: Task<()>,
     _community: Subscription,
@@ -176,6 +156,15 @@ impl AgentActivity {
         let subscription = cx.observe(community, |this, community, cx| {
             this.community_changed(&community, cx)
         });
+        let mut changes = cx.default_global::<LocalActivity>().subscribe();
+        let local = cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while changes.next().await.is_some() {
+                if this.update(cx, |this, cx| this.local(cx)).is_err() {
+                    return;
+                }
+            }
+        });
         let mut this = Self {
             community: community.downgrade(),
             session,
@@ -185,6 +174,8 @@ impl AgentActivity {
             snapshot: Arc::default(),
             access: HashSet::new(),
             ticks: 0,
+            looking_up: false,
+            _local: local,
             _feed: None,
             _tick: tick,
             _community: subscription,
@@ -194,8 +185,55 @@ impl AgentActivity {
         this.subscribe(cx);
         this.read_history(read, cx);
         this.read_capture(cx);
+        this.local(cx);
         this.publish(cx);
         this
+    }
+
+    /// Shows this community's own agents' local work, in channels the
+    /// viewer can read.
+    fn local(&mut self, cx: &mut Context<Self>) {
+        let scope = local::scope(&self.origin.http(), self.session.viewer());
+        let work: Arc<[LocalWork]> = cx
+            .default_global::<LocalActivity>()
+            .work()
+            .iter()
+            .filter(|row| row.scope == scope && self.access.contains(&row.channel_id))
+            .cloned()
+            .collect();
+        if self.activity.set_local(work, now_ms()) {
+            self.publish(cx);
+        }
+    }
+
+    /// Asks the session for the messages telemetry turns name, so their
+    /// requests tie to messages and threads (`messagesChanged`). Messages
+    /// that arrive later are found on a later tick.
+    fn look_up(&mut self, cx: &mut Context<Self>) {
+        if self.looking_up {
+            return;
+        }
+        let ids: Vec<EventId> = self
+            .activity
+            .unresolved()
+            .iter()
+            .filter_map(|id| EventId::from_hex(id).ok())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.looking_up = true;
+        let found = self.session.retained_events(ids);
+        cx.spawn(async move |this, cx| {
+            let found: Vec<TriggerMessage> = found.await.iter().map(trigger_message).collect();
+            let _ = this.update(cx, |this, cx| {
+                this.looking_up = false;
+                if this.activity.messages_found(&found, now_ms()) {
+                    this.publish(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn accessible(&self, cx: &App) -> HashSet<String> {
@@ -246,6 +284,7 @@ impl AgentActivity {
                             let access = this.access.clone();
                             this.activity
                                 .receive(frame, now, &|channel| access.contains(channel));
+                            this.look_up(cx);
                         }
                         Err(status) => {
                             tracing::debug!(?status, "agent activity feed");
@@ -282,6 +321,7 @@ impl AgentActivity {
         }
         let _ = community;
         self.typing(cx);
+        self.local(cx);
         self.publish(cx);
     }
 
@@ -301,6 +341,7 @@ impl AgentActivity {
             self.read_capture(cx);
         }
         self.activity.publish(now_ms());
+        self.look_up(cx);
         self.publish(cx);
     }
 
@@ -447,6 +488,26 @@ impl AgentActivity {
             };
             self.activity.receive(frame, now, &|_| true);
         }
+    }
+}
+
+/// What association needs of a retained message.
+fn trigger_message(event: &Event) -> TriggerMessage {
+    let tags = |name: &str| {
+        event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .filter(move |tag| tag.first().map(String::as_str) == Some(name))
+            .filter_map(|tag| tag.get(1).cloned())
+            .collect::<Vec<String>>()
+    };
+    TriggerMessage {
+        id: event.id.to_hex(),
+        kind: event.kind.as_u16(),
+        channels: tags("h"),
+        references: !tags("e").is_empty(),
+        root: buzz_relay_client::unread::thread_reference(event).map(|thread| thread.root_id),
     }
 }
 

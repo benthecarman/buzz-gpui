@@ -6,6 +6,7 @@
 //! the SDK serves an in-process MCP server, so the process holds no Buzz
 //! key.
 
+use crate::agent_activity::local::WorkHandle;
 use crate::agent_plugins::process::{Lines, Process, SpawnOptions, Spawner};
 use buzz_host::api::ProcessOutput;
 use futures::FutureExt;
@@ -200,6 +201,20 @@ struct State {
     /// it.
     own_effort: Option<String>,
     reading_effort: Option<Shared<BoxFuture<'static, ()>>>,
+    /// Messages sent with a work row, by the uuid Claude echoes back.
+    receipts: HashMap<String, Receipt>,
+    /// The latest acknowledged mention per Buzz thread: the one that gets
+    /// steps.
+    active: HashMap<String, Receipt>,
+}
+
+/// A mention's work row, sent with its message so Claude's echo and
+/// steps reach it (`ActivityReceipt`).
+#[derive(Clone)]
+pub struct Receipt {
+    /// Its Buzz thread: a session shared by a channel handles several.
+    pub scope: String,
+    pub work: WorkHandle,
 }
 
 struct Inner {
@@ -325,6 +340,8 @@ impl ClaudeProcess {
                 effort: None,
                 own_effort: None,
                 reading_effort: None,
+                receipts: HashMap::new(),
+                active: HashMap::new(),
             }),
             writes,
             exited: watch::Sender::new(None),
@@ -429,12 +446,26 @@ impl ClaudeProcess {
     /// runs with the picked model and effort, or the session's own without
     /// them; a message folded into a running turn changes only what it
     /// asks for.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn send(
         &self,
         text: &str,
         pick: TurnPick,
     ) -> impl std::future::Future<Output = Settled> + Send + 'static {
+        self.send_with(text, pick, None)
+    }
+
+    /// [`Self::send`], with the mention's work row: Claude's echo of this
+    /// exact message moves its thread's activity to it, and its steps show
+    /// there.
+    pub fn send_with(
+        &self,
+        text: &str,
+        pick: TurnPick,
+        receipt: Option<Receipt>,
+    ) -> impl std::future::Future<Output = Settled> + Send + 'static {
         let (sender, receiver) = oneshot::channel();
+        let uuid = uuid::Uuid::new_v4().to_string();
         let (alive, busy, picked_model, effort) = {
             let state = self.state();
             (
@@ -463,12 +494,16 @@ impl ClaudeProcess {
                 state.pending += 1;
                 state.unread += 1;
                 state.waiters.push(sender);
+                if let Some(receipt) = receipt {
+                    state.receipts.insert(uuid.clone(), receipt);
+                }
             }
             state.alive
         };
         let write = alive.then(|| {
             self.write(json!({
                 "type": "user",
+                "uuid": uuid,
                 "message": { "role": "user", "content": text },
                 "parent_tool_use_id": null,
                 "session_id": "",
@@ -636,6 +671,8 @@ impl ClaudeProcess {
             state.pending = 0;
             state.unread = 0;
             state.last_error = None;
+            state.receipts.clear();
+            state.active.clear();
             std::mem::take(&mut state.waiters)
         };
         for waiter in waiters {
@@ -738,8 +775,38 @@ impl ClaudeProcess {
             return;
         }
         if kind == Some("user") && message.get("isReplay") == Some(&Value::Bool(true)) {
-            let mut state = self.state();
-            state.unread = state.unread.saturating_sub(1);
+            // Acknowledgements match the uuid sent, never prompt text or
+            // tool results. Only the latest one in a thread gets steps.
+            let (taken, replaced) = {
+                let mut state = self.state();
+                state.unread = state.unread.saturating_sub(1);
+                let receipt = message
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .and_then(|uuid| state.receipts.remove(uuid));
+                match receipt {
+                    Some(receipt) => {
+                        let replaced = state.active.insert(receipt.scope.clone(), receipt.clone());
+                        (Some(receipt), replaced)
+                    }
+                    None => (None, None),
+                }
+            };
+            if let Some(replaced) = replaced {
+                replaced.work.supersede();
+            }
+            if let Some(taken) = taken {
+                taken.work.started();
+            }
+            return;
+        }
+        if kind == Some("assistant") {
+            if let Some((tool, target)) = step_label(&message) {
+                let active: Vec<Receipt> = self.state().active.values().cloned().collect();
+                for receipt in active {
+                    receipt.work.step(&tool, target.as_deref());
+                }
+            }
             return;
         }
         if kind == Some("system") && subtype == Some("session_state_changed") {
@@ -892,3 +959,48 @@ fn truthy(value: &Value) -> bool {
 pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
+
+/// The last block of an assistant message as the tool it names and what
+/// it acts on (`stepLabel`).
+pub fn step_label(message: &Value) -> Option<(String, Option<String>)> {
+    let block = message.get("message")?.get("content")?.as_array()?.last()?;
+    match block.get("type").and_then(Value::as_str) {
+        Some("tool_use") => {
+            let tool = block.get("name")?.as_str()?.rsplit("__").next()?;
+            if tool.is_empty() {
+                return None;
+            }
+            let input = block.get("input");
+            let target = [
+                "description",
+                "file_path",
+                "notebook_path",
+                "pattern",
+                "url",
+                "query",
+                "command",
+            ]
+            .iter()
+            .find_map(|key| {
+                input
+                    .and_then(|input| input.get(*key))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(short_target);
+            Some((tool.to_string(), target))
+        }
+        Some("thinking") => Some(("Thinking".into(), None)),
+        Some("text") => Some(("Writing reply".into(), None)),
+        _ => None,
+    }
+}
+
+/// File paths show their name; anything else passes through.
+fn short_target(value: &str) -> String {
+    if value.starts_with('/') {
+        value.rsplit('/').next().unwrap_or(value).to_string()
+    } else {
+        value.to_string()
+    }
+}

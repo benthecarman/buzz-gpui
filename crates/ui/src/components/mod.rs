@@ -1,5 +1,6 @@
 //! Components styled per section 6 of the spec.
 
+mod activity;
 mod avatar;
 mod button;
 mod checkbox;
@@ -22,6 +23,7 @@ mod thinking;
 mod toast;
 mod tooltip;
 
+pub use activity::{Arrive, StackSize, arrive, avatar_stack, shimmer_text, typing_dots};
 pub use avatar::{Avatar, AvatarShape, AvatarSize, Presence};
 pub use button::{Button, ButtonShape, ButtonSize, ButtonVariant};
 pub use checkbox::{Checkbox, CheckboxState};

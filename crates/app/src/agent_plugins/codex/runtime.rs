@@ -12,6 +12,7 @@ use super::config::{Config, DEFAULT_WORKSPACE, absolute_workspace, effort_name, 
 use super::history::conversation_history;
 use super::prompt::{Conversation, developer_instructions, root_of, session_name, turn_input};
 use super::rpc::{AppServer, Listener, ToolCall, ToolHandler, list_models};
+use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agent_plugins::owner_relay::{OwnerRelay, Scoped};
 use crate::agent_plugins::process::{SpawnOptions, Spawner, collect};
 use crate::agents2::{Effort as PickEffort, Model as PickModel, Models};
@@ -70,6 +71,8 @@ pub struct Run {
     pub effort: Option<String>,
     /// Told when the request this run hands over is answered.
     pub working: crate::agent_plugins::HoldUntil,
+    /// A mention's local work row.
+    pub activity: Option<WorkHandle>,
 }
 
 /// One conversation's state, for the Codex tab.
@@ -147,34 +150,50 @@ struct Request {
     model: Option<String>,
     effort: Option<String>,
     /// Called once a final send answers this request, or one steered
-    /// after it, or a steering rejection is posted in its place.
+    /// after it, or it fails first.
     answered: Answered,
+    /// A mention's work row: its acknowledgement, steps and supersession.
+    activity: Option<WorkHandle>,
 }
 
-/// Settles a request's working hold once it is answered. Cheap to clone.
+/// Settles a request's working hold once it is answered or has failed;
+/// the first outcome wins. Cheap to clone.
 #[derive(Clone)]
-struct Answered(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+struct Answered(Arc<Mutex<Option<oneshot::Sender<WorkOutcome>>>>);
 
 impl Answered {
-    /// The answer, and the future that settles with it (or when the
-    /// request is dropped unanswered, which never holds anything).
-    fn new() -> (Self, BoxFuture<'static, ()>) {
+    /// The answer, and the future that settles with it. A request dropped
+    /// unanswered can no longer be answered: it ended without a reply.
+    fn new() -> (Self, BoxFuture<'static, WorkOutcome>) {
         let (sender, receiver) = oneshot::channel();
         let replied = async move {
-            if receiver.await.is_err() {
-                futures::future::pending::<()>().await;
-            }
+            receiver
+                .await
+                .unwrap_or_else(|_| WorkOutcome::failed(NO_REPLY))
         }
         .boxed();
         (Self(Arc::new(Mutex::new(Some(sender)))), replied)
     }
 
     fn answer(&self) {
+        self.settle(WorkOutcome::ok());
+    }
+
+    /// The request failed: its bubble shows why.
+    fn fail(&self, reason: &str) {
+        self.settle(WorkOutcome::failed(reason));
+    }
+
+    fn settle(&self, outcome: WorkOutcome) {
         if let Some(sender) = locked(&self.0).take() {
-            let _ = sender.send(());
+            let _ = sender.send(outcome);
         }
     }
 }
+
+/// Why a request's work failed when its turn ended without answering it.
+const NO_REPLY: &str = "Codex ended without a final reply";
+const STOPPED: &str = "Codex was stopped";
 
 /// A conversation's Codex thread, saved across restarts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +230,32 @@ struct Active {
     /// Every request this turn has taken in, the first and each steered
     /// one.
     requests: Mutex<Vec<Request>>,
+    /// The latest acknowledged mention per Buzz thread, whatever the
+    /// session scope: the one that gets steps.
+    activity: Mutex<HashMap<String, Request>>,
+}
+
+impl Active {
+    /// Codex took `request`: its thread's activity moves to it, without
+    /// claiming the earlier request succeeded. Watches have no bubble, and
+    /// mentions in other threads keep theirs.
+    fn acknowledge(&self, request: &Request) {
+        let Some(work) = &request.activity else {
+            return;
+        };
+        let prior = locked(&self.activity).insert(root_of(&request.event), request.clone());
+        if let Some(prior) = prior.and_then(|prior| prior.activity) {
+            prior.supersede();
+        }
+        work.started();
+    }
+
+    /// Every request taken in has failed with `reason`, unless answered.
+    fn fail_all(&self, reason: &str) {
+        for taken in locked(&self.requests).iter() {
+            taken.answered.fail(reason);
+        }
+    }
 }
 
 impl Active {
@@ -886,6 +931,7 @@ impl CodexRuntime {
             model,
             effort,
             working,
+            activity,
         } = run;
         let (event, interest) = match wake {
             Wake::Timer => {
@@ -905,6 +951,10 @@ impl CodexRuntime {
         )
         .await;
         if !trusted {
+            // Declined: no work, and no outcome, to show.
+            if let Some(work) = &activity {
+                work.remove();
+            }
             return Ok(());
         }
         let Some((scope, relay)) = scoped else {
@@ -915,6 +965,7 @@ impl CodexRuntime {
         // turn ends; the agent is done working on this request once it has
         // replied.
         let (answered, replied) = Answered::new();
+        working(replied);
         let settings = Config::read(&config);
         let info = relay.channel(&channel_id);
         let dm = info.as_ref().is_some_and(|info| info.dm);
@@ -933,6 +984,7 @@ impl CodexRuntime {
             model,
             effort,
             answered: answered.clone(),
+            activity,
             conversation: Conversation {
                 name: info
                     .and_then(|info| info.name)
@@ -943,6 +995,7 @@ impl CodexRuntime {
             interest,
         };
         if !valid_workspace(&request.settings.workspace) {
+            answered.fail("Choose an absolute workspace path or ~/.buzz in Codex settings first.");
             return self
                 .publish(
                     &request,
@@ -981,30 +1034,10 @@ impl CodexRuntime {
                 }
                 .boxed()
                 .shared();
-                *steering = accepted.clone();
-                // The steered turn, or one started in its place, answers
-                // this mention.
-                let steered = lane.clone();
-                let done = async move {
-                    accepted.await;
-                    let tail = locked(&steered.tail).1.clone();
-                    tail.await;
-                };
-                working(
-                    async move {
-                        futures::future::select(replied, done.boxed()).await;
-                    }
-                    .boxed(),
-                );
+                *steering = accepted;
             }
             None => {
-                let job = self.start(request, text, key, lane, entry);
-                working(
-                    async move {
-                        futures::future::select(replied, job).await;
-                    }
-                    .boxed(),
-                );
+                drop(self.start(request, text, key, lane, entry));
             }
         }
         Ok(())
@@ -1024,12 +1057,13 @@ impl CodexRuntime {
         /// What became of the follow-up, when it did not fail.
         enum Steered {
             Done,
+            Stopped,
             NextTurn,
         }
         let steered = async {
             let ready = active.ready.clone().await;
             if entry.abort.aborted() {
-                return Ok(Steered::Done);
+                return Ok(Steered::Stopped);
             }
             // A turn that failed to start is over too: its failure is
             // already posted, and the follow-up, often a retry sent after
@@ -1054,7 +1088,7 @@ impl CodexRuntime {
             ready?;
             let context = self.history(&request, &entry.abort).await?;
             if entry.abort.aborted() {
-                return Ok(Steered::Done);
+                return Ok(Steered::Stopped);
             }
             if active.finished() {
                 return Ok(Steered::NextTurn);
@@ -1073,19 +1107,24 @@ impl CodexRuntime {
             *locked(&active.reply) = request.clone();
             locked(&active.requests).push(request.clone());
             active.version.fetch_add(1, Ordering::SeqCst);
+            active.acknowledge(&request);
             Ok::<_, String>(Steered::Done)
         }
         .await;
         match steered {
             Ok(Steered::Done) => {}
+            Ok(Steered::Stopped) => request.answered.fail(STOPPED),
             Ok(Steered::NextTurn) => self.start_next(request, text, key, &entry),
-            Err(_) if entry.abort.aborted() => {}
+            Err(_) if entry.abort.aborted() => request.answered.fail(STOPPED),
             // A completion racing the request means this is the next
             // ordinary turn.
             Err(error) if error == "no active turn to steer" => {
                 self.start_next(request, text, key, &entry)
             }
             Err(error) => {
+                request
+                    .answered
+                    .fail(&format!("Steering was not accepted: {error}"));
                 let notice = format!(
                     "Steering was not accepted: {error}. Send another mention to continue."
                 );
@@ -1135,6 +1174,7 @@ impl CodexRuntime {
                 previous.await;
                 lane.queued.fetch_sub(1, Ordering::SeqCst);
                 if entry.abort.aborted() {
+                    request.answered.fail(STOPPED);
                     return;
                 }
                 this.execute(request, text, key, lane, entry).await;
@@ -1391,6 +1431,7 @@ impl CodexRuntime {
             steering: Mutex::new(futures::future::ready(()).boxed().shared()),
             reply: Mutex::new(request.clone()),
             requests: Mutex::new(vec![request.clone()]),
+            activity: Mutex::default(),
             finished: AtomicBool::new(false),
             model: Mutex::default(),
             effort: Mutex::default(),
@@ -1444,6 +1485,15 @@ impl CodexRuntime {
                         *locked(&active.turn_id) = text_at(turn, &["id"]).map(str::to_string);
                     }
                     (Some("item/started"), _, Some(item)) => {
+                        if let Some((tool, target)) = codex_step(item) {
+                            let taken: Vec<WorkHandle> = locked(&active.activity)
+                                .values()
+                                .filter_map(|request| request.activity.clone())
+                                .collect();
+                            for work in taken {
+                                work.step(&tool, target.as_deref());
+                            }
+                        }
                         if let Some(command) = text_at(item, &["command"]).filter(|c| !c.is_empty())
                         {
                             this.status(&pubkey, &key, "Working", command);
@@ -1645,6 +1695,7 @@ impl CodexRuntime {
                 )
                 .await?;
             *locked(&active.turn_id) = text_at(&turn, &["turn", "id"]).map(str::to_string);
+            active.acknowledge(&request);
             // An empty thread has no resumable rollout until a turn is
             // accepted.
             self.save(
@@ -1670,6 +1721,7 @@ impl CodexRuntime {
             signal.check()?;
             let reply = active.reply();
             if status == "interrupted" {
+                active.fail_all("Codex’s turn was interrupted");
                 self.terminals(&rpc, &thread_id).await?;
                 self.publish(
                     &reply,
@@ -1692,6 +1744,7 @@ impl CodexRuntime {
         }
         .await;
         if let Err(error) = outcome {
+            active.fail_all(&error);
             let ended = active.finished.swap(true, Ordering::SeqCst);
             if let Some(ready) = locked(&ready_sender).take() {
                 let _ = ready.send(Err(error.clone()));
@@ -1727,6 +1780,7 @@ impl CodexRuntime {
                 self.status(&pubkey, &key, "Needs attention", &reason);
             }
         }
+        active.fail_all(NO_REPLY);
         signal.abort(TURN_ENDED);
         deadline.abort();
         aborted.abort();
@@ -1750,6 +1804,154 @@ impl CodexRuntime {
             *current = None;
         }
     }
+}
+
+/// A started Codex item as a step, in the shared step vocabulary
+/// (`codexStep`). Shapes follow the app-server v2 `ThreadItem` and
+/// `CommandAction`.
+pub fn codex_step(item: &Value) -> Option<(String, Option<String>)> {
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let file = |value: Option<&Value>| {
+        text(value).and_then(|path| path.rsplit('/').next().map(str::to_string))
+    };
+    let step = |tool: &str, target: Option<String>| Some((tool.to_string(), target));
+    match item.get("type").and_then(Value::as_str)? {
+        "commandExecution" => {
+            let action = item
+                .get("commandActions")
+                .and_then(Value::as_array)
+                .and_then(|actions| actions.first());
+            let get = |key: &str| action.and_then(|action| action.get(key));
+            match get("type").and_then(Value::as_str) {
+                Some("read") => step("Read", text(get("name")).or_else(|| file(get("path")))),
+                Some("search") => step("Grep", text(get("query"))),
+                Some("listFiles") => step("ListFiles", text(get("path"))),
+                _ => step(
+                    "Shell",
+                    programs(
+                        text(get("command"))
+                            .or_else(|| text(item.get("command")))
+                            .as_deref(),
+                    ),
+                ),
+            }
+        }
+        "fileChange" => step(
+            "Edit",
+            file(
+                item.get("changes")
+                    .and_then(Value::as_array)
+                    .and_then(|changes| changes.first())
+                    .and_then(|change| change.get("path")),
+            ),
+        ),
+        "mcpToolCall" | "dynamicToolCall" => {
+            let tool = text(item.get("tool"))?;
+            step(&tool, None)
+        }
+        "collabAgentToolCall" => step("Agent", text(item.get("prompt"))),
+        "webSearch" => step("WebSearch", text(item.get("query"))),
+        "imageView" => step("ImageView", file(item.get("path"))),
+        "plan" => step("TodoWrite", None),
+        "contextCompaction" => step("Compacting", None),
+        "reasoning" => step("Thinking", None),
+        "agentMessage" => step("Writing reply", None),
+        _ => None,
+    }
+}
+
+/// The programs a shell command runs ("mktemp, xargs"), without the
+/// login-shell wrapper, arguments or quoted scripts (`programs`). The raw
+/// command stays in the transcript.
+pub fn programs(command: Option<&str>) -> Option<String> {
+    let command = command?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let inner = shell_script(command).unwrap_or(command);
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                current.push(c);
+            }
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            None if matches!(c, '|' | ';' | '&' | '\n') => {
+                segments.push(std::mem::take(&mut current))
+            }
+            None => current.push(c),
+        }
+    }
+    segments.push(current);
+    let mut names: Vec<String> = Vec::new();
+    for segment in &segments {
+        let word = segment.split_whitespace().find(|token| !assignment(token));
+        let name = word.map(|word| {
+            word.trim_start_matches(['"', '\''])
+                .trim_end_matches(['"', '\''])
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+        if let Some(name) = name.filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || matches!(c, '.' | '+' | '-'))
+        }) && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    match names.len() {
+        0 => None,
+        1..=3 => Some(names.join(", ")),
+        n => Some(format!("{} and {} more", names[..3].join(", "), n - 3)),
+    }
+}
+
+/// `VAR=value`, which is not the program.
+fn assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The script of `[/path/]sh|bash|zsh -c|-lc '<script>'`.
+fn shell_script(command: &str) -> Option<&str> {
+    let (shell, rest) = command.split_once(char::is_whitespace)?;
+    let shell = shell.rsplit('/').next()?;
+    if !matches!(shell, "sh" | "bash" | "zsh") {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (flag, rest) = rest.split_once(char::is_whitespace)?;
+    if !matches!(flag, "-c" | "-lc") {
+        return None;
+    }
+    let rest = rest.trim();
+    let quote = rest.chars().next().filter(|c| *c == '\'' || *c == '"')?;
+    let body = rest.strip_prefix(quote)?.strip_suffix(quote)?;
+    Some(body)
 }
 
 #[cfg(test)]

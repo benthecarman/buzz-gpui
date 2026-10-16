@@ -25,6 +25,7 @@ pub fn latest_activity(
     community: &Entity<Community>,
     pubkey: &str,
     channel: Option<&str>,
+    on_view: Option<super::row::Action>,
     cx: &App,
 ) -> Option<AnyElement> {
     let channel = channel?.to_string();
@@ -112,8 +113,10 @@ pub fn latest_activity(
                 div().flex().child(
                     Button::new("profile-view-activity", "View activity")
                         .size(ButtonSize::Sm)
-                        .on_click(move |_, window, cx| {
-                            super::open(&agent, Some(&channel), None, window, cx)
+                        // The profile's own Activity tab when it has one.
+                        .on_click(move |_, window, cx| match &on_view {
+                            Some(view) => view(window, cx),
+                            None => super::open(&agent, Some(&channel), None, window, cx),
                         }),
                 ),
             )

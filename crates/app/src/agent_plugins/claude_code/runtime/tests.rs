@@ -161,6 +161,7 @@ impl Setup {
             model: None,
             effort: None,
             working: std::sync::Arc::new(|_| {}),
+            activity: None,
         };
         async move { runtime.run(run).await }
     }
@@ -627,6 +628,7 @@ async fn runs_a_mention_on_the_model_and_effort_its_delivery_picked() {
             model: Some("haiku".into()),
             effort: Some("low".into()),
             working: std::sync::Arc::new(|_| {}),
+            activity: None,
         })
         .await;
     flush().await;

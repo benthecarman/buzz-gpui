@@ -3,6 +3,7 @@
 //! and what it posts.
 
 use super::*;
+use crate::agent_activity::local::{Begin, LocalActivity, LocalWorkState};
 use crate::agent_plugins::codex::rpc::testing::{FakeCodex, Gate, Held, flush, gate, until};
 use crate::agent_plugins::owner_relay::ChannelInfo;
 use crate::buzz_mcp::{ClientResult, Upload};
@@ -207,7 +208,9 @@ struct Fixture {
     next: Mutex<u64>,
     tools: Mutex<u64>,
     /// What each delivery counted as working until, in order.
-    holds: Arc<Mutex<Vec<Shared<BoxFuture<'static, ()>>>>>,
+    holds: Arc<Mutex<Vec<Shared<BoxFuture<'static, WorkOutcome>>>>>,
+    /// Each delivery's work row, in order.
+    activity: LocalActivity,
 }
 
 impl Drop for Fixture {
@@ -245,6 +248,7 @@ fn fixture_with(storage: Arc<MemoryStorage>) -> Fixture {
         next: Mutex::new(0),
         tools: Mutex::new(0),
         holds: Arc::default(),
+        activity: LocalActivity::default(),
     }
 }
 
@@ -286,7 +290,32 @@ impl Fixture {
                 let holds = self.holds.clone();
                 Arc::new(move |done| locked(&holds).push(done.shared()))
             },
+            activity: Some(self.activity.begin(
+                Begin {
+                    scope: "s".into(),
+                    agent: "a".into(),
+                    channel_id: CHANNEL.into(),
+                    message_id: content.into(),
+                    thread_root_id: thread.into(),
+                },
+                0,
+            )),
         }
+    }
+
+    /// Each delivery's work row: its state, step tool and error.
+    fn work(&self) -> Vec<(LocalWorkState, Option<String>, Option<String>)> {
+        self.activity
+            .work()
+            .iter()
+            .map(|row| {
+                (
+                    row.state,
+                    row.step.as_ref().map(|step| step.tool.clone()),
+                    row.error.clone(),
+                )
+            })
+            .collect()
     }
 
     fn delivery(&self, content: &str) -> Run {
@@ -1877,4 +1906,100 @@ async fn does_not_clean_after_the_last_agent_closes_the_server() {
     flush().await;
     assert!(f.fake.calls("thread/backgroundTerminals/clean").is_empty());
     assert!(f.runtime.sessions(&agent_key()).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moves_activity_to_the_latest_acknowledged_mention_and_reports_steps() {
+    let f = fixture();
+    f.run(f.delivery("first")).await;
+    f.starts_reach(1).await;
+    until(|| f.work()[0].0 == LocalWorkState::Working).await;
+    f.fake.emit(json!({
+        "method": "item/started",
+        "params": {
+            "threadId": f.thread_of(0),
+            "item": { "type": "commandExecution", "command": "/bin/zsh -lc 'mktemp | xargs rm'" },
+        },
+    }));
+    until(|| f.work()[0].1.as_deref() == Some("Shell")).await;
+    assert_eq!(
+        f.activity.work()[0]
+            .step
+            .as_ref()
+            .unwrap()
+            .target
+            .as_deref(),
+        Some("mktemp, xargs")
+    );
+    // An accepted steer moves the bubble without claiming the first
+    // request succeeded.
+    f.run(f.delivery("second")).await;
+    f.steered(1).await;
+    until(|| f.work()[0].0 == LocalWorkState::Superseded).await;
+    assert_eq!(f.work()[1].0, LocalWorkState::Working);
+    f.complete().await;
+    until(|| f.holds() == (2, 2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_steer_and_a_turn_without_a_reply_fail_their_requests() {
+    let f = fixture();
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    f.fake
+        .state()
+        .errors
+        .insert("turn/steer".into(), "model busy".into());
+    f.run(f.delivery("new request")).await;
+    until(|| f.holds() == (2, 1)).await;
+    let rejected = locked(&f.holds)[1].clone();
+    let rejected = rejected.await;
+    assert_eq!(
+        rejected,
+        WorkOutcome::failed("Steering was not accepted: model busy")
+    );
+    f.end_turn(0, "completed");
+    until(|| f.holds() == (2, 2)).await;
+    let first = locked(&f.holds)[0].clone();
+    let first = first.await;
+    assert_eq!(
+        first,
+        WorkOutcome::failed("Codex ended without a final reply")
+    );
+}
+
+#[test]
+fn words_codex_items_as_steps() {
+    let step = |item: Value| codex_step(&item);
+    assert_eq!(
+        step(json!({"type": "commandExecution", "command": "ls",
+            "commandActions": [{"type": "read", "path": "/a/b/notes.md"}]})),
+        Some(("Read".into(), Some("notes.md".into())))
+    );
+    assert_eq!(
+        step(json!({"type": "fileChange", "changes": [{"path": "src/main.rs"}]})),
+        Some(("Edit".into(), Some("main.rs".into())))
+    );
+    assert_eq!(
+        step(json!({"type": "reasoning"})),
+        Some(("Thinking".into(), None))
+    );
+    assert_eq!(
+        step(json!({"type": "agentMessage"})),
+        Some(("Writing reply".into(), None))
+    );
+    assert_eq!(step(json!({"type": "userMessage"})), None);
+    assert_eq!(
+        programs(Some("FOO=1 cargo test && ./x/run.sh | grep -v 'a|b'")).as_deref(),
+        Some("cargo, run.sh, grep")
+    );
+    assert_eq!(
+        programs(Some("a; b; c; d; e")).as_deref(),
+        Some("a, b, c and 2 more")
+    );
+    assert_eq!(
+        programs(Some("bash -c \"echo hi\"")).as_deref(),
+        Some("echo")
+    );
+    assert_eq!(programs(Some("   ")), None);
 }

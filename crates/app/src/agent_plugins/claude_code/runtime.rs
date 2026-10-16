@@ -6,7 +6,7 @@
 //! in-process Buzz tools, signed by the agent's host-held key; the runtime
 //! only reports a turn that fails.
 
-use super::claude::{Launch, Settled, ToolServer, TurnPick};
+use super::claude::{Launch, Receipt, Settled, ToolServer, TurnPick};
 use super::prompt::{
     CONTEXT_LIMIT, Channel, Scope, Thread, steer_prompt, system_prompt, timer_prompt, turn_prompt,
 };
@@ -14,6 +14,7 @@ use super::sessions::{
     AgentSessions, DeliverOptions, FileSessions, SessionStore, SessionView, SessionsOptions, Spare,
     Where,
 };
+use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::{Effort, Model, Models};
@@ -190,6 +191,17 @@ pub struct Run {
     pub effort: Option<String>,
     /// Told when the turn this run hands over settles.
     pub working: crate::agent_plugins::HoldUntil,
+    /// A mention's local work row.
+    pub activity: Option<WorkHandle>,
+}
+
+/// A settled turn as its request's outcome.
+fn outcome(settled: Settled) -> WorkOutcome {
+    if settled.ok {
+        WorkOutcome::ok()
+    } else {
+        WorkOutcome::failed(settled.error.unwrap_or_default())
+    }
 }
 
 /// One agent, as `sync` describes it.
@@ -474,6 +486,10 @@ impl ClaudeRuntime {
             Wake::Timer { .. } => true,
         };
         if !trusted {
+            // Declined: no work, and no outcome, to show.
+            if let Some(work) = &run.activity {
+                work.remove();
+            }
             return;
         }
         let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone());
@@ -500,7 +516,7 @@ impl ClaudeRuntime {
                         DeliverOptions::default(),
                     )
                     .shared();
-                (run.working)(done.clone().map(drop).boxed());
+                (run.working)(done.clone().map(outcome).boxed());
                 self.watch(done.boxed(), None);
                 return;
             }
@@ -528,7 +544,7 @@ impl ClaudeRuntime {
             key.clone(),
             Context {
                 channel: Some(channel.clone()),
-                root: (key != channel).then_some(root),
+                root: (key != channel).then_some(root.clone()),
             },
         );
         let fresh = {
@@ -561,12 +577,19 @@ impl ClaudeRuntime {
                     model: run.model,
                     effort: run.effort,
                 },
+                receipt: run
+                    .activity
+                    .filter(|_| label == "@mention")
+                    .map(|work| Receipt {
+                        scope: root.clone(),
+                        work,
+                    }),
             },
         );
         // The turn outlives `run`, which the host is told so it shows it as
         // working.
         let done = done.shared();
-        (run.working)(done.clone().map(drop).boxed());
+        (run.working)(done.clone().map(outcome).boxed());
         self.notify();
         self.watch(done.boxed(), Some((run.agent, channel, event)));
     }

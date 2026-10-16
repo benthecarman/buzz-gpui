@@ -488,17 +488,11 @@ impl MessageActions {
                 (dialog.message(), dialog.error())
             });
         rows.presence = snapshot.presence.clone();
-        rows.working = match self.hooks.thread {
-            Some(root) => snapshot.thread_typing.get(&root.to_hex()).cloned(),
-            None => snapshot.typing.get(&self.channel).cloned(),
-        }
-        .unwrap_or_default();
-        rows.working
-            .extend(crate::agent_activity::observer::thinking(
-                &self.community,
-                &self.channel,
-                cx,
-            ));
+        rows.bubbles = Some(crate::ui::agent_activity::bubble::Bubbles::of(
+            &self.community,
+            &self.channel,
+            cx,
+        ));
         rows.quick_reactions = quick;
         rows.actions = self.actions(this);
     }
@@ -700,6 +694,13 @@ impl MessageActions {
             }
             Command::Edit => (self.hooks.edit)(row, window, cx),
             Command::Delete => self.open_delete(row, window, cx),
+            Command::ViewActivity => {
+                if let Some(target) =
+                    crate::ui::profile_panel::activity_target(&row.author.to_hex())
+                {
+                    crate::ui::navigation::open_url(&target, window, cx);
+                }
+            }
             Command::Follow(follow) => {
                 self.error = None;
                 let root = row.thread_root_id.unwrap_or(row.id);
