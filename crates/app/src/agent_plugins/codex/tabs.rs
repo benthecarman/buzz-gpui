@@ -6,12 +6,13 @@
 use super::config::{Config, DEFAULT_WORKSPACE, Model, effort_name, valid_workspace};
 use super::rpc::{AppServer, list_models};
 use super::runtime::{CodexRuntime, SavedConversation, SessionView};
+use super::setup::{CodexSetup, CodexStatus, SetupState, Step};
 use super::transcript::{Lookup, SharedNames, TURN_LIMIT, read_transcript};
 use crate::agent_plugins::opened::{self, CONVERSATION_LIMIT, CardSession, Found, Place, places};
 use crate::agent_plugins::process::Spawner;
 use crate::agent_plugins::tabs::{
     Options, Picking, choice, description_text, field, instructions_field, instructions_state,
-    model_picker, saved_config,
+    model_picker, note_with_code, saved_config,
 };
 use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
 use crate::agents2::{AgentConversation, AgentView, Agents2, ModelChoice};
@@ -27,8 +28,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// What `account/read` says when nobody is signed in.
-pub const SIGN_IN: &str =
-    "Codex needs you to sign in. Run codex login in a terminal, then check again.";
+pub const SIGN_IN: &str = "Codex needs you to sign in.";
+/// What the check says when Buzz has no copy of Codex on the host.
+pub const NOT_INSTALLED: &str = "Codex is not installed.";
 
 /// The account Codex uses and the models it offers.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -74,13 +76,11 @@ pub async fn catalog(spawn: Spawner, signal: Signal) -> Result<Catalog, String> 
     result
 }
 
-/// Where the agent's processes run, and how its person signs Codex in
-/// there.
+/// Where the agent's processes run, and Buzz's copy of Codex there.
 #[derive(Clone)]
 pub struct Host {
     pub spawn: Option<Spawner>,
-    pub label: SharedString,
-    pub remote: bool,
+    pub setup: CodexSetup,
 }
 
 /// One check of Codex on the agent's host (buzz-app's `useCatalog`): a
@@ -90,19 +90,42 @@ pub struct CatalogCheck {
     pub data: Option<Catalog>,
     pub error: String,
     pub checking: bool,
+    /// The copy's install or sign-in, as it runs.
+    pub setup: SetupState,
     signal: Signal,
     _task: Option<Task<()>>,
+    _follow: Option<Task<()>>,
 }
 
 impl CatalogCheck {
     pub fn new(host: Host, cx: &mut Context<Self>) -> Self {
+        // An install or sign-in holds the tab, then Codex is checked again.
+        let mut changes = host.setup.subscribe();
+        let follow = cx.spawn(async move |this, cx| {
+            while changes.changed().await.is_ok() {
+                let state = changes.borrow_and_update().clone();
+                let updated = this.update(cx, |this, cx| {
+                    let ended = this.setup.running.is_some() && state.running.is_none();
+                    this.setup = state;
+                    if ended {
+                        this.retry(cx);
+                    }
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    return;
+                }
+            }
+        });
         let mut this = Self {
+            setup: host.setup.snapshot(),
             host,
             data: None,
             error: String::new(),
             checking: true,
             signal: Signal::default(),
             _task: None,
+            _follow: Some(follow),
         };
         this.retry(cx);
         this
@@ -122,7 +145,20 @@ impl CatalogCheck {
             return;
         };
         let signal = self.signal.clone();
-        let check = Runtime::handle(cx).spawn(catalog(spawn, signal.clone()));
+        let setup = self.host.setup.clone();
+        let check = Runtime::handle(cx).spawn({
+            let signal = signal.clone();
+            async move {
+                match setup.check().await {
+                    CodexStatus::Ready { .. } => catalog(spawn, signal).await,
+                    CodexStatus::Missing => Err(NOT_INSTALLED.into()),
+                    CodexStatus::SignedOut { .. } | CodexStatus::Outdated { .. } => {
+                        Err(SIGN_IN.into())
+                    }
+                    CodexStatus::Error { message } => Err(message),
+                }
+            }
+        });
         self._task = Some(cx.spawn(async move |this, cx| {
             let result = check
                 .await
@@ -144,38 +180,122 @@ impl CatalogCheck {
         }));
     }
 
-    /// The host's terminal sign-in, shown when Codex is signed out: a
-    /// remote host has no browser for the usual sign-in, so it signs in
-    /// with a device code instead.
-    fn sign_in(&self, c: &Colors) -> Option<Div> {
-        if self.error != SIGN_IN {
-            return None;
-        }
-        let (lead, command) = if self.host.remote {
-            (
-                format!(
-                    "Run this in a terminal on {} and follow Codex’s sign-in steps:",
-                    self.host.label
-                ),
-                "codex login --device-auth",
-            )
-        } else {
-            (
-                "Run this in your terminal and follow Codex’s sign-in steps:".to_string(),
-                "codex login",
-            )
-        };
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::S2)
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child(lead)
-                .child(div().w_full().min_w_0().text_mono().child(command)),
-        )
+    /// What setting Codex up needs next: install or sign in.
+    pub fn action(&self) -> Option<(Step, &'static str)> {
+        setup_action(&self.error)
     }
+
+    /// The copy's install or sign-in: its progress and Cancel while it
+    /// runs, otherwise what Codex needs, then its output.
+    fn setup_view(&self, c: &Colors) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::S2)
+            .children(
+                self.setup
+                    .notice
+                    .clone()
+                    .map(|notice| div().text_body_sm().child(notice)),
+            )
+            .child(setup_steps(
+                &self.host.setup,
+                &self.setup,
+                self.action(),
+                self.checking,
+                c,
+            ))
+    }
+}
+
+/// What setting Codex up needs next, from what its check said: install or
+/// sign in.
+pub fn setup_action(error: &str) -> Option<(Step, &'static str)> {
+    match error {
+        NOT_INSTALLED => Some((Step::Install, "Install Codex")),
+        SIGN_IN => Some((Step::Login, "Sign in")),
+        _ => None,
+    }
+}
+
+/// The copy's install or sign-in, shared by the tabs and the provider
+/// dialog: its progress and Cancel while it runs, otherwise the step
+/// `action` names, then its output.
+pub fn setup_steps(
+    setup: &CodexSetup,
+    state: &SetupState,
+    action: Option<(Step, &'static str)>,
+    checking: bool,
+    c: &Colors,
+) -> Div {
+    let running = state.running;
+    let start = |step: Step| {
+        let setup = setup.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let setup = setup.clone();
+            Runtime::handle(cx).spawn(async move { setup.run(step).await });
+        }
+    };
+    let cancel = {
+        let setup = setup.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let setup = setup.clone();
+            Runtime::handle(cx).spawn(async move { setup.cancel().await });
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::S2)
+        .when_some(running, |this, running| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(space::S2)
+                    .child(div().text_body_sm().child(match running {
+                        Step::Login => "Waiting for Codex sign-in…",
+                        Step::Install => "Installing Codex…",
+                    }))
+                    .child(Button::new("codex-setup-cancel", "Cancel").on_click(cancel)),
+            )
+        })
+        .when_some(
+            action.filter(|_| running.is_none() && !checking),
+            |this, (step, label)| {
+                this.child(
+                    div().flex().child(
+                        Button::new("codex-setup-action", label)
+                            .prominent()
+                            .on_click(start(step)),
+                    ),
+                )
+            },
+        )
+        .when(
+            matches!(action, Some((Step::Install, _))) && running.is_none(),
+            |this| {
+                this.child(note_with_code(
+                    "Downloads Buzz's own copy of Codex (about 130 MB) from releases.openai.com and keeps it on the latest release. It does not change the",
+                    "codex",
+                    "in your terminal, and uses the same sign-in and settings.",
+                    c,
+                ))
+            },
+        )
+        .when(!state.output.is_empty(), |this| {
+            this.child(
+                div()
+                    .id("codex-setup-output")
+                    .max_h(rems(15.))
+                    .overflow_y_scroll()
+                    .text_caption()
+                    .text_mono()
+                    .whitespace_normal()
+                    .child(state.output.clone()),
+            )
+        })
 }
 
 impl Drop for CatalogCheck {
@@ -546,7 +666,7 @@ impl Render for CodexTab {
             .when(!check.error.is_empty(), |this| {
                 this.child(div().child(check.error.clone()))
             })
-            .children(check.sign_in(&c))
+            .child(check.setup_view(&c))
             .child(
                 div().flex().child(
                     Button::new("codex-check", "Check again")
@@ -557,7 +677,7 @@ impl Render for CodexTab {
                 ),
             )
             .child(description_text(
-                "Uses your existing Codex sign-in. Install Codex and run codex login in a terminal if needed.",
+                "Uses your Codex sign-in and settings.",
                 &c,
             ))
             .children(card)
@@ -792,7 +912,7 @@ impl Render for SettingsTab {
         let changed = current != self.saved(cx);
         let check = self.check.read(cx);
         let (checking, catalog_error) = (check.checking, check.error.clone());
-        let sign_in = check.sign_in(&c);
+        let setup = check.setup_view(&c);
         let models = check.data.as_ref().map(|data| data.models.clone());
         let selected = models
             .as_deref()
@@ -828,7 +948,7 @@ impl Render for SettingsTab {
                         .items_start()
                         .gap(space::S2)
                         .child(catalog_error)
-                        .children(sign_in)
+                        .child(setup)
                         .child(
                             Button::new("codex-settings-check", "Check again")
                                 .ghost()

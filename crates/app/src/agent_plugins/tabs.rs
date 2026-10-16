@@ -7,7 +7,8 @@ use crate::agents2::{AgentView, Agents2, ModelChoice};
 use crate::ui::overlay::{self, Align};
 use buzz_ui::{
     ActiveTheme, Button, Colors, Dialog, Icon, IconName, Menu, MenuItem, MenuSize, Select, Surface,
-    TextArea, TextField, TypeStyled, tokens::space,
+    TextArea, TextField, TypeStyled,
+    tokens::{font, space},
 };
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
@@ -49,6 +50,34 @@ pub fn description_text(text: impl Into<SharedString>, c: &Colors) -> Div {
         .text_body_sm()
         .text_color(c.text_subtle)
         .child(text.into())
+}
+
+/// A description with one word in code type: words wrap one at a time,
+/// and punctuation after the code word stays with it.
+pub fn note_with_code(before: &str, code: &str, after: &str, c: &Colors) -> Div {
+    let word = |text: &str, code: bool| {
+        div()
+            .when(code, |this| this.font_family(font::MONO))
+            .child(SharedString::from(text.to_string()))
+    };
+    let (attached, after) = match after.split_once(' ') {
+        Some((first, rest)) if first.starts_with([',', '.']) => (first, rest),
+        _ => ("", after),
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_x(rems(0.25))
+        .text_body_sm()
+        .text_color(c.text_subtle)
+        .children(before.split(' ').map(|text| word(text, false)))
+        .child(
+            div()
+                .flex()
+                .child(word(code, true))
+                .child(word(attached, false)),
+        )
+        .children(after.split(' ').map(|text| word(text, false)))
 }
 
 /// The agent's saved settings, as they are now: they can change in

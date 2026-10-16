@@ -109,6 +109,9 @@ pub fn env() -> BTreeMap<String, Option<String>> {
         "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".into(),
         Some("1".into()),
     );
+    // Buzz keeps its own copy current; Claude must not install itself
+    // elsewhere.
+    env.insert("DISABLE_AUTOUPDATER".into(), Some("1".into()));
     // A key in the shell that launched the app would outrank the sign-in;
     // the interactive CLI asks before using one, but stream-json mode uses
     // it silently.

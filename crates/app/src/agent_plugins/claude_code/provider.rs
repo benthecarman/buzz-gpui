@@ -10,15 +10,14 @@ use super::runtime::model_name;
 use super::setup::{ClaudeSetup, ClaudeStatus, SetupState, Step};
 use crate::agent_plugins::process::Spawner;
 use crate::agent_plugins::provider::{Choice, described_choice};
-use crate::agent_plugins::tabs::{Picking, field};
+use crate::agent_plugins::tabs::{Picking, field, note_with_code};
 use crate::agents2::{
     AgentProvider, CloseProvider, CreateModels, ModelChoice, ProviderSnapshot, Readiness,
     providers_changed, registry::AttentionAction,
 };
 use crate::runtime::Runtime;
 use buzz_ui::{
-    ActiveTheme, Button, Colors, Spinner, Surface, TextField, TypeStyled,
-    tokens::{font, space},
+    ActiveTheme, Button, Colors, Spinner, Surface, TextField, TypeStyled, tokens::space,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
@@ -33,6 +32,9 @@ pub fn status_line(state: &SetupState) -> String {
     match (&state.status, state.checking) {
         (None, _) | (_, true) => "Checking Claude…".into(),
         (Some(ClaudeStatus::Missing), _) => "Claude is not installed.".into(),
+        (Some(ClaudeStatus::Outdated { version }), _) => {
+            format!("Claude {version} is older than Buzz needs.")
+        }
         (Some(ClaudeStatus::SignedOut { version }), _) => {
             format!("Claude {version} needs you to sign in.")
         }
@@ -51,11 +53,13 @@ pub fn health(state: &SetupState) -> ProviderSnapshot {
         None => (Readiness::Checking, None),
         Some(ClaudeStatus::Ready { .. }) => (Readiness::Ready, None),
         Some(ClaudeStatus::Missing) => (Readiness::Attention, Some("Install Claude Code")),
+        Some(ClaudeStatus::Outdated { .. }) => (Readiness::Attention, Some("Update Claude Code")),
         Some(ClaudeStatus::SignedOut { .. }) => {
             (Readiness::Attention, Some("Log in to Claude Code"))
         }
-        #[allow(unreachable_patterns)]
-        Some(_) => (Readiness::Attention, Some("Claude Code needs attention")),
+        Some(ClaudeStatus::Error { .. }) => {
+            (Readiness::Attention, Some("Claude Code needs attention"))
+        }
     };
     ProviderSnapshot {
         readiness,
@@ -296,7 +300,7 @@ impl AgentProvider for Provider {
             return None;
         }
         let step = match state.status {
-            Some(ClaudeStatus::Missing) => Step::Install,
+            Some(ClaudeStatus::Missing | ClaudeStatus::Outdated { .. }) => Step::Install,
             Some(ClaudeStatus::SignedOut { .. }) => Step::Login,
             _ => return None,
         };
@@ -314,39 +318,14 @@ impl AgentProvider for Provider {
     }
 }
 
-/// `curl … | bash`, `claude` and `~/.local/bin` in code type.
+/// What Install does.
 fn installer_note(c: &Colors) -> Div {
-    // Words wrap one at a time; punctuation stays with the word before it.
-    // `true` marks code.
-    const WORDS: &[&[(&str, bool)]] = &[
-        &[("Runs", false)],
-        &[("the", false)],
-        &[("official", false)],
-        &[("installer,", false)],
-        &[("curl", true)],
-        &[("-fsSL", true)],
-        &[("https://claude.ai/install.sh", true)],
-        &[("|", true)],
-        &[("bash", true), (",", false)],
-        &[("which", false)],
-        &[("puts", false)],
-        &[("claude", true)],
-        &[("in", false)],
-        &[("~/.local/bin", true), (".", false)],
-    ];
-    div()
-        .flex()
-        .flex_wrap()
-        .gap_x(rems(0.25))
-        .text_body_sm()
-        .text_color(c.text_subtle)
-        .children(WORDS.iter().map(|word| {
-            div().flex().children(word.iter().map(|(text, code)| {
-                div()
-                    .when(*code, |this| this.font_family(font::MONO))
-                    .child(*text)
-            }))
-        }))
+    note_with_code(
+        "Downloads Buzz's own copy of Claude (about 250 MB) from downloads.claude.ai and keeps it on the latest release. It does not change the",
+        "claude",
+        "in your terminal, and uses the same sign-in and settings.",
+        c,
+    )
 }
 
 /// Claude's install and sign-in on a host: where it stands, the step to
@@ -424,6 +403,7 @@ impl Render for SetupControls {
         let running = state.running;
         let action = match status {
             Some(ClaudeStatus::Missing) => Some((Step::Install, "Install Claude")),
+            Some(ClaudeStatus::Outdated { .. }) => Some((Step::Install, "Update Claude")),
             Some(ClaudeStatus::SignedOut { .. }) => Some((Step::Login, "Sign in")),
             _ => None,
         };
@@ -495,6 +475,12 @@ impl Render for SetupControls {
             .flex()
             .flex_col()
             .gap(space::S2)
+            .children(
+                state
+                    .notice
+                    .clone()
+                    .map(|notice| div().text_body_sm().child(notice)),
+            )
             .when(running.is_none(), |this| this.child(line))
             .children(progress)
             .children(buttons)

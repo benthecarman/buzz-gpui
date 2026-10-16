@@ -170,18 +170,26 @@ fn says_where_codex_stands() {
     let mut check = CatalogCheck {
         host: Host {
             spawn: None,
-            label: "This computer".into(),
-            remote: false,
+            setup: crate::agent_plugins::codex::setup::setup(None, false),
         },
         data: None,
         error: String::new(),
         checking: true,
+        setup: Default::default(),
         signal: Signal::default(),
         _task: None,
+        _follow: None,
     };
     assert_eq!(status_line(&check), "Checking Codex…");
     check.checking = false;
     assert_eq!(status_line(&check), "Codex needs attention.");
+    // Not installed, or signed out: the tab offers the step that fixes it.
+    check.error = NOT_INSTALLED.into();
+    assert_eq!(check.action(), Some((Step::Install, "Install Codex")));
+    check.error = SIGN_IN.into();
+    assert_eq!(check.action(), Some((Step::Login, "Sign in")));
+    check.error = "Codex did not start".into();
+    assert_eq!(check.action(), None);
     check.data = Some(Catalog {
         models: vec![],
         account: "me@example.com".into(),

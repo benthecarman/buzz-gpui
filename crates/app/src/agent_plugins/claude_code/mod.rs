@@ -19,19 +19,18 @@ pub mod setup;
 pub mod tabs;
 pub mod transcript;
 
+use crate::agent_plugins::managed::{Copies, UPDATE_EVERY};
 use crate::agent_plugins::owner_relay;
 use crate::agent_plugins::process::Spawner;
 use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, MigrationSetting, Models, Status, Trigger,
     TypeDefaults, register_type,
 };
-use crate::hosts::{HostConnection, Hosts};
+use crate::hosts::Hosts;
 use crate::runtime::Runtime;
 use gpui_kit::*;
 use provider::{ClaudeProvider, DefaultsChanged};
 use runtime::{ClaudeRuntime, Config, Run, Synced, Wake};
-use setup::ClaudeSetup;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,8 +46,9 @@ const HANDOVER: Duration = Duration::from_secs(2 * 60);
 /// The runtime and each host's setup view, kept for the app's lifetime.
 pub struct ClaudeCode {
     runtime: ClaudeRuntime,
-    /// Claude's setup on each host, by host entity.
-    setups: HashMap<EntityId, ClaudeSetup>,
+    /// Buzz's copy of Claude on each host.
+    copies: Copies,
+    _updates: Task<()>,
     /// Claude on this computer, for the Agents page's provider settings,
     /// and the device-wide defaults agents inherit.
     provider: Entity<ClaudeProvider>,
@@ -80,8 +80,8 @@ pub fn init(cx: &mut App) {
             this.runtime.dispose_and_wait()
         }));
         // The provider is Claude on the embedded host, sharing that host's
-        // setup with its agents' Claude tabs.
-        let mut setups = HashMap::new();
+        // copy with its agents' Claude tabs.
+        let mut copies = Copies::new(PROCESS_OWNER, setup::for_host);
         let embedded = cx.try_global::<Hosts>().and_then(|hosts| {
             hosts
                 .hosts
@@ -92,10 +92,10 @@ pub fn init(cx: &mut App) {
         let spawn = embedded
             .as_ref()
             .map(|host| host.read(cx).spawner(PROCESS_OWNER));
-        let setup = ClaudeSetup::new(spawn.clone());
-        if let Some(host) = &embedded {
-            setups.insert(host.entity_id(), setup.clone());
-        }
+        let setup = match &embedded {
+            Some(host) => copies.setup(host, cx),
+            None => setup::setup(None),
+        };
         let provider = cx.new(|cx| ClaudeProvider::new(setup, spawn, cx));
         // Agents with a blank model follow a changed default.
         subscriptions.push(cx.subscribe(
@@ -104,7 +104,15 @@ pub fn init(cx: &mut App) {
         ));
         let mut this = ClaudeCode {
             runtime: ClaudeRuntime::new(None),
-            setups,
+            copies,
+            _updates: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(UPDATE_EVERY).await;
+                    if this.update(cx, |this, cx| this.copies.refresh(cx)).is_err() {
+                        return;
+                    }
+                }
+            }),
             provider,
             _subscriptions: subscriptions,
         };
@@ -165,22 +173,10 @@ impl ClaudeCode {
             .into_iter()
             .map(|(pubkey, (_, relay))| (pubkey, relay))
             .collect();
+        self.copies.sync(agents, &key, cx);
         let _runtime = Runtime::handle(cx).enter();
         self.runtime.set_relays(relays);
         self.runtime.sync(synced);
-    }
-
-    /// Claude's setup on the host that holds `pubkey`.
-    fn setup_for(&mut self, pubkey: &str, cx: &mut Context<Self>) -> ClaudeSetup {
-        let host: Option<Entity<HostConnection>> =
-            Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(pubkey));
-        let Some(host) = host else {
-            return ClaudeSetup::new(None);
-        };
-        self.setups
-            .entry(host.entity_id())
-            .or_insert_with(|| ClaudeSetup::new(Some(host.read(cx).spawner(PROCESS_OWNER))))
-            .clone()
     }
 }
 
@@ -299,7 +295,7 @@ impl AgentType for ClaudeCodeType {
                     };
                     let (pubkey, conversation) = (view.agent.pubkey.clone(), view.conversation);
                     let (setup, runtime) = state.update(cx, |state, cx| {
-                        (state.setup_for(&pubkey, cx), state.runtime.clone())
+                        (state.copies.setup_of(&pubkey, cx), state.runtime.clone())
                     });
                     cx.new(|cx| {
                         tabs::ClaudeTab::new(pubkey, conversation, setup, runtime, window, cx)
@@ -345,6 +341,8 @@ impl AgentType for ClaudeCodeType {
         };
         let spawn: Spawner = host.read(cx).spawner(PROCESS_OWNER);
         let activity = super::activity(&delivery);
+        let setup = state.update(cx, |state, cx| state.copies.setup(&host, cx));
+        let cancel = delivery.cancel.clone();
         let wake = match delivery.trigger {
             Trigger::Mention { event } => Wake::Mention {
                 event: super::event_of(&event),
@@ -391,8 +389,21 @@ impl AgentType for ClaudeCodeType {
             current: delivery.current,
         };
         let runtime = state.read(cx).runtime.clone();
-        let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });
-        cx.background_spawn(async move { handed.await.map_err(|_| "Claude stopped".to_string()) })
+        // A mention during the first download waits for it, within its
+        // deadline.
+        let handed = Runtime::handle(cx).spawn(async move {
+            tokio::select! {
+                () = setup.installed() => {}
+                () = cancel.cancelled() => return Err("The run was cancelled".to_string()),
+            }
+            runtime.run(run).await;
+            Ok(())
+        });
+        cx.background_spawn(async move {
+            handed
+                .await
+                .unwrap_or_else(|_| Err("Claude stopped".to_string()))
+        })
     }
 
     fn timeout(&self) -> Duration {

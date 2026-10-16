@@ -8,7 +8,8 @@ use super::defaults::{
     CodexDefaults, CodexProviderDefaults, default_effort_label, find, native_label,
     provider_default_label,
 };
-use super::tabs::{Catalog, SIGN_IN, catalog};
+use super::setup::{CodexSetup, CodexStatus, SetupState};
+use super::tabs::{Catalog, NOT_INSTALLED, SIGN_IN, catalog, setup_action, setup_steps};
 use crate::agent_plugins::process::Spawner;
 use crate::agent_plugins::provider::{Choice, described_choice};
 use crate::agent_plugins::tabs::{Picking, field};
@@ -23,12 +24,13 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::Value;
 
-/// How the dialog words a signed-out Codex.
-const SIGNED_OUT: &str = "Codex needs you to sign in.";
-
 /// Codex's one device-wide health and catalog view, and its defaults.
 pub struct CodexProvider {
     spawn: Option<Spawner>,
+    /// Buzz's copy of Codex on the embedded host, and its install or
+    /// sign-in as it runs.
+    setup: CodexSetup,
+    setup_state: SetupState,
     pub snapshot: ProviderSnapshot,
     pub checking: bool,
     pub data: Option<Catalog>,
@@ -36,12 +38,39 @@ pub struct CodexProvider {
     pub defaults: CodexDefaults,
     signal: Signal,
     _task: Option<Task<()>>,
+    _follow: Task<()>,
 }
 
 impl CodexProvider {
-    pub fn new(spawn: Option<Spawner>) -> Self {
+    pub fn new(spawn: Option<Spawner>, setup: CodexSetup, cx: &mut Context<Self>) -> Self {
+        // An install or sign-in holds the dialog open, then Codex is checked
+        // again.
+        let mut changes = setup.subscribe();
+        let follow = cx.spawn(async move |this, cx| {
+            while changes.changed().await.is_ok() {
+                let state = changes.borrow_and_update().clone();
+                let alive = this.update(cx, |this, cx| {
+                    let running = state.running.is_some();
+                    let was = this.setup_state.running.is_some();
+                    this.setup_state = state;
+                    if running != was {
+                        this.snapshot.blocking = running;
+                        providers_changed(cx);
+                        if !running {
+                            this.check(cx);
+                        }
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        });
         Self {
             spawn,
+            setup_state: setup.snapshot(),
+            setup,
             snapshot: ProviderSnapshot::CHECKING,
             checking: false,
             data: None,
@@ -49,6 +78,7 @@ impl CodexProvider {
             defaults: CodexDefaults::load(),
             signal: Signal::default(),
             _task: None,
+            _follow: follow,
         }
     }
 
@@ -69,8 +99,21 @@ impl CodexProvider {
         self.error.clear();
         self.signal = Signal::default();
         let signal = self.signal.clone();
+        let setup = self.setup.clone();
         let check = match self.spawn.clone() {
-            Some(spawn) => Runtime::handle(cx).spawn(catalog(spawn, signal.clone())),
+            Some(spawn) => Runtime::handle(cx).spawn({
+                let signal = signal.clone();
+                async move {
+                    match setup.check().await {
+                        CodexStatus::Ready { .. } => catalog(spawn, signal).await,
+                        CodexStatus::Missing => Err(NOT_INSTALLED.into()),
+                        CodexStatus::SignedOut { .. } | CodexStatus::Outdated { .. } => {
+                            Err(SIGN_IN.into())
+                        }
+                        CodexStatus::Error { message } => Err(message),
+                    }
+                }
+            }),
             None => Runtime::handle(cx).spawn(async {
                 Err::<Catalog, _>("Codex agents run only in the desktop app".to_string())
             }),
@@ -84,25 +127,26 @@ impl CodexProvider {
                     return;
                 }
                 this.checking = false;
+                let blocking = this.setup_state.running.is_some();
                 match result {
                     Ok(data) => {
                         this.snapshot = ProviderSnapshot {
                             readiness: Readiness::Ready,
                             attention_label: None,
-                            blocking: false,
+                            blocking,
                         };
                         this.data = Some(data);
                     }
                     Err(error) => {
-                        let label = if error == SIGN_IN {
-                            "Log in to Codex"
-                        } else {
-                            "Codex needs attention"
+                        let label = match error.as_str() {
+                            NOT_INSTALLED => "Install Codex",
+                            SIGN_IN => "Log in to Codex",
+                            _ => "Codex needs attention",
                         };
                         this.snapshot = ProviderSnapshot {
                             readiness: Readiness::Attention,
                             attention_label: Some(label.into()),
-                            blocking: false,
+                            blocking,
                         };
                         this.data = None;
                         this.error = error;
@@ -329,14 +373,16 @@ impl Render for ProviderBody {
         let c = *cx.colors();
         let provider = self.provider.read(cx);
         let ready = provider.snapshot.readiness == Readiness::Ready;
-        let attention = provider.snapshot.readiness == Readiness::Attention;
         let checking = provider.checking;
-        let signed_out = provider.error == SIGN_IN;
-        let error = if signed_out {
-            SIGNED_OUT.to_string()
-        } else {
-            provider.error.clone()
-        };
+        let error = provider.error.clone();
+        let installing = provider.setup_state.clone();
+        let setup = setup_steps(
+            &provider.setup,
+            &installing,
+            setup_action(&error),
+            checking,
+            &c,
+        );
         let models = provider.models().map(<[Model]>::to_vec);
         let models = models.as_deref();
         let native = find(models, "");
@@ -386,37 +432,27 @@ impl Render for ProviderBody {
         let no_data = models.is_none();
         let draft = self.draft.clone();
         let changed = self.draft != self.saved;
-        let status =
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::S2)
-                .map(|this| {
-                    if checking {
-                        this.child(div().child("Checking Codex…"))
-                    } else if !error.is_empty() {
-                        this.child(
-                            div()
-                                .text_body_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .child(error.clone()),
-                        )
-                    } else {
-                        this
-                    }
-                })
-                .when(attention, |this| {
-                    this.child(div().text_body_sm().text_color(c.text_subtle).child(
-                        if signed_out {
-                            "Run this command in a terminal, then please try again."
-                        } else {
-                            "Open Codex in a terminal for more details, then please try again."
-                        },
-                    ))
-                    .when(signed_out, |this| {
-                        this.child(div().text_body_sm().text_mono().child("codex login"))
-                    })
-                });
+        let status = div()
+            .flex()
+            .flex_col()
+            .gap(space::S2)
+            .map(|this| {
+                if installing.running.is_some() {
+                    this
+                } else if checking {
+                    this.child(div().child("Checking Codex…"))
+                } else if !error.is_empty() {
+                    this.child(
+                        div()
+                            .text_body_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .child(error.clone()),
+                    )
+                } else {
+                    this
+                }
+            })
+            .child(setup);
         let model_select = described_choice(
             self.open,
             Picker::Model,
@@ -461,6 +497,11 @@ impl Render for ProviderBody {
             .flex_col()
             .gap(space::S6)
             .text_body()
+            .children(
+                installing
+                    .notice
+                    .map(|notice| div().text_body_sm().child(notice)),
+            )
             .when(!ready, |this| this.child(status))
             .when(ready, |this| this.child(form))
     }

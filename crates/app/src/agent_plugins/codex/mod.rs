@@ -15,9 +15,11 @@ pub mod prompt;
 pub mod provider;
 pub mod rpc;
 pub mod runtime;
+pub mod setup;
 pub mod tabs;
 pub mod transcript;
 
+use crate::agent_plugins::managed::{Copies, UPDATE_EVERY};
 use crate::agent_plugins::owner_relay;
 use crate::agents2::{
     Agent, AgentTab, AgentType, Agents2, Delivery, MigrationSetting, Models, Status, Trigger,
@@ -42,12 +44,15 @@ pub const PROCESS_OWNER: &str = "codex";
 /// hand-over.
 const HANDOVER: Duration = Duration::from_secs(2 * 60);
 
-/// The runtime, kept for the app's lifetime.
+/// The runtime and Buzz's copy of Codex on each host, kept for the app's
+/// lifetime.
 pub struct Codex {
     runtime: CodexRuntime,
     /// Codex on this computer, for the Agents page's provider settings,
     /// and the device-wide defaults agents inherit.
     provider: Entity<CodexProvider>,
+    copies: Copies,
+    _updates: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -80,16 +85,35 @@ pub fn init(cx: &mut App) {
             let _runtime = Runtime::handle(cx).enter();
             this.runtime.dispose_and_wait()
         }));
-        let spawn = cx.try_global::<Hosts>().and_then(|hosts| {
+        // The provider is Codex on the embedded host, sharing that host's
+        // copy with its agents' Codex tabs.
+        let mut copies = Copies::new(PROCESS_OWNER, setup::setup);
+        let embedded = cx.try_global::<Hosts>().and_then(|hosts| {
             hosts
                 .hosts
                 .iter()
                 .find(|host| host.read(cx).remote.is_none())
-                .map(|host| host.read(cx).spawner(PROCESS_OWNER))
+                .cloned()
         });
+        let spawn = embedded
+            .as_ref()
+            .map(|host| host.read(cx).spawner(PROCESS_OWNER));
+        let setup = match &embedded {
+            Some(host) => copies.setup(host, cx),
+            None => setup::setup(None, false),
+        };
         let mut this = Codex {
             runtime: CodexRuntime::new(None),
-            provider: cx.new(|_| CodexProvider::new(spawn)),
+            provider: cx.new(|cx| CodexProvider::new(spawn, setup, cx)),
+            copies,
+            _updates: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(UPDATE_EVERY).await;
+                    if this.update(cx, |this, cx| this.copies.refresh(cx)).is_err() {
+                        return;
+                    }
+                }
+            }),
             _subscriptions: subscriptions,
         };
         this.sync(cx);
@@ -137,27 +161,21 @@ impl Codex {
             .collect();
         self.runtime.set_relays(owner_relay::running(agents, cx));
         self.runtime.sync(&pubkeys);
+        self.copies.sync(agents, &key, cx);
     }
 }
 
 /// The agent's host, for its tabs.
-fn host_of(pubkey: &str, cx: &App) -> Host {
+fn host_of(pubkey: &str, cx: &mut App) -> Host {
     let host: Option<Entity<HostConnection>> =
         Agents2::global(cx).and_then(|agents| agents.read(cx).host_of(pubkey));
-    match host {
-        Some(host) => {
-            let host = host.read(cx);
-            Host {
-                spawn: Some(host.spawner(PROCESS_OWNER)),
-                label: host.label.clone(),
-                remote: host.remote.is_some(),
-            }
-        }
-        None => Host {
-            spawn: None,
-            label: SharedString::default(),
-            remote: false,
-        },
+    let setup = match Codex::global(cx) {
+        Some(state) => state.update(cx, |state, cx| state.copies.setup_of(pubkey, cx)),
+        None => setup::setup(None, false),
+    };
+    Host {
+        spawn: host.map(|host| host.read(cx).spawner(PROCESS_OWNER)),
+        setup,
     }
 }
 
@@ -346,6 +364,8 @@ impl AgentType for CodexType {
         };
         let spawn = host.read(cx).spawner(PROCESS_OWNER);
         let activity = super::activity(&delivery);
+        let setup = state.update(cx, |state, cx| state.copies.setup(&host, cx));
+        let cancel = delivery.cancel.clone();
         let wake = match delivery.trigger {
             Trigger::Mention { event } => Wake::Mention {
                 event: super::event_of(&event),
@@ -374,7 +394,15 @@ impl AgentType for CodexType {
             working: super::hold_until(delivery.working),
         };
         let runtime = state.read(cx).runtime.clone();
-        let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });
+        // A mention during the first download waits for it, within its
+        // deadline.
+        let handed = Runtime::handle(cx).spawn(async move {
+            tokio::select! {
+                () = setup.installed() => {}
+                () = cancel.cancelled() => return Err("The run was cancelled".to_string()),
+            }
+            runtime.run(run).await
+        });
         cx.background_spawn(async move {
             handed
                 .await

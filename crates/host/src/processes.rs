@@ -44,16 +44,36 @@ type Declared = (
     &'static [&'static str],
 );
 
-/// The Claude Code and Codex types' processes, as their manifests declare
-/// them.
+/// Buzz's own copies of Claude and Codex, apart from any the user
+/// installed, kept on the latest release. buzz-app's plugins pass these
+/// scripts to a declared `bash -c`; the host pins them instead, so it
+/// still runs only what it declares.
+const CLAUDE_SH: &str = include_str!("processes/claude.sh");
+const CODEX_SH: &str = include_str!("processes/codex.sh");
+
+/// The Claude and Codex types' processes, as their manifests declare
+/// them. `claude`, `codex` and `app-server` start the copy in use;
+/// `install` and `use` download a release and switch to it.
 const DECLARED: &[Declared] = &[
-    ("claude-code", "claude", "claude", &[]),
+    (
+        "claude-code",
+        "claude",
+        "bash",
+        &["-c", CLAUDE_SH, "claude.sh", "run"],
+    ),
     (
         "claude-code",
         "install",
         "bash",
-        &["-c", "curl -fsSL https://claude.ai/install.sh | bash"],
+        &["-c", CLAUDE_SH, "claude.sh", "install"],
     ),
+    (
+        "claude-code",
+        "use",
+        "bash",
+        &["-c", CLAUDE_SH, "claude.sh", "use"],
+    ),
+    ("claude-code", "platform", "uname", &["-sm"]),
     ("claude-code", "read", "base64", &["-i"]),
     // Prints the agent's workspace, which names its Claude project folder.
     ("claude-code", "workspace", "pwd", &[]),
@@ -67,7 +87,26 @@ const DECLARED: &[Declared] = &[
     ),
     // Prints the default workspace once the host has expanded and made it.
     ("codex", "workspace", "pwd", &[]),
-    ("codex", "app-server", "codex", &["app-server"]),
+    (
+        "codex",
+        "codex",
+        "bash",
+        &["-c", CODEX_SH, "codex.sh", "run"],
+    ),
+    (
+        "codex",
+        "app-server",
+        "bash",
+        &["-c", CODEX_SH, "codex.sh", "run", "app-server"],
+    ),
+    (
+        "codex",
+        "install",
+        "bash",
+        &["-c", CODEX_SH, "codex.sh", "install"],
+    ),
+    ("codex", "use", "bash", &["-c", CODEX_SH, "codex.sh", "use"]),
+    ("codex", "platform", "uname", &["-sm"]),
     ("codex", "read", "base64", &["-i"]),
 ];
 
@@ -462,20 +501,24 @@ fn take_text(pending: &mut Vec<u8>) -> String {
     text
 }
 
-/// The `PATH` processes start with. Claude Code's official installer puts
-/// `claude` in `~/.local/bin`, which a service's `PATH` often lacks, so it
-/// is added on every platform, not only on macOS as buzz-app does.
+/// The `PATH` processes start with. `~/.local/bin`, where per-user tools
+/// install, is often missing from a service's `PATH`, so it is added on
+/// every platform, not only on macOS as buzz-app does. So is NixOS's
+/// system profile, which holds the `curl`, `tar` and `flock` the copies'
+/// scripts need when a service's `PATH` has only the bare essentials.
 fn effective_path() -> std::ffi::OsString {
     let path = buzz_desktop::process::effective_path();
-    let Ok(home) = home() else {
-        return path;
-    };
-    let local = home.join(".local/bin");
     let mut directories: Vec<PathBuf> = std::env::split_paths(&path)
         .filter(|directory| !directory.as_os_str().is_empty())
         .collect();
-    if !directories.contains(&local) {
-        directories.push(local);
+    let extra = home()
+        .map(|home| home.join(".local/bin"))
+        .into_iter()
+        .chain(Some(PathBuf::from("/run/current-system/sw/bin")).filter(|path| path.is_dir()));
+    for directory in extra {
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
     }
     std::env::join_paths(directories).unwrap_or(path)
 }
@@ -527,13 +570,105 @@ mod tests {
 
     #[test]
     fn only_declared_processes() {
-        assert!(
-            DECLARED
-                .iter()
-                .any(|(kind, id, program, _)| *kind == "claude-code"
-                    && *id == "claude"
-                    && *program == "claude")
-        );
         assert!(!DECLARED.iter().any(|(_, _, program, _)| *program == "sh"));
+        // Every `bash` runs a script the host pins, never one it is sent.
+        for (_, _, program, args) in DECLARED {
+            if *program == "bash" {
+                assert!(args[0] == "-c" && [CLAUDE_SH, CODEX_SH].contains(&args[1]));
+            }
+        }
+    }
+
+    /// The copies' scripts, run as the host runs them.
+    #[cfg(unix)]
+    mod scripts {
+        use super::*;
+
+        /// Runs a copy's script step with its folders under `data`.
+        fn step(script: &str, data: &std::path::Path, args: &[&str]) -> std::process::Output {
+            std::process::Command::new("bash")
+                .args(["-c", script, "script.sh"])
+                .args(args)
+                .env("XDG_DATA_HOME", data)
+                .env("PATH", effective_path())
+                .output()
+                .unwrap()
+        }
+
+        /// A downloaded release of Claude that prints its version.
+        fn release(data: &std::path::Path, version: &str) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = data.join("buzz/claude-code").join(version);
+            std::fs::create_dir_all(&folder).unwrap();
+            let claude = folder.join("claude");
+            std::fs::write(&claude, format!("#!/bin/sh\necho {version} \"$@\"\n")).unwrap();
+            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("buzz-host-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn a_missing_copy_exits_127() {
+            let data = scratch("missing");
+            let output = step(CLAUDE_SH, &data, &["run", "--version"]);
+            assert_eq!(output.status.code(), Some(127));
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "Claude is not installed\n"
+            );
+            let output = step(CODEX_SH, &data, &["run", "--version"]);
+            assert_eq!(output.status.code(), Some(127));
+        }
+
+        #[test]
+        fn switching_prunes_older_releases_but_keeps_a_newer_one() {
+            let data = scratch("prune");
+            for version in ["2.1.100", "2.1.121", "2.1.130", "2.1.140"] {
+                release(&data, version);
+            }
+            assert!(step(CLAUDE_SH, &data, &["use", "2.1.121"]).status.success());
+            assert!(step(CLAUDE_SH, &data, &["use", "2.1.130"]).status.success());
+            let dir = data.join("buzz/claude-code");
+            let mut kept: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            kept.sort();
+            // The new release, the one before it, and a newer one another build
+            // may be testing.
+            assert_eq!(kept, ["2.1.121", "2.1.130", "2.1.140"]);
+            let output = step(CLAUDE_SH, &data, &["run", "--version"]);
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "2.1.130 --version\n"
+            );
+            // A release named to test it runs before it is in use.
+            let output = std::process::Command::new("bash")
+                .args(["-c", CLAUDE_SH, "claude.sh", "run"])
+                .env("XDG_DATA_HOME", &data)
+                .env("BUZZ_CLAUDE_VERSION", "2.1.140")
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "2.1.140\n");
+        }
+
+        #[test]
+        fn refuses_versions_that_escape_the_folder() {
+            let data = scratch("escape");
+            let output = step(CLAUDE_SH, &data, &["use", "../x"]);
+            assert_eq!(output.status.code(), Some(2));
+            let output = step(CODEX_SH, &data, &["install", "1.0.0", "evil", "00"]);
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "Unsupported platform\n"
+            );
+        }
     }
 }

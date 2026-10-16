@@ -1,85 +1,70 @@
-//! Claude on a host: whether it is installed and signed in, and the
-//! installer and sign-in, each run as a declared process (buzz-app's
-//! `setup.ts`).
+//! Claude on a host: Buzz's own copy, whether it is signed in, and keeping
+//! that copy on the latest release (buzz-app's `setup.ts`). The copy lives
+//! apart from any `claude` the user installed, and shares their
+//! `~/.claude` sign-in and settings.
 
-use super::claude::env;
-use crate::agent_plugins::process::{Process, SpawnOptions, Spawner, collect};
-use buzz_host::api::ProcessOutput;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
-use tokio::sync::watch;
+use super::claude::{ClaudeProcess, Launch, env};
+use crate::agent_plugins::managed::{
+    self, CHECK_TIMEOUT, Fetch, Release, Setup, Tool, fetch_text, run_short,
+};
+use crate::agent_plugins::process::Spawner;
+use futures::future::BoxFuture;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClaudeStatus {
-    Missing,
-    SignedOut {
-        version: String,
-    },
-    Ready {
-        version: String,
-        account: Option<String>,
-    },
-    Error {
-        message: String,
-    },
+pub use managed::{SetupState, Status as ClaudeStatus, Step};
+
+pub type ClaudeSetup = Setup;
+
+/// Where Anthropic publishes each release with its checksums.
+const RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
+/// The oldest release Buzz drives: MCP servers marked `alwaysLoad`, which
+/// the Buzz tools are, arrived in 2.1.121.
+pub const MIN_VERSION: &str = "2.1.121";
+/// `uname -sm` to the release's platform name.
+const PLATFORMS: [(&str, &str); 4] = [
+    ("Darwin arm64", "darwin-arm64"),
+    ("Darwin x86_64", "darwin-x64"),
+    ("Linux aarch64", "linux-arm64"),
+    ("Linux x86_64", "linux-x64"),
+];
+
+/// Claude's setup on a host whose processes `spawn` starts.
+pub fn setup(spawn: Option<Spawner>) -> ClaudeSetup {
+    Setup::new(Arc::new(Claude), spawn, managed::http())
 }
 
-const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
-const OUTPUT_LIMIT: usize = 20_000;
-
-/// Runs a short process and returns its exit code and output.
-async fn run_short(
-    spawn: &Spawner,
-    id: &str,
-    args: &[&str],
-) -> Result<(Option<i32>, String, String), String> {
-    let mut spawned = spawn
-        .spawn(
-            id,
-            SpawnOptions {
-                args: args.iter().map(|arg| arg.to_string()).collect(),
-                cwd: None,
-                env: env(),
-            },
-        )
-        .await?;
-    let process = spawned.process.clone();
-    let timer = tokio::spawn(async move {
-        tokio::time::sleep(CHECK_TIMEOUT).await;
-        let _ = process.kill().await;
-    });
-    let result = collect(&mut spawned.output).await;
-    timer.abort();
-    Ok(result)
+/// [`setup`] as [`managed::Copies`] makes it.
+pub fn for_host(spawn: Option<Spawner>, _remote: bool) -> ClaudeSetup {
+    setup(spawn)
 }
 
 pub async fn check_claude(spawn: &Spawner) -> ClaudeStatus {
-    let version = match run_short(spawn, "claude", &["--version"]).await {
-        Ok((code, stdout, stderr)) => {
-            if code != Some(0) {
-                let stderr = stderr.trim();
-                return ClaudeStatus::Error {
-                    message: if stderr.is_empty() {
-                        "Claude did not start".into()
-                    } else {
-                        stderr.into()
-                    },
-                };
-            }
-            stdout
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string()
-        }
-        // The host reports a program it cannot find as a failure to start it.
-        Err(message) if message.to_lowercase().contains("could not start") => {
-            return ClaudeStatus::Missing;
+    let version = match run_short(spawn, "claude", &["--version"], env()).await {
+        // The launcher's answer when Buzz has no copy yet.
+        Ok((Some(127), _, _)) => return ClaudeStatus::Missing,
+        Ok((Some(0), stdout, _)) => stdout
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        Ok((_, _, stderr)) => {
+            let stderr = stderr.trim();
+            return ClaudeStatus::Error {
+                message: if stderr.is_empty() {
+                    "Claude did not start".into()
+                } else {
+                    stderr.into()
+                },
+            };
         }
         Err(message) => return ClaudeStatus::Error { message },
     };
-    let Ok((_, stdout, _)) = run_short(spawn, "claude", &["auth", "status", "--json"]).await else {
+    if managed::compare_versions(&version, MIN_VERSION).is_lt() {
+        return ClaudeStatus::Outdated { version };
+    }
+    let Ok((_, stdout, _)) = run_short(spawn, "claude", &["auth", "status", "--json"], env()).await
+    else {
         return ClaudeStatus::SignedOut { version };
     };
     let Ok(status) = serde_json::from_str::<serde_json::Value>(&stdout) else {
@@ -100,179 +85,92 @@ pub async fn check_claude(spawn: &Spawner) -> ClaudeStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Step {
-    Install,
-    Login,
-}
+struct Claude;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SetupState {
-    pub status: Option<ClaudeStatus>,
-    pub checking: bool,
-    pub running: Option<Step>,
-    /// The running or last step's output.
-    pub output: String,
-}
-
-/// The one view of Claude on a host. Cheap to clone.
-#[derive(Clone)]
-pub struct ClaudeSetup {
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    spawn: Option<Spawner>,
-    state: watch::Sender<SetupState>,
-    process: Mutex<Option<Process>>,
-    /// Cancel was asked for before the running step's process was returned.
-    cancelled: AtomicBool,
-}
-
-/// Why setup cannot run without a host to run it on.
-pub const NO_HOST: &str = "Claude agents run only in the desktop app";
-
-impl ClaudeSetup {
-    pub fn new(spawn: Option<Spawner>) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                spawn,
-                state: watch::Sender::new(SetupState::default()),
-                process: Mutex::default(),
-                cancelled: AtomicBool::new(false),
-            }),
-        }
+impl Tool for Claude {
+    fn name(&self) -> &'static str {
+        "Claude"
     }
-
-    pub fn snapshot(&self) -> SetupState {
-        self.inner.state.borrow().clone()
+    fn origin(&self) -> &'static str {
+        "downloads.claude.ai"
     }
-    pub fn subscribe(&self) -> watch::Receiver<SetupState> {
-        self.inner.state.subscribe()
+    fn pin(&self) -> &'static str {
+        "BUZZ_CLAUDE_VERSION"
     }
-    fn set(&self, change: impl FnOnce(&mut SetupState)) {
-        self.inner.state.send_modify(change);
+    fn env(&self) -> BTreeMap<String, Option<String>> {
+        env()
     }
-    fn process(&self) -> std::sync::MutexGuard<'_, Option<Process>> {
-        self.inner
-            .process
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    fn min_version(&self) -> Option<&'static str> {
+        Some(MIN_VERSION)
     }
-
-    pub async fn check(&self) {
-        let Some(spawn) = self.inner.spawn.clone() else {
-            self.set(|state| {
-                state.status = Some(ClaudeStatus::Error {
-                    message: NO_HOST.into(),
-                })
-            });
-            return;
-        };
-        let mut already = false;
-        self.inner.state.send_modify(|state| {
-            already = state.checking;
-            state.checking = true;
-        });
-        if already {
-            return;
-        }
-        let status = check_claude(&spawn).await;
-        self.set(|state| {
-            state.status = Some(status);
-            state.checking = false;
-        });
+    fn check(&self, spawn: Spawner) -> BoxFuture<'static, ClaudeStatus> {
+        Box::pin(async move { check_claude(&spawn).await })
     }
-
-    /// Runs the installer or sign-in, then checks again.
-    pub async fn run(&self, step: Step) {
-        let Some(spawn) = self.inner.spawn.clone() else {
-            return;
-        };
-        let mut already = false;
-        self.inner.state.send_modify(|state| {
-            already = state.running.is_some();
-            if !already {
-                state.running = Some(step);
-                state.output.clear();
+    fn login(&self) -> (&'static str, Vec<String>) {
+        ("claude", vec!["auth".into(), "login".into()])
+    }
+    fn target(&self, uname: &str) -> Option<&'static str> {
+        PLATFORMS
+            .iter()
+            .find(|(name, _)| *name == uname)
+            .map(|(_, platform)| *platform)
+    }
+    fn latest(&self, fetch: Fetch) -> BoxFuture<'static, Result<Release, String>> {
+        Box::pin(async move {
+            let latest =
+                fetch_text(&fetch, "downloads.claude.ai", format!("{RELEASES}/latest")).await?;
+            Ok(Release {
+                version: latest.trim().to_string(),
+                data: serde_json::Value::Null,
+            })
+        })
+    }
+    fn checksum(
+        &self,
+        fetch: Fetch,
+        release: &Release,
+        target: &str,
+    ) -> BoxFuture<'static, Result<Option<String>, String>> {
+        let url = format!("{RELEASES}/{}/manifest.json", release.version);
+        let target = target.to_string();
+        Box::pin(async move {
+            let manifest = fetch_text(&fetch, "downloads.claude.ai", url).await?;
+            let manifest: serde_json::Value = serde_json::from_str(&manifest)
+                .map_err(|_| "downloads.claude.ai sent an invalid manifest".to_string())?;
+            Ok(manifest
+                .pointer(&format!("/platforms/{target}/checksum"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string))
+        })
+    }
+    fn test(&self, spawn: Spawner, version: String) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            let (code, stdout, stderr) = run_short(&spawn, "claude", &["--version"], env()).await?;
+            if code != Some(0) || !stdout.starts_with(&version) {
+                let stderr = stderr.trim();
+                return Err(if stderr.is_empty() {
+                    "it did not report its version".into()
+                } else {
+                    stderr.into()
+                });
             }
-        });
-        if already {
-            return;
-        }
-        self.inner.cancelled.store(false, Ordering::SeqCst);
-        let (id, args) = match step {
-            Step::Install => ("install", vec![]),
-            Step::Login => ("claude", vec!["auth".to_string(), "login".to_string()]),
-        };
-        let spawned = spawn
-            .spawn(
-                id,
-                SpawnOptions {
-                    args,
-                    cwd: None,
-                    env: env(),
-                },
-            )
+            let launch = Launch {
+                cwd: "~".into(),
+                ..Launch::default()
+            };
+            let claude = ClaudeProcess::spawn(&spawn, &launch).await?;
+            let models = tokio::time::timeout(CHECK_TIMEOUT, async {
+                claude.initialize(&launch).await?;
+                Ok::<_, String>(claude.models().await)
+            })
             .await;
-        match spawned {
-            Ok(mut spawned) => {
-                *self.process() = Some(spawned.process.clone());
-                if self.inner.cancelled.load(Ordering::SeqCst) {
-                    let _ = spawned.process.kill().await;
-                }
-                let mut code = None;
-                while let Some(item) = spawned.output.recv().await {
-                    match item {
-                        ProcessOutput::Stdout(text) | ProcessOutput::Stderr(text) => {
-                            self.append(&text)
-                        }
-                        ProcessOutput::Exit(exit) => {
-                            code = exit;
-                            break;
-                        }
-                    }
-                }
-                if code != Some(0) {
-                    let name = match step {
-                        Step::Install => "Install",
-                        Step::Login => "Sign-in",
-                    };
-                    let code = code.map_or("stopped".into(), |code| code.to_string());
-                    self.append(&format!("\n{name} ended ({code})."));
-                }
+            claude.kill().await;
+            match models {
+                Ok(Ok(models)) if !models.is_empty() => Ok(()),
+                Ok(Err(error)) => Err(error),
+                _ => Err("it did not list its models".into()),
             }
-            Err(error) => self.append(&format!("\n{error}")),
-        }
-        *self.process() = None;
-        self.set(|state| state.running = None);
-        self.check().await;
-    }
-
-    fn append(&self, text: &str) {
-        self.set(|state| {
-            state.output.push_str(text);
-            let length = state.output.chars().count();
-            if length > OUTPUT_LIMIT {
-                state.output = state.output.chars().skip(length - OUTPUT_LIMIT).collect();
-            }
-        });
-    }
-
-    /// Sends a line to the running step, such as a sign-in code.
-    pub async fn answer(&self, text: &str) {
-        let process = self.process().clone();
-        if let Some(process) = process {
-            let _ = process.write(format!("{text}\n")).await;
-        }
-    }
-
-    pub async fn cancel(&self) {
-        self.inner.cancelled.store(true, Ordering::SeqCst);
-        let process = self.process().clone();
-        if let Some(process) = process {
-            let _ = process.kill().await;
-        }
+        })
     }
 }
 

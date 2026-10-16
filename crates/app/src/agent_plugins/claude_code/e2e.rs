@@ -1,13 +1,15 @@
-//! End to end through a real agent host: a fake `claude` on the host's
-//! `PATH` speaks stream-json, the host runs it through the process bridge,
+//! End to end through a real agent host: a fake `claude` as Buzz's copy
+//! of Claude speaks stream-json, the host runs it through the process bridge,
 //! and the runtime serves it the Buzz tools as the agent. No network and no
 //! Claude account.
 
 use super::runtime::{ClaudeRuntime, Config, Run, Synced, Wake};
 use super::sessions::SessionView;
-use super::setup::{ClaudeSetup, ClaudeStatus};
+use super::setup::ClaudeStatus;
 use crate::agent_plugins::owner_relay::{ChannelInfo, OwnerRelay};
-use crate::agent_plugins::process::{HostSpawner, ProcessSinks, Spawner};
+use crate::agent_plugins::process::{
+    HostSpawner, ProcessSinks, Spawn, SpawnOptions, Spawned, Spawner,
+};
 use crate::buzz_mcp::app_client::AgentActions;
 use crate::buzz_mcp::{BuzzEvent, ClientResult, Memory, Template, Upload};
 use buzz_host::api::{HostAnswer, HostAsk, HostProtocol};
@@ -34,25 +36,44 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// Puts the fake `claude` first on this process's `PATH`, once.
-fn fake_on_path() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = scratch("bin");
-        let claude = dir.join("claude");
+/// Makes the fake `claude` Buzz's copy in a data folder of its own, once.
+fn fake_copy() -> &'static Path {
+    static DATA: OnceLock<PathBuf> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let data = scratch("data");
+        let dir = data.join("buzz/claude-code");
+        std::fs::create_dir_all(dir.join(VERSION)).unwrap();
+        std::fs::write(dir.join("current"), VERSION).unwrap();
+        let claude = dir.join(VERSION).join("claude");
         std::fs::write(&claude, FAKE_CLAUDE).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![dir.clone()];
-        paths.extend(std::env::split_paths(&path));
-        // SAFETY: set once, before this test's host spawns anything.
-        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
-        dir
+        data
     })
+}
+
+/// The fake's release, as it reports it.
+const VERSION: &str = "2.1.130";
+
+/// Starts the host's processes with Buzz's copies under the fake's data
+/// folder.
+struct WithData(Spawner);
+
+impl Spawn for WithData {
+    fn spawn(
+        &self,
+        id: &str,
+        mut options: SpawnOptions,
+    ) -> BoxFuture<'static, Result<Spawned, String>> {
+        options.env.insert(
+            "XDG_DATA_HOME".into(),
+            Some(fake_copy().to_string_lossy().into_owned()),
+        );
+        self.0.spawn(id, options)
+    }
 }
 
 /// The GUI's side of the connection: process output only.
@@ -142,7 +163,7 @@ async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 
 /// A host embedded as the app embeds it, with the GUI's side connected.
 async fn connect_host() -> (Arc<HostClient<HostProtocol>>, Spawner) {
-    fake_on_path();
+    fake_copy();
     let state = scratch("host");
     let host = AgentHost::start(HostConfig {
         info: HostInfo {
@@ -175,11 +196,11 @@ async fn connect_host() -> (Arc<HostClient<HostProtocol>>, Spawner) {
         .wait_for(|state| matches!(state, ConnectionState::Connected { .. }))
         .await
         .unwrap();
-    let spawn: Spawner = Arc::new(HostSpawner {
+    let spawn: Spawner = Arc::new(WithData(Arc::new(HostSpawner {
         client: client.clone(),
         sinks,
         owner: super::PROCESS_OWNER,
-    });
+    })));
     (client, spawn)
 }
 
@@ -188,12 +209,12 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
     let (_client, spawn) = connect_host().await;
 
     // Setup reads the version and account through the host.
-    let setup = ClaudeSetup::new(Some(spawn.clone()));
+    let setup = super::setup::setup(Some(spawn.clone()));
     setup.check().await;
     assert_eq!(
         setup.snapshot().status,
         Some(ClaudeStatus::Ready {
-            version: "2.1.3".into(),
+            version: VERSION.into(),
             account: Some("e2e@example.com".into()),
         })
     );

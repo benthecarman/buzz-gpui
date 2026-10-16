@@ -5,7 +5,7 @@
 # message holding READ:<path> sends that file's text instead.
 case "$1" in
 --version)
-  echo "2.1.3 (Claude)"
+  echo "2.1.130 (Claude Code)"
   exit 0
   ;;
 auth)

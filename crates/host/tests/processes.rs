@@ -53,25 +53,26 @@ impl ClientHandler<HostProtocol> for Gui {
     }
 }
 
-/// A `claude` on PATH that runs `$FAKE_CLAUDE` as a shell script, so each
-/// test picks its behaviour through the spawn environment.
+/// Buzz's copy of Claude, under this binary's own data folder, as a
+/// `claude` that runs `$FAKE_CLAUDE` as a shell script, so each test picks
+/// its behaviour through the spawn environment.
 fn fake_bin() -> &'static Path {
-    static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap();
-        let claude = dir.path().join("claude");
+    static DATA: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let data = tempfile::tempdir().unwrap();
+        let copies = data.path().join("buzz/claude-code");
+        std::fs::create_dir_all(copies.join("2.1.130")).unwrap();
+        std::fs::write(copies.join("current"), "2.1.130").unwrap();
+        let claude = copies.join("2.1.130/claude");
         std::fs::write(&claude, "#!/bin/sh\neval \"$FAKE_CLAUDE\"\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![dir.path().to_path_buf()];
-        paths.extend(std::env::split_paths(&path));
         // SAFETY: set once, before any host in this binary spawns.
-        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
-        dir
+        unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+        data
     })
     .path()
 }
