@@ -14,6 +14,7 @@ pub mod prompt;
 pub mod rpc;
 pub mod runtime;
 pub mod tabs;
+pub mod transcript;
 
 use crate::agent_plugins::owner_relay;
 use crate::agents2::{

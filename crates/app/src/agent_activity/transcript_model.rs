@@ -192,7 +192,7 @@ fn opening_tag(line: &str) -> Option<String> {
 }
 
 /// The triggering Buzz events' content and authors (`promptMessage`).
-fn prompt_message(sections: &[Section]) -> (String, Option<String>) {
+pub fn prompt_message(sections: &[Section]) -> (String, Option<String>) {
     let mut authors: Vec<String> = Vec::new();
     let mut contents = Vec::new();
     for section in sections

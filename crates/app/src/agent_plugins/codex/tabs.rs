@@ -5,12 +5,15 @@
 
 use super::config::{Config, DEFAULT_WORKSPACE, Model, effort_name, valid_workspace};
 use super::rpc::{AppServer, list_models};
-use super::runtime::{CodexRuntime, SessionView};
+use super::runtime::{CodexRuntime, SavedConversation, SessionView};
+use super::transcript::{Place, TURN_LIMIT, read_transcript};
 use crate::agent_plugins::process::Spawner;
 use crate::agent_plugins::tabs::{Options, Picking, choice, description_text, field, saved_config};
+use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
 use crate::agents2::{AgentView, Agents2};
 use crate::buzz_mcp::app_client::Signal;
 use crate::runtime::Runtime;
+use crate::ui::agent_activity::panel::date_time;
 use buzz_ui::{
     ActiveTheme, Button, Colors, Surface, TextArea, TextField, TypeStyled, tokens::space,
 };
@@ -18,6 +21,8 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{Value, json};
+use std::rc::Rc;
+use std::sync::Arc;
 
 /// What `account/read` says when nobody is signed in.
 pub const SIGN_IN: &str =
@@ -188,18 +193,36 @@ pub fn status_line(check: &CatalogCheck) -> String {
     }
 }
 
+const TEXTS: Texts = Texts {
+    harness: "Codex",
+    missing: "Codex has no history for this conversation on this computer. Its session may have been deleted.",
+    turn_limit: TURN_LIMIT,
+};
+
+fn label(conversation: &SavedConversation) -> String {
+    transcript_view::label(
+        &conversation.channel_id,
+        conversation.name.as_deref(),
+        conversation.root.as_deref(),
+    )
+}
+
 /// Codex on the agent's host, and this agent's conversations.
 pub struct CodexTab {
     pubkey: String,
     check: Entity<CatalogCheck>,
     runtime: CodexRuntime,
     sessions: Vec<SessionView>,
+    spawn: Option<Spawner>,
+    /// The conversation whose transcript is shown.
+    open: Option<Entity<TranscriptView>>,
     _task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl CodexTab {
     pub fn new(pubkey: String, host: Host, runtime: CodexRuntime, cx: &mut Context<Self>) -> Self {
+        let spawn = host.spawn.clone();
         let check = cx.new(|cx| CatalogCheck::new(host, cx));
         let mut changes = runtime.subscribe();
         let follow = cx.spawn(async move |this, cx| {
@@ -221,52 +244,131 @@ impl CodexTab {
             _subscriptions: vec![cx.observe(&check, |_, _, cx| cx.notify())],
             check,
             runtime,
+            spawn,
+            open: None,
             _task: follow,
         }
     }
+
+    /// Shows the conversation's transcript in place of the tab.
+    fn show(&mut self, conversation: SavedConversation, cx: &mut Context<Self>) {
+        let spawn = self.spawn.clone();
+        let (thread, place) = (
+            conversation.thread_id.clone(),
+            Place {
+                channel_id: conversation.channel_id.clone(),
+                root: conversation.root.clone(),
+            },
+        );
+        let reader: Reader = Arc::new(move |_, signal| {
+            let (spawn, thread, place) = (spawn.clone(), thread.clone(), place.clone());
+            Box::pin(async move {
+                let Some(spawn) = spawn else {
+                    return Err("The agent's host is not connected".into());
+                };
+                let read = read_transcript(&spawn, &thread, &place, &signal).await?;
+                Ok(read.map(|read| Loaded {
+                    transcript: read.transcript,
+                    more: read.more,
+                    working: Some(read.working),
+                }))
+            })
+        });
+        let weak = cx.entity().downgrade();
+        let back: Back = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.open = None;
+                cx.notify();
+            });
+        });
+        let (pubkey, title) = (self.pubkey.clone(), label(&conversation).into());
+        self.open =
+            Some(cx.new(|cx| TranscriptView::new(pubkey, title, TEXTS, reader, false, back, cx)));
+        cx.notify();
+    }
+}
+
+/// A conversation's status detail, scrolled when long.
+fn detail(key: &str, text: &str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("codex-detail-{key}")))
+        .max_h(rems(12.))
+        .overflow_y_scroll()
+        .text_caption()
+        .text_mono()
+        .whitespace_normal()
+        .child(text.to_string())
 }
 
 impl Render for CodexTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(view) = &self.open {
+            return div().child(view.clone());
+        }
         let c = *cx.colors();
+        // Read on each render: bindings change as turns start, which also
+        // changes the session list this tab follows.
+        let saved = self.runtime.conversations(&self.pubkey);
         let check = self.check.read(cx);
         let checking = check.checking;
-        let conversations = if self.sessions.is_empty() {
+        // Work that failed before Codex started a thread has no binding.
+        let unbound: Vec<&SessionView> = self
+            .sessions
+            .iter()
+            .filter(|view| !saved.iter().any(|row| row.key == view.key))
+            .collect();
+        let conversations = if saved.is_empty() && unbound.is_empty() {
             description_text(
                 "Mention this agent in a channel to start a conversation.",
                 &c,
             )
         } else {
+            let unbound = unbound.into_iter().map(|session| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S1)
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .child(div().text_mono().child(session.key.clone()))
+                            .child(format!(" · {}", session.status)),
+                    )
+                    .when(!session.detail.is_empty(), |this| {
+                        this.child(detail(&session.key, &session.detail))
+                    })
+            });
+            let bound = saved.into_iter().map(|row| {
+                let view = self.sessions.iter().find(|view| view.key == row.key);
+                let line: String = std::iter::once(label(&row))
+                    .chain(view.map(|view| view.status.clone()))
+                    .chain(row.at.map(date_time))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let id = SharedString::from(format!("codex-transcript-{}", row.key));
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S2)
+                    .min_w_0()
+                    .child(div().child(line))
+                    .when_some(view.filter(|view| !view.detail.is_empty()), |this, view| {
+                        this.child(detail(&view.key, &view.detail))
+                    })
+                    .child(div().flex().child(
+                        Button::new(id, "View transcript").ghost().on_click(
+                            cx.listener(move |this, _, _, cx| this.show(row.clone(), cx)),
+                        ),
+                    ))
+            });
             div()
                 .flex()
                 .flex_col()
                 .gap(space::S4)
-                .children(self.sessions.iter().map(|session| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space::S1)
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .child(div().text_mono().child(session.key.clone()))
-                                .child(format!(" · {}", session.status)),
-                        )
-                        .when(!session.detail.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .id(SharedString::from(format!("codex-detail-{}", session.key)))
-                                    .max_h(rems(12.))
-                                    .overflow_y_scroll()
-                                    .text_caption()
-                                    .text_mono()
-                                    .whitespace_normal()
-                                    .child(session.detail.clone()),
-                            )
-                        })
-                }))
+                .children(unbound.map(IntoElement::into_any_element))
+                .children(bound.map(IntoElement::into_any_element))
         };
         div()
             .flex()

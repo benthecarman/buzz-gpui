@@ -19,6 +19,9 @@ use tokio::sync::{mpsc, oneshot};
 /// Something a test opens later.
 pub type Gate = Shared<BoxFuture<'static, ()>>;
 
+/// Answers a method's params with its result, or an error message.
+pub type Answer = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
+
 /// A gate and the call that opens it.
 pub fn gate() -> (Gate, oneshot::Sender<()>) {
     let (open, opened) = oneshot::channel::<()>();
@@ -55,6 +58,8 @@ pub struct State {
     pub termination: Option<Gate>,
     /// Methods answered with an error message instead.
     pub errors: HashMap<String, String>,
+    /// Methods the test answers itself.
+    pub answers: HashMap<String, Answer>,
     /// The exit code of `workspace`.
     pub workspace_exit: i32,
     /// App-servers whose input was closed, and processes killed.
@@ -114,6 +119,7 @@ impl Default for FakeCodex {
                 terminals: Vec::new(),
                 termination: None,
                 errors: HashMap::new(),
+                answers: HashMap::new(),
                 workspace_exit: 0,
                 ended: 0,
                 killed: 0,
@@ -201,6 +207,14 @@ impl FakeCodex {
         };
         if let Some(error) = error {
             self.output(json!({ "id": id, "error": { "code": -32600, "message": error } }));
+            return None;
+        }
+        let answer = self.state().answers.get(method).cloned();
+        if let Some(answer) = answer {
+            self.output(match answer(params) {
+                Ok(result) => json!({ "id": id, "result": result }),
+                Err(error) => json!({ "id": id, "error": { "code": -32600, "message": error } }),
+            });
             return None;
         }
         let result = match method {

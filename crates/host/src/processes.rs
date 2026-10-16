@@ -55,6 +55,8 @@ const DECLARED: &[Declared] = &[
         &["-c", "curl -fsSL https://claude.ai/install.sh | bash"],
     ),
     ("claude-code", "read", "base64", &["-i"]),
+    // Prints the agent's workspace, which names its Claude project folder.
+    ("claude-code", "workspace", "pwd", &[]),
     // Prints the default workspace once the host has expanded and made it.
     ("codex", "workspace", "pwd", &[]),
     ("codex", "app-server", "codex", &["app-server"]),

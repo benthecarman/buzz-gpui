@@ -1,18 +1,47 @@
-//! The turn-by-turn transcript (`ActivityTranscript.tsx` and its CSS).
+//! The turn-by-turn transcript (`ActivityTranscript.tsx` and its CSS),
+//! shown by the Agent Activity panel and the agent types' session
+//! transcripts.
 
 use super::panel::{ActivityPanel, code_block, date_time};
 use crate::agent_activity::transcript_model::{
     Item, ItemKind, Section, ToolDiff, ToolItem, Transcript, TranscriptTurn, duration,
 };
 use crate::agent_activity::turns::TurnState;
+use crate::community::Community;
 use crate::ui::markdown::{self, Directory};
 use buzz_relay_client::fold::MessageRow;
 use buzz_ui::tokens::{font, radius};
 use buzz_ui::{ActiveTheme, Icon, IconName, Tooltip, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// A view that shows a transcript: it keeps which disclosures are open,
+/// and names the community whose names and links replies render with.
+pub trait TranscriptHost: Sized + 'static {
+    fn expanded(&mut self) -> &mut HashSet<String>;
+    /// `None` shows replies as plain text.
+    fn community(&self, cx: &App) -> Option<Entity<Community>>;
+}
+
+impl TranscriptHost for ActivityPanel {
+    fn expanded(&mut self) -> &mut HashSet<String> {
+        &mut self.expanded
+    }
+    fn community(&self, _: &App) -> Option<Entity<Community>> {
+        Some(self.community.clone())
+    }
+}
+
+/// Opens or closes the disclosure `key`.
+fn toggle<T: TranscriptHost>(this: &mut T, key: String, cx: &mut Context<T>) {
+    let expanded = this.expanded();
+    if !expanded.remove(&key) {
+        expanded.insert(key);
+    }
+    cx.notify();
+}
 
 /// ACP's standard tool kinds; tool names stay as the adapter sent them.
 fn tool_icon(kind: &str) -> IconName {
@@ -104,518 +133,529 @@ fn row(icon: IconName, color: Hsla, content: impl IntoElement) -> Div {
         .child(div().flex_1().min_w_0().child(content))
 }
 
-impl ActivityPanel {
-    pub(super) fn timeline(
-        &mut self,
-        transcript: &Arc<Transcript>,
-        agent_name: &str,
-        states: &HashMap<String, TurnState>,
-        before: Vec<AnyElement>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut children = before;
-        if transcript.turns.is_empty() {
-            children.push(
-                div()
-                    .text_body_sm()
-                    .text_color(cx.colors().text_subtle)
-                    .child("No turns captured for this scope yet.")
-                    .into_any_element(),
-            );
-        }
-        for turn in &transcript.turns {
-            let state = if turn.ended_at.is_some() {
-                TurnState::Ended
-            } else {
-                states
-                    .get(&turn.turn_id)
-                    .copied()
-                    .unwrap_or(TurnState::Unknown)
-            };
-            children.push(self.turn(turn, state, agent_name, cx));
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap(rems(1.))
-            .min_w_0()
-            .children(children)
-            .into_any_element()
-    }
-
-    fn turn(
-        &mut self,
-        turn: &TranscriptTurn,
-        state: TurnState,
-        agent_name: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let c = *cx.colors();
-        let (status, color) = if turn.error.is_some() {
-            ("Error", c.text_danger)
-        } else if state == TurnState::Working {
-            ("Working", c.affordance_accent_prominent)
-        } else if turn.ended_at.is_some() {
-            ("Completed", c.text_subtle)
-        } else {
-            ("Status unknown", c.text_subtle)
-        };
-        let mut facts: Vec<String> = Vec::new();
-        if let Some(ended) = turn.ended_at {
-            facts.push(duration(ended.saturating_sub(turn.started_at)));
-        }
-        facts.push(thread_fact(turn));
-        if turn.source.as_deref() == Some("heartbeat") {
-            facts.push("heartbeat".into());
-        }
-        if turn.new_session {
-            facts.push("new session".into());
-        }
-        facts.extend(turn.stop_reason.clone());
-        if let Some((used, size)) = turn.context {
-            facts.push(format!(
-                "context {}k/{}k",
-                (used / 1000.).round(),
-                (size / 1000.).round()
-            ));
-        }
-        let mut session = vec!["Turn".to_string(), date_time(turn.started_at)];
-        session.extend(turn.config.iter().cloned());
-        let mut children: Vec<AnyElement> = vec![
+pub fn timeline<T: TranscriptHost>(
+    this: &mut T,
+    transcript: &Arc<Transcript>,
+    agent_name: &str,
+    states: &HashMap<String, TurnState>,
+    before: Vec<AnyElement>,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let mut children = before;
+    if transcript.turns.is_empty() {
+        children.push(
             div()
-                .pt(rems(0.5))
-                .border_t_1()
-                .border_color(c.border_standard)
                 .text_body_sm()
-                .text_color(c.text_subtle)
-                .text_center()
-                .child(session.join(" · "))
+                .text_color(cx.colors().text_subtle)
+                .child("No turns captured for this scope yet.")
                 .into_any_element(),
-            {
-                // The state is colored; the facts wrap after it.
-                let text: String = std::iter::once(status.to_string())
-                    .chain(facts.iter().map(|fact| format!(" · {fact}")))
-                    .collect();
-                div()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child(StyledText::new(text).with_highlights([(
-                        0..status.len(),
-                        HighlightStyle {
-                            color: Some(color),
-                            ..Default::default()
-                        },
-                    )]))
-                    .into_any_element()
-            },
-        ];
-        if turn.partial {
-            children.push(
-                div()
-                    .text_body_sm()
-                    .text_color(c.text_subtle)
-                    .child("The start of this turn isn't loaded.")
-                    .into_any_element(),
-            );
-        }
-        for item in &turn.items {
-            children.push(self.item(&turn.turn_id, item, agent_name, cx));
-        }
-        if let Some(error) = &turn.error {
-            children.push(
-                row(
-                    IconName::WarningCircle,
-                    c.text_danger,
-                    div().text_color(c.text_danger).child(error.clone()),
-                )
-                .into_any_element(),
-            );
-        }
-        if state == TurnState::Working {
-            children.push(
-                row(
-                    IconName::DotsThree,
-                    c.text_subtle,
-                    div().text_color(c.text_subtle).child("Working…"),
-                )
-                .into_any_element(),
-            );
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap(rems(0.5))
-            .min_w_0()
-            .children(children)
-            .into_any_element()
+        );
     }
-
-    /// A `<details>`-like disclosure: a summary line toggling the body.
-    fn disclosure(
-        &mut self,
-        key: String,
-        summary: AnyElement,
-        body: impl FnOnce(&mut Self, &mut Context<Self>) -> Vec<AnyElement>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let open = self.expanded.contains(&key);
-        let toggle = key.clone();
-        let body = open.then(|| body(self, cx));
-        div()
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .child(
-                div()
-                    .id(SharedString::from(key))
-                    .cursor_pointer()
-                    .min_w_0()
-                    .child(summary)
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx))),
-            )
-            .children(body.into_iter().flatten())
-            .into_any_element()
+    for turn in &transcript.turns {
+        let state = if turn.ended_at.is_some() {
+            TurnState::Ended
+        } else {
+            states
+                .get(&turn.turn_id)
+                .copied()
+                .unwrap_or(TurnState::Unknown)
+        };
+        children.push(turn_view(this, turn, state, agent_name, cx));
     }
+    div()
+        .flex()
+        .flex_col()
+        .gap(rems(1.))
+        .min_w_0()
+        .children(children)
+        .into_any_element()
+}
 
-    fn sections(
-        &mut self,
-        key: String,
-        title: &str,
-        sections: &[Section],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let c = *cx.colors();
-        let summary = div()
+fn turn_view<T: TranscriptHost>(
+    this: &mut T,
+    turn: &TranscriptTurn,
+    state: TurnState,
+    agent_name: &str,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let c = *cx.colors();
+    let (status, color) = if turn.error.is_some() {
+        ("Error", c.text_danger)
+    } else if state == TurnState::Working {
+        ("Working", c.affordance_accent_prominent)
+    } else if turn.ended_at.is_some() {
+        ("Completed", c.text_subtle)
+    } else {
+        ("Status unknown", c.text_subtle)
+    };
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(ended) = turn.ended_at {
+        facts.push(duration(ended.saturating_sub(turn.started_at)));
+    }
+    facts.push(thread_fact(turn));
+    if turn.source.as_deref() == Some("heartbeat") {
+        facts.push("heartbeat".into());
+    }
+    if turn.new_session {
+        facts.push("new session".into());
+    }
+    facts.extend(turn.stop_reason.clone());
+    if let Some((used, size)) = turn.context {
+        facts.push(format!(
+            "context {}k/{}k",
+            (used / 1000.).round(),
+            (size / 1000.).round()
+        ));
+    }
+    let mut session = vec!["Turn".to_string(), date_time(turn.started_at)];
+    session.extend(turn.config.iter().cloned());
+    let mut children: Vec<AnyElement> = vec![
+        div()
+            .pt(rems(0.5))
+            .border_t_1()
+            .border_color(c.border_standard)
             .text_body_sm()
             .text_color(c.text_subtle)
-            .child(format!("{title} · {} sections", sections.len()))
-            .into_any_element();
-        let sections = sections.to_vec();
-        let base = key.clone();
-        self.disclosure(
-            key,
-            summary,
-            move |this, cx| {
-                sections
-                    .iter()
-                    .enumerate()
-                    .map(|(index, section)| {
-                        let summary = div()
-                            .text_body_sm()
-                            .child(section.tag.clone())
-                            .into_any_element();
-                        let body = section.body.clone();
-                        div()
-                            .ml(rems(1.))
-                            .child(this.disclosure(
-                                format!("{base}:{index}"),
-                                summary,
-                                move |_, cx| vec![code_block(&body, cx)],
-                                cx,
-                            ))
-                            .into_any_element()
-                    })
-                    .collect()
-            },
-            cx,
-        )
+            .text_center()
+            .child(session.join(" · "))
+            .into_any_element(),
+        {
+            // The state is colored; the facts wrap after it.
+            let text: String = std::iter::once(status.to_string())
+                .chain(facts.iter().map(|fact| format!(" · {fact}")))
+                .collect();
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child(StyledText::new(text).with_highlights([(
+                    0..status.len(),
+                    HighlightStyle {
+                        color: Some(color),
+                        ..Default::default()
+                    },
+                )]))
+                .into_any_element()
+        },
+    ];
+    if turn.partial {
+        children.push(
+            div()
+                .text_body_sm()
+                .text_color(c.text_subtle)
+                .child("The start of this turn isn't loaded.")
+                .into_any_element(),
+        );
     }
-
-    fn item(
-        &mut self,
-        turn: &str,
-        item: &Item,
-        agent_name: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let c = *cx.colors();
-        let key = format!("{turn}:{}", item.id);
-        match &item.kind {
-            ItemKind::System(sections) => {
-                self.sections(format!("system:{key}"), "System prompt", sections, cx)
-            }
-            ItemKind::Prompt {
-                text,
-                author,
-                sections,
-                steer,
-            } => {
-                // "**Author** *(steer)* text" in one wrapping run.
-                let mut line = String::new();
-                let mut highlights = Vec::new();
-                if let Some(author) = author {
-                    highlights.push((
-                        0..author.len(),
-                        HighlightStyle {
-                            font_weight: Some(FontWeight::SEMIBOLD),
-                            ..Default::default()
-                        },
-                    ));
-                    line.push_str(author);
-                    line.push(' ');
-                }
-                if *steer {
-                    let start = line.len();
-                    line.push_str("(steer)");
-                    highlights.push((
-                        start..line.len(),
-                        HighlightStyle {
-                            font_style: Some(FontStyle::Italic),
-                            ..Default::default()
-                        },
-                    ));
-                    line.push(' ');
-                }
-                line.push_str(text);
-                let line = StyledText::new(line).with_highlights(highlights);
-                let mut out = vec![row(IconName::User, c.text_standard, line).into_any_element()];
-                if sections.len() > 1 {
-                    out.push(self.sections(
-                        format!("prompt:{key}"),
-                        "Prompt context",
-                        sections,
-                        cx,
-                    ));
-                }
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(rems(0.5))
-                    .children(out)
-                    .into_any_element()
-            }
-            ItemKind::Thought { text, .. } => row(
-                IconName::Bulb,
-                c.text_subtle,
-                div().text_color(c.text_subtle).child(text.clone()),
+    for item in &turn.items {
+        children.push(item_view(this, &turn.turn_id, item, agent_name, cx));
+    }
+    if let Some(error) = &turn.error {
+        children.push(
+            row(
+                IconName::WarningCircle,
+                c.text_danger,
+                div().text_color(c.text_danger).child(error.clone()),
             )
             .into_any_element(),
-            ItemKind::Message { text, .. } => {
-                let body = self.reply(text, &key, cx);
-                row(
-                    IconName::ChatCircle,
-                    c.text_standard,
+        );
+    }
+    if state == TurnState::Working {
+        children.push(
+            row(
+                IconName::DotsThree,
+                c.text_subtle,
+                div().text_color(c.text_subtle).child("Working…"),
+            )
+            .into_any_element(),
+        );
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(rems(0.5))
+        .min_w_0()
+        .children(children)
+        .into_any_element()
+}
+
+/// A `<details>`-like disclosure: a summary line toggling the body.
+fn disclosure<T: TranscriptHost>(
+    this: &mut T,
+    key: String,
+    summary: AnyElement,
+    body: impl FnOnce(&mut T, &mut Context<T>) -> Vec<AnyElement>,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let open = this.expanded().contains(&key);
+    let toggle_key = key.clone();
+    let body = open.then(|| body(this, cx));
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(
+            div()
+                .id(SharedString::from(key))
+                .cursor_pointer()
+                .min_w_0()
+                .child(summary)
+                .on_click(
+                    cx.listener(move |this: &mut T, _, _, cx| toggle(this, toggle_key.clone(), cx)),
+                ),
+        )
+        .children(body.into_iter().flatten())
+        .into_any_element()
+}
+
+fn sections_view<T: TranscriptHost>(
+    this: &mut T,
+    key: String,
+    title: &str,
+    sections: &[Section],
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let c = *cx.colors();
+    let summary = div()
+        .text_body_sm()
+        .text_color(c.text_subtle)
+        .child(format!("{title} · {} sections", sections.len()))
+        .into_any_element();
+    let sections = sections.to_vec();
+    let base = key.clone();
+    disclosure(
+        this,
+        key,
+        summary,
+        move |this, cx| {
+            sections
+                .iter()
+                .enumerate()
+                .map(|(index, section)| {
+                    let summary = div()
+                        .text_body_sm()
+                        .child(section.tag.clone())
+                        .into_any_element();
+                    let body = section.body.clone();
                     div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(agent_name.to_string()),
-                        )
-                        .child(body),
-                )
-                .into_any_element()
+                        .ml(rems(1.))
+                        .child(disclosure(
+                            this,
+                            format!("{base}:{index}"),
+                            summary,
+                            move |_, cx| vec![code_block(&body, cx)],
+                            cx,
+                        ))
+                        .into_any_element()
+                })
+                .collect()
+        },
+        cx,
+    )
+}
+
+fn item_view<T: TranscriptHost>(
+    this: &mut T,
+    turn: &str,
+    item: &Item,
+    agent_name: &str,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let c = *cx.colors();
+    let key = format!("{turn}:{}", item.id);
+    match &item.kind {
+        ItemKind::System(sections) => {
+            sections_view(this, format!("system:{key}"), "System prompt", sections, cx)
+        }
+        ItemKind::Prompt {
+            text,
+            author,
+            sections,
+            steer,
+        } => {
+            // "**Author** *(steer)* text" in one wrapping run.
+            let mut line = String::new();
+            let mut highlights = Vec::new();
+            if let Some(author) = author {
+                highlights.push((
+                    0..author.len(),
+                    HighlightStyle {
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                ));
+                line.push_str(author);
+                line.push(' ');
             }
-            ItemKind::Tool(tool) => self.tool(format!("tool:{key}"), tool, item.at, cx),
-            ItemKind::Plan(entries) => row(
-                IconName::ListChecks,
+            if *steer {
+                let start = line.len();
+                line.push_str("(steer)");
+                highlights.push((
+                    start..line.len(),
+                    HighlightStyle {
+                        font_style: Some(FontStyle::Italic),
+                        ..Default::default()
+                    },
+                ));
+                line.push(' ');
+            }
+            line.push_str(text);
+            let line = StyledText::new(line).with_highlights(highlights);
+            let mut out = vec![row(IconName::User, c.text_standard, line).into_any_element()];
+            if sections.len() > 1 {
+                out.push(sections_view(
+                    this,
+                    format!("prompt:{key}"),
+                    "Prompt context",
+                    sections,
+                    cx,
+                ));
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap(rems(0.5))
+                .children(out)
+                .into_any_element()
+        }
+        ItemKind::Thought { text, .. } => row(
+            IconName::Bulb,
+            c.text_subtle,
+            div().text_color(c.text_subtle).child(text.clone()),
+        )
+        .into_any_element(),
+        ItemKind::Message { text, .. } => {
+            let body = reply_view(this, text, &key, cx);
+            row(
+                IconName::ChatCircle,
                 c.text_standard,
                 div()
                     .flex()
                     .flex_col()
-                    .children(entries.iter().map(|entry| {
-                        let done = entry.status == "completed";
-                        div().child(format!(
-                            "{} {}",
-                            if done { "☑" } else { "☐" },
-                            entry.content
-                        ))
-                    })),
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(agent_name.to_string()),
+                    )
+                    .child(body),
             )
-            .into_any_element(),
-            ItemKind::Status(text) => div()
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child(text.clone())
-                .into_any_element(),
+            .into_any_element()
         }
-    }
-
-    /// An agent reply as Markdown, like a message body.
-    fn reply(&mut self, text: &str, key: &str, cx: &mut Context<Self>) -> AnyElement {
-        let community = self.community.read(cx);
-        let directory = Directory::of(community, None, cx);
-        let row = Arc::new(reply_row(text, key, community.session.viewer()));
-        markdown::body(&row, &directory, cx)
-    }
-
-    fn tool(
-        &mut self,
-        key: String,
-        tool: &ToolItem,
-        at: u64,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let c = *cx.colors();
-        let failed = tool.status == "failed";
-        let name = Some(first_line(&tool.title))
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| "tool".into());
-        // The first location, unless the title already names it.
-        let path = tool
-            .paths
-            .first()
-            .filter(|path| !tool.title.contains(path.as_str()))
-            .cloned();
-        let mono = |text: String, color: Hsla| {
+        ItemKind::Tool(tool) => tool_view(this, format!("tool:{key}"), tool, item.at, cx),
+        ItemKind::Plan(entries) => row(
+            IconName::ListChecks,
+            c.text_standard,
             div()
-                .min_w_0()
-                .truncate()
-                .font_family(font::MONO)
-                .text_size(rems(0.8125))
-                .text_color(color)
-                .child(text)
-        };
-        let summary = div()
-            .flex()
-            .items_center()
-            .gap(rems(0.5))
+                .flex()
+                .flex_col()
+                .children(entries.iter().map(|entry| {
+                    let done = entry.status == "completed";
+                    div().child(format!(
+                        "{} {}",
+                        if done { "☑" } else { "☐" },
+                        entry.content
+                    ))
+                })),
+        )
+        .into_any_element(),
+        ItemKind::Status(text) => div()
+            .text_body_sm()
+            .text_color(c.text_subtle)
+            .child(text.clone())
+            .into_any_element(),
+    }
+}
+
+/// An agent reply as Markdown, like a message body.
+fn reply_view<T: TranscriptHost>(
+    this: &mut T,
+    text: &str,
+    key: &str,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    // Without the community, the reply shows as its plain text.
+    let Some(community) = this.community(cx) else {
+        return div().child(text.to_string()).into_any_element();
+    };
+    let community = community.read(cx);
+    let directory = Directory::of(community, None, cx);
+    let row = Arc::new(reply_row(text, key, community.session.viewer()));
+    markdown::body(&row, &directory, cx)
+}
+
+fn tool_view<T: TranscriptHost>(
+    this: &mut T,
+    key: String,
+    tool: &ToolItem,
+    at: u64,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let c = *cx.colors();
+    let failed = tool.status == "failed";
+    let name = Some(first_line(&tool.title))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "tool".into());
+    // The first location, unless the title already names it.
+    let path = tool
+        .paths
+        .first()
+        .filter(|path| !tool.title.contains(path.as_str()))
+        .cloned();
+    let mono = |text: String, color: Hsla| {
+        div()
             .min_w_0()
-            .text_color(if failed {
-                c.text_danger
-            } else {
-                c.text_standard
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .child(Icon::new(tool_icon(&tool.kind)).size(16.).color(if failed {
+            .truncate()
+            .font_family(font::MONO)
+            .text_size(rems(0.8125))
+            .text_color(color)
+            .child(text)
+    };
+    let summary = div()
+        .flex()
+        .items_center()
+        .gap(rems(0.5))
+        .min_w_0()
+        .text_color(if failed {
+            c.text_danger
+        } else {
+            c.text_standard
+        })
+        .child(
+            div()
+                .flex_none()
+                .child(Icon::new(tool_icon(&tool.kind)).size(16.).color(if failed {
+                    c.text_danger
+                } else {
+                    c.text_standard
+                })),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .gap(rems(0.25))
+                .items_baseline()
+                .when_some(tool_status(&tool.status), |this, status| {
+                    this.child(
+                        div()
+                            .text_color(if failed { c.text_danger } else { c.text_subtle })
+                            .child(status),
+                    )
+                })
+                .child(mono(
+                    name,
+                    if failed {
                         c.text_danger
                     } else {
                         c.text_standard
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .gap(rems(0.25))
-                    .items_baseline()
-                    .when_some(tool_status(&tool.status), |this, status| {
-                        this.child(
-                            div()
-                                .text_color(if failed { c.text_danger } else { c.text_subtle })
-                                .child(status),
-                        )
-                    })
-                    .child(mono(
-                        name,
-                        if failed {
-                            c.text_danger
-                        } else {
-                            c.text_standard
-                        },
-                    ))
-                    .when_some(path, |this, path| this.child(mono(path, c.text_subtle))),
-            )
-            .when_some(tool.permission.clone(), |this, permission| {
-                this.child(
-                    div()
-                        .id(SharedString::from(format!("{key}-permission")))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(rems(0.25))
-                        .text_body_sm()
-                        .text_color(c.text_subtle)
-                        .tooltip(Tooltip::text(format!(
-                            "Permission options: {}",
-                            permission.options.join(", ")
-                        )))
-                        .child(Icon::new(IconName::Shield).size(14.).color(c.text_subtle))
-                        .child(
-                            permission
-                                .outcome
-                                .clone()
-                                .unwrap_or_else(|| "Permission requested".into()),
-                        ),
-                )
-            })
-            .when_some(tool.completed_at, |this, done| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_body_sm()
-                        .text_color(c.text_subtle)
-                        .child(duration(done.saturating_sub(at))),
-                )
-            })
-            .into_any_element();
-        let tool = tool.clone();
-        self.disclosure(
-            key,
-            summary,
-            move |_, cx| {
-                let c = *cx.colors();
-                let mut out = Vec::new();
-                if tool.title.contains('\n') {
-                    out.push(code_block(&tool.title, cx));
-                }
-                if !tool.input.is_empty() {
-                    out.push(code_block(&tool.input, cx));
-                }
-                for diff in &tool.diffs {
-                    let (removed, added) = diff_hunk(diff);
-                    out.push(
-                        div()
-                            .mt(rems(0.25))
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_body_sm()
-                                    .text_color(c.text_subtle)
-                                    .child(format!(
-                                        "{} {}",
-                                        if diff.old_text.is_none() {
-                                            "New file"
-                                        } else {
-                                            "Changed"
-                                        },
-                                        diff.path
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .mt(rems(0.25))
-                                    .p(rems(0.5))
-                                    .rounded(radius::CONTROL)
-                                    .bg(c.surface_inset)
-                                    .text_mono()
-                                    .children(removed.into_iter().map(|line| {
-                                        div().text_color(c.text_danger).child(format!("- {line}"))
-                                    }))
-                                    .children(added.into_iter().map(|line| {
-                                        div().text_color(c.text_success).child(format!("+ {line}"))
-                                    })),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                if !tool.output.is_empty() {
-                    out.push(code_block(&tool.output, cx));
-                }
-                if tool.truncated {
-                    out.push(
-                        div()
-                            .text_body_sm()
-                            .text_color(c.text_subtle)
-                            .child(
-                                "Part of this tool call was too large and was elided by the agent.",
-                            )
-                            .into_any_element(),
-                    );
-                }
-                out
-            },
-            cx,
+                    },
+                ))
+                .when_some(path, |this, path| this.child(mono(path, c.text_subtle))),
         )
-    }
+        .when_some(tool.permission.clone(), |this, permission| {
+            this.child(
+                div()
+                    .id(SharedString::from(format!("{key}-permission")))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(rems(0.25))
+                    .text_body_sm()
+                    .text_color(c.text_subtle)
+                    .tooltip(Tooltip::text(format!(
+                        "Permission options: {}",
+                        permission.options.join(", ")
+                    )))
+                    .child(Icon::new(IconName::Shield).size(14.).color(c.text_subtle))
+                    .child(
+                        permission
+                            .outcome
+                            .clone()
+                            .unwrap_or_else(|| "Permission requested".into()),
+                    ),
+            )
+        })
+        .when_some(tool.completed_at, |this, done| {
+            this.child(
+                div()
+                    .flex_none()
+                    .text_body_sm()
+                    .text_color(c.text_subtle)
+                    .child(duration(done.saturating_sub(at))),
+            )
+        })
+        .into_any_element();
+    let tool = tool.clone();
+    disclosure(
+        this,
+        key,
+        summary,
+        move |_, cx| {
+            let c = *cx.colors();
+            let mut out = Vec::new();
+            if tool.title.contains('\n') {
+                out.push(code_block(&tool.title, cx));
+            }
+            if !tool.input.is_empty() {
+                out.push(code_block(&tool.input, cx));
+            }
+            for diff in &tool.diffs {
+                let (removed, added) = diff_hunk(diff);
+                out.push(
+                    div()
+                        .mt(rems(0.25))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_body_sm()
+                                .text_color(c.text_subtle)
+                                .child(format!(
+                                    "{} {}",
+                                    if diff.old_text.is_none() {
+                                        "New file"
+                                    } else {
+                                        "Changed"
+                                    },
+                                    diff.path
+                                )),
+                        )
+                        .child(
+                            div()
+                                .mt(rems(0.25))
+                                .p(rems(0.5))
+                                .rounded(radius::CONTROL)
+                                .bg(c.surface_inset)
+                                .text_mono()
+                                .children(removed.into_iter().map(|line| {
+                                    div().text_color(c.text_danger).child(format!("- {line}"))
+                                }))
+                                .children(added.into_iter().map(|line| {
+                                    div().text_color(c.text_success).child(format!("+ {line}"))
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+            if !tool.output.is_empty() {
+                out.push(code_block(&tool.output, cx));
+            }
+            if tool.truncated {
+                out.push(
+                    div()
+                        .text_body_sm()
+                        .text_color(c.text_subtle)
+                        .child("Part of this tool call was too large and was elided by the agent.")
+                        .into_any_element(),
+                );
+            }
+            out
+        },
+        cx,
+    )
 }
 
 /// A reply as a message row, so it renders like a message body.

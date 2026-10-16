@@ -43,6 +43,12 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
 /// Why an agent woke, as this type needs it.
 #[derive(Clone, Debug)]
 pub enum Wake {
@@ -201,7 +207,26 @@ const STOPPED: &str = "Codex was stopped";
 struct Saved {
     thread_id: String,
     workspace: String,
+    /// When the binding last started a turn, in milliseconds; bindings
+    /// saved before it existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<u64>,
 }
+
+/// A saved binding, for the owner's transcript list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedConversation {
+    pub key: String,
+    pub channel_id: String,
+    /// The channel's name, when the agent's community lists it.
+    pub name: Option<String>,
+    pub root: Option<String>,
+    pub thread_id: String,
+    pub at: Option<u64>,
+}
+
+/// Bindings listed for the owner.
+const CONVERSATION_LIMIT: usize = 30;
 
 /// The turn a conversation is running.
 struct Active {
@@ -853,13 +878,61 @@ impl CodexRuntime {
     }
 
     fn storage_key(request: &Request) -> String {
+        Self::key_of(&request.scope, &request.agent.pubkey())
+    }
+
+    fn key_of(scope: &str, pubkey: &str) -> String {
         // Resume restores the persisted tool schema, so a binding from
         // before a tool change starts fresh. v4 added media_get.
-        format!(
-            "buzz.codex.sessions.v4:{}:{}",
-            request.scope,
-            request.agent.pubkey()
-        )
+        format!("buzz.codex.sessions.v4:{scope}:{pubkey}")
+    }
+
+    /// Saved bindings, in the order they were saved. Malformed local data
+    /// starts fresh.
+    fn load(&self, storage_key: &str) -> Vec<(String, Saved)> {
+        match self.inner.storage.get(storage_key) {
+            Some(Value::Object(stored)) => stored
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The agent's most recently used bindings in its community, for its
+    /// owner's transcript list.
+    pub fn conversations(&self, pubkey: &str) -> Vec<SavedConversation> {
+        let relay = self.relay(pubkey);
+        let entry = locked(&self.inner.entries).get(pubkey).cloned();
+        let saved = match (entry, &relay) {
+            (Some(entry), _) => locked(&entry.saved).clone(),
+            (None, Some((scope, _))) => self.load(&Self::key_of(scope, pubkey)),
+            (None, None) => Vec::new(),
+        };
+        // Untimestamped bindings keep save order, newest last; listed
+        // newest first.
+        let mut conversations: Vec<SavedConversation> = saved
+            .into_iter()
+            .rev()
+            .filter_map(|(key, saved)| {
+                let place: Vec<String> = serde_json::from_str(&key).ok()?;
+                let [channel_id, root] = <[String; 2]>::try_from(place).ok()?;
+                let name = relay
+                    .as_ref()
+                    .and_then(|(_, relay)| relay.channel(&channel_id)?.name);
+                Some(SavedConversation {
+                    key,
+                    name,
+                    root: (root != "channel").then_some(root),
+                    channel_id,
+                    thread_id: saved.thread_id,
+                    at: saved.at,
+                })
+            })
+            .collect();
+        conversations.sort_by_key(|row| std::cmp::Reverse(row.at.unwrap_or(0)));
+        conversations.truncate(CONVERSATION_LIMIT);
+        conversations
     }
 
     fn entry(&self, request: &Request, spawn: &Spawner) -> Arc<Entry> {
@@ -869,14 +942,7 @@ impl CodexRuntime {
             return prior.clone();
         }
         let storage_key = Self::storage_key(request);
-        // Malformed local data starts fresh.
-        let saved: Vec<(String, Saved)> = match self.inner.storage.get(&storage_key) {
-            Some(Value::Object(stored)) => stored
-                .into_iter()
-                .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
-                .collect(),
-            _ => Vec::new(),
-        };
+        let saved = self.load(&storage_key);
         let after = locked(&self.inner.stopping)
             .get(&pubkey)
             .cloned()
@@ -896,10 +962,10 @@ impl CodexRuntime {
     fn save(&self, request: &Request, entry: &Entry, key: &str, saved: Saved) {
         let value = {
             let mut bindings = locked(&entry.saved);
-            match bindings.iter_mut().find(|(other, _)| other == key) {
-                Some((_, binding)) => *binding = saved,
-                None => bindings.push((key.into(), saved)),
-            }
+            // Moved to the end, so the bounded set keeps the most recently
+            // used bindings.
+            bindings.retain(|(other, _)| other != key);
+            bindings.push((key.into(), saved));
             let excess = bindings.len().saturating_sub(SAVED_LIMIT);
             bindings.drain(..excess);
             Value::Object(
@@ -1705,6 +1771,7 @@ impl CodexRuntime {
                 Saved {
                     thread_id: thread_id.clone(),
                     workspace,
+                    at: Some(now_ms()),
                 },
             );
             if let Some(ready) = locked(&ready_sender).take() {

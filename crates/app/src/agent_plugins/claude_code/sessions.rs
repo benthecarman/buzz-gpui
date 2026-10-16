@@ -41,6 +41,10 @@ pub trait SessionStore: Send + Sync {
     fn get(&self, key: &str) -> Option<SavedSession>;
     fn set(&self, key: &str, session: SavedSession);
     fn delete(&self, key: &str);
+    /// Saved sessions, most recently used first.
+    fn list(&self) -> Vec<(String, SavedSession)> {
+        Vec::new()
+    }
 }
 
 pub type LaunchFn = Arc<dyn Fn() -> BoxFuture<'static, Result<Launch, String>> + Send + Sync>;
@@ -1153,6 +1157,17 @@ impl SessionStore for FileSessions {
         self.update(|sessions| {
             sessions.remove(key);
         });
+    }
+    fn list(&self) -> Vec<(String, SavedSession)> {
+        let mut saved: Vec<(String, SavedSession)> = self.with(|loaded| {
+            loaded
+                .all
+                .get(&self.agent)
+                .map(|sessions| sessions.clone().into_iter().collect())
+                .unwrap_or_default()
+        });
+        saved.sort_by_key(|(_, session)| std::cmp::Reverse(session.at));
+        saved
     }
 }
 

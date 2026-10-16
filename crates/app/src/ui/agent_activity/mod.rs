@@ -7,7 +7,7 @@ pub mod bubble;
 pub mod panel;
 pub mod profile;
 pub mod row;
-mod transcript;
+pub mod transcript;
 
 use crate::agent_activity::{selection, target};
 use crate::community::Community;

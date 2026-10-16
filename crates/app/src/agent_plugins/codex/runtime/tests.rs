@@ -994,8 +994,15 @@ async fn restores_a_saved_binding_and_starts_fresh_in_another_workspace() {
     f.starts_reach(1).await;
     f.complete().await;
     until(|| !f.fake.calls("thread/unsubscribe").is_empty()).await;
+    let mut stored = locked(&f.storage.0).clone();
+    let binding = &mut stored
+        .get_mut(&format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key()))
+        .unwrap()[key(&root())];
+    // When it last started a turn.
+    assert!(binding["at"].as_u64().is_some_and(|at| at > 0));
+    binding.as_object_mut().unwrap().remove("at");
     assert_eq!(
-        *locked(&f.storage.0),
+        stored,
         HashMap::from([(
             format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key()),
             json!({ key(&root()): { "threadId": "thread-1", "workspace": "/tmp/codex-test" } }),
@@ -1188,6 +1195,77 @@ async fn slash_commands_are_ordinary_steering_text() {
         f.complete().await;
         f.published_reach(1).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lists_saved_conversations_newest_first_and_moves_a_started_one_to_the_front() {
+    let storage = Arc::new(MemoryStorage::default());
+    let storage_key = format!("buzz.codex.sessions.v4:{SCOPE}:{}", agent_key());
+    let thread = key(&root());
+    let channel = key("channel");
+    let elsewhere = json!(["unlisted", root()]).to_string();
+    let mut stored = Map::new();
+    stored.insert(
+        channel.clone(),
+        json!({ "threadId": "before-timestamps", "workspace": "/w" }),
+    );
+    stored.insert(
+        thread.clone(),
+        json!({ "threadId": "older", "workspace": "/w", "at": 1 }),
+    );
+    stored.insert(
+        elsewhere.clone(),
+        json!({ "threadId": "newer", "workspace": "/w", "at": 2 }),
+    );
+    stored.insert(
+        "not a key".into(),
+        json!({ "threadId": "ignored", "workspace": "/w", "at": 3 }),
+    );
+    storage.set(&storage_key, Value::Object(stored)).unwrap();
+    let f = fixture_with(storage);
+    let conversation =
+        |key: &str, channel: &str, name: Option<&str>, root: Option<String>, thread: &str, at| {
+            SavedConversation {
+                key: key.into(),
+                channel_id: channel.into(),
+                name: name.map(str::to_string),
+                root,
+                thread_id: thread.into(),
+                at,
+            }
+        };
+    assert_eq!(
+        f.runtime.conversations(&agent_key()),
+        [
+            conversation(&elsewhere, "unlisted", None, Some(root()), "newer", Some(2)),
+            conversation(
+                &thread,
+                CHANNEL,
+                Some("test"),
+                Some(root()),
+                "older",
+                Some(1)
+            ),
+            conversation(
+                &channel,
+                CHANNEL,
+                Some("test"),
+                None,
+                "before-timestamps",
+                None
+            ),
+        ]
+    );
+    f.run(f.delivery("work")).await;
+    f.starts_reach(1).await;
+    until(|| f.runtime.conversations(&agent_key())[0].at.unwrap_or(0) > 2).await;
+    let latest = f.runtime.conversations(&agent_key())[0].key.clone();
+    let stored = f.storage.get(&storage_key).unwrap();
+    assert_eq!(
+        stored.as_object().unwrap().keys().next_back(),
+        Some(&latest)
+    );
+    f.complete().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -18,6 +18,7 @@ use super::sessions::{
     AgentSessions, DeliverOptions, FileSessions, ONCE_DEADLINE, SessionStore, SessionView,
     SessionsOptions, Spare, Where,
 };
+use super::transcript::Conversation;
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
@@ -229,6 +230,31 @@ pub struct Synced {
     /// Whether the owner has attention on for it.
     pub attention: bool,
 }
+
+/// A saved session, for the owner's transcript list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedConversation {
+    pub key: String,
+    pub session_id: String,
+    pub channel_id: String,
+    pub root: Option<String>,
+    /// The channel's name, when the agent's community lists it.
+    pub name: Option<String>,
+    pub at: u64,
+}
+
+impl SavedConversation {
+    pub fn conversation(&self) -> Conversation {
+        Conversation {
+            session_id: self.session_id.clone(),
+            channel_id: self.channel_id.clone(),
+            root: self.root.clone(),
+        }
+    }
+}
+
+/// Saved sessions listed for the owner.
+const CONVERSATION_LIMIT: usize = 30;
 
 /// Where an agent's saved sessions are kept, by agent pubkey.
 pub type StoreFn = Arc<dyn Fn(&str) -> Arc<dyn SessionStore> + Send + Sync>;
@@ -464,6 +490,34 @@ impl ClaudeRuntime {
             .get(pubkey)
             .map(|entry| entry.sessions.snapshot())
             .unwrap_or_default()
+    }
+
+    /// The agent's saved sessions, most recently used first, for its
+    /// owner's transcript list.
+    pub fn conversations(&self, pubkey: &str) -> Vec<SavedConversation> {
+        let relay = self.relay(pubkey);
+        (self.inner.store)(pubkey)
+            .list()
+            .into_iter()
+            .take(CONVERSATION_LIMIT)
+            .map(|(key, saved)| {
+                let (channel_id, root) = match key.split_once('/') {
+                    Some((channel, root)) => (channel.to_string(), Some(root.to_string())),
+                    None => (key.clone(), None),
+                };
+                let name = relay
+                    .as_ref()
+                    .and_then(|relay| relay.channel(&channel_id)?.name);
+                SavedConversation {
+                    key,
+                    session_id: saved.id,
+                    channel_id,
+                    root,
+                    name,
+                    at: saved.at,
+                }
+            })
+            .collect()
     }
 
     /// [`Self::dispose`], resolving once the processes it stops have

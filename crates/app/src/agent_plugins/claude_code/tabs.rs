@@ -1,13 +1,17 @@
 //! The type's tabs (buzz-app's `tabs.ts`): Claude, with Claude's
-//! status on the agent's host, its setup and the agent's running sessions;
-//! and Settings, what the agent runs with.
+//! status on the agent's host, its setup and the agent's conversations,
+//! each with its session's transcript; and Settings, what the agent runs
+//! with.
 
-use super::runtime::{ClaudeRuntime, Config};
+use super::runtime::{ClaudeRuntime, Config, SavedConversation};
 use super::sessions::SessionView;
 use super::setup::{ClaudeSetup, ClaudeStatus, SetupState, Step};
+use super::transcript::{TURN_LIMIT, read_transcript};
 use crate::agent_plugins::tabs::{Picking, choice, description_text, field, options, saved_config};
+use crate::agent_plugins::transcript_view::{self, Back, Loaded, Reader, Texts, TranscriptView};
 use crate::agents2::{AgentView, Agents2};
 use crate::runtime::Runtime;
+use crate::ui::agent_activity::panel::date_time;
 use buzz_ui::{
     ActiveTheme, Button, Colors, Surface, TextArea, TextField, TypeStyled,
     tokens::{font, space},
@@ -15,6 +19,8 @@ use buzz_ui::{
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::rc::Rc;
+use std::sync::Arc;
 
 const MODELS: [(&str, &str); 4] = [
     ("", "Claude default"),
@@ -43,13 +49,29 @@ pub fn status_line(state: &SetupState) -> String {
     }
 }
 
-/// Claude on the agent's host, and what this agent has running.
+const TEXTS: Texts = Texts {
+    harness: "Claude",
+    missing: "Claude has no transcript for this conversation on this computer. It may have been deleted, or the session ran in a different workspace.",
+    turn_limit: TURN_LIMIT,
+};
+
+fn label(conversation: &SavedConversation) -> String {
+    transcript_view::label(
+        &conversation.channel_id,
+        conversation.name.as_deref(),
+        conversation.root.as_deref(),
+    )
+}
+
+/// Claude on the agent's host, and this agent's conversations.
 pub struct ClaudeTab {
     pubkey: String,
     setup: ClaudeSetup,
     state: SetupState,
     runtime: ClaudeRuntime,
     sessions: Vec<SessionView>,
+    /// The conversation whose transcript is shown, by key.
+    open: Option<(String, Entity<TranscriptView>)>,
     code: Entity<InputState>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -85,6 +107,10 @@ impl ClaudeTab {
                 if this
                     .update(cx, |this, cx| {
                         this.sessions = this.runtime.sessions(&this.pubkey);
+                        if let Some((key, view)) = &this.open {
+                            let working = this.busy(key).unwrap_or(false);
+                            view.update(cx, |view, cx| view.set_working(working, cx));
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -106,10 +132,64 @@ impl ClaudeTab {
             pubkey,
             setup,
             runtime,
+            open: None,
             code,
             _tasks: vec![follow_setup, follow_sessions],
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Whether the conversation's session is working; `None` when none
+    /// is running.
+    fn busy(&self, key: &str) -> Option<bool> {
+        self.sessions
+            .iter()
+            .find(|session| session.key == key)
+            .map(|session| session.busy)
+    }
+
+    /// Shows the conversation's transcript in place of the tab.
+    fn show(&mut self, conversation: SavedConversation, cx: &mut Context<Self>) {
+        let agents = Agents2::global(cx);
+        let spawn = agents.as_ref().and_then(|agents| {
+            let host = agents.read(cx).host_of(&self.pubkey)?;
+            Some(host.read(cx).spawner(super::PROCESS_OWNER))
+        });
+        let workspace = agents
+            .and_then(|agents| {
+                let agent = agents.read(cx).find(&self.pubkey)?;
+                Some(Config::read(&agent.config).workspace)
+            })
+            .unwrap_or_else(|| Config::default().workspace);
+        let session = conversation.conversation();
+        let reader: Reader = Arc::new(move |working, signal| {
+            let (spawn, workspace, session) = (spawn.clone(), workspace.clone(), session.clone());
+            Box::pin(async move {
+                let Some(spawn) = spawn else {
+                    return Err("The agent's host is not connected".into());
+                };
+                let read = read_transcript(&spawn, &workspace, &session, working, &signal).await?;
+                Ok(read.map(|read| Loaded {
+                    transcript: read.transcript,
+                    more: read.more,
+                    working: None,
+                }))
+            })
+        });
+        let weak = cx.entity().downgrade();
+        let back: Back = Rc::new(move |_, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.open = None;
+                cx.notify();
+            });
+        });
+        let working = self.busy(&conversation.key).unwrap_or(false);
+        let pubkey = self.pubkey.clone();
+        let title = label(&conversation).into();
+        let view =
+            cx.new(|cx| TranscriptView::new(pubkey, title, TEXTS, reader, working, back, cx));
+        self.open = Some((conversation.key, view));
+        cx.notify();
     }
 
     fn run(&self, step: Step, cx: &mut Context<Self>) {
@@ -166,6 +246,9 @@ fn installer_note(c: &Colors) -> Div {
 
 impl Render for ClaudeTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((_, view)) = &self.open {
+            return div().child(view.clone());
+        }
         let c = *cx.colors();
         let state = &self.state;
         let status = state.status.clone();
@@ -251,7 +334,10 @@ impl Render for ClaudeTab {
                         ),
                 )
             });
-        let sessions = if self.sessions.is_empty() {
+        // Read on each render: bindings change as turns start, which also
+        // changes the session list this tab follows.
+        let conversations = self.runtime.conversations(&self.pubkey);
+        let list = if conversations.is_empty() {
             description_text(
                 "None. A conversation's session starts when the agent is mentioned.",
                 &c,
@@ -260,26 +346,46 @@ impl Render for ClaudeTab {
             div()
                 .flex()
                 .flex_col()
-                .gap(space::S1)
-                .children(self.sessions.iter().map(|session| {
+                .gap(space::S2)
+                .children(conversations.into_iter().map(|conversation| {
+                    let activity = self
+                        .busy(&conversation.key)
+                        .map(|busy| if busy { "Working" } else { "Idle" }.to_string());
+                    let detail: Vec<String> = activity
+                        .into_iter()
+                        .chain([date_time(conversation.at)])
+                        .collect();
                     div()
                         .flex()
+                        .items_center()
                         .justify_between()
                         .gap(space::S2)
                         .child(
                             div()
+                                .flex()
+                                .flex_col()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .font_family(font::MONO)
-                                .child(session.key.clone()),
+                                .child(div().truncate().child(label(&conversation)))
+                                .child(
+                                    div()
+                                        .text_body_sm()
+                                        .text_color(c.text_subtle)
+                                        .child(detail.join(" · ")),
+                                ),
                         )
-                        .child(div().flex_none().child(if session.busy {
-                            "Working"
-                        } else {
-                            "Idle"
-                        }))
+                        .child(
+                            Button::new(
+                                SharedString::from(format!(
+                                    "claude-transcript-{}",
+                                    conversation.key
+                                )),
+                                "View transcript",
+                            )
+                            .ghost()
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.show(conversation.clone(), cx),
+                            )),
+                        )
                 }))
         };
         let _ = window;
@@ -294,12 +400,8 @@ impl Render for ClaudeTab {
                     .flex()
                     .flex_col()
                     .gap(space::S1)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child("Running sessions"),
-                    )
-                    .child(sessions),
+                    .child(div().font_weight(FontWeight::BOLD).child("Conversations"))
+                    .child(list),
             )
     }
 }

@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod sessions;
 pub mod setup;
 pub mod tabs;
+pub mod transcript;
 
 use crate::agent_plugins::owner_relay;
 use crate::agent_plugins::process::Spawner;

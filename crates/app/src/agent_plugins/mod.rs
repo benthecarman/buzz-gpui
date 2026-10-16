@@ -5,6 +5,7 @@ pub mod codex;
 pub mod owner_relay;
 pub mod process;
 mod tabs;
+mod transcript_view;
 
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agents2::attention::EventData;

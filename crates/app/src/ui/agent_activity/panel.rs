@@ -160,7 +160,7 @@ fn small(text: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 /// `10/10/2026, 12:00:00 PM` (`toLocaleString`).
-pub(super) fn date_time(ms: u64) -> String {
+pub fn date_time(ms: u64) -> String {
     use chrono::{Local, TimeZone};
     Local
         .timestamp_millis_opt(ms as i64)
@@ -517,7 +517,14 @@ impl ActivityPanel {
                         .into_any_element(),
                     );
                 }
-                out.push(self.timeline(&transcript, &name, &states, before, cx));
+                out.push(super::transcript::timeline(
+                    self,
+                    &transcript,
+                    &name,
+                    &states,
+                    before,
+                    cx,
+                ));
             }
         }
         out
