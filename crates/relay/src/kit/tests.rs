@@ -276,56 +276,54 @@ fn lineups_resolve_teams_and_report_unavailable_members() {
     assert!(missing.starts_with("Agent npub1"), "{missing}");
 }
 
+/// `team-payload.test.ts`.
 #[test]
-fn team_payloads_split_and_rejoin_with_their_digest() {
-    let owner = key(9);
-    let revision = "11111111-1111-4111-8111-111111111111";
-    let snapshot = json!({
-        "format": "buzz-team-snapshot", "version": 1,
-        "team": {"name": "Squad"},
-        "members": [{"name": "a", "prompt": "x".repeat(40_000), "memory": {"level": "all", "entries": [1]}}]
+fn text_manifests_have_exactly_their_six_fields() {
+    let manifest = json!({
+        "version": 1,
+        "owner": key(1),
+        "revision": "00000000-0000-4000-8000-000000000000",
+        "digest": "cd".repeat(32),
+        "bytes": 9,
+        "chunks": 1,
     });
-    let (manifest, payloads) =
-        encode_team_payload(&snapshot, COMMUNITY, &owner, "team-a", revision).unwrap();
-    assert_eq!(manifest.chunks, 3);
-    assert_eq!(payloads.len(), 3);
-    let decoded = decode_team_payload(&manifest, &payloads, COMMUNITY, &owner, "team-a").unwrap();
     assert_eq!(
-        decoded["members"][0]["memory"],
-        json!({"level": "none", "entries": []})
+        serde_json::to_value(parse_text_manifest(&manifest).unwrap()).unwrap(),
+        manifest
     );
-    assert_eq!(
-        decoded["members"][0]["prompt"],
-        snapshot["members"][0]["prompt"]
-    );
-    // Each chunk record parses back to itself under its coordinate.
-    let record = payloads[1].record();
-    assert_eq!(
-        parse_payload_record(&record, COMMUNITY).unwrap(),
-        payloads[1]
-    );
-    assert_eq!(
-        buzz_desktop::relay::kit::coordinate(&record, COMMUNITY).unwrap(),
-        payloads[1].coordinate()
-    );
-    // A swapped chunk or a changed byte fails.
-    let mut swapped = payloads.clone();
-    swapped.swap(0, 1);
-    assert!(decode_team_payload(&manifest, &swapped, COMMUNITY, &owner, "team-a").is_err());
-    let mut tampered = payloads.clone();
-    tampered[2].data = STANDARD_ENCODE(b"{}");
-    assert!(decode_team_payload(&manifest, &tampered, COMMUNITY, &owner, "team-a").is_err());
-    assert!(decode_team_payload(&manifest, &payloads[..2], COMMUNITY, &owner, "team-a").is_err());
+    let mut extra = manifest.clone();
+    extra["extra"] = json!(1);
     assert!(
-        decode_team_payload(&manifest, &payloads, COMMUNITY, &key(7), "team-a").is_err(),
-        "another owner"
+        parse_text_manifest(&extra)
+            .unwrap_err()
+            .contains("manifest")
     );
 }
 
-#[allow(non_snake_case)]
-fn STANDARD_ENCODE(bytes: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+#[test]
+fn payload_chunks_are_keyed_by_community_owner_team_revision_and_index() {
+    let owner = key(1);
+    let revision = "00000000-0000-4000-8000-000000000000";
+    assert_eq!(
+        payload_coordinate("https://relay.example", &owner, "team", revision, 2),
+        format!("buzz-team-payload-v1:https%3A%2F%2Frelay.example:{owner}:team:{revision}:2")
+    );
+    // A chunk record parses back to itself under that coordinate.
+    let chunk = TeamPayload {
+        version: 1,
+        community: COMMUNITY.into(),
+        owner,
+        team_id: "team".into(),
+        revision: revision.into(),
+        index: 2,
+        data: "e30=".into(),
+    };
+    let record = chunk.record();
+    assert_eq!(parse_payload_record(&record, COMMUNITY).unwrap(), chunk);
+    assert_eq!(
+        buzz_desktop::relay::kit::coordinate(&record, COMMUNITY).unwrap(),
+        chunk.coordinate()
+    );
 }
 
 #[test]
@@ -535,68 +533,4 @@ fn team_text_records_parse_with_their_own_coordinate_and_owner() {
         vec![vec!["d".into(), d], vec!["t".into(), TEXT_TAG.into()]],
     );
     assert!(open(&identity, &event, COMMUNITY).is_err());
-}
-
-#[test]
-fn team_text_round_trips_through_chunks_up_to_its_cap() {
-    let owner = key(1);
-    // 4-byte characters and JSON escapes, exactly 128 KiB.
-    let unit = "\u{1F600}\"\\\n";
-    let text =
-        unit.repeat(TEAM_TEXT_BYTES / unit.len()) + &"x".repeat(TEAM_TEXT_BYTES % unit.len());
-    assert_eq!(text.len(), TEAM_TEXT_BYTES);
-    let revision = "11111111-1111-4111-8111-111111111111";
-    let (manifest, payloads) =
-        encode_team_text(&text, COMMUNITY, &owner, "crew", revision).unwrap();
-    assert_eq!(manifest.bytes as usize, TEAM_TEXT_BYTES + 3);
-    assert_eq!(payloads.len(), 9);
-    assert_eq!(
-        decode_team_text(&manifest, &payloads, COMMUNITY, &owner, "crew").unwrap(),
-        text
-    );
-    // Its chunks are ordinary payload records.
-    for chunk in &payloads {
-        assert!(chunk.coordinate().starts_with("buzz-team-payload-v1:"));
-    }
-    // Empty text is a live head too.
-    let (empty, chunks) = encode_team_text("", COMMUNITY, &owner, "crew", revision).unwrap();
-    assert_eq!((empty.bytes, chunks.len()), (3, 1));
-    assert_eq!(
-        decode_team_text(&empty, &chunks, COMMUNITY, &owner, "crew").unwrap(),
-        ""
-    );
-}
-
-#[test]
-fn team_text_refuses_oversized_nul_and_tampered_text() {
-    let owner = key(1);
-    let revision = "11111111-1111-4111-8111-111111111111";
-    let over = "x".repeat(TEAM_TEXT_BYTES + 1);
-    let error = encode_team_text(&over, COMMUNITY, &owner, "crew", revision).unwrap_err();
-    assert!(error.contains("exceed"), "{error}");
-    let error = encode_team_text("a\0b", COMMUNITY, &owner, "crew", revision).unwrap_err();
-    assert!(error.contains("NUL"), "{error}");
-    let (manifest, payloads) =
-        encode_team_text("SHARED", COMMUNITY, &owner, "crew", revision).unwrap();
-    let mut tampered = manifest.clone();
-    tampered.digest = "ab".repeat(32);
-    assert_eq!(
-        decode_team_text(&tampered, &payloads, COMMUNITY, &owner, "crew").unwrap_err(),
-        "Portable team integrity check failed"
-    );
-    assert!(decode_team_text(&manifest, &payloads, COMMUNITY, &owner, "other").is_err());
-    // A text manifest has exactly the six manifest fields.
-    let mut extra = serde_json::to_value(&manifest).unwrap();
-    extra["note"] = json!("x");
-    assert!(parse_text_manifest(&extra).is_err());
-    // A portable snapshot's bytes are not text.
-    let (snapshot, chunks) = encode_team_payload(
-        &json!({"team": {"name": "Crew"}, "members": []}),
-        COMMUNITY,
-        &owner,
-        "crew",
-        revision,
-    )
-    .unwrap();
-    assert!(decode_team_text(&snapshot, &chunks, COMMUNITY, &owner, "crew").is_err());
 }

@@ -1,8 +1,8 @@
 //! Portable team payloads (`features/channel-templates/team-payload.ts`):
-//! a team snapshot of up to 8 MiB split into 16 KiB chunks, each its own
-//! private 30078 record, bound to a manifest by owner, team, revision,
-//! index and a SHA-256 digest. A team's shared instructions are stored
-//! the same way, as `v1:` and their UTF-8 bytes.
+//! the manifest and 16 KiB chunk records of a team snapshot (up to
+//! 8 MiB) or of a team's shared instructions (`v1:` and their UTF-8
+//! bytes). The app no longer writes or assembles them; it only admits
+//! such records when reading the kit.
 
 use super::identifier;
 use crate::discovery::is_uuid;
@@ -11,7 +11,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 pub const TEAM_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub const TEAM_CHUNK_BYTES: usize = 16 * 1024;
@@ -147,140 +146,6 @@ pub fn payload_coordinate(
     )
 }
 
-fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-/// `withoutTeamMemories`: only portable configuration is persisted.
-pub fn without_team_memories(snapshot: &Value) -> Value {
-    let mut snapshot = snapshot.clone();
-    if let Some(members) = snapshot.get_mut("members").and_then(Value::as_array_mut) {
-        for member in members {
-            if let Some(member) = member.as_object_mut() {
-                member.insert("memory".into(), json!({"level": "none", "entries": []}));
-            }
-        }
-    }
-    snapshot
-}
-
-/// `encodePayloadBytes`: splits bytes into immutable digest-bound chunks
-/// for one revision.
-fn encode_payload_bytes(
-    bytes: &[u8],
-    community: &str,
-    owner: &str,
-    team_id: &str,
-    revision: &str,
-    parse_manifest: fn(&Value) -> Result<TeamManifest, String>,
-) -> Result<(TeamManifest, Vec<TeamPayload>), String> {
-    let manifest = parse_manifest(&json!({
-        "version": 1,
-        "owner": owner,
-        "revision": revision,
-        "digest": digest(bytes),
-        "bytes": bytes.len(),
-        "chunks": bytes.len().div_ceil(TEAM_CHUNK_BYTES),
-    }))?;
-    let payloads = bytes
-        .chunks(TEAM_CHUNK_BYTES)
-        .enumerate()
-        .map(|(index, chunk)| {
-            parse_team_payload(
-                &json!({
-                    "version": 1,
-                    "community": community,
-                    "owner": owner,
-                    "teamId": team_id,
-                    "revision": revision,
-                    "index": index,
-                    "data": STANDARD.encode(chunk),
-                }),
-                community,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((manifest, payloads))
-}
-
-/// `decodePayloadBytes`: checks every immutable binding, exact chunk
-/// length and the digest before returning the bytes.
-fn decode_payload_bytes(
-    manifest: &TeamManifest,
-    payloads: &[TeamPayload],
-    community: &str,
-    owner: &str,
-    team_id: &str,
-) -> Result<Vec<u8>, String> {
-    if manifest.owner != owner || payloads.len() as u64 != manifest.chunks {
-        return Err("Incomplete portable team payload".into());
-    }
-    let mut bytes = Vec::with_capacity(manifest.bytes as usize);
-    for (index, payload) in payloads.iter().enumerate() {
-        let payload = parse_team_payload(
-            &serde_json::to_value(payload).unwrap_or_default(),
-            community,
-        )?;
-        if payload.owner != owner
-            || payload.team_id != team_id
-            || payload.revision != manifest.revision
-            || payload.index != index as u64
-        {
-            return Err("Portable team revision mismatch".into());
-        }
-        let chunk = STANDARD
-            .decode(&payload.data)
-            .map_err(|_| "Invalid portable team chunk size".to_owned())?;
-        let expected = TEAM_CHUNK_BYTES.min(manifest.bytes as usize - index * TEAM_CHUNK_BYTES);
-        if chunk.len() != expected {
-            return Err("Invalid portable team chunk size".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    if digest(&bytes) != manifest.digest {
-        return Err("Portable team integrity check failed".into());
-    }
-    Ok(bytes)
-}
-
-/// `encodeTeamPayload`: the manifest and its chunks.
-pub fn encode_team_payload(
-    snapshot: &Value,
-    community: &str,
-    owner: &str,
-    team_id: &str,
-    revision: &str,
-) -> Result<(TeamManifest, Vec<TeamPayload>), String> {
-    let bytes = serde_json::to_vec(&without_team_memories(snapshot))
-        .map_err(|_| "Team snapshot exceeds the size limit".to_owned())?;
-    if bytes.is_empty() || bytes.len() > TEAM_PAYLOAD_BYTES {
-        return Err("Team snapshot exceeds the size limit".into());
-    }
-    encode_payload_bytes(
-        &bytes,
-        community,
-        owner,
-        team_id,
-        revision,
-        parse_team_manifest,
-    )
-}
-
-/// `decodeTeamPayload`: every binding checked before the JSON is parsed.
-pub fn decode_team_payload(
-    manifest: &TeamManifest,
-    payloads: &[TeamPayload],
-    community: &str,
-    owner: &str,
-    team_id: &str,
-) -> Result<Value, String> {
-    let manifest = parse_team_manifest(&serde_json::to_value(manifest).unwrap_or_default())?;
-    let bytes = decode_payload_bytes(&manifest, payloads, community, owner, team_id)?;
-    let text =
-        String::from_utf8(bytes).map_err(|_| "Portable team integrity check failed".to_owned())?;
-    serde_json::from_str(&text).map_err(|_| "Portable team integrity check failed".into())
-}
-
 /// Largest team instructions, in UTF-8 bytes (`TEAM_TEXT_BYTES`). They
 /// travel as ASCII `v1:` plus their raw UTF-8 bytes.
 pub const TEAM_TEXT_BYTES: usize = 128 * 1024;
@@ -297,73 +162,4 @@ pub fn parse_text_manifest(raw: &Value) -> Result<TeamManifest, String> {
         return Err("Invalid team instructions manifest".into());
     }
     Ok(manifest)
-}
-
-/// `teamTextBytes`: no NUL and at most 128 KiB before any trimming. A
-/// Rust string is always valid UTF-8.
-pub fn team_text_bytes(text: &str) -> Result<&[u8], String> {
-    if text.contains('\0') {
-        return Err("Team instructions cannot contain NUL characters".into());
-    }
-    if text.len() > TEAM_TEXT_BYTES {
-        return Err("Team instructions exceed 128 KiB".into());
-    }
-    Ok(text.as_bytes())
-}
-
-/// `encodeTeamText`: the text's manifest and chunks for one revision.
-pub fn encode_team_text(
-    text: &str,
-    community: &str,
-    owner: &str,
-    team_id: &str,
-    revision: &str,
-) -> Result<(TeamManifest, Vec<TeamPayload>), String> {
-    let body = team_text_bytes(text)?;
-    let mut bytes = Vec::with_capacity(TEXT_PREFIX.len() + body.len());
-    bytes.extend_from_slice(TEXT_PREFIX.as_bytes());
-    bytes.extend_from_slice(body);
-    encode_payload_bytes(
-        &bytes,
-        community,
-        owner,
-        team_id,
-        revision,
-        parse_text_manifest,
-    )
-}
-
-/// `decodeTeamText`: the text of a manifest's chunks, with every binding
-/// and the digest checked first.
-pub fn decode_team_text(
-    manifest: &TeamManifest,
-    payloads: &[TeamPayload],
-    community: &str,
-    owner: &str,
-    team_id: &str,
-) -> Result<String, String> {
-    let manifest = parse_text_manifest(&serde_json::to_value(manifest).unwrap_or_default())?;
-    let bytes = decode_payload_bytes(&manifest, payloads, community, owner, team_id)?;
-    let decoded =
-        String::from_utf8(bytes).map_err(|_| "Portable team integrity check failed".to_owned())?;
-    let text = decoded
-        .strip_prefix(TEXT_PREFIX)
-        .ok_or("Unsupported team instructions format")?;
-    team_text_bytes(text)?;
-    Ok(text.to_owned())
-}
-
-/// The manifest's chunk coordinates, in order.
-pub fn chunk_coordinates(manifest: &TeamManifest, community: &str, team_id: &str) -> Vec<String> {
-    (0..manifest.chunks)
-        .map(|index| {
-            payload_coordinate(
-                community,
-                &manifest.owner,
-                team_id,
-                &manifest.revision,
-                index,
-            )
-        })
-        .collect()
 }

@@ -39,7 +39,6 @@ pub mod sidebar;
 pub mod sidebar_store;
 pub mod socket;
 pub mod store;
-pub mod teams;
 pub mod threads;
 pub mod typing;
 pub mod unread;

@@ -180,7 +180,22 @@ pub fn coordinate(record: &Value, community: &str) -> Result<String, String> {
 
 /// The `t` tag a record is filed under (`kitTag`).
 pub fn tag(record: &Value) -> &'static str {
-    crate::teams::record_tag(record)
+    if record["value"]["type"] == "team-payload" {
+        PAYLOAD_TAG
+    } else if record["value"]["type"] == "team-text" {
+        super::TEXT_TAG
+    } else if record["version"] == 2 {
+        MANIFEST_TAG
+    } else if (record["value"]["type"] == "groups" && record["value"]["id"] == "me")
+        || (record["value"]["type"] == "template"
+            && record["value"]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("me-section-")))
+    {
+        ME_KIT_TAG
+    } else {
+        KIT_TAG
+    }
 }
 
 /// Opens one catalog head (`relay_kit_decode`) with the kit cipher, and

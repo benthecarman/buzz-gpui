@@ -8,9 +8,8 @@ use buzz_identity::Identity;
 use buzz_relay_client::kit::setup::{ChannelCreationInput, ChannelSetup};
 use buzz_relay_client::kit::{KitStatus, KitValue, Template};
 use buzz_relay_client::lifecycle::{self, Action, NewChannel};
-use buzz_relay_client::teams::Team;
 use buzz_relay_client::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -164,73 +163,6 @@ async fn saves_reads_conflicts_and_deletes_a_template() {
             .iter()
             .all(|t| t.id != template.id)
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn saves_and_loads_a_portable_team() {
-    let Some(fixture) = fixture() else {
-        eprintln!("BUZZ_TEST_RELAY not set; skipping");
-        return;
-    };
-    let carol = fixture.session("carol", Store::in_memory().unwrap()).await;
-    carol.kit_refresh().await.unwrap();
-    let name = unique("team");
-    let team = Team {
-        id: uuid(),
-        name: name.clone(),
-        agents: vec![fixture.pubkey("bob")],
-        portable: None,
-    };
-    // One chunk: a full 16 KiB chunk encrypts past the outbox's 32 KiB
-    // input limit, in buzz-app as here.
-    let snapshot = json!({
-        "format": "buzz-team-snapshot", "version": 1,
-        "team": {"name": name, "instructions": "Be brief."},
-        "members": [{"name": "Bob", "prompt": "x".repeat(3_000),
-            "memory": {"level": "all", "entries": ["secret"]}}]
-    });
-    let teams = carol.team_kit();
-    teams
-        .save_portable(team.clone(), snapshot.clone(), None, uuid())
-        .await
-        .unwrap();
-    carol.kit_refresh().await.unwrap();
-    let saved = entry(&carol, &team.id).expect("the team is listed");
-    assert_eq!(saved.record.version, 2);
-    let KitValue::Team(saved_team) = saved.record.value.clone() else {
-        panic!("a team")
-    };
-    assert_eq!(saved_team.portable.as_ref().unwrap().chunks, 1);
-    let portable = Team {
-        portable: saved_team.portable.clone(),
-        ..team
-    };
-    let loaded = teams.load_team(&portable).await.unwrap();
-    assert_eq!(loaded["team"]["instructions"], "Be brief.");
-    assert_eq!(loaded["members"][0]["memory"]["entries"], json!([]));
-
-    next_second().await;
-    carol
-        .kit_save(KitValue::Team(saved_team), Some(saved.event_id), true)
-        .await
-        .unwrap();
-}
-
-fn uuid() -> String {
-    // Version 4 shape from the clock; unique enough for throwaway records.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let hex = format!("{nanos:032x}");
-    format!(
-        "{}-{}-4{}-8{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[13..16],
-        &hex[17..20],
-        &hex[20..32]
-    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
