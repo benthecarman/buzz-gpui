@@ -190,7 +190,7 @@ impl AgentType for CodexType {
         true
     }
 
-    /// A workspace Codex cannot use, such as `~/code`, stays behind.
+    /// A workspace Codex cannot use, such as a relative one, stays behind.
     fn adopt(&self, carry: &buzz_host::api::Carry, saved: serde_json::Value) -> serde_json::Value {
         let mut config = Config::read(&saved);
         if let Some(instructions) = &carry.instructions {
@@ -334,7 +334,9 @@ mod adopt_tests {
             (adopted.instructions.as_str(), adopted.workspace.as_str()),
             ("Look around.", "/srv/code")
         );
-        let relative = Config::read(&CodexType.adopt(&carry("~/code"), saved));
+        let home = Config::read(&CodexType.adopt(&carry("~/code"), saved.clone()));
+        assert_eq!(home.workspace, "~/code");
+        let relative = Config::read(&CodexType.adopt(&carry("code"), saved));
         assert_eq!(relative.workspace, config::DEFAULT_WORKSPACE);
         assert_eq!(relative.instructions, "Look around.");
     }

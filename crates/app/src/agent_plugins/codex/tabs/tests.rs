@@ -102,7 +102,7 @@ fn saves_only_a_valid_workspace_and_restores_the_default_when_cleared() {
     };
     assert_eq!(
         validate(&relative),
-        Err("Enter an absolute workspace path or ~/.buzz.".into())
+        Err("Enter an absolute or ~/… workspace path.".into())
     );
     let custom = Config {
         workspace: " /tmp/codex ".into(),
@@ -118,6 +118,15 @@ fn saves_only_a_valid_workspace_and_restores_the_default_when_cleared() {
         ..Config::default()
     };
     assert_eq!(validate(&cleared), Ok(Config::default()));
+    // The process host expands a workspace under home.
+    let home = Config {
+        workspace: "~/code".into(),
+        ..Config::default()
+    };
+    assert_eq!(
+        validate(&home).map(|config| config.workspace),
+        Ok("~/code".into())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

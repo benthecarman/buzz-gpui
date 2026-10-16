@@ -14,7 +14,8 @@ pub struct Config {
     /// A reasoning effort; empty uses the model's default.
     pub effort: String,
     pub instructions: String,
-    /// An absolute directory, or `~/.buzz`.
+    /// An absolute directory, or one under the home directory written
+    /// `~/…`.
     pub workspace: String,
     /// `thread` or `channel`: whether each thread is its own session, or
     /// the whole channel is one.
@@ -117,9 +118,11 @@ pub fn absolute_workspace(path: &str) -> bool {
             && matches!(bytes[2], b'\\' | b'/'))
 }
 
-/// A workspace Codex can start in: absolute, or the default.
+/// A workspace Codex can start in: absolute, or under the home directory
+/// written `~/…`, which the process host expands.
 pub fn valid_workspace(path: &str) -> bool {
-    path.trim() == DEFAULT_WORKSPACE || absolute_workspace(path)
+    let path = path.trim();
+    path == "~" || path.starts_with("~/") || absolute_workspace(path)
 }
 
 #[cfg(test)]
@@ -165,6 +168,7 @@ mod tests {
         assert_eq!(effort_name(""), "");
         assert!(valid_workspace("~/.buzz") && valid_workspace(" /tmp/x "));
         assert!(valid_workspace("C:\\work") && valid_workspace("d:/work"));
-        assert!(!valid_workspace("relative") && !valid_workspace("~/other"));
+        assert!(valid_workspace("~/code") && valid_workspace(" ~ "));
+        assert!(!valid_workspace("relative") && !valid_workspace("~other"));
     }
 }

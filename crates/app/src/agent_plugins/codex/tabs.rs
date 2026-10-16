@@ -642,7 +642,7 @@ pub fn selected_model<'a>(draft: &Config, models: &'a [Model]) -> Option<&'a Mod
 pub fn validate(draft: &Config) -> Result<Config, String> {
     let settings = Config::read(&draft.value());
     if !valid_workspace(&settings.workspace) {
-        return Err("Enter an absolute workspace path or ~/.buzz.".into());
+        return Err("Enter an absolute or ~/… workspace path.".into());
     }
     Ok(settings)
 }

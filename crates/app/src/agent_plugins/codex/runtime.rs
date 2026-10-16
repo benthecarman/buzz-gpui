@@ -401,8 +401,8 @@ fn input(text: String) -> Value {
     json!([{ "type": "text", "text": text, "text_elements": [] }])
 }
 
-/// The workspace as an absolute path. The host expands `~/.buzz` and makes
-/// it; Codex needs an absolute path rather than shell-style home notation.
+/// The workspace as an absolute path. The host expands `~/…` and makes the
+/// directory; Codex needs an absolute path rather than shell-style home notation.
 async fn workspace(spawn: &Spawner, path: &str) -> Result<String, String> {
     if absolute_workspace(path) {
         return Ok(path.to_string());
@@ -419,7 +419,7 @@ async fn workspace(spawn: &Spawner, path: &str) -> Result<String, String> {
     let (code, stdout, _) = collect(&mut spawned.output).await;
     let workspace = stdout.trim().to_string();
     if code != Some(0) || !absolute_workspace(&workspace) {
-        return Err("Could not resolve the default Codex workspace.".to_string());
+        return Err(format!("Could not resolve the Codex workspace {path}."));
     }
     Ok(workspace)
 }
@@ -1114,7 +1114,7 @@ impl CodexRuntime {
             return self
                 .publish(
                     &request,
-                    "Choose an absolute workspace path or ~/.buzz in Codex settings first.",
+                    "Choose an absolute or ~/… workspace path in Codex settings first.",
                 )
                 .await;
         }

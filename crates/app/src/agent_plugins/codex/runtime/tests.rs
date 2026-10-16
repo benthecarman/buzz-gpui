@@ -1066,8 +1066,20 @@ async fn a_relative_workspace_is_reported_without_starting() {
     let f = fixture();
     let run = f.delivery_with("hello", &root(), json!({ "workspace": "relative" }));
     f.run(run).await;
-    assert!(f.contents()[0].contains("absolute workspace"));
+    assert!(f.contents()[0].contains("absolute or ~/… workspace"));
     assert!(f.fake.state().spawns.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_under_home_is_resolved_by_the_process_host() {
+    let f = fixture();
+    let run = f.delivery_with("hello", &root(), json!({ "workspace": "~/code" }));
+    f.run(run).await;
+    f.starts_reach(1).await;
+    assert_eq!(
+        f.fake.spawned("workspace")[0].cwd.as_deref(),
+        Some("~/code")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1111,7 +1123,7 @@ async fn reports_a_default_workspace_that_cannot_be_resolved() {
     f.fake.state().workspace_exit = 1;
     f.run(f.delivery_with("hello", &root(), json!({}))).await;
     f.published_reach(1).await;
-    assert!(f.contents()[0].contains("Could not resolve the default Codex workspace"));
+    assert!(f.contents()[0].contains("Could not resolve the Codex workspace ~/.buzz"));
     assert!(f.starts().is_empty());
 }
 
