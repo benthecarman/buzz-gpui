@@ -2,8 +2,8 @@
 
 use crate::{ActiveTheme, Icon, IconName, Surface, TypeStyled, tokens::radius};
 use gpui_kit::{
-    App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, rems,
+    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, rems,
 };
 use std::rc::Rc;
 
@@ -34,6 +34,8 @@ pub struct Checkbox {
     id: ElementId,
     state: CheckboxState,
     label: Option<SharedString>,
+    /// Shown in place of `label`, such as an avatar beside a name.
+    label_element: Option<AnyElement>,
     description: Option<SharedString>,
     disabled: bool,
     surface: Surface,
@@ -46,6 +48,7 @@ impl Checkbox {
             id: id.into(),
             state: state.into(),
             label: None,
+            label_element: None,
             description: None,
             disabled: false,
             surface: Surface::default(),
@@ -55,6 +58,12 @@ impl Checkbox {
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// A label that is more than text (React's `label: ReactNode`).
+    pub fn label_element(mut self, label: impl IntoElement) -> Self {
+        self.label_element = Some(label.into_any_element());
         self
     }
 
@@ -114,7 +123,8 @@ impl RenderOnce for Checkbox {
             .border_color(border)
             .bg(bg)
             .children(mark.map(|m| Icon::new(m).size(14.).color(glyph)));
-        let has_text = self.label.is_some() || self.description.is_some();
+        let has_text =
+            self.label.is_some() || self.label_element.is_some() || self.description.is_some();
         let next = self.state != CheckboxState::Checked;
         div()
             .id(self.id)
@@ -136,6 +146,18 @@ impl RenderOnce for Checkbox {
                         .min_w_0()
                         .py(rems(0.625))
                         .when_some(self.label, |this, label| {
+                            this.child(
+                                div()
+                                    .text_label_sm()
+                                    .text_color(if self.disabled {
+                                        c.text_unavailable
+                                    } else {
+                                        c.text_standard
+                                    })
+                                    .child(label),
+                            )
+                        })
+                        .when_some(self.label_element, |this, label| {
                             this.child(
                                 div()
                                     .text_label_sm()

@@ -14,6 +14,7 @@ mod teams;
 pub use attention::AttentionPanel;
 pub use manage::{AgentDelete, Removed};
 pub use page::Agents2Page;
+pub(crate) use page::agent_picture;
 pub use tabs::AgentTabs;
 
 use super::pages::{self, Page, PageSpec};

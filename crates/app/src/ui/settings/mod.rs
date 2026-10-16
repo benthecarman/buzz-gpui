@@ -15,6 +15,7 @@ pub(crate) mod form;
 pub mod messages;
 mod notifications;
 pub mod pairing;
+pub mod templates;
 pub use pairing::close as close_pairing;
 mod plugins;
 mod profile;

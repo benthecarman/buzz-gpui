@@ -7,6 +7,7 @@ mod agents2;
 mod appearance;
 mod atomic_file;
 mod buzz_mcp;
+mod channel_templates;
 mod community;
 mod config;
 mod deep_links;
@@ -121,6 +122,7 @@ fn main() {
         idle::Idle::init(cx);
         plugins::Plugins::init(cx);
         agents2::init(cx);
+        channel_templates::init(cx);
         agent_plugins::claude_code::init(cx);
         agent_plugins::codex::init(cx);
         mission_control::init(cx);
@@ -133,6 +135,7 @@ fn main() {
         ui::projects::init(cx);
         ui::moderation::init(cx);
         ui::settings::messages::init(cx);
+        ui::settings::templates::init(cx);
         ui::settings::pairing::init(cx);
         ui::new_channel::init(cx);
         ui::channel_panels::dev_sample(cx);
