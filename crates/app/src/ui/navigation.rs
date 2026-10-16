@@ -188,6 +188,17 @@ impl History {
         true
     }
 
+    /// Puts `target` in place of the current entry (`replace: true`),
+    /// keeping the entries after it.
+    pub fn replace(&mut self, target: Target) {
+        match self.entries.get_mut(self.index) {
+            Some((_, current)) => *current = target,
+            None => {
+                self.push(target);
+            }
+        }
+    }
+
     pub fn can_go_back(&self) -> bool {
         self.index > 0
     }
@@ -451,6 +462,22 @@ mod tests {
         history.back();
         assert!(history.push(channel("d")));
         assert!(!history.can_go_forward());
+        assert_eq!(history.back(), Some(channel("a")));
+    }
+
+    #[test]
+    fn replacing_swaps_the_current_entry_only() {
+        let mut history = History::default();
+        history.replace(channel("a"));
+        assert_eq!(history.current(), Some(&channel("a")));
+        for name in ["b", "c"] {
+            history.push(channel(name));
+        }
+        history.back();
+        history.replace(channel("d"));
+        assert_eq!(history.current(), Some(&channel("d")));
+        assert_eq!(history.forward(), Some(channel("c")));
+        history.back();
         assert_eq!(history.back(), Some(channel("a")));
     }
 

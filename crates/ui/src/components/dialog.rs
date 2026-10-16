@@ -89,6 +89,7 @@ pub struct Dialog {
     heading_title: bool,
     stable_height: bool,
     title_icon: Option<IconName>,
+    title_leading: Option<AnyElement>,
     on_close: Option<ClickHandler>,
 }
 
@@ -108,8 +109,15 @@ impl Dialog {
             heading_title: false,
             stable_height: false,
             title_icon: None,
+            title_leading: None,
             on_close: None,
         }
+    }
+
+    /// An element before the title, such as a brand mark, 8px from it.
+    pub fn title_leading(mut self, element: impl IntoElement) -> Self {
+        self.title_leading = Some(element.into_any_element());
+        self
     }
 
     /// A 16px icon before the title, 8px from it.
@@ -240,6 +248,7 @@ impl RenderOnce for Dialog {
                                             this.text_label()
                                         }
                                     })
+                                    .children(self.title_leading)
                                     .when_some(self.title_icon, |this, icon| {
                                         this.child(crate::Icon::new(icon).size(16.))
                                     })

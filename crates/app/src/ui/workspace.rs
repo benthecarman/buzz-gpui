@@ -812,6 +812,19 @@ impl Workspace {
         super::search_kit::record_visit(self.community.as_ref(), &place, false, cx);
     }
 
+    /// Goes to `target` in place of the current visit (`replace: true`),
+    /// as closing a routed dialog does.
+    pub fn navigate_replacing(
+        &mut self,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_outside_settings(&target);
+        self.history.replace(target.clone());
+        self.apply(target, window, cx);
+    }
+
     /// Selecting a community in the rail is a visit to its Messages page,
     /// except while an outside link waits to be retried there.
     pub(crate) fn select_community(

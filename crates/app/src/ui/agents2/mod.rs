@@ -10,6 +10,7 @@ mod manage;
 mod memory;
 mod packs;
 mod page;
+pub(crate) mod routes;
 mod tabs;
 mod teams;
 
@@ -17,10 +18,10 @@ pub use attention::AttentionPanel;
 pub(crate) use browse::model_icon;
 pub use manage::{AgentDelete, Removed};
 pub use page::Agents2Page;
-pub(crate) use page::agent_picture;
+pub(crate) use page::{agent_picture, agent_target};
 pub use tabs::AgentTabs;
 
-use super::pages::{self, Page, PageSpec};
+use super::pages::{self, Page, PageRoutes, PageSpec};
 use crate::agents2::{AgentConversation, Agents2};
 use buzz_ui::{ActiveTheme, Button, ButtonSize, Colors, IconName, TypeStyled, tokens::radius};
 use gpui_kit::*;
@@ -37,6 +38,18 @@ pub fn register(cx: &mut App) {
             ..PageSpec::sidebar(PAGE, "Agents", IconName::Robot, |window, cx| {
                 cx.new(|cx| Agents2Page::new(window, cx)).into()
             })
+        },
+        cx,
+    );
+    pages::register_routes(
+        PAGE,
+        PageRoutes {
+            validate: routes::valid,
+            open: |view, params, window, cx| {
+                if let Ok(page) = view.clone().downcast::<Agents2Page>() {
+                    page.update(cx, |page, cx| page.open_route(params, window, cx));
+                }
+            },
         },
         cx,
     );

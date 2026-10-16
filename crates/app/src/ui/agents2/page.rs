@@ -9,24 +9,32 @@
 //! - Import: identities earlier agent systems saved on the hosts.
 //! - Browse: agents shared in the community.
 //!
-//! The header's More menu opens Teams in the side panel.
+//! The header's More menu opens Provider settings, each agent type's
+//! readiness on this device with its provider dialog, and Teams in the
+//! side panel. The page's routes open a provider dialog or an agent.
 
 use super::attention::summary as attention_summary;
 use super::bring_over::{BringOver, BringOverEvent};
 use super::browse::{AgentBrowse, BrowseEvent};
 use super::card::{self, AgentCard};
 use super::create::{CreateAgent, CreateEvent, type_icon};
+use super::routes;
 use super::teams::{CloseTeams, TeamsPanel};
 use super::{AgentDelete, AgentTabs, Removed, empty_state, problem};
 use crate::agents2::listings::Elsewhere;
-use crate::agents2::{Agent, AgentChange, Agents2, RegisteredType, Status, type_of, types};
+use crate::agents2::{
+    Agent, AgentChange, Agents2, CloseProvider, ProviderChanges, Readiness, RegisteredType, Status,
+    type_of, types,
+};
+use crate::ui::navigation::{self, Place, Target};
 use crate::ui::overlay::{self, Align, Dismiss};
+use crate::ui::pages::Page;
 use crate::ui::settings::avatar::{
     AvatarDismissed, AvatarDone, AvatarEditor, Preview, popover as avatar_popover,
 };
 use buzz_ui::{
-    ActiveTheme, Avatar, AvatarSize, Button, Colors, IconButton, IconButtonSize, IconName, Menu,
-    MenuItem, PanelHeader, Tab, TabVariant, Tabs, TextField, TypeStyled,
+    ActiveTheme, Avatar, AvatarSize, Button, Colors, Dialog, IconButton, IconButtonSize, IconName,
+    Menu, MenuItem, PanelHeader, Spinner, Tab, TabVariant, Tabs, TextField, TypeStyled,
     tokens::{duration, easing, radius},
 };
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -114,6 +122,33 @@ fn shown(cx: &App) -> Vec<Shown> {
         .collect()
 }
 
+/// The selected community's origin, as navigation names it.
+fn community(cx: &App) -> Option<String> {
+    crate::community::AppState::current(cx).map(|community| community.read(cx).origin.to_string())
+}
+
+/// Closes the provider dialog: the page's start replaces its route.
+fn close_provider(cx: &mut App) {
+    let target = Target {
+        community: community(cx),
+        place: Place::Page(Page::AGENTS),
+    };
+    navigation::with_workspace(cx, move |workspace, window, cx| {
+        workspace.navigate_replacing(target, window, cx)
+    });
+}
+
+/// The route that opens an agent's Build view, for other pages.
+pub(crate) fn agent_target(pubkey: &str, cx: &App) -> Target {
+    Target {
+        community: community(cx),
+        place: Place::Route {
+            page: Page::AGENTS,
+            params: routes::agent_params(pubkey),
+        },
+    }
+}
+
 /// The next selection for a key in the listbox: arrows move by one or by
 /// a row, Home and End go to the ends. `None` when the key does nothing.
 pub(crate) fn step(key: &str, from: Option<usize>, count: usize, columns: usize) -> Option<usize> {
@@ -157,6 +192,10 @@ pub struct Agents2Page {
     teams: Option<Entity<TeamsPanel>>,
     build: Option<Entity<Build>>,
     more_open: bool,
+    /// The Provider settings submenu is open.
+    providers_open: bool,
+    /// The provider dialog the route opened: its type's key, and its body.
+    provider: Option<(SharedString, Option<AnyView>)>,
     /// Counts side panel openings, so each one animates in.
     side_opened: usize,
     side_key: Option<String>,
@@ -165,8 +204,10 @@ pub struct Agents2Page {
 
 impl Agents2Page {
     pub fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut subscriptions =
-            vec![cx.observe_global::<crate::agents2::registry::AgentTypes>(|_, cx| cx.notify())];
+        let mut subscriptions = vec![
+            cx.observe_global::<crate::agents2::registry::AgentTypes>(|_, cx| cx.notify()),
+            cx.observe_global::<ProviderChanges>(|_, cx| cx.notify()),
+        ];
         if let Some(service) = Agents2::global(cx) {
             subscriptions.push(cx.observe(&service, |_, _, cx| cx.notify()));
         }
@@ -183,6 +224,8 @@ impl Agents2Page {
             teams: None,
             build: None,
             more_open: false,
+            providers_open: false,
+            provider: None,
             side_opened: 0,
             side_key: None,
             _subscriptions: subscriptions,
@@ -222,6 +265,121 @@ impl Agents2Page {
         self.tab = TabId::Yours;
         self.create = None;
         self.build(pubkey, window, cx);
+    }
+
+    /// Shows a route's place (`navigation.target.route`); `None` is the
+    /// page's start, which closes a provider dialog.
+    pub fn open_route(
+        &mut self,
+        params: Option<&serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(params) = params else {
+            self.provider = None;
+            return cx.notify();
+        };
+        if let Some(pubkey) = routes::agent_route(params) {
+            self.provider = None;
+            self.open_agent(pubkey.to_owned(), window, cx);
+        } else if let Some(key) = routes::provider_route(params) {
+            let key = SharedString::from(key.to_owned());
+            if self.provider.as_ref().map(|(open, _)| open) == Some(&key) {
+                return;
+            }
+            let close: CloseProvider = Rc::new(|_, cx| close_provider(cx));
+            let body = type_of(&key, cx)
+                .and_then(|kind| kind.kind.provider(cx))
+                .map(|provider| provider.dialog_body(close, window, cx));
+            self.provider = Some((key, body));
+            cx.notify();
+        }
+    }
+
+    /// Opens a type's provider dialog as a new visit.
+    fn select_provider(&mut self, key: SharedString, cx: &mut Context<Self>) {
+        self.more_open = false;
+        self.providers_open = false;
+        cx.notify();
+        let target = Target {
+            community: community(cx),
+            place: Place::Route {
+                page: Page::AGENTS,
+                params: routes::provider_params(&key),
+            },
+        };
+        navigation::with_workspace(cx, move |workspace, window, cx| {
+            workspace.navigate(target, window, cx)
+        });
+    }
+
+    /// A row of the Provider settings submenu: the type's mark, a spinner
+    /// while it checks, and what it needs.
+    fn provider_row(
+        &self,
+        index: usize,
+        kind: &RegisteredType,
+        cx: &mut Context<Self>,
+    ) -> MenuItem {
+        let title = kind.kind.title();
+        let id = ("agents-provider", index);
+        let Some(provider) = kind.kind.provider(cx) else {
+            return MenuItem::new(id, title)
+                .leading(type_icon(Some(kind), 17., cx))
+                .disabled(true);
+        };
+        let snapshot = provider.snapshot(cx);
+        let checking = snapshot.readiness == Readiness::Checking;
+        let label: SharedString = match snapshot.readiness {
+            Readiness::Attention => snapshot
+                .attention_label
+                .unwrap_or_else(|| format!("Set up {title}"))
+                .into(),
+            _ => title,
+        };
+        let leading = if checking {
+            Spinner::new().size(17.).into_any_element()
+        } else {
+            type_icon(Some(kind), 17., cx)
+        };
+        let key = kind.key.clone();
+        MenuItem::new(id, label)
+            .leading(leading)
+            .disabled(checking)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // Attention handled directly, such as an install, skips
+                // the dialog.
+                let provider = type_of(&key, cx).and_then(|kind| kind.kind.provider(cx));
+                if let Some(provider) = provider
+                    && provider.snapshot(cx).readiness == Readiness::Attention
+                    && let Some(action) = provider.attention_action(cx)
+                {
+                    this.more_open = false;
+                    this.providers_open = false;
+                    cx.notify();
+                    return action(cx);
+                }
+                this.select_provider(key.clone(), cx);
+            }))
+    }
+
+    /// The open provider dialog: the type's mark and title over its
+    /// provider's body. Outside clicks close it unless its work blocks.
+    fn provider_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (key, body) = self.provider.as_ref()?;
+        let body = body.clone()?;
+        let kind = type_of(key, cx)?;
+        let blocking = kind.kind.provider(cx)?.snapshot(cx).blocking;
+        let dialog = Dialog::new("agents-provider-dialog", kind.kind.title())
+            .title_leading(type_icon(Some(&kind), 22., cx))
+            .compact_header_gap()
+            .when(!blocking, |dialog| {
+                dialog.on_close(|_, _, cx| close_provider(cx))
+            })
+            .child(body);
+        let dismiss: Option<Dismiss> = (!blocking)
+            .then(|| Rc::new(|_: &mut Window, cx: &mut App| close_provider(cx)) as Dismiss);
+        Some(overlay::modal(window, dialog, dismiss).into_any_element())
     }
 
     fn new_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -377,16 +535,73 @@ impl Agents2Page {
                 cx.notify();
             }));
         let menu = self.more_open.then(|| {
-            Menu::new().child(
-                MenuItem::new("agents-teams", "Teams")
-                    .disabled(teams_open)
-                    .on_click(cx.listener(|this, _, _, cx| this.open_teams(cx))),
-            )
+            // Hovering the trigger checks every provider.
+            let check = |cx: &mut App| {
+                for kind in types(cx) {
+                    if let Some(provider) = kind.kind.provider(cx) {
+                        provider.check(cx);
+                    }
+                }
+            };
+            let providers = div()
+                .id("agents-providers-trigger")
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && !this.providers_open {
+                        this.providers_open = true;
+                        check(cx);
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    MenuItem::new("agents-providers", "Provider settings")
+                        .submenu()
+                        .highlighted(self.providers_open)
+                        // Opens it, as hovering does; a press never closes
+                        // what the pointer just opened.
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.providers_open {
+                                this.providers_open = true;
+                                check(cx);
+                                cx.notify();
+                            }
+                        })),
+                );
+            let teams = div()
+                .id("agents-teams-row")
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if *hovered && this.providers_open {
+                        this.providers_open = false;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    MenuItem::new("agents-teams", "Teams")
+                        .disabled(teams_open)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_teams(cx))),
+                );
+            let submenu = self.providers_open.then(|| {
+                let kinds = types(cx);
+                Menu::new().children(
+                    kinds
+                        .iter()
+                        .enumerate()
+                        .map(|(index, kind)| self.provider_row(index, kind, cx)),
+                )
+            });
+            // The menu hangs from the page's right edge, so the submenu
+            // opens to its left.
+            div()
+                .flex()
+                .items_start()
+                .gap(px(4.))
+                .children(submenu)
+                .child(Menu::new().child(providers).child(teams))
         });
         let weak = cx.entity().downgrade();
         let dismiss: Dismiss = Rc::new(move |_, cx| {
             let _ = weak.update(cx, |this, cx| {
                 this.more_open = false;
+                this.providers_open = false;
                 cx.notify();
             });
         });
@@ -824,6 +1039,7 @@ impl Render for Agents2Page {
             .child(self.header(building.as_ref(), window, cx))
             .child(div().flex_1().min_h_0().child(body))
             .children(self.create.clone())
+            .children(self.provider_dialog(window, cx))
     }
 }
 
