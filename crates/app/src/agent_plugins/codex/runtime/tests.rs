@@ -27,6 +27,7 @@ fn other_root() -> String {
 }
 
 type Pending = BoxFuture<'static, Result<Vec<BuzzEvent>, String>>;
+type PendingMemories = BoxFuture<'static, Result<(Vec<Memory>, bool), String>>;
 
 #[derive(Default)]
 struct FakeRelay {
@@ -36,6 +37,8 @@ struct FakeRelay {
     read_count: Mutex<usize>,
     memories: Arc<Mutex<Vec<Memory>>>,
     memory_reads: Mutex<usize>,
+    /// Answers for the next memory reads; later reads list `memories`.
+    memory_answers: Mutex<VecDeque<PendingMemories>>,
 }
 
 impl FakeRelay {
@@ -76,6 +79,14 @@ impl OwnerRelay for FakeRelay {
         *locked(&self.memory_reads) += 1;
         let memories = locked(&self.memories).clone();
         async move { Ok(memories) }.boxed()
+    }
+    fn memory_listing(&self, _: &str) -> PendingMemories {
+        *locked(&self.memory_reads) += 1;
+        if let Some(answer) = locked(&self.memory_answers).pop_front() {
+            return answer;
+        }
+        let memories = locked(&self.memories).clone();
+        async move { Ok((memories, false)) }.boxed()
     }
 }
 
@@ -1431,7 +1442,9 @@ async fn file_tools_use_the_launched_workspace_and_memory_the_owners_view() {
         *locked(&f.agent.remembered),
         [("mem/test".to_string(), "remembered".to_string(), 0)]
     );
-    assert_eq!(*locked(&f.relay.memory_reads), 2);
+    // The turn's own `core` read, then mem_set's read and a fresh read
+    // after the write.
+    assert_eq!(*locked(&f.relay.memory_reads), 3);
     let sent = f
         .tool(
             "send",
@@ -2087,4 +2100,86 @@ fn words_codex_items_as_steps() {
         Some("echo")
     );
     assert_eq!(programs(Some("   ")), None);
+}
+
+/// The Buzz instructions turn `index` was started with.
+fn instructions(f: &Fixture, index: usize) -> String {
+    f.starts()[index]["params"]["additionalContext"]["buzz.instructions"]["value"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gives_each_turn_the_current_core_memory_and_goes_on_without_it() {
+    let f = fixture();
+    f.run(f.delivery("@Codex first")).await;
+    f.starts_reach(1).await;
+    assert!(instructions(&f, 0).contains(
+        "Current core memory replaces all prior core memory.\n<core-memory>\nNo core memory found."
+    ));
+    f.complete_turn(0, "FIRST").await;
+    locked(&f.relay.memories).push(Memory {
+        slug: "core".into(),
+        body: "I am Codex.".into(),
+        created_at: 1,
+    });
+    f.run(f.delivery_in("@Codex second", &other_root())).await;
+    f.starts_reach(2).await;
+    assert!(instructions(&f, 1).contains(
+        "Current core memory replaces all prior core memory.\n<core-memory>\nI am Codex.\n</core-memory>"
+    ));
+    f.complete_turn(1, "SECOND").await;
+    locked(&f.relay.memory_answers).push_back(async { Err("offline".to_string()) }.boxed());
+    f.run(f.delivery_in("@Codex third", &"f".repeat(64))).await;
+    f.starts_reach(3).await;
+    assert!(instructions(&f, 2).contains("TEST_INSTRUCTIONS"));
+    assert!(!instructions(&f, 2).contains("<core-memory>"));
+    f.complete_turn(2, "THIRD").await;
+    f.published_reach(3).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn does_not_declare_core_missing_when_the_listing_is_partial() {
+    let f = fixture();
+    locked(&f.relay.memory_answers).push_back(async { Ok((vec![], true)) }.boxed());
+    f.run(f.delivery("partial")).await;
+    f.starts_reach(1).await;
+    let instructions = instructions(&f, 0);
+    assert!(instructions.contains("TEST_INSTRUCTIONS"));
+    assert!(!instructions.contains("No core memory found"));
+    assert!(!instructions.contains("<core-memory>"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coalesces_concurrent_core_reads() {
+    let f = fixture();
+    let (held, open) = gate();
+    locked(&f.relay.memory_answers).push_back(
+        async move {
+            held.await;
+            let core = Memory {
+                slug: "core".into(),
+                body: "CONCURRENT CORE".into(),
+                created_at: 1,
+            };
+            Ok((vec![core], false))
+        }
+        .boxed(),
+    );
+    for index in 0..5u8 {
+        let thread = format!("{index:x}").repeat(64);
+        f.run(f.delivery_in(&format!("concurrent {index}"), &thread))
+            .await;
+    }
+    until(|| *locked(&f.relay.memory_reads) == 1).await;
+    flush().await;
+    assert_eq!(*locked(&f.relay.memory_reads), 1);
+    assert!(f.starts().is_empty());
+    let _ = open.send(());
+    until(|| f.starts().len() == 5).await;
+    for index in 0..5 {
+        assert!(instructions(&f, index).contains("CONCURRENT CORE"));
+    }
+    assert_eq!(*locked(&f.relay.memory_reads), 1);
 }

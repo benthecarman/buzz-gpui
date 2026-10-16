@@ -39,6 +39,15 @@ const DETAIL_LIMIT: usize = 4000;
 /// The abort reasons of buzz-app's `AbortController` and `AbortSignal`.
 const ABORTED: &str = "The operation was aborted.";
 const TURN_ENDED: &str = "The Codex turn has ended";
+const NOT_CONNECTED: &str = "Buzz is not connected to this community";
+const MEMORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// An owner read of an agent's memory, and whether it is partial, with
+/// the community it reads.
+type MemoryRead = (
+    Arc<dyn OwnerRelay>,
+    Shared<BoxFuture<'static, Result<(Vec<Memory>, bool), String>>>,
+);
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -373,6 +382,9 @@ struct Inner {
     views: Mutex<HashMap<String, Vec<SessionView>>>,
     /// Each agent's own community, as its owner reads it, and its scope.
     relays: Mutex<HashMap<String, Scoped>>,
+    /// Each agent's memory read, which its turns and tools share while it
+    /// runs, and the community it reads.
+    reading: Mutex<HashMap<String, MemoryRead>>,
     storage: Arc<dyn Storage>,
     changes: watch::Sender<u64>,
     next_job: AtomicU64,
@@ -471,6 +483,7 @@ impl CodexRuntime {
                 previews: Mutex::default(),
                 views: Mutex::default(),
                 relays: Mutex::default(),
+                reading: Mutex::default(),
                 storage,
                 changes: watch::Sender::new(0),
                 next_job: AtomicU64::new(1),
@@ -1320,6 +1333,72 @@ impl CodexRuntime {
         }
     }
 
+    /// The agent's memory, read back through the owner's view: it is
+    /// encrypted to the owner, so no agent key is needed. Reads at once
+    /// share one, and the result is only the community's it was read in.
+    async fn memories(
+        &self,
+        request: &Request,
+        signal: &Signal,
+    ) -> Result<(Vec<Memory>, bool), String> {
+        signal.check()?;
+        let relay = self.relay_of(request).ok_or(NOT_CONNECTED)?;
+        let agent = request.agent.pubkey();
+        let read = {
+            let mut reading = locked(&self.inner.reading);
+            match reading.get(&agent) {
+                Some((of, read)) if Arc::ptr_eq(of, &relay) && read.peek().is_none() => {
+                    read.clone()
+                }
+                _ => {
+                    let read = relay.memory_listing(&agent);
+                    let read = async move {
+                        tokio::time::timeout(MEMORY_TIMEOUT, read)
+                            .await
+                            .unwrap_or_else(|_| Err("Memory read timed out".into()))
+                    }
+                    .boxed()
+                    .shared();
+                    reading.insert(agent, (relay.clone(), read.clone()));
+                    read
+                }
+            }
+        };
+        let listing = tokio::select! {
+            listing = read => listing?,
+            reason = signal.wait() => return Err(reason),
+        };
+        signal.check()?;
+        match self.relay_of(request) {
+            Some(current) if Arc::ptr_eq(&current, &relay) => Ok(listing),
+            _ => Err(NOT_CONNECTED.into()),
+        }
+    }
+
+    /// The agent's `core` memory for a turn: its text, `Some(None)` when
+    /// it has none, or `None` when it could not be read, so the turn goes
+    /// on without it. Fails only when the turn is stopped.
+    async fn core(
+        &self,
+        request: &Request,
+        signal: &Signal,
+    ) -> Result<Option<Option<String>>, String> {
+        match self.memories(request, signal).await {
+            Ok((memories, partial)) => Ok(
+                match memories.into_iter().find(|memory| memory.slug == "core") {
+                    Some(core) => Some(Some(core.body)),
+                    None if partial => None,
+                    None => Some(None),
+                },
+            ),
+            Err(error) => {
+                signal.check()?;
+                tracing::warn!(%error, "Codex could not read the agent's memory");
+                Ok(None)
+            }
+        }
+    }
+
     /// Replies to the request in its thread, as the agent. Tags the owner
     /// even when a sibling asked.
     async fn publish(&self, request: &Request, content: &str) -> Result<(), String> {
@@ -1388,18 +1467,18 @@ impl CodexRuntime {
                 let (this, request, check, signal) =
                     (this.clone(), request.clone(), check.clone(), signal.clone());
                 async move {
-                    let relay = this
-                        .relay_of(&request)
-                        .ok_or("Buzz is not connected to this community")?;
-                    let agent = request.agent.pubkey();
-                    let memories: Vec<Memory> = tokio::select! {
-                        memories = relay.memories(&agent) => memories?,
-                        reason = signal.wait() => return Err(reason),
-                    };
+                    let (memories, _) = this.memories(&request, &signal).await?;
                     check()?;
                     Ok(memories)
                 }
                 .boxed()
+            })
+        };
+        // A read that started before a write would hide it.
+        let remembered = {
+            let (this, agent) = (self.clone(), request.agent.pubkey());
+            Arc::new(move |_: &str| {
+                locked(&this.inner.reading).remove(&agent);
             })
         };
         let client = AppClient {
@@ -1407,7 +1486,7 @@ impl CodexRuntime {
             spawn: entry.spawn.clone(),
             cwd: locked(&active.workspace).clone(),
             memories,
-            remembered: Arc::new(|_| {}),
+            remembered,
             check: Some(check),
             signal: Some(active.signal.clone()),
         };
@@ -1768,7 +1847,8 @@ impl CodexRuntime {
                 }),
             )
             .await?;
-            let context = self.history(&request, &signal).await?;
+            let (context, memory) =
+                tokio::try_join!(self.history(&request, &signal), self.core(&request, &signal))?;
             signal.check()?;
             // Before the request: Codex reports the turn's commands as soon
             // as it starts, sometimes before this task resumes with the
@@ -1790,7 +1870,7 @@ impl CodexRuntime {
                         "additionalContext": {
                             "buzz.instructions": {
                                 "kind": "application",
-                                "value": developer_instructions(&name, &agent, Some((&request.settings, &request.team)), None),
+                                "value": developer_instructions(&name, &agent, Some((&request.settings, &request.team)), memory.as_ref().map(Option::as_deref)),
                             },
                         },
                     }),

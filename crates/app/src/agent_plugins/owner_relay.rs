@@ -39,6 +39,15 @@ pub trait OwnerRelay: Send + Sync {
     /// The agent's memory, read back with the owner's key: it is encrypted
     /// to the owner, so no agent key is needed to read it.
     fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>>;
+    /// [`Self::memories`], and whether some records could not be read,
+    /// so a missing `core` is not taken for one the agent never wrote.
+    fn memory_listing(
+        &self,
+        agent: &str,
+    ) -> BoxFuture<'static, Result<(Vec<Memory>, bool), String>> {
+        let read = self.memories(agent);
+        Box::pin(async move { read.await.map(|memories| (memories, false)) })
+    }
     /// The community's own signing key (NIP-11 `self`), which signs its
     /// workflows' messages, once known.
     fn authority(&self) -> Option<String> {
@@ -190,6 +199,14 @@ impl OwnerRelay for AppRelay {
     }
 
     fn memories(&self, agent: &str) -> BoxFuture<'static, Result<Vec<Memory>, String>> {
+        let read = self.memory_listing(agent);
+        Box::pin(async move { read.await.map(|(memories, _)| memories) })
+    }
+
+    fn memory_listing(
+        &self,
+        agent: &str,
+    ) -> BoxFuture<'static, Result<(Vec<Memory>, bool), String>> {
         let (http, identity, agent) = (self.http.clone(), self.identity.clone(), agent.to_string());
         Box::pin(async move {
             let query = buzz_desktop::relay::agent::memory_query(&identity.pubkey_hex(), &agent)?;
@@ -201,7 +218,8 @@ impl OwnerRelay for AppRelay {
                 .map_err(|error| error.to_string())?;
             let records: Vec<Option<Value>> = records.into_iter().map(Some).collect();
             let listing = identity.decode_agent_memories(&agent, &records)?;
-            Ok(listing
+            let partial = listing["partial"].as_bool().unwrap_or(true);
+            let memories = listing
                 .get("entries")
                 .and_then(Value::as_array)
                 .map(|entries| {
@@ -216,7 +234,8 @@ impl OwnerRelay for AppRelay {
                         })
                         .collect()
                 })
-                .unwrap_or_default())
+                .unwrap_or_default();
+            Ok((memories, partial))
         })
     }
 }
