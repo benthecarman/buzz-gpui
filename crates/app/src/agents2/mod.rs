@@ -20,6 +20,7 @@ mod cleanup;
 mod dev;
 pub mod listings;
 pub mod objects;
+mod presence;
 pub mod registry;
 pub mod runtime;
 mod service;

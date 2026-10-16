@@ -162,6 +162,33 @@ impl Actor {
         self.publish_activity();
     }
 
+    /// Signs owner presence for the viewer's `agents`, and the socket to
+    /// send it on; `None` when this session can never sign it.
+    pub(super) fn agent_presence(
+        &self,
+        status: &str,
+        agents: Vec<String>,
+    ) -> Result<Option<(crate::socket::SocketPublisher, nostr::prelude::Event)>, String> {
+        let Some(socket) = self.live.as_ref().map(|live| live.socket().publisher()) else {
+            return Err("Agent presence needs a live connection".into());
+        };
+        let tags = agents
+            .into_iter()
+            .map(|agent| vec!["p".to_string(), agent])
+            .collect();
+        let signed = self
+            .identity
+            .template(
+                Purpose::Presence,
+                buzz_identity::AGENT_PRESENCE,
+                now_ms() / 1000,
+                tags,
+                status.to_owned(),
+            )
+            .and_then(|unsigned| self.identity.sign(Purpose::Presence, unsigned));
+        Ok(signed.ok().map(|event| (socket, event)))
+    }
+
     /// Signs our status (bare content, no tags) and sends it over the
     /// authenticated socket only: never HTTP, never the outbox.
     fn publish_presence(&mut self, publication: Publication) {

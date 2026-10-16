@@ -735,6 +735,36 @@ impl Session {
         let _ = self.commands.send(Message::SetPresenceMode(mode));
     }
 
+    /// Says the viewer's `agents`, which this app runs, are `online` or
+    /// `offline` (owner presence, kind 20003), on the live socket:
+    /// ephemeral, so nothing is queued or retried. The relay keeps only the
+    /// agents the viewer owns. `Ok(false)` when this session can never send
+    /// it.
+    pub async fn publish_agent_presence(
+        &self,
+        status: &str,
+        agents: Vec<String>,
+    ) -> Result<bool, String> {
+        let (reply, answer) = oneshot::channel();
+        let status = status.to_owned();
+        self.commands
+            .send(Message::With(Box::new(move |actor| {
+                let _ = reply.send(actor.agent_presence(&status, agents));
+            })))
+            .map_err(|_| "The session has closed".to_string())?;
+        let prepared = answer
+            .await
+            .map_err(|_| "The session has closed".to_string())??;
+        let Some((socket, event)) = prepared else {
+            return Ok(false);
+        };
+        socket
+            .publish(event)
+            .await
+            .map(|_| true)
+            .map_err(|error| error.to_string())
+    }
+
     /// Whether the app's window is on screen. While it is hidden, other
     /// people's presence is not observed and reads as unknown
     /// (`activity.visible()` in `presence.ts`).

@@ -219,6 +219,9 @@ impl Identity {
         content: String,
     ) -> Result<UnsignedEvent, IdentityError> {
         check_kind(purpose, kind)?;
+        if kind == AGENT_PRESENCE {
+            check_agent_presence(&tags, &content)?;
+        }
         let tags = tags
             .into_iter()
             .map(|tag| Tag::parse(tag).map_err(|error| IdentityError::Signing(error.to_string())))
@@ -240,6 +243,14 @@ impl Identity {
     /// Signs an event built by [`Self::template`], keeping its ID.
     pub fn sign(&self, purpose: Purpose, unsigned: UnsignedEvent) -> Result<Event, IdentityError> {
         check_kind(purpose, unsigned.kind.as_u16())?;
+        if unsigned.kind.as_u16() == AGENT_PRESENCE {
+            let tags: Vec<Vec<String>> = unsigned
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect();
+            check_agent_presence(&tags, &unsigned.content)?;
+        }
         if unsigned.pubkey != self.keys.public_key() {
             return Err(IdentityError::NotAllowed);
         }
@@ -568,7 +579,8 @@ fn check_kind(purpose: Purpose, kind: u16) -> Result<(), IdentityError> {
     let allowed = match purpose {
         Purpose::Content => CONTENT_KINDS.contains(&kind),
         Purpose::AppData => kind == 30078,
-        Purpose::Presence => kind == 20001,
+        // The viewer's own presence, and its agents' (owner presence).
+        Purpose::Presence => kind == 20001 || kind == AGENT_PRESENCE,
     };
     if allowed {
         Ok(())
@@ -577,6 +589,26 @@ fn check_kind(purpose: Purpose, kind: u16) -> Result<(), IdentityError> {
     }
 }
 
+/// Owner presence for the viewer's agents.
+pub const AGENT_PRESENCE: u16 = 20003;
+
+/// buzz-app's native check of owner presence: `online` or `offline`, and
+/// one to 256 `p` tags of agent keys; the relay keeps only the agents the
+/// signer owns.
+fn check_agent_presence(tags: &[Vec<String>], content: &str) -> Result<(), IdentityError> {
+    let hex_key =
+        |key: &str| key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !matches!(content, "online" | "offline")
+        || tags.is_empty()
+        || tags.len() > 256
+        || !tags
+            .iter()
+            .all(|tag| matches!(tag.as_slice(), [name, key] if name == "p" && hex_key(key)))
+    {
+        return Err(IdentityError::NotAllowed);
+    }
+    Ok(())
+}
 /// A canonical Buzz Git repository URL, `https://<host>/git/<owner>/<name>`
 /// (`git_repository` in buzz-app's `relay.rs`): lowercase hex owner, and a
 /// name of 1-64 of `[A-Za-z0-9._-]` after one optional `.git`, with no
@@ -696,6 +728,42 @@ mod tests {
         let event = identity.sign(Purpose::Content, unsigned).unwrap();
         assert_eq!(event.id, id);
         assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn signs_owner_presence_only_in_its_shape() {
+        let identity = Identity::ephemeral();
+        let agent = "a".repeat(64);
+        let presence = |content: &str, tags: Vec<Vec<String>>| {
+            identity.template(Purpose::Presence, AGENT_PRESENCE, 1, tags, content.into())
+        };
+        let unsigned = presence("online", vec![vec!["p".into(), agent.clone()]]).unwrap();
+        assert!(identity.sign(Purpose::Presence, unsigned).is_ok());
+        for (content, tags) in [
+            ("away", vec![vec!["p".to_string(), agent.clone()]]),
+            ("online", vec![]),
+            ("online", vec![vec!["p".into(), "npub1x".into()]]),
+            ("offline", vec![vec!["e".into(), agent.clone()]]),
+            ("offline", vec![vec!["p".into(), agent.clone()]; 257]),
+        ] {
+            assert_eq!(
+                presence(content, tags).unwrap_err(),
+                IdentityError::NotAllowed
+            );
+        }
+        // Only as presence.
+        assert_eq!(
+            identity
+                .template(
+                    Purpose::Content,
+                    AGENT_PRESENCE,
+                    1,
+                    Vec::new(),
+                    "online".into()
+                )
+                .unwrap_err(),
+            IdentityError::NotAllowed
+        );
     }
 
     #[test]

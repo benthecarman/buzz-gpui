@@ -26,9 +26,9 @@ use super::store::{
     write_records, write_teams,
 };
 use super::teams::{self, Team, TeamChange};
-use super::typing;
 use super::working::{self, Working};
 use super::{Agent, AgentChange, Made};
+use super::{presence, typing};
 use crate::agent_activity::local::{self, Begin, LocalActivity, WorkHandle, WorkOutcome};
 use crate::community::{AppState, Community, IdentityState};
 use crate::hosts::{HostConnection, Hosts};
@@ -235,6 +235,9 @@ struct Runner {
     /// Whether the host may hold the agent for this GUI; true at first, so
     /// an agent that starts out of view is let go of once.
     may_hold: bool,
+    /// Whether a claim has been answered, so `may_hold` is known rather
+    /// than assumed.
+    asked: bool,
     /// When the run in progress started, Unix ms.
     working_since: Option<u64>,
     /// The last run's failure: when it ended, Unix ms, and why.
@@ -762,6 +765,8 @@ pub struct Agents2 {
     attention_calls: futures::channel::mpsc::UnboundedSender<AttentionCall>,
     /// The owner's agent list in each bound community.
     listed: listed::Listed,
+    /// What each community was told about which agents run here.
+    presence: presence::Announcer,
     _subscriptions: Vec<Subscription>,
     _tick: Task<()>,
     _attention: Task<()>,
@@ -801,6 +806,7 @@ impl Agents2 {
                         this.drain(&pubkey, cx);
                     }
                     this.reconnect(cx);
+                    this.announce(cx);
                 });
                 if alive.is_err() {
                     return;
@@ -833,6 +839,7 @@ impl Agents2 {
             cleaning: HashMap::new(),
             attention_calls,
             listed: listed::Listed::default(),
+            presence: presence::Announcer::default(),
             _subscriptions: subscriptions,
             _tick: tick,
             _attention: attention,
@@ -1501,6 +1508,7 @@ impl Agents2 {
                             compiled: None,
                             serial: self.serial,
                             may_hold: true,
+                            asked: false,
                             typing: typing::Pulses::default(),
                             working_since: None,
                             failed: None,
@@ -1554,6 +1562,99 @@ impl Agents2 {
         for pubkey in drains {
             self.drain(&pubkey, cx);
         }
+        self.announce(cx);
+    }
+
+    /// Tells each community which agents this copy runs there (owner
+    /// presence): see [`presence::Announcer::plan`].
+    fn announce(&mut self, cx: &mut Context<Self>) {
+        let mut online: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+        for agent in &self.running {
+            if let Some(origin) = http_origin(&agent.relay)
+                && self.ready(&agent.pubkey).is_some()
+                && self.runs(&agent.pubkey)
+            {
+                online
+                    .entry(origin)
+                    .or_default()
+                    .insert(agent.pubkey.clone());
+            }
+        }
+        let bound: Vec<(String, Option<usize>)> = self
+            .bound
+            .iter()
+            .map(|(origin, bound)| {
+                let session = bound
+                    .binding
+                    .as_ref()
+                    .map(|binding| Arc::as_ptr(&binding.session) as usize);
+                (origin.clone(), session)
+            })
+            .collect();
+        let yielded: HashSet<String> = self
+            .runners
+            .keys()
+            .filter(|pubkey| self.yielded(pubkey))
+            .cloned()
+            .collect();
+        let announcements = self.presence.plan(
+            &bound,
+            &online,
+            |pubkey| yielded.contains(pubkey),
+            Instant::now(),
+        );
+        let runtime = Runtime::handle(cx);
+        for announcement in announcements {
+            let Some(session) = self
+                .bound
+                .get(&announcement.origin)
+                .and_then(|bound| bound.binding.as_ref())
+                .map(|binding| binding.session.clone())
+            else {
+                continue;
+            };
+            let (origin, id) = (announcement.origin.clone(), announcement.id);
+            let sent = runtime.spawn(async move {
+                for (status, agents) in [
+                    ("offline", announcement.offline),
+                    ("online", announcement.online),
+                ] {
+                    for batch in agents.chunks(presence::BATCH) {
+                        if !session
+                            .publish_agent_presence(status, batch.to_vec())
+                            .await?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+                Ok(true)
+            });
+            cx.spawn(async move |this, cx| {
+                let outcome = sent
+                    .await
+                    .unwrap_or_else(|_| Err("Agent presence stopped".to_string()));
+                let _ = this.update(cx, |this, _| this.presence.finished(&origin, id, outcome));
+            })
+            .detach();
+        }
+    }
+
+    /// Whether this copy runs the agent: its type can run it, and no other
+    /// copy of the app holds it.
+    fn runs(&self, pubkey: &str) -> bool {
+        self.runners.get(pubkey).is_some_and(|runner| {
+            runner.kind.as_ref().is_some_and(|kind| kind.kind.runs())
+                && runner.asked
+                && runner.may_hold
+        })
+    }
+
+    /// Whether another copy of the app runs an agent this one could.
+    fn yielded(&self, pubkey: &str) -> bool {
+        self.runners.get(pubkey).is_some_and(|runner| {
+            runner.kind.as_ref().is_some_and(|kind| kind.kind.runs()) && !runner.may_hold
+        }) && self.ready(pubkey).is_some()
     }
 
     /// Gives a community's live events to the agents in it.
@@ -1885,6 +1986,7 @@ impl Agents2 {
             return Start::Idle;
         };
         runner.may_hold = claimed;
+        runner.asked = true;
         let local = cx.default_global::<LocalActivity>().clone();
         // Another GUI or copy of the app holds it and runs these.
         if !claimed {
