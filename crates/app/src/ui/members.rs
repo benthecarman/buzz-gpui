@@ -2,12 +2,14 @@
 //! `MemberAdministration.tsx`): the roster grouped by role with presence
 //! and a role filter, adding people and agents, each member's actions
 //! (profile, direct message), and role changes and removal for channel
-//! admins and for an agent's verified owner.
+//! admins and for an agent's verified owner. Searching also offers the
+//! owner's Agents teams, each added with one button.
 
 use super::message::display_name;
 use super::modal::{Dismissed, error, group_label, note};
 use super::navigation;
 use super::overlay::{self, Align, Dismiss};
+use crate::agents2::teams::Team;
 use crate::community::Community;
 use buzz_relay_client::lifecycle::{ChannelState, MemberRole};
 use buzz_relay_client::members::{self, Change, MemberChange, Person};
@@ -89,6 +91,31 @@ fn role_label(role: Option<MemberRole>, agent: bool) -> &'static str {
 
 /// The search results shown per page (`MEMBER_SEARCH_PAGE_SIZE`).
 const SEARCH_PAGE: usize = 30;
+
+/// The teams the search offers (`ChannelMembersDialog.tsx`): those whose
+/// name matches `query`, each with its members that are the owner's
+/// agents in this community (`mine`) and not yet in the channel. A team
+/// with none of them is not offered.
+fn team_offers<'a>(
+    teams: &'a [Team],
+    query: &str,
+    mine: impl Fn(&str) -> bool,
+    member: impl Fn(&str) -> bool,
+) -> Vec<(&'a Team, Vec<String>)> {
+    teams
+        .iter()
+        .filter_map(|team| {
+            let missing: Vec<String> = team
+                .members
+                .iter()
+                .filter(|key| mine(key) && !member(key))
+                .cloned()
+                .collect();
+            (!missing.is_empty() && members::match_tier(&team.name, query).is_some())
+                .then_some((team, missing))
+        })
+        .collect()
+}
 
 /// An agent's owner, when its attestation verifies.
 fn owner_of(key: &str, profiles: &Profiles) -> Option<String> {
@@ -365,6 +392,108 @@ impl MembersDialog {
             });
         }));
         cx.notify();
+    }
+
+    /// "Add team": adds each of `missing` through the normal additions,
+    /// together. A failed member shows its own error and Retry.
+    fn add_team(
+        &mut self,
+        team: String,
+        missing: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if missing.iter().any(|key| self.is_busy(key)) {
+            return;
+        }
+        self.notice = None;
+        let session = self.community.read(cx).session.clone();
+        let channel = self.channel.id.clone();
+        for key in &missing {
+            self.busy.insert(key.clone());
+        }
+        self.additions
+            .retain(|addition| !missing.contains(&addition.pubkey));
+        cx.spawn_in(window, async move |this, cx| {
+            let added = futures::future::join_all(
+                missing.iter().map(|key| session.add_member(&channel, key)),
+            )
+            .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                for key in &missing {
+                    this.busy.remove(key);
+                }
+                if added.iter().all(Result::is_ok) {
+                    this.notice = Some(format!("{team} is in the channel.").into());
+                }
+                this.refresh(window, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// A team of the owner's agents, added with one button (`TeamRow`).
+    fn team_row(&self, team: &Team, missing: &[String], cx: &mut Context<Self>) -> AnyElement {
+        let c = *cx.colors();
+        let busy = missing.iter().any(|key| self.is_busy(key));
+        let community = self.community.read(cx);
+        let agents = crate::agents2::Agents2::global(cx);
+        let names: Vec<SharedString> = missing
+            .iter()
+            .map(|key| {
+                match community.snapshot.profiles.get(key) {
+                    Some(profile) => Some(profile.name.clone()),
+                    None => agents
+                        .as_ref()
+                        .and_then(|agents| agents.read(cx).find(key))
+                        .map(|agent| agent.name.clone()),
+                }
+                .map(SharedString::from)
+                .unwrap_or_else(|| display_name(&community.snapshot.profiles, key))
+            })
+            .collect();
+        let (name, id) = (team.name.clone(), team.id.clone());
+        let add = missing.to_vec();
+        div()
+            .id(SharedString::from(format!("team-{id}")))
+            .flex()
+            .items_center()
+            .gap(rems(0.75))
+            .min_h(rems(2.75))
+            .px(rems(1.))
+            .py(rems(0.25))
+            .rounded(px(11.))
+            .hover(|s| s.bg(c.interaction(Surface::Floating).row_hover))
+            .child(Avatar::new(name.clone()).size(AvatarSize::Small).squircle())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_body_sm().truncate().child(name.clone()))
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(c.text_subtle)
+                            .truncate()
+                            .child(names.join(", ")),
+                    ),
+            )
+            .child(
+                Button::new(
+                    SharedString::from(format!("add-team-{id}")),
+                    if busy { "Adding…" } else { "Add team" },
+                )
+                .prominent()
+                .size(ButtonSize::Xs)
+                .disabled(self.loading)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.add_team(name.clone(), add.clone(), window, cx)
+                })),
+            )
+            .into_any_element()
     }
 
     /// Adds someone (`memberAdditions.add`). A failure stays with the
@@ -1000,6 +1129,23 @@ impl Render for MembersDialog {
                         .flex()
                         .flex_col()
                         .child(group_label("Not in this channel", cx));
+                    if let Some(agents) = crate::agents2::Agents2::global(cx) {
+                        let offers: Vec<(Team, Vec<String>)> = {
+                            let agents = agents.read(cx);
+                            team_offers(
+                                agents.teams(),
+                                &query,
+                                |key| agents.find(key).is_some(),
+                                |key| state.roles.contains_key(key),
+                            )
+                            .into_iter()
+                            .map(|(team, missing)| (team.clone(), missing))
+                            .collect()
+                        };
+                        for (team, missing) in offers {
+                            section = section.child(self.team_row(&team, &missing, cx));
+                        }
+                    }
                     match &self.found {
                         Some((text, Ok(page))) if text.to_lowercase() == query => {
                             let others: Vec<&Person> = page
@@ -1199,6 +1345,33 @@ mod tests {
     use core::prelude::v1::test;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn teams_match_by_name_and_offer_only_agents_here_not_in_the_channel() {
+        let (ada, cy, far) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
+        let team = |id: &str, name: &str, members: &[&String]| Team {
+            id: id.into(),
+            name: name.into(),
+            instructions: String::new(),
+            members: members.iter().map(|key| (*key).clone()).collect(),
+        };
+        let teams = [
+            team("crew", "Crew", &[&ada, &cy]),
+            team("far", "Far", &[&far]),
+        ];
+        let mine = |key: &str| key == ada || key == cy;
+        let offers = team_offers(&teams, "Cr", mine, |_| false);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].0.id, "crew");
+        assert_eq!(offers[0].1, [ada.clone(), cy.clone()]);
+        // Once all its members are in, a team is not offered again.
+        assert!(team_offers(&teams, "Crew", mine, |_| true).is_empty());
+        let offers = team_offers(&teams, "Crew", mine, |key| key == ada);
+        assert_eq!(offers[0].1, std::slice::from_ref(&cy));
+        // A team with no agents in this community is never offered.
+        assert!(team_offers(&teams, "Far", mine, |_| false).is_empty());
+        assert!(team_offers(&teams, "Docs", mine, |_| false).is_empty());
+    }
 
     #[test]
     fn groups_roles_before_agents() {
