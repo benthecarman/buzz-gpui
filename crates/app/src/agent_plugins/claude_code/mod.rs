@@ -9,6 +9,7 @@ pub mod claude;
 mod dev;
 #[cfg(test)]
 mod e2e;
+pub mod lanes;
 pub mod prompt;
 pub mod runtime;
 pub mod sessions;
@@ -124,6 +125,7 @@ impl ClaudeCode {
                     name: agent.name.clone(),
                     config: agent.config.clone(),
                     spawn: host.read(cx).spawner(PROCESS_OWNER),
+                    attention: agent.attention_enabled,
                 })
             })
             .collect();
@@ -268,20 +270,23 @@ impl AgentType for ClaudeCodeType {
                 event: super::event_of(&event),
             },
             Trigger::Watch {
-                event, interest, ..
+                event,
+                slug,
+                watch,
+                classifier,
+                ..
             } => Wake::Watch {
                 event: super::event_of(&event),
-                interest: interest.map(|interest| interest.instructions),
+                slug,
+                interest: watch.interest_id,
+                classifier: classifier.map(|skip| skip.reason),
             },
             Trigger::Timer {
-                slug,
-                timer,
-                interest,
-                ..
+                slug, timer, spent, ..
             } => Wake::Timer {
                 slug,
-                prompt: timer.prompt,
-                interest: interest.map(|interest| interest.instructions),
+                interest: timer.interest_id,
+                spent,
             },
         };
         let run = Run {
@@ -294,6 +299,7 @@ impl AgentType for ClaudeCodeType {
             effort: delivery.effort,
             activity,
             working: super::hold_until(delivery.working),
+            current: delivery.current,
         };
         let runtime = state.read(cx).runtime.clone();
         let handed = Runtime::handle(cx).spawn(async move { runtime.run(run).await });

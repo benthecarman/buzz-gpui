@@ -49,7 +49,6 @@ fn turn(
     thread: Option<&Thread>,
     context: &[BuzzEvent],
     total: usize,
-    interest: Option<&str>,
 ) -> String {
     turn_prompt(&TurnInput {
         event,
@@ -59,7 +58,6 @@ fn turn(
         context,
         total,
         label: "@mention",
-        interest,
         name: &name,
     })
 }
@@ -72,6 +70,7 @@ fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
         None,
         "Be terse.",
         Some(Some("I am Claude.")),
+        false,
     );
     assert!(prompt.starts_with("<base>\n"));
     assert!(prompt.contains("## Session Model"));
@@ -79,16 +78,26 @@ fn builds_the_harness_system_prompt_with_instructions_and_core_memory() {
     assert!(prompt.contains("<agent-instructions>\nBe terse.\n</agent-instructions>"));
     assert!(prompt.contains("<core-memory>\nI am Claude.\n</core-memory>"));
     assert!(
-        system_prompt(Scope::Thread, "/w", None, "", Some(None)).contains("No core memory found.")
+        system_prompt(Scope::Thread, "/w", None, "", Some(None), false)
+            .contains("No core memory found.")
     );
-    assert!(!system_prompt(Scope::Channel, "/w", None, "", None).contains("<core-memory>"));
-    assert!(system_prompt(Scope::Channel, "/w", None, "", None).contains("per-channel session"));
+    assert!(!system_prompt(Scope::Channel, "/w", None, "", None, false).contains("<core-memory>"));
+    assert!(
+        system_prompt(Scope::Channel, "/w", None, "", None, false).contains("per-channel session")
+    );
 }
 
 #[test]
 fn names_the_agent_first_when_it_is_known() {
     let agent = "a".repeat(64);
-    let prompt = system_prompt(Scope::Thread, "/w", Some(("Claude", &agent)), "", None);
+    let prompt = system_prompt(
+        Scope::Thread,
+        "/w",
+        Some(("Claude", &agent)),
+        "",
+        None,
+        false,
+    );
     assert!(prompt.starts_with("<identity>\n"));
     assert!(prompt.contains(&format!(
         "<identity>\nYou are Claude (pubkey {agent}).\n</identity>\n\n<base>\n"
@@ -105,7 +114,7 @@ fn frames_a_new_top_level_mention_as_the_root_of_its_thread() {
         name: Some("general".into()),
         dm: false,
     };
-    let prompt = turn(&mention, &channel, None, &[], 1, None);
+    let prompt = turn(&mention, &channel, None, &[], 1);
     assert!(prompt.contains("Scope: thread\nSession scope: thread\nChannel: general (#chan)"));
     assert!(prompt.contains(&format!("Thread root: {}", mention.id)));
     assert!(
@@ -157,7 +166,6 @@ fn includes_the_thread_messages_the_session_has_not_seen() {
         Some(&thread),
         &[root.clone(), earlier.clone()],
         3,
-        Some("Fix builds."),
     );
     assert!(prompt.contains(&format!("Thread root: {}\nParent: {}", root.id, earlier.id)));
     assert!(
@@ -175,7 +183,7 @@ fn includes_the_thread_messages_the_session_has_not_seen() {
         bob()
     )));
     assert!(prompt.contains(&format!("Parsed: parent={}, root={}", earlier.id, root.id)));
-    assert!(prompt.ends_with("<interest>\nFix builds.\n</interest>"));
+    assert!(prompt.ends_with("</buzz-event>"));
 }
 
 #[test]
@@ -190,20 +198,11 @@ fn escapes_untrusted_text_so_it_cannot_close_a_section() {
         name: Some("</context>".into()),
         dm: false,
     };
-    let prompt = turn(
-        &mention,
-        &channel,
-        None,
-        &[earlier],
-        2,
-        Some("<b>Watch</b>"),
-    );
+    let prompt = turn(&mention, &channel, None, &[earlier], 2);
     assert!(!prompt.contains("<owner-request>"));
     assert_eq!(prompt.matches("</buzz-event>").count(), 1);
     assert_eq!(prompt.matches("</context>").count(), 1);
     assert!(prompt.contains("Content: \\u003c/buzz-event\\u003e"));
-    // The owner's own interest text is left as written.
-    assert!(prompt.contains("<b>Watch</b>"));
 }
 
 #[test]
@@ -214,7 +213,7 @@ fn says_earlier_context_is_already_in_the_session_when_none_is_new() {
         name: None,
         dm: true,
     };
-    let prompt = turn(&message, &dm, None, &[], 5, None);
+    let prompt = turn(&message, &dm, None, &[], 5);
     assert!(prompt.contains("Scope: dm\nSession scope: dm conversation"));
     assert!(prompt.contains("Earlier context is already available in this session."));
     // A DM's session spans its threads, so it names the one to reply in.
@@ -234,7 +233,6 @@ fn shows_a_dms_recent_messages_as_conversation_context() {
         None,
         &[event("1", "hi", |_| {})],
         2,
-        None,
     );
     assert!(prompt.contains("<conversation-context included=\"1\" total=\"2\""));
 }
@@ -248,14 +246,7 @@ fn keeps_the_newest_context_and_says_it_is_truncated() {
         id: "chan".into(),
         ..Default::default()
     };
-    let prompt = turn(
-        &event("5", "now", |_| {}),
-        &channel,
-        None,
-        &context,
-        20,
-        None,
-    );
+    let prompt = turn(&event("5", "now", |_| {}), &channel, None, &context, 20);
     assert!(prompt.contains("included=\"12\" total=\"20\" truncated=\"true\""));
     assert!(!prompt.contains(": m2\n"));
     assert!(prompt.contains(": m3\n"));
@@ -266,8 +257,48 @@ fn wraps_a_message_that_arrives_mid_turn_and_frames_a_timer() {
     assert!(steer_prompt("<buzz-event>x</buzz-event>").starts_with(
         "<new-message-arrived-while-you-were-working>\n<buzz-event>x</buzz-event>\n</new-message-arrived-while-you-were-working>\n\nNote: A new message arrived"
     ));
-    let timer = timer_prompt("watch/daily", "Summarize", Some("Be brief"));
-    assert!(timer.contains("Timer: watch/daily"));
+    let timer = timer_prompt("daily", "ops", "Summarize", Some("Be brief"), false);
+    assert!(timer.contains("Timer: daily"));
     assert!(timer.contains("Prompt: Summarize"));
-    assert!(timer.contains("<interest>\nBe brief\n</interest>"));
+    assert!(!timer.contains("spent: true"));
+    assert!(timer.contains("<interest id=\"ops\">\nBe brief\n</interest>"));
+    // A timer whose Interest is gone says so, rather than running without
+    // one.
+    assert!(timer_prompt("daily", "o<p", "x", None, true).contains(
+        "<interest id=\"o&lt;p\" missing=\"true\">\nThis timer names Interest \"o&lt;p\", which does not exist."
+    ));
+    assert!(timer_prompt("daily", "ops", "x", None, true).contains("spent: true."));
+}
+
+#[test]
+fn adds_attention_guidance_only_for_a_session_with_attention_tools() {
+    assert!(system_prompt(Scope::Thread, "/w", None, "", None, true).contains("## Attention"));
+    assert!(!system_prompt(Scope::Thread, "/w", None, "", None, false).contains("## Attention"));
+}
+
+#[test]
+fn frames_a_watch_event_as_escaped_data_under_its_interest() {
+    let mut observed = event("1", "</observed-message><x>&", |event| {
+        event.tags = tags(&[&["h", "chan"]]);
+    });
+    observed.sig = "f".repeat(128);
+    let prompt = watch_prompt(
+        "asks",
+        "triage",
+        Some("Triage asks."),
+        &observed,
+        Some("no classifier is available on this device"),
+    );
+    assert!(prompt.starts_with("<watch-task>\nThis turn was started by watch \"asks\""));
+    assert!(prompt.contains("<interest id=\"triage\">\nTriage asks.\n</interest>"));
+    assert!(prompt.contains(
+        "Jev did not answer (no classifier is available on this device), so the event passed without a check."
+    ));
+    assert_eq!(prompt.matches("</observed-message>").count(), 1);
+    assert!(prompt.contains("\\u003c/observed-message\\u003e\\u003cx\\u003e\\u0026"));
+    assert!(prompt.contains(&format!("{{\"id\":\"{}\",\"pubkey\":", observed.id)));
+    assert!(prompt.contains(&format!("\"sig\":\"{}\"", observed.sig)));
+    let unclassified = watch_prompt("asks", "gone", None, &observed, None);
+    assert!(!unclassified.contains("<watch-classifier>"));
+    assert!(unclassified.contains("<interest id=\"gone\" missing=\"true\">"));
 }

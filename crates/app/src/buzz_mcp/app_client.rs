@@ -38,6 +38,10 @@ pub trait AgentActions: Send + Sync {
         body: String,
         after: u64,
     ) -> BoxFuture<'static, ClientResult<()>>;
+    /// Its own attention, for the attention tools and wakes.
+    fn attention(&self) -> Option<Arc<dyn super::attention::Attention>> {
+        None
+    }
 }
 
 fn event(value: Value) -> ClientResult<BuzzEvent> {
@@ -53,6 +57,9 @@ impl AgentActions for AgentHandle {
     }
     fn name(&self) -> String {
         self.name.clone()
+    }
+    fn attention(&self) -> Option<Arc<dyn super::attention::Attention>> {
+        Some(Arc::new(self.attention.clone()))
     }
     fn publish(&self, template: Template) -> BoxFuture<'static, ClientResult<BuzzEvent>> {
         let handle = self.clone();

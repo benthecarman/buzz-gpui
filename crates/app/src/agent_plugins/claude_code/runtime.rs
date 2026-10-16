@@ -1,24 +1,31 @@
 //! Turns Agents2 deliveries into Claude turns, a port of buzz-app's
 //! `runtime.ts`. Each agent of this type has its own sessions; a delivery
 //! becomes a prompt in the harness format, sent to the session for its
-//! conversation. The run returns once the turn is handed over, so one agent
+//! conversation; a watch or timer wake runs as a one-off turn in a new
+//! session, in its Interest's lane. The run returns once the turn is handed
+//! over, so one agent
 //! works in several conversations at once. Claude acts in Buzz with the
 //! in-process Buzz tools, signed by the agent's host-held key; the runtime
 //! only reports a turn that fails.
 
 use super::claude::{Launch, Receipt, Settled, ToolServer, TurnPick};
+use super::lanes::{Added, Lanes};
 use super::prompt::{
-    CONTEXT_LIMIT, Channel, Scope, Thread, steer_prompt, system_prompt, timer_prompt, turn_prompt,
+    CONTEXT_LIMIT, Channel, Scope, Thread, attention_review, steer_prompt, system_prompt,
+    timer_prompt, turn_prompt, watch_prompt,
 };
 use super::sessions::{
-    AgentSessions, DeliverOptions, FileSessions, SessionStore, SessionView, SessionsOptions, Spare,
-    Where,
+    AgentSessions, DeliverOptions, FileSessions, ONCE_DEADLINE, SessionStore, SessionView,
+    SessionsOptions, Spare, Where,
 };
 use crate::agent_activity::local::{WorkHandle, WorkOutcome};
 use crate::agent_plugins::owner_relay::OwnerRelay;
 use crate::agent_plugins::process::Spawner;
+use crate::agents2::objects::ShownObject;
+use crate::agents2::runtime::Current;
 use crate::agents2::{Effort, Model, Models};
 use crate::buzz_mcp::app_client::{self, AgentActions, AppClient};
+use crate::buzz_mcp::rpc::AttentionTools;
 use crate::buzz_mcp::{BuzzClient, BuzzEvent, Context, Memory, Template, rpc, tools::hex};
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -165,15 +172,21 @@ pub enum Wake {
     Mention {
         event: BuzzEvent,
     },
+    /// A watch matched `event`, observed data from anyone.
     Watch {
         event: BuzzEvent,
-        /// The matched watch's Interest instructions.
-        interest: Option<String>,
+        slug: String,
+        /// The Interest the watch serves: its lane.
+        interest: String,
+        /// Why its classifier did not run, when it has one.
+        classifier: Option<String>,
     },
     Timer {
         slug: String,
-        prompt: String,
-        interest: Option<String>,
+        /// The Interest the timer serves: its lane.
+        interest: String,
+        /// This is its last allowed occurrence.
+        spent: bool,
     },
 }
 
@@ -191,6 +204,8 @@ pub struct Run {
     pub effort: Option<String>,
     /// Told when the turn this run hands over settles.
     pub working: crate::agent_plugins::HoldUntil,
+    /// Whether a watch's or timer's wake should still run.
+    pub current: Current,
     /// A mention's local work row.
     pub activity: Option<WorkHandle>,
 }
@@ -211,6 +226,8 @@ pub struct Synced {
     pub name: String,
     pub config: Value,
     pub spawn: Spawner,
+    /// Whether the owner has attention on for it.
+    pub attention: bool,
 }
 
 /// Where an agent's saved sessions are kept, by agent pubkey.
@@ -222,6 +239,9 @@ struct EntryState {
     config: Config,
     /// The agent's name, for its prompt; a rename restarts idle sessions.
     name: Option<String>,
+    /// Whether the owner has attention on: new sessions get its tools, its
+    /// guidance and the end-of-turn review.
+    attention: bool,
     /// The core memory and when it was read: `None` when it could not be.
     memory: Option<(Option<Option<String>>, Instant)>,
     /// The agent's handle from its latest delivery, for the tools to act
@@ -235,6 +255,8 @@ struct EntryState {
 struct Entry {
     sessions: AgentSessions,
     state: Arc<Mutex<EntryState>>,
+    /// Watch and timer turns, one lane per Interest.
+    lanes: Lanes,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -323,6 +345,7 @@ impl ClaudeRuntime {
             gone
         };
         for entry in gone {
+            entry.lanes.stop();
             entry.sessions.dispose();
         }
         let mut wheres = Vec::new();
@@ -332,18 +355,26 @@ impl ClaudeRuntime {
             let existing = locked(&self.inner.agents).get(&agent.pubkey).cloned();
             match existing {
                 None => {
-                    let entry = self.entry(&agent.pubkey, next, agent.spawn);
+                    let entry = self.entry(&agent.pubkey, next, agent.spawn, agent.attention);
                     locked(&entry.state).name = Some(agent.name);
                 }
                 Some(entry) => {
                     let changed = {
                         let mut state = locked(&entry.state);
-                        let changed =
-                            state.config != next || state.name.as_ref() != Some(&agent.name);
+                        let changed = state.config != next
+                            || state.name.as_ref() != Some(&agent.name)
+                            || state.attention != agent.attention;
                         state.config = next;
                         state.name = Some(agent.name);
+                        state.attention = agent.attention;
                         changed
                     };
+                    // Attention changes what a new session is told and
+                    // offered. Turned off, its waiting watch and timer
+                    // turns are dropped too.
+                    if !agent.attention {
+                        entry.lanes.clear();
+                    }
                     if changed {
                         entry.sessions.reconfigure();
                     }
@@ -464,6 +495,7 @@ impl ClaudeRuntime {
             .map(|(_, entry)| entry)
             .collect();
         for entry in entries {
+            entry.lanes.stop();
             entry.sessions.dispose();
         }
     }
@@ -476,14 +508,15 @@ impl ClaudeRuntime {
         // Claude runs commands as you; mentions need owner or delegated
         // authority.
         let owner = run.agent.owner();
+        // A watch is the agent's own attention: its event is observed data,
+        // framed as such, from anyone.
         let trusted = match &run.wake {
             Wake::Mention { event } => {
                 let relay = self.relay(&pubkey);
                 crate::agent_plugins::from_owner_or_workflow(event, &owner, &pubkey, relay.as_ref())
                     .await
             }
-            Wake::Watch { event, .. } => crate::agent_plugins::from_owner(event, &owner),
-            Wake::Timer { .. } => true,
+            Wake::Watch { .. } | Wake::Timer { .. } => true,
         };
         if !trusted {
             // Declined: no work, and no outcome, to show.
@@ -492,7 +525,11 @@ impl ClaudeRuntime {
             }
             return;
         }
-        let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone());
+        let attention = match run.agent.attention() {
+            Some(attention) => attention.enabled().await.unwrap_or(false),
+            None => false,
+        };
+        let entry = self.entry(&pubkey, settings.clone(), run.spawn.clone(), attention);
         locked(&entry.state).handle = Some(run.agent.clone());
         // Read while the turn's prompt is built, not after: a new session's
         // prompt needs it, and a spare is only faster if nothing else is
@@ -501,42 +538,21 @@ impl ClaudeRuntime {
             let (this, pubkey, state) = (self.clone(), pubkey.clone(), entry.state.clone());
             tokio::spawn(async move { this.memory(&pubkey, &state).await });
         }
-        let (event, label, interest) = match run.wake {
-            Wake::Timer {
-                slug,
-                prompt,
-                interest,
-            } => {
-                let done = entry
-                    .sessions
-                    .deliver(
-                        format!("timer/{slug}"),
-                        timer_prompt(&slug, &prompt, interest.as_deref()),
-                        0,
-                        DeliverOptions::default(),
-                    )
-                    .shared();
-                (run.working)(done.clone().map(outcome).boxed());
-                self.watch(done.boxed(), None);
+        let event = match run.wake {
+            Wake::Mention { event } => event,
+            wake => {
+                (run.working)(
+                    self.wake(&entry, run.agent, wake, run.current)
+                        .map(|()| WorkOutcome::ok())
+                        .boxed(),
+                );
                 return;
             }
-            Wake::Mention { event } => (event, "@mention", None),
-            Wake::Watch { event, interest } => (event, "watch", interest),
         };
         let Some(channel) = run.channel.or_else(|| tag(&event, "h")) else {
             return;
         };
-        let (key, text) = self
-            .prompt(
-                &entry,
-                &pubkey,
-                &event,
-                &channel,
-                false,
-                label,
-                interest.as_deref(),
-            )
-            .await;
+        let (key, text) = self.prompt(&entry, &pubkey, &event, &channel, false).await;
         // A conversation's tools default to its thread; a session shared by
         // several threads is told which to reply in instead.
         let root = thread_reference(&event).map_or(event.id.clone(), |thread| thread.root_id);
@@ -550,21 +566,7 @@ impl ClaudeRuntime {
         let fresh = {
             let (this, entry, event, channel) =
                 (self.clone(), entry.clone(), event.clone(), channel.clone());
-            let interest = interest.clone();
-            async move {
-                this.prompt(
-                    &entry,
-                    &pubkey,
-                    &event,
-                    &channel,
-                    true,
-                    label,
-                    interest.as_deref(),
-                )
-                .await
-                .1
-            }
-            .boxed()
+            async move { this.prompt(&entry, &pubkey, &event, &channel, true).await.1 }.boxed()
         };
         let done = entry.sessions.deliver(
             key,
@@ -577,13 +579,10 @@ impl ClaudeRuntime {
                     model: run.model,
                     effort: run.effort,
                 },
-                receipt: run
-                    .activity
-                    .filter(|_| label == "@mention")
-                    .map(|work| Receipt {
-                        scope: root.clone(),
-                        work,
-                    }),
+                receipt: run.activity.map(|work| Receipt {
+                    scope: root.clone(),
+                    work,
+                }),
             },
         );
         // The turn outlives `run`, which the host is told so it shows it as
@@ -592,6 +591,150 @@ impl ClaudeRuntime {
         (run.working)(done.clone().map(outcome).boxed());
         self.notify();
         self.watch(done.boxed(), Some((run.agent, channel, event)));
+    }
+
+    /// A watch or timer wake: a one-off turn in its Interest's lane, as in
+    /// Janet. It joins no conversation, and nothing about it is saved. The
+    /// host says whether it is still `current`, asked when its lane starts
+    /// it and again once it has a process: a wake whose watch or timer was
+    /// disabled or removed, whose watch changed or no longer matches, or
+    /// whose agent's attention went off, while it waited does not run. Its
+    /// prompt is built then, from the attention as it is. Resolves when the
+    /// turn ends or is dropped.
+    fn wake(
+        &self,
+        entry: &Arc<Entry>,
+        agent: Arc<dyn AgentActions>,
+        wake: Wake,
+        current: Current,
+    ) -> BoxFuture<'static, ()> {
+        let (kind, slug, lane) = match &wake {
+            Wake::Watch { slug, interest, .. } => ("watch", slug.clone(), interest.clone()),
+            Wake::Timer { slug, interest, .. } => ("timer", slug.clone(), interest.clone()),
+            Wake::Mention { .. } => return async {}.boxed(),
+        };
+        let id = slug.strip_prefix("watch/").unwrap_or(&slug).to_owned();
+        let (settle, settled) = tokio::sync::oneshot::channel::<()>();
+        let settle = Arc::new(Mutex::new(Some(settle)));
+        let done = {
+            let settle = settle.clone();
+            move || {
+                if let Some(settle) = locked(&settle).take() {
+                    let _ = settle.send(());
+                }
+            }
+        };
+        let dropped = {
+            let done = done.clone();
+            move |why: String| {
+                tracing::warn!("Claude dropped a {kind} turn: {why}");
+                done();
+            }
+        };
+        let task = {
+            let (this, sessions) = (self.clone(), entry.sessions.clone());
+            async move {
+                if !current().await {
+                    return done();
+                }
+                let prompt = {
+                    let (this, id) = (this.clone(), id.clone());
+                    move || this.wake_prompt(agent, wake, id, current).boxed()
+                };
+                let result = sessions
+                    .run_once(&format!("{kind}/{id}"), prompt, ONCE_DEADLINE)
+                    .await;
+                this.notify();
+                if !result.ok {
+                    let error = result.error.unwrap_or_default();
+                    tracing::warn!(%error, "Claude {kind} turn failed: {id}");
+                }
+                done();
+            }
+            .boxed()
+        };
+        let on_drop = {
+            let dropped = dropped.clone();
+            Box::new(move || dropped("attention was turned off or the agent stopped".into()))
+        };
+        match entry.lanes.add(&lane, task, Some(on_drop)) {
+            Added::Queued => {}
+            Added::Full => dropped(format!("too many are waiting (Interest {lane})")),
+            Added::Stopped => dropped("the agent stopped".into()),
+        }
+        // Dropped unsettled, as when its turn panicked, it has ended too.
+        async move {
+            let _ = settled.await;
+        }
+        .boxed()
+    }
+
+    /// The prompt for a wake as its watch or timer now is, or `None` when
+    /// it should no longer run.
+    async fn wake_prompt(
+        self,
+        agent: Arc<dyn AgentActions>,
+        wake: Wake,
+        id: String,
+        current: Current,
+    ) -> Option<String> {
+        if !current().await {
+            return None;
+        }
+        let attention = agent.attention()?;
+        let (slug, timer) = match &wake {
+            Wake::Watch { slug, .. } => (slug.clone(), false),
+            Wake::Timer { slug, .. } => (slug.clone(), true),
+            Wake::Mention { .. } => return None,
+        };
+        let object = attention.show(slug, None).await.ok()?.object?;
+        let prompt = match &object {
+            ShownObject::Timer { timer: value, .. } if timer => value.prompt.clone(),
+            ShownObject::Event { .. } if !timer => String::new(),
+            _ => return None,
+        };
+        let interest = object.value().interest_id().unwrap_or_default().to_owned();
+        let instructions = match attention
+            .show(format!("interest/{interest}"), None)
+            .await
+            .ok()
+            .and_then(|shown| shown.object)
+        {
+            Some(ShownObject::Interest { interest, .. }) => Some(interest.instructions),
+            _ => None,
+        };
+        let text = match &wake {
+            Wake::Watch {
+                event, classifier, ..
+            } => watch_prompt(
+                &id,
+                &interest,
+                instructions.as_deref(),
+                event,
+                classifier.as_deref(),
+            ),
+            _ => timer_prompt(
+                &id,
+                &interest,
+                &prompt,
+                instructions.as_deref(),
+                matches!(wake, Wake::Timer { spent: true, .. }),
+            ),
+        };
+        // Asked again: the attention can change while it is read.
+        current()
+            .await
+            .then(|| format!("{text}\n\n{}", attention_review()))
+    }
+
+    /// `text` with Janet's end-of-turn attention review, when attention is
+    /// on.
+    fn review(entry: &Entry, text: String) -> String {
+        if locked(&entry.state).attention {
+            format!("{text}\n\n{}", attention_review())
+        } else {
+            text
+        }
     }
 
     /// Notes when a turn settles, and says in the thread when it failed.
@@ -635,7 +778,6 @@ impl ClaudeRuntime {
 
     /// Where the event's turn goes, and its prompt. `fresh` is for a
     /// session that has been shown nothing yet.
-    #[allow(clippy::too_many_arguments)]
     async fn prompt(
         &self,
         entry: &Entry,
@@ -643,8 +785,6 @@ impl ClaudeRuntime {
         event: &BuzzEvent,
         channel_id: &str,
         fresh: bool,
-        label: &str,
-        interest: Option<&str>,
     ) -> (String, String) {
         let relay = self.relay(own);
         let summary = relay.as_ref().and_then(|relay| relay.channel(channel_id));
@@ -738,14 +878,13 @@ impl ClaudeRuntime {
             thread: thread.as_ref(),
             context: &unseen,
             total: earlier.len() + 1,
-            label,
-            interest,
+            label: "@mention",
             name: &name,
         });
-        (key, text)
+        (key, Self::review(entry, text))
     }
 
-    fn entry(&self, pubkey: &str, initial: Config, spawn: Spawner) -> Arc<Entry> {
+    fn entry(&self, pubkey: &str, initial: Config, spawn: Spawner, attention: bool) -> Arc<Entry> {
         let mut agents = locked(&self.inner.agents);
         if let Some(existing) = agents.get(pubkey) {
             return existing.clone();
@@ -753,6 +892,7 @@ impl ClaudeRuntime {
         let state = Arc::new(Mutex::new(EntryState {
             config: initial,
             name: None,
+            attention,
             memory: None,
             handle: None,
             contexts: HashMap::new(),
@@ -768,15 +908,21 @@ impl ClaudeRuntime {
                 let (this, state, pubkey, spawn) =
                     (this.clone(), state.clone(), pubkey.clone(), spawn.clone());
                 async move {
-                    let (config, name) = {
+                    let (config, name, attention) = {
                         let state = locked(&state);
-                        (state.config.clone(), state.name.clone())
+                        (state.config.clone(), state.name.clone(), state.attention)
                     };
                     let memory = this.memory(&pubkey, &state).await;
                     let Where { cwd, model, .. } = config.at(&spawn);
                     Ok(Launch {
                         cwd,
-                        tools: Some(this.tools(&pubkey, &state, &spawn, &config.workspace)),
+                        tools: Some(this.tools(
+                            &pubkey,
+                            &state,
+                            &spawn,
+                            &config.workspace,
+                            attention,
+                        )),
                         model,
                         system_prompt: system_prompt(
                             config.scope(),
@@ -784,6 +930,7 @@ impl ClaudeRuntime {
                             name.as_deref().map(|name| (name, pubkey.as_str())),
                             &config.instructions,
                             memory.as_ref().map(|memory| memory.as_deref()),
+                            attention,
                         ),
                         ..Default::default()
                     })
@@ -795,7 +942,7 @@ impl ClaudeRuntime {
             let state = state.clone();
             Arc::new(move || {
                 let state = locked(&state);
-                json!([state.config.fingerprint(), state.name]).to_string()
+                json!([state.config.fingerprint(), state.name, state.attention]).to_string()
             })
         };
         let mut options =
@@ -806,19 +953,22 @@ impl ClaudeRuntime {
         let entry = Arc::new(Entry {
             sessions: AgentSessions::new(options),
             state,
+            lanes: Lanes::default(),
         });
         agents.insert(pubkey.to_string(), entry.clone());
         entry
     }
 
     /// The tool server for processes started in `cwd`, which read files
-    /// where they were started until they are replaced.
+    /// where they were started, and keep the tool list they were given,
+    /// until they are replaced.
     fn tools(
         &self,
         pubkey: &str,
         state: &Arc<Mutex<EntryState>>,
         spawn: &Spawner,
         cwd: &str,
+        attention: bool,
     ) -> ToolServer {
         let (this, state, pubkey, spawn, cwd) = (
             self.clone(),
@@ -835,6 +985,10 @@ impl ClaudeRuntime {
                     .and_then(|conversation| state.contexts.get(conversation).cloned())
                     .unwrap_or_default();
                 (state.handle.clone(), context)
+            };
+            let tools = AttentionTools {
+                offered: attention,
+                api: handle.as_ref().and_then(|agent| agent.attention()),
             };
             let client: Option<Arc<dyn BuzzClient>> = handle.map(|agent| {
                 let memories = {
@@ -859,7 +1013,8 @@ impl ClaudeRuntime {
                     signal: None,
                 }) as Arc<dyn BuzzClient>
             });
-            async move { Ok(rpc::respond(client, &context, &message).await) }.boxed()
+            async move { Ok(rpc::respond_with(client, &context, &message, Some(&tools)).await) }
+                .boxed()
         })
     }
 

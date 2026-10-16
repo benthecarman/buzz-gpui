@@ -216,6 +216,7 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
         name: agent.name(),
         config: config.value(),
         spawn: spawn.clone(),
+        attention: false,
     }]);
     let mention = BuzzEvent {
         id: "1".repeat(64),
@@ -242,6 +243,7 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             effort: None,
             working: std::sync::Arc::new(|_| {}),
             activity: None,
+            current: crate::agents2::runtime::always_current(),
         })
         .await;
     wait_for("the reply", || !agent.published.lock().unwrap().is_empty()).await;
@@ -302,6 +304,7 @@ async fn a_mention_runs_a_claude_turn_on_the_agents_host() {
             effort: None,
             working: std::sync::Arc::new(|_| {}),
             activity: None,
+            current: crate::agents2::runtime::always_current(),
         })
         .await;
     wait_for("the file", || agent.published.lock().unwrap().len() == 2).await;
@@ -452,6 +455,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
             effort: None,
             working: std::sync::Arc::new(|_| {}),
             activity: None,
+            current: crate::agents2::runtime::always_current(),
         })
         .await;
     let filter = json!({ "kinds": [9], "authors": [pubkey], "#e": [event.id], "limit": 5 });

@@ -358,6 +358,59 @@ fn drops_a_queued_watch_run_whose_watch_or_attention_changed_before_it_ran() {
 }
 
 #[test]
+fn tells_a_handed_off_run_whether_its_watch_or_timer_is_still_current() {
+    let watch = json!({"type": "event", "interest_id": "default", "enabled": true,
+        "since": 1, "channels": "all", "kinds": [9]});
+    let timer = json!({"type": "timer", "interest_id": "default", "prompt": "tick",
+        "enabled": true, "interval_secs": 60, "armed_at": 1000, "max_occurrences": null,
+        "expires_at": null});
+    let objects = attention(json!({
+        "interest/default": {"type": "interest", "instructions": "Look."},
+        "watch/w": watch,
+        "watch/tick": timer,
+    }));
+    let agent = agent_with(&objects, true);
+    let job = queued(
+        &agent,
+        &event("1", |event| event.content = "deploy".into()),
+        0,
+    );
+    assert!(still_current(0, &agent, &job));
+    // An earlier turn tightened the watch: its event no longer matches.
+    let edit = |slug: &str, value: Value, at: u64| {
+        let record = AgentRecord {
+            attention: Arc::new(objects.clone()),
+            ..AgentRecord::blank(&bot())
+        };
+        let record = set_attention(&record, slug, Some(&value), at, None).unwrap();
+        agent_with(&record.attention, true)
+    };
+    let mut tightened = watch.clone();
+    tightened["filter"] = json!("content == \"ship\"");
+    assert!(!still_current(0, &edit("watch/w", tightened, 1), &job));
+    assert!(!still_current(0, &agent_with(&objects, false), &job));
+    // A timer occurrence is void once attention went off and on again, or
+    // its timer was disabled or rearmed.
+    let tick = Job {
+        trigger: Trigger::Timer {
+            slug: "watch/tick".into(),
+            timer: serde_json::from_value(timer.clone()).unwrap(),
+            interest: None,
+            spent: false,
+        },
+        channel: None,
+        work: None,
+        matched: Some((objects["watch/tick"].clone(), 0)),
+    };
+    assert!(still_current(0, &agent, &tick));
+    assert!(!still_current(1, &agent, &tick));
+    assert!(!still_current(0, &agent_with(&objects, false), &tick));
+    let mut rearmed = timer.clone();
+    rearmed["armed_at"] = json!(1100);
+    assert!(!still_current(0, &edit("watch/tick", rearmed, 1), &tick));
+}
+
+#[test]
 fn type_defaults_become_the_first_record() {
     struct Kind;
     impl registry::AgentType for Kind {

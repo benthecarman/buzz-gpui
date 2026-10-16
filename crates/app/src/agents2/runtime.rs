@@ -80,6 +80,21 @@ pub struct Delivery {
     /// type is replaced. Advisory: the handle keeps working, so finishing
     /// up is harmless.
     pub cancel: Cancellation,
+    /// Whether the trigger should still run, asked again now. False once
+    /// the agent is removed or its type replaced; for a watch or timer,
+    /// also once attention was turned off or its object disabled or
+    /// removed; and for a watch, once it was changed or its event no
+    /// longer matches. A type that queues a watch's or timer's work asks
+    /// before it starts that work.
+    pub current: Current,
+}
+
+/// Asks the Agents service whether a delivery's trigger is still current.
+pub type Current = Arc<dyn Fn() -> futures::future::BoxFuture<'static, bool> + Send + Sync>;
+
+/// A [`Current`] for a run no service tracks: always current.
+pub fn always_current() -> Current {
+    Arc::new(|| Box::pin(async { true }))
 }
 
 /// A cancellation signal a run can poll or await.

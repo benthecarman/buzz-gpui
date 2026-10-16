@@ -104,6 +104,7 @@ fn turns(pubkey: &str, cx: &mut App) {
                     spawn: spawn.clone(),
                     model: None,
                     effort: None,
+                    current: crate::agents2::runtime::always_current(),
                     working: std::sync::Arc::new(|_| {}),
                     activity: None,
                 })

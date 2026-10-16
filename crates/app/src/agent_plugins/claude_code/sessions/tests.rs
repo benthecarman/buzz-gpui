@@ -472,6 +472,118 @@ async fn runs_any_number_of_conversations_at_once() {
     assert!(pool.pool.snapshot().iter().all(|session| session.busy));
 }
 
+fn once_prompt(text: Option<&str>) -> impl FnOnce() -> BoxFuture<'static, Option<String>> {
+    let text = text.map(str::to_owned);
+    move || Box::pin(async move { text })
+}
+
+#[tokio::test]
+async fn runs_a_one_off_turn_in_a_new_session_that_is_never_saved() {
+    let pool = pool();
+    let settled = pool
+        .pool
+        .run_once("timer/a", once_prompt(Some("wake")), ONCE_DEADLINE)
+        .await;
+    assert!(settled.ok);
+    let claude = pool
+        .claudes()
+        .into_iter()
+        .find(|process| process.prompts().contains(&"wake".to_string()))
+        .unwrap();
+    assert!(claude.args().contains(&"--session-id".to_string()));
+    assert!(claude.killed());
+    assert!(pool.pool.snapshot().is_empty());
+    assert!(pool.store.get("timer/a #1").is_none());
+}
+
+#[tokio::test]
+async fn asks_a_one_off_turn_for_its_prompt_only_once_its_process_is_ready() {
+    let pool = sessions(Options {
+        held: true,
+        ..Options::default()
+    });
+    // It went stale while its process started, as a watch turned off would.
+    let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let prompt = {
+        let (stale, asked) = (stale.clone(), asked.clone());
+        move || -> BoxFuture<'static, Option<String>> {
+            asked.fetch_add(1, Ordering::SeqCst);
+            let stale = stale.load(Ordering::SeqCst);
+            Box::pin(async move { (!stale).then(|| "wake".to_string()) })
+        }
+    };
+    let waiting = {
+        let sessions = pool.pool.clone();
+        tokio::spawn(async move { sessions.run_once("watch/a", prompt, ONCE_DEADLINE).await })
+    };
+    flush().await;
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+    stale.store(true, Ordering::SeqCst);
+    pool.release.send_replace(true);
+    assert!(waiting.await.unwrap().ok);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert!(
+        !pool
+            .claudes()
+            .iter()
+            .any(|process| process.prompts().contains(&"wake".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn keeps_a_one_off_turn_until_its_process_has_exited_and_gives_up_at_its_deadline() {
+    let pool = sessions(Options {
+        hold: true,
+        ..Options::default()
+    });
+    let done = {
+        let sessions = pool.pool.clone();
+        tokio::spawn(async move {
+            sessions
+                .run_once(
+                    "timer/slow",
+                    once_prompt(Some("work")),
+                    Duration::from_millis(200),
+                )
+                .await
+        })
+    };
+    until(|| {
+        pool.claudes()
+            .iter()
+            .any(|process| process.prompts().contains(&"work".to_string()))
+    })
+    .await;
+    let claude = pool
+        .claudes()
+        .into_iter()
+        .find(|process| process.prompts().contains(&"work".to_string()))
+        .unwrap();
+    // The host only signals it; it exits later, as after a grace period.
+    claude.state().exit_on_kill = false;
+    until(|| claude.killed()).await;
+    flush().await;
+    assert!(!done.is_finished());
+    let keys: Vec<String> = pool
+        .pool
+        .snapshot()
+        .into_iter()
+        .map(|session| session.key)
+        .collect();
+    assert_eq!(keys, ["timer/slow #1"]);
+    claude.exit(None, None);
+    let settled = done.await.unwrap();
+    assert!(!settled.ok);
+    assert!(
+        settled
+            .error
+            .unwrap()
+            .contains("ran past its 0s deadline and was stopped")
+    );
+    assert!(pool.pool.snapshot().is_empty());
+}
+
 #[tokio::test]
 async fn starts_again_with_settings_saved_while_a_process_started() {
     let pool = sessions(Options {

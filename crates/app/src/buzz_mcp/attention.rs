@@ -678,4 +678,6 @@ async fn run(
 }
 
 #[cfg(test)]
+pub(crate) mod testing;
+#[cfg(test)]
 mod tests;

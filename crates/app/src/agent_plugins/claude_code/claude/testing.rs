@@ -30,6 +30,8 @@ pub struct FakeState {
     /// When set, a turn stays open until `finish()`.
     pub hold: bool,
     pub killed: bool,
+    /// When false, a kill is only a request; the test calls `exit()`.
+    pub exit_on_kill: bool,
     session: String,
     resume: Option<String>,
     open: usize,
@@ -290,7 +292,9 @@ impl ProcessControl for FakeClaude {
     }
     fn kill(&self) -> BoxFuture<'static, Result<(), String>> {
         self.state().killed = true;
-        self.exit(None, None);
+        if self.state().exit_on_kill {
+            self.exit(None, None);
+        }
         Box::pin(async { Ok(()) })
     }
 }
@@ -359,6 +363,7 @@ impl Spawn for FakeSpawn {
                 models: Vec::new(),
                 hold: self.hold,
                 killed: false,
+                exit_on_kill: true,
                 session,
                 resume,
                 open: 0,

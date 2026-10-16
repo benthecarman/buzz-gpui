@@ -3,7 +3,9 @@
 //! and app restarts. A conversation in use keeps its process; a quiet one is
 //! stopped and resumed from its saved session when it is next addressed.
 //! One spare process, shared by every agent, waits for the next new
-//! conversation, so that starts without a spawn.
+//! conversation, so that starts without a spawn. A one-off turn (a watch or
+//! timer wake) gets a new session of its own, which is never saved,
+//! resumed or shared.
 
 use super::claude::{ClaudeModel, ClaudeProcess, Launch, Receipt, Settled, ToolServer, TurnPick};
 use crate::agent_plugins::process::Spawner;
@@ -17,6 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
+/// How long a one-off turn can run before it is given up; Janet's turn
+/// deadline.
+pub const ONCE_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// A conversation's process stops after this long without a message.
 pub const IDLE: Duration = Duration::from_secs(15 * 60);
 /// Saved sessions per agent; the least recently used are forgotten.
@@ -111,6 +116,9 @@ struct State {
     discovery: Option<Discovery>,
     /// In the order they started, for the status view.
     live: Vec<(String, Arc<Live>)>,
+    /// One-off turns running or starting, by label.
+    once: Vec<(String, Option<Arc<Live>>)>,
+    once_count: u64,
     opening: BTreeMap<String, (u64, Starting)>,
     /// Per conversation, the latest message's place: it resolves once
     /// that message has been handed to the process, or given up.
@@ -242,14 +250,16 @@ impl AgentSessions {
 
     /// Conversations with a running process, and whether each is working.
     pub fn snapshot(&self) -> Vec<SessionView> {
-        self.state()
-            .live
-            .iter()
-            .map(|(key, live)| SessionView {
-                key: key.clone(),
-                busy: live.process.busy(),
-            })
-            .collect()
+        let state = self.state();
+        let live = state.live.iter().map(|(key, live)| SessionView {
+            key: key.clone(),
+            busy: live.process.busy(),
+        });
+        let once = state.once.iter().map(|(key, _)| SessionView {
+            key: key.clone(),
+            busy: true,
+        });
+        live.chain(once).collect()
     }
 
     /// The defaults and models of a session with the current settings,
@@ -494,6 +504,80 @@ impl AgentSessions {
         delivered
     }
 
+    /// Runs one turn in a new session, then stops its process. The session
+    /// is not saved, so it never displaces a conversation's saved session
+    /// and is never resumed. `label` names it in the snapshot. It gives up,
+    /// and stops the turn, after `deadline` of running. `prompt` is asked
+    /// for the turn's text once a process is ready, so a turn that should
+    /// no longer run by then answers `None` and sends nothing. It settles
+    /// only when its process has exited, so it shows as working while it
+    /// may still be working.
+    pub async fn run_once(
+        &self,
+        label: &str,
+        prompt: impl FnOnce() -> BoxFuture<'static, Option<String>>,
+        deadline: Duration,
+    ) -> Settled {
+        let key = {
+            let mut state = self.state();
+            if state.disposed {
+                return Settled::failed("Claude was stopped");
+            }
+            state.once_count += 1;
+            let key = format!("{label} #{}", state.once_count);
+            state.once.push((key.clone(), None));
+            key
+        };
+        (self.options().on_change)();
+        let mut held: Option<Arc<Live>> = None;
+        let settled = async {
+            let live = match self.start(None).await {
+                Ok(live) => live,
+                Err(error) => {
+                    tracing::warn!(%error, "Claude could not start a one-off session");
+                    return Settled::failed("Claude could not start");
+                }
+            };
+            held = Some(live.clone());
+            if self.state().disposed {
+                return Settled::failed("Claude was stopped");
+            }
+            // A key no conversation uses: its tools have no default
+            // destination.
+            live.process.set_conversation(&key);
+            if let Some((_, slot)) = self
+                .state()
+                .once
+                .iter_mut()
+                .find(|(other, _)| *other == key)
+            {
+                *slot = Some(live.clone());
+            }
+            let text = prompt().await;
+            let Some(text) = text.filter(|_| !self.state().disposed) else {
+                return Settled::ok();
+            };
+            let send = live.process.send(&text, TurnPick::default());
+            match tokio::time::timeout(deadline, send).await {
+                Ok(settled) => settled,
+                Err(_) => Settled::failed(format!(
+                    "The turn ran past its {}s deadline and was stopped",
+                    deadline.as_secs_f64().round() as u64
+                )),
+            }
+        }
+        .await;
+        if let Some(live) = held {
+            // Killing only asks it to stop; the host may let it run a few
+            // seconds.
+            live.process.kill().await;
+            live.process.exited().await;
+        }
+        self.state().once.retain(|(other, _)| *other != key);
+        (self.options().on_change)();
+        settled
+    }
+
     /// Stops idle processes started with old settings; busy ones stop when
     /// they next fall idle.
     pub fn reconfigure(&self) {
@@ -513,22 +597,29 @@ impl AgentSessions {
 
     /// The processes it runs, so a caller can wait for them to exit.
     pub fn processes(&self) -> Vec<ClaudeProcess> {
-        self.state()
+        let state = self.state();
+        let once = state.once.iter().filter_map(|(_, live)| live.as_ref());
+        state
             .live
             .iter()
-            .map(|(_, live)| live.process.clone())
+            .map(|(_, live)| live)
+            .chain(once)
+            .map(|live| live.process.clone())
             .collect()
     }
 
     pub fn dispose(&self) {
         self.clear_discovery();
-        let live = {
+        let (live, once) = {
             let mut state = self.state();
             state.disposed = true;
-            state.live.clone()
+            (state.live.clone(), state.once.clone())
         };
         for (key, live) in live {
             self.drop_live(&key, &live);
+        }
+        for live in once.into_iter().filter_map(|(_, live)| live) {
+            kill_later(live);
         }
     }
 

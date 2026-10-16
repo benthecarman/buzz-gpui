@@ -175,14 +175,16 @@ pub(crate) fn retry_due(
     !selected && failed && retried.is_none_or(|at| now.duration_since(at) >= RETRY)
 }
 
+#[derive(Clone)]
 struct Job {
     trigger: Trigger,
     channel: Option<String>,
     /// A mention's local work row, once the runner holds the agent.
     work: Option<WorkHandle>,
-    /// For a watch: the object and attention epoch it was matched under.
-    /// It runs only while both are still current, so a watch edited,
-    /// replaced or turned off and on again since then does not run it.
+    /// For a watch or timer: the object and attention epoch it was
+    /// matched or found due under. It runs only while both are still
+    /// current, so a watch or timer edited, disabled, rearmed, replaced or
+    /// turned off and on again since then does not run it.
     matched: Option<(AttentionObject, u64)>,
 }
 
@@ -627,6 +629,28 @@ fn rematched(epoch: u64, agent: &Agent, job: Job) -> Option<Job> {
         },
         ..job
     })
+}
+
+/// Whether `job`, already started, should still run: the rule
+/// [`rematched`] applies to a queued job, asked again for work a type
+/// queued itself.
+fn still_current(epoch: u64, agent: &Agent, job: &Job) -> bool {
+    match &job.trigger {
+        Trigger::Mention { .. } => true,
+        Trigger::Watch { .. } => rematched(epoch, agent, job.clone()).is_some(),
+        // A timer occurrence belongs to the object and epoch it fell due
+        // under: attention off and on again, or a disable and rearm, voids
+        // it.
+        Trigger::Timer { slug, .. } => {
+            let object = agent.attention.get(slug);
+            agent.attention_enabled
+                && job
+                    .matched
+                    .as_ref()
+                    .is_some_and(|(matched, at)| *at == epoch && object == Some(matched))
+                && matches!(object.map(|o| &o.value), Some(AttentionValue::Timer(timer)) if timer.enabled)
+        }
+    }
 }
 
 fn now_secs() -> u64 {
@@ -1537,7 +1561,7 @@ impl Agents2 {
     }
 
     /// The due timer of a running agent, recording its run.
-    fn due(&mut self, agent: &Agent) -> Option<Job> {
+    fn due(&mut self, agent: &Agent, epoch: u64) -> Option<Job> {
         // Off, timers keep their saved state; one overdue runs once when
         // back on.
         if !agent.attention_enabled {
@@ -1563,6 +1587,10 @@ impl Agents2 {
         }
         let (slug, timer, ran) = next?;
         let interest = interest(&agent.attention, &timer.interest_id);
+        let matched = agent
+            .attention
+            .get(&slug)
+            .map(|object| (object.clone(), epoch));
         Some(Job {
             trigger: Trigger::Timer {
                 spent: timer_spent(&timer, &ran, ran.next_due),
@@ -1572,7 +1600,7 @@ impl Agents2 {
             },
             channel: None,
             work: None,
-            matched: None,
+            matched,
         })
     }
 
@@ -1795,7 +1823,7 @@ impl Agents2 {
         }
         let job = match queued {
             Some(job) => Some(job),
-            None => self.due(&agent),
+            None => self.due(&agent, epoch),
         };
         let Some(job) = job else {
             return Start::Idle;
@@ -1819,6 +1847,26 @@ impl Agents2 {
             runner.working_since = Some(now_ms());
         }
         let working = self.working(&handle, &job, &lifetime, cx);
+        let current = {
+            let (calls, pubkey, job, lifetime) = (
+                self.attention_calls.clone(),
+                agent.pubkey.clone(),
+                job.clone(),
+                lifetime.clone(),
+            );
+            Arc::new(move || -> futures::future::BoxFuture<'static, bool> {
+                let (reply, answer) = futures::channel::oneshot::channel();
+                let (pubkey, job, lifetime) = (pubkey.clone(), job.clone(), lifetime.clone());
+                let asked = calls.unbounded_send(Box::new(
+                    move |this: &mut Agents2, _: &mut Context<Agents2>| {
+                        let current =
+                            !lifetime.is_cancelled() && this.still_current(&pubkey, serial, &job);
+                        let _ = reply.send(current);
+                    },
+                ));
+                Box::pin(async move { asked.is_ok() && answer.await.unwrap_or(false) })
+            }) as super::runtime::Current
+        };
         let delivery = Delivery {
             trigger: job.trigger,
             channel: job.channel,
@@ -1828,8 +1876,18 @@ impl Agents2 {
             effort: None,
             working,
             cancel,
+            current,
         };
         Start::Run(kind.kind, Box::new((delivery, agent)), lifetime, source)
+    }
+
+    /// [`still_current`] for the runner `serial` of agent `pubkey`.
+    fn still_current(&self, pubkey: &str, serial: u64, job: &Job) -> bool {
+        let Some(runner) = self.runners.get(pubkey).filter(|r| r.serial == serial) else {
+            return false;
+        };
+        self.agent(pubkey)
+            .is_some_and(|agent| still_current(runner.epoch, agent, job))
     }
 
     /// Counts a run as working until it and everything it handed to
