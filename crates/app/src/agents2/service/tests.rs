@@ -29,7 +29,7 @@ fn attention(objects: Value) -> BTreeMap<String, AttentionObject> {
     let record = AgentRecord::blank(&bot());
     let mut record = record;
     for (slug, value) in objects.as_object().unwrap() {
-        record = set_attention(&record, slug, Some(value), 1).unwrap();
+        record = set_attention(&record, slug, Some(value), 1, None).unwrap();
     }
     (*record.attention).clone()
 }
@@ -280,6 +280,83 @@ fn a_timer_without_state_does_not_run_for_what_it_missed() {
     assert_eq!(timers["watch/t"].used, 3);
 }
 
+/// The bot with `objects` as its attention, attention on or off.
+fn agent_with(objects: &BTreeMap<String, AttentionObject>, on: bool) -> Agent {
+    Agent {
+        pubkey: bot(),
+        name: "Echo".into(),
+        agent_type: "p/kind".into(),
+        owner: owner(),
+        relay: "wss://relay.example.com".into(),
+        picture: None,
+        attention: Arc::new(objects.clone()),
+        skipped: Arc::default(),
+        timers: Arc::default(),
+        attention_enabled: on,
+        config: Value::Null,
+    }
+}
+
+/// The job a watch match queues, as `dispatch` does.
+fn queued(agent: &Agent, event: &Arc<EventData>, epoch: u64) -> Job {
+    let watches = compile(&agent.attention);
+    let trigger = heard(&agent.pubkey, &agent.owner, event, &|_| false, &watches)
+        .pop()
+        .expect("a watch matches");
+    let Trigger::Watch { slug, .. } = &trigger else {
+        panic!("a watch");
+    };
+    let matched = Some((agent.attention[slug].clone(), epoch));
+    Job {
+        trigger,
+        channel: None,
+        matched,
+        work: None,
+    }
+}
+
+#[test]
+fn drops_a_queued_watch_run_whose_watch_or_attention_changed_before_it_ran() {
+    let watch = json!({"type": "event", "interest_id": "default", "enabled": true,
+        "since": 1, "channels": "all", "kinds": [9]});
+    let objects = attention(json!({
+        "interest/default": {"type": "interest", "instructions": "Look."},
+        "watch/w": watch,
+    }));
+    let agent = agent_with(&objects, true);
+    let hello = event("1", |_| {});
+    assert!(rematched(0, &agent, queued(&agent, &hello, 0)).is_some());
+    // Attention off, or off and on again since (a new epoch).
+    assert!(rematched(0, &agent_with(&objects, false), queued(&agent, &hello, 0)).is_none());
+    assert!(rematched(1, &agent, queued(&agent, &hello, 0)).is_none());
+    // Its watch disabled, removed or replaced, even by the same value.
+    let mut disabled = watch.clone();
+    disabled["enabled"] = json!(false);
+    let edited = |value: Option<Value>, at: u64| {
+        let mut record = AgentRecord {
+            attention: Arc::new(objects.clone()),
+            ..AgentRecord::blank(&bot())
+        };
+        record = set_attention(&record, "watch/w", value.as_ref(), at, None).unwrap();
+        agent_with(&record.attention, true)
+    };
+    for changed in [
+        edited(Some(disabled), 2),
+        edited(None, 2),
+        edited(Some(watch.clone()), 2),
+    ] {
+        assert!(rematched(0, &changed, queued(&agent, &hello, 0)).is_none());
+    }
+    // A mention always runs.
+    let mention = Job {
+        trigger: Trigger::Mention { event: hello },
+        channel: None,
+        matched: None,
+        work: None,
+    };
+    assert!(rematched(5, &agent_with(&objects, false), mention).is_some());
+}
+
 #[test]
 fn type_defaults_become_the_first_record() {
     struct Kind;
@@ -352,6 +429,7 @@ fn a_claim_notices_a_changed_agent_or_type() {
         attention: Arc::default(),
         skipped: Arc::default(),
         timers: Arc::default(),
+        attention_enabled: true,
         config: Value::Null,
     };
     let first = kind();

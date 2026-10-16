@@ -6,6 +6,10 @@
 #![allow(dead_code)]
 
 use super::attention::{EventData, EventWatch, Interest, TimerWatch};
+use super::objects::{
+    CLASSIFIER, ClassifierAvailability, Shown, WatchFilter, WatchSummary, WriteOptions,
+};
+use super::service::Agents2;
 pub use super::working::Working;
 use buzz_host::api::{
     AppAgentEvent, AppAgentRequest, AppAgentResponse, HostProtocol, Request, Response,
@@ -32,17 +36,26 @@ pub enum Trigger {
         watch: EventWatch,
         /// `None` when the watch names an Interest that does not exist.
         interest: Option<Interest>,
-        /// The watch has a classifier this app could not run. The spec
-        /// passes the event rather than lose a match to an unavailable
-        /// model.
-        classifier_not_run: bool,
+        /// Set when the watch has a classifier that did not run. The
+        /// event passes rather than lose a match to an unavailable model,
+        /// and the agent is told why.
+        classifier: Option<ClassifierSkip>,
     },
     Timer {
         slug: String,
         timer: TimerWatch,
         /// `None` when the timer names an Interest that does not exist.
         interest: Option<Interest>,
+        /// This is its last allowed occurrence.
+        spent: bool,
     },
+}
+
+/// Why a classified watch's event passed without a classifier answer
+/// (outcome `not-run`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassifierSkip {
+    pub reason: String,
 }
 
 /// One run of an agent.
@@ -202,6 +215,98 @@ pub struct AgentHandle {
     pub(crate) host: HostLink,
     /// Events the agent wrote, so reactions to them reach no watch.
     pub(crate) wrote: Arc<Mutex<Bounded>>,
+    /// The agent's own attention, one object at a time.
+    pub attention: AgentAttention,
+}
+
+/// Work for the Agents service, run on its thread.
+pub(crate) type AttentionCall =
+    Box<dyn FnOnce(&mut Agents2, &mut gpui_kit::Context<Agents2>) + Send>;
+
+/// What an agent reads and writes of its attention (buzz-app's
+/// `AgentAttention`). Every read is current, so a long run sees the
+/// owner's switch and the classifier's state change. Each call is answered
+/// by the Agents service, which keeps the records, so a write is checked
+/// against the record as it is when it lands.
+#[derive(Clone)]
+pub struct AgentAttention {
+    pub(crate) pubkey: String,
+    pub(crate) calls: futures::channel::mpsc::UnboundedSender<AttentionCall>,
+}
+
+impl AgentAttention {
+    /// One no service answers: every call fails.
+    pub fn detached(pubkey: &str) -> Self {
+        Self {
+            pubkey: pubkey.into(),
+            calls: futures::channel::mpsc::unbounded().0,
+        }
+    }
+
+    /// Runs `call` on the service's thread, with the agent's pubkey.
+    async fn ask<T: Send + 'static>(
+        &self,
+        call: impl FnOnce(&mut Agents2, &str, &mut gpui_kit::Context<Agents2>) -> T + Send + 'static,
+    ) -> Result<T, String> {
+        let (reply, answer) = oneshot::channel();
+        let pubkey = self.pubkey.clone();
+        self.calls
+            .unbounded_send(Box::new(move |this, cx| {
+                let _ = reply.send(call(this, &pubkey, cx));
+            }))
+            .map_err(|_| "Agents stopped".to_string())?;
+        answer.await.map_err(|_| "Agents stopped".to_string())
+    }
+
+    /// False when the owner turned attention off: none of its objects
+    /// wakes the agent. The handle still reads and writes them; the
+    /// attention tools refuse every call while it is off.
+    pub async fn enabled(&self) -> Result<bool, String> {
+        self.ask(|this, pubkey, cx| this.attention_enabled(pubkey, cx))
+            .await?
+    }
+
+    /// Whether a watch's classifier can run now. Classifiers can be saved
+    /// either way; one that cannot run lets every event pass.
+    pub fn classifier(&self) -> ClassifierAvailability {
+        CLASSIFIER
+    }
+
+    /// One object and its expected-state token. `interest` scopes the
+    /// read: an object of another Interest is `wrong-scope`.
+    pub async fn show(&self, slug: &str, interest: Option<&str>) -> Result<Shown, String> {
+        let (slug, interest) = (slug.to_owned(), interest.map(str::to_owned));
+        self.ask(move |this, pubkey, cx| {
+            this.attention_show(pubkey, &slug, interest.as_deref(), cx)
+        })
+        .await?
+    }
+
+    pub async fn interests(&self, search: &str) -> Result<Vec<String>, String> {
+        let search = search.to_owned();
+        self.ask(move |this, pubkey, cx| this.attention_interests(pubkey, &search, cx))
+            .await?
+    }
+
+    pub async fn watches(&self, filter: WatchFilter) -> Result<Vec<WatchSummary>, String> {
+        self.ask(move |this, pubkey, cx| this.attention_watches(pubkey, &filter, cx))
+            .await?
+    }
+
+    /// Replaces, or with `None` removes, one object; returns it as shown
+    /// after the write. A refused write is an `AttentionError`'s text.
+    pub async fn write(
+        &self,
+        slug: &str,
+        value: Option<Value>,
+        options: WriteOptions,
+    ) -> Result<Shown, String> {
+        let slug = slug.to_owned();
+        self.ask(move |this, pubkey, cx| {
+            this.attention_write(pubkey, &slug, value.as_ref(), &options, cx)
+        })
+        .await?
+    }
 }
 
 impl AgentHandle {

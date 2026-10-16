@@ -10,6 +10,7 @@
 //! - [`registry`]: the [`AgentType`] trait and [`register_type`].
 //! - [`runtime`]: what a run receives ([`Delivery`], [`AgentHandle`]).
 //! - [`attention`] and [`store`]: the attention format and local records.
+//! - [`objects`]: the agent's own one-object reads and writes of it.
 //! - [`Agents2`]: the service, a GPUI entity reachable with
 //!   [`Agents2::global`].
 
@@ -17,6 +18,7 @@ pub mod attention;
 mod cleanup;
 #[cfg(debug_assertions)]
 mod dev;
+pub mod objects;
 pub mod registry;
 pub mod runtime;
 mod service;
@@ -57,6 +59,8 @@ pub struct Agent {
     pub skipped: Arc<BTreeMap<String, SkippedObject>>,
     /// Run state of its timers, by slug; written only by the runtime.
     pub timers: Arc<BTreeMap<String, TimerState>>,
+    /// Whether its watches and timers wake it. Off keeps every object.
+    pub attention_enabled: bool,
     pub config: Value,
 }
 
@@ -69,6 +73,10 @@ pub struct AgentChange {
     pub picture: Option<String>,
     pub config: Option<Value>,
     pub attention: Vec<(String, Option<Value>)>,
+    pub attention_enabled: Option<bool>,
+    /// Timers in `attention` to start over: a new schedule from their
+    /// `armed_at`, with no occurrences used.
+    pub restart: Vec<String>,
 }
 
 /// Starts the Agents2 service. Call after the hosts and the app state.

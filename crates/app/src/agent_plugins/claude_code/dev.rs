@@ -74,6 +74,9 @@ fn turns(pubkey: &str, cx: &mut App) {
             runtime: crate::runtime::Runtime::handle(cx),
         },
         wrote: Default::default(),
+        attention: crate::agents2::Agents2::global(cx)
+            .map(|agents| agents.read(cx).attention(&agent.pubkey))
+            .unwrap_or_else(|| crate::agents2::runtime::AgentAttention::detached(&agent.pubkey)),
     };
     let spawn = host.read(cx).spawner(super::PROCESS_OWNER);
     let runtime = state.read(cx).runtime.clone();

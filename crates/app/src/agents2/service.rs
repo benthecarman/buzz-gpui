@@ -15,12 +15,14 @@ use super::attention::{
     self, AttentionObject, AttentionValue, CHAT_KINDS, EventData, Predicate, TimerState,
     addressed_to, compile_filter, tags_agent, timer_spent, timer_state, watch_matches,
 };
+use super::objects::{CLASSIFIER, ClassifierAvailability};
 use super::registry::{self, AgentType, Models, RegisteredType};
 use super::runtime::{
-    AgentHandle, Bounded, CancelSource, Cancellation, Delivery, HostLink, Trigger, UNSUPPORTED,
+    AgentAttention, AgentHandle, AttentionCall, Bounded, CancelSource, Cancellation,
+    ClassifierSkip, Delivery, HostLink, Trigger, UNSUPPORTED,
 };
 use super::store::{
-    self, AgentRecord, FileStorage, Storage, read_records, set_attention, write_records,
+    self, AgentRecord, FileStorage, Schedule, Storage, read_records, set_attention, write_records,
 };
 use super::working::{self, Working};
 use super::{Agent, AgentChange};
@@ -178,15 +180,23 @@ struct Job {
     channel: Option<String>,
     /// A mention's local work row, once the runner holds the agent.
     work: Option<WorkHandle>,
+    /// For a watch: the object and attention epoch it was matched under.
+    /// It runs only while both are still current, so a watch edited,
+    /// replaced or turned off and on again since then does not run it.
+    matched: Option<(AttentionObject, u64)>,
 }
 
 pub(crate) struct CompiledWatch {
     slug: String,
     watch: attention::EventWatch,
     interest: Option<attention::Interest>,
-    classifier_not_run: bool,
+    classifier: Option<ClassifierSkip>,
     filter: Option<Predicate>,
 }
+
+/// Until a classifier is wired in, every classified watch passes
+/// unchecked.
+const UNAVAILABLE: &str = "no classifier is available on this device";
 
 /// The watches compiled for one attention set.
 type Compiled = (
@@ -223,6 +233,9 @@ struct Runner {
     /// The host lets this GUI hold the agent, so its mentions show here
     /// as local work.
     activity_claimed: bool,
+    /// Advances each time attention is seen off, which voids queued watch
+    /// work.
+    epoch: u64,
 }
 
 /// What a full queue says on the mention it could not take.
@@ -489,7 +502,7 @@ pub(crate) fn heard(
             slug: compiled.slug.clone(),
             watch: compiled.watch.clone(),
             interest: compiled.interest.clone(),
-            classifier_not_run: compiled.classifier_not_run,
+            classifier: compiled.classifier.clone(),
         })
         .collect()
 }
@@ -508,9 +521,11 @@ fn compile(attention: &BTreeMap<String, AttentionObject>) -> Vec<CompiledWatch> 
             Some(CompiledWatch {
                 slug: object.slug.clone(),
                 interest: interest(attention, &watch.interest_id),
-                // No classifier model runs here yet, so the event passes
-                // unclassified.
-                classifier_not_run: watch.classifier.is_some(),
+                classifier: (watch.classifier.is_some()
+                    && CLASSIFIER == ClassifierAvailability::Unavailable)
+                    .then(|| ClassifierSkip {
+                        reason: UNAVAILABLE.into(),
+                    }),
                 filter: watch
                     .filter
                     .as_deref()
@@ -534,6 +549,9 @@ fn interest(
     }
 }
 
+/// A due timer's slug, value and state once this run counts.
+pub(crate) type DueTimer = (String, attention::TimerWatch, TimerState);
+
 /// Spec schedule rules: occurrence k is due at armed_at + k × interval, at
 /// most one runs when overdue, then the next is due interval after it ran.
 /// A timer with no saved state counts what was already due as used. The
@@ -544,10 +562,7 @@ pub(crate) fn due_timer(
     attention: &BTreeMap<String, AttentionObject>,
     prior: &BTreeMap<String, TimerState>,
     now: u64,
-) -> (
-    BTreeMap<String, TimerState>,
-    Option<(String, attention::TimerWatch)>,
-) {
+) -> (BTreeMap<String, TimerState>, Option<DueTimer>) {
     let mut timers = prior.clone();
     let mut next: Option<(&str, &attention::TimerWatch, TimerState)> = None;
     for object in attention.values() {
@@ -575,15 +590,43 @@ pub(crate) fn due_timer(
     let Some((slug, timer, state)) = next else {
         return (timers, None);
     };
-    timers.insert(
-        slug.to_owned(),
-        TimerState {
-            used: state.used + 1,
-            next_due: now + timer.interval_secs,
-            ..state
+    let ran = TimerState {
+        used: state.used + 1,
+        next_due: now + timer.interval_secs,
+        ..state
+    };
+    timers.insert(slug.to_owned(), ran);
+    (timers, Some((slug.to_owned(), timer.clone(), ran)))
+}
+
+/// The job as it should run now, or `None` when it should not run: a
+/// watch's event is matched again against the agent's current attention,
+/// so one turned off, disabled, removed, replaced or changed since it was
+/// queued wakes nothing, even if it now matches again.
+fn rematched(epoch: u64, agent: &Agent, job: Job) -> Option<Job> {
+    let Trigger::Watch { event, slug, .. } = &job.trigger else {
+        return Some(job);
+    };
+    if !agent.attention_enabled {
+        return None;
+    }
+    let (object, matched) = job.matched.as_ref()?;
+    if *matched != epoch || agent.attention.get(slug) != Some(object) {
+        return None;
+    }
+    let compiled = compile(&agent.attention).into_iter().find(|compiled| {
+        compiled.slug == *slug && watch_matches(&compiled.watch, event, compiled.filter.as_ref())
+    })?;
+    Some(Job {
+        trigger: Trigger::Watch {
+            event: event.clone(),
+            slug: compiled.slug,
+            watch: compiled.watch,
+            interest: compiled.interest,
+            classifier: compiled.classifier,
         },
-    );
-    (timers, Some((slug.to_owned(), timer.clone())))
+        ..job
+    })
 }
 
 fn now_secs() -> u64 {
@@ -602,7 +645,7 @@ fn defaults(pubkey: &str, kind: &RegisteredType) -> Result<AgentRecord, String> 
     };
     let now = now_secs();
     for (slug, value) in &defaults.attention {
-        record = set_attention(&record, slug, Some(&value.to_json()), now)?;
+        record = set_attention(&record, slug, Some(&value.to_json()), now, None)?;
     }
     Ok(record)
 }
@@ -647,8 +690,11 @@ pub struct Agents2 {
     /// Deleted agents whose community cleanup is running, and whether it
     /// was asked for again meanwhile.
     cleaning: HashMap<String, bool>,
+    /// Where agents' attention handles send their reads and writes.
+    attention_calls: futures::channel::mpsc::UnboundedSender<AttentionCall>,
     _subscriptions: Vec<Subscription>,
     _tick: Task<()>,
+    _attention: Task<()>,
 }
 
 impl Agents2 {
@@ -686,6 +732,15 @@ impl Agents2 {
                 }
             }
         });
+        let (attention_calls, mut calls) = futures::channel::mpsc::unbounded::<AttentionCall>();
+        let attention = cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(call) = calls.next().await {
+                if this.update(cx, |this, cx| call(this, cx)).is_err() {
+                    return;
+                }
+            }
+        });
         let mut this = Self {
             storage,
             records,
@@ -699,8 +754,10 @@ impl Agents2 {
             runners: HashMap::new(),
             serial: 0,
             cleaning: HashMap::new(),
+            attention_calls,
             _subscriptions: subscriptions,
             _tick: tick,
+            _attention: attention,
         };
         this.watch_hosts(cx);
         this.watch(cx);
@@ -1257,6 +1314,7 @@ impl Agents2 {
             attention: record.attention.clone(),
             skipped: record.skipped.clone(),
             timers: record.timers.clone(),
+            attention_enabled: record.attention_on(),
             config: record.config.clone(),
         }
     }
@@ -1298,6 +1356,19 @@ impl Agents2 {
         let mut drains = Vec::new();
         for summary in &live {
             let kind = registry::type_of(&summary.agent_type, cx);
+            // Turning attention off voids the watch work it queued, even if
+            // it is turned on again before that work would run.
+            if let Some(runner) = self.runners.get_mut(&summary.pubkey)
+                && !self
+                    .records
+                    .get(&summary.pubkey)
+                    .is_none_or(AgentRecord::attention_on)
+            {
+                runner.epoch += 1;
+                runner
+                    .queue
+                    .retain(|job| !matches!(job.trigger, Trigger::Watch { .. }));
+            }
             match self.runners.get_mut(&summary.pubkey) {
                 None => {
                     self.serial += 1;
@@ -1322,6 +1393,7 @@ impl Agents2 {
                             working_since: None,
                             failed: None,
                             activity_claimed: false,
+                            epoch: 0,
                         },
                     );
                 }
@@ -1385,6 +1457,10 @@ impl Agents2 {
             if !hears(&agent.owner, &agent.relay, origin, &sessions) {
                 continue;
             }
+            let community = agent
+                .attention_enabled
+                .then(|| self.relay(&agent.pubkey))
+                .flatten();
             let Some(runner) = self.runners.get_mut(&agent.pubkey) else {
                 continue;
             };
@@ -1418,11 +1494,24 @@ impl Agents2 {
                 let wrote = runner.wrote.clone();
                 let wrote =
                     move |id: &str| wrote.lock().unwrap_or_else(|p| p.into_inner()).contains(id);
-                for trigger in heard(&agent.pubkey, &agent.owner, event, &wrote, &watches) {
+                // Off, or outside the agent's channels, no watch hears it.
+                let watching = community
+                    .as_ref()
+                    .is_some_and(|community| member(community, &agent.pubkey, event, cx));
+                let watches: &[CompiledWatch] = if watching { &watches } else { &[] };
+                for trigger in heard(&agent.pubkey, &agent.owner, event, &wrote, watches) {
+                    let matched = match &trigger {
+                        Trigger::Watch { slug, .. } => agent
+                            .attention
+                            .get(slug)
+                            .map(|object| (object.clone(), runner.epoch)),
+                        _ => None,
+                    };
                     let mut job = Job {
                         trigger,
                         channel: batch.channel.clone(),
                         work: None,
+                        matched,
                     };
                     let scope = work_scope(agent).filter(|_| runner.activity_claimed);
                     if let Some(scope) = &scope {
@@ -1449,6 +1538,11 @@ impl Agents2 {
 
     /// The due timer of a running agent, recording its run.
     fn due(&mut self, agent: &Agent) -> Option<Job> {
+        // Off, timers keep their saved state; one overdue runs once when
+        // back on.
+        if !agent.attention_enabled {
+            return None;
+        }
         let record = self
             .records
             .get(&agent.pubkey)
@@ -1467,16 +1561,18 @@ impl Agents2 {
                 return None;
             }
         }
-        let (slug, timer) = next?;
+        let (slug, timer, ran) = next?;
         let interest = interest(&agent.attention, &timer.interest_id);
         Some(Job {
             trigger: Trigger::Timer {
+                spent: timer_spent(&timer, &ran, ran.next_due),
                 slug,
                 timer,
                 interest,
             },
             channel: None,
             work: None,
+            matched: None,
         })
     }
 
@@ -1689,7 +1785,15 @@ impl Agents2 {
             }
         }
         let lifetime = runner.lifetime_signal.clone();
-        let job = match runner.queue.pop_front() {
+        let epoch = runner.epoch;
+        let mut queued = None;
+        while let Some(job) = runner.queue.pop_front() {
+            queued = rematched(epoch, &agent, job);
+            if queued.is_some() {
+                break;
+            }
+        }
+        let job = match queued {
             Some(job) => Some(job),
             None => self.due(&agent),
         };
@@ -1709,6 +1813,7 @@ impl Agents2 {
             owner: agent.owner.clone(),
             host: link(&host, cx),
             wrote: runner.wrote.clone(),
+            attention: self.attention(&agent.pubkey),
         };
         if let Some(runner) = self.runners.get_mut(pubkey) {
             runner.working_since = Some(now_ms());
@@ -2026,9 +2131,13 @@ impl Agents2 {
         if let Some(config) = change.config.clone() {
             record.config = config;
         }
+        if let Some(enabled) = change.attention_enabled {
+            record.attention_enabled = (!enabled).then_some(false);
+        }
         let now = now_secs();
         for (slug, value) in &change.attention {
-            record = match set_attention(&record, slug, value.as_ref(), now) {
+            let schedule = change.restart.contains(slug).then_some(Schedule::Restart);
+            record = match set_attention(&record, slug, value.as_ref(), now, schedule) {
                 Ok(record) => record,
                 Err(error) => return Task::ready(Err(error)),
             };
@@ -2049,7 +2158,9 @@ impl Agents2 {
                 ));
             }
         }
-        if (change.config.is_some() || !change.attention.is_empty())
+        if (change.config.is_some()
+            || !change.attention.is_empty()
+            || change.attention_enabled.is_some())
             && let Err(error) = self.write(record)
         {
             return Task::ready(Err(error));
@@ -2154,6 +2265,23 @@ impl Agents2 {
     }
 }
 
+/// Whether the agent is in the event's channel, by its relay-signed
+/// roster. The stream is the owner's, so a watch, even of "all", sees only
+/// what the agent itself could read; an event with no channel, or whose
+/// roster is unknown, wakes no watch.
+fn member(community: &Entity<Community>, agent: &str, event: &EventData, cx: &App) -> bool {
+    let Some(channel) = event.tag("h") else {
+        return false;
+    };
+    community
+        .read(cx)
+        .snapshot
+        .channels
+        .iter()
+        .find(|item| item.id == channel)
+        .is_some_and(|item| item.members.iter().any(|member| member == agent))
+}
+
 fn link(host: &Entity<HostConnection>, cx: &App) -> HostLink {
     HostLink {
         client: host.read(cx).client(),
@@ -2200,5 +2328,6 @@ fn listen(session: &Arc<Session>, origin: &str, cx: &mut Context<Agents2>) -> Ta
     })
 }
 
+mod attention_calls;
 #[cfg(test)]
 mod tests;

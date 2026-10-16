@@ -25,14 +25,21 @@ pub struct Interest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClassifierQuestion {
     pub question: String,
-    #[serde(rename = "true")]
-    pub when_true: String,
-    #[serde(rename = "false")]
-    pub when_false: String,
+    #[serde(rename = "true", default, skip_serializing_if = "Option::is_none")]
+    pub when_true: Option<String>,
+    #[serde(rename = "false", default, skip_serializing_if = "Option::is_none")]
+    pub when_false: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<String>,
-    pub threshold: f64,
+    /// The yes probability at which the answer passes;
+    /// [`CLASSIFIER_THRESHOLD`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
 }
+
+/// Janet's default: a lower threshold passes more events.
+#[allow(dead_code)] // Read once a classifier runs here.
+pub const CLASSIFIER_THRESHOLD: f64 = 0.2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Classifier {
@@ -392,8 +399,8 @@ fn event_watch(value: &Map<String, Value>) -> Check {
             };
             fields(
                 q,
-                &["question", "true", "false", "threshold"],
-                &["guidance"],
+                &["question"],
+                &["true", "false", "guidance", "threshold"],
             )?;
             for (key, max) in [
                 ("question", 2_048),
@@ -405,8 +412,9 @@ fn event_watch(value: &Map<String, Value>) -> Check {
                     total += text(q.get(key), key, max)?.len();
                 }
             }
-            match q.get("threshold").and_then(Value::as_f64) {
-                Some(threshold) if threshold > 0.0 && threshold < 1.0 => {}
+            match q.get("threshold").map(Value::as_f64) {
+                None => {}
+                Some(Some(threshold)) if threshold > 0.0 && threshold < 1.0 => {}
                 _ => return fail("threshold must be between 0 and 1"),
             }
         }
@@ -763,11 +771,6 @@ pub fn timer_state(timer: &TimerWatch, prior: Option<&TimerState>, now: u64) -> 
         next_due: timer.armed_at + (used + 1) * interval,
         used,
     }
-}
-
-/// Edits to these restart the count; the rest keep the saved state.
-pub fn same_schedule(a: &TimerWatch, b: &TimerWatch) -> bool {
-    a.armed_at == b.armed_at && a.interval_secs == b.interval_secs && a.enabled == b.enabled
 }
 
 pub fn timer_spent(timer: &TimerWatch, state: &TimerState, now: u64) -> bool {

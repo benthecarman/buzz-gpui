@@ -399,6 +399,7 @@ async fn tools_publish_to_the_test_relay_as_a_throwaway_agent() {
             runtime: tokio::runtime::Handle::current(),
         },
         wrote: Default::default(),
+        attention: crate::agents2::runtime::AgentAttention::detached(&pubkey),
     };
     // Core memory, written as the agent, is read back with the owner's key.
     handle

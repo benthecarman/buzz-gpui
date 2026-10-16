@@ -8,7 +8,7 @@
 //! JSON file of the same shape in the data directory.
 
 use super::attention::{
-    AttentionObject, AttentionValue, OBJECT_LIMIT, TimerState, same_schedule, timer_state,
+    AttentionObject, AttentionValue, OBJECT_LIMIT, TimerState, TimerWatch, timer_state,
     validate_object,
 };
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,10 @@ pub struct AgentRecord {
     /// Run state of its timers, by slug. Not config, so it never leaves the
     /// device; kept here so removing a timer or the agent removes its state.
     pub timers: Arc<BTreeMap<String, TimerState>>,
+    /// `Some(false)` when the owner turned attention off: its watches and
+    /// timers stay stored but wake nothing, and the agent is not offered
+    /// attention tools. Absent means on.
+    pub attention_enabled: Option<bool>,
 }
 
 impl AgentRecord {
@@ -81,6 +85,21 @@ impl AgentRecord {
             ..Default::default()
         }
     }
+
+    /// Whether its watches and timers wake it.
+    pub fn attention_on(&self) -> bool {
+        self.attention_enabled != Some(false)
+    }
+}
+
+/// How [`set_attention`] treats an edited timer's schedule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Schedule {
+    /// A new deadline from its `armed_at`, even when that is unchanged.
+    #[allow(dead_code)] // For the attention tools.
+    Rearm,
+    /// A new deadline and a fresh budget, as the owner's "Run again".
+    Restart,
 }
 
 /// Where the records are kept.
@@ -269,6 +288,8 @@ pub fn read_records(storage: &dyn Storage) -> BTreeMap<String, AgentRecord> {
                 skipped: Arc::new(skipped),
                 config: record.get("config").cloned().unwrap_or(Value::Null),
                 timers: Arc::new(timers),
+                attention_enabled: (record.get("attentionEnabled") == Some(&Value::Bool(false)))
+                    .then_some(false),
             },
         );
     }
@@ -311,6 +332,9 @@ pub fn write_records(
             "timers".into(),
             serde_json::to_value(&*record.timers).expect("timers serialize"),
         );
+        if let Some(enabled) = record.attention_enabled {
+            stored.insert("attentionEnabled".into(), Value::Bool(enabled));
+        }
         agents.insert(pubkey.clone(), Value::Object(stored));
     }
     let text = serde_json::json!({ "version": 1, "agents": agents }).to_string();
@@ -318,14 +342,18 @@ pub fn write_records(
 }
 
 /// Replaces or deletes (`None`) one attention object, after validating it
-/// and the count limits. A timer keeps its run state only while its
-/// schedule (`armed_at`, `interval_secs`, `enabled`) is unchanged;
-/// otherwise it recounts.
+/// and the count limits. A timer keeps its run state while its `armed_at`
+/// is unchanged, as Janet's do: a new interval applies from its next run,
+/// and enabling it again runs at most one overdue occurrence. A new
+/// `armed_at` (a rearm) sets a new deadline, one interval after it, and
+/// keeps the occurrences already used. Only a timer with no saved state
+/// counts what was already due. `schedule` overrides that for a timer.
 pub fn set_attention(
     record: &AgentRecord,
     slug: &str,
     value: Option<&Value>,
     now: u64,
+    schedule: Option<Schedule>,
 ) -> Result<AgentRecord, String> {
     let mut rest = (*record.attention).clone();
     let prior = rest.remove(slug).map(|object| object.value);
@@ -354,9 +382,7 @@ pub fn set_attention(
     }
     if let AttentionValue::Timer(timer) = &parsed {
         let kept = match (state, &prior) {
-            (Some(state), Some(AttentionValue::Timer(prior))) if same_schedule(prior, timer) => {
-                state
-            }
+            (Some(state), Some(AttentionValue::Timer(_))) => rearmed(timer, state, schedule),
             _ => timer_state(timer, None, now),
         };
         timers.insert(slug.into(), kept);
@@ -375,6 +401,22 @@ pub fn set_attention(
         timers: Arc::new(timers),
         ..record.clone()
     })
+}
+
+/// `state` for the edited `timer`: unchanged unless it was rearmed.
+fn rearmed(timer: &TimerWatch, state: TimerState, schedule: Option<Schedule>) -> TimerState {
+    if schedule.is_none() && state.armed_at == timer.armed_at {
+        return state;
+    }
+    TimerState {
+        armed_at: timer.armed_at,
+        next_due: timer.armed_at + timer.interval_secs,
+        used: if schedule == Some(Schedule::Restart) {
+            0
+        } else {
+            state.used
+        },
+    }
 }
 
 #[cfg(test)]

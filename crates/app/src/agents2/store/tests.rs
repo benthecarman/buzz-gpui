@@ -25,6 +25,7 @@ fn round_trips_records_and_keeps_objects_a_reader_would_ignore() {
         "interest/default",
         Some(&json!({"type": "interest", "instructions": "Be brief."})),
         7,
+        None,
     )
     .unwrap();
     let records = BTreeMap::from([(pubkey(), saved.clone())]);
@@ -49,7 +50,7 @@ fn round_trips_records_and_keeps_objects_a_reader_would_ignore() {
         json!({"slug": "watch/bad", "value": {"type": "event"}, "modifiedAt": 1})
     );
     // Removing it clears it from the skipped set.
-    let fixed = set_attention(&read[&pubkey()], "watch/bad", None, 2).unwrap();
+    let fixed = set_attention(&read[&pubkey()], "watch/bad", None, 2, None).unwrap();
     assert!(fixed.skipped.is_empty());
 }
 
@@ -78,7 +79,7 @@ fn skips_objects_over_the_count_limit_in_slug_order_and_refuses_more() {
         vec!["interest/i100"]
     );
     let interest = json!({"type": "interest", "instructions": "x"});
-    let error = set_attention(&read, "interest/new", Some(&interest), 1).unwrap_err();
+    let error = set_attention(&read, "interest/new", Some(&interest), 1, None).unwrap_err();
     assert!(error.contains("at most 100"), "{error}");
     let mut full = (*read.attention).clone();
     full.remove("interest/i099");
@@ -86,81 +87,121 @@ fn skips_objects_over_the_count_limit_in_slug_order_and_refuses_more() {
         attention: Arc::new(full),
         ..read.clone()
     };
-    assert!(set_attention(&room, "interest/new", Some(&interest), 1).is_ok());
+    assert!(set_attention(&room, "interest/new", Some(&interest), 1, None).is_ok());
     // Replacing an existing object is not adding one.
-    assert!(set_attention(&read, "interest/i000", Some(&interest), 1).is_ok());
+    assert!(set_attention(&read, "interest/i000", Some(&interest), 1, None).is_ok());
 }
 
 #[test]
-fn keeps_a_timer_run_state_only_while_its_schedule_is_unchanged() {
+fn keeps_a_timer_budget_across_edits_and_only_a_rearm_moves_its_deadline() {
     let timer = json!({
         "type": "timer", "interest_id": "x", "prompt": "tick", "enabled": true,
-        "interval_secs": 10, "armed_at": 100, "max_occurrences": null, "expires_at": null,
+        "interval_secs": 3600, "armed_at": 100, "max_occurrences": 3, "expires_at": null,
     });
-    let armed = set_attention(&record(), "watch/t", Some(&timer), 100).unwrap();
-    assert_eq!(
-        armed.timers["watch/t"],
-        TimerState {
-            armed_at: 100,
-            next_due: 110,
-            used: 0
-        }
-    );
+    let state = |armed_at, next_due, used| TimerState {
+        armed_at,
+        next_due,
+        used,
+    };
+    let armed = set_attention(&record(), "watch/t", Some(&timer), 100, None).unwrap();
+    assert_eq!(armed.timers["watch/t"], state(100, 3700, 0));
     let ran = AgentRecord {
         timers: Arc::new(BTreeMap::from([(
             "watch/t".to_owned(),
-            TimerState {
-                armed_at: 100,
-                next_due: 125,
-                used: 1,
-            },
+            state(100, 7300, 1),
         )])),
-        ..armed
+        ..armed.clone()
     };
     let with = |key: &str, value: Value| {
         let mut timer = timer.clone();
         timer[key] = value;
         timer
     };
-    // A new prompt keeps the count; pausing, or a new interval, recounts.
-    assert_eq!(
-        set_attention(&ran, "watch/t", Some(&with("prompt", json!("tock"))), 140)
+    let later = 100 + 10 * 3600;
+    // A new prompt or interval, pausing and resuming: none of them spends
+    // an occurrence or moves the deadline. A new interval applies from the
+    // next run.
+    for edit in [
+        with("prompt", json!("tock")),
+        with("interval_secs", json!(60)),
+        with("enabled", json!(false)),
+        with("enabled", json!(true)),
+    ] {
+        assert_eq!(
+            set_attention(&ran, "watch/t", Some(&edit), later, None)
+                .unwrap()
+                .timers,
+            ran.timers
+        );
+    }
+    let timers_of = |edit: Value, schedule| {
+        set_attention(&ran, "watch/t", Some(&edit), later, schedule)
             .unwrap()
-            .timers,
-        ran.timers
+            .timers["watch/t"]
+    };
+    // A rearm is a new deadline that keeps what was used, as in Janet,
+    // even when it is armed in the past.
+    assert_eq!(
+        timers_of(with("armed_at", json!(later)), None),
+        state(later, later + 3600, 1)
     );
     assert_eq!(
-        set_attention(&ran, "watch/t", Some(&with("enabled", json!(false))), 140)
+        timers_of(with("armed_at", json!(200)), None),
+        state(200, 3800, 1)
+    );
+    // An explicit rearm sets the deadline even at the same armed_at, so a
+    // new interval applies from it; a restart also gives back the whole
+    // budget.
+    assert_eq!(
+        timers_of(with("interval_secs", json!(60)), Some(Schedule::Rearm)),
+        state(100, 160, 1)
+    );
+    assert_eq!(
+        timers_of(with("armed_at", json!(later)), Some(Schedule::Restart)),
+        state(later, later + 3600, 0)
+    );
+    // Without saved state, what was already due counts as used.
+    assert_eq!(
+        set_attention(&record(), "watch/t", Some(&timer), 100 + 2 * 3600 + 5, None)
             .unwrap()
             .timers["watch/t"],
-        TimerState {
-            armed_at: 100,
-            next_due: 150,
-            used: 4
-        }
-    );
-    assert_eq!(
-        set_attention(
-            &ran,
-            "watch/t",
-            Some(&with("interval_secs", json!(20))),
-            140
-        )
-        .unwrap()
-        .timers["watch/t"],
-        TimerState {
-            armed_at: 100,
-            next_due: 160,
-            used: 2
-        }
+        state(100, 100 + 3 * 3600, 2)
     );
     // Timer state of a removed timer goes with it.
     assert!(
-        set_attention(&ran, "watch/t", None, 141)
+        set_attention(&ran, "watch/t", None, 141, None)
             .unwrap()
             .timers
             .is_empty()
     );
+}
+
+#[test]
+fn saves_attention_only_as_off() {
+    let storage = MemoryStorage::default();
+    let other = "b".repeat(64);
+    let records = BTreeMap::from([
+        (
+            pubkey(),
+            AgentRecord {
+                attention_enabled: Some(false),
+                ..record()
+            },
+        ),
+        (
+            other.clone(),
+            AgentRecord {
+                attention_enabled: Some(true),
+                ..AgentRecord::blank(&other)
+            },
+        ),
+    ]);
+    write_records(&storage, &records).unwrap();
+    let read = read_records(&storage);
+    assert_eq!(read[&pubkey()].attention_enabled, Some(false));
+    assert!(!read[&pubkey()].attention_on());
+    assert_eq!(read[&other].attention_enabled, None);
+    assert!(read[&other].attention_on());
 }
 
 #[test]
@@ -170,6 +211,7 @@ fn validates_replaces_and_deletes_one_object_at_a_time() {
         "interest/x",
         Some(&json!({"type": "interest", "instructions": " "})),
         1,
+        None,
     )
     .unwrap_err();
     assert!(error.contains("empty"), "{error}");
@@ -178,6 +220,7 @@ fn validates_replaces_and_deletes_one_object_at_a_time() {
         "interest/x",
         Some(&json!({"type": "interest", "instructions": "a"})),
         1,
+        None,
     )
     .unwrap();
     let two = set_attention(
@@ -185,6 +228,7 @@ fn validates_replaces_and_deletes_one_object_at_a_time() {
         "interest/x",
         Some(&json!({"type": "interest", "instructions": "b"})),
         2,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -192,7 +236,7 @@ fn validates_replaces_and_deletes_one_object_at_a_time() {
         json!({"slug": "interest/x", "value": {"type": "interest", "instructions": "b"}, "modifiedAt": 2})
     );
     assert!(
-        set_attention(&two, "interest/x", None, 3)
+        set_attention(&two, "interest/x", None, 3, None)
             .unwrap()
             .attention
             .is_empty()

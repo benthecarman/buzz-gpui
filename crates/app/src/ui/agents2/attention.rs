@@ -170,6 +170,8 @@ fn timer_status(timer: &TimerWatch, saved: Option<&TimerState>, at: u64) -> (boo
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Key {
+    /// The Attention switch.
+    Switch,
     Row(String),
     NewInterest,
     Interest(String),
@@ -285,22 +287,27 @@ impl AttentionPanel {
         done: impl FnOnce(&mut Self) + 'static,
         cx: &mut Context<Self>,
     ) {
+        let change = AgentChange {
+            attention: changes,
+            ..Default::default()
+        };
+        self.save_change(key, change, done, cx);
+    }
+
+    fn save_change(
+        &mut self,
+        key: Key,
+        change: AgentChange,
+        done: impl FnOnce(&mut Self) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let Some(service) = Agents2::global(cx) else {
             return;
         };
         self.pending.insert(key.clone());
         self.errors.remove(&key);
         let pubkey = self.pubkey.clone();
-        let task = service.update(cx, |service, cx| {
-            service.save(
-                &pubkey,
-                AgentChange {
-                    attention: changes,
-                    ..Default::default()
-                },
-                cx,
-            )
-        });
+        let task = service.update(cx, |service, cx| service.save(&pubkey, change, cx));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -630,6 +637,40 @@ impl AttentionPanel {
         self.menu = None;
         self.save(Key::Row(slug.clone()), vec![(slug, value)], |_| {}, cx);
     }
+
+    /// The owner's switch for the agent's own attention.
+    fn attention_switch(&self, agent: &Agent, cx: &mut Context<Self>) -> Div {
+        let c = *cx.colors();
+        let weak = cx.entity().downgrade();
+        let switch = Switch::new("attention-on", agent.attention_enabled)
+            .disabled(self.pending.contains(&Key::Switch))
+            .on_change(move |checked, _, cx| {
+                let change = AgentChange {
+                    attention_enabled: Some(checked),
+                    ..Default::default()
+                };
+                let _ = weak.update(cx, |this, cx| {
+                    this.save_change(Key::Switch, change, |_| {}, cx)
+                });
+            });
+        preference_row(
+            IconName::Eye,
+            "Attention",
+            Some(
+                div()
+                    .child(
+                        "Lets the agent add and change its own Interests, watches and timers, \
+                         and wakes it for them. Off, nothing below wakes it, and it is not \
+                         offered the tools.",
+                    )
+                    .children(problem(self.errors.get(&Key::Switch), &c))
+                    .into_any_element(),
+            ),
+            false,
+            Some(switch.into_any_element()),
+            &c,
+        )
+    }
 }
 
 /// A JSON number, or `null` when it is not finite, which validation
@@ -951,7 +992,7 @@ impl AttentionPanel {
         let remove_slug = slug.clone();
         let again = match (&value, spent) {
             (AttentionValue::Timer(timer), true) => {
-                // A new armed_at is a new schedule, with nothing used yet.
+                // The owner starts it over: a new schedule, nothing used yet.
                 let at = now();
                 let mut json = AttentionValue::Timer(timer.clone()).to_json();
                 json["enabled"] = json!(true);
@@ -965,7 +1006,13 @@ impl AttentionPanel {
                         .icon(IconName::Timer)
                         .icon_size(14.)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.put(again_slug.clone(), Some(json.clone()), cx)
+                            this.menu = None;
+                            let change = AgentChange {
+                                attention: vec![(again_slug.clone(), Some(json.clone()))],
+                                restart: vec![again_slug.clone()],
+                                ..Default::default()
+                            };
+                            this.save_change(Key::Row(again_slug.clone()), change, |_| {}, cx)
                         })),
                 )
             }
@@ -1576,6 +1623,7 @@ impl Render for AttentionPanel {
                         &c,
                     )
                     .into_any_element(),
+                    self.attention_switch(&agent, cx).into_any_element(),
                 ],
                 &c,
             ));
@@ -1698,6 +1746,7 @@ mod tests {
             attention: Arc::new(attention),
             skipped: Arc::default(),
             timers: Arc::default(),
+            attention_enabled: true,
             config: Value::Null,
         }
     }

@@ -277,6 +277,7 @@ impl AgentType for ClaudeCodeType {
                 slug,
                 timer,
                 interest,
+                ..
             } => Wake::Timer {
                 slug,
                 prompt: timer.prompt,

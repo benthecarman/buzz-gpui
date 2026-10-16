@@ -119,17 +119,27 @@ fn refuses_values_over_the_spec_limits() {
     );
     let kinds: Vec<u16> = (0..101).collect();
     assert!(problem("watch/w", &with(watch_json(), "kinds", json!(kinds))).contains("kinds"));
-    let question = json!({"question": "q", "threshold": 0.5});
-    assert!(
-        problem(
+    let classified = |question: Value| {
+        validate_object(
             "watch/w",
             &with(
                 watch_json(),
                 "classifier",
-                json!({"questions": {"a": question}})
-            )
+                json!({"questions": {"a": question}}),
+            ),
         )
-        .contains("Missing field: true")
+    };
+    // As in Janet, only the question is required.
+    assert_eq!(classified(json!({"question": "q"})), None);
+    assert!(
+        classified(json!({}))
+            .unwrap()
+            .contains("Missing field: question")
+    );
+    assert!(
+        classified(json!({"question": "q", "threshold": 1}))
+            .unwrap()
+            .contains("threshold")
     );
     assert_eq!(
         validate_object(
