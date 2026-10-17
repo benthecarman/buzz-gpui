@@ -68,7 +68,7 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `description` | Optional. Shown in Settings. |
 | `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
 | `apiVersion` | Optional. `1`, the only version so far. |
-| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents and teams. `manage-channels`: start DMs and create, join, leave, archive and delete channels. Reading needs no permission. |
+| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents and teams. `manage-channels`: start DMs; create, join, leave, archive and delete channels; change members, details and your kit. Reading needs no permission. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
 `BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
@@ -470,6 +470,14 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `channels/action` | `channel`, `action`: `join`, `leave`, `archive`, `unarchive`, `delete` (by an owner) or `hide` (a DM) | `null` once the relay shows it. Needs `manage-channels`. |
 | `channels/addMember` | `channel`, `pubkey` (such as one of your agents) | `null` once the roster lists them. Needs `manage-channels`. |
 | `channels/changeMember` | `channel`, `pubkey`, `change` (`admin`, `member`, `guest` or `remove`), `expected` (their role now: `owner`, `admin`, `member`, `guest` or `bot`) | `null` once done. Needs `manage-channels`. |
+| `channels/details` | `channel` | `{"channel","version","details","canEdit","attempt"}`: `details` is `{"name","description","private","ttlSeconds","labels"}`; `attempt` is a save still `saving` or `unconfirmed`, with its `details`, or `null` |
+| `channels/saveDetails` | `channel`, `version` (from `channels/details`), `details`; or `channel` and `check: true` to check an unconfirmed save | `null` once saved. A save that may have landed stays `unconfirmed` until checked. Needs `manage-channels`. |
+| `canvas/read` | `channel`, `strong` (default `true`: past relay replicas, as before an edit) | The channel's Canvas `{"id","author","createdAt","content"}`, or `null` |
+| `canvas/history` | `channel`, `cursor` (the `next` of the page before) | `{"revisions","next"}`: 25 revisions, newest first |
+| `canvas/save` | `channel`, `content`, `expected` (the `id` it was read as, or `null` for none) | The saved revision. If the Canvas changed since, it fails with code 4 and nothing is written. Needs `send-messages`. |
+| `agents/memories` | `agent` (one of your agents) | `{"entries","partial"}`: its newest memory per slug, `{"slug","body","eventId","createdAt"}` |
+| `kit/get` | none | `{"status","entries","error"}`: your teams, channel templates and sidebar groups in the community, each `{"eventId","createdAt","version","deleted","value"}`, where `value` has a `type` of `team`, `template` or `groups` |
+| `kit/save` | `value` (as `kit/get` gives it), `expected` (its `eventId`, or `null` for new), `deleted` | `{"eventId"}`. Needs `manage-channels`. |
 | `threads/follow` | `channel`, `root`, and `following` (`true` or `false`), or no `following` to ask | Whether you follow the thread now |
 | `reminders/list` | none | `{"reminders","error"}`, each `{"id","createdAt","notBefore","status","note","message"}` with `status` `pending`, `done` or `cancelled` |
 | `reminders/watch` | none | `{"watch"}`. Buzz then sends `reminders/changed` with what `reminders/list` gives. Stop with `reminders/unwatch`. |

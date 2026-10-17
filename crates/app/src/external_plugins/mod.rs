@@ -16,6 +16,7 @@
 mod agents;
 mod capabilities;
 mod channels;
+mod content;
 mod contribute;
 mod dialogs;
 pub use dialogs::dialog;
@@ -1599,7 +1600,10 @@ impl ExternalPlugins {
             | "channels/changeMember"
             | "messages/report"
             | "messages/retry"
-            | "messages/dismiss" => {
+            | "messages/dismiss"
+            | "canvas/save"
+            | "channels/saveDetails"
+            | "kit/save" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1608,7 +1612,9 @@ impl ExternalPlugins {
                     | "channels/create"
                     | "channels/action"
                     | "channels/addMember"
-                    | "channels/changeMember" => Permission::ManageChannels,
+                    | "channels/changeMember"
+                    | "channels/saveDetails"
+                    | "kit/save" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1647,9 +1653,17 @@ impl ExternalPlugins {
                     "channels/action" => channels::action(params, cx),
                     "channels/addMember" => channels::add_member(params, cx),
                     "channels/changeMember" => channels::change_member(params, cx),
+                    "canvas/save" => content::canvas_save(params, cx),
+                    "channels/saveDetails" => content::save_details(params, cx),
+                    "kit/save" => content::save_kit(params, cx),
                     _ => capabilities::send(params, cx),
                 })
             }
+            "agents/memories" => later(content::memories(params, cx)),
+            "canvas/read" => later(content::canvas_read(params, cx)),
+            "canvas/history" => later(content::canvas_history(params, cx)),
+            "channels/details" => later(content::details(params, cx)),
+            "kit/get" => Reply::Now(content::kit(cx)),
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
             "agents/watch" => Self::watch(path, generation, "agents/watch", params, cx),
