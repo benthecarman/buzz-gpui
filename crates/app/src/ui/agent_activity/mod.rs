@@ -29,6 +29,7 @@ pub fn init(cx: &mut App) {
     channel_panels::register(
         ChannelPanel {
             key: PANEL,
+            order: 0,
             title: "Agent Activity",
             icon: IconName::ListBullets,
             matches: channel_panels::matches(|target| selection(target).is_some()),

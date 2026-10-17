@@ -35,6 +35,7 @@ pub fn init(cx: &mut App) {
     channel_panels::register(
         ChannelPanel {
             key: KEY,
+            order: 0,
             title: "Usage",
             icon: IconName::Browser,
             matches: channel_panels::matches(|_| false),

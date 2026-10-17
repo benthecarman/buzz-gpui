@@ -75,6 +75,10 @@ pub fn build(build: impl Fn(Opening, &mut Window, &mut App) -> AnyView + 'static
 pub struct ChannelPanel {
     /// `plugin/panel`, unique.
     pub key: &'static str,
+    /// Which of the panels that show a link wins: the lowest, then the
+    /// lowest key (`MatchOrder`). By convention -10 specialises what
+    /// another panel shows, 0 is the default and 100 a catch-all.
+    pub order: i32,
     pub title: &'static str,
     pub icon: IconName,
     /// Links this panel shows, opened as a tab beside the conversation.
@@ -144,9 +148,17 @@ pub fn get(key: &str, cx: &App) -> Option<ChannelPanel> {
     all(cx).into_iter().find(|panel| panel.key == key)
 }
 
-/// The first panel that shows `target`, in registration order.
+/// The panel that shows `target`: of those that match, the lowest order,
+/// then the lowest key (`resolveMatch`).
 pub fn resolve(target: &str, cx: &App) -> Option<ChannelPanel> {
-    all(cx).into_iter().find(|panel| (panel.matches)(target))
+    winner(all(cx), target)
+}
+
+fn winner(panels: Vec<ChannelPanel>, target: &str) -> Option<ChannelPanel> {
+    panels
+        .into_iter()
+        .filter(|panel| (panel.matches)(target))
+        .min_by(|a, b| a.order.cmp(&b.order).then_with(|| a.key.cmp(b.key)))
 }
 
 /// The channel menu's panel entries for `channel`.
@@ -202,6 +214,7 @@ pub fn dev_sample(cx: &mut App) {
     register(
         ChannelPanel {
             key: "buzz.dev/sample",
+            order: 0,
             title: "Sample",
             icon: IconName::ListChecks,
             matches: matches(|target| target.starts_with("buzz://dev-sample")),
@@ -218,4 +231,40 @@ pub fn dev_sample(cx: &mut App) {
         },
         cx,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    fn panel(key: &'static str, order: i32, prefix: &'static str) -> ChannelPanel {
+        ChannelPanel {
+            key,
+            order,
+            title: key,
+            icon: IconName::Globe,
+            matches: matches(move |target| target.starts_with(prefix)),
+            launcher: None,
+            menu: None,
+            build: build(|_, _, _| unreachable!()),
+        }
+    }
+
+    #[test]
+    fn the_lowest_order_then_key_shows_a_link() {
+        let key = |panels, target| winner(panels, target).map(|panel| panel.key);
+        let all = || {
+            vec![
+                panel("b.web/all", 100, "https://"),
+                panel("c.docs/docs", 0, "https://docs.test/"),
+                panel("a.docs/docs", 0, "https://docs.test/"),
+                panel("z.special/api", -10, "https://docs.test/api"),
+            ]
+        };
+        assert_eq!(key(all(), "https://other.test/"), Some("b.web/all"));
+        assert_eq!(key(all(), "https://docs.test/x"), Some("a.docs/docs"));
+        assert_eq!(key(all(), "https://docs.test/api/x"), Some("z.special/api"));
+        assert_eq!(key(all(), "buzz://x"), None);
+    }
 }

@@ -32,6 +32,7 @@ pub fn init(cx: &mut App) {
     channel_panels::register(
         ChannelPanel {
             key: PANEL,
+            order: 0,
             title: "Terminal",
             icon: IconName::TerminalWindow,
             matches: channel_panels::matches(|_| false),

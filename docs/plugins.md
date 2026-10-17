@@ -115,8 +115,10 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 - `icon` names a Buzz icon, such as `House`, `Globe`, `Bell`, `Gear`, `Code`
   or `Plug`. An unknown name shows the plug icon.
 - `matches` lists link prefixes. A matching link clicked in a message opens
-  the panel as a tab. Buzz's own panels win over a plugin's for the same
-  link.
+  the panel as a tab. When several panels match, the lowest `order` wins,
+  then the lowest `plugin/id` key. Buzz's own panels are at 0. By convention,
+  use -10 to specialise links another panel shows, 0 (the default) for your
+  own links and 100 for a catch-all.
 - `launcher` adds a button to the channel header. `placement` is `side` (the
   default) or `bottom`. `menu` (`{"label"}`) adds an entry to the channel's
   menu.

@@ -963,6 +963,7 @@ impl ExternalPlugins {
             channel_panels::register(
                 ChannelPanel {
                     key,
+                    order: panel.order,
                     title,
                     icon: icon(panel.icon.as_deref()),
                     matches: channel_panels::matches(move |target| {

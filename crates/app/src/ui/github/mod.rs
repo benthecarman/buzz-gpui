@@ -28,6 +28,7 @@ pub fn init(cx: &mut App) {
     channel_panels::register(
         ChannelPanel {
             key: PANEL,
+            order: 0,
             title: "GitHub",
             icon: IconName::GithubLogo,
             matches: channel_panels::matches(|target| references::parse(target).is_some()),

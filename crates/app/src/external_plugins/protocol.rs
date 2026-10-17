@@ -256,6 +256,9 @@ pub struct PanelDecl {
     /// matching link clicked in a message opens the panel.
     #[serde(default)]
     pub matches: Vec<String>,
+    /// Which panel shows a link several match: the lowest wins.
+    #[serde(default)]
+    pub order: i32,
     /// A button in the channel header that toggles the panel.
     #[serde(default)]
     pub launcher: Option<LauncherDecl>,

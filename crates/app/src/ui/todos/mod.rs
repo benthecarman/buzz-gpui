@@ -49,6 +49,7 @@ pub fn init(cx: &mut App) {
     channel_panels::register(
         ChannelPanel {
             key: KEY,
+            order: 0,
             title: "Todos",
             icon: IconName::ListChecks,
             matches: channel_panels::matches(|_| false),

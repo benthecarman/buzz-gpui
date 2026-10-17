@@ -82,6 +82,7 @@ pub fn init(cx: &mut App) {
     channel_panels::register(
         ChannelPanel {
             key: KEY,
+            order: 0,
             title: "Profile",
             icon: IconName::User,
             matches: channel_panels::matches(|target| parse_target(target).is_some()),
