@@ -536,20 +536,27 @@ impl AgentType for PluginType {
     }
 
     fn defaults(&self) -> TypeDefaults {
+        let mut attention: Vec<(String, AttentionValue)> = self
+            .instructions
+            .iter()
+            .map(|instructions| {
+                (
+                    "interest/default".to_owned(),
+                    AttentionValue::Interest(Interest {
+                        instructions: instructions.clone(),
+                    }),
+                )
+            })
+            .collect();
+        // Objects that do not parse are left out.
+        attention.extend(self.decl.attention.iter().filter_map(|(slug, value)| {
+            serde_json::from_value(value.clone())
+                .ok()
+                .map(|value| (slug.clone(), value))
+        }));
         TypeDefaults {
             config: self.config.clone(),
-            attention: self
-                .instructions
-                .iter()
-                .map(|instructions| {
-                    (
-                        "interest/default".to_owned(),
-                        AttentionValue::Interest(Interest {
-                            instructions: instructions.clone(),
-                        }),
-                    )
-                })
-                .collect(),
+            attention: attention.into_iter().collect(),
         }
     }
 

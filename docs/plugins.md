@@ -139,7 +139,7 @@ The rest of the result can list:
 
 | Key | Each entry | What it adds |
 | --- | --- | --- |
-| `settingsCards` | `id`, `title`, `icon`, `placement`: `community`, `administration` or a group name (default `Integrations`) | A Settings section. It is a view with `kind` `settings`. |
+| `settingsCards` | `id`, `title`, `icon`, `placement`: `community`, `administration` or a group name (default `Integrations`) | A Settings section. It is a view with `kind` `settings`; its `view/open` carries the selected `community`'s relay. |
 | `notifications` | `id`, `label` | A category with its own switch in Settings → Notifications. Send with `notifications/submit`. |
 | `messageActions` | `id`, `title`, `icon`, `kinds` (default chat messages), `mine` | An item in a message's More menu. Choosing it sends `message/action`. |
 | `linkRenderers` | `id`, `matches` (link prefixes), `order` | Draws the chip of matching links in messages. Buzz asks with `link/render`. |
@@ -175,7 +175,9 @@ resume) and starts new Codex threads.
 
 `agentTypes` lists kinds of agent, which show in Create agent beside Claude
 and Codex. Each has an `id`, a `title`, an optional `description`, `config`
-(a new agent's settings), `instructions` (a new agent's default Interest) and
+(a new agent's settings), `instructions` (a new agent's default Interest),
+`attention` (more attention objects a new agent starts with, by slug, as
+`agents/save` takes them) and
 `timeoutSeconds` (default 300, at most 1800). Each time such an agent wakes,
 Buzz sends a request and the run lasts until the plugin answers it:
 
@@ -238,8 +240,9 @@ the answer until the agent's name or config changes:
   type takes over when an agent changes type, and where this type keeps what
   it takes over. `migrationWarning` says what leaving this type costs.
 - `tabs` (`[{"id", "title"}]`, at most 8): settings tabs before Attention.
-  Each is a view of `kind` `agentTab`; `view/open` also carries `type`,
-  `agent` and `contribution` (the tab id). To save, send `agent/save` with the
+    Each is a view of `kind` `agentTab`; `view/open` also carries `type`,
+  `agent`, `contribution` (the tab id) and `conversation` (`{"channel","root"}`
+  when the agent was opened from a message). To save, send `agent/save` with the
   `view` and the whole new `config`.
 
 While a call or run is open, the plugin can act as its agent:
@@ -408,6 +411,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/edit` | `channel`, `message`, `content` | `null` once sent. Only your own messages. Needs `send-messages`. |
 | `messages/react` | `channel`, `message`, `emoji` | `null` once sent. Needs `send-messages`. |
 | `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
+| `messages/report` | `channel`, `message`, `reason` (`spam`, `profanity`, `nudity`, `impersonation`, `malware`, `illegal` or `other`), `note` | `null` once the relay accepts it. Needs `send-messages`. |
+| `messages/retry`, `messages/dismiss` | `message` (one of yours whose `delivery` is `failed`) | `null`. Sends it again, or drops it. Needs `send-messages`. |
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
 | `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |

@@ -101,7 +101,18 @@ impl ExternalView {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        Self::open(plugin, contribution, "settings", |_| {}, cx).into()
+        // The section belongs to the selected community, if any.
+        let community = crate::community::AppState::current(cx)
+            .map(|community| community.read(cx).origin.websocket().to_string());
+        let extra = json!({ "community": community });
+        Self::open(
+            plugin,
+            contribution,
+            "settings",
+            |view| view.extra = extra,
+            cx,
+        )
+        .into()
     }
 
     /// A settings tab of one of the plugin's agent types.
@@ -344,11 +355,18 @@ impl ExternalView {
     /// `view/open`'s params.
     pub(super) fn open_params(&self) -> Value {
         let opening = self.opening.as_ref();
-        let (agent, kind) = match &self.agent {
-            Some((view, kind)) => (Some(super::agents::agent_json(&view.agent)), Some(*kind)),
-            None => (None, None),
+        let (agent, kind, conversation) = match &self.agent {
+            Some((view, kind)) => (
+                Some(super::agents::agent_json(&view.agent)),
+                Some(*kind),
+                view.conversation.as_ref().map(|conversation| {
+                    json!({ "channel": conversation.channel_id, "root": conversation.root_id })
+                }),
+            ),
+            None => (None, None, None),
         };
         let mut params = json!({
+            "conversation": conversation,
             "route": self.route,
             "agent": agent,
             "type": kind,

@@ -285,6 +285,10 @@ pub struct AgentTypeDecl {
     /// A new agent's standing instructions, as its default Interest.
     #[serde(default)]
     pub instructions: Option<String>,
+    /// More attention objects a new agent starts with, by slug, as
+    /// `agents/save` takes them (watches, timers, interests).
+    #[serde(default)]
+    pub attention: serde_json::Map<String, Value>,
     /// How long one run may take, at most 30 minutes.
     #[serde(default = "five_minutes")]
     pub timeout_seconds: u64,

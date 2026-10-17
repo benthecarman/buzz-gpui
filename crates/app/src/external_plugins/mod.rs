@@ -1528,7 +1528,10 @@ impl ExternalPlugins {
             | "teams/save"
             | "teams/remove"
             | "channels/addMember"
-            | "channels/changeMember" => {
+            | "channels/changeMember"
+            | "messages/report"
+            | "messages/retry"
+            | "messages/dismiss" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1563,6 +1566,9 @@ impl ExternalPlugins {
                     "messages/edit" => capabilities::edit(params, cx),
                     "messages/react" => capabilities::react(params, cx),
                     "messages/delete" => capabilities::delete(params, cx),
+                    "messages/report" => capabilities::report(params, cx),
+                    "messages/retry" => capabilities::retry(false, params, cx),
+                    "messages/dismiss" => capabilities::retry(true, params, cx),
                     "files/upload" => capabilities::upload(params, cx),
                     "events/publish" => events::publish(params, cx),
                     "agents/create" => agents::create(params, cx),

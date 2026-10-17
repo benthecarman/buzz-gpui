@@ -355,6 +355,56 @@ pub fn delete(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
     }))
 }
 
+/// `messages/report`: reports a message to the community's moderators
+/// (NIP-56), with a `reason` and a `note`.
+pub fn report(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::messages::ReportType;
+    let (community, channel, message) = message_target(params, cx)?;
+    let kind = match text(params, "reason") {
+        Some("spam") => ReportType::Spam,
+        Some("profanity") => ReportType::Profanity,
+        Some("nudity") => ReportType::Nudity,
+        Some("impersonation") => ReportType::Impersonation,
+        Some("malware") => ReportType::Malware,
+        Some("illegal") => ReportType::Illegal,
+        Some("other") | None => ReportType::Other,
+        Some(_) => return Err(invalid("reason is not a report reason")),
+    };
+    let note = text(params, "note")
+        .unwrap_or_default()
+        .chars()
+        .take(2000)
+        .collect::<String>();
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .report(&channel, message, kind, &note)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `messages/retry` and `messages/dismiss`: sends one of your failed
+/// messages or changes again, or drops it.
+pub fn retry(
+    dismiss: bool,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let message = event_id(params, "message")?.ok_or_else(|| invalid("message is required"))?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let done = if dismiss {
+            session.dismiss(message).await
+        } else {
+            session.retry_send(message).await
+        };
+        done.map(|()| Value::Null).map_err(|error| (3, error))
+    }))
+}
+
 /// The largest file `files/upload` takes, before base64.
 const MAX_UPLOAD: usize = 3 * 1024 * 1024;
 
