@@ -1348,6 +1348,17 @@ impl ExternalPlugins {
                     None => Reply::Now(Err((1, "The plugin stopped.".to_owned()))),
                 }
             }
+            "agent/step" | "agent/acknowledged" | "agent/superseded" | "agent/ignored" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                Reply::Now(match plugin {
+                    Some(plugin) => agents::presence(&plugin, method, params),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                })
+            }
+            "agents/activity" => Reply::Now(Ok(agents::activity(cx))),
             "agent/current" => {
                 let plugin = cx
                     .global_mut::<Self>()

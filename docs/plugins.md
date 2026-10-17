@@ -250,6 +250,9 @@ While a call or run is open, the plugin can act as its agent:
 | Request | Params | Result |
 | --- | --- | --- |
 | `agent/tool` | `call` or `run`, `tool` (a Buzz tool, such as `send`, `read`, `react` or `channels`, or in a run one of the attention tools, such as `watch_add`), `arguments` | The tool's answer: `{"text"}` or `{"image"}` |
+| `agent/step` | `run`, `tool`, `target` (optional) | `null`. Shows what the run is doing on its message, such as `read` on a channel. |
+| `agent/acknowledged`, `agent/superseded`, `agent/ignored` | `run` | `null`. Marks the run's message as taken up, as replaced by a newer request (its bubble hides), or as declined (nothing shows). |
+| `agents/activity` | none | What agents on this device are doing, newest first: `[{"agent","channel","message","root","state","startedAt","error","step"}]`, `state` being `waiting`, `working`, `done`, `error` or `superseded` |
 | `agent/current` | `run` | Whether the trigger should still run: `false` once the agent is removed, its attention turned off, or its watch changed |
 | `agent/query` | `call` or `run`, `filters` (1 to 10 NIP-01 filters) | The events, read as the agent, at most 500 |
 | `agent/publish` | `call` or `run`, `kind`, `content`, `tags` | The signed event, published as the agent |

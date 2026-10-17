@@ -41,6 +41,8 @@ struct Acting {
     attention: Option<Arc<dyn crate::buzz_mcp::attention::Attention>>,
     /// Whether a run's trigger is still current (`Delivery.current`).
     current: Option<crate::agents2::runtime::Current>,
+    /// A run's local work row, for its steps and outcome.
+    work: Option<crate::agent_activity::local::WorkHandle>,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -76,6 +78,7 @@ fn open(
                 context,
                 attention,
                 current: None,
+                work: None,
             },
         )
     });
@@ -757,9 +760,11 @@ impl AgentType for PluginType {
         let attention = AgentActions::attention(agent);
         let (run, open) = open(&self.plugin, client, context.clone(), attention);
         let current = delivery.current.clone();
+        let work = delivery.working.work();
         acting(|acting| {
             if let Some(open) = acting.get_mut(&run) {
                 open.current = Some(current);
+                open.work = work;
             }
         });
         let request = requester.request(
@@ -1075,6 +1080,68 @@ pub fn remove(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
     Ok(cx.background_spawn(
         async move { task.await.map(|()| Value::Null).map_err(|error| (3, error)) },
     ))
+}
+
+/// `agent/step`, `agent/acknowledged`, `agent/superseded` and
+/// `agent/ignored`: what a run shows on its message (`Delivery.step`,
+/// `acknowledged`, `superseded`, `ignored`).
+pub fn presence(plugin: &str, method: &str, params: &Value) -> Result<Value, Failure> {
+    let run = params
+        .get("run")
+        .and_then(Value::as_u64)
+        .ok_or((INVALID_PARAMS, "run is required".to_owned()))?;
+    let work = acting(|acting| {
+        acting
+            .get(&run)
+            .filter(|open| open.plugin == plugin)
+            .map(|open| open.work.clone())
+    })
+    .ok_or((1, "That run has ended.".to_owned()))?;
+    // A run without a work row, such as a timer's, has nothing to show.
+    let Some(work) = work else {
+        return Ok(Value::Null);
+    };
+    match method {
+        "agent/step" => {
+            let tool = params
+                .get("tool")
+                .and_then(Value::as_str)
+                .ok_or((INVALID_PARAMS, "tool is required".to_owned()))?;
+            let target = params.get("target").and_then(Value::as_str);
+            work.step(&tool.chars().take(64).collect::<String>(), target);
+        }
+        "agent/acknowledged" => work.started(),
+        "agent/superseded" => work.supersede(),
+        _ => work.remove(),
+    }
+    Ok(Value::Null)
+}
+
+/// `agents/activity`: what agents on this device are doing about which
+/// messages, newest first.
+pub fn activity(cx: &App) -> Value {
+    let Some(local) = cx.try_global::<crate::agent_activity::local::LocalActivity>() else {
+        return json!([]);
+    };
+    let mut work: Vec<_> = local.work().iter().cloned().collect();
+    work.sort_by_key(|work| std::cmp::Reverse(work.started_at));
+    Value::Array(
+        work.iter()
+            .take(200)
+            .map(|work| {
+                json!({
+                    "agent": work.agent,
+                    "channel": work.channel_id,
+                    "message": work.message_id,
+                    "root": work.thread_root_id,
+                    "state": format!("{:?}", work.state).to_ascii_lowercase(),
+                    "startedAt": work.started_at,
+                    "error": work.error,
+                    "step": work.step.as_ref().map(|step| json!({ "tool": step.tool, "target": step.target })),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// `agent/current`: whether a run's trigger should still run, asked now
