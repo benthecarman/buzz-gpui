@@ -13,7 +13,9 @@ A plugin can add:
 - **Settings sections** and **notification categories**.
 - **Message actions** in a message's More menu, with an optional marker.
 - **Renderers** that draw link chips, message bodies or attachments.
-- **Composer tools** and **keyboard shortcuts**.
+- **Composer tools**, **completions** and **keyboard shortcuts**.
+- **Agent tools** every agent session gets, and **kinds of agent** the plugin
+  runs.
 
 [`examples/plugins/hello`](../examples/plugins/hello) is a complete plugin in
 one Python file with no dependencies. It adds one of each, except an
@@ -135,6 +137,56 @@ The rest of the result can list:
 | `composerTools` | `id`, `title`, `icon`, `order` | A button in every composer's toolbar. Clicking it sends `composer/tool`. |
 | `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`) | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. |
 | `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`) | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. |
+
+### Agents
+
+`agentTools` lists tools every agent gets beside the Buzz tools: Claude,
+Codex and the plugin's own agents. Each has a `name` (a lowercase letter,
+then lowercase letters, digits or `_`, not a Buzz tool's name), a
+`description` and an `inputSchema` (a JSON Schema object). When an agent
+calls one, Buzz sends a request:
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"agentTool/call","params":{
+  "call":12,"tool":"hello_time","arguments":{},
+  "agent":"<agent pubkey>","channel":"<channel id>","root":"<thread root id>"
+}}
+```
+
+Answer with `{"text"}`, `{"image": {"data", "mime"}}` (base64) or an error.
+A call may take five minutes. Agent sessions read their tools when they
+start, so adding or changing a tool replaces idle Claude sessions (which
+resume) and starts new Codex threads.
+
+`agentTypes` lists kinds of agent, which show in Create agent beside Claude
+and Codex. Each has an `id`, a `title`, an optional `description`, `config`
+(a new agent's settings), `instructions` (a new agent's default Interest) and
+`timeoutSeconds` (default 300, at most 1800). Each time such an agent wakes,
+Buzz sends a request and the run lasts until the plugin answers it:
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"agent/run","params":{
+  "run":13,"type":"greeter",
+  "trigger":{"kind":"mention","event":{"id","pubkey","createdAt","kind","content","tags"}},
+  "channel":"<channel id>","root":"<thread root id>",
+  "agent":{"pubkey","name","owner"},
+  "config":{},"model":null,"effort":null,"team":null
+}}
+```
+
+A trigger's `kind` is `mention`, `watch` (with `watch` and `interest`) or
+`timer` (with `timer`, `interest` and `spent`). If the run is cancelled, Buzz
+sends the notification `agent/cancel` with the `run`.
+
+While a call or run is open, the plugin can act as its agent:
+
+| Request | Params | Result |
+| --- | --- | --- |
+| `agent/tool` | `call` or `run`, `tool` (a Buzz tool, such as `send`, `read`, `react` or `channels`), `arguments` | The tool's answer: `{"text"}` or `{"image"}` |
+
+The agent's key stays on its host; Buzz signs for it. Buzz tools that read
+local files or memories are not available to plugin agents. `send` needs
+`audience`: `everyone`, or `agents` for a message only agents act on.
 
 ### Renderers
 
@@ -384,7 +436,6 @@ you added from running for that launch. Their switches stay as they were.
 
 ## Not built yet
 
-- Agent types and tools from plugins.
 - Inline renderers. The app draws only custom emoji inline, so it has
   nowhere to put them yet.
 - Following a thread live, editing and reacting.

@@ -203,22 +203,17 @@ impl Connection {
         method: &str,
         params: Value,
     ) -> tokio::task::JoinHandle<Result<Value, String>> {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let (answer, answered) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, answer);
-        let _ = self.lines.send(protocol::request(id, method, params));
-        let pending = self.pending.clone();
-        let method = method.to_owned();
-        self.runtime.spawn(async move {
-            match tokio::time::timeout(REQUEST_TIMEOUT, answered).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(STOPPED.into()),
-                Err(_) => {
-                    pending.lock().unwrap().remove(&id);
-                    Err(format!("The plugin did not answer {method} in time."))
-                }
-            }
-        })
+        self.requester().request(method, params, REQUEST_TIMEOUT)
+    }
+
+    /// A handle that sends requests from any thread while this run lasts.
+    pub fn requester(&self) -> Requester {
+        Requester {
+            lines: self.lines.clone(),
+            pending: self.pending.clone(),
+            next: self.next.clone(),
+            runtime: self.runtime.clone(),
+        }
     }
 
     pub fn notify(&self, method: &str, params: Value) {
@@ -227,6 +222,46 @@ impl Connection {
 
     pub fn respond(&self, id: &Value, result: Result<Value, (i64, String)>) {
         let _ = self.lines.send(protocol::response(id, result));
+    }
+}
+
+/// Sends requests to one run of a plugin; they fail once it stops.
+#[derive(Clone)]
+pub struct Requester {
+    lines: mpsc::UnboundedSender<String>,
+    pending: Pending,
+    next: Arc<AtomicU64>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Requester {
+    pub fn notify(&self, method: &str, params: Value) {
+        let _ = self.lines.send(protocol::notification(method, params));
+    }
+
+    /// Sends a request; the answer comes within `timeout`.
+    pub fn request(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> tokio::task::JoinHandle<Result<Value, String>> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (answer, answered) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, answer);
+        let _ = self.lines.send(protocol::request(id, method, params));
+        let pending = self.pending.clone();
+        let method = method.to_owned();
+        self.runtime.spawn(async move {
+            match tokio::time::timeout(timeout, answered).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(STOPPED.into()),
+                Err(_) => {
+                    pending.lock().unwrap().remove(&id);
+                    Err(format!("The plugin did not answer {method} in time."))
+                }
+            }
+        })
     }
 }
 

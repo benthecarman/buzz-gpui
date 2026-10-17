@@ -140,7 +140,7 @@ fn valid_contribution_id(id: &str) -> bool {
 }
 
 /// The `initialize` result: what the plugin adds to the app.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contributions {
     #[serde(default)]
@@ -165,6 +165,44 @@ pub struct Contributions {
     pub shortcuts: Vec<ShortcutDecl>,
     #[serde(default)]
     pub completions: Vec<CompletionDecl>,
+    #[serde(default)]
+    pub agent_tools: Vec<AgentToolDecl>,
+    #[serde(default)]
+    pub agent_types: Vec<AgentTypeDecl>,
+}
+
+/// A tool every agent session gets (`agents.addTool`). Calling it sends
+/// `agentTool/call`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentToolDecl {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// A kind of agent the plugin runs (`agents2.register`). Each delivery
+/// sends `agent/run`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTypeDecl {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// A new agent's settings.
+    #[serde(default)]
+    pub config: Option<Value>,
+    /// A new agent's standing instructions, as its default Interest.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// How long one run may take, at most 30 minutes.
+    #[serde(default = "five_minutes")]
+    pub timeout_seconds: u64,
+}
+
+fn five_minutes() -> u64 {
+    300
 }
 
 /// Suggestions after a trigger character typed in the composer
@@ -430,6 +468,8 @@ impl Contributions {
             self.composer_tools.len(),
             self.shortcuts.len(),
             self.completions.len(),
+            self.agent_tools.len(),
+            self.agent_types.len(),
         ];
         if counts.iter().any(|count| *count > MAX_EACH) {
             return Err(format!("A plugin can add at most {MAX_EACH} of each kind."));
@@ -518,6 +558,53 @@ impl Contributions {
                     "“{}” needs one trigger character that is not a letter, digit, space, @, # \
                      or :.",
                     completion.id
+                ));
+            }
+        }
+        let mut names = std::collections::HashSet::new();
+        for tool in &self.agent_tools {
+            if !crate::buzz_mcp::added::valid_name(&tool.name) {
+                return Err(format!(
+                    "“{}” is not a tool name. Use a lowercase letter, then lowercase letters, \
+                     digits or _.",
+                    tool.name
+                ));
+            }
+            if !names.insert(&tool.name) {
+                return Err(format!(
+                    "The plugin adds the agent tool “{}” twice.",
+                    tool.name
+                ));
+            }
+            if tool.description.trim().is_empty() || tool.description.chars().count() > 2_000 {
+                return Err(format!(
+                    "“{}” needs a description of up to 2000 characters.",
+                    tool.name
+                ));
+            }
+            if tool.input_schema.get("type").and_then(Value::as_str) != Some("object")
+                || tool.input_schema.to_string().len() > 32 * 1024
+            {
+                return Err(format!(
+                    "“{}” needs an object inputSchema under 32 KiB.",
+                    tool.name
+                ));
+            }
+        }
+        for kind in &self.agent_types {
+            id(&kind.id)?;
+            check_title(&kind.id, &kind.title)?;
+            if kind
+                .config
+                .as_ref()
+                .is_some_and(|config| !config.is_object())
+            {
+                return Err(format!("“{}”'s config must be an object.", kind.id));
+            }
+            if !(1..=1_800).contains(&kind.timeout_seconds) {
+                return Err(format!(
+                    "“{}”'s timeout must be 1 to 1800 seconds.",
+                    kind.id
                 ));
             }
         }

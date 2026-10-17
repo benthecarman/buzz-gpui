@@ -827,7 +827,8 @@ impl Where {
         json!([
             self.spawn.host(),
             self.cwd,
-            self.model.as_deref().unwrap_or("")
+            self.model.as_deref().unwrap_or(""),
+            crate::buzz_mcp::added::key()
         ])
         .to_string()
     }

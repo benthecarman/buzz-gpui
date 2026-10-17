@@ -557,6 +557,14 @@ pub fn register_type(plugin: &str, kind: Arc<dyn AgentType>, cx: &mut App) -> Re
     Ok(())
 }
 
+/// Removes the type `key`, as when the plugin that added it stops. Its
+/// agents show their type as unavailable until it is back.
+pub fn unregister_type(key: &str, cx: &mut App) {
+    cx.default_global::<AgentTypes>()
+        .0
+        .retain(|existing| existing.key != key);
+}
+
 /// Every registered type whose plugin is on. A plugin turned off takes its
 /// types with it, as unloading it does in buzz-app: its agents show their
 /// type as unavailable and stop running until it is back.

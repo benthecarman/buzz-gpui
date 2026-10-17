@@ -14,11 +14,14 @@ It adds:
 - a Settings section, a notification category, two message actions (one
   marks messages), a chip for example.com links, a card for messages that
   start with "!hello", a composer button, "/" commands in the composer and
-  a shortcut (Ctrl/Cmd+Shift+H).
+  a shortcut (Ctrl/Cmd+Shift+H);
+- an agent tool every agent can call, and a "Greeter" kind of agent that
+  answers mentions.
 """
 
 import json
 import sys
+import time
 
 views = {}  # view id -> what the app opened it with, plus our state
 pending = {}  # our request id -> what to do with the answer
@@ -361,6 +364,26 @@ def on_action(params):
         notify("message/markers", {"action": "star", "messages": sorted(starred)})
 
 
+def run_agent(run_request, params):
+    """A Greeter run: answer a mention in its thread, as the agent."""
+    trigger = params["trigger"]
+    if trigger["kind"] != "mention":
+        send({"id": run_request, "result": None})
+        return
+    event = trigger["event"]
+    name = params["agent"]["name"]
+
+    def sent(result, error):
+        # Answering agent/run ends the run.
+        if error:
+            send({"id": run_request, "error": {"code": 1, "message": error["message"]}})
+        else:
+            send({"id": run_request, "result": None})
+
+    text = f"Hello from {name}! You said: {event['content']}"
+    request("agent/tool", {"run": params["run"], "tool": "send", "arguments": {"text": text, "audience": "everyone"}}, sent)
+
+
 def handle(message):
     method = message.get("method")
     if method is None:
@@ -399,11 +422,31 @@ def handle(message):
                         "composerTools": [{"id": "wave", "title": "Insert a wave", "icon": "Smiley"}],
                         "shortcuts": [{"id": "hi", "title": "Say hi", "keys": ["mod+shift+h"]}],
                         "completions": [{"id": "commands", "title": "Commands", "trigger": "/"}],
+                        "agentTools": [
+                            {
+                                "name": "hello_time",
+                                "description": "The time on the computer running Buzz.",
+                                "inputSchema": {"type": "object", "properties": {}},
+                            }
+                        ],
+                        "agentTypes": [
+                            {
+                                "id": "greeter",
+                                "title": "Greeter",
+                                "description": "Answers every mention with a greeting. Runs in the Hello plugin.",
+                                "instructions": "Answer every mention.",
+                            }
+                        ],
                     },
                 }
             )
         elif method == "link/render":
             send({"id": message["id"], "result": {"tree": link_chip(params["url"])}})
+        elif method == "agentTool/call" and params["tool"] == "hello_time":
+            now = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+            send({"id": message["id"], "result": {"text": f"It is {now}."}})
+        elif method == "agent/run":
+            run_agent(message["id"], params)
         elif method == "completion/query":
             query = params["query"].lower()
             items = [

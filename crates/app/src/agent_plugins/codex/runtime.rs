@@ -219,6 +219,10 @@ struct Saved {
     /// saved before it existed have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     at: Option<u64>,
+    /// [`crate::buzz_mcp::added::key`] when the thread started: a resumed
+    /// thread keeps its tools, so other tools need a new thread.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    tools: String,
 }
 
 /// A saved binding, for the owner's transcript list.
@@ -1781,9 +1785,10 @@ impl CodexRuntime {
                 params
             };
             let fresh = || with(json!({ "dynamicTools": dynamic_tools() }));
+            let tools_key = crate::buzz_mcp::added::key();
             let resumed = existing
                 .as_ref()
-                .filter(|existing| existing.workspace == workspace);
+                .filter(|existing| existing.workspace == workspace && existing.tools == tools_key);
             let started = match resumed {
                 Some(existing) => {
                     let resume = rpc
@@ -1864,6 +1869,7 @@ impl CodexRuntime {
                     thread_id: thread_id.clone(),
                     workspace,
                     at: Some(now_ms()),
+                    tools: tools_key,
                 },
             );
             if let Some(ready) = locked(&ready_sender).take() {

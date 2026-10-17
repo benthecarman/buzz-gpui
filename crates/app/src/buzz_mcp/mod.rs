@@ -4,6 +4,7 @@
 //! stream-json pipe ([`rpc::respond`]); whoever holds the agent's key
 //! implements [`BuzzClient`], so the tools never see the key itself.
 
+pub mod added;
 pub mod app_client;
 pub mod attention;
 pub mod rpc;

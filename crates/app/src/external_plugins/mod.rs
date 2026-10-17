@@ -13,6 +13,7 @@
 //! Plugins load from the folder the user picked, and the app watches it:
 //! saving a file restarts the plugin, and open views ask for a new tree.
 
+mod agents;
 mod capabilities;
 mod contribute;
 mod draw;
@@ -129,6 +130,7 @@ enum Added {
     Panel(&'static str),
     Page(Page),
     Other(contribute::Added),
+    Agent(agents::AgentAdded),
 }
 
 pub struct Plugin {
@@ -893,7 +895,28 @@ impl ExternalPlugins {
         let before = std::mem::take(&mut plugin.added);
         // Renderer answers and marks belong to the old run.
         contribute::forget(&id);
-        let added = Self::register(&id, &name, &contributions, cx);
+        let requester = plugin.connection.as_ref().map(Connection::requester);
+        let mut added = Self::register(&id, &name, &contributions, cx);
+        if let Some(requester) = requester {
+            let (agents, errors) = agents::register(
+                &id,
+                &contributions.agent_tools,
+                &contributions.agent_types,
+                requester,
+                cx,
+            );
+            added.extend(agents.into_iter().map(Added::Agent));
+            if !errors.is_empty() {
+                toasts::show(
+                    Notice::error(
+                        exit_notice(path),
+                        format!("{name} could not add everything"),
+                    )
+                    .description(errors.join(" ")),
+                    cx,
+                );
+            }
+        }
         take_away(
             before
                 .into_iter()
@@ -1137,6 +1160,16 @@ impl ExternalPlugins {
             "profiles/get" => Reply::Now(capabilities::profiles(params, cx)),
             "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
             "composer/insert" => Reply::Now(contribute::insert(params, cx)),
+            "agent/tool" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                match plugin {
+                    Some(plugin) => later(agents::act(&plugin, params, cx)),
+                    None => Reply::Now(Err((1, "The plugin stopped.".to_owned()))),
+                }
+            }
             "notifications/submit" => {
                 let plugin = cx
                     .global_mut::<Self>()
@@ -1303,6 +1336,7 @@ fn take_away(added: Vec<Added>, cx: &mut App) {
             Added::Panel(key) => channel_panels::unregister(key, cx),
             Added::Page(page) => pages::unregister(page, cx),
             Added::Other(added) => contribute::take_away(added, cx),
+            Added::Agent(added) => agents::take_away(added, cx),
         }
     }
 }

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-type Args = Map<String, Value>;
+pub type Args = Map<String, Value>;
 type ToolResult = Result<String, String>;
 /// Whether a roster shows a member change to a key.
 type Shown<'a> = dyn Fn(&[(String, String)], &str) -> bool + 'a;
@@ -46,8 +46,23 @@ pub(super) fn tool(name: &str, description: &str, properties: Value, required: &
     json!({ "name": name, "description": description, "inputSchema": schema })
 }
 
-/// The tools as `tools/list` describes them.
+/// The tools as `tools/list` describes them: Buzz's, then those plugins
+/// added ([`super::added`]).
 pub fn tools() -> Vec<Value> {
+    let mut tools = buzz_tools();
+    tools.extend(super::added::listed());
+    tools
+}
+
+/// Whether `name` is one of Buzz's own tools.
+pub fn buzz_tool(name: &str) -> bool {
+    name == "media_get"
+        || buzz_tools()
+            .iter()
+            .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn buzz_tools() -> Vec<Value> {
     let str = json!({ "type": "string" });
     let strs = json!({ "type": "array", "items": { "type": "string" } });
     let int = json!({ "type": "integer" });
@@ -212,6 +227,11 @@ pub async fn call_tool(
     name: &str,
     args: &Args,
 ) -> Result<Reply, String> {
+    if !buzz_tool(name)
+        && let Some(added) = super::added::get(name)
+    {
+        return (added.call)(client, context.clone(), args.clone()).await;
+    }
     let tools = Tools {
         client,
         context: context.clone(),

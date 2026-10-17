@@ -1214,11 +1214,14 @@ impl ClaudeRuntime {
             let state = state.clone();
             Arc::new(move || {
                 let state = locked(&state);
+                // Tools plugins add are read when a session starts: a
+                // change replaces idle sessions, which resume.
                 json!([
                     state.config.fingerprint(),
                     state.name,
                     state.attention,
-                    state.team
+                    state.team,
+                    crate::buzz_mcp::added::key()
                 ])
                 .to_string()
             })
