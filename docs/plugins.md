@@ -514,6 +514,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `projects/gitAuthorization` | `repository` (a `https://…/git/<owner>/<d>.git` URL of the community) | `{"repository","token"}`: a NIP-98 value for `Authorization: Nostr `, good on that repository's Git routes for 60 seconds, for running Git yourself |
 | `agents/logProof` | `id` (the agent's log session), `pubkey` (the agent), `relayUrl` (the community's relay), `nonce` (the host's challenge) | `{"signature"}`: your proof, as the agent's owner, for one read of its harness log |
 | `agents/attest` | `pubkey` (an agent key) | `{"auth"}`: your NIP-OA tag `["auth", owner, "", signature]` saying you own that agent, for an agent to attach to what it signs. Needs `manage-agents`. |
+| `agents/presence` | `status` (`online` or `offline`), `pubkeys` (up to 32 of your agents) | `true` once sent on the live connection, `false` if this community cannot take it: owner presence (kind 20003) for agents Buzz does not run itself, such as hosted ones. Needs `manage-agents`. |
 | `services/list` | none | The services running plugins offer, each `{"plugin","service"}` |
 | `services/request` | `plugin`, `service`, `method`, `params` | The answer of the plugin that offers it, within 30 seconds |
 | `projects/git` | `owner`, `dtag`, optional `commit` and `path` | `{"head","commits","files","readme","file","diff"}`: read with Git from the community; `file` is the file at `path` and `diff` the commit's changes. Failures are `notFound`, `denied`, `unavailable` or `invalidTarget`. |

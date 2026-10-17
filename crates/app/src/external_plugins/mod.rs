@@ -1687,6 +1687,7 @@ impl ExternalPlugins {
             | "agents/retype"
             | "agents/port"
             | "agents/attest"
+            | "agents/presence"
             | "channels/addMember"
             | "channels/changeMember"
             | "messages/report"
@@ -1706,9 +1707,8 @@ impl ExternalPlugins {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
-                    | "teams/remove" | "agents/retype" | "agents/port" | "agents/attest" => {
-                        Permission::ManageAgents
-                    }
+                    | "teams/remove" | "agents/retype" | "agents/port" | "agents/attest"
+                    | "agents/presence" => Permission::ManageAgents,
                     "dm/open"
                     | "channels/create"
                     | "channels/action"
@@ -1762,6 +1762,7 @@ impl ExternalPlugins {
                     "agents/remove" => agents::remove(params, cx),
                     "agents/retype" => agents::retype(params, cx),
                     "agents/port" => agents::port(params, cx),
+                    "agents/presence" => capabilities::agent_presence(params, cx),
                     "dm/open" => channels::open_dm(params, cx),
                     "channels/create" => channels::create(params, cx),
                     "channels/action" => channels::action(params, cx),

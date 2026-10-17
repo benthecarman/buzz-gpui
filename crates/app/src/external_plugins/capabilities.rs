@@ -1086,6 +1086,34 @@ pub fn attest(params: &Value, cx: &App) -> Result<Value, Failure> {
     Ok(json!({ "auth": auth }))
 }
 
+/// `agents/presence`: publishes owner presence (`online` or `offline`)
+/// for up to 32 of your agents, such as hosted ones Buzz does not run
+/// (`publishAgentPresence`). Answers whether it went out.
+pub fn agent_presence(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let status = match text(params, "status") {
+        Some(status @ ("online" | "offline")) => status.to_owned(),
+        _ => return Err(invalid("status must be online or offline")),
+    };
+    let agents = pubkeys(params, 32)?;
+    let owned = crate::agents2::Agents2::global(cx).is_some_and(|service| {
+        let service = service.read(cx);
+        agents
+            .iter()
+            .all(|key| service.agents().iter().any(|agent| agent.pubkey == *key))
+    });
+    if !owned {
+        return Err(invalid("pubkeys must all be your agents"));
+    }
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .publish_agent_presence(&status, agents)
+            .await
+            .map(|sent| json!(sent))
+            .map_err(|error| (3, error))
+    }))
+}
+
 /// `agents/logProof`: the owner's signature for one read of an agent's
 /// harness log at the community's relay (`authorizeAgentLog`).
 pub fn log_proof(params: &Value, cx: &App) -> Result<Value, Failure> {
