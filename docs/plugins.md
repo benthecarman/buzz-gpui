@@ -274,6 +274,9 @@ While a call or run is open, the plugin can act as its agent:
 | `agent/step` | `run`, `tool`, `target` (optional) | `null`. Shows what the run is doing on its message, such as `read` on a channel. |
 | `agent/acknowledged`, `agent/superseded`, `agent/ignored` | `run` | `null`. Marks the run's message as taken up, as replaced by a newer request (its bubble hides), or as declined (nothing shows). |
 | `agents/activity` | none | What agents on this device are doing, newest first: `[{"agent","channel","message","root","state","startedAt","error","step"}]`, `state` being `waiting`, `working`, `done`, `error` or `superseded` |
+| `activity/observed` | `agent` (optional) | `{"status","turns","typing","records","history","hasOlder","workingChannels"}`: what the community's activity feed shows of agents anywhere, of one agent or all. `turns` are `{"agent","turn","channel","at","state","requests"}`, and `records` (newest 200) the decrypted transcript frames of your own agents, `{"id","agent","kind","createdAt","receivedAt","historical","channels","frame"}`. |
+| `activity/history` | `agent` (optional), `older` (optional) | `null`. Reads saved records from the archive: an agent's, older ones with `older: true`, or everyone's newest. They arrive through `activity/watch`. |
+| `activity/watch` | `agent` (optional) | `{"watch"}`. Buzz then sends `activity/changed` with what `activity/observed` gives, now and whenever it changes. Stop with `activity/unwatch`. |
 | `agent/current` | `run` | Whether the trigger should still run: `false` once the agent is removed, its attention turned off, or its watch changed |
 | `agent/query` | `call` or `run`, `filters` (1 to 10 NIP-01 filters) | The events, read as the agent, at most 500 |
 | `agent/publish` | `call` or `run`, `kind`, `content`, `tags` | The signed event, published as the agent |
