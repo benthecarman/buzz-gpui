@@ -201,8 +201,9 @@ file that holds its rows.
 ## Decided
 
 - **Skipped:**
-  - External plugin import, signing and host grants. Bundled plugins are
-    ported natively instead.
+  - buzz-app's external `plugin.js` plugins, their signing and host
+    grants. Bundled plugins are ported natively instead, and people build
+    their own as programs ([docs/plugins.md](../plugins.md)).
   - Block-hosted services: Hosted communities, Builderlab and the enterprise
     login gate.
 - **Updates** come from GitHub releases. Copies installed from the .deb

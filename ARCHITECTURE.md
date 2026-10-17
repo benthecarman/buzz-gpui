@@ -62,6 +62,17 @@ same budgets, and the same outbox semantics. It is backed by SQLite instead of
 IndexedDB and localStorage. UI views read from in-memory projections that are
 updated incrementally; no projection is rebuilt from scratch on each event.
 
+## Plugins
+
+- buzz-app's bundled plugins are compiled in: each registers its pages,
+  panels and settings cards from Rust (`crates/app/src/plugins.rs`).
+- Plugins people build themselves are programs, since this app has no
+  JavaScript runtime. A folder's `buzz-plugin.json` names a command; the app
+  starts it and speaks JSON-RPC over its stdio. The plugin sends element
+  trees that the app draws with its own components
+  (`crates/app/src/external_plugins/`, [docs/plugins.md](docs/plugins.md)).
+- Like buzz-app's, these plugins are trusted and not sandboxed.
+
 ## Reused code
 
 - From buzz-app: `buzz-agent-controller` (Agents identities and custody),

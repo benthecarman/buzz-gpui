@@ -1,0 +1,222 @@
+# Writing a plugin
+
+A Buzz plugin is a program on your computer. Buzz starts it, asks what it
+adds, and draws what it sends with Buzz's own components. You can write it in
+any language that reads stdin and writes stdout: a short Python or Node script
+is enough, and no SDK is needed.
+
+A plugin can add:
+
+- **Pages**, with a row in the channel sidebar.
+- **Panels** beside the conversation. A panel opens when someone clicks a link
+  it matches, or from a button in the channel header.
+
+[`examples/plugins/hello`](../examples/plugins/hello) is a complete plugin in
+one Python file with no dependencies. It adds a page and a panel.
+
+## Try the example
+
+1. Open **Settings → Plugins** and click **Add plugin folder…**.
+2. Choose `examples/plugins/hello`. New plugins start off.
+3. Read the command it runs, then turn it on. **Hello** appears in the channel
+   sidebar.
+4. Edit `plugin.py` and save. Buzz restarts the plugin, and the open page
+   redraws.
+
+## Trust
+
+A plugin runs with your full access. It is not sandboxed: it can read your
+files and use your network like any other program you run. Turn on only
+plugins you trust. Settings shows the command a plugin runs before you turn it
+on.
+
+This is buzz-app's model too: its plugins are trusted code in the app's own
+WebView. Buzz never gives a plugin your private key, and it removes `BUZZ_*`
+and `NOSTR_*` variables from the plugin's environment.
+
+## The folder
+
+A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
+
+```json
+{
+  "id": "com.example.hello",
+  "name": "Hello",
+  "description": "A sample page and link panel.",
+  "command": ["python3", "plugin.py"]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Unique. Lowercase letters, digits, `.`, `-` and `_`, such as `com.example.weather`. Ids starting with `buzz.` are reserved. |
+| `name` | Shown in Settings. 1 to 64 characters. |
+| `description` | Optional. Shown in Settings. |
+| `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
+| `apiVersion` | Optional. `1`, the only version so far. |
+
+The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
+`BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
+
+Buzz watches the folder. Saving any file restarts the plugin, except for files
+under hidden folders (such as `.cache`), `node_modules`, `target`,
+`__pycache__` and `venv`. Keep the plugin's own state under a hidden folder so
+that writing it does not restart the plugin.
+
+## How Buzz talks to a plugin
+
+Messages are [JSON-RPC 2.0](https://www.jsonrpc.org/specification), one JSON
+object per line, on the plugin's stdin and stdout. stdout is only for
+messages: write logs to stderr. Buzz logs each stderr line and shows the last
+ones if the plugin stops.
+
+The plugin should exit when stdin closes. To stop a plugin, Buzz closes its
+stdin, waits up to two seconds, then ends the plugin and every process it
+started.
+
+### 1. `initialize` (request from Buzz)
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"apiVersion":1,"app":{"name":"Buzz","version":"0.1.0"}}}
+```
+
+Answer with what the plugin adds. The answer is due within 10 seconds.
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{
+  "pages":[{"id":"home","title":"Weather","icon":"Sun"}],
+  "panels":[{
+    "id":"forecast",
+    "title":"Forecast",
+    "icon":"Globe",
+    "matches":["https://weather.example/"],
+    "launcher":{"label":"Forecast","placement":"side"}
+  }]
+}}
+```
+
+- A contribution `id` uses lowercase letters, digits, `-` and `_`. Titles are
+  1 to 64 characters.
+- `icon` names a Buzz icon, such as `House`, `Globe`, `Bell`, `Gear`, `Code`
+  or `Plug`. An unknown name shows the plug icon.
+- `matches` lists link prefixes. A matching link clicked in a message opens
+  the panel as a tab. Buzz's own panels win over a plugin's for the same
+  link.
+- `launcher` adds a button to the channel header. `placement` is `side` (the
+  default) or `bottom`.
+- A plugin can add at most 16 panels and 8 pages.
+
+### 2. `view/open` (notification from Buzz)
+
+Each open page or panel is a view with its own id. Buzz tells the plugin when
+one opens:
+
+```json
+{"jsonrpc":"2.0","method":"view/open","params":{
+  "view":"v3","contribution":"forecast","kind":"panel",
+  "target":"https://weather.example/today","channel":"<channel id>","thread":null
+}}
+```
+
+For a page, `kind` is `page`, and `target` and `channel` are `null`. A panel
+opened from the channel header has the channel id as its `target`.
+
+### 3. `view/render` (notification from the plugin)
+
+Send a view's tree whenever it changes. The first one replaces the loading
+spinner.
+
+```json
+{"jsonrpc":"2.0","method":"view/render","params":{"view":"v3","tree":{
+  "type":"column","children":[
+    {"type":"text","text":"Sunny","style":"title"},
+    {"type":"button","id":"refresh","label":"Refresh"}
+  ]
+}}}
+```
+
+### 4. `view/event` (notification from Buzz)
+
+Clicks, toggles and typing come back as events:
+
+```json
+{"jsonrpc":"2.0","method":"view/event","params":{"view":"v3","id":"refresh","event":"click"}}
+```
+
+| Element | `event` | `value` |
+| --- | --- | --- |
+| `button` | `click` | none |
+| `switch` | `toggle` | `true` or `false` |
+| `input` | `change` | the field's text |
+| `input` | `submit` (Enter) | the field's text |
+
+### 5. `view/close` (notification from Buzz)
+
+The view is gone. Forget its state.
+
+When the plugin restarts, Buzz sends `initialize` again, then `view/open` for
+every view that is still open. Until a new tree arrives, the old one stays on
+screen.
+
+## Elements
+
+Every element is an object with a `type`. Unknown types draw nothing, so a
+plugin written for a newer Buzz still shows what this one understands. A tree
+can hold at most 5,000 elements, nested at most 32 deep.
+
+| `type` | Fields |
+| --- | --- |
+| `column` | `children`, `gap` (`none`, `sm` (default), `md`, `lg`) |
+| `row` | `children`, `gap`, `justify` (`start`, `center`, `end`, `between`), `wrap` |
+| `card` | `title` (optional), `children` |
+| `text` | `text`, `style` (`body`, `small`, `label`, `title`, `heading`, `code`), `tone` (`default`, `subtle`, `accent`, `success`, `warning`, `danger`) |
+| `markdown` | `text`, rendered as a Buzz message is |
+| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading` |
+| `link` | `label`, `url`. Opens like a link in a message: a panel that matches it opens; otherwise the browser does. |
+| `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit` |
+| `switch` | `id`, `checked`, `label` |
+| `badge` | `text`, `tone` |
+| `icon` | `name` |
+| `divider` | none |
+| `spinner` | none |
+
+Buzz keeps what is typed in an `input`, so typing never waits on the plugin.
+`value` is the text a field starts with. To replace the text later, send a
+new `value` with a higher `version`. Set `clearOnSubmit` to empty the field
+when Enter sends it.
+
+## Asking Buzz for things
+
+A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `ui/toast` | `title`, `body` (optional), `tone` (`info`, `success`, `warning`, `error`) | `null` |
+| `ui/openUrl` | `url` (http or https), opened in the browser | `null` |
+| `community/current` | none | `{"name","relay"}` for the selected community, or `null` |
+| `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
+
+Toast titles are cut to 128 characters, and bodies to 200. An unknown method
+returns error `-32601`.
+
+## When something goes wrong
+
+- Lines on stdout that are not JSON-RPC are logged and ignored. A stray
+  `print` to stdout does not stop the plugin, but its output goes nowhere.
+- A tree that is not valid keeps the last good one on screen and shows the
+  error under it.
+- If the plugin exits, its pages and panels stay and show the exit code and
+  its last stderr lines, with a **Restart** button. Fixing a file in the
+  folder restarts it too.
+- **Settings → Plugins** shows each plugin's state. **Reload** reads the
+  manifest again and restarts the plugin.
+
+## Not built yet
+
+- Signing plugins, and adding them from Git (buzz-app's NIP-PS and import
+  preview).
+- More capabilities: reading messages, sending as you, and notifications.
+- Settings cards, message actions and agent tools from plugins.
+- Running a plugin on a remote `buzzd` host.
+- A WebAssembly runtime for plugins that run sandboxed
+  ([#12](https://github.com/benthecarman/buzz-gpui/issues/12)).

@@ -96,6 +96,13 @@ pub fn register(panel: ChannelPanel, cx: &mut App) {
     panels.push(panel);
 }
 
+/// Removes the panel `key`, as when the plugin that added it stops.
+pub fn unregister(key: &str, cx: &mut App) {
+    cx.default_global::<ChannelPanels>()
+        .0
+        .retain(|existing| existing.key != key);
+}
+
 /// A panel tab's title from its view, such as the person a profile
 /// shows (`usePanelTabTitle`). Without one the tab shows the panel's
 /// title.

@@ -11,6 +11,7 @@ mod channel_templates;
 mod community;
 mod config;
 mod deep_links;
+mod external_plugins;
 mod gst_bundle;
 mod hosts;
 mod http;
@@ -140,6 +141,9 @@ fn main() {
         ui::new_channel::init(cx);
         ui::channel_panels::dev_sample(cx);
         ui::terminal::init(cx);
+        // After the bundled pages and panels, so a plugin never takes a
+        // link a bundled panel shows.
+        external_plugins::ExternalPlugins::init(cx);
         network::init(cx);
         let requests = navigation::init(cx);
         if let Some(link) = link {

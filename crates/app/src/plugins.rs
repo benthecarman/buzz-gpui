@@ -6,11 +6,14 @@
 //! and actions registered under its id. The enable state is saved by
 //! buzz-app's own plugin manager, with its defaults: everything bundled is
 //! on except Todos, Templates & teams and Bestie, and Channels cannot be
-//! turned off. External plugins are not supported.
+//! turned off. buzz-app's external `plugin.js` plugins do not load here.
 //!
 //! Contributions name their plugin with a `plugin/id` key; the registries
 //! ask [`enabled_key`] before showing one, so turning a plugin off hides
 //! everything it contributes without restarting.
+//!
+//! Plugins people build themselves are programs, not bundled code; see
+//! [`crate::external_plugins`].
 
 use buzzodz_plugins::{Catalog, Manager};
 use gpui_kit::*;
@@ -80,12 +83,17 @@ fn rows(catalog: Catalog) -> Vec<PluginRow> {
         .collect()
 }
 
+/// Where plugin settings live: `BUZZODZ_HOME`, else `plugins` in this
+/// app's data directory.
+pub fn home() -> std::path::PathBuf {
+    std::env::var_os("BUZZODZ_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::community::data_dir().join("plugins"))
+}
+
 /// Opens the plugin settings under this app's data directory.
 fn open() -> Result<Manager, String> {
-    let home = std::env::var_os("BUZZODZ_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::community::data_dir().join("plugins"));
-    Manager::open(Some(home), "default", false)
+    Manager::open(Some(home()), "default", false)
 }
 
 impl Plugins {

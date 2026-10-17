@@ -164,6 +164,13 @@ pub fn register(spec: PageSpec, cx: &mut App) {
     pages.push(spec);
 }
 
+/// Removes the page `page`, as when the plugin that added it stops.
+pub fn unregister(page: Page, cx: &mut App) {
+    cx.default_global::<Pages>()
+        .0
+        .retain(|existing| existing.page != page);
+}
+
 /// A registered page whose plugin is on.
 pub fn spec(page: Page, cx: &App) -> Option<PageSpec> {
     cx.try_global::<Pages>()?

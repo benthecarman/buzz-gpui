@@ -37,7 +37,7 @@ pub mod launch;
 mod link_preview;
 mod links;
 mod live_status;
-mod markdown;
+pub mod markdown;
 mod me;
 pub(crate) mod media;
 mod members;
