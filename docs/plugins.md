@@ -137,7 +137,9 @@ The rest of the result can list:
 | `messageRenderers` | `id`, `kinds`, `prefix`, `order` | Draws the body of matching messages. Buzz asks with `message/render`. It needs a `prefix` of two or more characters, or kinds other than chat messages. |
 | `attachmentRenderers` | `id`, `mime` (MIME type prefixes) | Draws matching attachments. Buzz asks with `attachment/render`. |
 | `inlineRenderers` | `id`, `pattern` (a regular expression, up to 500 characters, that cannot match empty text) | Draws the pieces of message text the pattern matches, such as ticket numbers. Buzz asks with `inline/render`. Mentions, emoji, links and code are left alone. |
-| `composerTools` | `id`, `title`, `icon`, `order` | A button in every composer's toolbar. Clicking it sends `composer/tool`. |
+| `composerTools` | `id`, `title`, `icon`, `order`, `reactionPicker` | A button in every composer's toolbar. Clicking it sends `composer/tool`. With `reactionPicker: true`, it can also replace the emoji picker that "Add reaction" opens: the tool with the lowest `order`, then the lowest `plugin/id` key, wins, and Buzz's own picker is `buzz.emoji/emoji` at 0. The picker is a view of `kind` `reactionPicker`. Send `reaction/select` with its `view` and an `emoji` to react. |
+| `composerAccessories` | `id`, `title`, `order` | A view above every composer, of `kind` `accessory`. `view/open` also carries the composer's `channel` and `thread`. Keep it to a line or two. |
+| `accountActions` | `id`, `title`, `icon` | A row in the account menu that opens a dialog titled `title`. The dialog's body is a view of `kind` `dialog`. Send `ui/closeView` with its `view` to close it. |
 | `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`) | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. |
 | `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`) | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. |
 
@@ -347,6 +349,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
+| `ui/closeView` | `view` (an open `dialog`) | `null`, once the dialog has closed |
+| `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |
 | `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |
 
 Reads cover the selected community and channels you can read in it. They

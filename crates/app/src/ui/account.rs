@@ -37,6 +37,8 @@ enum Modal {
         dialog: Entity<FeedbackDialog>,
         _subscription: Subscription,
     },
+    /// A plugin's account action.
+    Plugin(AnyView),
 }
 
 pub struct Account {
@@ -216,6 +218,26 @@ impl Account {
         cx.notify();
     }
 
+    /// Opens a plugin's account action in its dialog.
+    fn open_action(
+        &mut self,
+        action: &super::account_actions::AccountAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let account = cx.weak_entity();
+        let close: super::account_actions::Close = std::rc::Rc::new(move |_, cx| {
+            let _ = account.update(cx, |this, cx| {
+                this.modal = None;
+                cx.notify();
+            });
+        });
+        let view = (action.build)(close, window, cx);
+        self.open = None;
+        self.modal = Some(Modal::Plugin(view));
+        cx.notify();
+    }
+
     /// "Check for updates", or "Update available" with the new version
     /// once one is on offer; both open Settings → Updates.
     fn update_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -249,9 +271,9 @@ impl Account {
 
     /// A direct menu row: 28px high, 12px gap, `text-body`.
     fn row(
-        id: &'static str,
+        id: impl Into<ElementId>,
         icon: IconName,
-        label: &'static str,
+        label: impl Into<SharedString>,
         trailing: Option<AnyElement>,
         cx: &App,
     ) -> Stateful<Div> {
@@ -276,7 +298,7 @@ impl Account {
                     .text_color(c.text_subtle)
                     .child(Icon::new(icon).size(16.)),
             )
-            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(div().flex_1().min_w_0().truncate().child(label.into()))
             .children(trailing)
     }
 
@@ -480,6 +502,18 @@ impl Account {
                     .on_click(cx.listener(|this, _, window, cx| this.send_feedback(window, cx))),
                 )
             })
+            .children(
+                super::account_actions::all(cx)
+                    .into_iter()
+                    .map(|action| {
+                        let id = SharedString::from(format!("account-action-{}", action.key));
+                        let row = Self::row(id, action.icon, action.title.clone(), None, cx);
+                        row.on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_action(&action, window, cx)
+                        }))
+                    })
+                    .collect::<Vec<_>>(),
+            )
             .child(self.update_row(cx))
             .child(
                 Self::row(
@@ -501,6 +535,7 @@ impl Account {
         let content = match self.modal.as_ref()? {
             Modal::Status { editor, .. } => editor.clone().into_any_element(),
             Modal::Feedback { dialog, .. } => dialog.clone().into_any_element(),
+            Modal::Plugin(view) => view.clone().into_any_element(),
         };
         Some(overlay::modal(window, content, None).into_any_element())
     }

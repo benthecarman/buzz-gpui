@@ -113,7 +113,7 @@ impl MessageActions {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx));
+        let picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx).for_reactions());
         let subscriptions = vec![
             cx.subscribe_in(&picker, window, |this, _, Picked(pick), window, cx| {
                 if let Some((id, Popup::Picker { .. })) = this.interaction.open.take()

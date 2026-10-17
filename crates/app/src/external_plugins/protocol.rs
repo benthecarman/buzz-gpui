@@ -173,9 +173,33 @@ pub struct Contributions {
     #[serde(default)]
     pub inline_renderers: Vec<InlineRendererDecl>,
     #[serde(default)]
+    pub account_actions: Vec<AccountActionDecl>,
+    #[serde(default)]
+    pub composer_accessories: Vec<AccessoryDecl>,
+    #[serde(default)]
     pub agent_tools: Vec<AgentToolDecl>,
     #[serde(default)]
     pub agent_types: Vec<AgentTypeDecl>,
+}
+
+/// A row in the account menu that opens a dialog of kind `dialog`
+/// (`accountActions.register`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct AccountActionDecl {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// A view above every composer, beside the typing indicator, of kind
+/// `accessory` (`conversation.registerAccessory`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct AccessoryDecl {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub order: i32,
 }
 
 /// Draws pieces of message text that `pattern` (a regular expression)
@@ -422,6 +446,11 @@ pub struct ToolDecl {
     pub icon: Option<String>,
     #[serde(default)]
     pub order: i32,
+    /// Also a reaction picker (`reactionComponent`): a view of kind
+    /// `reactionPicker` shown for "Add reaction" when its order (then
+    /// key) comes before Buzz's emoji picker at 0.
+    #[serde(default)]
+    pub reaction_picker: bool,
 }
 
 /// A keyboard shortcut (`shortcuts.register`), listed and rebindable in
@@ -522,6 +551,8 @@ impl Contributions {
             self.completions.len(),
             self.agent_tools.len(),
             self.inline_renderers.len(),
+            self.account_actions.len(),
+            self.composer_accessories.len(),
             self.agent_types.len(),
         ];
         if counts.iter().any(|count| *count > MAX_EACH) {
@@ -617,6 +648,14 @@ impl Contributions {
         for renderer in &self.inline_renderers {
             id(&renderer.id)?;
             renderer.regex()?;
+        }
+        for action in &self.account_actions {
+            id(&action.id)?;
+            check_title(&action.id, &action.title)?;
+        }
+        for accessory in &self.composer_accessories {
+            id(&accessory.id)?;
+            check_title(&accessory.id, &accessory.title)?;
         }
         let mut names = std::collections::HashSet::new();
         for tool in &self.agent_tools {

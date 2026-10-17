@@ -1201,6 +1201,59 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 })
             }
+            "reaction/select" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let emoji = params
+                    .get("emoji")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|emoji| !emoji.is_empty() && emoji.chars().count() <= 64)
+                    .map(str::to_owned);
+                let select = view.and_then(|view| view.read(cx).selector());
+                Reply::Now(
+                    match (select, emoji, crate::ui::navigation::main_window(cx)) {
+                        (Some(select), Some(emoji), Some(window)) => window
+                            .update(cx, |_, window, cx| select(emoji, window, cx))
+                            .map(|()| Value::Null)
+                            .map_err(|_| (1, "The window is not open.".to_owned())),
+                        _ => Err((
+                            INVALID_PARAMS,
+                            "reaction/select takes an open reactionPicker view and an emoji"
+                                .to_owned(),
+                        )),
+                    },
+                )
+            }
+            "ui/closeView" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let close = view.and_then(|view| view.read(cx).closer());
+                let closed = match (close, crate::ui::navigation::main_window(cx)) {
+                    (Some(close), Some(window)) => {
+                        window.update(cx, |_, window, cx| close(window, cx)).is_ok()
+                    }
+                    _ => false,
+                };
+                Reply::Now(if closed {
+                    Ok(Value::Null)
+                } else {
+                    Err((
+                        INVALID_PARAMS,
+                        "ui/closeView takes an open dialog".to_owned(),
+                    ))
+                })
+            }
             "agent/save" => {
                 let view = params.get("view").and_then(Value::as_str).and_then(|view| {
                     cx.global_mut::<Self>()

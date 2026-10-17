@@ -16,8 +16,10 @@ It adds:
   start with "!hello", a badge for ticket numbers like HELLO-42 in message
   text, a composer button, "/" commands in the composer and a shortcut
   (Ctrl/Cmd+Shift+H);
+- an "About Hello" item in the account menu, and a note above composers
+  that reply in a thread;
 - an agent tool every agent can call, and a "Greeter" kind of agent that
-  answers mentions.
+  answers mentions, with its own settings tab.
 """
 
 import json
@@ -255,10 +257,36 @@ def greeting_tab(state):
     }
 
 
+def about_dialog(state):
+    return {
+        "type": "column",
+        "gap": "md",
+        "children": [
+            text("Hello is a sample plugin written in plain Python. It shows what a plugin can add to Buzz."),
+            {"type": "row", "justify": "end", "children": [{"type": "button", "id": "close", "label": "Close", "variant": "prominent"}]},
+        ],
+    }
+
+
+def thread_note(state):
+    """An accessory: a line above composers that reply in a thread."""
+    if not state.get("thread"):
+        return {"type": "column", "gap": "none", "children": []}
+    return {
+        "type": "row",
+        "gap": "sm",
+        "children": [{"type": "icon", "name": "Smiley"}, text("Hello is following this thread.", style="small", tone="subtle")],
+    }
+
+
 def render(view):
     state = views[view]
     kind = state["kind"]
-    if kind == "agentTab":
+    if kind == "dialog":
+        tree = about_dialog(state)
+    elif kind == "accessory":
+        tree = thread_note(state)
+    elif kind == "agentTab":
         tree = greeting_tab(state)
     elif kind == "page":
         tree = page(state)
@@ -366,6 +394,9 @@ def on_event(params):
             request("messages/react", {**params, "emoji": "👋"})
         else:
             request("messages/delete", params)
+        return
+    elif element == "close" and event == "click" and state["kind"] == "dialog":
+        request("ui/closeView", {"view": view})
         return
     elif element == "plugins" and event == "click":
         request("ui/navigate", {"to": "settings", "section": "plugins"})
@@ -496,6 +527,8 @@ def handle(message):
                         "composerTools": [{"id": "wave", "title": "Insert a wave", "icon": "Smiley"}],
                         "shortcuts": [{"id": "hi", "title": "Say hi", "keys": ["mod+shift+h"]}],
                         "completions": [{"id": "commands", "title": "Commands", "trigger": "/"}],
+                        "accountActions": [{"id": "about", "title": "About Hello", "icon": "Smiley"}],
+                        "composerAccessories": [{"id": "thread-note", "title": "Thread note"}],
                         "inlineRenderers": [{"id": "tickets", "pattern": "\\bHELLO-[0-9]{1,6}\\b"}],
                         "agentTools": [
                             {

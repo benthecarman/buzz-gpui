@@ -1,6 +1,7 @@
 //! The app's views.
 
 mod account;
+pub mod account_actions;
 mod add_community;
 pub mod agent_activity;
 pub(crate) mod agents;

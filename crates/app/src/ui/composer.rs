@@ -256,6 +256,8 @@ pub struct Composer {
     no_followup: bool,
     /// Plugin tools in the toolbar (`composer_tools`).
     tools: Vec<AnyView>,
+    /// Plugin accessories above the composer.
+    accessories: Vec<AnyView>,
     /// The tool registry's [`super::composer_tools::generation`] the
     /// tools were made at; a plugin adding one rebuilds them.
     tools_generation: u64,
@@ -458,15 +460,14 @@ impl Composer {
         })
         .detach();
         let markdown = LiveMarkdown::new(&input, cx);
-        let tools = super::composer_tools::build(
-            super::composer_tools::ToolContext {
-                community: community.clone(),
-                channel: channel.clone(),
-                composer: cx.weak_entity(),
-            },
-            window,
-            cx,
-        );
+        let context = super::composer_tools::ToolContext {
+            community: community.clone(),
+            channel: channel.clone(),
+            thread: thread_root.map(|root| root.to_hex()),
+            composer: cx.weak_entity(),
+        };
+        let tools = super::composer_tools::build(context.clone(), window, cx);
+        let accessories = super::composer_tools::build_accessories(context, window, cx);
         let mut composer = Self {
             community,
             channel,
@@ -532,6 +533,7 @@ impl Composer {
             chat: false,
             no_followup: false,
             tools,
+            accessories,
             tools_generation: super::composer_tools::generation(cx),
             completions_generation: super::composer_completions::generation(),
             no_attachments: false,
@@ -5304,15 +5306,14 @@ impl Render for Composer {
         let generation = super::composer_tools::generation(cx);
         if generation != self.tools_generation {
             self.tools_generation = generation;
-            self.tools = super::composer_tools::build(
-                super::composer_tools::ToolContext {
-                    community: self.community.clone(),
-                    channel: self.channel.clone(),
-                    composer: cx.weak_entity(),
-                },
-                window,
-                cx,
-            );
+            let context = super::composer_tools::ToolContext {
+                community: self.community.clone(),
+                channel: self.channel.clone(),
+                thread: self.thread_root.map(|root| root.to_hex()),
+                composer: cx.weak_entity(),
+            };
+            self.tools = super::composer_tools::build(context.clone(), window, cx);
+            self.accessories = super::composer_tools::build_accessories(context, window, cx);
         }
         let c = *cx.colors();
         self.sync_uploads(cx);
@@ -5541,6 +5542,15 @@ impl Render for Composer {
                 // The pane's drop zone must not attach them again.
                 cx.stop_propagation();
             }))
+            .when(!self.accessories.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .children(self.accessories.iter().cloned()),
+                )
+            })
             .when(editing, |d| d.child(self.edit_header(cx)))
             .children(self.edit_retry(cx))
             .children(self.background_status(cx))

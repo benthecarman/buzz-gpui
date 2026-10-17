@@ -713,6 +713,8 @@ pub enum Added {
     Tool(&'static str),
     Shortcut(&'static str),
     Completion(&'static str),
+    AccountAction(&'static str),
+    ReactionPicker(&'static str),
 }
 
 pub fn take_away(added: Added, cx: &mut App) {
@@ -723,6 +725,8 @@ pub fn take_away(added: Added, cx: &mut App) {
         Added::Tool(key) => crate::ui::composer_tools::unregister(key, cx),
         Added::Shortcut(key) => crate::shortcuts::unregister_external(key),
         Added::Completion(key) => composer_completions::unregister(key),
+        Added::AccountAction(key) => crate::ui::account_actions::unregister(key, cx),
+        Added::ReactionPicker(key) => crate::ui::emoji_picker::unregister_reaction_picker(key, cx),
     }
 }
 
@@ -839,6 +843,7 @@ pub fn register(
             crate::ui::composer_tools::ComposerTool {
                 key: tool_key,
                 order: tool.order,
+                accessory: false,
                 build: Rc::new(move |context, _, cx| {
                     let composer = NEXT_COMPOSER.with(|next| {
                         next.set(next.get() + 1);
@@ -863,6 +868,63 @@ pub fn register(
             cx,
         );
         added.push(Added::Tool(tool_key));
+        if tool.reaction_picker {
+            let (owner, id) = (plugin.to_owned(), tool.id.clone());
+            crate::ui::emoji_picker::register_reaction_picker(
+                crate::ui::emoji_picker::ReactionPicker {
+                    key: tool_key,
+                    order: tool.order,
+                    build: Rc::new(move |select, window, cx| {
+                        super::view::ExternalView::reaction_picker(&owner, &id, select, window, cx)
+                    }),
+                },
+                cx,
+            );
+            added.push(Added::ReactionPicker(tool_key));
+        }
+    }
+    for accessory in &contributions.composer_accessories {
+        let accessory_key = key(&accessory.id);
+        let (owner, id) = (plugin.to_owned(), accessory.id.clone());
+        crate::ui::composer_tools::register(
+            crate::ui::composer_tools::ComposerTool {
+                key: accessory_key,
+                order: accessory.order,
+                accessory: true,
+                build: Rc::new(move |context, window, cx| {
+                    super::view::ExternalView::accessory(
+                        &owner,
+                        &id,
+                        &context.channel,
+                        context.thread.as_deref(),
+                        window,
+                        cx,
+                    )
+                }),
+            },
+            cx,
+        );
+        added.push(Added::Tool(accessory_key));
+    }
+    for action in &contributions.account_actions {
+        let action_key = key(&action.id);
+        let (owner, id, title) = (
+            plugin.to_owned(),
+            action.id.clone(),
+            SharedString::from(action.title.clone()),
+        );
+        crate::ui::account_actions::register(
+            crate::ui::account_actions::AccountAction {
+                key: action_key,
+                title: title.clone(),
+                icon: super::icon(action.icon.as_deref()),
+                build: Rc::new(move |close, window, cx| {
+                    super::view::ExternalView::dialog(&owner, &id, title.clone(), close, window, cx)
+                }),
+            },
+            cx,
+        );
+        added.push(Added::AccountAction(action_key));
     }
     for completion in &contributions.completions {
         let completion_key = key(&completion.id);

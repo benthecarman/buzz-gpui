@@ -224,6 +224,8 @@ fn every_kind_of_contribution_is_checked() {
         "shortcuts": [{ "id": "go", "title": "Go", "keys": ["mod+shift+g"] }],
         "completions": [{ "id": "commands", "title": "Commands", "trigger": "/" }],
         "inlineRenderers": [{ "id": "tickets", "pattern": "BUZZ-[0-9]+" }],
+        "accountActions": [{ "id": "about", "title": "About", "icon": "Smiley" }],
+        "composerAccessories": [{ "id": "note", "title": "Note", "order": 2 }],
         "pages": [{ "id": "top", "title": "Top", "placement": "topbar" }],
         "panels": [{ "id": "p", "title": "P", "menu": { "label": "Open P" } }],
     }))
@@ -231,6 +233,8 @@ fn every_kind_of_contribution_is_checked() {
     assert_eq!(parsed.settings_cards[0].placement, "Integrations");
     assert_eq!(parsed.pages[0].placement, PagePlacement::Topbar);
     assert!(parsed.message_actions[0].mine);
+    assert_eq!(parsed.composer_accessories[0].order, 2);
+    assert_eq!(parsed.account_actions[0].icon.as_deref(), Some("Smiley"));
 
     for (value, reason) in [
         (

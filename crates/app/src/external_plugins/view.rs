@@ -7,6 +7,7 @@ use super::protocol::Node;
 use super::{ExternalPlugins, Status};
 use crate::agents2::registry::AgentView;
 use crate::community::{AppState, Community};
+use crate::ui::account_actions::Close;
 use crate::ui::channel_panels::Opening;
 use buzz_ui::{ActiveTheme, Button, IconName, Spinner, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -34,6 +35,12 @@ pub struct ExternalView {
     opening: Option<Opening>,
     /// An agent tab's agent, and its type's id.
     agent: Option<(AgentView, &'static str)>,
+    /// More `view/open` params, such as an accessory's channel.
+    extra: Value,
+    /// Closes a dialog (`ui/closeView`).
+    close: Option<crate::ui::account_actions::Close>,
+    /// Picks a reaction (`reaction/select`).
+    select: Option<crate::ui::emoji_picker::Select>,
     tree: Option<Node>,
     /// The last tree the plugin sent could not be drawn.
     error: Option<String>,
@@ -46,32 +53,31 @@ impl ExternalView {
         plugin: &str,
         contribution: &str,
         opening: Opening,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
         Self::open(
             plugin,
             contribution,
             "panel",
-            Some(opening),
-            None,
-            window,
+            |view| view.opening = Some(opening),
             cx,
         )
+        .into()
     }
 
-    pub fn page(plugin: &str, contribution: &str, window: &mut Window, cx: &mut App) -> AnyView {
-        Self::open(plugin, contribution, "page", None, None, window, cx)
+    pub fn page(plugin: &str, contribution: &str, _window: &mut Window, cx: &mut App) -> AnyView {
+        Self::open(plugin, contribution, "page", |_| {}, cx).into()
     }
 
     /// A Settings section the plugin added.
     pub fn settings(
         plugin: &str,
         contribution: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        Self::open(plugin, contribution, "settings", None, None, window, cx)
+        Self::open(plugin, contribution, "settings", |_| {}, cx).into()
     }
 
     /// A settings tab of one of the plugin's agent types.
@@ -80,18 +86,87 @@ impl ExternalView {
         kind: &'static str,
         tab: &str,
         agent: AgentView,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
         Self::open(
             plugin,
             tab,
             "agentTab",
-            None,
-            Some((agent, kind)),
-            window,
+            |view| view.agent = Some((agent, kind)),
             cx,
         )
+        .into()
+    }
+
+    /// An account action's dialog, titled `title`, with the plugin's view
+    /// as its body.
+    pub fn dialog(
+        plugin: &str,
+        contribution: &str,
+        title: SharedString,
+        close: Close,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        let inner = close.clone();
+        let view = Self::open(
+            plugin,
+            contribution,
+            "dialog",
+            |view| view.close = Some(inner),
+            cx,
+        );
+        cx.new(|_| Framed { title, view, close }).into()
+    }
+
+    /// A composer accessory, shown above one composer.
+    pub fn accessory(
+        plugin: &str,
+        contribution: &str,
+        channel: &str,
+        thread: Option<&str>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        let extra = json!({ "channel": channel, "thread": thread });
+        Self::open(
+            plugin,
+            contribution,
+            "accessory",
+            |view| view.extra = extra,
+            cx,
+        )
+        .into()
+    }
+
+    /// A reaction picker, standing in for the emoji picker.
+    pub fn reaction_picker(
+        plugin: &str,
+        contribution: &str,
+        select: crate::ui::emoji_picker::Select,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        Self::open(
+            plugin,
+            contribution,
+            "reactionPicker",
+            |view| view.select = Some(select),
+            cx,
+        )
+        .into()
+    }
+
+    /// What `reaction/select` calls: a reaction picker's pick.
+    pub(super) fn selector(&self) -> Option<crate::ui::emoji_picker::Select> {
+        self.select.clone()
+    }
+
+    /// What `ui/closeView` calls: a dialog's close; `None` for other
+    /// views.
+    pub(super) fn closer(&self) -> Option<Close> {
+        self.close.clone()
     }
 
     /// `agent/save`: replaces this tab's agent's config.
@@ -104,33 +179,40 @@ impl ExternalView {
         Some(agent.save(config, cx))
     }
 
+    /// A view of `kind`, which `setup` fills in before the plugin hears of
+    /// it.
     fn open(
         plugin: &str,
         contribution: &str,
         kind: &'static str,
-        opening: Option<Opening>,
-        agent: Option<(AgentView, &'static str)>,
-        _window: &mut Window,
+        setup: impl FnOnce(&mut Self),
         cx: &mut App,
-    ) -> AnyView {
+    ) -> Entity<Self> {
         let id = ExternalPlugins::next_view_id(cx);
-        let view = cx.new(|cx| Self {
-            plugin: plugin.to_owned(),
-            contribution: contribution.to_owned(),
-            kind,
-            id: id.clone(),
-            opening,
-            agent,
-            tree: None,
-            error: None,
-            fields: HashMap::new(),
-            _release: cx.on_release(|this: &mut Self, cx| {
-                ExternalPlugins::close_view(&this.plugin, &this.id, cx);
-            }),
+        let view = cx.new(|cx| {
+            let mut view = Self {
+                plugin: plugin.to_owned(),
+                contribution: contribution.to_owned(),
+                kind,
+                id: id.clone(),
+                opening: None,
+                agent: None,
+                extra: Value::Null,
+                close: None,
+                select: None,
+                tree: None,
+                error: None,
+                fields: HashMap::new(),
+                _release: cx.on_release(|this: &mut Self, cx| {
+                    ExternalPlugins::close_view(&this.plugin, &this.id, cx);
+                }),
+            };
+            setup(&mut view);
+            view
         });
         let params = view.read(cx).open_params();
         ExternalPlugins::open_view(plugin, &id, view.downgrade(), params, cx);
-        view.into()
+        view
     }
 
     /// `view/open`'s params.
@@ -140,7 +222,7 @@ impl ExternalView {
             Some((view, kind)) => (Some(super::agents::agent_json(&view.agent)), Some(*kind)),
             None => (None, None),
         };
-        json!({
+        let mut params = json!({
             "agent": agent,
             "type": kind,
             "view": self.id,
@@ -149,7 +231,13 @@ impl ExternalView {
             "target": opening.map(|opening| opening.target.clone()),
             "channel": opening.map(|opening| opening.channel.clone()),
             "thread": opening.and_then(|opening| opening.thread.clone()),
-        })
+        });
+        if let Value::Object(extra) = &self.extra {
+            for (key, value) in extra {
+                params[key] = value.clone();
+            }
+        }
+        params
     }
 
     pub(super) fn set_tree(&mut self, tree: Result<Node, String>, cx: &mut Context<Self>) {
@@ -303,8 +391,10 @@ impl Render for ExternalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let status = ExternalPlugins::status(&self.plugin, cx);
-        // An agent tab sits in the host's own padded tab.
-        let framed = self.kind != "agentTab";
+        // Panels, pages and Settings sections fill their place; agent tabs,
+        // dialogs and accessories sit in the host's own frame.
+        let framed = matches!(self.kind, "panel" | "page" | "settings");
+        // A reaction picker sits in the picker's own padded surface.
         let mut body = div()
             .flex()
             .flex_col()
@@ -356,11 +446,30 @@ impl Render for ExternalView {
         }
         div()
             .id(SharedString::from(format!("plugin-view-{}", self.id)))
-            .size_full()
-            .min_h_0()
-            .overflow_y_scroll()
-            .when(framed, |view| view.bg(c.surface_panel))
+            .w_full()
+            .when(framed, |view| {
+                view.size_full()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .bg(c.surface_panel)
+            })
             .text_color(c.text_standard)
             .child(body)
+    }
+}
+
+/// An account action's dialog around the plugin's view.
+struct Framed {
+    title: SharedString,
+    view: Entity<ExternalView>,
+    close: Close,
+}
+
+impl Render for Framed {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let close = self.close.clone();
+        buzz_ui::Dialog::new("plugin-dialog", self.title.clone())
+            .on_close(move |_, window, cx| close(window, cx))
+            .child(self.view.clone())
     }
 }

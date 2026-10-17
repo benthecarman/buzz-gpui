@@ -652,6 +652,10 @@ pub struct EmojiPicker {
     built_for: Option<Arc<[CustomEmoji]>>,
     /// The composer's picker also offers GIFs, when the relay does.
     gifs: Option<GifTab>,
+    /// Whether it picks reactions, so a plugin's picker may replace it.
+    reactions: bool,
+    /// The plugin reaction picker shown instead, by its key.
+    plugin_view: Option<(&'static str, AnyView)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -734,6 +738,8 @@ impl EmojiPicker {
             preview_tone: None,
             built_for: None,
             gifs: None,
+            reactions: false,
+            plugin_view: None,
             _subscriptions: subscriptions,
         };
         picker.rebuild(cx);
@@ -1150,8 +1156,8 @@ impl EmojiPicker {
     }
 }
 
-impl Render for EmojiPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl EmojiPicker {
+    fn render_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let available = self
             .container
@@ -1389,6 +1395,103 @@ impl Render for EmojiPicker {
                 ))
                 .child(self.tone_menu(cx))
             })
+    }
+}
+
+impl Render for EmojiPicker {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.plugin_picker(window, cx) {
+            Some(view) => {
+                let c = *cx.colors();
+                div()
+                    .w(px(mart::width(9, f32::from(window.viewport_size().width))))
+                    .max_h(px(MART_HEIGHT))
+                    .floating_surface(&c)
+                    .overflow_hidden()
+                    .occlude()
+                    .p(px(12.))
+                    .child(view)
+                    .into_any_element()
+            }
+            None => self.render_grid(window, cx).into_any_element(),
+        }
+    }
+}
+
+/// Picks for a plugin's reaction picker: the emoji it chose.
+pub type Select = Rc<dyn Fn(String, &mut Window, &mut App)>;
+/// Makes a plugin's reaction picker view.
+pub type BuildReactionPicker = Rc<dyn Fn(Select, &mut Window, &mut App) -> AnyView>;
+
+/// A reaction picker a plugin adds (a composer tool's
+/// `reactionComponent`). Of these and the bundled emoji picker
+/// (`buzz.emoji/emoji` at 0), the lowest order, then the lowest key,
+/// picks reactions (`selectReactionTool`).
+#[derive(Clone)]
+pub struct ReactionPicker {
+    pub key: &'static str,
+    pub order: i32,
+    pub build: BuildReactionPicker,
+}
+
+#[derive(Default)]
+struct ReactionPickers(Vec<ReactionPicker>);
+
+impl Global for ReactionPickers {}
+
+pub fn register_reaction_picker(picker: ReactionPicker, cx: &mut App) {
+    let pickers = &mut cx.default_global::<ReactionPickers>().0;
+    pickers.retain(|existing| existing.key != picker.key);
+    pickers.push(picker);
+}
+
+pub fn unregister_reaction_picker(key: &str, cx: &mut App) {
+    cx.default_global::<ReactionPickers>()
+        .0
+        .retain(|existing| existing.key != key);
+}
+
+/// The plugin picker that outranks the bundled one, if any.
+fn winning_picker(cx: &App) -> Option<ReactionPicker> {
+    const BUNDLED: (i32, &str) = (0, "buzz.emoji/emoji");
+    cx.try_global::<ReactionPickers>()?
+        .0
+        .iter()
+        .filter(|picker| crate::plugins::enabled_key(picker.key))
+        .filter(|picker| (picker.order, picker.key) < BUNDLED)
+        .min_by_key(|picker| (picker.order, picker.key))
+        .cloned()
+}
+
+impl EmojiPicker {
+    /// A picker for reactions, which a plugin's reaction picker can stand
+    /// in for.
+    pub fn for_reactions(mut self) -> Self {
+        self.reactions = true;
+        self
+    }
+
+    /// The winning plugin reaction picker's view, made once per picker.
+    fn plugin_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyView> {
+        if !self.reactions {
+            return None;
+        }
+        let Some(winner) = winning_picker(cx) else {
+            self.plugin_view = None;
+            return None;
+        };
+        if let Some((key, view)) = &self.plugin_view
+            && *key == winner.key
+        {
+            return Some(view.clone());
+        }
+        let picker = cx.entity().downgrade();
+        let select: Select = Rc::new(move |emoji, _, cx| {
+            let _ = picker.update(cx, |_, cx| cx.emit(Picked(Pick::Unicode(emoji))));
+        });
+        let view = (winner.build)(select, window, cx);
+        self.plugin_view = Some((winner.key, view.clone()));
+        Some(view)
     }
 }
 

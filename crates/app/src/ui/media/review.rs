@@ -521,6 +521,7 @@ impl Review {
         let picker = community.as_ref().map(|community| {
             let picker = cx.new(|cx| {
                 super::super::emoji_picker::EmojiPicker::new(community.clone(), window, cx)
+                    .for_reactions()
             });
             subscriptions.push(cx.subscribe(
                 &picker,

@@ -17,6 +17,8 @@ use std::rc::Rc;
 pub struct ToolContext {
     pub community: Entity<Community>,
     pub channel: String,
+    /// The thread the composer replies in, as hex.
+    pub thread: Option<String>,
     pub composer: WeakEntity<Composer>,
 }
 
@@ -25,6 +27,9 @@ pub struct ComposerTool {
     /// `plugin/tool`, such as `buzz.projects/resources`.
     pub key: &'static str,
     pub order: i32,
+    /// An accessory (`registerAccessory`): shown above the composer, beside
+    /// the typing indicator, rather than in the toolbar.
+    pub accessory: bool,
     pub build: BuildTool,
 }
 
@@ -58,8 +63,22 @@ pub fn unregister(key: &str, cx: &mut App) {
     tools.1 += 1;
 }
 
-/// One view per registered tool for a new composer.
+/// One view per registered toolbar tool for a new composer.
 pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<AnyView> {
+    build_where(false, context, window, cx)
+}
+
+/// One view per registered accessory for a new composer.
+pub fn build_accessories(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<AnyView> {
+    build_where(true, context, window, cx)
+}
+
+fn build_where(
+    accessory: bool,
+    context: ToolContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<AnyView> {
     let tools = cx
         .try_global::<Tools>()
         .map(|tools| tools.0.clone())
@@ -67,7 +86,7 @@ pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<Any
     // A switched-off plugin's tools stay out of new composers.
     tools
         .into_iter()
-        .filter(|tool| crate::plugins::enabled_key(tool.key))
+        .filter(|tool| tool.accessory == accessory && crate::plugins::enabled_key(tool.key))
         .map(|tool| (tool.build)(context.clone(), window, cx))
         .collect()
 }
