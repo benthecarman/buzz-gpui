@@ -122,6 +122,37 @@ pub struct SettingsHost {
     pub pending: Option<PendingSave>,
 }
 
+/// A hosted type's provider (`RemoteAgentType`): it holds each agent's
+/// key and runs it. The app calls these in order to make one
+/// (`provision`, then `activate`) and owns the owner's agent list; each
+/// step may be asked again after a failure, so each must be safe to
+/// repeat. `community` is the agent's `wss://` community.
+pub trait RemoteAgentType {
+    /// Makes the agent and resolves with its pubkey, not yet the owner's.
+    fn provision(&self, name: &str, community: &str, cx: &mut App) -> Task<Result<String, String>>;
+    /// Hands over the owner's NIP-OA attestation (`["auth", owner, "",
+    /// signature]`); the provider publishes its profile and starts it.
+    fn activate(
+        &self,
+        pubkey: &str,
+        name: &str,
+        community: &str,
+        auth: Vec<String>,
+        cx: &mut App,
+    ) -> Task<Result<(), String>>;
+    /// Publishes its profile with this name and picture.
+    fn profile(
+        &self,
+        pubkey: &str,
+        community: &str,
+        name: &str,
+        picture: Option<&str>,
+        cx: &mut App,
+    ) -> Task<Result<(), String>>;
+    /// Stops it and deletes its key; one already gone counts as removed.
+    fn remove(&self, pubkey: &str, community: &str, cx: &mut App) -> Task<Result<(), String>>;
+}
+
 /// Gives the New agent dialog a new starting config from a type's form.
 pub type CreateChange = Rc<dyn Fn(Value, &mut App)>;
 
@@ -470,6 +501,11 @@ pub trait AgentType: 'static {
     /// them.
     fn tabs(&self) -> Vec<AgentTab> {
         Vec::new()
+    }
+    /// Makes the type hosted: its provider runs each agent, so it has no
+    /// run, models or timeout, and its agents have no attention.
+    fn remote(&self) -> Option<Rc<dyn RemoteAgentType>> {
+        None
     }
     /// Whether [`Self::run`] does anything. Agents of a type that does not
     /// run drop what wakes them.

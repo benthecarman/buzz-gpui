@@ -36,7 +36,7 @@ impl Listed {
 
     /// The community's listings: as read, or until the first read
     /// finishes, those written since.
-    fn rows_of(&self, origin: &str) -> Vec<Listing> {
+    pub(super) fn rows_of(&self, origin: &str) -> Vec<Listing> {
         self.rows.get(origin).cloned().unwrap_or_else(|| {
             self.edits
                 .get(origin)
@@ -47,7 +47,7 @@ impl Listed {
 
     /// Replaces or removes the agent's listing, and keeps the change until
     /// the community's records are first read.
-    fn set_row(&mut self, origin: &str, pubkey: &str, row: Option<Listing>) {
+    pub(super) fn set_row(&mut self, origin: &str, pubkey: &str, row: Option<Listing>) {
         let Some(rows) = self.rows.get_mut(origin) else {
             self.edits
                 .entry(origin.to_owned())

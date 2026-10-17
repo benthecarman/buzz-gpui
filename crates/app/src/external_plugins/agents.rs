@@ -329,6 +329,87 @@ impl registry::AgentProvider for Provider {
     }
 }
 
+/// A hosted plugin type's provider: each step is a request to the plugin.
+struct Hosted {
+    requester: Requester,
+    kind: &'static str,
+}
+
+/// How long one hosted step may take.
+const HOSTED_TIMEOUT: Duration = Duration::from_secs(120);
+
+impl Hosted {
+    fn ask(&self, method: &str, mut params: Value, cx: &mut App) -> Task<Result<Value, String>> {
+        params["type"] = json!(self.kind);
+        let request = self.requester.request(method, params, HOSTED_TIMEOUT);
+        cx.background_spawn(async move {
+            match request.await {
+                Ok(answer) => answer,
+                Err(error) => Err(error.to_string()),
+            }
+        })
+    }
+}
+
+impl registry::RemoteAgentType for Hosted {
+    fn provision(&self, name: &str, community: &str, cx: &mut App) -> Task<Result<String, String>> {
+        let asked = self.ask(
+            "agent/provision",
+            json!({ "name": name, "community": community }),
+            cx,
+        );
+        cx.background_spawn(async move {
+            asked
+                .await?
+                .get("pubkey")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .ok_or_else(|| "The provider did not return the agent's key".to_owned())
+        })
+    }
+
+    fn activate(
+        &self,
+        pubkey: &str,
+        name: &str,
+        community: &str,
+        auth: Vec<String>,
+        cx: &mut App,
+    ) -> Task<Result<(), String>> {
+        let asked = self.ask(
+            "agent/activate",
+            json!({ "pubkey": pubkey, "name": name, "community": community, "auth": auth }),
+            cx,
+        );
+        cx.background_spawn(async move { asked.await.map(drop) })
+    }
+
+    fn profile(
+        &self,
+        pubkey: &str,
+        community: &str,
+        name: &str,
+        picture: Option<&str>,
+        cx: &mut App,
+    ) -> Task<Result<(), String>> {
+        let asked = self.ask(
+            "agent/profile",
+            json!({ "pubkey": pubkey, "community": community, "name": name, "picture": picture }),
+            cx,
+        );
+        cx.background_spawn(async move { asked.await.map(drop) })
+    }
+
+    fn remove(&self, pubkey: &str, community: &str, cx: &mut App) -> Task<Result<(), String>> {
+        let asked = self.ask(
+            "agent/remove",
+            json!({ "pubkey": pubkey, "community": community }),
+            cx,
+        );
+        cx.background_spawn(async move { asked.await.map(drop) })
+    }
+}
+
 /// A `agent/models` answer.
 fn models_of(value: &Value) -> Option<registry::Models> {
     let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
@@ -498,7 +579,16 @@ impl AgentType for PluginType {
     }
 
     fn runs(&self) -> bool {
-        true
+        !self.decl.hosted
+    }
+
+    fn remote(&self) -> Option<std::rc::Rc<dyn registry::RemoteAgentType>> {
+        self.decl.hosted.then(|| {
+            std::rc::Rc::new(Hosted {
+                requester: self.requester.clone(),
+                kind: self.id,
+            }) as std::rc::Rc<dyn registry::RemoteAgentType>
+        })
     }
 
     fn create_instructions(&self) -> bool {

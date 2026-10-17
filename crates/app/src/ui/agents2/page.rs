@@ -232,6 +232,26 @@ impl Agents2Page {
         }
     }
 
+    /// Deletes a hosted agent through its provider.
+    fn remove_hosted(&mut self, pubkey: String, cx: &mut Context<Self>) {
+        let Some(service) = Agents2::global(cx) else {
+            return;
+        };
+        let task = service.update(cx, |service, cx| service.remove_hosted(&pubkey, cx));
+        cx.spawn(async move |this, cx| {
+            let removed = task.await;
+            let _ = this.update(cx, |this, cx| match removed {
+                Ok(()) => this.browse(None, cx),
+                Err(error) => crate::ui::toasts::show(
+                    crate::ui::toasts::Notice::error("hosted-delete", "Could not delete the agent")
+                        .description(error),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
     fn browse(&mut self, selected: Option<String>, cx: &mut Context<Self>) {
         self.frame = Frame::Browse {
             selected,
@@ -632,6 +652,9 @@ impl Agents2Page {
         };
         let detail = match agent {
             Shown::Here(agent) => summary_of(agent, kind.as_ref()),
+            Shown::Elsewhere(agent) if crate::agents2::is_hosted(&agent.agent_type, cx) => {
+                "Hosted".into()
+            }
             Shown::Elsewhere(_) => "On another device".into(),
         };
         AgentCard::new(
@@ -762,6 +785,32 @@ impl Agents2Page {
                 )
         };
         let agent = match agent {
+            Shown::Elsewhere(agent) if crate::agents2::is_hosted(&agent.agent_type, cx) => {
+                let pubkey = agent.pubkey.clone();
+                return side_body()
+                    .child(identity(
+                        agent.name.clone(),
+                        agent.picture.clone(),
+                        agent.relay.clone(),
+                        "Hosted".into(),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_body_sm()
+                            .text_color(c.text_subtle)
+                            .child("Its type's provider holds its key and runs it."),
+                    )
+                    .child(
+                        div().flex().child(
+                            Button::new("hosted-delete", "Delete agent")
+                                .icon(IconName::Trash)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.remove_hosted(pubkey.clone(), cx)
+                                })),
+                        ),
+                    );
+            }
             Shown::Elsewhere(agent) => {
                 return side_body()
                     .child(identity(

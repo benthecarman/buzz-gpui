@@ -88,7 +88,7 @@ file that holds its rows.
 | #849 `8c151a23` compact icon actions | [shell](gaps/shell.md) | DONE |
 | #840 `736975e2` buzz-mcp media_get | [agents](gaps/agents.md) | DONE (new host request) |
 | #910 `94fdec47` wake on mentions only | [agents](gaps/agents.md) | DONE |
-| #870 `287a557d` hosted agent types and the owner's agent list | [agents](gaps/agents.md) | DONE (owner's list); SKIPPED (hosted types: Builderlab) |
+| #870 `287a557d` hosted agent types and the owner's agent list | [agents](gaps/agents.md) | DONE (owner's list; hosted types for plugins, docs/plugins.md); SKIPPED (Builderlab's own hosted type) |
 | #850 `63c39eee` remove blank-tab creation from the side pane | [channels](gaps/channels.md) | DONE |
 | #903 `6730a3d2` pick the agent session for session-debug | [agents](gaps/agents.md) | DONE (prompt part); scripts N/A |
 | #912 `dd360ca3` re-sign stale agent removals | [agents](gaps/agents.md) | DONE (already signed fresh) |

@@ -220,6 +220,16 @@ the answer until the agent's name or config changes:
   `attentionLabel` and `blocking`. Buzz sends `agentType/check` when the user
   asks to check again. The provider's dialog is a view of `kind`
   `agentProvider`; close it with `ui/closeView`.
+- `hosted: true`: the plugin holds each agent's key and runs it, as a hosted
+  service would. Buzz never sends `agent/run` for it. Making one asks
+  `agent/provision` (`type`, `name`, `community`; answer `{"pubkey"}`, a key
+  not yet in use), then `agent/activate` (`type`, `pubkey`, `name`,
+  `community`, `auth`: your NIP-OA attestation `["auth", owner, "",
+  signature]` to attach to what it signs), then lists it in your agent list
+  and, with a picture, asks `agent/profile` (`type`, `pubkey`, `community`,
+  `name`, `picture`). Deleting it asks `agent/remove` (`type`, `pubkey`,
+  `community`). Each step may come again after a failure, so make each safe to
+  repeat. The Agents page shows these agents as Hosted.
 - `carry` (`{"instructions", "workspace"}`, each a config key): what another
   type takes over when an agent changes type, and where this type keeps what
   it takes over. `migrationWarning` says what leaving this type costs.

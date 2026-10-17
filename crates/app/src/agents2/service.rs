@@ -2869,6 +2869,8 @@ fn listen(session: &Arc<Session>, origin: &str, cx: &mut Context<Agents2>) -> Ta
 }
 
 mod attention_calls;
+mod hosted;
+pub use hosted::is_hosted;
 mod listed;
 #[cfg(test)]
 mod tests;

@@ -310,6 +310,11 @@ pub struct AgentTypeDecl {
     /// What leaving this type costs, shown before a change of type.
     #[serde(default)]
     pub migration_warning: Option<String>,
+    /// The plugin holds each agent's key and runs it (`remote`): Buzz asks
+    /// `agent/provision`, `agent/activate`, `agent/profile` and
+    /// `agent/remove`, and never `agent/run`.
+    #[serde(default)]
+    pub hosted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

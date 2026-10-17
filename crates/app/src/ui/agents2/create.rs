@@ -414,14 +414,23 @@ impl CreateAgent {
             carry: None,
         };
         let host = self.host.clone();
-        let task = service.update(cx, |service, cx| {
-            service.create(&kind.key, &name, made, host, cx)
-        });
+        // A hosted type's provider makes and runs it (`remote`).
+        let task: Task<Result<String, String>> = if crate::agents2::is_hosted(&kind.key, cx) {
+            let picture = made.picture;
+            service.update(cx, |service, cx| {
+                service.create_hosted(&kind.key, &name, picture, cx)
+            })
+        } else {
+            let task = service.update(cx, |service, cx| {
+                service.create(&kind.key, &name, made, host, cx)
+            });
+            cx.background_spawn(async move { task.await.map(|agent| agent.pubkey) })
+        };
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(agent) => cx.emit(CreateEvent::Created(agent.pubkey)),
+                    Ok(pubkey) => cx.emit(CreateEvent::Created(pubkey)),
                     Err(error) => {
                         this.error = Some(error.into());
                         this.pending = false;
