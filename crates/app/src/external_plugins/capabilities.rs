@@ -12,8 +12,8 @@ use crate::runtime::Runtime;
 use crate::ui::navigation::{self, Place, Request, Target};
 use buzz_relay_client::fold::Delivery;
 use buzz_relay_client::{
-    ChannelView, EventId, Mentions, MessageRow, Profile, Profiles, Session, ThreadStatus,
-    TimelineSnapshot, TimelineStatus,
+    EventId, Mentions, MessageRow, Profile, Profiles, Session, ThreadStatus, TimelineSnapshot,
+    TimelineStatus,
 };
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -260,6 +260,151 @@ pub fn thread_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
     }))
 }
 
+/// Runs `work` on the tokio runtime, where the session's network calls
+/// need to be, and answers with what it returns.
+pub(super) fn on_tokio<T: Send + 'static>(
+    cx: &App,
+    work: impl std::future::Future<Output = Result<T, Failure>> + Send + 'static,
+) -> Task<Result<T, Failure>> {
+    let handle = Runtime::handle(cx).spawn(work);
+    cx.background_spawn(async move {
+        handle
+            .await
+            .unwrap_or_else(|_| Err((2, "The request stopped.".to_owned())))
+    })
+}
+
+/// The `channel` and `message` params of a write, checked.
+fn message_target(
+    params: &Value,
+    cx: &App,
+) -> Result<(Entity<Community>, String, EventId), Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let message = event_id(params, "message")?.ok_or_else(|| invalid("message is required"))?;
+    Ok((community, channel, message))
+}
+
+/// `messages/edit`: replaces the text of one of the user's messages.
+pub fn edit(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let (community, channel, message) = message_target(params, cx)?;
+    let content = text(params, "content")
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| invalid("content is required"))?
+        .to_owned();
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .edit(&channel, message, &content)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `messages/react`: reacts to a message with an emoji.
+pub fn react(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let (community, channel, message) = message_target(params, cx)?;
+    let emoji = text(params, "emoji")
+        .map(str::trim)
+        .filter(|emoji| !emoji.is_empty() && emoji.chars().count() <= 64)
+        .ok_or_else(|| invalid("emoji is required"))?
+        .to_owned();
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .react(&channel, message, &emoji)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `messages/delete`: deletes one of the user's messages or reactions, or
+/// a message of an agent the user owns.
+pub fn delete(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let (community, channel, message) = message_target(params, cx)?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .remove(&channel, message)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// The largest file `files/upload` takes, before base64.
+const MAX_UPLOAD: usize = 3 * 1024 * 1024;
+
+/// `files/upload`: uploads a file to the community, for `messages/send`'s
+/// `attachments`.
+pub fn upload(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use base64::Engine;
+    let community = community(cx)?;
+    let data = text(params, "data").ok_or_else(|| invalid("data (base64) is required"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| invalid("data is not base64"))?;
+    if bytes.is_empty() || bytes.len() > MAX_UPLOAD {
+        return Err(invalid("A file must be 1 byte to 3 MiB."));
+    }
+    let name = text(params, "name")
+        .map(|name| name.chars().take(200).collect::<String>())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "file".to_owned());
+    let mime = text(params, "mime")
+        .map(str::to_owned)
+        .unwrap_or_else(|| buzz_relay_client::upload::mime_type(&name, &bytes));
+    let media = community.read(cx).session.media().clone();
+    Ok(on_tokio(cx, async move {
+        let file = buzz_relay_client::upload::UploadFile { name, mime, bytes };
+        let attachment = buzz_relay_client::upload::upload(&media, file)
+            .await
+            .map_err(|error| (3, error.to_string()))?;
+        Ok(json!({
+            "name": attachment.name,
+            "url": attachment.url,
+            "mime": attachment.mime,
+            "size": attachment.size,
+            "sha256": attachment.sha256,
+        }))
+    }))
+}
+
+/// `messages/send`'s `attachments`, as `files/upload` answered them.
+fn attachments(params: &Value) -> Result<Vec<buzz_relay_client::Attachment>, Failure> {
+    let Some(list) = params.get("attachments").filter(|list| !list.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let list = list
+        .as_array()
+        .filter(|list| list.len() <= 16)
+        .ok_or_else(|| invalid("attachments must be a list of at most 16"))?;
+    list.iter()
+        .map(|item| {
+            let field = |key: &str| {
+                item.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid(format!("an attachment needs {key}")))
+            };
+            let url = field("url")?;
+            if !url.starts_with("https://") && !url.starts_with("http://") {
+                return Err(invalid("an attachment's url must be http(s)"));
+            }
+            Ok(buzz_relay_client::Attachment {
+                name: field("name")?,
+                url,
+                mime: field("mime")?,
+                size: item.get("size").and_then(Value::as_u64).unwrap_or(0),
+                sha256: field("sha256")?,
+                voice_duration: None,
+            })
+        })
+        .collect()
+}
+
 /// `messages/send`. It answers once the message is safely queued; the
 /// relay may still refuse it, which `channel/watch` shows as a delivery
 /// of `failed`.
@@ -267,7 +412,7 @@ pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     let community = community(cx)?;
     let channel = channel(params, community.read(cx))?;
     let content = text(params, "content")
-        .filter(|content| !content.trim().is_empty())
+        .filter(|content| !content.trim().is_empty() || params.get("attachments").is_some())
         .ok_or_else(|| invalid("content is required"))?
         .to_owned();
     let thread = match params.get("thread") {
@@ -292,8 +437,9 @@ pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
         recipients,
         ..Mentions::default()
     };
+    let attachments = attachments(params)?;
     let session: Arc<Session> = community.read(cx).session.clone();
-    let sent = session.send(&channel, &content, mentions, Vec::new(), thread);
+    let sent = session.send(&channel, &content, mentions, attachments, thread);
     Ok(cx.spawn(async move |_| sent.await.map(|()| Value::Null).map_err(|error| (3, error))))
 }
 
@@ -313,6 +459,53 @@ pub fn open_conversation(params: &Value, cx: &App) -> Result<Value, Failure> {
             thread,
             members: false,
         },
+    };
+    let sender = navigation::sender(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    let _ = sender.unbounded_send(Request::Open(target).into());
+    Ok(Value::Null)
+}
+
+/// `ui/navigate`: shows a page or Settings.
+pub fn navigate(params: &Value, cx: &App) -> Result<Value, Failure> {
+    use crate::ui::pages::Page;
+    use crate::ui::settings::Section;
+    let place = match text(params, "to") {
+        Some("home") | Some("messages") => Place::Page(Page::MESSAGES),
+        Some("me") => Place::Page(Page::ME),
+        Some("agents") => Place::Page(Page::AGENTS),
+        Some("settings") => Place::Settings(match text(params, "section") {
+            None => Section::default_for(AppState::current(cx).is_some()),
+            Some("profile") => Section::Profile,
+            Some("custom-emoji") => Section::CustomEmoji,
+            Some("communities") => Section::Communities,
+            Some("appearance") => Section::Appearance,
+            Some("notifications") => Section::Notifications,
+            Some("shortcuts") => Section::Shortcuts,
+            Some("agents") => Section::Agents,
+            Some("plugins") => Section::Plugins,
+            Some("updates") => Section::Updates,
+            Some("about") => Section::About,
+            Some(card) => {
+                let card = crate::ui::settings::cards::get(card, cx)
+                    .ok_or_else(|| invalid(format!("Settings has no section {card}")))?;
+                Section::Card(card.key)
+            }
+        }),
+        Some("page") => {
+            let key = text(params, "page").ok_or_else(|| invalid("page is required"))?;
+            let spec = crate::ui::pages::all(cx)
+                .into_iter()
+                .find(|spec| spec.page.key() == key)
+                .ok_or_else(|| invalid(format!("There is no page {key}")))?;
+            Place::Page(spec.page)
+        }
+        _ => {
+            return Err(invalid("to must be home, me, agents, settings or page"));
+        }
+    };
+    let target = Target {
+        community: AppState::current(cx).map(|community| community.read(cx).origin.to_string()),
+        place,
     };
     let sender = navigation::sender(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let _ = sender.unbounded_send(Request::Open(target).into());
@@ -359,11 +552,80 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
     Ok(Value::Bool(shown))
 }
 
-/// A channel a plugin follows: the view keeps the timeline live.
+/// Something a plugin follows, live until dropped: a channel, a thread or
+/// events.
 pub struct Watch {
-    pub channel: String,
-    _view: ChannelView,
+    _keep: Box<dyn std::any::Any>,
     _forward: Task<()>,
+}
+
+impl Watch {
+    pub fn new(keep: impl std::any::Any, forward: Task<()>) -> Self {
+        Self {
+            _keep: Box::new(keep),
+            _forward: forward,
+        }
+    }
+}
+
+/// `thread/watch`: sends `thread/changed` with the root and replies now
+/// and whenever the thread changes.
+pub fn watch_thread(
+    params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let root = event_id(params, "root")?.ok_or_else(|| invalid("root is required"))?;
+    let view = community
+        .read(cx)
+        .session
+        .open_thread(&channel, root, false);
+    let mut receiver = view.snapshot.clone();
+    let (sender, mut values) = futures::channel::mpsc::unbounded();
+    let _ = sender.unbounded_send(receiver.borrow_and_update().clone());
+    Runtime::handle(cx).spawn(async move {
+        while receiver.changed().await.is_ok() {
+            let value = receiver.borrow_and_update().clone();
+            if sender.unbounded_send(value).is_err() {
+                return;
+            }
+        }
+    });
+    let thread_channel = channel.clone();
+    let forward = cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some(mut thread) = values.next().await {
+            while let Ok(newer) = values.try_recv() {
+                thread = newer;
+            }
+            if !matches!(thread.status, ThreadStatus::Ready | ThreadStatus::Error) {
+                continue;
+            }
+            cx.update(|cx| {
+                let profiles = community.read(cx).snapshot.profiles.clone();
+                notify(
+                    json!({
+                        "channel": thread_channel,
+                        "root": thread.root.as_ref().map(|row| message(row, &profiles)),
+                        "replies": thread
+                            .replies
+                            .iter()
+                            .map(|row| message(row, &profiles))
+                            .collect::<Vec<_>>(),
+                        "hasMore": thread.can_load_more,
+                        "error": thread.error,
+                    }),
+                    cx,
+                );
+            });
+        }
+    });
+    Ok((
+        Watch::new(view, forward),
+        json!({ "channel": channel, "root": root.to_hex() }),
+    ))
 }
 
 /// `channel/watch`: sends `channel/changed` with the newest messages now
@@ -373,7 +635,7 @@ pub fn watch(
     params: &Value,
     notify: impl Fn(Value, &mut App) + 'static,
     cx: &mut App,
-) -> Result<Watch, Failure> {
+) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
     let channel = channel(params, community.read(cx))?;
     let limit = limit(params);
@@ -405,11 +667,7 @@ pub fn watch(
             });
         }
     });
-    Ok(Watch {
-        channel,
-        _view: view,
-        _forward: forward,
-    })
+    Ok((Watch::new(view, forward), json!({ "channel": channel })))
 }
 
 #[cfg(test)]

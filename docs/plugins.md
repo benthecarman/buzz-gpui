@@ -68,7 +68,7 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `description` | Optional. Shown in Settings. |
 | `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
 | `apiVersion` | Optional. `1`, the only version so far. |
-| `permissions` | Optional. What the plugin may do as you. `send-messages`: send messages and replies. Reading needs no permission. |
+| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). Reading needs no permission. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
 `BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
@@ -327,14 +327,23 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | --- | --- | --- |
 | `ui/toast` | `title`, `body` (optional), `tone` (`info`, `success`, `warning`, `error`) | `null` |
 | `ui/openUrl` | `url` (http or https), opened in the browser | `null` |
-| `community/current` | none | `{"name","relay"}` for the selected community, or `null` |
+| `community/current` | none | `{"name","relay","viewer"}` for the selected community (`viewer` is your pubkey), or `null` |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
 | `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first |
 | `thread/messages` | `channel`, `root` | `{"root","replies","hasMore"}` |
-| `channel/watch` | `channel`, `limit` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). A plugin follows at most 16 channels. |
-| `channel/unwatch` | `watch` | `null` |
+| `channel/watch` | `channel`, `limit` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). |
+| `thread/watch` | `channel`, `root` | `{"watch","channel","root"}`. Buzz then sends `thread/changed` with `root`, `replies`, `hasMore` and `error`, now and whenever the thread changes. |
+| `events/watch` | `filters` (see `events/query`) | `{"watch"}`. Buzz then sends `events/live` with `events`, the live events that match, from now on. |
+| `channel/unwatch`, `thread/unwatch`, `events/unwatch` | `watch` | `null`. A plugin follows at most 16 channels, threads and filters in all. |
+| `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit` | The matching signed events, at most 500, read from the community as you |
 | `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
-| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys) | `null`, once the message is queued. Needs `send-messages`. |
+| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys), `attachments` (optional, from `files/upload`) | `null`, once the message is queued. Needs `send-messages`. |
+| `messages/edit` | `channel`, `message`, `content` | `null` once sent. Only your own messages. Needs `send-messages`. |
+| `messages/react` | `channel`, `message`, `emoji` | `null` once sent. Needs `send-messages`. |
+| `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
+| `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
+| `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
+| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`) or `page` (with `page`, a page's `plugin/id`) | `null` |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |

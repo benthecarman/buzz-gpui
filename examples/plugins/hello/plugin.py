@@ -94,7 +94,22 @@ def live(state):
                 "type": "column",
                 "gap": "none",
                 "children": [
-                    text(m["authorName"] or m["author"][:10], style="label"),
+                    {
+                        "type": "row",
+                        "justify": "between",
+                        "children": [
+                            text(m["authorName"] or m["author"][:10], style="label"),
+                            {
+                                "type": "row",
+                                "gap": "sm",
+                                "children": [
+                                    {"type": "button", "id": f"react:{m['id']}", "label": "👋", "variant": "ghost"},
+                                ]
+                                # `delivery` is set on your own messages.
+                                + ([{"type": "button", "id": f"delete:{m['id']}", "label": "Delete", "variant": "ghost"}] if m["delivery"] else []),
+                            },
+                        ],
+                    },
                     {"type": "markdown", "text": m["content"]},
                 ]
                 + ([text(m["delivery"], style="small", tone="subtle")] if m["delivery"] else []),
@@ -179,6 +194,7 @@ def page(state):
                 "children": [
                     {"type": "button", "id": "toast", "label": "Show a toast"},
                     {"type": "button", "id": "notify", "label": "Notify me", "icon": "Bell"},
+                    {"type": "button", "id": "plugins", "label": "Plugin settings", "icon": "Gear"},
                     {"type": "link", "label": "Open example.com", "url": "https://example.com/"},
                 ],
             },
@@ -342,6 +358,17 @@ def on_event(params):
                 render(view)
 
         request("messages/send", {"channel": state["following"], "content": content}, sent)
+        return
+    elif (element.startswith("react:") or element.startswith("delete:")) and event == "click":
+        action, message = element.split(":", 1)
+        params = {"channel": state["following"], "message": message}
+        if action == "react":
+            request("messages/react", {**params, "emoji": "👋"})
+        else:
+            request("messages/delete", params)
+        return
+    elif element == "plugins" and event == "click":
+        request("ui/navigate", {"to": "settings", "section": "plugins"})
         return
     elif element == "open" and event == "click":
         request("ui/openConversation", {"channel": state["following"]})

@@ -17,6 +17,7 @@ mod agents;
 mod capabilities;
 mod contribute;
 mod draw;
+mod events;
 pub mod git;
 mod process;
 pub mod protocol;
@@ -1123,8 +1124,16 @@ impl ExternalPlugins {
         }
     }
 
-    /// `channel/watch`: follows a channel for this run of the plugin.
-    fn watch(path: &Path, generation: u64, params: &Value, cx: &mut App) -> Reply {
+    /// `channel/watch`, `thread/watch` and `events/watch`: follows a
+    /// channel, a thread or live events for this run of the plugin, telling
+    /// it with `method`.
+    fn watch(
+        path: &Path,
+        generation: u64,
+        method: &'static str,
+        params: &Value,
+        cx: &mut App,
+    ) -> Reply {
         let Some(plugin) = cx.global_mut::<Self>().current(path, generation) else {
             return Reply::Now(Err((1, "The plugin stopped.".to_owned())));
         };
@@ -1137,20 +1146,26 @@ impl ExternalPlugins {
         plugin.next_watch += 1;
         let id = plugin.next_watch;
         let notify_path = path.to_path_buf();
-        let watch = capabilities::watch(
-            params,
-            move |mut timeline, cx| {
-                timeline["watch"] = json!(id);
-                Self::notify(&notify_path, generation, "channel/changed", timeline, cx);
-            },
-            cx,
-        );
-        Reply::Now(watch.map(|watch| {
-            let channel = watch.channel.clone();
+        let changed = match method {
+            "thread/watch" => "thread/changed",
+            "events/watch" => "events/live",
+            _ => "channel/changed",
+        };
+        let notify = move |mut value: Value, cx: &mut App| {
+            value["watch"] = json!(id);
+            Self::notify(&notify_path, generation, changed, value, cx);
+        };
+        let started = match method {
+            "thread/watch" => capabilities::watch_thread(params, notify, cx),
+            "events/watch" => events::watch(params, notify, cx),
+            _ => capabilities::watch(params, notify, cx),
+        };
+        Reply::Now(started.map(|(watch, mut value)| {
             if let Some(plugin) = cx.global_mut::<Self>().current(path, generation) {
                 plugin.watches.insert(id, watch);
             }
-            json!({ "watch": id, "channel": channel })
+            value["watch"] = json!(id);
+            value
         }))
     }
 
@@ -1212,8 +1227,10 @@ impl ExternalPlugins {
                     ))),
                 }
             }
-            "channel/watch" => Self::watch(path, generation, params, cx),
-            "channel/unwatch" => {
+            "channel/watch" => Self::watch(path, generation, "channel/watch", params, cx),
+            "thread/watch" => Self::watch(path, generation, "thread/watch", params, cx),
+            "events/watch" => Self::watch(path, generation, "events/watch", params, cx),
+            "channel/unwatch" | "thread/unwatch" | "events/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
@@ -1222,20 +1239,40 @@ impl ExternalPlugins {
                 }
                 Reply::Now(Ok(Value::Null))
             }
-            "messages/send" => {
+            "messages/send" | "messages/edit" | "messages/react" | "messages/delete"
+            | "files/upload" | "events/publish" => {
+                let permission = if method == "events/publish" {
+                    Permission::PublishEvents
+                } else {
+                    Permission::SendMessages
+                };
                 let allowed = cx
                     .global_mut::<Self>()
                     .current(path, generation)
-                    .is_some_and(|plugin| plugin.may(Permission::SendMessages));
-                if allowed {
-                    later(capabilities::send(params, cx))
-                } else {
-                    Reply::Now(Err((
+                    .is_some_and(|plugin| plugin.may(permission));
+                if !allowed {
+                    return Reply::Now(Err((
                         FORBIDDEN,
-                        "Declare the send-messages permission in buzz-plugin.json.".to_owned(),
-                    )))
+                        format!(
+                            "Declare the {} permission in buzz-plugin.json.",
+                            serde_json::to_value(permission)
+                                .ok()
+                                .and_then(|name| name.as_str().map(str::to_owned))
+                                .unwrap_or_default()
+                        ),
+                    )));
                 }
+                later(match method {
+                    "messages/edit" => capabilities::edit(params, cx),
+                    "messages/react" => capabilities::react(params, cx),
+                    "messages/delete" => capabilities::delete(params, cx),
+                    "files/upload" => capabilities::upload(params, cx),
+                    "events/publish" => events::publish(params, cx),
+                    _ => capabilities::send(params, cx),
+                })
             }
+            "events/query" => later(events::query(params, cx)),
+            "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),
             _ => Reply::Now(Self::answer_now(method, params, cx)),
         }
     }
@@ -1272,8 +1309,16 @@ impl ExternalPlugins {
                 Ok(Value::Null)
             }
             "community/current" => Ok(AppState::current(cx).map_or(Value::Null, |community| {
+                let viewer = match &cx.global::<AppState>().identity {
+                    crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+                    _ => None,
+                };
                 let community = community.read(cx);
-                json!({ "name": community.name(), "relay": community.origin.websocket() })
+                json!({
+                    "name": community.name(),
+                    "relay": community.origin.websocket(),
+                    "viewer": viewer,
+                })
             })),
             "community/channels" => {
                 let Some(community) = AppState::current(cx) else {

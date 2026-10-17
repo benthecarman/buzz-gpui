@@ -52,15 +52,20 @@ fn api_version() -> u32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Permission {
-    /// Send messages and replies as the user.
+    /// Send, edit, react to and delete messages as the user, and upload
+    /// files to attach.
     SendMessages,
+    /// Sign and publish other Nostr events as the user, of the kinds the
+    /// app itself writes.
+    PublishEvents,
 }
 
 impl Permission {
     /// How Settings describes it.
     pub fn describe(self) -> &'static str {
         match self {
-            Permission::SendMessages => "Send messages as you",
+            Permission::SendMessages => "Send, edit, react to and delete messages as you",
+            Permission::PublishEvents => "Publish other events as you",
         }
     }
 }
