@@ -109,6 +109,8 @@ pub struct CreateAgent {
     custom: Option<(SharedString, Entity<InputState>)>,
     host: Option<Entity<HostConnection>>,
     host_open: bool,
+    /// The chosen type's own form (`Create`), by type key.
+    form: Option<(SharedString, AnyView)>,
     example: usize,
     _subscriptions: Vec<Subscription>,
     _examples: Task<()>,
@@ -184,10 +186,38 @@ impl CreateAgent {
             custom: None,
             host: None,
             host_open: false,
+            form: None,
             example: 0,
             _subscriptions: subscriptions,
             _examples: examples,
         }
+    }
+
+    /// Makes the chosen type's form, if it has one, once per type.
+    fn ensure_form(
+        &mut self,
+        kind: Option<&RegisteredType>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = kind else {
+            return;
+        };
+        if self.form.as_ref().is_some_and(|(key, _)| *key == kind.key) {
+            return;
+        }
+        let dialog = cx.weak_entity();
+        let change: crate::agents2::registry::CreateChange = std::rc::Rc::new(move |config, cx| {
+            let _ = dialog.update(cx, |this, cx| {
+                this.config = config;
+                this.dirty = true;
+                cx.notify();
+            });
+        });
+        self.form = kind
+            .kind
+            .create_form(&self.config, change, window, cx)
+            .map(|form| (kind.key.clone(), form));
     }
 
     fn kind(&self, cx: &App) -> Option<RegisteredType> {
@@ -225,6 +255,7 @@ impl CreateAgent {
         let kind = types(cx).into_iter().find(|kind| kind.key == key);
         self.type_key = Some(key);
         self.config = starting_config(kind.as_ref());
+        self.form = None;
         self.sync_instructions(window, cx);
         self.dirty = true;
         cx.notify();
@@ -503,6 +534,11 @@ impl CreateAgent {
         let Some(kind) = self.kind(cx) else {
             return div().into_any_element();
         };
+        if let Some((key, form)) = &self.form
+            && *key == kind.key
+        {
+            return form.clone().into_any_element();
+        }
         if !kind.kind.create_instructions() {
             return div()
                 .text_center()
@@ -982,6 +1018,7 @@ impl Render for CreateAgent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let kind = self.kind(cx);
+        self.ensure_form(kind.as_ref(), window, cx);
         let name_empty = self.name.read(cx).value().trim().is_empty();
         let hosts = Agents2::global(cx)
             .map(|service| service.read(cx).hosts(cx))

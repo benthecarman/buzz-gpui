@@ -122,6 +122,9 @@ pub struct SettingsHost {
     pub pending: Option<PendingSave>,
 }
 
+/// Gives the New agent dialog a new starting config from a type's form.
+pub type CreateChange = Rc<dyn Fn(Value, &mut App)>;
+
 /// Builds a tab's view. Called when the tab is shown; the view may read
 /// the current agent from [`super::Agents2`] to follow later changes.
 pub type BuildTab = Arc<dyn Fn(AgentView, &mut Window, &mut App) -> AnyView>;
@@ -411,6 +414,18 @@ pub trait AgentType: 'static {
             fields.insert("model".into(), Value::from(model));
         }
         config
+    }
+    /// The type's own part of the New agent dialog (`Create`), such as a
+    /// plugin's form: it starts from `config` and reports each change
+    /// through `change`. `None` keeps the dialog's own controls.
+    fn create_form(
+        &self,
+        _config: &Value,
+        _change: CreateChange,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<AnyView> {
+        None
     }
     /// The non-default model a New agent's config names, for the type
     /// selector (`createModelLabel`).

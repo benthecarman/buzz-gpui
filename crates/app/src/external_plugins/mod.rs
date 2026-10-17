@@ -1270,6 +1270,27 @@ impl ExternalPlugins {
                     },
                 )
             }
+            "agent/createConfig" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let change = view.and_then(|view| view.read(cx).changer());
+                Reply::Now(match (change, params.get("config").filter(|config| config.is_object())) {
+                    (Some(change), Some(config)) => {
+                        change(config.clone(), cx);
+                        Ok(Value::Null)
+                    }
+                    _ => Err((
+                        INVALID_PARAMS,
+                        "agent/createConfig takes an open agentCreate view and an object config"
+                            .to_owned(),
+                    )),
+                })
+            }
             "ui/openDialog" => {
                 let plugin = cx
                     .global_mut::<Self>()

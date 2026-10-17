@@ -201,6 +201,10 @@ the answer until the agent's name or config changes:
   selected. Answer `{"tree"}` or `null`, as a renderer does.
 - `createInstructions: true`: the New agent dialog offers the new agent's
   instructions.
+- `createForm: true`: the type's own part of the New agent dialog, in place
+  of the instructions. It is a view of `kind` `agentCreate` whose `view/open`
+  carries `type` and the starting `config`; send `agent/createConfig` with the
+  `view` and the whole new `config` as it changes.
 - `createModels` (`{"models": [{"id", "label", "description"}], "defaultLabel",
   "allowCustom"}`): model choices in the New agent dialog, saved as the
   config's `model`.
@@ -391,6 +395,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/create` | `type` (a `plugin/id` key, such as `com.example.hello/greeter`), `name`, optional `config` and `picture` (https) | The new agent. Needs `manage-agents`. |
 | `agents/save` | `pubkey`, and any of `name`, `picture`, `config` (the whole config), `attentionEnabled` | `null` once saved. Needs `manage-agents`. |
 | `agents/remove` | `pubkey` | `null` once the agent and its key are gone. Needs `manage-agents`. |
+| `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
 | `ui/closeView` | `view` (an open `dialog`) | `null`, once the dialog has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |

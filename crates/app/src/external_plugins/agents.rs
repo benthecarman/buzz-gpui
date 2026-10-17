@@ -505,6 +505,25 @@ impl AgentType for PluginType {
         self.decl.create_instructions
     }
 
+    fn create_form(
+        &self,
+        config: &Value,
+        change: registry::CreateChange,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyView> {
+        self.decl.create_form.then(|| {
+            super::view::ExternalView::agent_create(
+                &self.plugin,
+                self.id,
+                config,
+                change,
+                window,
+                cx,
+            )
+        })
+    }
+
     fn create_models(&self, _: &mut App) -> Option<registry::CreateModels> {
         let decl = self.decl.create_models.as_ref()?;
         Some(registry::CreateModels {

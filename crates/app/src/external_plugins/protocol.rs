@@ -281,6 +281,11 @@ pub struct AgentTypeDecl {
     /// The New agent dialog offers the new agent's instructions.
     #[serde(default)]
     pub create_instructions: bool,
+    /// The type's own part of the New agent dialog: a view of kind
+    /// `agentCreate` that sets the new agent's config with
+    /// `agent/createConfig`.
+    #[serde(default)]
+    pub create_form: bool,
     /// Model choices in the New agent dialog, saved as the config's
     /// `model`.
     #[serde(default)]

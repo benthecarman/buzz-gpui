@@ -41,6 +41,8 @@ pub struct ExternalView {
     close: Option<crate::ui::account_actions::Close>,
     /// Picks a reaction (`reaction/select`).
     select: Option<crate::ui::emoji_picker::Select>,
+    /// Sets a new agent's config (`agent/createConfig`).
+    change: Option<crate::agents2::registry::CreateChange>,
     /// A page's route params, from `ui/navigate`.
     route: Option<Value>,
     tree: Option<Node>,
@@ -159,6 +161,34 @@ impl ExternalView {
         .into()
     }
 
+    /// A plugin agent type's part of the New agent dialog.
+    pub fn agent_create(
+        plugin: &str,
+        kind: &'static str,
+        config: &Value,
+        change: crate::agents2::registry::CreateChange,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        let extra = json!({ "type": kind, "config": config });
+        Self::open(
+            plugin,
+            kind,
+            "agentCreate",
+            |view| {
+                view.extra = extra;
+                view.change = Some(change);
+            },
+            cx,
+        )
+        .into()
+    }
+
+    /// What `agent/createConfig` calls: a create form's change.
+    pub(super) fn changer(&self) -> Option<crate::agents2::registry::CreateChange> {
+        self.change.clone()
+    }
+
     /// A plugin agent type's provider dialog body.
     pub fn agent_provider(
         plugin: &str,
@@ -241,6 +271,7 @@ impl ExternalView {
                 extra: Value::Null,
                 close: None,
                 select: None,
+                change: None,
                 route: None,
                 tree: None,
                 error: None,

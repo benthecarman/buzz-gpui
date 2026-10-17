@@ -298,7 +298,17 @@ def provider_dialog(state):
 def render(view):
     state = views[view]
     kind = state["kind"]
-    if kind == "agentProvider":
+    if kind == "agentCreate":
+        greeting = state["config"].get("greeting", "Hello")
+        tree = {
+            "type": "column",
+            "gap": "sm",
+            "children": [
+                text("What should it say first?", style="label"),
+                {"type": "input", "id": "create-greeting", "value": greeting, "placeholder": "Hello"},
+            ],
+        }
+    elif kind == "agentProvider":
         tree = provider_dialog(state)
     elif kind == "dialog" and state["contribution"] == "words":
         tree = {
@@ -437,6 +447,11 @@ def on_event(params):
         return
     elif element == "toast" and event == "click":
         toast("Hello from a plugin")
+        return
+    elif element == "create-greeting" and event == "change":
+        config = {**state["config"], "greeting": params.get("value", "").strip() or "Hello"}
+        state["config"] = config
+        request("agent/createConfig", {"view": view, "config": config})
         return
     elif element == "greeting" and event == "change":
         state["draft"] = params.get("value", "")
@@ -579,7 +594,7 @@ def handle(message):
                                 "summary": True,
                                 "peek": True,
                                 "tabs": [{"id": "greeting", "title": "Greeting"}],
-                                "createInstructions": True,
+                                "createForm": True,
                                 "createModels": {
                                     "models": [
                                         {"id": "polite", "label": "Polite"},
