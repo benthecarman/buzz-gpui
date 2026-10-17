@@ -374,7 +374,12 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
 | `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`) or `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`) | `null` |
-| `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
+| `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |
+| `presence/get` | `pubkeys` (at most 500) | `{"<pubkey>": "online" | "away" | "offline" | null}`, for people Buzz already follows; `null` for others |
+| `statuses/get` | `pubkeys` (at most 20) | `{"<pubkey>": {"text","emoji","updatedAt","expiresAt"} | null}`, read fresh |
+| `typing/get` | `channel`, `root` (optional, a thread) | The pubkeys typing there |
+| `emoji/list` | none | The community's custom emoji: `[{"shortcode","url"}]` |
+| `people/search` | `query`, `page` (from 1, the default) | `{"people","more"}`: profiles that match, as `profiles/get` gives them |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
 | `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","stale"}`. Counts are sampled, not exact. |
@@ -389,6 +394,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/closeView` | `view` (an open `dialog`) | `null`, once the dialog has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |
 | `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |
+| `composer/insertMentions` | `composer`, `pubkeys` (at most 32) | `null`, after putting mention chips at the caret; the people become recipients |
+| `composer/insertResource` | `composer`, `uri` (a Buzz or web link), `label` | `null`, after putting the link as one chip at the caret |
+| `composer/focus` | `composer` | `null`, after putting the caret back in the composer |
 
 Reads cover the selected community and channels you can read in it. They
 never mark anything read. A read waits up to 10 seconds for the relay.

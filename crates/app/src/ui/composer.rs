@@ -2278,7 +2278,7 @@ impl Composer {
 
     /// Puts a chip for each of a team's agents over `range`, or at the
     /// caret. False when that would pass 32 recipients.
-    pub(super) fn insert_team(
+    pub(crate) fn insert_team(
         &mut self,
         recipients: &[(String, SharedString, Option<String>)],
         range: Option<std::ops::Range<usize>>,

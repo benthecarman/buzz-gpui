@@ -457,12 +457,124 @@ pub fn open_conversation(params: &Value, cx: &App) -> Result<Value, Failure> {
             // A thread alone opens it.
             message: message.or(thread),
             thread,
-            members: false,
+            // `panel: "members"`: the members dialog over it.
+            members: params.get("members").and_then(Value::as_bool) == Some(true),
         },
     };
     let sender = navigation::sender(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let _ = sender.unbounded_send(Request::Open(target).into());
     Ok(Value::Null)
+}
+
+/// Up to `max` lowercase hex keys from the `pubkeys` param.
+fn pubkeys(params: &Value, max: usize) -> Result<Vec<String>, Failure> {
+    Ok(params
+        .get("pubkeys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("pubkeys must be a list"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .take(max)
+        .collect())
+}
+
+/// `presence/get`: who is online, away or offline, for the people Buzz
+/// already follows; `null` for anyone it does not.
+pub fn presence(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let keys = pubkeys(params, MAX_PROFILES)?;
+    let community = community(cx)?;
+    let presence = community.read(cx).snapshot.presence.clone();
+    Ok(Value::Object(
+        keys.into_iter()
+            .map(|key| {
+                let state = presence.get(&key).map(|state| state.as_str());
+                (key, json!(state))
+            })
+            .collect(),
+    ))
+}
+
+/// `statuses/get`: people's current statuses, read fresh; `null` for
+/// none.
+pub fn statuses(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let keys = pubkeys(params, 20)?;
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let mut statuses = serde_json::Map::new();
+        for key in keys {
+            let status = session
+                .user_status(&key)
+                .await
+                .map_err(|error| (2, error))?
+                .map(|status| {
+                    json!({
+                        "text": status.text,
+                        "emoji": status.emoji,
+                        "updatedAt": status.updated_at,
+                        "expiresAt": status.expires_at,
+                    })
+                });
+            statuses.insert(key, json!(status));
+        }
+        Ok(Value::Object(statuses))
+    }))
+}
+
+/// `emoji/list`: the community's custom emoji.
+pub fn emoji(cx: &App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let emoji = community.read(cx).snapshot.emoji.clone();
+    Ok(Value::Array(
+        emoji
+            .entries
+            .iter()
+            .map(|emoji| json!({ "shortcode": emoji.shortcode, "url": emoji.url }))
+            .collect(),
+    ))
+}
+
+/// `typing/get`: who is typing in a channel, or in one of its threads.
+pub fn typing(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let community = community.read(cx);
+    let channel = channel(params, community)?;
+    let people = match text(params, "root") {
+        Some(root) => community.snapshot.thread_typing.get(root).cloned(),
+        None => community.snapshot.typing.get(&channel).cloned(),
+    };
+    Ok(json!(people.unwrap_or_default()))
+}
+
+/// `people/search`: people in the community whose profile matches
+/// `query`, a page at a time.
+pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let query = text(params, "query")
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| invalid("query is required"))?
+        .to_owned();
+    let page = params
+        .get("page")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let found = session
+            .search_members(&query, page)
+            .await
+            .map_err(|error| (2, error))?;
+        Ok(json!({
+            "people": found
+                .people
+                .iter()
+                .map(|person| profile(&person.pubkey, Some(&Arc::new(person.profile.clone()))))
+                .collect::<Vec<_>>(),
+            "more": found.more,
+        }))
+    }))
 }
 
 /// `ui/navigate`: shows a page or Settings.

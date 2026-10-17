@@ -728,6 +728,101 @@ pub fn insert(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failu
     Ok(Value::Null)
 }
 
+/// The open composer `params.composer` names, and the window it is in.
+fn composer_of(
+    params: &Value,
+    cx: &App,
+) -> Result<(Entity<Composer>, AnyWindowHandle), capabilities::Failure> {
+    let id = params
+        .get("composer")
+        .and_then(Value::as_u64)
+        .ok_or((protocol::INVALID_PARAMS, "composer is required".to_owned()))?;
+    let composer = COMPOSERS
+        .with_borrow(|composers| composers.get(&id).and_then(WeakEntity::upgrade))
+        .ok_or((1, "That composer is closed.".to_owned()))?;
+    let window =
+        crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    Ok((composer, window))
+}
+
+/// `composer/insertMentions`: mention chips for `pubkeys` at the caret,
+/// which also make them recipients (`insertMentions`).
+pub fn insert_mentions(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = composer_of(params, cx)?;
+    let pubkeys: Vec<String> = params
+        .get("pubkeys")
+        .and_then(Value::as_array)
+        .ok_or((
+            protocol::INVALID_PARAMS,
+            "pubkeys must be a list".to_owned(),
+        ))?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .take(32)
+        .collect();
+    if pubkeys.is_empty() {
+        return Err((protocol::INVALID_PARAMS, "pubkeys names no one".to_owned()));
+    }
+    let community = AppState::current(cx).ok_or((1, "No community is selected.".to_owned()))?;
+    let profiles = community.read(cx).snapshot.profiles.clone();
+    let recipients: Vec<(String, SharedString, Option<String>)> = pubkeys
+        .into_iter()
+        .map(|key| {
+            let name = profiles
+                .get(&key)
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| key.chars().take(10).collect());
+            (key, name.into(), None)
+        })
+        .collect();
+    let inserted = window
+        .update(cx, |_, window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.insert_team(&recipients, None, window, cx)
+            })
+        })
+        .map_err(|_| (1, "The window is not open.".to_owned()))?;
+    if inserted {
+        Ok(Value::Null)
+    } else {
+        Err((3, "Choose at most 32 recipients".to_owned()))
+    }
+}
+
+/// `composer/insertResource`: a link to `uri`, labelled `label`, as one
+/// chip at the caret (`insertResource`).
+pub fn insert_resource(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = composer_of(params, cx)?;
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((protocol::INVALID_PARAMS, format!("{key} is required")))
+    };
+    let (uri, label) = (text("uri")?.to_owned(), text("label")?.to_owned());
+    window
+        .update(cx, |_, window, cx| {
+            crate::ui::composer_tools::insert_resource(&composer, &uri, &label, window, cx)
+        })
+        .map_err(|_| (1, "The window is not open.".to_owned()))?
+        .map(|()| Value::Null)
+        .map_err(|reason| (3, reason.to_owned()))
+}
+
+/// `composer/focus`: puts the caret back in the composer (`focus`).
+pub fn focus(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = composer_of(params, cx)?;
+    let input = composer.read(cx).input();
+    window
+        .update(cx, |_, window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx))
+        })
+        .map_err(|_| (1, "The window is not open.".to_owned()))?;
+    Ok(Value::Null)
+}
+
 /// What one plugin added to these registries, to take away later.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Added {

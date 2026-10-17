@@ -1209,8 +1209,16 @@ impl ExternalPlugins {
             "channel/messages" => later(capabilities::channel_messages(params, cx)),
             "thread/messages" => later(capabilities::thread_messages(params, cx)),
             "profiles/get" => Reply::Now(capabilities::profiles(params, cx)),
+            "presence/get" => Reply::Now(capabilities::presence(params, cx)),
+            "statuses/get" => later(capabilities::statuses(params, cx)),
+            "emoji/list" => Reply::Now(capabilities::emoji(cx)),
+            "typing/get" => Reply::Now(capabilities::typing(params, cx)),
+            "people/search" => later(capabilities::search_people(params, cx)),
             "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
             "composer/insert" => Reply::Now(contribute::insert(params, cx)),
+            "composer/insertMentions" => Reply::Now(contribute::insert_mentions(params, cx)),
+            "composer/insertResource" => Reply::Now(contribute::insert_resource(params, cx)),
+            "composer/focus" => Reply::Now(contribute::focus(params, cx)),
             "agent/tool" => {
                 let plugin = cx
                     .global_mut::<Self>()
