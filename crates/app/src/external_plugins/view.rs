@@ -47,6 +47,8 @@ pub struct ExternalView {
     accept: Option<Accept>,
     /// A page's route params, from `ui/navigate`.
     route: Option<Value>,
+    /// A `workspace` page: no padding around the plugin's tree.
+    edge_to_edge: bool,
     tree: Option<Node>,
     /// The last tree the plugin sent could not be drawn.
     error: Option<String>,
@@ -72,8 +74,21 @@ impl ExternalView {
         .into()
     }
 
-    pub fn page(plugin: &str, contribution: &str, _window: &mut Window, cx: &mut App) -> AnyView {
-        Self::open(plugin, contribution, "page", |_| {}, cx).into()
+    pub fn page(
+        plugin: &str,
+        contribution: &str,
+        edge_to_edge: bool,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        Self::open(
+            plugin,
+            contribution,
+            "page",
+            |view| view.edge_to_edge = edge_to_edge,
+            cx,
+        )
+        .into()
     }
 
     /// A Settings section the plugin added.
@@ -304,6 +319,7 @@ impl ExternalView {
                 change: None,
                 accept: None,
                 route: None,
+                edge_to_edge: false,
                 tree: None,
                 error: None,
                 fields: HashMap::new(),
@@ -504,7 +520,7 @@ impl Render for ExternalView {
             .flex()
             .flex_col()
             .gap(space::S4)
-            .when(framed, |body| body.p(space::S6));
+            .when(framed && !self.edge_to_edge, |body| body.p(space::S6));
         if let Some(placeholder) = self.placeholder(status, cx) {
             body = body.child(placeholder);
         } else if let Some(tree) = self.tree.clone() {

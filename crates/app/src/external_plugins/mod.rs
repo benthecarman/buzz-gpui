@@ -1015,11 +1015,14 @@ impl ExternalPlugins {
             let key = Page::new(intern(format!("{id}/{}", page.id)));
             let plugin = id.to_owned();
             let contribution = page.id.clone();
+            let edge_to_edge = page.layout == protocol::PageLayout::Workspace;
             let mut spec = PageSpec::sidebar(
                 key,
                 intern(page.title.clone()),
                 icon(page.icon.as_deref()),
-                move |window, cx| ExternalView::page(&plugin, &contribution, window, cx),
+                move |window, cx| {
+                    ExternalView::page(&plugin, &contribution, edge_to_edge, window, cx)
+                },
             );
             spec.placement = match page.placement {
                 PagePlacement::Sidebar => pages::Placement::Sidebar,

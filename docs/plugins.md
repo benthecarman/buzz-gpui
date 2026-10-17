@@ -127,7 +127,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   menu; `kinds` (such as `["stream", "forum"]`) and `private` (`true` or
   `false`) limit the channels it is offered in.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
-  same here) or `hidden`. With `routes: true`, `ui/navigate` can open the page
+  same here) or `hidden`. `layout` is `document` (the default, padded) or
+  `workspace` (edge to edge). Buzz's dock shows a page's companion beside it. With `routes: true`, `ui/navigate` can open the page
   at `params` (a JSON object up to 4 KiB): its view's `view/open` carries
   `route`, and Buzz sends `page/route` with the `view` and `route` when it
   changes. Back and Forward step through routes.
@@ -534,8 +535,20 @@ you added from running for that launch. Their switches stay as they were.
 - **Settings → Plugins** shows each plugin's state. **Reload** reads the
   manifest again and restarts the plugin.
 
+## How this differs from buzz-app
+
+buzz-app plugins are JavaScript running inside the app; these are programs
+that draw with Buzz's elements. Everything buzz-app's plugin API offers has a
+request, a notification or a contribution here, except:
+
+- Buzz draws a panel's channel-header launcher from its `icon` and `label`,
+  as the icon button buzz-app's own launchers are; a plugin cannot draw a
+  different control there.
+- There is no embedded browser (`host.browser` is `false`).
+- Host grants (commands, network origins, processes) do not apply: a plugin
+  is a program and already has your access.
+
 ## Not built yet
 
-- Following a thread live, editing and reacting.
 - A WebAssembly runtime for plugins that run sandboxed
   ([#12](https://github.com/benthecarman/buzz-gpui/issues/12)).

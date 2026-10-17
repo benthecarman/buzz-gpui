@@ -437,6 +437,10 @@ pub struct PageDecl {
     /// view hears `page/route`.
     #[serde(default)]
     pub routes: bool,
+    /// `document` (the default) pads the page; `workspace` gives the plugin
+    /// the whole area, edge to edge.
+    #[serde(default)]
+    pub layout: PageLayout,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -451,6 +455,14 @@ pub enum PagePlacement {
     Toolbar,
     /// No navigation entry; search and links still reach it.
     Hidden,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PageLayout {
+    #[default]
+    Document,
+    Workspace,
 }
 
 /// A Settings section (`settingsCards.register`).
