@@ -362,6 +362,59 @@ impl ExternalPlugins {
             }
         })
         .detach();
+        // Tells running plugins when the selected community, or its
+        // connection, changes (`communityReader.subscribe`).
+        cx.spawn(async move |cx| {
+            let mut last = Value::Null;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                cx.update(|cx| {
+                    let now = Self::current_community(cx);
+                    if now != last {
+                        last = now.clone();
+                        let ids: Vec<String> = cx
+                            .global::<Self>()
+                            .plugins
+                            .iter()
+                            .filter(|plugin| plugin.status == Status::Running)
+                            .filter_map(|plugin| plugin.id().map(str::to_owned))
+                            .collect();
+                        for id in ids {
+                            Self::notify_running(&id, "community/changed", now.clone(), cx);
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// `community/current`: the selected community, who the user is there,
+    /// and its connection.
+    fn current_community(cx: &App) -> Value {
+        let Some(community) = AppState::current(cx) else {
+            return Value::Null;
+        };
+        let viewer = match &cx.global::<AppState>().identity {
+            crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+            _ => None,
+        };
+        let community = community.read(cx);
+        let snapshot = &community.snapshot;
+        json!({
+            "name": community.name(),
+            "relay": community.origin.websocket(),
+            "viewer": viewer,
+            "status": match &snapshot.status {
+                buzz_relay_client::SessionStatus::Connecting => "connecting",
+                buzz_relay_client::SessionStatus::Ready => "ready",
+                buzz_relay_client::SessionStatus::Failed(_) => "failed",
+            },
+            "live": snapshot.live,
+            "cached": snapshot.cached,
+        })
     }
 
     pub fn plugins(&self) -> &[Plugin] {
@@ -1114,6 +1167,21 @@ impl ExternalPlugins {
                         contribute::set_badge(&id, &params, cx);
                     }
                 }
+                "shortcut/enable" => {
+                    if let (Some(id), Some(shortcut)) = (
+                        plugin.id().map(str::to_owned),
+                        params.get("shortcut").and_then(Value::as_str),
+                    ) {
+                        let enabled = params
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        crate::shortcuts::set_external_enabled(
+                            &format!("{id}/{shortcut}"),
+                            enabled,
+                        );
+                    }
+                }
                 "agentType/readiness" => {
                     if let Some(id) = plugin.id().map(str::to_owned) {
                         agents::set_readiness(&id, &params, cx);
@@ -1227,6 +1295,7 @@ impl ExternalPlugins {
             "thread/messages" => later(capabilities::thread_messages(params, cx)),
             "profiles/get" => Reply::Now(capabilities::profiles(params, cx)),
             "presence/get" => Reply::Now(capabilities::presence(params, cx)),
+            "names/get" => Reply::Now(capabilities::names(params, cx)),
             "statuses/get" => later(capabilities::statuses(params, cx)),
             "emoji/list" => Reply::Now(capabilities::emoji(cx)),
             "typing/get" => Reply::Now(capabilities::typing(params, cx)),
@@ -1448,6 +1517,7 @@ impl ExternalPlugins {
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
             "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),
+            "ui/openLink" => Reply::Now(capabilities::open_link(params, cx)),
             _ => Reply::Now(Self::answer_now(method, params, cx)),
         }
     }
@@ -1483,18 +1553,23 @@ impl ExternalPlugins {
                 cx.open_url(url);
                 Ok(Value::Null)
             }
-            "community/current" => Ok(AppState::current(cx).map_or(Value::Null, |community| {
-                let viewer = match &cx.global::<AppState>().identity {
-                    crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
-                    _ => None,
-                };
-                let community = community.read(cx);
-                json!({
-                    "name": community.name(),
-                    "relay": community.origin.websocket(),
-                    "viewer": viewer,
-                })
-            })),
+            "community/current" => Ok(Self::current_community(cx)),
+            "community/list" => Ok(Value::Array(
+                cx.global::<AppState>()
+                    .communities
+                    .iter()
+                    .map(|community| {
+                        let community = community.read(cx);
+                        json!({ "name": community.name(), "relay": community.origin.websocket() })
+                    })
+                    .collect(),
+            )),
+            "community/retry" => {
+                if let Some(community) = AppState::current(cx) {
+                    community.read(cx).session.retry();
+                }
+                Ok(Value::Null)
+            }
             "community/channels" => {
                 let Some(community) = AppState::current(cx) else {
                     return Ok(json!([]));

@@ -275,7 +275,7 @@ it drew), `id`, `event` and `value`.
 | Notification | Params |
 | --- | --- |
 | `message/action` | `action`, `message` |
-| `composer/tool` | `tool`, `channel`, `composer` (an id for `composer/insert`) |
+| `composer/tool` | `tool`, `channel`, `thread` (the root it replies in, or `null`), `composer` (an id for `composer/insert`) |
 | `shortcut` | `shortcut` |
 | `render/event` | `renderer`, `target`, `id`, `event`, `value` |
 
@@ -285,6 +285,7 @@ it drew), `id`, `event` and `value`.
 | --- | --- | --- |
 | `message/markers` | `action`, `messages` (event ids) | Those messages show the action's icon after the byline; the list replaces the last one. |
 | `page/badge` | `page`, `text` (up to 8 characters, or `null` to clear), `tone` | A badge on the page's row. |
+| `shortcut/enable` | `shortcut`, `enabled` | Turns one of the plugin's shortcuts off or back on for now, as buzz-app's `when` does. |
 | `settings/visibility` | `card`, `visibility` (`visible`, `hidden` or `pending`) | Lists or hides one of the plugin's Settings sections, such as one only some communities need. Sections start visible. |
 
 ### 2. `view/open` (notification from Buzz)
@@ -374,7 +375,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | --- | --- | --- |
 | `ui/toast` | `title`, `body` (optional), `tone` (`info`, `success`, `warning`, `error`) | `null` |
 | `ui/openUrl` | `url` (http or https), opened in the browser | `null` |
-| `community/current` | none | `{"name","relay","viewer"}` for the selected community (`viewer` is your pubkey), or `null` |
+| `community/current` | none | `{"name","relay","viewer","status","live","cached"}` for the selected community, or `null`. `viewer` is your pubkey; `status` is `connecting`, `ready` or `failed`; `live` says the live connection is up; `cached` says it shows saved data while the relay has not answered. Buzz sends the notification `community/changed` with the same fields whenever any of them change, such as when another community is selected. |
+| `community/list` | none | Your communities: `[{"name","relay"}]` |
+| `community/retry` | none | `null`. Connects to the selected community again after a failure. |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
 | `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first |
 | `thread/messages` | `channel`, `root` | `{"root","replies","hasMore"}` |
@@ -390,27 +393,29 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
-| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`) or `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`) | `null` |
+| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |
+| `ui/openLink` | `url` (`buzz://` or a web link) | `null`. Opens it as a click in a message does: in Buzz, in a panel that shows it, or in the browser. |
+| `names/get` | `pubkeys` (at most 500) | `{"<pubkey>": {"name","qualifier"}}`: names as Buzz shows them, through the naming policy, with the npub suffix that tells namesakes apart |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |
 | `presence/get` | `pubkeys` (at most 500) | `{"<pubkey>": "online" | "away" | "offline" | null}`, for people Buzz already follows; `null` for others |
 | `statuses/get` | `pubkeys` (at most 20) | `{"<pubkey>": {"text","emoji","updatedAt","expiresAt"} | null}`, read fresh |
 | `typing/get` | `channel`, `root` (optional, a thread) | The pubkeys typing there |
 | `emoji/list` | none | The community's custom emoji: `[{"shortcode","url"}]` |
 | `people/search` | `query`, `page` (from 1, the default) | `{"people","more"}`: profiles that match, as `profiles/get` gives them |
-| `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
+| `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and what a click opens: an optional `channel`, `message` and `thread`, or a `page` (`plugin/id`) | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
 | `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","stale"}`. Counts are sampled, not exact. |
 | `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |
 | `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
 | `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount"}` |
 | `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. |
- none | `{"agents", "running"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled"}` |
+| `agents/list` | none | `{"agents", "running"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled"}` |
 | `agents/create` | `type` (a `plugin/id` key, such as `com.example.hello/greeter`), `name`, optional `config` and `picture` (https) | The new agent. Needs `manage-agents`. |
 | `agents/save` | `pubkey`, and any of `name`, `picture`, `config` (the whole config), `attentionEnabled` | `null` once saved. Needs `manage-agents`. |
 | `agents/remove` | `pubkey` | `null` once the agent and its key are gone. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
-| `ui/closeView` | `view` (an open `dialog`) | `null`, once the dialog has closed |
+| `ui/closeView` | `view` (an open `dialog`, panel or provider dialog) | `null`, once it has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |
 | `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |
 | `composer/insertMentions` | `composer`, `pubkeys` (at most 32) | `null`, after putting mention chips at the caret; the people become recipients |
@@ -430,7 +435,11 @@ A message looks like this:
   "author": "<pubkey>", "authorName": "Ada",
   "content": "Hello", "createdAt": 1792200000, "createdAtMs": 1792200000000,
   "edited": false, "threadRoot": null, "replyParent": null, "replyCount": 2,
-  "mentions": [], "delivery": null
+  "mentions": [], "delivery": null, "kind": 9, "audience": null,
+  "signer": null, "workflowOwner": null, "participants": [],
+  "reactions": [{"content": "👍", "emojiUrl": null, "count": 1, "authors": ["<pubkey>"]}],
+  "attachments": [{"url": "https://…", "mime": "image/png", "size": 73, "name": "dot.png"}],
+  "emoji": [{"shortcode": "party", "url": "https://…"}]
 }
 ```
 

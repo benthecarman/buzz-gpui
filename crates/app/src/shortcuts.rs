@@ -400,6 +400,21 @@ pub type RunShortcut = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 thread_local! {
     static EXTERNAL: std::cell::RefCell<Vec<std::rc::Rc<ExternalShortcut>>> =
         std::cell::RefCell::default();
+    /// Plugin shortcuts their plugin turned off for now (buzz-app's
+    /// `when`), by key.
+    static EXTERNAL_OFF: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::default();
+}
+
+/// Turns a plugin shortcut on or off without unregistering it, as
+/// buzz-app's `when` does for the current state.
+pub fn set_external_enabled(key: &str, enabled: bool) {
+    EXTERNAL_OFF.with_borrow_mut(|off| {
+        if enabled {
+            off.remove(key);
+        } else {
+            off.insert(key.to_owned());
+        }
+    });
 }
 
 /// Adds a plugin's shortcut, replacing one with the same key.
@@ -828,6 +843,9 @@ pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App
     else {
         return false;
     };
+    if EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)) {
+        return false;
+    }
     let place = KeyPlace {
         editable: window
             .context_stack()

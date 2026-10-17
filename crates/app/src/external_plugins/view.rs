@@ -282,7 +282,9 @@ impl ExternalView {
     /// What `ui/closeView` calls: a dialog's close; `None` for other
     /// views.
     pub(super) fn closer(&self) -> Option<Close> {
-        self.close.clone()
+        self.close
+            .clone()
+            .or_else(|| self.opening.as_ref().map(|opening| opening.close.clone()))
     }
 
     /// `agent/save`: replaces this tab's agent's config.

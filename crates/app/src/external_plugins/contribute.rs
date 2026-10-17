@@ -679,11 +679,12 @@ struct Tool {
 
 impl Render for Tool {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let (plugin, id, channel, composer) = (
+        let (plugin, id, channel, composer, thread) = (
             self.plugin.clone(),
             self.id.clone(),
             self.context.channel.clone(),
             self.composer,
+            self.context.thread.clone(),
         );
         IconButton::new(
             SharedString::from(format!("plugin-tool-{}-{}", self.plugin, self.id)),
@@ -695,7 +696,7 @@ impl Render for Tool {
             ExternalPlugins::notify_running(
                 &plugin,
                 "composer/tool",
-                json!({ "tool": id, "channel": channel, "composer": composer }),
+                json!({ "tool": id, "channel": channel, "thread": thread, "composer": composer }),
                 cx,
             );
         })

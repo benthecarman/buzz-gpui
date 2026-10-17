@@ -91,6 +91,27 @@ pub fn message(row: &MessageRow, profiles: &Profiles) -> Value {
         "replyParent": row.reply_parent_id.map(|id| id.to_hex()),
         "replyCount": row.reply_count,
         "mentions": row.mentions.iter().map(|key| key.to_hex()).collect::<Vec<_>>(),
+        "kind": row.kind,
+        "audience": row.audience.map(|_| "agents"),
+        "signer": row.signer.map(|key| key.to_hex()),
+        "workflowOwner": row.workflow_owner.map(|key| key.to_hex()),
+        "participants": row.participants.iter().map(|key| key.to_hex()).collect::<Vec<_>>(),
+        "reactions": row.reactions.iter().map(|group| json!({
+            "content": group.content,
+            "emojiUrl": group.emoji.as_ref().map(|emoji| emoji.url.clone()),
+            "count": group.events.len(),
+            "authors": group.events.iter().map(|reaction| reaction.author.to_hex()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "attachments": row.attachments.iter().map(|attachment| json!({
+            "url": attachment.url,
+            "mime": attachment.mime,
+            "size": attachment.size,
+            "name": attachment.name,
+        })).collect::<Vec<_>>(),
+        "emoji": row.emoji.iter().map(|emoji| json!({
+            "shortcode": emoji.shortcode,
+            "url": emoji.url,
+        })).collect::<Vec<_>>(),
         "delivery": row.delivery.as_ref().map(|delivery| match delivery.status {
             Delivery::Sending => "sending",
             Delivery::Accepted => "accepted",
@@ -480,6 +501,35 @@ fn pubkeys(params: &Value, max: usize) -> Result<Vec<String>, Failure> {
         .collect())
 }
 
+/// `names/get`: display names as Buzz shows them, through the naming
+/// policy on, with the npub suffix that told namesakes apart, if any.
+pub fn names(params: &Value, cx: &App) -> Result<Value, Failure> {
+    use crate::ui::identity;
+    let keys = pubkeys(params, MAX_PROFILES)?;
+    let community = community(cx)?;
+    let community = community.read(cx);
+    let library = identity::AgentLibrary::from_hosts(cx);
+    let viewer = community.session.viewer().to_string();
+    let names = identity::names(
+        &community.snapshot.profiles,
+        &library,
+        &viewer,
+        Some(&community.origin),
+        None,
+    );
+    Ok(Value::Object(
+        keys.into_iter()
+            .map(|key| {
+                let value = json!({
+                    "name": names.display(&key),
+                    "qualifier": names.qualifier(&key),
+                });
+                (key, value)
+            })
+            .collect(),
+    ))
+}
+
 /// `presence/get`: who is online, away or offline, for the people Buzz
 /// already follows; `null` for anyone it does not.
 pub fn presence(params: &Value, cx: &App) -> Result<Value, Failure> {
@@ -578,9 +628,20 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 }
 
 /// `ui/navigate`: shows a page or Settings.
-pub fn navigate(params: &Value, cx: &App) -> Result<Value, Failure> {
+pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
     use crate::ui::pages::Page;
     use crate::ui::settings::Section;
+    match text(params, "to") {
+        Some("back") => {
+            cx.dispatch_action(&crate::ui::navigation::GoBack);
+            return Ok(Value::Null);
+        }
+        Some("forward") => {
+            cx.dispatch_action(&crate::ui::navigation::GoForward);
+            return Ok(Value::Null);
+        }
+        _ => {}
+    }
     let place = match text(params, "to") {
         Some("home") | Some("messages") => Place::Page(Page::MESSAGES),
         Some("me") => Place::Page(Page::ME),
@@ -625,15 +686,57 @@ pub fn navigate(params: &Value, cx: &App) -> Result<Value, Failure> {
             }
         }
         _ => {
-            return Err(invalid("to must be home, me, agents, settings or page"));
+            return Err(invalid(
+                "to must be home, me, agents, settings, page, back or forward",
+            ));
         }
     };
     let target = Target {
-        community: AppState::current(cx).map(|community| community.read(cx).origin.to_string()),
+        community: scope(params, cx)?,
         place,
     };
     let sender = navigation::sender(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let _ = sender.unbounded_send(Request::Open(target).into());
+    Ok(Value::Null)
+}
+
+/// The community a navigation targets: `community` (a joined community's
+/// relay, `wss://…`), else the selected one.
+fn scope(params: &Value, cx: &App) -> Result<Option<String>, Failure> {
+    match text(params, "community") {
+        None => Ok(AppState::current(cx).map(|community| community.read(cx).origin.to_string())),
+        Some(relay) => cx
+            .global::<AppState>()
+            .communities
+            .iter()
+            .map(|community| community.read(cx))
+            .find(|community| community.origin.websocket() == relay)
+            .map(|community| Some(community.origin.to_string()))
+            .ok_or_else(|| invalid(format!("You have not joined {relay}"))),
+    }
+}
+
+/// `ui/openLink`: opens a link as one clicked in a message does: a
+/// `buzz://` link in Buzz, a web link in the panel that shows it or the
+/// browser.
+pub fn open_link(params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    let url = text(params, "url")
+        .filter(|url| {
+            url.starts_with("buzz://") || url.starts_with("https://") || url.starts_with("http://")
+        })
+        .ok_or_else(|| invalid("url must be a buzz:// or web link"))?
+        .to_owned();
+    let window =
+        crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    window
+        .update(cx, |_, window, cx| {
+            if url.starts_with("buzz://") {
+                navigation::open_url(&url, window, cx);
+            } else {
+                navigation::open_web_link(&url, Modifiers::default(), window, cx);
+            }
+        })
+        .map_err(|_| (1, "The window is not open.".to_owned()))?;
     Ok(Value::Null)
 }
 
@@ -658,7 +761,15 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
                 members: false,
             }
         }
-        _ => Place::Page(crate::ui::pages::Page::MESSAGES),
+        _ => match text(params, "page").and_then(|key| {
+            crate::ui::pages::all(cx)
+                .into_iter()
+                .find(|spec| spec.page.key() == key)
+        }) {
+            // A plugin page a click opens.
+            Some(spec) => Place::Page(spec.page),
+            None => Place::Page(crate::ui::pages::Page::MESSAGES),
+        },
     };
     let target = Target {
         community: community.map(|community| community.read(cx).origin.to_string()),
