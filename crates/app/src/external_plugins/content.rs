@@ -1,8 +1,9 @@
 //! What the selected community keeps beside messages, as the user sees
 //! it: an agent's memories (buzz-app's `agentMemories`), a channel's
-//! Canvas (`canvas`), its details (`channelDetails`), and the user's
-//! kit of teams, templates and sidebar groups (`channelKit`). Saving a
-//! Canvas needs `send-messages`; saving details or the kit,
+//! Canvas (`canvas`), its details (`channelDetails`), the user's kit of
+//! teams, templates and sidebar groups (`channelKit`), and the
+//! community's repositories and projects (`projects`, `projectGit`).
+//! Saving a Canvas needs `send-messages`; saving details or the kit,
 //! `manage-channels`.
 
 use super::capabilities::{Failure, channel, community, on_tokio};
@@ -11,6 +12,9 @@ use buzz_relay_client::EventId;
 use buzz_relay_client::canvas::{HistoryCursor, Revision};
 use buzz_relay_client::kit::KitValue;
 use buzz_relay_client::lifecycle::{AttemptStatus, DetailsDraft};
+use buzz_relay_client::projects::{
+    Entity as ProjectEntity, EntityFailure, EntityKind, EntityRoute, GitRead, Home,
+};
 use gpui_kit::*;
 use serde_json::{Value, json};
 
@@ -283,5 +287,132 @@ pub fn save_kit(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
             .await
             .map(|id| json!({ "eventId": id.to_hex() }))
             .map_err(|error| (3, error))
+    }))
+}
+
+fn failure(failure: EntityFailure) -> Failure {
+    let text = match failure {
+        EntityFailure::NotFound => "notFound",
+        EntityFailure::Denied => "denied",
+        EntityFailure::Unavailable => "unavailable",
+        EntityFailure::InvalidTarget => "invalidTarget",
+    };
+    (3, text.to_owned())
+}
+
+/// A repository or project. `route` is what `ui/navigate` takes as the
+/// Projects page's `params`.
+fn entity(entity: &ProjectEntity) -> Value {
+    json!({
+        "kind": match entity.kind {
+            EntityKind::Repo => "repo",
+            EntityKind::Project => "project",
+        },
+        "owner": entity.owner,
+        "dtag": entity.dtag,
+        "address": entity.address,
+        "name": entity.name,
+        "description": entity.description,
+        "route": entity.route().map(|route| route.params()),
+        "event": serde_json::to_value(&*entity.event).unwrap_or(Value::Null),
+    })
+}
+
+fn events(events: &[buzz_relay_client::event::Verified]) -> Vec<Value> {
+    events
+        .iter()
+        .map(|event| serde_json::to_value(&**event).unwrap_or(Value::Null))
+        .collect()
+}
+
+/// `projects/list`: the community's repositories and projects.
+pub fn projects(cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let projects = community(cx)?.read(cx).session.projects();
+    Ok(on_tokio(cx, async move {
+        let listed = projects.list().await.map_err(failure)?;
+        Ok(json!(listed.iter().map(entity).collect::<Vec<_>>()))
+    }))
+}
+
+/// `projects/load`: everything a Projects route shows except repository
+/// content: the entity, a project's repositories, its channels, and the
+/// issue or pull request the route names with its comments.
+pub fn project(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let route = params
+        .get("route")
+        .and_then(EntityRoute::from_params)
+        .ok_or_else(|| invalid("route is not a Projects route"))?;
+    let projects = community(cx)?.read(cx).session.projects();
+    Ok(on_tokio(cx, async move {
+        let detail = projects.load(route).await.map_err(failure)?;
+        Ok(json!({
+            "entity": entity(&detail.entity),
+            "repositories": detail.repositories.iter().map(entity).collect::<Vec<_>>(),
+            "unavailableRepositories": detail.unavailable_repositories,
+            "channels": detail.channels,
+            "item": detail.item.as_ref().map(|item| serde_json::to_value(&**item).unwrap_or(Value::Null)),
+            "status": detail.status,
+            "commit": detail.commit,
+            "activity": events(&detail.activity),
+            "items": events(&detail.items),
+            "truncated": detail.truncated,
+        }))
+    }))
+}
+
+/// `projects/home`: a channel's project, `{"home": null}` without one,
+/// or `{"ambiguous": true}` when it has several.
+pub fn project_home(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let projects = community.read(cx).session.projects();
+    Ok(on_tokio(cx, async move {
+        Ok(match projects.home(channel).await.map_err(failure)? {
+            Home::None => json!({ "home": null, "ambiguous": false }),
+            Home::Ambiguous => json!({ "home": null, "ambiguous": true }),
+            Home::Project(project) => json!({ "home": entity(&project), "ambiguous": false }),
+        })
+    }))
+}
+
+/// `projects/git`: a repository's head, latest commits, files and
+/// README, and the file at `path` or the diff of `commit`, read with Git.
+pub fn git(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let read = GitRead {
+        owner: text(params, "owner")
+            .ok_or_else(|| invalid("owner is required"))?
+            .to_ascii_lowercase(),
+        dtag: text(params, "dtag")
+            .ok_or_else(|| invalid("dtag is required"))?
+            .to_owned(),
+        commit: text(params, "commit").map(str::to_ascii_lowercase),
+        path: text(params, "path").map(str::to_owned),
+    }
+    .parse()
+    .ok_or_else(|| invalid("not a repository, commit or path Git can read"))?;
+    let projects = community(cx)?.read(cx).session.projects();
+    Ok(on_tokio(cx, async move {
+        let snapshot = projects.read_git(read).await.map_err(failure)?;
+        Ok(json!({
+            "head": snapshot.head,
+            "commits": snapshot.commits.iter().map(|commit| json!({
+                "hash": commit.hash,
+                "author": commit.author,
+                "date": commit.date,
+                "subject": commit.subject,
+            })).collect::<Vec<_>>(),
+            "files": snapshot.files.iter().map(|file| json!({
+                "path": file.path,
+                "hash": file.hash,
+                "size": file.size,
+            })).collect::<Vec<_>>(),
+            "readme": snapshot.readme,
+            "file": snapshot.file.map(|file| json!({
+                "path": file.path,
+                "content": file.content,
+                "size": file.size,
+            })),
+            "diff": snapshot.diff,
+        }))
     }))
 }

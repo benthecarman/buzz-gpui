@@ -478,6 +478,10 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/memories` | `agent` (one of your agents) | `{"entries","partial"}`: its newest memory per slug, `{"slug","body","eventId","createdAt"}` |
 | `kit/get` | none | `{"status","entries","error"}`: your teams, channel templates and sidebar groups in the community, each `{"eventId","createdAt","version","deleted","value"}`, where `value` has a `type` of `team`, `template` or `groups` |
 | `kit/save` | `value` (as `kit/get` gives it), `expected` (its `eventId`, or `null` for new), `deleted` | `{"eventId"}`. Needs `manage-channels`. |
+| `projects/list` | none | The community's repositories and projects, each `{"kind","owner","dtag","address","name","description","route","event"}`. `route` is what `ui/navigate` takes as `params` for the Projects page, `buzz.projects/projects`. |
+| `projects/load` | `route` (an entity's `route`, or one naming a `tab`, `commit`, or an issue or pull request `id`) | `{"entity","repositories","unavailableRepositories","channels","item","status","commit","activity","items","truncated"}`: a project's repositories, linked channels, and the issue or pull request the route names with its comments, as Nostr events |
+| `projects/home` | `channel` | `{"home","ambiguous"}`: the channel's project, or `null` |
+| `projects/git` | `owner`, `dtag`, optional `commit` and `path` | `{"head","commits","files","readme","file","diff"}`: read with Git from the community; `file` is the file at `path` and `diff` the commit's changes. Failures are `notFound`, `denied`, `unavailable` or `invalidTarget`. |
 | `threads/follow` | `channel`, `root`, and `following` (`true` or `false`), or no `following` to ask | Whether you follow the thread now |
 | `reminders/list` | none | `{"reminders","error"}`, each `{"id","createdAt","notBefore","status","note","message"}` with `status` `pending`, `done` or `cancelled` |
 | `reminders/watch` | none | `{"watch"}`. Buzz then sends `reminders/changed` with what `reminders/list` gives. Stop with `reminders/unwatch`. |
