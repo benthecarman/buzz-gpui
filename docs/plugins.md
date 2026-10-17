@@ -421,6 +421,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `community/current` | none | `{"name","relay","viewer","status","live","cached"}` for the selected community, or `null`. `viewer` is your pubkey; `status` is `connecting`, `ready` or `failed`; `live` says the live connection is up; `cached` says it shows saved data while the relay has not answered. Buzz sends the notification `community/changed` with the same fields whenever any of them change, such as when another community is selected. |
 | `community/list` | none | Your communities: `[{"name","relay"}]` |
 | `community/retry` | none | `null`. Connects to the selected community again after a failure. |
+| `community/clearCache` | none | `null`, after forgetting the conversations Buzz saved of the community, here and on disk, as Clear cache in Settings does. Open channels load again. |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind","members","labels","lastActivityAt","readOnly","creator","createdAt","parent"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
 | `session/watch` | `what`: `channels`, `presence`, `emoji`, or `typing` or `activity` with a `channel` | `{"watch"}`. Buzz then sends `session/changed` with `what` and `value` (as `community/channels`, `presence/get`, `emoji/list`, `typing/get` with `channel` and `anywhere`, or `threads/activity`'s `items`), now and whenever it changes. Stop with `session/unwatch`. |
 | `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first. For older history, use `events/query` with `until`. |
@@ -527,6 +528,11 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 
 Reads cover the selected community and channels you can read in it. They
 never mark anything read. A read waits up to 10 seconds for the relay.
+
+Any request can name `community`, the `wss://` relay of another community
+you joined (see `community/list`), to reach that one instead, such as the
+community a running agent works in. Watches keep the community they
+started with.
 
 A message looks like this:
 

@@ -1211,7 +1211,11 @@ impl ExternalPlugins {
                 _ => tracing::debug!(plugin = %name, %method, "unknown plugin notification"),
             },
             Event::Request { id, method, params } => {
-                match Self::answer(path, generation, &method, &params, cx) {
+                let reply = capabilities::in_community(&params, cx, |cx| {
+                    Self::answer(path, generation, &method, &params, cx)
+                })
+                .unwrap_or_else(|failure| Reply::Now(Err(failure)));
+                match reply {
                     Reply::Now(result) => Self::respond(path, generation, &id, result, cx),
                     Reply::Later(task) => {
                         let path = path.to_path_buf();
@@ -1578,6 +1582,13 @@ impl ExternalPlugins {
             "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
             "presence/watch" => Self::watch(path, generation, "presence/watch", params, cx),
             "media/get" => later(capabilities::media(params, cx)),
+            "community/clearCache" => later(capabilities::community(cx).map(|community| {
+                let session = community.read(cx).session.clone();
+                capabilities::on_tokio(cx, async move {
+                    session.clear_cache().await;
+                    Ok(Value::Null)
+                })
+            })),
             "sidebar/get" => Reply::Now(channels::sidebar(cx)),
             "projects/gitAuthorization" => Reply::Now(capabilities::git_authorization(params, cx)),
             "agents/logProof" => Reply::Now(capabilities::log_proof(params, cx)),
@@ -1771,7 +1782,7 @@ impl ExternalPlugins {
                     .collect(),
             )),
             "community/retry" => {
-                if let Some(community) = AppState::current(cx) {
+                if let Ok(community) = capabilities::community(cx) {
                     community.read(cx).session.retry();
                 }
                 Ok(Value::Null)

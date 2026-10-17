@@ -33,8 +33,45 @@ fn invalid(message: impl Into<String>) -> Failure {
     (INVALID_PARAMS, message.into())
 }
 
-/// The selected community, or an error a plugin can show.
+thread_local! {
+    /// The community the request being answered names, if any.
+    static SCOPE: std::cell::RefCell<Option<Entity<Community>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `answer` with requests reaching the joined community at
+/// `params.community` (its `wss://` relay) rather than the selected one,
+/// as buzz-app's `agents.relay` reaches a running agent's community.
+pub fn in_community<T>(
+    params: &Value,
+    cx: &mut App,
+    answer: impl FnOnce(&mut App) -> T,
+) -> Result<T, Failure> {
+    let scope = match params.get("community").and_then(Value::as_str) {
+        None => None,
+        Some(relay) => Some(
+            cx.global::<AppState>()
+                .communities
+                .iter()
+                .find(|community| {
+                    let origin = &community.read(cx).origin;
+                    origin.websocket() == relay || origin.to_string() == relay
+                })
+                .cloned()
+                .ok_or_else(|| invalid(format!("You have not joined {relay}")))?,
+        ),
+    };
+    let previous = SCOPE.with_borrow_mut(|current| std::mem::replace(current, scope));
+    let answered = answer(cx);
+    SCOPE.with_borrow_mut(|current| *current = previous);
+    Ok(answered)
+}
+
+/// The community a request reaches: the one it names, or the selected
+/// one; an error a plugin can show without either.
 pub fn community(cx: &App) -> Result<Entity<Community>, Failure> {
+    if let Some(scoped) = SCOPE.with_borrow(Clone::clone) {
+        return Ok(scoped);
+    }
     AppState::current(cx).ok_or_else(|| (1, "No community is selected.".to_owned()))
 }
 
