@@ -34,7 +34,7 @@ pub fn init(cx: &mut App) {
             key: PANEL,
             title: "Terminal",
             icon: IconName::TerminalWindow,
-            matches: |_| false,
+            matches: channel_panels::matches(|_| false),
             // Offered under Tools in the New tab picker (`isChannelTabTool`).
             launcher: Some(Launcher {
                 icon: IconName::TerminalWindow,
@@ -42,7 +42,7 @@ pub fn init(cx: &mut App) {
                 placement: Placement::Bottom,
             }),
             menu: None,
-            build: |opening, _, cx| {
+            build: channel_panels::build(|opening, _, cx| {
                 let summary = opening
                     .community
                     .read(cx)
@@ -62,7 +62,7 @@ pub fn init(cx: &mut App) {
                 let close = opening.close.clone();
                 cx.new(|cx| panel::TerminalPanel::new(context, close, cx))
                     .into()
-            },
+            }),
         },
         cx,
     );

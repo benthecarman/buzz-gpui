@@ -37,13 +37,15 @@ pub fn init(cx: &mut App) {
             key: KEY,
             title: "Usage",
             icon: IconName::Browser,
-            matches: |_| false,
+            matches: channel_panels::matches(|_| false),
             launcher: None,
             menu: Some(MenuEntry {
                 label: "View channel usage",
                 eligible,
             }),
-            build: |opening, _, cx| cx.new(|cx| ChannelUsage::new(opening, cx)).into(),
+            build: channel_panels::build(|opening, _, cx| {
+                cx.new(|cx| ChannelUsage::new(opening, cx)).into()
+            }),
         },
         cx,
     );

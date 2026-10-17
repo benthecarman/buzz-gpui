@@ -9,6 +9,7 @@
 use buzz_ui::IconName;
 use gpui_kit::*;
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 /// A page's identity: buzz-app's contribution key, such as
 /// `buzz.inbox/inbox`.
@@ -53,7 +54,13 @@ pub enum Navigation {
 }
 
 /// The view a page shows. `None` for Messages, which the workspace draws.
-pub type Build = fn(&mut Window, &mut App) -> AnyView;
+pub type Build = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
+
+/// A page's [`Build`] from a closure.
+pub fn build(build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Option<Build> {
+    Some(Rc::new(build))
+}
+
 /// A trailing count or mark on the page's row, such as Reminders' due
 /// count. `None` hides it.
 pub type Badge = fn(&App) -> Option<AnyElement>;
@@ -75,7 +82,12 @@ pub struct PageSpec {
 impl PageSpec {
     /// A page shown as a sidebar row beside the channel sidebar, the
     /// usual case for bundled pages.
-    pub fn sidebar(page: Page, label: &'static str, icon: IconName, build: Build) -> Self {
+    pub fn sidebar(
+        page: Page,
+        label: &'static str,
+        icon: IconName,
+        build: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+    ) -> Self {
         Self {
             page,
             label,
@@ -84,7 +96,7 @@ impl PageSpec {
             navigation: Navigation::Channels,
             collapsible: false,
             badge: None,
-            build: Some(build),
+            build: self::build(build),
         }
     }
 }

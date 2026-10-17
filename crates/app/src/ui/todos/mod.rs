@@ -51,14 +51,16 @@ pub fn init(cx: &mut App) {
             key: KEY,
             title: "Todos",
             icon: IconName::ListChecks,
-            matches: |_| false,
+            matches: channel_panels::matches(|_| false),
             launcher: Some(Launcher {
                 icon: IconName::ListChecks,
                 label: "Todos",
                 placement: Placement::Side,
             }),
             menu: None,
-            build: |opening, window, cx| cx.new(|cx| TodosPanel::new(opening, window, cx)).into(),
+            build: channel_panels::build(|opening, window, cx| {
+                cx.new(|cx| TodosPanel::new(opening, window, cx)).into()
+            }),
         },
         cx,
     );

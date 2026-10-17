@@ -30,13 +30,13 @@ pub fn init(cx: &mut App) {
             key: PANEL,
             title: "GitHub",
             icon: IconName::GithubLogo,
-            matches: |target| references::parse(target).is_some(),
+            matches: channel_panels::matches(|target| references::parse(target).is_some()),
             launcher: None,
             menu: None,
-            build: |opening, window, cx| {
+            build: channel_panels::build(|opening, window, cx| {
                 cx.new(|cx| panel::GitHubPanel::new(opening, window, cx))
                     .into()
-            },
+            }),
         },
         cx,
     );

@@ -31,13 +31,13 @@ pub fn init(cx: &mut App) {
             key: PANEL,
             title: "Agent Activity",
             icon: IconName::ListBullets,
-            matches: |target| selection(target).is_some(),
+            matches: channel_panels::matches(|target| selection(target).is_some()),
             launcher: None,
             menu: None,
-            build: |opening, window, cx| {
+            build: channel_panels::build(|opening, window, cx| {
                 cx.new(|cx| panel::ActivityPanel::new(opening, window, cx))
                     .into()
-            },
+            }),
         },
         cx,
     );

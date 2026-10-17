@@ -84,13 +84,13 @@ pub fn init(cx: &mut App) {
             key: KEY,
             title: "Profile",
             icon: IconName::User,
-            matches: |target| parse_target(target).is_some(),
+            matches: channel_panels::matches(|target| parse_target(target).is_some()),
             launcher: None,
             menu: None,
-            build: |opening, window, cx| {
+            build: channel_panels::build(|opening, window, cx| {
                 cx.new(|cx| ProfilePanel::from_opening(opening, window, cx))
                     .into()
-            },
+            }),
         },
         cx,
     );

@@ -56,6 +56,21 @@ pub struct MenuEntry {
     pub eligible: fn(&ChannelSummary, &App) -> bool,
 }
 
+/// Whether a panel shows a link.
+pub type Matches = Rc<dyn Fn(&str) -> bool>;
+/// Makes a panel's view for an opening.
+pub type Build = Rc<dyn Fn(Opening, &mut Window, &mut App) -> AnyView>;
+
+/// A panel's [`Matches`] from a closure.
+pub fn matches(matches: impl Fn(&str) -> bool + 'static) -> Matches {
+    Rc::new(matches)
+}
+
+/// A panel's [`Build`] from a closure.
+pub fn build(build: impl Fn(Opening, &mut Window, &mut App) -> AnyView + 'static) -> Build {
+    Rc::new(build)
+}
+
 #[derive(Clone)]
 pub struct ChannelPanel {
     /// `plugin/panel`, unique.
@@ -63,10 +78,10 @@ pub struct ChannelPanel {
     pub title: &'static str,
     pub icon: IconName,
     /// Links this panel shows, opened as a tab beside the conversation.
-    pub matches: fn(&str) -> bool,
+    pub matches: Matches,
     pub launcher: Option<Launcher>,
     pub menu: Option<MenuEntry>,
-    pub build: fn(Opening, &mut Window, &mut App) -> AnyView,
+    pub build: Build,
 }
 
 #[derive(Default)]
@@ -182,7 +197,7 @@ pub fn dev_sample(cx: &mut App) {
             key: "buzz.dev/sample",
             title: "Sample",
             icon: IconName::ListChecks,
-            matches: |target| target.starts_with("buzz://dev-sample"),
+            matches: matches(|target| target.starts_with("buzz://dev-sample")),
             launcher: Some(Launcher {
                 icon: IconName::ListChecks,
                 label: "Sample",
@@ -192,7 +207,7 @@ pub fn dev_sample(cx: &mut App) {
                 label: "View sample",
                 eligible: |_, _| true,
             }),
-            build: |opening, _, cx| cx.new(|_| Sample(opening)).into(),
+            build: build(|opening, _, cx| cx.new(|_| Sample(opening)).into()),
         },
         cx,
     );

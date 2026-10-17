@@ -55,7 +55,7 @@ pub fn register(cx: &mut App) {
             }),
             collapsible: true,
             badge: None,
-            build: Some(|window, cx| cx.new(|cx| MePage::new(window, cx)).into()),
+            build: pages::build(|window, cx| cx.new(|cx| MePage::new(window, cx)).into()),
         },
         cx,
     );
@@ -68,7 +68,7 @@ pub fn register(cx: &mut App) {
             navigation: Navigation::Channels,
             collapsible: false,
             badge: None,
-            build: Some(|_, cx| cx.new(|_| LegacySessions { opened: false }).into()),
+            build: pages::build(|_, cx| cx.new(|_| LegacySessions { opened: false }).into()),
         },
         cx,
     );
