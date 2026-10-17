@@ -515,6 +515,10 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `reminders/create` | `channel`, `message`, `notBefore` (unix seconds), optional `note`, `preview` and `author` | `null` once saved |
 | `reminders/snooze`, `reminders/complete`, `reminders/cancel` | `id`, and `notBefore` to snooze | `null` once saved |
 | `agents/remove` | `pubkey` | `null` once the agent and its key are gone. Needs `manage-agents`. |
+| `agents/previewRetype` | `pubkey` (an agent on this device), `type` | `{"config","moved","dropped","settings"}`: the config it would start with as that type, what it carries over (`instructions`, `workspace`) or leaves, and the settings the move resets or drops |
+| `agents/retype` | `pubkey`, `type`, `config` (optional; from `agents/previewRetype`, edited or not) | `{"dropped"}` once it runs as the new type, keeping its key, name, picture, communities and attention. Refused while it is answering. Needs `manage-agents`. |
+| `agents/portable` | none | `{"agents","warnings"}`: identities earlier agent systems saved on this device, `{"pubkey","name","picture","relay","source"}`, that are not agents yet |
+| `agents/port` | `pubkey` (from `agents/portable`), `type` | The new agent, keeping the identity's key, name and picture, in the selected community. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
 | `ui/closeView` | `view` (an open `dialog`, panel or provider dialog) | `null`, once it has closed |

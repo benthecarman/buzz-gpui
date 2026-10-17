@@ -1413,6 +1413,108 @@ pub fn act(
     }))
 }
 
+fn carry_key(key: &registry::CarryKey) -> &'static str {
+    match key {
+        registry::CarryKey::Instructions => "instructions",
+        registry::CarryKey::Workspace => "workspace",
+    }
+}
+
+/// `agents/previewRetype`: what moving an agent on this device to another
+/// type would do: the config it would start with, what it carries over
+/// or leaves, and the settings the move resets or drops.
+pub fn preview_retype(params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((INVALID_PARAMS, format!("{key} is required")))
+    };
+    let (pubkey, kind) = (text("pubkey")?.to_owned(), text("type")?.to_owned());
+    let preview = agents2(cx)?
+        .update(cx, |agents, cx| agents.preview_retype(&pubkey, &kind, cx))
+        .map_err(|error| (3, error))?;
+    Ok(json!({
+        "config": preview.config,
+        "moved": preview.moved.iter().map(carry_key).collect::<Vec<_>>(),
+        "dropped": preview.dropped.iter().map(carry_key).collect::<Vec<_>>(),
+        "settings": preview.settings.iter().map(|setting| json!({
+            "id": setting.id,
+            "label": setting.label,
+            "outcome": format!("{:?}", setting.outcome).to_ascii_lowercase(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `agents/retype`: moves an agent on this device to another type, with
+/// `config` (from `agents/previewRetype`, possibly edited) or the
+/// type's defaults. Answers what stayed behind.
+pub fn retype(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((INVALID_PARAMS, format!("{key} is required")))
+    };
+    let (pubkey, kind) = (text("pubkey")?.to_owned(), text("type")?.to_owned());
+    let config = params
+        .get("config")
+        .filter(|config| config.is_object())
+        .cloned();
+    let task = agents2(cx)?.update(cx, |agents, cx| agents.retype(&pubkey, &kind, config, cx));
+    Ok(cx.background_spawn(async move {
+        task.await
+            .map(|dropped| json!({ "dropped": dropped.iter().map(carry_key).collect::<Vec<_>>() }))
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `agents/portable`: identities earlier agent systems saved on this
+/// device that are not agents yet.
+pub fn portable(cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let task = agents2(cx)?.update(cx, |agents, cx| agents.portable(cx));
+    Ok(cx.background_spawn(async move {
+        let found = task.await.map_err(|error| (3, error))?;
+        Ok(json!({
+            "agents": found.agents.iter().map(|portable| json!({
+                "pubkey": portable.agent.pubkey,
+                "name": portable.agent.name,
+                "picture": portable.agent.picture,
+                "relay": portable.agent.relay,
+                "source": format!("{:?}", portable.agent.source).to_ascii_lowercase(),
+            })).collect::<Vec<_>>(),
+            "warnings": found.warnings,
+        }))
+    }))
+}
+
+/// `agents/port`: takes one of `agents/portable`'s identities over as an
+/// agent of `type` in the selected community.
+pub fn port(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((INVALID_PARAMS, format!("{key} is required")))
+    };
+    let (pubkey, kind) = (text("pubkey")?.to_owned(), text("type")?.to_owned());
+    let service = agents2(cx)?;
+    let listed = service.update(cx, |agents, cx| agents.portable(cx));
+    let hosted = crate::agents2::is_hosted(&kind, cx);
+    Ok(cx.spawn(async move |cx| {
+        let found = listed.await.map_err(|error| (3, error))?;
+        let portable = found
+            .agents
+            .into_iter()
+            .find(|portable| portable.agent.pubkey == pubkey)
+            .ok_or((3, "That identity cannot be brought over.".to_owned()))?;
+        let task = service.update(cx, |agents, cx| agents.port(&portable, &kind, cx));
+        task.await
+            .map(|agent| entry_at(&agent, hosted))
+            .map_err(|error| (3, error))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

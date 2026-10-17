@@ -1628,6 +1628,8 @@ impl ExternalPlugins {
             | "channels/action"
             | "teams/save"
             | "teams/remove"
+            | "agents/retype"
+            | "agents/port"
             | "channels/addMember"
             | "channels/changeMember"
             | "messages/report"
@@ -1647,7 +1649,7 @@ impl ExternalPlugins {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
-                    | "teams/remove" => Permission::ManageAgents,
+                    | "teams/remove" | "agents/retype" | "agents/port" => Permission::ManageAgents,
                     "dm/open"
                     | "channels/create"
                     | "channels/action"
@@ -1696,6 +1698,8 @@ impl ExternalPlugins {
                     "agents/create" => agents::create(params, cx),
                     "agents/save" => agents::save(params, cx),
                     "agents/remove" => agents::remove(params, cx),
+                    "agents/retype" => agents::retype(params, cx),
+                    "agents/port" => agents::port(params, cx),
                     "dm/open" => channels::open_dm(params, cx),
                     "channels/create" => channels::create(params, cx),
                     "channels/action" => channels::action(params, cx),
@@ -1732,6 +1736,8 @@ impl ExternalPlugins {
             "projects/git" => later(content::git(params, cx)),
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
+            "agents/previewRetype" => Reply::Now(agents::preview_retype(params, cx)),
+            "agents/portable" => later(agents::portable(cx)),
             "agents/watch" => Self::watch(path, generation, "agents/watch", params, cx),
             "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),
             "ui/openLink" => Reply::Now(capabilities::open_link(params, cx)),
