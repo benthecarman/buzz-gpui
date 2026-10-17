@@ -222,6 +222,7 @@ fn every_kind_of_contribution_is_checked() {
         "attachmentRenderers": [{ "id": "pdf", "mime": ["application/pdf"] }],
         "composerTools": [{ "id": "tool", "title": "Tool" }],
         "shortcuts": [{ "id": "go", "title": "Go", "keys": ["mod+shift+g"] }],
+        "completions": [{ "id": "commands", "title": "Commands", "trigger": "/" }],
         "pages": [{ "id": "top", "title": "Top", "placement": "topbar" }],
         "panels": [{ "id": "p", "title": "P", "menu": { "label": "Open P" } }],
     }))

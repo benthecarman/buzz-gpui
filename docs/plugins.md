@@ -133,6 +133,7 @@ The rest of the result can list:
 | `messageRenderers` | `id`, `kinds`, `prefix`, `order` | Draws the body of matching messages. Buzz asks with `message/render`. It needs a `prefix` of two or more characters, or kinds other than chat messages. |
 | `attachmentRenderers` | `id`, `mime` (MIME type prefixes) | Draws matching attachments. Buzz asks with `attachment/render`. |
 | `composerTools` | `id`, `title`, `icon`, `order` | A button in every composer's toolbar. Clicking it sends `composer/tool`. |
+| `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`) | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. |
 | `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`) | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. |
 
 ### Renderers
@@ -140,13 +141,15 @@ The rest of the result can list:
 Buzz draws while it paints and does not wait for a plugin. The first time a
 renderer matches something, Buzz asks the plugin, draws what it would have
 drawn anyway, and redraws when the answer comes. Answers are kept until the
-plugin restarts, so answer from the request alone.
+plugin restarts, so answer from the request alone. Completions work the
+same way, per query.
 
 | Request from Buzz | Params | Answer |
 | --- | --- | --- |
 | `link/render` | `renderer`, `url`, `label` | `{"tree"}`, or `null` to leave the chip as it is |
 | `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
+| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel` | `{"items": [{"label", "detail", "text"}]}`, at most 50. Picking one replaces the trigger and query with `text`. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches
 send `render/event` with `renderer`, `target` (the URL, message or attachment
@@ -382,7 +385,8 @@ you added from running for that launch. Their switches stay as they were.
 ## Not built yet
 
 - Agent types and tools from plugins.
-- Composer completions and inline renderers.
+- Inline renderers. The app draws only custom emoji inline, so it has
+  nowhere to put them yet.
 - Following a thread live, editing and reacting.
 - A WebAssembly runtime for plugins that run sandboxed
   ([#12](https://github.com/benthecarman/buzz-gpui/issues/12)).

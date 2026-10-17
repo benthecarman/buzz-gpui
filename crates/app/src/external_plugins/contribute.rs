@@ -14,6 +14,7 @@ use super::{ExternalPlugins, capabilities, intern};
 use crate::community::AppState;
 use crate::runtime::Runtime;
 use crate::ui::composer::Composer;
+use crate::ui::composer_completions::{self, Item};
 use crate::ui::composer_tools::ToolContext;
 use crate::ui::markdown::Directory;
 use crate::ui::renderers::{AttachmentRenderer, LinkRenderer, MessageAction, MessageRenderer};
@@ -54,11 +55,109 @@ thread_local! {
     /// A page's badge text and tone, by page key.
     static BADGES: RefCell<HashMap<String, (String, BadgeTone)>> = RefCell::default();
     static COMPOSERS: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    /// Completion answers by completion key, channel and query; `None`
+    /// while one is on its way.
+    static SUGGESTIONS: RefCell<Suggestions> = RefCell::default();
+    static SUGGESTION_INBOX: RefCell<Option<futures::channel::mpsc::UnboundedSender<Suggested>>> =
+        RefCell::default();
     static NEXT_COMPOSER: Cell<u64> = const { Cell::new(0) };
+}
+
+type SuggestionKey = (String, String, String);
+/// A completion's answer, on its way to the UI thread.
+type Suggested = (SuggestionKey, Vec<Item>);
+
+#[derive(Default)]
+struct Suggestions {
+    entries: HashMap<SuggestionKey, Option<Vec<Item>>>,
+    order: VecDeque<SuggestionKey>,
+}
+
+/// A completion's suggestions for `query` typed in `channel`, asking the
+/// plugin the first time.
+fn suggest(
+    plugin: &str,
+    key: &str,
+    id: &str,
+    query: &str,
+    channel: &str,
+    cx: &App,
+) -> Option<Vec<Item>> {
+    let entry = (key.to_owned(), channel.to_owned(), query.to_owned());
+    if let Some(known) =
+        SUGGESTIONS.with_borrow(|suggestions| suggestions.entries.get(&entry).cloned())
+    {
+        return known;
+    }
+    let connection = ExternalPlugins::running_connection(plugin, cx)?;
+    let inbox = SUGGESTION_INBOX.with_borrow(Clone::clone)?;
+    let request = connection.request(
+        "completion/query",
+        json!({ "completion": id, "query": query, "channel": channel }),
+    );
+    SUGGESTIONS.with_borrow_mut(|suggestions| {
+        suggestions.entries.insert(entry.clone(), None);
+        suggestions.order.push_back(entry.clone());
+        while suggestions.order.len() > MAX_ANSWERS {
+            if let Some(old) = suggestions.order.pop_front() {
+                suggestions.entries.remove(&old);
+            }
+        }
+    });
+    Runtime::handle(cx).spawn(async move {
+        let items = match request.await {
+            Ok(Ok(value)) => items(&value),
+            _ => Vec::new(),
+        };
+        let _ = inbox.unbounded_send((entry, items));
+    });
+    None
+}
+
+/// `completion/query`'s answer: `{"items": [{"label", "detail", "text"}]}`.
+fn items(value: &Value) -> Vec<Item> {
+    let text = |item: &Value, key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .map(|text| text.chars().take(2_000).collect::<String>())
+    };
+    value
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(50)
+                .filter_map(|item| {
+                    let label = text(item, "label").filter(|label| !label.is_empty())?;
+                    Some(Item {
+                        text: text(item, "text").unwrap_or_else(|| label.clone()),
+                        detail: text(item, "detail").map(Into::into),
+                        label: label.into(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Starts taking renderer answers.
 pub fn init(cx: &mut App) {
+    let (sender, mut suggestions) = futures::channel::mpsc::unbounded();
+    SUGGESTION_INBOX.with_borrow_mut(|inbox| *inbox = Some(sender));
+    cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some((key, items)) = suggestions.next().await {
+            SUGGESTIONS.with_borrow_mut(|suggestions| {
+                if let Some(entry) = suggestions.entries.get_mut(&key) {
+                    *entry = Some(items);
+                }
+            });
+            composer_completions::changed();
+            cx.update(|cx| cx.refresh_windows());
+        }
+    })
+    .detach();
     let (sender, mut answers) = futures::channel::mpsc::unbounded();
     INBOX.with_borrow_mut(|inbox| *inbox = Some(sender));
     cx.spawn(async move |cx| {
@@ -85,6 +184,14 @@ pub fn forget(plugin: &str) {
         answers.order.retain(|(key, _)| !key.starts_with(&prefix));
     });
     MARKS.with_borrow_mut(|marks| marks.retain(|key, _| !key.starts_with(&prefix)));
+    SUGGESTIONS.with_borrow_mut(|suggestions| {
+        suggestions
+            .entries
+            .retain(|(key, _, _), _| !key.starts_with(&prefix));
+        suggestions
+            .order
+            .retain(|(key, _, _)| !key.starts_with(&prefix));
+    });
     BADGES.with_borrow_mut(|badges| badges.retain(|key, _| !key.starts_with(&prefix)));
 }
 
@@ -490,6 +597,7 @@ pub enum Added {
     Renderer(&'static str),
     Tool(&'static str),
     Shortcut(&'static str),
+    Completion(&'static str),
 }
 
 pub fn take_away(added: Added, cx: &mut App) {
@@ -499,6 +607,7 @@ pub fn take_away(added: Added, cx: &mut App) {
         Added::Renderer(key) => crate::ui::renderers::unregister(key),
         Added::Tool(key) => crate::ui::composer_tools::unregister(key, cx),
         Added::Shortcut(key) => crate::shortcuts::unregister_external(key),
+        Added::Completion(key) => composer_completions::unregister(key),
     }
 }
 
@@ -638,6 +747,21 @@ pub fn register(
             cx,
         );
         added.push(Added::Tool(tool_key));
+    }
+    for completion in &contributions.completions {
+        let completion_key = key(&completion.id);
+        let Some(trigger) = completion.trigger.chars().next() else {
+            continue;
+        };
+        let (plugin, id) = (plugin.to_owned(), completion.id.clone());
+        composer_completions::register(composer_completions::PluginCompletion {
+            key: completion_key,
+            trigger,
+            query: Rc::new(move |query, channel, cx| {
+                suggest(&plugin, completion_key, &id, query, channel, cx)
+            }),
+        });
+        added.push(Added::Completion(completion_key));
     }
     let owner = intern(name.to_owned());
     for shortcut in &contributions.shortcuts {

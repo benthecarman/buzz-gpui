@@ -13,7 +13,8 @@ It adds:
   header;
 - a Settings section, a notification category, two message actions (one
   marks messages), a chip for example.com links, a card for messages that
-  start with "!hello", a composer button and a shortcut (Ctrl/Cmd+Shift+H).
+  start with "!hello", a composer button, "/" commands in the composer and
+  a shortcut (Ctrl/Cmd+Shift+H).
 """
 
 import json
@@ -23,6 +24,8 @@ views = {}  # view id -> what the app opened it with, plus our state
 pending = {}  # our request id -> what to do with the answer
 next_request = 0
 starred = set()  # message ids the "Star" action marks
+# What typing "/" in the composer offers.
+COMMANDS = {"shrug": "¯\\_(ツ)_/¯", "tableflip": "(╯°□°)╯︵ ┻━┻", "wave": "👋"}
 settings = {"loud": False}  # what the Settings section edits
 
 
@@ -395,11 +398,20 @@ def handle(message):
                         "messageRenderers": [{"id": "hello-card", "prefix": "!hello"}],
                         "composerTools": [{"id": "wave", "title": "Insert a wave", "icon": "Smiley"}],
                         "shortcuts": [{"id": "hi", "title": "Say hi", "keys": ["mod+shift+h"]}],
+                        "completions": [{"id": "commands", "title": "Commands", "trigger": "/"}],
                     },
                 }
             )
         elif method == "link/render":
             send({"id": message["id"], "result": {"tree": link_chip(params["url"])}})
+        elif method == "completion/query":
+            query = params["query"].lower()
+            items = [
+                {"label": f"/{name}", "detail": text, "text": text + " "}
+                for name, text in COMMANDS.items()
+                if name.startswith(query)
+            ]
+            send({"id": message["id"], "result": {"items": items}})
         elif method == "message/render":
             send({"id": message["id"], "result": {"tree": hello_card(params["message"])}})
         else:

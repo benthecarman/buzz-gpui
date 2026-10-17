@@ -163,6 +163,19 @@ pub struct Contributions {
     pub composer_tools: Vec<ToolDecl>,
     #[serde(default)]
     pub shortcuts: Vec<ShortcutDecl>,
+    #[serde(default)]
+    pub completions: Vec<CompletionDecl>,
+}
+
+/// Suggestions after a trigger character typed in the composer
+/// (`conversation.registerCompletion`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionDecl {
+    pub id: String,
+    pub title: String,
+    /// One character, not `@`, `#` or `:`, which the composer keeps.
+    pub trigger: String,
 }
 
 /// A panel beside the conversation (`panels.register`).
@@ -416,6 +429,7 @@ impl Contributions {
             self.attachment_renderers.len(),
             self.composer_tools.len(),
             self.shortcuts.len(),
+            self.completions.len(),
         ];
         if counts.iter().any(|count| *count > MAX_EACH) {
             return Err(format!("A plugin can add at most {MAX_EACH} of each kind."));
@@ -490,6 +504,22 @@ impl Contributions {
         for tool in &self.composer_tools {
             id(&tool.id)?;
             check_title(&tool.id, &tool.title)?;
+        }
+        for completion in &self.completions {
+            id(&completion.id)?;
+            check_title(&completion.id, &completion.title)?;
+            let mut chars = completion.trigger.chars();
+            let one = match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            };
+            if one.is_none_or(|c| c.is_alphanumeric() || c.is_whitespace() || "@#:".contains(c)) {
+                return Err(format!(
+                    "“{}” needs one trigger character that is not a letter, digit, space, @, # \
+                     or :.",
+                    completion.id
+                ));
+            }
         }
         for shortcut in &self.shortcuts {
             id(&shortcut.id)?;

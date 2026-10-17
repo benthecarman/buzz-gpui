@@ -259,6 +259,9 @@ pub struct Composer {
     /// The tool registry's [`super::composer_tools::generation`] the
     /// tools were made at; a plugin adding one rebuilds them.
     tools_generation: u64,
+    /// [`super::composer_completions::generation`] when the completion
+    /// was last worked out; a plugin's answer arriving works it out again.
+    completions_generation: u64,
     /// A new Me conversation's first message carries no files.
     no_attachments: bool,
     /// Model and effort picked for mentioned agents' next run, and the
@@ -530,6 +533,7 @@ impl Composer {
             no_followup: false,
             tools,
             tools_generation: super::composer_tools::generation(cx),
+            completions_generation: super::composer_completions::generation(),
             no_attachments: false,
             run_models: models::RunModels::default(),
             _subscriptions: subscriptions,
@@ -1436,7 +1440,13 @@ impl Composer {
         let selection = state.selected_range();
         self.completion_key = Some((text.len(), selection.end));
         let query = (selection.is_empty())
-            .then(|| find_query(&text, selection.end))
+            .then(|| {
+                find_query(
+                    &text,
+                    selection.end,
+                    &super::composer_completions::triggers(),
+                )
+            })
             .flatten()
             .filter(|query| {
                 // A chip's own `@Name` is not a search.
@@ -1487,6 +1497,26 @@ impl Composer {
                     None => found.items,
                 };
                 (items, found.status, found.retry)
+            }
+            Trigger::Plugin(key) => {
+                let answer = super::composer_completions::get(key)
+                    .and_then(|completion| (completion.query)(&query.text, &self.channel, cx));
+                match answer {
+                    None => (Vec::new(), Some("Loading…".into()), None),
+                    Some(items) => (
+                        items
+                            .into_iter()
+                            .take(50)
+                            .map(|item| Suggestion::Text {
+                                label: item.label,
+                                detail: item.detail,
+                                text: item.text,
+                            })
+                            .collect(),
+                        None,
+                        None,
+                    ),
+                }
             }
             Trigger::Emoji => {
                 // Unicode results still show while the community catalog
@@ -2021,6 +2051,7 @@ impl Composer {
             Trigger::Mention => Vec::new(),
             // `channel_suggestions` owns `#`.
             Trigger::Channel => Vec::new(),
+            Trigger::Plugin(_) => Vec::new(),
             Trigger::Emoji => {
                 emoji_picker::search(&query.text, &snapshot.emoji.entries, EMOJI_LIMIT)
                     .into_iter()
@@ -2101,7 +2132,7 @@ impl Composer {
                     name.to_lowercase() == wanted
                 }
                 Suggestion::Emoji(candidate) => candidate.shortcode().to_lowercase() == wanted,
-                Suggestion::Team { .. } => false,
+                Suggestion::Team { .. } | Suggestion::Text { .. } => false,
             })
             .map(|(index, _)| index)
             .collect();
@@ -2196,13 +2227,14 @@ impl Composer {
                 InlineToken::new(id.clone(), channel_reference(id, name))
                     .with_label(format!("#{name}")),
             ),
-            Suggestion::Emoji(_) | Suggestion::Team { .. } => None,
+            Suggestion::Emoji(_) | Suggestion::Team { .. } | Suggestion::Text { .. } => None,
         };
         let text = match item {
             Suggestion::Emoji(candidate) => candidate.pick(None).text(),
             Suggestion::Team { name, .. } => format!("@{name} "),
             Suggestion::Person { name, .. } => format!("@{name} "),
             Suggestion::Channel { id, name, .. } => format!("{} ", channel_reference(id, name)),
+            Suggestion::Text { text, .. } => text.clone(),
         };
         self.input.update(cx, |state, cx| {
             let chip = token.and_then(|token| {
@@ -3328,6 +3360,8 @@ enum Trigger {
     Mention,
     Channel,
     Emoji,
+    /// A plugin's completion, by key (`super::composer_completions`).
+    Plugin(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3342,8 +3376,10 @@ struct Query {
 
 /// The active `@`, `#` or `:` query ending at `caret` (`mentionQuery`,
 /// `channelQuery`, `emojiQuery`): the sigil at the start of the text or
-/// after whitespace or `([{`, at most 160 characters back.
-fn find_query(text: &str, caret: usize) -> Option<Query> {
+/// after whitespace or `([{`, at most 160 characters back. A plugin's
+/// trigger in `plugins` opens its query the same way, up to the first
+/// space.
+fn find_query(text: &str, caret: usize, plugins: &[(char, &'static str)]) -> Option<Query> {
     if caret > text.len() || !text.is_char_boundary(caret) {
         return None;
     }
@@ -3361,7 +3397,7 @@ fn find_query(text: &str, caret: usize) -> Option<Query> {
         text: before[index + 1..].to_string(),
     };
     // What the text after the current character still allows.
-    let (mut channel, mut emoji) = (true, true);
+    let (mut channel, mut emoji, mut plugin) = (true, true, true);
     for (length, (index, c)) in before.char_indices().rev().enumerate() {
         if length > 160 || matches!(c, '\n' | '\r' | '\t') {
             return None;
@@ -3375,6 +3411,14 @@ fn find_query(text: &str, caret: usize) -> Option<Query> {
             '@' => return None,
             _ => {}
         }
+        if plugin
+            && boundary(index)
+            && caret - index <= 65
+            && let Some((_, key)) = plugins.iter().find(|(trigger, _)| *trigger == c)
+        {
+            return Some(query(Trigger::Plugin(key), index));
+        }
+        plugin &= !c.is_whitespace();
         channel &= !"#[](){}`<>\\".contains(c);
         emoji &= c.is_ascii_alphanumeric() || "_+-".contains(c);
     }
@@ -3456,6 +3500,12 @@ pub(super) enum Suggestion {
         detail: Option<SharedString>,
     },
     Emoji(Candidate),
+    /// A plugin's suggestion: a pick puts `text` in place of the query.
+    Text {
+        label: SharedString,
+        detail: Option<SharedString>,
+        text: String,
+    },
     /// A saved team: its agents as `(key, name, picture)`, the detail line
     /// (its reason when disabled).
     Team {
@@ -5051,6 +5101,21 @@ impl Composer {
                         )
                         .into_any_element()
                 }
+                Suggestion::Text { label, detail, .. } => row
+                    .h(px(40.))
+                    .px(px(8.))
+                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                    .children(detail.clone().map(|detail| {
+                        div()
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .max_w(px(200.))
+                            .truncate()
+                            .text_caption()
+                            .text_color(c.text_subtle)
+                            .child(detail)
+                    }))
+                    .into_any_element(),
                 Suggestion::Channel {
                     name, icon, detail, ..
                 } => row
@@ -5180,6 +5245,7 @@ impl Composer {
             Trigger::Mention => (px(380.), px(280.), px(12.)),
             Trigger::Channel => (px(480.), px(320.), px(12.)),
             Trigger::Emoji => (px(320.), px(280.), px(6.)),
+            Trigger::Plugin(_) => (px(380.), px(280.), px(12.)),
         };
         Some(
             div()
@@ -5223,6 +5289,18 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let completions = super::composer_completions::generation();
+        if completions != self.completions_generation {
+            self.completions_generation = completions;
+            if self
+                .completion
+                .as_ref()
+                .is_some_and(|completion| matches!(completion.query.trigger, Trigger::Plugin(_)))
+                || self.completion.is_none()
+            {
+                self.refresh_completion(cx);
+            }
+        }
         let generation = super::composer_tools::generation(cx);
         if generation != self.tools_generation {
             self.tools_generation = generation;
@@ -5611,7 +5689,7 @@ mod tests {
     use core::prelude::v1::test;
 
     fn query(text: &str) -> Option<(Trigger, String)> {
-        find_query(text, text.len()).map(|q| (q.trigger, q.text))
+        find_query(text, text.len(), &[('/', "x/commands")]).map(|q| (q.trigger, q.text))
     }
 
     fn channel(channel_type: ChannelType, members: &[&str]) -> ChannelSummary {
@@ -5750,7 +5828,18 @@ mod tests {
         assert_eq!(query("at 12:30"), None);
         assert_eq!(query("@al\nnext"), None);
         let text = "x @bo";
-        assert_eq!(find_query(text, text.len()).unwrap().start, 2);
+        assert_eq!(find_query(text, text.len(), &[]).unwrap().start, 2);
+        // A plugin's trigger, up to the first space.
+        assert_eq!(
+            query("/dep"),
+            Some((Trigger::Plugin("x/commands"), "dep".into()))
+        );
+        assert_eq!(
+            query("run /"),
+            Some((Trigger::Plugin("x/commands"), String::new()))
+        );
+        assert_eq!(query("/dep now"), None);
+        assert_eq!(query("a/b"), None);
     }
 
     #[test]
