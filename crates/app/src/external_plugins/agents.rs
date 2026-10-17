@@ -36,6 +36,9 @@ struct Acting {
     plugin: String,
     client: Arc<dyn BuzzClient>,
     context: Context,
+    /// A run's agent's attention, for the attention tools; a tool call has
+    /// none.
+    attention: Option<Arc<dyn crate::buzz_mcp::attention::Attention>>,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -49,7 +52,12 @@ fn acting<R>(f: impl FnOnce(&mut HashMap<u64, Acting>) -> R) -> R {
 }
 
 /// Holds `client` as call `id` until the returned guard drops.
-fn open(plugin: &str, client: Arc<dyn BuzzClient>, context: Context) -> (u64, impl Drop + use<>) {
+fn open(
+    plugin: &str,
+    client: Arc<dyn BuzzClient>,
+    context: Context,
+    attention: Option<Arc<dyn crate::buzz_mcp::attention::Attention>>,
+) -> (u64, impl Drop + use<>) {
     struct Close(u64);
     impl Drop for Close {
         fn drop(&mut self) {
@@ -64,6 +72,7 @@ fn open(plugin: &str, client: Arc<dyn BuzzClient>, context: Context) -> (u64, im
                 plugin: plugin.to_owned(),
                 client,
                 context,
+                attention,
             },
         )
     });
@@ -111,7 +120,7 @@ fn tool(plugin: &str, decl: &AgentToolDecl, requester: Requester) -> AddedTool {
             let (owner, name, requester) = (owner.clone(), name.clone(), requester.clone());
             async move {
                 let agent = client.pubkey();
-                let (call, _open) = open(&owner, client, context.clone());
+                let (call, _open) = open(&owner, client, context.clone(), None);
                 let answered = requester
                     .request(
                         "agentTool/call",
@@ -731,7 +740,8 @@ impl AgentType for PluginType {
         let params_agent =
             json!({ "pubkey": agent.pubkey, "name": agent.name, "owner": agent.owner });
         let client: Arc<dyn BuzzClient> = Arc::new(HandleClient(Arc::new(agent.clone())));
-        let (run, open) = open(&self.plugin, client, context.clone());
+        let attention = AgentActions::attention(agent);
+        let (run, open) = open(&self.plugin, client, context.clone(), attention);
         let request = requester.request(
             "agent/run",
             json!({
@@ -834,8 +844,9 @@ fn agent_entry(agent: &Agent) -> Value {
         "owner": agent.owner,
         "relay": agent.relay,
         "picture": agent.picture,
-        "config": agent.config,
+                "config": agent.config,
         "attentionEnabled": agent.attention_enabled,
+        "attention": serde_json::to_value(&*agent.attention).unwrap_or(Value::Null),
     })
 }
 
@@ -855,12 +866,99 @@ fn https(value: Option<&Value>) -> Result<Option<String>, Failure> {
 /// `agents/list`: the owner's agents in the selected community, and every
 /// agent running on this device.
 pub fn list(cx: &App) -> Result<Value, Failure> {
-    let agents = agents2(cx)?;
-    let agents = agents.read(cx);
+    let service = agents2(cx)?;
+    let agents = service.read(cx);
     Ok(json!({
         "agents": agents.agents().iter().map(agent_entry).collect::<Vec<_>>(),
         "running": agents.running().iter().map(agent_entry).collect::<Vec<_>>(),
+        "elsewhere": agents.elsewhere(cx).iter().map(|agent| json!({
+            "pubkey": agent.pubkey,
+            "name": agent.name,
+            "type": agent.agent_type,
+            "relay": agent.relay,
+            "picture": agent.picture,
+            "hosted": crate::agents2::is_hosted(&agent.agent_type, cx),
+        })).collect::<Vec<_>>(),
+        "teams": agents.teams().iter().map(|team| json!({
+            "id": team.id,
+            "name": team.name,
+            "instructions": team.instructions,
+            "members": team.members,
+        })).collect::<Vec<_>>(),
+        "types": registry::types(cx).iter().map(|kind| json!({
+            "type": kind.key,
+            "title": kind.kind.title(),
+            "description": kind.kind.description(),
+            "hosted": kind.kind.remote().is_some(),
+        })).collect::<Vec<_>>(),
     }))
+}
+
+/// `agents/watch`: sends `agents/changed` with what `agents/list` gives,
+/// now and whenever it changes.
+pub fn watch(
+    _params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(super::capabilities::Watch, Value), Failure> {
+    let service = agents2(cx)?;
+    let first = list(cx)?;
+    let last = std::cell::RefCell::new(first.clone());
+    let notify = std::rc::Rc::new(notify);
+    let send = notify.clone();
+    cx.defer(move |cx| send(first, cx));
+    let subscription = cx.observe(&service, move |_, cx| {
+        let Ok(now) = list(cx) else {
+            return;
+        };
+        if now != *last.borrow() {
+            *last.borrow_mut() = now.clone();
+            notify(now, cx);
+        }
+    });
+    Ok((
+        super::capabilities::Watch::new(subscription, Task::ready(())),
+        json!({}),
+    ))
+}
+
+/// `teams/save` and `teams/remove`: the owner's agent teams.
+pub fn team(method: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    let service = agents2(cx)?;
+    if method == "teams/remove" {
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or((INVALID_PARAMS, "id is required".to_owned()))?
+            .to_owned();
+        return service
+            .update(cx, |agents, cx| agents.remove_team(&id, cx))
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error));
+    }
+    let text = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+    let change = crate::agents2::teams::TeamChange {
+        id: text("id"),
+        name: text("name").ok_or((INVALID_PARAMS, "name is required".to_owned()))?,
+        instructions: text("instructions").unwrap_or_default(),
+        members: params
+            .get("members")
+            .and_then(Value::as_array)
+            .map(|members| {
+                members
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let team = service
+        .update(cx, |agents, cx| agents.save_team(change, cx))
+        .map_err(|error| (3, error))?;
+    Ok(
+        json!({ "id": team.id, "name": team.name, "instructions": team.instructions, "members": team.members }),
+    )
 }
 
 /// `agents/create`: a new agent of `type` (a `plugin/id` key) named
@@ -908,6 +1006,27 @@ pub fn save(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
     if config.as_ref().is_some_and(|config| !config.is_object()) {
         return Err((INVALID_PARAMS, "config must be an object".to_owned()));
     }
+    let attention: Vec<(String, Option<Value>)> = params
+        .get("attention")
+        .and_then(Value::as_object)
+        .map(|objects| {
+            objects
+                .iter()
+                .map(|(slug, value)| (slug.clone(), (!value.is_null()).then(|| value.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let restart: Vec<String> = params
+        .get("restart")
+        .and_then(Value::as_array)
+        .map(|slugs| {
+            slugs
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let change = crate::agents2::AgentChange {
         name: params
             .get("name")
@@ -916,7 +1035,8 @@ pub fn save(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
         picture: https(params.get("picture"))?,
         config,
         attention_enabled: params.get("attentionEnabled").and_then(Value::as_bool),
-        ..Default::default()
+        attention,
+        restart,
     };
     let task = agents2(cx)?.update(cx, |agents, cx| agents.save(&pubkey, change, cx));
     Ok(cx.background_spawn(
@@ -937,6 +1057,105 @@ pub fn remove(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
     ))
 }
 
+/// `agent/query`, `agent/publish` and `agent/upload`: raw reads, signed
+/// writes and uploads as the agent of an open call or run
+/// (`AgentHandle.query`, `publish`, `upload`).
+pub fn act_raw(
+    plugin: &str,
+    method: &str,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use base64::Engine;
+    let call = params
+        .get("call")
+        .or_else(|| params.get("run"))
+        .and_then(Value::as_u64)
+        .ok_or((INVALID_PARAMS, "call or run is required".to_owned()))?;
+    let client = acting(|acting| {
+        acting
+            .get(&call)
+            .filter(|open| open.plugin == plugin)
+            .map(|open| open.client.clone())
+    })
+    .ok_or((1, "That call or run has ended.".to_owned()))?;
+    let work: BoxFuture<'static, Result<Value, String>> = match method {
+        "agent/query" => {
+            let filters: Vec<Value> = params
+                .get("filters")
+                .and_then(Value::as_array)
+                .filter(|filters| (1..=10).contains(&filters.len()))
+                .ok_or((
+                    INVALID_PARAMS,
+                    "filters must list 1 to 10 filters".to_owned(),
+                ))?
+                .clone();
+            let read = client.query(filters);
+            Box::pin(async move {
+                let events = read.await?;
+                serde_json::to_value(events.into_iter().take(500).collect::<Vec<_>>())
+                    .map_err(|error| error.to_string())
+            })
+        }
+        "agent/publish" => {
+            let kind = params
+                .get("kind")
+                .and_then(Value::as_u64)
+                .and_then(|kind| u32::try_from(kind).ok())
+                .ok_or((INVALID_PARAMS, "kind is required".to_owned()))?;
+            let tags: Vec<Vec<String>> =
+                serde_json::from_value(params.get("tags").cloned().unwrap_or_else(|| json!([])))
+                    .map_err(|_| {
+                        (
+                            INVALID_PARAMS,
+                            "tags must be a list of lists of strings".to_owned(),
+                        )
+                    })?;
+            let content = params
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let write = client.publish(Template {
+                kind,
+                content,
+                tags,
+            });
+            Box::pin(async move {
+                serde_json::to_value(write.await?).map_err(|error| error.to_string())
+            })
+        }
+        _ => {
+            let data = params
+                .get("data")
+                .and_then(Value::as_str)
+                .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+                .filter(|data| !data.is_empty() && data.len() <= 3 * 1024 * 1024)
+                .ok_or((
+                    INVALID_PARAMS,
+                    "data must be base64 of 1 byte to 3 MiB".to_owned(),
+                ))?;
+            let mime = params
+                .get("mime")
+                .and_then(Value::as_str)
+                .ok_or((INVALID_PARAMS, "mime is required".to_owned()))?
+                .to_owned();
+            let upload = client.upload(data, mime);
+            Box::pin(async move {
+                serde_json::to_value(upload.await?).map_err(|error| error.to_string())
+            })
+        }
+    };
+    let done = crate::runtime::Runtime::handle(cx).spawn(work);
+    Ok(cx.background_spawn(async move {
+        match done.await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err((2, error)),
+            Err(error) => Err((2, error.to_string())),
+        }
+    }))
+}
+
 /// `agent/tool`: runs a Buzz tool as the agent of an open call or run.
 pub fn act(
     plugin: &str,
@@ -951,7 +1170,7 @@ pub fn act(
     let name = params
         .get("tool")
         .and_then(Value::as_str)
-        .filter(|name| buzz_tool(name))
+        .filter(|name| buzz_tool(name) || crate::buzz_mcp::attention::is_attention_tool(name))
         .ok_or((
             INVALID_PARAMS,
             "tool must be one of the Buzz tools".to_owned(),
@@ -962,13 +1181,39 @@ pub fn act(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let (client, context) = acting(|acting| {
+    let (client, context, attention) = acting(|acting| {
         acting
             .get(&call)
             .filter(|open| open.plugin == plugin)
-            .map(|open| (open.client.clone(), open.context.clone()))
+            .map(|open| {
+                (
+                    open.client.clone(),
+                    open.context.clone(),
+                    open.attention.clone(),
+                )
+            })
     })
     .ok_or((1, "That call or run has ended.".to_owned()))?;
+    if crate::buzz_mcp::attention::is_attention_tool(&name) {
+        // A run's agent manages its own watches and timers.
+        let attention = attention.ok_or((
+            INVALID_PARAMS,
+            "Attention tools work only inside an agent run".to_owned(),
+        ))?;
+        let done = crate::runtime::Runtime::handle(cx).spawn(async move {
+            if !attention.enabled().await? {
+                return Err("The owner turned this agent's attention off.".to_owned());
+            }
+            crate::buzz_mcp::attention::call_attention_tool(&*attention, &name, &args).await
+        });
+        return Ok(cx.background_spawn(async move {
+            match done.await {
+                Ok(Ok(text)) => Ok(json!({ "text": text })),
+                Ok(Err(error)) => Err((2, error)),
+                Err(error) => Err((2, error.to_string())),
+            }
+        }));
+    }
     let done = crate::runtime::Runtime::handle(cx)
         .spawn(async move { call_tool(client, &context, &name, &args).await });
     Ok(cx.background_spawn(async move {
@@ -1046,7 +1291,7 @@ mod tests {
 
     #[test]
     fn open_calls_close_with_their_guard() {
-        let (id, guard) = open("a.b", Arc::new(Nobody), Context::default());
+        let (id, guard) = open("a.b", Arc::new(Nobody), Context::default(), None);
         assert!(acting(|acting| acting.contains_key(&id)));
         drop(guard);
         assert!(!acting(|acting| acting.contains_key(&id)));

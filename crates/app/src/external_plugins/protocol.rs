@@ -60,6 +60,8 @@ pub enum Permission {
     PublishEvents,
     /// Create, change and remove the user's agents.
     ManageAgents,
+    /// Start DMs and create, join, leave, archive and delete channels.
+    ManageChannels,
 }
 
 impl Permission {
@@ -69,6 +71,7 @@ impl Permission {
             Permission::SendMessages => "Send, edit, react to and delete messages as you",
             Permission::PublishEvents => "Publish other events as you",
             Permission::ManageAgents => "Create, change and remove your agents",
+            Permission::ManageChannels => "Start DMs and create, join and leave channels",
         }
     }
 }

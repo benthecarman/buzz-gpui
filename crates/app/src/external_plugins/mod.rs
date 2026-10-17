@@ -15,6 +15,7 @@
 
 mod agents;
 mod capabilities;
+mod channels;
 mod contribute;
 mod dialogs;
 pub use dialogs::dialog;
@@ -1263,6 +1264,8 @@ impl ExternalPlugins {
             "thread/watch" => "thread/changed",
             "events/watch" => "events/live",
             "unread/watch" => "unread/changed",
+            "reminders/watch" => "reminders/changed",
+            "agents/watch" => "agents/changed",
             _ => "channel/changed",
         };
         let notify = move |mut value: Value, cx: &mut App| {
@@ -1273,6 +1276,8 @@ impl ExternalPlugins {
             "thread/watch" => capabilities::watch_thread(params, notify, cx),
             "events/watch" => events::watch(params, notify, cx),
             "unread/watch" => reading::watch(params, notify, cx),
+            "reminders/watch" => channels::watch(params, notify, cx),
+            "agents/watch" => agents::watch(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
         };
         Reply::Now(started.map(|(watch, mut value)| {
@@ -1338,6 +1343,16 @@ impl ExternalPlugins {
                     .and_then(|plugin| plugin.id().map(str::to_owned));
                 match plugin {
                     Some(plugin) => later(agents::act(&plugin, params, cx)),
+                    None => Reply::Now(Err((1, "The plugin stopped.".to_owned()))),
+                }
+            }
+            "agent/query" | "agent/publish" | "agent/upload" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                match plugin {
+                    Some(plugin) => later(agents::act_raw(&plugin, method, params, cx)),
                     None => Reply::Now(Err((1, "The plugin stopped.".to_owned()))),
                 }
             }
@@ -1466,10 +1481,17 @@ impl ExternalPlugins {
             "events/watch" => Self::watch(path, generation, "events/watch", params, cx),
             "unread/watch" => Self::watch(path, generation, "unread/watch", params, cx),
             "unread/get" => Reply::Now(reading::get(cx)),
+            "threads/follow" => later(channels::follow(params, cx)),
+            "reminders/list" => Reply::Now(channels::list(cx)),
+            "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
+            "reminders/create" | "reminders/snooze" | "reminders/complete" | "reminders/cancel" => {
+                later(channels::change(method, params, cx))
+            }
             "inbox/get" => Reply::Now(reading::inbox(cx)),
             "threads/activity" => later(reading::threads(params, cx)),
             "read/mark" => later(reading::mark(params, cx)),
-            "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch" => {
+            "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
+            | "reminders/unwatch" | "agents/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
@@ -1480,10 +1502,13 @@ impl ExternalPlugins {
             }
             "messages/send" | "messages/edit" | "messages/react" | "messages/delete"
             | "files/upload" | "events/publish" | "agents/create" | "agents/save"
-            | "agents/remove" => {
+            | "agents/remove" | "dm/open" | "channels/create" | "channels/action"
+            | "teams/save" | "teams/remove" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
-                    "agents/create" | "agents/save" | "agents/remove" => Permission::ManageAgents,
+                    "agents/create" | "agents/save" | "agents/remove" | "teams/save"
+                    | "teams/remove" => Permission::ManageAgents,
+                    "dm/open" | "channels/create" | "channels/action" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1502,6 +1527,9 @@ impl ExternalPlugins {
                         ),
                     )));
                 }
+                if method.starts_with("teams/") {
+                    return Reply::Now(agents::team(method, params, cx));
+                }
                 later(match method {
                     "messages/edit" => capabilities::edit(params, cx),
                     "messages/react" => capabilities::react(params, cx),
@@ -1511,11 +1539,15 @@ impl ExternalPlugins {
                     "agents/create" => agents::create(params, cx),
                     "agents/save" => agents::save(params, cx),
                     "agents/remove" => agents::remove(params, cx),
+                    "dm/open" => channels::open_dm(params, cx),
+                    "channels/create" => channels::create(params, cx),
+                    "channels/action" => channels::action(params, cx),
                     _ => capabilities::send(params, cx),
                 })
             }
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
+            "agents/watch" => Self::watch(path, generation, "agents/watch", params, cx),
             "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),
             "ui/openLink" => Reply::Now(capabilities::open_link(params, cx)),
             _ => Reply::Now(Self::answer_now(method, params, cx)),

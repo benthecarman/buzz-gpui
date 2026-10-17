@@ -68,7 +68,7 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `description` | Optional. Shown in Settings. |
 | `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
 | `apiVersion` | Optional. `1`, the only version so far. |
-| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents. Reading needs no permission. |
+| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents and teams. `manage-channels`: start DMs and create, join, leave, archive and delete channels. Reading needs no permission. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
 `BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
@@ -243,7 +243,10 @@ While a call or run is open, the plugin can act as its agent:
 
 | Request | Params | Result |
 | --- | --- | --- |
-| `agent/tool` | `call` or `run`, `tool` (a Buzz tool, such as `send`, `read`, `react` or `channels`), `arguments` | The tool's answer: `{"text"}` or `{"image"}` |
+| `agent/tool` | `call` or `run`, `tool` (a Buzz tool, such as `send`, `read`, `react` or `channels`, or in a run one of the attention tools, such as `watch_add`), `arguments` | The tool's answer: `{"text"}` or `{"image"}` |
+| `agent/query` | `call` or `run`, `filters` (1 to 10 NIP-01 filters) | The events, read as the agent, at most 500 |
+| `agent/publish` | `call` or `run`, `kind`, `content`, `tags` | The signed event, published as the agent |
+| `agent/upload` | `call` or `run`, `data` (base64, up to 3 MiB), `mime` | `{"url","sha256","size","type",…}`, uploaded as the agent |
 
 The agent's key stays on its host; Buzz signs for it. Buzz tools that read
 local files or memories are not available to plugin agents. `send` needs
@@ -409,9 +412,20 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
 | `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount"}` |
 | `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. |
-| `agents/list` | none | `{"agents", "running"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled"}` |
+| `agents/list` | none | `{"agents","running","elsewhere","teams","types"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled","attention"}`; agents listed as running elsewhere or hosted; your teams `{"id","name","instructions","members"}`; and the agent types `{"type","title","description","hosted"}` |
+| `agents/watch` | none | `{"watch"}`. Buzz then sends `agents/changed` with what `agents/list` gives, now and whenever it changes. Stop with `agents/unwatch`. |
 | `agents/create` | `type` (a `plugin/id` key, such as `com.example.hello/greeter`), `name`, optional `config` and `picture` (https) | The new agent. Needs `manage-agents`. |
-| `agents/save` | `pubkey`, and any of `name`, `picture`, `config` (the whole config), `attentionEnabled` | `null` once saved. Needs `manage-agents`. |
+| `agents/save` | `pubkey`, and any of `name`, `picture`, `config` (the whole config), `attentionEnabled`, `attention` (slug to attention object, or `null` to delete it) and `restart` (timer slugs to start over) | `null` once saved. Needs `manage-agents`. |
+| `teams/save` | `id` (to replace one), `name`, `instructions`, `members` (agents on this device) | The team. Needs `manage-agents`. |
+| `teams/remove` | `id` | `null`. Its agents stay. Needs `manage-agents`. |
+| `dm/open` | `pubkeys` (1 to 8 others) | `{"channel"}`: the direct message with them, made if new. Needs `manage-channels`. |
+| `channels/create` | `name`, `description`, `private`, `ttlSeconds` (optional; without it the channel is ongoing) | `{"channel"}`. Needs `manage-channels`. |
+| `channels/action` | `channel`, `action`: `join`, `leave`, `archive`, `unarchive`, `delete` (by an owner) or `hide` (a DM) | `null` once the relay shows it. Needs `manage-channels`. |
+| `threads/follow` | `channel`, `root`, and `following` (`true` or `false`), or no `following` to ask | Whether you follow the thread now |
+| `reminders/list` | none | `{"reminders","error"}`, each `{"id","createdAt","notBefore","status","note","message"}` with `status` `pending`, `done` or `cancelled` |
+| `reminders/watch` | none | `{"watch"}`. Buzz then sends `reminders/changed` with what `reminders/list` gives. Stop with `reminders/unwatch`. |
+| `reminders/create` | `channel`, `message`, `notBefore` (unix seconds), optional `note`, `preview` and `author` | `null` once saved |
+| `reminders/snooze`, `reminders/complete`, `reminders/cancel` | `id`, and `notBefore` to snooze | `null` once saved |
 | `agents/remove` | `pubkey` | `null` once the agent and its key are gone. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
