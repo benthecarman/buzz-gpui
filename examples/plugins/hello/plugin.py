@@ -10,7 +10,10 @@ It adds:
   community's channels. Choosing a channel follows it live, and you can
   reply from the page (the manifest declares "send-messages" for that);
 - a panel for https://example.com/ links, with a button in the channel
-  header.
+  header;
+- a Settings section, a notification category, two message actions (one
+  marks messages), a chip for example.com links, a card for messages that
+  start with "!hello", a composer button and a shortcut (Ctrl/Cmd+Shift+H).
 """
 
 import json
@@ -19,6 +22,8 @@ import sys
 views = {}  # view id -> what the app opened it with, plus our state
 pending = {}  # our request id -> what to do with the answer
 next_request = 0
+starred = set()  # message ids the "Star" action marks
+settings = {"loud": False}  # what the Settings section edits
 
 
 def send(message):
@@ -166,6 +171,7 @@ def page(state):
                 "type": "row",
                 "children": [
                     {"type": "button", "id": "toast", "label": "Show a toast"},
+                    {"type": "button", "id": "notify", "label": "Notify me", "icon": "Bell"},
                     {"type": "link", "label": "Open example.com", "url": "https://example.com/"},
                 ],
             },
@@ -194,10 +200,34 @@ def panel(state):
     }
 
 
+def settings_section(state):
+    return {
+        "type": "column",
+        "gap": "md",
+        "children": [
+            text("Hello settings", style="title"),
+            text("This section is drawn by the plugin too.", tone="subtle"),
+            {
+                "type": "switch",
+                "id": "loud",
+                "checked": settings["loud"],
+                "label": "Shout in toasts",
+            },
+        ],
+    }
+
+
 def render(view):
     state = views[view]
-    tree = page(state) if state["kind"] == "page" else panel(state)
+    kind = state["kind"]
+    tree = page(state) if kind == "page" else settings_section(state) if kind == "settings" else panel(state)
     notify("view/render", {"view": view, "tree": tree})
+
+
+def toast(title, tone="success"):
+    if settings["loud"]:
+        title = title.upper() + "!"
+    request("ui/toast", {"title": title, "tone": tone})
 
 
 def on_open(params):
@@ -247,8 +277,24 @@ def on_event(params):
         return
     if element == "add" and event == "click":
         state["count"] += 1
+        notify("page/badge", {"page": "hello", "text": str(state["count"])})
     elif element == "reset" and event == "click":
         state["count"] = 0
+        notify("page/badge", {"page": "hello", "text": None})
+    elif element == "loud" and event == "toggle":
+        settings["loud"] = params.get("value", False)
+    elif element == "notify" and event == "click":
+        global next_request
+        request(
+            "notifications/submit",
+            {
+                "category": "greetings",
+                "sourceKey": f"hello-{next_request}",
+                "title": "Hello!",
+                "body": "A notification from a plugin.",
+            },
+        )
+        return
     elif element == "note" and event == "submit":
         note = params.get("value", "").strip()
         if not note:
@@ -272,11 +318,44 @@ def on_event(params):
         request("ui/openConversation", {"channel": state["following"]})
         return
     elif element == "toast" and event == "click":
-        request("ui/toast", {"title": "Hello from a plugin", "tone": "success"})
+        toast("Hello from a plugin")
         return
     else:
         return
     render(view)
+
+
+def link_chip(url):
+    """A link renderer's answer: what the chip for an example.com link shows."""
+    path = url[len("https://example.com"):] or "/"
+    return {
+        "type": "row",
+        "gap": "sm",
+        "children": [{"type": "icon", "name": "Globe"}, text(f"Example · {path}")],
+    }
+
+
+def hello_card(message):
+    """A message renderer's answer: a card for "!hello" messages."""
+    rest = message["content"][len("!hello"):].strip() or "Hello!"
+    return {
+        "type": "card",
+        "title": f"{message['authorName'] or 'Someone'} says hello",
+        "children": [
+            {"type": "markdown", "text": rest},
+            {"type": "button", "id": "wave", "label": "Wave back", "icon": "Smiley"},
+        ],
+    }
+
+
+def on_action(params):
+    action, message = params["action"], params["message"]
+    if action == "words":
+        count = len(message["content"].split())
+        toast(f"{count} words")
+    elif action == "star":
+        starred.symmetric_difference_update({message["id"]})
+        notify("message/markers", {"action": "star", "messages": sorted(starred)})
 
 
 def handle(message):
@@ -301,11 +380,28 @@ def handle(message):
                                 "icon": "Globe",
                                 "matches": ["https://example.com/"],
                                 "launcher": {"label": "Example", "placement": "side"},
+                                "menu": {"label": "Open the example panel"},
                             }
                         ],
+                        "settingsCards": [
+                            {"id": "settings", "title": "Hello", "icon": "Smiley", "placement": "Integrations"}
+                        ],
+                        "notifications": [{"id": "greetings", "label": "Hello greetings"}],
+                        "messageActions": [
+                            {"id": "words", "title": "Count words", "icon": "TextAa"},
+                            {"id": "star", "title": "Star or unstar", "icon": "Flag"},
+                        ],
+                        "linkRenderers": [{"id": "example-link", "matches": ["https://example.com/"]}],
+                        "messageRenderers": [{"id": "hello-card", "prefix": "!hello"}],
+                        "composerTools": [{"id": "wave", "title": "Insert a wave", "icon": "Smiley"}],
+                        "shortcuts": [{"id": "hi", "title": "Say hi", "keys": ["mod+shift+h"]}],
                     },
                 }
             )
+        elif method == "link/render":
+            send({"id": message["id"], "result": {"tree": link_chip(params["url"])}})
+        elif method == "message/render":
+            send({"id": message["id"], "result": {"tree": hello_card(params["message"])}})
         else:
             send({"id": message["id"], "error": {"code": -32601, "message": method}})
     elif method == "view/open":
@@ -316,6 +412,14 @@ def handle(message):
         views.pop(params.get("view"), None)
     elif method == "channel/changed":
         on_changed(params)
+    elif method == "message/action":
+        on_action(params)
+    elif method == "composer/tool":
+        request("composer/insert", {"composer": params["composer"], "text": "👋 "})
+    elif method == "shortcut":
+        toast("Hi from a shortcut")
+    elif method == "render/event" and params.get("id") == "wave":
+        toast("You waved back")
 
 
 def main():

@@ -100,14 +100,23 @@ fn bundled() -> Registry {
     }
 }
 
-// Extension points: the bundled features register above; nothing else
-// registers yet.
-#[allow(dead_code)]
+/// Removes every renderer and action registered under `key`, as when the
+/// plugin that added it stops.
+pub fn unregister(key: &str) {
+    REGISTRY.with_borrow_mut(|r| {
+        r.messages.retain(|item| item.key() != key);
+        r.links.retain(|item| item.key() != key);
+        r.inline.retain(|item| item.key() != key);
+        r.attachments.retain(|item| item.key() != key);
+        r.actions.retain(|item| item.key() != key);
+    });
+}
+
+// Extension points: bundled features and plugins people added register.
 pub fn register_message(renderer: Rc<dyn MessageRenderer>) {
     REGISTRY.with_borrow_mut(|r| r.messages.push(renderer));
 }
 
-#[allow(dead_code)]
 pub fn register_link(renderer: Rc<dyn LinkRenderer>) {
     REGISTRY.with_borrow_mut(|r| r.links.push(renderer));
 }
@@ -117,12 +126,10 @@ pub fn register_inline(renderer: Rc<dyn InlineRenderer>) {
     REGISTRY.with_borrow_mut(|r| r.inline.push(renderer));
 }
 
-#[allow(dead_code)]
 pub fn register_attachment(renderer: Rc<dyn AttachmentRenderer>) {
     REGISTRY.with_borrow_mut(|r| r.attachments.push(renderer));
 }
 
-#[allow(dead_code)]
 pub fn register_action(action: Rc<dyn MessageAction>) {
     REGISTRY.with_borrow_mut(|r| r.actions.push(action));
 }

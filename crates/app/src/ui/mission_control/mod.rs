@@ -27,7 +27,7 @@ actions!(
 pub fn register(cx: &mut App) {
     pages::register(
         PageSpec {
-            badge: Some(badge),
+            badge: Some(std::rc::Rc::new(badge)),
             ..PageSpec::sidebar(PAGE, "Mission control", IconName::SquaresFour, |_, cx| {
                 cx.new(page::MissionControlPage::new).into()
             })

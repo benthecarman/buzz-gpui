@@ -63,7 +63,7 @@ pub fn build(build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Opti
 
 /// A trailing count or mark on the page's row, such as Reminders' due
 /// count. `None` hides it.
-pub type Badge = fn(&App) -> Option<AnyElement>;
+pub type Badge = Rc<dyn Fn(&App) -> Option<AnyElement>>;
 
 #[derive(Clone)]
 pub struct PageSpec {

@@ -210,3 +210,76 @@ fn messages_are_single_lines() {
         json!({ "jsonrpc": "2.0", "id": 7, "error": { "code": -32601, "message": "no" } })
     );
 }
+
+#[test]
+fn every_kind_of_contribution_is_checked() {
+    let parsed = Contributions::parse(json!({
+        "settingsCards": [{ "id": "card", "title": "Card" }],
+        "notifications": [{ "id": "alerts", "label": "Alerts" }],
+        "messageActions": [{ "id": "act", "title": "Act", "kinds": [9, 1], "mine": true }],
+        "linkRenderers": [{ "id": "links", "matches": ["https://example.com/"] }],
+        "messageRenderers": [{ "id": "cards", "prefix": "!card" }],
+        "attachmentRenderers": [{ "id": "pdf", "mime": ["application/pdf"] }],
+        "composerTools": [{ "id": "tool", "title": "Tool" }],
+        "shortcuts": [{ "id": "go", "title": "Go", "keys": ["mod+shift+g"] }],
+        "pages": [{ "id": "top", "title": "Top", "placement": "topbar" }],
+        "panels": [{ "id": "p", "title": "P", "menu": { "label": "Open P" } }],
+    }))
+    .unwrap();
+    assert_eq!(parsed.settings_cards[0].placement, "Integrations");
+    assert_eq!(parsed.pages[0].placement, PagePlacement::Topbar);
+    assert!(parsed.message_actions[0].mine);
+
+    for (value, reason) in [
+        (
+            json!({ "messageRenderers": [{ "id": "all" }] }),
+            "every chat message",
+        ),
+        (
+            json!({ "messageRenderers": [{ "id": "all", "kinds": [9] }] }),
+            "every chat message",
+        ),
+        (
+            json!({ "linkRenderers": [{ "id": "l", "matches": [] }] }),
+            "too broadly",
+        ),
+        (
+            json!({ "attachmentRenderers": [{ "id": "a", "mime": [] }] }),
+            "MIME",
+        ),
+        (
+            json!({ "shortcuts": [{ "id": "s", "title": "S", "keys": ["k"] }] }),
+            "needs mod or alt",
+        ),
+        (
+            json!({ "shortcuts": [{ "id": "s", "title": "S", "keys": ["hyper+k"] }] }),
+            "not a modifier",
+        ),
+        (
+            json!({ "notifications": [{ "id": "x", "label": "X" }], "composerTools": [{ "id": "x", "title": "X" }] }),
+            "twice",
+        ),
+    ] {
+        let error = Contributions::parse(value.clone()).unwrap_err();
+        assert!(error.contains(reason), "{value}: {error}");
+    }
+    assert!(
+        Contributions::parse(json!({ "messageRenderers": [{ "id": "k", "kinds": [30023] }] }))
+            .is_ok()
+    );
+}
+
+#[test]
+fn chords_parse() {
+    assert_eq!(
+        Chord::parse("mod+shift+K").unwrap(),
+        Chord {
+            key: "K".into(),
+            primary: true,
+            shift: true,
+            alt: false
+        }
+    );
+    assert!(Chord::parse("alt+1").unwrap().alt);
+    assert!(Chord::parse("mod+").is_err());
+}

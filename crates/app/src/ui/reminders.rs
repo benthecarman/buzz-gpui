@@ -37,7 +37,7 @@ const CHECKED: &str = "buzz-reminders-checked.v1";
 pub fn register(cx: &mut App) {
     pages::register(
         PageSpec {
-            badge: Some(badge),
+            badge: Some(std::rc::Rc::new(badge)),
             ..PageSpec::sidebar(PAGE, "Reminders", IconName::Alarm, |window, cx| {
                 cx.new(|cx| page::RemindersPage::new(window, cx)).into()
             })

@@ -23,7 +23,9 @@ pub fn init(cx: &mut App) {
             icon: None,
             placement: CardPlacement::Administration,
             visibility: Some(visibility),
-            build: |window, cx| cx.new(|cx| card::CommunityAdmin::new(window, cx)).into(),
+            build: crate::ui::settings::cards::build(|window, cx| {
+                cx.new(|cx| card::CommunityAdmin::new(window, cx)).into()
+            }),
         },
         cx,
     );

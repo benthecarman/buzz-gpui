@@ -169,7 +169,9 @@ pub fn init(cx: &mut App) {
             icon: Some(IconName::ChatCircle),
             placement: super::cards::CardPlacement::Group("Account"),
             visibility: None,
-            build: |window, cx| cx.new(|cx| PairingSettings::new(window, cx)).into(),
+            build: super::cards::build(|window, cx| {
+                cx.new(|cx| PairingSettings::new(window, cx)).into()
+            }),
         },
         cx,
     );

@@ -7,12 +7,17 @@ is enough, and no SDK is needed.
 
 A plugin can add:
 
-- **Pages**, with a row in the channel sidebar.
-- **Panels** beside the conversation. A panel opens when someone clicks a link
-  it matches, or from a button in the channel header.
+- **Pages**, in the channel sidebar or the header, with a badge.
+- **Panels** beside the conversation. A panel opens from a link it matches,
+  a button in the channel header or the channel's menu.
+- **Settings sections** and **notification categories**.
+- **Message actions** in a message's More menu, with an optional marker.
+- **Renderers** that draw link chips, message bodies or attachments.
+- **Composer tools** and **keyboard shortcuts**.
 
 [`examples/plugins/hello`](../examples/plugins/hello) is a complete plugin in
-one Python file with no dependencies. It adds a page and a panel.
+one Python file with no dependencies. It adds one of each, except an
+attachment renderer.
 
 ## Try the example
 
@@ -111,8 +116,57 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   the panel as a tab. Buzz's own panels win over a plugin's for the same
   link.
 - `launcher` adds a button to the channel header. `placement` is `side` (the
-  default) or `bottom`.
-- A plugin can add at most 16 panels and 8 pages.
+  default) or `bottom`. `menu` (`{"label"}`) adds an entry to the channel's
+  menu.
+- A page's `placement` is `sidebar` (the default), `topbar` or `hidden`.
+- A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
+  below. Ids are unique across all of them.
+
+The rest of the result can list:
+
+| Key | Each entry | What it adds |
+| --- | --- | --- |
+| `settingsCards` | `id`, `title`, `icon`, `placement`: `community`, `administration` or a group name (default `Integrations`) | A Settings section. It is a view with `kind` `settings`. |
+| `notifications` | `id`, `label` | A category with its own switch in Settings → Notifications. Send with `notifications/submit`. |
+| `messageActions` | `id`, `title`, `icon`, `kinds` (default chat messages), `mine` | An item in a message's More menu. Choosing it sends `message/action`. |
+| `linkRenderers` | `id`, `matches` (link prefixes), `order` | Draws the chip of matching links in messages. Buzz asks with `link/render`. |
+| `messageRenderers` | `id`, `kinds`, `prefix`, `order` | Draws the body of matching messages. Buzz asks with `message/render`. It needs a `prefix` of two or more characters, or kinds other than chat messages. |
+| `attachmentRenderers` | `id`, `mime` (MIME type prefixes) | Draws matching attachments. Buzz asks with `attachment/render`. |
+| `composerTools` | `id`, `title`, `icon`, `order` | A button in every composer's toolbar. Clicking it sends `composer/tool`. |
+| `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`) | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. |
+
+### Renderers
+
+Buzz draws while it paints and does not wait for a plugin. The first time a
+renderer matches something, Buzz asks the plugin, draws what it would have
+drawn anyway, and redraws when the answer comes. Answers are kept until the
+plugin restarts, so answer from the request alone.
+
+| Request from Buzz | Params | Answer |
+| --- | --- | --- |
+| `link/render` | `renderer`, `url`, `label` | `{"tree"}`, or `null` to leave the chip as it is |
+| `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
+| `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
+
+A renderer's tree can use every element but `input`. Its buttons and switches
+send `render/event` with `renderer`, `target` (the URL, message or attachment
+it drew), `id`, `event` and `value`.
+
+### Other notifications from Buzz
+
+| Notification | Params |
+| --- | --- |
+| `message/action` | `action`, `message` |
+| `composer/tool` | `tool`, `channel`, `composer` (an id for `composer/insert`) |
+| `shortcut` | `shortcut` |
+| `render/event` | `renderer`, `target`, `id`, `event`, `value` |
+
+### Notifications from the plugin
+
+| Notification | Params | Effect |
+| --- | --- | --- |
+| `message/markers` | `action`, `messages` (event ids) | Those messages show the action's icon after the byline; the list replaces the last one. |
+| `page/badge` | `page`, `text` (up to 8 characters, or `null` to clear), `tone` | A badge on the page's row. |
 
 ### 2. `view/open` (notification from Buzz)
 
@@ -210,6 +264,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
 | `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys) | `null`, once the message is queued. Needs `send-messages`. |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
+| `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
+| `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |
 
 Reads cover the selected community and channels you can read in it. They
 never mark anything read. A read waits up to 10 seconds for the relay.
@@ -325,8 +381,8 @@ you added from running for that launch. Their switches stay as they were.
 
 ## Not built yet
 
-- Notification categories, settings cards, message actions, link and
-  message renderers, and composer tools from plugins.
+- Agent types and tools from plugins.
+- Composer completions and inline renderers.
 - Following a thread live, editing and reacting.
 - A WebAssembly runtime for plugins that run sandboxed
   ([#12](https://github.com/benthecarman/buzz-gpui/issues/12)).

@@ -256,6 +256,9 @@ pub struct Composer {
     no_followup: bool,
     /// Plugin tools in the toolbar (`composer_tools`).
     tools: Vec<AnyView>,
+    /// The tool registry's [`super::composer_tools::generation`] the
+    /// tools were made at; a plugin adding one rebuilds them.
+    tools_generation: u64,
     /// A new Me conversation's first message carries no files.
     no_attachments: bool,
     /// Model and effort picked for mentioned agents' next run, and the
@@ -526,6 +529,7 @@ impl Composer {
             chat: false,
             no_followup: false,
             tools,
+            tools_generation: super::composer_tools::generation(cx),
             no_attachments: false,
             run_models: models::RunModels::default(),
             _subscriptions: subscriptions,
@@ -5219,6 +5223,19 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let generation = super::composer_tools::generation(cx);
+        if generation != self.tools_generation {
+            self.tools_generation = generation;
+            self.tools = super::composer_tools::build(
+                super::composer_tools::ToolContext {
+                    community: self.community.clone(),
+                    channel: self.channel.clone(),
+                    composer: cx.weak_entity(),
+                },
+                window,
+                cx,
+            );
+        }
         let c = *cx.colors();
         self.sync_uploads(cx);
         self.markdown.follow_theme(&self.input, &c, cx);

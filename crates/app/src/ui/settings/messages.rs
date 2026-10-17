@@ -80,7 +80,7 @@ pub fn init(cx: &mut App) {
             icon: Some(IconName::ChatCircle),
             placement: CardPlacement::Community,
             visibility: None,
-            build: |_, cx| cx.new(|_| MessageSettings { menu: false }).into(),
+            build: super::cards::build(|_, cx| cx.new(|_| MessageSettings { menu: false }).into()),
         },
         cx,
     );

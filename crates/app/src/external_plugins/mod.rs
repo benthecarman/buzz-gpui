@@ -14,6 +14,8 @@
 //! saving a file restarts the plugin, and open views ask for a new tree.
 
 mod capabilities;
+mod contribute;
+mod draw;
 pub mod git;
 mod process;
 pub mod protocol;
@@ -22,7 +24,7 @@ mod view;
 
 use crate::community::AppState;
 use crate::runtime::Runtime;
-use crate::ui::channel_panels::{self, ChannelPanel, Launcher, Placement};
+use crate::ui::channel_panels::{self, ChannelPanel, Launcher, MenuEntry, Placement};
 use crate::ui::pages::{self, Page, PageSpec};
 use crate::ui::toasts::{self, Notice};
 use buzz_relay_client::ChannelType;
@@ -31,7 +33,8 @@ use futures::StreamExt;
 use gpui_kit::*;
 use process::{Connection, Event};
 use protocol::{
-    Contributions, INVALID_PARAMS, LauncherPlacement, MANIFEST, METHOD_NOT_FOUND, Permission,
+    Contributions, INVALID_PARAMS, LauncherPlacement, MANIFEST, METHOD_NOT_FOUND, PagePlacement,
+    Permission,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -125,6 +128,7 @@ pub enum Status {
 enum Added {
     Panel(&'static str),
     Page(Page),
+    Other(contribute::Added),
 }
 
 pub struct Plugin {
@@ -303,6 +307,7 @@ fn icon(name: Option<&str>) -> IconName {
 
 impl ExternalPlugins {
     pub fn init(cx: &mut App) {
+        contribute::init(cx);
         let file = crate::plugins::home().join(SAVED);
         let saved: Saved = std::fs::read(&file)
             .ok()
@@ -840,6 +845,9 @@ impl ExternalPlugins {
         plugin.generation += 1;
         let off = status == Status::Off;
         plugin.status = status;
+        if let Some(id) = plugin.id() {
+            contribute::forget(id);
+        }
         if off {
             let added = std::mem::take(&mut plugin.added);
             take_away(added, cx);
@@ -866,6 +874,7 @@ impl ExternalPlugins {
         let Some(id) = plugin.id().map(str::to_owned) else {
             return;
         };
+        let name = plugin.name();
         let contributions = match result.and_then(Contributions::parse) {
             Ok(contributions) => contributions,
             // It exited; the exit says why, with its stderr.
@@ -882,7 +891,9 @@ impl ExternalPlugins {
             return;
         };
         let before = std::mem::take(&mut plugin.added);
-        let added = Self::register(&id, &contributions, cx);
+        // Renderer answers and marks belong to the old run.
+        contribute::forget(&id);
+        let added = Self::register(&id, &name, &contributions, cx);
         take_away(
             before
                 .into_iter()
@@ -912,7 +923,7 @@ impl ExternalPlugins {
         cx.refresh_windows();
     }
 
-    fn register(id: &str, contributions: &Contributions, cx: &mut App) -> Vec<Added> {
+    fn register(id: &str, name: &str, contributions: &Contributions, cx: &mut App) -> Vec<Added> {
         let mut added = Vec::new();
         for panel in &contributions.panels {
             let key = intern(format!("{id}/{}", panel.id));
@@ -938,7 +949,10 @@ impl ExternalPlugins {
                             LauncherPlacement::Bottom => Placement::Bottom,
                         },
                     }),
-                    menu: None,
+                    menu: panel.menu.as_ref().map(|menu| MenuEntry {
+                        label: intern(menu.label.clone()),
+                        eligible: |_, _| true,
+                    }),
                     build: channel_panels::build(move |opening, window, cx| {
                         ExternalView::panel(&plugin, &contribution, opening, window, cx)
                     }),
@@ -951,18 +965,44 @@ impl ExternalPlugins {
             let key = Page::new(intern(format!("{id}/{}", page.id)));
             let plugin = id.to_owned();
             let contribution = page.id.clone();
-            pages::register(
-                PageSpec::sidebar(
-                    key,
-                    intern(page.title.clone()),
-                    icon(page.icon.as_deref()),
-                    move |window, cx| ExternalView::page(&plugin, &contribution, window, cx),
-                ),
-                cx,
+            let mut spec = PageSpec::sidebar(
+                key,
+                intern(page.title.clone()),
+                icon(page.icon.as_deref()),
+                move |window, cx| ExternalView::page(&plugin, &contribution, window, cx),
             );
+            spec.placement = match page.placement {
+                PagePlacement::Sidebar => pages::Placement::Sidebar,
+                PagePlacement::Topbar => pages::Placement::Topbar,
+                PagePlacement::Hidden => pages::Placement::Hidden,
+            };
+            spec.collapsible = page.placement == PagePlacement::Topbar;
+            spec.badge = Some(contribute::badge(key.key()));
+            pages::register(spec, cx);
             added.push(Added::Page(key));
         }
+        added.extend(
+            contribute::register(id, name, contributions, cx)
+                .into_iter()
+                .map(Added::Other),
+        );
         added
+    }
+
+    /// The connection of plugin `id` while it runs.
+    fn running_connection<'a>(id: &str, cx: &'a App) -> Option<&'a Connection> {
+        cx.try_global::<Self>()?
+            .by_id(id)
+            .filter(|plugin| plugin.status == Status::Running)?
+            .connection
+            .as_ref()
+    }
+
+    /// Sends a notification to plugin `id` if it runs.
+    fn notify_running(id: &str, method: &str, params: Value, cx: &App) {
+        if let Some(connection) = Self::running_connection(id, cx) {
+            connection.notify(method, params);
+        }
     }
 
     fn event(path: &Path, generation: u64, event: Event, cx: &mut App) {
@@ -997,6 +1037,16 @@ impl ExternalPlugins {
                         .ok_or_else(|| "view/render has no tree".to_owned())
                         .and_then(protocol::Node::parse);
                     view.update(cx, |view, cx| view.set_tree(tree, cx));
+                }
+                "message/markers" => {
+                    if let Some(id) = plugin.id().map(str::to_owned) {
+                        contribute::set_marks(&id, &params, cx);
+                    }
+                }
+                "page/badge" => {
+                    if let Some(id) = plugin.id().map(str::to_owned) {
+                        contribute::set_badge(&id, &params, cx);
+                    }
                 }
                 _ => tracing::debug!(plugin = %name, %method, "unknown plugin notification"),
             },
@@ -1086,6 +1136,17 @@ impl ExternalPlugins {
             "thread/messages" => later(capabilities::thread_messages(params, cx)),
             "profiles/get" => Reply::Now(capabilities::profiles(params, cx)),
             "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
+            "composer/insert" => Reply::Now(contribute::insert(params, cx)),
+            "notifications/submit" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                Reply::Now(match plugin {
+                    Some(plugin) => capabilities::notify(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                })
+            }
             "channel/watch" => Self::watch(path, generation, params, cx),
             "channel/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
@@ -1241,6 +1302,7 @@ fn take_away(added: Vec<Added>, cx: &mut App) {
         match added {
             Added::Panel(key) => channel_panels::unregister(key, cx),
             Added::Page(page) => pages::unregister(page, cx),
+            Added::Other(added) => contribute::take_away(added, cx),
         }
     }
 }

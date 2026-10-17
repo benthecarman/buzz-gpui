@@ -41,10 +41,10 @@ pub fn init(cx: &mut App) {
         ComposerTool {
             key: "buzz.projects/resources",
             order: 0,
-            build: |context, window, cx| {
+            build: std::rc::Rc::new(|context, window, cx| {
                 cx.new(|cx| resource_picker::ResourcePicker::new(context, window, cx))
                     .into()
-            },
+            }),
         },
         cx,
     );

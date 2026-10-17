@@ -2,20 +2,17 @@
 //! app's components. Fields keep their text here, so typing does not wait
 //! on the plugin; each change and Enter is sent to it as an event.
 
-use super::protocol::{ButtonStyle, Gap, Justify, Node, TextStyle, Tone};
+use super::draw::{self, Draw};
+use super::protocol::Node;
 use super::{ExternalPlugins, Status};
 use crate::community::{AppState, Community};
 use crate::ui::channel_panels::Opening;
-use crate::ui::markdown;
-use crate::ui::navigation;
-use buzz_ui::{
-    ActiveTheme, Badge, BadgeTone, Button, ButtonVariant, Colors, Divider, Icon, IconName, Spinner,
-    Switch, TextField, TypeStyled, tokens::space,
-};
+use buzz_ui::{ActiveTheme, Button, IconName, Spinner, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 struct Field {
     state: Entity<InputState>,
@@ -28,6 +25,8 @@ struct Field {
 pub struct ExternalView {
     plugin: String,
     contribution: String,
+    /// `panel`, `page` or `settings`.
+    kind: &'static str,
     id: String,
     /// A panel's opening; `None` for a page.
     opening: Option<Opening>,
@@ -46,16 +45,27 @@ impl ExternalView {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        Self::open(plugin, contribution, Some(opening), window, cx)
+        Self::open(plugin, contribution, "panel", Some(opening), window, cx)
     }
 
     pub fn page(plugin: &str, contribution: &str, window: &mut Window, cx: &mut App) -> AnyView {
-        Self::open(plugin, contribution, None, window, cx)
+        Self::open(plugin, contribution, "page", None, window, cx)
+    }
+
+    /// A Settings section the plugin added.
+    pub fn settings(
+        plugin: &str,
+        contribution: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        Self::open(plugin, contribution, "settings", None, window, cx)
     }
 
     fn open(
         plugin: &str,
         contribution: &str,
+        kind: &'static str,
         opening: Option<Opening>,
         _window: &mut Window,
         cx: &mut App,
@@ -64,6 +74,7 @@ impl ExternalView {
         let view = cx.new(|cx| Self {
             plugin: plugin.to_owned(),
             contribution: contribution.to_owned(),
+            kind,
             id: id.clone(),
             opening,
             tree: None,
@@ -84,7 +95,7 @@ impl ExternalView {
         json!({
             "view": self.id,
             "contribution": self.contribution,
-            "kind": if opening.is_some() { "panel" } else { "page" },
+            "kind": self.kind,
             "target": opening.map(|opening| opening.target.clone()),
             "channel": opening.map(|opening| opening.channel.clone()),
             "thread": opening.and_then(|opening| opening.thread.clone()),
@@ -174,194 +185,6 @@ impl ExternalView {
         (self.fields.get_mut(id).expect("just added"), created)
     }
 
-    fn node(
-        &mut self,
-        node: &Node,
-        path: &str,
-        seen: &mut HashSet<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let c = *cx.colors();
-        let element_id = |kind: &str| SharedString::from(format!("plugin-{kind}-{path}"));
-        match node {
-            Node::Column { children, gap } => gap_of(div().flex().flex_col().min_w_0(), *gap)
-                .children(self.children(children, path, seen, window, cx))
-                .into_any_element(),
-            Node::Row {
-                children,
-                gap,
-                justify,
-                wrap,
-            } => {
-                let row = gap_of(div().flex().flex_row().items_center().min_w_0(), *gap);
-                let row = match justify {
-                    Justify::Start => row,
-                    Justify::Center => row.justify_center(),
-                    Justify::End => row.justify_end(),
-                    Justify::Between => row.justify_between(),
-                };
-                let row = if *wrap { row.flex_wrap() } else { row };
-                row.children(self.children(children, path, seen, window, cx))
-                    .into_any_element()
-            }
-            Node::Card { title, children } => div()
-                .flex()
-                .flex_col()
-                .gap(space::S2)
-                .p(space::S4)
-                .border_1()
-                .border_color(c.border_standard)
-                .rounded(rems(0.75))
-                .children(
-                    title
-                        .as_ref()
-                        .map(|title| div().text_label().child(title.clone())),
-                )
-                .children(self.children(children, path, seen, window, cx))
-                .into_any_element(),
-            Node::Text { text, style, tone } => {
-                let text = div().child(text.clone());
-                let text = match style {
-                    TextStyle::Body => text.text_body(),
-                    TextStyle::Small => text.text_body_sm(),
-                    TextStyle::Label => text.text_label(),
-                    TextStyle::Title => text.text_title(),
-                    TextStyle::Heading => text.text_heading(),
-                    TextStyle::Code => text.text_mono(),
-                };
-                match tone_color(*tone, &c) {
-                    Some(color) => text.text_color(color),
-                    None => text,
-                }
-                .into_any_element()
-            }
-            Node::Markdown { text } => match self.community(cx) {
-                Some(community) => markdown::text(text, &self.contribution, community.read(cx), cx),
-                None => div().text_body().child(text.clone()).into_any_element(),
-            },
-            Node::Button {
-                id,
-                label,
-                variant,
-                icon,
-                disabled,
-                loading,
-            } => {
-                let (variant, destructive) = match variant {
-                    ButtonStyle::Prominent => (ButtonVariant::Prominent, false),
-                    ButtonStyle::Subtle => (ButtonVariant::Subtle, false),
-                    ButtonStyle::Ghost => (ButtonVariant::Ghost, false),
-                    ButtonStyle::Outline => (ButtonVariant::Outline, false),
-                    ButtonStyle::Destructive => (ButtonVariant::Subtle, true),
-                };
-                let mut button = Button::new(element_id("button"), label.clone())
-                    .variant(variant)
-                    .disabled(*disabled)
-                    .loading(*loading);
-                if destructive {
-                    button = button.destructive();
-                }
-                if let Some(icon) = icon.as_deref().map(|name| super::icon(Some(name))) {
-                    button = button.icon(icon);
-                }
-                let weak = cx.entity().downgrade();
-                let id = id.clone();
-                // Sized to its label, even in a column.
-                div()
-                    .flex()
-                    .child(button.on_click(move |_, _, cx| {
-                        if let Some(this) = weak.upgrade() {
-                            this.read(cx).event(&id, "click", None, cx);
-                        }
-                    }))
-                    .into_any_element()
-            }
-            Node::Link { label, url } => {
-                let url = url.clone();
-                div()
-                    .id(element_id("link"))
-                    .text_body()
-                    .text_color(c.text_accent)
-                    .cursor_pointer()
-                    .hover(|style| style.underline())
-                    .child(label.clone())
-                    .on_click(move |event, window, cx| {
-                        if url.starts_with("buzz://") {
-                            navigation::open_url(&url, window, cx);
-                        } else if url.starts_with("https://") || url.starts_with("http://") {
-                            navigation::open_web_link(&url, event.modifiers(), window, cx);
-                        }
-                    })
-                    .into_any_element()
-            }
-            Node::Input {
-                id,
-                value,
-                placeholder,
-                version,
-                clear_on_submit,
-            } => {
-                seen.insert(id.clone());
-                let (field, created) = self.field(id, placeholder.as_ref(), window, cx);
-                field.clear_on_submit = *clear_on_submit;
-                if created || field.version != *version {
-                    field.version = *version;
-                    let text = value.clone().unwrap_or_default();
-                    field
-                        .state
-                        .update(cx, |state, cx| state.set_value(text, window, cx));
-                }
-                TextField::new(&field.state).into_any_element()
-            }
-            Node::Switch { id, checked, label } => {
-                let weak = cx.entity().downgrade();
-                let id = id.clone();
-                let mut switch = Switch::new(element_id("switch"), *checked);
-                if let Some(label) = label {
-                    switch = switch.label(label.clone());
-                }
-                switch
-                    .on_change(move |on, _, cx| {
-                        if let Some(this) = weak.upgrade() {
-                            this.read(cx).event(&id, "toggle", Some(json!(on)), cx);
-                        }
-                    })
-                    .into_any_element()
-            }
-            Node::Badge { text, tone } => Badge::new(text.clone())
-                .tone(match tone {
-                    Tone::Default | Tone::Subtle => BadgeTone::Neutral,
-                    Tone::Accent => BadgeTone::Accent,
-                    Tone::Success => BadgeTone::Success,
-                    Tone::Warning => BadgeTone::Warning,
-                    Tone::Danger => BadgeTone::Danger,
-                })
-                .into_any_element(),
-            Node::Icon { name } => Icon::new(super::icon(Some(name)))
-                .size(16.)
-                .into_any_element(),
-            Node::Divider => Divider::horizontal().into_any_element(),
-            Node::Spinner => Spinner::new().size(16.).into_any_element(),
-            Node::Unknown => div().into_any_element(),
-        }
-    }
-
-    fn children(
-        &mut self,
-        children: &[Node],
-        path: &str,
-        seen: &mut HashSet<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        children
-            .iter()
-            .enumerate()
-            .map(|(index, child)| self.node(child, &format!("{path}-{index}"), seen, window, cx))
-            .collect()
-    }
-
     /// What shows before the plugin's tree, or instead of it.
     fn placeholder(&self, status: Status, cx: &App) -> Option<AnyElement> {
         let c = cx.colors();
@@ -426,26 +249,6 @@ impl ExternalView {
     }
 }
 
-fn gap_of(div: Div, gap: Gap) -> Div {
-    match gap {
-        Gap::None => div,
-        Gap::Sm => div.gap(space::S2),
-        Gap::Md => div.gap(space::S4),
-        Gap::Lg => div.gap(space::S6),
-    }
-}
-
-fn tone_color(tone: Tone, c: &Colors) -> Option<Hsla> {
-    match tone {
-        Tone::Default => None,
-        Tone::Subtle => Some(c.text_subtle),
-        Tone::Accent => Some(c.text_accent),
-        Tone::Success => Some(c.text_success),
-        Tone::Warning => Some(c.text_warning),
-        Tone::Danger => Some(c.text_danger),
-    }
-}
-
 impl Render for ExternalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
@@ -455,9 +258,37 @@ impl Render for ExternalView {
             body = body.child(placeholder);
         } else if let Some(tree) = self.tree.clone() {
             let mut seen = HashSet::new();
-            body = body.child(self.node(&tree, "0", &mut seen, window, cx));
+            for input in draw::inputs(&tree) {
+                seen.insert(input.id.to_owned());
+                let (field, created) = self.field(input.id, input.placeholder, window, cx);
+                field.clear_on_submit = input.clear_on_submit;
+                if created || field.version != input.version {
+                    field.version = input.version;
+                    let text = input.value.cloned().unwrap_or_default();
+                    field
+                        .state
+                        .update(cx, |state, cx| state.set_value(text, window, cx));
+                }
+            }
             // Fields the tree no longer has start empty if they return.
             self.fields.retain(|id, _| seen.contains(id));
+            let fields: HashMap<String, Entity<InputState>> = self
+                .fields
+                .iter()
+                .map(|(id, field)| (id.clone(), field.state.clone()))
+                .collect();
+            let weak = cx.entity().downgrade();
+            let draw = Draw {
+                send: Rc::new(move |id, event, value, cx| {
+                    if let Some(this) = weak.upgrade() {
+                        this.read(cx).event(id, event, value, cx);
+                    }
+                }),
+                fields: &fields,
+                community: self.community(cx),
+                place: &self.contribution,
+            };
+            body = body.child(draw::node(&tree, &self.id, &draw, cx));
         }
         if let Some(error) = &self.error {
             body = body.child(

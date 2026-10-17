@@ -35,6 +35,13 @@ pub fn register(spec: CategorySpec, cx: &mut App) {
     categories.push(spec);
 }
 
+/// Removes the category `key`, as when the plugin that added it stops.
+pub fn unregister(key: &str, cx: &mut App) {
+    cx.default_global::<Categories>()
+        .0
+        .retain(|existing| existing.key != key);
+}
+
 /// The categories whose plugin is on, in registration order.
 pub fn all(cx: &App) -> Vec<CategorySpec> {
     cx.try_global::<Categories>()

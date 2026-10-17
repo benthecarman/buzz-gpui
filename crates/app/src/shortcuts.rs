@@ -373,6 +373,56 @@ pub const PLUGINS: &[PluginShortcut] = &[
     },
 ];
 
+/// A shortcut from a plugin someone added (`crate::external_plugins`). It
+/// is listed and rebound like a bundled plugin's, and runs through a
+/// keystroke interceptor instead of a GPUI action.
+pub struct ExternalShortcut {
+    pub key: &'static str,
+    pub plugin: &'static str,
+    pub title: &'static str,
+    pub defaults: &'static [Binding],
+    pub run: RunShortcut,
+}
+
+/// What an [`ExternalShortcut`] does.
+pub type RunShortcut = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
+thread_local! {
+    static EXTERNAL: std::cell::RefCell<Vec<std::rc::Rc<ExternalShortcut>>> =
+        std::cell::RefCell::default();
+}
+
+/// Adds a plugin's shortcut, replacing one with the same key.
+pub fn register_external(shortcut: ExternalShortcut) {
+    EXTERNAL.with_borrow_mut(|external| {
+        external.retain(|existing| existing.key != shortcut.key);
+        external.push(std::rc::Rc::new(shortcut));
+    });
+}
+
+pub fn unregister_external(key: &str) {
+    EXTERNAL.with_borrow_mut(|external| external.retain(|existing| existing.key != key));
+}
+
+fn external(key: &str) -> Option<std::rc::Rc<ExternalShortcut>> {
+    EXTERNAL.with_borrow(|external| {
+        external
+            .iter()
+            .find(|shortcut| shortcut.key == key)
+            .cloned()
+    })
+}
+
+/// A chord from a plugin manifest, such as `mod+shift+k`.
+pub fn binding(key: &str, primary: bool, shift: bool, alt: bool) -> Binding {
+    Binding {
+        key: Cow::Owned(key.to_owned()),
+        primary,
+        shift,
+        alt,
+    }
+}
+
 /// Copy, paste, cut and select all: a shortcut there would take them
 /// from every field.
 const CLIPBOARD_CHORDS: &[Binding] = &[
@@ -463,6 +513,24 @@ pub fn rows(overrides: &Overrides, desktop: bool) -> Vec<Row> {
             effective,
         };
         ((shortcut.plugin, shortcut.order), row)
+    }));
+    let external: Vec<_> = EXTERNAL.with_borrow(|external| external.clone());
+    rows.extend(external.iter().map(|shortcut| {
+        let override_ = overrides.get(shortcut.key).cloned();
+        let effective = match &override_ {
+            Some(binding) => vec![binding.clone()],
+            None => shortcut.defaults.to_vec(),
+        };
+        let row = Row {
+            key: shortcut.key,
+            title: shortcut.title,
+            owner: shortcut.plugin,
+            read_only: false,
+            defaults: shortcut.defaults,
+            override_,
+            effective,
+        };
+        ((shortcut.plugin, 100), row)
     }));
     rows.sort_by(|(a, x), (b, y)| a.cmp(b).then(x.key.cmp(y.key)).then(x.title.cmp(y.title)));
     rows.into_iter().map(|(_, row)| row).collect()
@@ -694,6 +762,29 @@ pub fn init(cx: &mut App) {
     let (overrides, error) = restore(saved);
     cx.set_global(Shortcuts { overrides, error });
     rebuild_keymap(cx);
+    // Plugins people added have no GPUI action; their chords are matched
+    // here. Host and bundled chords come first in the rows and win.
+    cx.intercept_keystrokes(|event, window, cx| {
+        let Press::Chord(captured) = press(&event.keystroke, APPLE) else {
+            return;
+        };
+        if captured.other_primary || EXTERNAL.with_borrow(Vec::is_empty) {
+            return;
+        }
+        let rows = rows(Shortcuts::overrides(cx), DESKTOP);
+        let Some(row) = rows.iter().find(|row| {
+            row.effective
+                .iter()
+                .any(|binding| binding.same(&captured.binding))
+        }) else {
+            return;
+        };
+        if let Some(shortcut) = external(row.key) {
+            cx.stop_propagation();
+            (shortcut.run)(window, cx);
+        }
+    })
+    .detach();
 }
 
 /// Replaces every app-wide binding of a host action with the current

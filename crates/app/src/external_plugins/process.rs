@@ -418,6 +418,8 @@ mod tests {
                 .unwrap();
             let contributions = protocol::Contributions::parse(initialized).unwrap();
             assert_eq!(contributions.pages[0].id, "hello");
+            assert_eq!(contributions.message_actions.len(), 2);
+            assert_eq!(contributions.shortcuts[0].keys, ["mod+shift+h"]);
             assert_eq!(contributions.panels[0].matches, ["https://example.com/"]);
 
             connection.notify(
@@ -452,7 +454,38 @@ mod tests {
                 "view/event",
                 json!({ "view": "v1", "id": "add", "event": "click" }),
             );
+            // The page's badge counts the clicks too.
+            let Event::Notification { method, params } = next().await else {
+                panic!("no badge");
+            };
+            assert_eq!(
+                (method.as_str(), &params["text"]),
+                ("page/badge", &json!("1"))
+            );
             assert!(tree(next().await).contains("Clicked 1 times"));
+
+            // Renderers answer requests with trees.
+            let chip = connection
+                .request(
+                    "link/render",
+                    json!({ "renderer": "example-link", "url": "https://example.com/docs" }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            protocol::Node::parse(chip["tree"].clone()).unwrap();
+            assert!(chip.to_string().contains("Example · /docs"));
+            let card = connection
+                .request(
+                    "message/render",
+                    json!({ "renderer": "hello-card", "message": {
+                        "content": "!hello *there*", "authorName": "Ada",
+                    } }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(card.to_string().contains("Ada says hello"), "{card}");
         });
         // Dropping the connection closes stdin; the plugin exits without
         // reporting a crash.

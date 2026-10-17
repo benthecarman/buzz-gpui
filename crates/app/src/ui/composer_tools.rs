@@ -10,6 +10,7 @@
 use super::composer::Composer;
 use crate::community::Community;
 use gpui_kit::*;
+use std::rc::Rc;
 
 /// What a tool knows about the composer it sits in.
 #[derive(Clone)]
@@ -24,11 +25,15 @@ pub struct ComposerTool {
     /// `plugin/tool`, such as `buzz.projects/resources`.
     pub key: &'static str,
     pub order: i32,
-    pub build: fn(ToolContext, &mut Window, &mut App) -> AnyView,
+    pub build: BuildTool,
 }
 
+/// Makes a tool's view for one composer.
+pub type BuildTool = Rc<dyn Fn(ToolContext, &mut Window, &mut App) -> AnyView>;
+
+/// The tools, and a count of changes so open composers can catch up.
 #[derive(Default)]
-struct Tools(Vec<ComposerTool>);
+struct Tools(Vec<ComposerTool>, u64);
 
 impl Global for Tools {}
 
@@ -38,6 +43,19 @@ pub fn register(tool: ComposerTool, cx: &mut App) {
     tools.retain(|existing| existing.key != tool.key);
     tools.push(tool);
     tools.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.key.cmp(b.key)));
+    cx.default_global::<Tools>().1 += 1;
+}
+
+/// Changes whenever a tool is added or removed.
+pub fn generation(cx: &App) -> u64 {
+    cx.try_global::<Tools>().map_or(0, |tools| tools.1)
+}
+
+/// Removes the tool `key`, as when the plugin that added it stops.
+pub fn unregister(key: &str, cx: &mut App) {
+    let tools = cx.default_global::<Tools>();
+    tools.0.retain(|existing| existing.key != key);
+    tools.1 += 1;
 }
 
 /// One view per registered tool for a new composer.

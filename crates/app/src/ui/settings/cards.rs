@@ -34,7 +34,12 @@ pub enum CardVisibility {
 }
 
 /// The view a card shows; the page keeps it while its section is open.
-pub type BuildCard = fn(&mut Window, &mut App) -> AnyView;
+pub type BuildCard = std::rc::Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
+
+/// A card's [`BuildCard`] from a closure.
+pub fn build(build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> BuildCard {
+    std::rc::Rc::new(build)
+}
 
 #[derive(Clone)]
 pub struct SettingsCard {
@@ -83,6 +88,14 @@ pub fn register(card: SettingsCard, cx: &mut App) {
     let cards = &mut cx.default_global::<SettingsCards>().0;
     cards.retain(|existing| existing.key != card.key);
     cards.push(card);
+}
+
+/// Removes the card `key`, as when the plugin that added it stops.
+pub fn unregister(key: &str, cx: &mut App) {
+    cx.default_global::<SettingsCards>()
+        .0
+        .retain(|existing| existing.key != key);
+    changed(cx);
 }
 
 /// Gives the card `key` a visibility check that runs while the settings
@@ -165,7 +178,7 @@ mod tests {
             icon: None,
             placement,
             visibility: None,
-            build: |_, _| unreachable!(),
+            build: build(|_, _| unreachable!()),
         }
     }
 

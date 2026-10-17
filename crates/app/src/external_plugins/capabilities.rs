@@ -319,6 +319,46 @@ pub fn open_conversation(params: &Value, cx: &App) -> Result<Value, Failure> {
     Ok(Value::Null)
 }
 
+/// `notifications/submit`: a notification in one of the plugin's
+/// categories, through the user's preferences. `true` if it showed.
+pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    use crate::notifications::categories::{self, Submission};
+    let category = text(params, "category").ok_or_else(|| invalid("category is required"))?;
+    let source = text(params, "sourceKey")
+        .filter(|key| !key.is_empty() && key.len() <= 256)
+        .ok_or_else(|| invalid("sourceKey is required"))?;
+    let community = AppState::current(cx);
+    let place = match (text(params, "channel"), &community) {
+        (Some(channel), Some(community)) => {
+            let channel = self::channel(&json!({ "channel": channel }), community.read(cx))?;
+            let message = event_id(params, "message")?;
+            let thread = event_id(params, "thread")?;
+            Place::Conversation {
+                channel,
+                message: message.or(thread),
+                thread,
+                members: false,
+            }
+        }
+        _ => Place::Page(crate::ui::pages::Page::MESSAGES),
+    };
+    let target = Target {
+        community: community.map(|community| community.read(cx).origin.to_string()),
+        place,
+    };
+    let shown = categories::submit(
+        &format!("{plugin}/{category}"),
+        Submission {
+            source_key: source.to_owned(),
+            title: text(params, "title").unwrap_or_default().to_owned(),
+            body: text(params, "body").unwrap_or_default().to_owned(),
+            target,
+        },
+        cx,
+    );
+    Ok(Value::Bool(shown))
+}
+
 /// A channel a plugin follows: the view keeps the timeline live.
 pub struct Watch {
     pub channel: String,

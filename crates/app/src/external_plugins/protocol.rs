@@ -147,6 +147,22 @@ pub struct Contributions {
     pub panels: Vec<PanelDecl>,
     #[serde(default)]
     pub pages: Vec<PageDecl>,
+    #[serde(default)]
+    pub settings_cards: Vec<CardDecl>,
+    #[serde(default)]
+    pub notifications: Vec<CategoryDecl>,
+    #[serde(default)]
+    pub message_actions: Vec<ActionDecl>,
+    #[serde(default)]
+    pub link_renderers: Vec<LinkRendererDecl>,
+    #[serde(default)]
+    pub message_renderers: Vec<MessageRendererDecl>,
+    #[serde(default)]
+    pub attachment_renderers: Vec<AttachmentRendererDecl>,
+    #[serde(default)]
+    pub composer_tools: Vec<ToolDecl>,
+    #[serde(default)]
+    pub shortcuts: Vec<ShortcutDecl>,
 }
 
 /// A panel beside the conversation (`panels.register`).
@@ -164,6 +180,9 @@ pub struct PanelDecl {
     /// A button in the channel header that toggles the panel.
     #[serde(default)]
     pub launcher: Option<LauncherDecl>,
+    /// An entry in the channel's menu that opens the panel as a tab.
+    #[serde(default)]
+    pub menu: Option<MenuDecl>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -183,7 +202,13 @@ pub enum LauncherPlacement {
     Bottom,
 }
 
-/// A page with a row in the channel sidebar (`pages.register`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuDecl {
+    pub label: String,
+}
+
+/// A page (`pages.register`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageDecl {
@@ -191,52 +216,289 @@ pub struct PageDecl {
     pub title: String,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub placement: PagePlacement,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PagePlacement {
+    /// A row at the top of the channel sidebar.
+    #[default]
+    Sidebar,
+    /// A pill in the middle of the header.
+    Topbar,
+    /// No navigation entry; search and links still reach it.
+    Hidden,
+}
+
+/// A Settings section (`settingsCards.register`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardDecl {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// `community` (under the selected community), `administration` (its
+    /// Administration group) or the name of an account-level group, such
+    /// as `Integrations`.
+    #[serde(default = "integrations")]
+    pub placement: String,
+}
+
+fn integrations() -> String {
+    "Integrations".into()
+}
+
+/// A notification category with its own switch (`notifications.register`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryDecl {
+    pub id: String,
+    pub label: String,
+}
+
+/// An item in a message's More menu, and optionally a marker on the
+/// messages the plugin marks (`conversation.registerMessageAction`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDecl {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Event kinds it applies to; empty for chat messages (kind 9).
+    #[serde(default)]
+    pub kinds: Vec<u16>,
+    /// Only the user's own messages.
+    #[serde(default)]
+    pub mine: bool,
+}
+
+/// Draws link chips for URLs with these prefixes.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRendererDecl {
+    pub id: String,
+    pub matches: Vec<String>,
+    /// Lower wins among renderers that match.
+    #[serde(default)]
+    pub order: i32,
+}
+
+/// Replaces the body of messages of these kinds whose content starts
+/// with `prefix`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRendererDecl {
+    pub id: String,
+    #[serde(default)]
+    pub kinds: Vec<u16>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub order: i32,
+}
+
+/// Replaces the player of attachments with these MIME type prefixes.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRendererDecl {
+    pub id: String,
+    pub mime: Vec<String>,
+}
+
+/// A button in every composer's toolbar (`conversation.registerTool`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDecl {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub order: i32,
+}
+
+/// A keyboard shortcut (`shortcuts.register`), listed and rebindable in
+/// Settings → Shortcuts.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutDecl {
+    pub id: String,
+    pub title: String,
+    /// Chords such as `mod+shift+k`; `mod` is Command on macOS and Control
+    /// elsewhere.
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+/// A chord as `mod+shift+alt+key`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chord {
+    pub key: String,
+    pub primary: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl Chord {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut chord = Chord {
+            key: String::new(),
+            primary: false,
+            shift: false,
+            alt: false,
+        };
+        let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+        let (key, modifiers) = parts.split_last().ok_or("an empty chord")?;
+        for modifier in modifiers {
+            match modifier.to_ascii_lowercase().as_str() {
+                "mod" | "cmd" | "ctrl" => chord.primary = true,
+                "shift" => chord.shift = true,
+                "alt" | "option" => chord.alt = true,
+                other => return Err(format!("“{other}” is not a modifier in “{text}”.")),
+            }
+        }
+        if key.is_empty() || key.chars().count() > 16 {
+            return Err(format!("“{text}” has no key."));
+        }
+        if !chord.primary && !chord.alt {
+            return Err(format!(
+                "“{text}” needs mod or alt, so typing is not taken."
+            ));
+        }
+        chord.key = key.to_string();
+        Ok(chord)
+    }
+}
+
+/// How many of each a plugin can add.
+const MAX_EACH: usize = 16;
+
+fn check_title(id: &str, title: &str) -> Result<(), String> {
+    if title.trim().is_empty() || title.chars().count() > 64 {
+        return Err(format!("“{id}” needs a title of 1 to 64 characters."));
+    }
+    Ok(())
+}
+
+fn check_prefixes(id: &str, prefixes: &[String]) -> Result<(), String> {
+    if prefixes.is_empty() || prefixes.iter().any(|prefix| prefix.len() < 4) {
+        return Err(format!(
+            "“{id}” matches links too broadly. Use a prefix such as https://example.com/."
+        ));
+    }
+    Ok(())
 }
 
 impl Contributions {
     pub fn parse(value: Value) -> Result<Self, String> {
         let contributions: Self = serde_json::from_value(value)
             .map_err(|error| format!("The plugin's initialize result is not valid: {error}"))?;
-        if contributions.panels.len() > MAX_PANELS || contributions.pages.len() > MAX_PAGES {
+        contributions.validate()?;
+        Ok(contributions)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.panels.len() > MAX_PANELS || self.pages.len() > MAX_PAGES {
             return Err(format!(
                 "A plugin can add at most {MAX_PANELS} panels and {MAX_PAGES} pages."
             ));
         }
-        let ids = contributions
-            .panels
-            .iter()
-            .map(|panel| (&panel.id, &panel.title))
-            .chain(
-                contributions
-                    .pages
-                    .iter()
-                    .map(|page| (&page.id, &page.title)),
-            );
+        let counts = [
+            self.settings_cards.len(),
+            self.notifications.len(),
+            self.message_actions.len(),
+            self.link_renderers.len(),
+            self.message_renderers.len(),
+            self.attachment_renderers.len(),
+            self.composer_tools.len(),
+            self.shortcuts.len(),
+        ];
+        if counts.iter().any(|count| *count > MAX_EACH) {
+            return Err(format!("A plugin can add at most {MAX_EACH} of each kind."));
+        }
         let mut seen = std::collections::HashSet::new();
-        for (id, title) in ids {
+        let mut id = |id: &str| -> Result<(), String> {
             if !valid_contribution_id(id) {
                 return Err(format!(
                     "“{id}” is not a contribution id. Use lowercase letters, digits, “-” and “_”."
                 ));
             }
-            if !seen.insert(id) {
+            if !seen.insert(id.to_owned()) {
                 return Err(format!("The plugin adds “{id}” twice."));
             }
-            if title.trim().is_empty() || title.chars().count() > 64 {
-                return Err(format!("“{id}” needs a title of 1 to 64 characters."));
+            Ok(())
+        };
+        for panel in &self.panels {
+            id(&panel.id)?;
+            check_title(&panel.id, &panel.title)?;
+            if !panel.matches.is_empty() {
+                check_prefixes(&panel.id, &panel.matches)?;
+            }
+            if let Some(menu) = &panel.menu {
+                check_title(&panel.id, &menu.label)?;
             }
         }
-        if let Some(panel) = contributions
-            .panels
-            .iter()
-            .find(|panel| panel.matches.iter().any(|prefix| prefix.len() < 4))
-        {
-            return Err(format!(
-                "“{}” matches links too broadly. Use a prefix such as https://example.com/.",
-                panel.id
-            ));
+        for page in &self.pages {
+            id(&page.id)?;
+            check_title(&page.id, &page.title)?;
         }
-        Ok(contributions)
+        for card in &self.settings_cards {
+            id(&card.id)?;
+            check_title(&card.id, &card.title)?;
+            check_title(&card.id, &card.placement)?;
+        }
+        for category in &self.notifications {
+            id(&category.id)?;
+            check_title(&category.id, &category.label)?;
+        }
+        for action in &self.message_actions {
+            id(&action.id)?;
+            check_title(&action.id, &action.title)?;
+        }
+        for renderer in &self.link_renderers {
+            id(&renderer.id)?;
+            check_prefixes(&renderer.id, &renderer.matches)?;
+        }
+        for renderer in &self.message_renderers {
+            id(&renderer.id)?;
+            let narrow = renderer
+                .prefix
+                .as_ref()
+                .is_some_and(|prefix| prefix.len() >= 2)
+                || (!renderer.kinds.is_empty() && !renderer.kinds.contains(&9));
+            if !narrow {
+                return Err(format!(
+                    "“{}” would draw every chat message. Give it a prefix of at least two \
+                     characters, or other kinds.",
+                    renderer.id
+                ));
+            }
+        }
+        for renderer in &self.attachment_renderers {
+            id(&renderer.id)?;
+            if renderer.mime.is_empty() || renderer.mime.iter().any(|mime| mime.len() < 3) {
+                return Err(format!(
+                    "“{}” needs MIME type prefixes, such as audio/.",
+                    renderer.id
+                ));
+            }
+        }
+        for tool in &self.composer_tools {
+            id(&tool.id)?;
+            check_title(&tool.id, &tool.title)?;
+        }
+        for shortcut in &self.shortcuts {
+            id(&shortcut.id)?;
+            check_title(&shortcut.id, &shortcut.title)?;
+            for keys in &shortcut.keys {
+                Chord::parse(keys)?;
+            }
+        }
+        Ok(())
     }
 }
 

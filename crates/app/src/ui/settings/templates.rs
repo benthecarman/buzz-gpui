@@ -26,7 +26,9 @@ pub fn init(cx: &mut App) {
             icon: Some(IconName::Copy),
             placement: CardPlacement::Community,
             visibility: None,
-            build: |window, cx| cx.new(|cx| TemplateSettings::new(window, cx)).into(),
+            build: super::cards::build(|window, cx| {
+                cx.new(|cx| TemplateSettings::new(window, cx)).into()
+            }),
         },
         cx,
     );
