@@ -175,11 +175,20 @@ pub struct Contributions {
     #[serde(default)]
     pub account_actions: Vec<AccountActionDecl>,
     #[serde(default)]
+    pub naming_policies: Vec<NamingPolicyDecl>,
+    #[serde(default)]
     pub composer_accessories: Vec<AccessoryDecl>,
     #[serde(default)]
     pub agent_tools: Vec<AgentToolDecl>,
     #[serde(default)]
     pub agent_types: Vec<AgentTypeDecl>,
+}
+
+/// A naming policy (`identityNames.register`): Buzz asks `names/resolve`
+/// for display names. It applies only while it is the one policy on.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct NamingPolicyDecl {
+    pub id: String,
 }
 
 /// A row in the account menu that opens a dialog of kind `dialog`
@@ -669,6 +678,12 @@ impl Contributions {
         for renderer in &self.inline_renderers {
             id(&renderer.id)?;
             renderer.regex()?;
+        }
+        if self.naming_policies.len() > 1 {
+            return Err("A plugin can add one naming policy.".to_owned());
+        }
+        for policy in &self.naming_policies {
+            id(&policy.id)?;
         }
         for action in &self.account_actions {
             id(&action.id)?;

@@ -19,6 +19,7 @@ mod contribute;
 mod draw;
 mod events;
 pub mod git;
+mod naming;
 mod process;
 pub mod protocol;
 pub mod release;

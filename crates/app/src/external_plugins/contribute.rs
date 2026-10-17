@@ -149,6 +149,7 @@ fn items(value: &Value) -> Vec<Item> {
 
 /// Starts taking renderer answers.
 pub fn init(cx: &mut App) {
+    super::naming::init(cx);
     let (sender, mut suggestions) = futures::channel::mpsc::unbounded();
     SUGGESTION_INBOX.with_borrow_mut(|inbox| *inbox = Some(sender));
     cx.spawn(async move |cx| {
@@ -195,6 +196,7 @@ pub fn forget(plugin: &str) {
     });
     MARKS.with_borrow_mut(|marks| marks.retain(|key, _| !key.starts_with(&prefix)));
     CARD_STATES.with_borrow_mut(|states| states.retain(|key, _| !key.starts_with(&prefix)));
+    super::naming::forget(plugin);
     // Prose drew this plugin's old answers.
     crate::ui::renderers::text_changed();
     SUGGESTIONS.with_borrow_mut(|suggestions| {
@@ -737,6 +739,7 @@ pub enum Added {
     Completion(&'static str),
     AccountAction(&'static str),
     ReactionPicker(&'static str),
+    NamingPolicy(&'static str),
 }
 
 pub fn take_away(added: Added, cx: &mut App) {
@@ -749,6 +752,7 @@ pub fn take_away(added: Added, cx: &mut App) {
         Added::Completion(key) => composer_completions::unregister(key),
         Added::AccountAction(key) => crate::ui::account_actions::unregister(key, cx),
         Added::ReactionPicker(key) => crate::ui::emoji_picker::unregister_reaction_picker(key, cx),
+        Added::NamingPolicy(key) => crate::ui::identity::unregister_policy(key),
     }
 }
 
@@ -970,6 +974,15 @@ pub fn register(
             }),
         });
         added.push(Added::Completion(completion_key));
+    }
+    if let Some(requester) = &requester {
+        for policy in &contributions.naming_policies {
+            added.push(Added::NamingPolicy(super::naming::register(
+                plugin,
+                &policy.id,
+                requester.clone(),
+            )));
+        }
     }
     if let Some(requester) = requester {
         for renderer in &contributions.inline_renderers {

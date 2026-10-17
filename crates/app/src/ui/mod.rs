@@ -31,7 +31,7 @@ mod form_fields;
 
 mod gif_picker;
 pub mod github;
-mod identity;
+pub mod identity;
 mod inbox;
 mod jump;
 pub(crate) mod keys;

@@ -143,6 +143,7 @@ The rest of the result can list:
 | `inlineRenderers` | `id`, `pattern` (a regular expression, up to 500 characters, that cannot match empty text) | Draws the pieces of message text the pattern matches, such as ticket numbers. Buzz asks with `inline/render`. Mentions, emoji, links and code are left alone. |
 | `composerTools` | `id`, `title`, `icon`, `order`, `reactionPicker` | A button in every composer's toolbar. Clicking it sends `composer/tool`. With `reactionPicker: true`, it can also replace the emoji picker that "Add reaction" opens: the tool with the lowest `order`, then the lowest `plugin/id` key, wins, and Buzz's own picker is `buzz.emoji/emoji` at 0. The picker is a view of `kind` `reactionPicker`. Send `reaction/select` with its `view` and an `emoji` to react. |
 | `composerAccessories` | `id`, `title`, `order` | A view above every composer, of `kind` `accessory`. `view/open` also carries the composer's `channel` and `thread`. Keep it to a line or two. |
+| `namingPolicies` | `id` (at most one) | Display names for people and agents (`identityNames.register`). Buzz asks `names/resolve` and shows public names until the answer comes. As in buzz-app, a policy applies only while it is the only one on: switch off Identity Naming in Settings → Plugins to use a plugin's. |
 | `accountActions` | `id`, `title`, `icon` | A row in the account menu that opens a dialog titled `title`. The dialog's body is a view of `kind` `dialog`. Send `ui/closeView` with its `view` to close it. |
 | `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`), `order` | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. When plugins share a trigger, the lowest `order`, then the lowest `plugin/id` key, answers. |
 | `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`), `order`, `allowInEditable`, `allowInModal`, `repeat` | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. It does not run while a text field has focus or a dialog is open unless `allowInEditable` or `allowInModal` is set, and a held chord runs once unless `repeat` is set. |
@@ -224,6 +225,7 @@ same way, per query.
 | `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
 | `inline/render` | `renderer`, `text` (what the pattern matched) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text |
+| `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
 | `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel` | `{"items": [{"label", "detail", "text"}]}`, at most 50. Picking one replaces the trigger and query with `text`. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches

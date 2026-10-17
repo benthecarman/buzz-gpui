@@ -372,6 +372,62 @@ pub fn identities(
 
 thread_local! {
     static CACHE: RefCell<Vec<(CacheKey, Arc<Names>)>> = const { RefCell::new(Vec::new()) };
+    static POLICIES: RefCell<Vec<(&'static str, Policy)>> = const { RefCell::new(Vec::new()) };
+    static POLICY_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A naming policy a plugin adds (`identityNames.register`): labels for
+/// `identities` as [`resolve`] makes them, or `None` while it has no
+/// answer yet, when public names show.
+pub type Policy = std::rc::Rc<
+    dyn Fn(&[NamingIdentity], Option<&str>, Option<&[String]>) -> Option<HashMap<String, Label>>,
+>;
+
+/// The bundled policy's plugin.
+const BUNDLED: &str = "buzz.identity-naming";
+
+/// Adds a plugin's naming policy. As in buzz-app, a policy applies only
+/// while it is the one on: with the bundled one or another also on, no
+/// policy applies and names are public profile names.
+pub fn register_policy(key: &'static str, policy: Policy) {
+    POLICIES.with_borrow_mut(|policies| {
+        policies.retain(|(existing, _)| *existing != key);
+        policies.push((key, policy));
+    });
+    policy_changed();
+}
+
+pub fn unregister_policy(key: &str) {
+    POLICIES.with_borrow_mut(|policies| policies.retain(|(existing, _)| *existing != key));
+    policy_changed();
+}
+
+/// Names need resolving again: a policy came, went or answered.
+pub fn policy_changed() {
+    POLICY_GENERATION.set(POLICY_GENERATION.get() + 1);
+}
+
+/// The policy on, if exactly one is: `None` for the bundled one.
+enum Active {
+    None,
+    Bundled,
+    Plugin(&'static str, Policy),
+}
+
+fn active() -> Active {
+    let plugins: Vec<(&'static str, Policy)> = POLICIES.with_borrow(|policies| {
+        policies
+            .iter()
+            .filter(|(key, _)| crate::plugins::enabled_key(key))
+            .cloned()
+            .collect()
+    });
+    let bundled = crate::plugins::enabled(BUNDLED);
+    match (bundled, plugins.as_slice()) {
+        (true, []) => Active::Bundled,
+        (false, [(key, policy)]) => Active::Plugin(key, policy.clone()),
+        _ => Active::None,
+    }
 }
 
 #[derive(PartialEq)]
@@ -381,8 +437,10 @@ struct CacheKey {
     viewer: String,
     origin: Option<String>,
     members: Option<Vec<String>>,
-    /// The Identity Naming plugin is on.
-    naming: bool,
+    /// The policy on: the bundled one, a plugin's by key, or none.
+    naming: Option<&'static str>,
+    /// Changes when a plugin policy answers.
+    generation: u64,
 }
 
 /// Names scoped to `members` (a channel's roster), or community-wide.
@@ -404,7 +462,17 @@ pub fn names(
             m.sort();
             m
         }),
-        naming: crate::plugins::enabled("buzz.identity-naming"),
+        naming: None,
+        generation: POLICY_GENERATION.get(),
+    };
+    let active = active();
+    let key = CacheKey {
+        naming: match &active {
+            Active::None => None,
+            Active::Bundled => Some(BUNDLED),
+            Active::Plugin(key, _) => Some(*key),
+        },
+        ..key
     };
     if let Some(found) = CACHE.with_borrow(|cache| {
         cache
@@ -414,14 +482,20 @@ pub fn names(
     }) {
         return found;
     }
-    // Without the Identity Naming plugin there is no policy: public
-    // profile names only (`bindNames` with no provider).
-    let (labels, library_names) = if key.naming {
-        let (identities, library_names) = identities(profiles, library, origin);
-        let labels = resolve(&identities, Some(viewer), key.members.as_deref());
-        (labels, library_names)
-    } else {
-        (HashMap::new(), HashMap::new())
+    // Without exactly one policy on there is none: public profile names
+    // only (`bindNames` with no provider).
+    let (labels, library_names) = match active {
+        Active::None => (HashMap::new(), HashMap::new()),
+        Active::Bundled => {
+            let (identities, library_names) = identities(profiles, library, origin);
+            let labels = resolve(&identities, Some(viewer), key.members.as_deref());
+            (labels, library_names)
+        }
+        Active::Plugin(_, policy) => {
+            let (identities, library_names) = identities(profiles, library, origin);
+            let labels = policy(&identities, Some(viewer), key.members.as_deref());
+            (labels.unwrap_or_default(), library_names)
+        }
     };
     let names = Arc::new(Names {
         labels,
