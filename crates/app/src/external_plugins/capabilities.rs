@@ -1072,6 +1072,20 @@ pub fn git_authorization(params: &Value, cx: &App) -> Result<Value, Failure> {
     Ok(json!({ "repository": repository, "token": token }))
 }
 
+/// `agents/attest`: your NIP-OA proof that you own `pubkey`, the tag
+/// `["auth", owner, "", signature]` an agent attaches to what it signs
+/// (`prepareRemoteAgentAuthorization`).
+pub fn attest(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let pubkey = text(params, "pubkey")
+        .ok_or_else(|| invalid("pubkey is required"))?
+        .to_ascii_lowercase();
+    let auth = identity(cx)?
+        .attest_agent(&pubkey)
+        .map_err(|_| invalid("pubkey is not an agent key you can attest"))?;
+    let auth: Value = serde_json::from_str(&auth).map_err(|error| (3, error.to_string()))?;
+    Ok(json!({ "auth": auth }))
+}
+
 /// `agents/logProof`: the owner's signature for one read of an agent's
 /// harness log at the community's relay (`authorizeAgentLog`).
 pub fn log_proof(params: &Value, cx: &App) -> Result<Value, Failure> {

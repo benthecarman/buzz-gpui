@@ -162,6 +162,8 @@ pub struct Plugin {
     /// Channels this run follows, by watch id.
     watches: HashMap<u64, capabilities::Watch>,
     next_watch: u64,
+    /// The services this run offers other plugins.
+    services: Vec<String>,
 }
 
 impl Plugin {
@@ -181,6 +183,7 @@ impl Plugin {
             views: HashMap::new(),
             watches: HashMap::new(),
             next_watch: 0,
+            services: Vec::new(),
         }
     }
 
@@ -995,6 +998,11 @@ impl ExternalPlugins {
             return;
         };
         plugin.added = added;
+        plugin.services = contributions
+            .services
+            .iter()
+            .map(|service| service.id.clone())
+            .collect();
         // Views open before this run ask the new run for their trees.
         let views: Vec<_> = plugin.views.values().cloned().collect();
         for view in views {
@@ -1132,6 +1140,48 @@ impl ExternalPlugins {
             .filter(|plugin| plugin.status == Status::Running)?
             .connection
             .as_ref()
+    }
+
+    /// `services/request`: asks the running plugin that offers `service`
+    /// to answer `method`, as `service/request` with who asks.
+    fn service_request(
+        from: Option<String>,
+        params: &Value,
+        cx: &App,
+    ) -> Result<Task<Result<Value, capabilities::Failure>>, capabilities::Failure> {
+        let text = |key: &str| {
+            params
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or((INVALID_PARAMS, format!("{key} is required")))
+        };
+        let (target, service, method) = (text("plugin")?, text("service")?, text("method")?);
+        let offered = cx.global::<Self>().by_id(target).is_some_and(|plugin| {
+            plugin.status == Status::Running && plugin.services.iter().any(|id| id == service)
+        });
+        let connection = Self::running_connection(target, cx)
+            .filter(|_| offered)
+            .ok_or((
+                3,
+                format!("{target} does not offer the service {service} now."),
+            ))?;
+        let request = connection.requester().request(
+            "service/request",
+            json!({
+                "from": from,
+                "service": service,
+                "method": method,
+                "params": params.get("params").cloned().unwrap_or(Value::Null),
+            }),
+            std::time::Duration::from_secs(30),
+        );
+        Ok(cx.background_spawn(async move {
+            match request.await {
+                Ok(Ok(answer)) => Ok(answer),
+                Ok(Err(error)) => Err((3, error)),
+                Err(error) => Err((3, error.to_string())),
+            }
+        }))
     }
 
     /// Sends a notification to plugin `id` if it runs.
@@ -1636,6 +1686,7 @@ impl ExternalPlugins {
             | "teams/remove"
             | "agents/retype"
             | "agents/port"
+            | "agents/attest"
             | "channels/addMember"
             | "channels/changeMember"
             | "messages/report"
@@ -1655,7 +1706,9 @@ impl ExternalPlugins {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
-                    | "teams/remove" | "agents/retype" | "agents/port" => Permission::ManageAgents,
+                    | "teams/remove" | "agents/retype" | "agents/port" | "agents/attest" => {
+                        Permission::ManageAgents
+                    }
                     "dm/open"
                     | "channels/create"
                     | "channels/action"
@@ -1688,6 +1741,9 @@ impl ExternalPlugins {
                                 .unwrap_or_default()
                         ),
                     )));
+                }
+                if method == "agents/attest" {
+                    return Reply::Now(capabilities::attest(params, cx));
                 }
                 if method.starts_with("teams/") {
                     return Reply::Now(agents::team(method, params, cx));
@@ -1742,6 +1798,27 @@ impl ExternalPlugins {
             "projects/git" => later(content::git(params, cx)),
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
+            "services/list" => Reply::Now(Ok(Value::Array(
+                cx.global::<Self>()
+                    .plugins
+                    .iter()
+                    .filter(|plugin| plugin.status == Status::Running)
+                    .flat_map(|plugin| {
+                        let id = plugin.id().unwrap_or_default().to_owned();
+                        plugin
+                            .services
+                            .iter()
+                            .map(move |service| json!({ "plugin": id, "service": service }))
+                    })
+                    .collect(),
+            ))),
+            "services/request" => {
+                let from = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                later(Self::service_request(from, params, cx))
+            }
             "agents/previewRetype" => Reply::Now(agents::preview_retype(params, cx)),
             "agents/portable" => later(agents::portable(cx)),
             "agents/watch" => Self::watch(path, generation, "agents/watch", params, cx),

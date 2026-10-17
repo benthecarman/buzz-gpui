@@ -182,6 +182,11 @@ pub struct Contributions {
     pub account_actions: Vec<AccountActionDecl>,
     #[serde(default)]
     pub naming_policies: Vec<NamingPolicyDecl>,
+    /// What the plugin offers other plugins (`ctx.provide`): they call it
+    /// with `services/request`, and Buzz asks this plugin
+    /// `service/request`.
+    #[serde(default)]
+    pub services: Vec<ServiceDecl>,
     #[serde(default)]
     pub composer_accessories: Vec<AccessoryDecl>,
     #[serde(default)]
@@ -194,6 +199,12 @@ pub struct Contributions {
 /// for display names. It applies only while it is the one policy on.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct NamingPolicyDecl {
+    pub id: String,
+}
+
+/// A service a plugin offers other plugins.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ServiceDecl {
     pub id: String,
 }
 
@@ -835,6 +846,9 @@ impl Contributions {
         }
         for policy in &self.naming_policies {
             id(&policy.id)?;
+        }
+        for service in &self.services {
+            id(&service.id)?;
         }
         for action in &self.account_actions {
             id(&action.id)?;
