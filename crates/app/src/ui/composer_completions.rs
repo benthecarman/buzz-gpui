@@ -24,9 +24,18 @@ pub struct Item {
     pub mentions: Vec<String>,
 }
 
-/// The suggestions for a query typed in a channel, or a thread in it;
-/// `None` while waiting.
-pub type Query = Rc<dyn Fn(&str, &str, Option<&str>, &App) -> Option<Vec<Item>>>;
+/// Where a query is typed (`CompletionContext`).
+#[derive(Clone, Copy)]
+pub struct Place<'a> {
+    pub channel: &'a str,
+    /// The thread the composer replies in, as hex.
+    pub thread: Option<&'a str>,
+    /// The composer may offer library agents not yet in the conversation.
+    pub invite_agents: bool,
+}
+
+/// The suggestions for a query; `None` while waiting.
+pub type Query = Rc<dyn Fn(&str, Place, &App) -> Option<Vec<Item>>>;
 
 pub struct PluginCompletion {
     pub key: &'static str,
@@ -103,7 +112,7 @@ mod tests {
                 key,
                 trigger: '/',
                 order,
-                query: Rc::new(|_, _, _, _| None),
+                query: Rc::new(|_, _, _| None),
             })
         };
         add("b.plugin/commands", 0);

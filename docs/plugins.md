@@ -147,7 +147,7 @@ The rest of the result can list:
 | `messageRenderers` | `id`, `kinds`, `prefix`, `order` | Draws the body of matching messages. Buzz asks with `message/render`. It needs a `prefix` of two or more characters, or kinds other than chat messages. |
 | `attachmentRenderers` | `id`, `mime` (MIME type prefixes) | Draws matching audio attachments hosted by the community, in place of the audio player. Buzz asks with `attachment/render`. As in buzz-app, images, videos and files keep Buzz's own views, and voice notes keep Buzz's voice note card. |
 | `inlineRenderers` | `id`, `pattern` (a regular expression, up to 500 characters, that cannot match empty text) | Draws the pieces of message text the pattern matches, such as ticket numbers. Buzz asks with `inline/render`. Mentions, emoji, links and code are left alone. |
-| `composerTools` | `id`, `title`, `icon`, `order`, `reactionPicker` | A button in every composer's toolbar. Clicking it sends `composer/tool`. With `reactionPicker: true`, it can also replace the emoji picker that "Add reaction" opens: the tool with the lowest `order`, then the lowest `plugin/id` key, wins, and Buzz's own picker is `buzz.emoji/emoji` at 0. The picker is a view of `kind` `reactionPicker`. Send `reaction/select` with its `view` and an `emoji` to react. |
+| `composerTools` | `id`, `title`, `icon`, `order`, `reactionPicker` | A button in every composer's toolbar. Clicking it sends `composer/tool`. Buzz disables the button while the composer cannot be used, such as while it sends or in a read-only channel. With `reactionPicker: true`, it can also replace the emoji picker that "Add reaction" opens: the tool with the lowest `order`, then the lowest `plugin/id` key, wins, and Buzz's own picker is `buzz.emoji/emoji` at 0. The picker is a view of `kind` `reactionPicker`. Send `reaction/select` with its `view` and an `emoji` to react. |
 | `composerAccessories` | `id`, `title`, `order`, `placement`, `kinds` | With `placement` `composer` (the default): a view above every composer, of `kind` `accessory`; `view/open` also carries the composer's `channel` and `thread`. Keep it to a line or two. With `placement` `message`: something beside each message's reactions, such as work on it; Buzz asks `message/accessory`, for chat messages or the `kinds` listed. |
 | `namingPolicies` | `id` (at most one) | Display names for people and agents (`identityNames.register`). Buzz asks `names/resolve` and shows public names until the answer comes. As in buzz-app, a policy applies only while it is the only one on: switch off Identity Naming in Settings → Plugins to use a plugin's. |
 | `accountActions` | `id`, `title`, `icon` | A row in the account menu that opens a dialog titled `title`. The dialog's body is a view of `kind` `dialog`. Send `ui/closeView` with its `view` to close it. |
@@ -279,7 +279,7 @@ same way, per query.
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
 | `inline/render` | `renderer`, `text` (what the pattern matched) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
-| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`) | `{"items": [{"label", "detail", "text", "mentions"}]}`, at most 50. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. |
+| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items": [{"label", "detail", "text", "mentions"}]}`, at most 50. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches
 send `render/event` with `renderer`, `target` (the URL, message or attachment
@@ -290,7 +290,7 @@ it drew), `id`, `event` and `value`.
 | Notification | Params |
 | --- | --- |
 | `message/action` | `action`, `message` |
-| `composer/tool` | `tool`, `channel`, `thread` (the root it replies in, or `null`), `composer` (an id for `composer/insert`) |
+| `composer/tool` | `tool`, `channel`, `thread` (the root it replies in, or `null`), `composer` (an id for `composer/insert`), `inviteAgents` (as in `completion/query`) |
 | `shortcut` | `shortcut` |
 | `render/event` | `renderer`, `target`, `id`, `event`, `value` |
 

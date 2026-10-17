@@ -15,7 +15,7 @@ use super::{ExternalPlugins, capabilities, intern};
 use crate::community::AppState;
 use crate::runtime::Runtime;
 use crate::ui::composer::Composer;
-use crate::ui::composer_completions::{self, Item};
+use crate::ui::composer_completions::{self, Item, Place};
 use crate::ui::composer_tools::ToolContext;
 use crate::ui::markdown::Directory;
 use crate::ui::renderers::{AttachmentRenderer, LinkRenderer, MessageAction, MessageRenderer};
@@ -86,15 +86,19 @@ fn suggest(
     key: &str,
     id: &str,
     query: &str,
-    channel: &str,
-    thread: Option<&str>,
+    place: Place,
     cx: &App,
 ) -> Option<Vec<Item>> {
-    let place = match thread {
-        Some(thread) => format!("{channel}/{thread}"),
-        None => channel.to_owned(),
-    };
-    let entry = (key.to_owned(), place, query.to_owned());
+    let Place {
+        channel,
+        thread,
+        invite_agents,
+    } = place;
+    let entry = (
+        key.to_owned(),
+        format!("{channel}/{thread:?}/{invite_agents}"),
+        query.to_owned(),
+    );
     if let Some(known) =
         SUGGESTIONS.with_borrow(|suggestions| suggestions.entries.get(&entry).cloned())
     {
@@ -104,7 +108,13 @@ fn suggest(
     let inbox = SUGGESTION_INBOX.with_borrow(Clone::clone)?;
     let request = connection.request(
         "completion/query",
-        json!({ "completion": id, "query": query, "channel": channel, "thread": thread }),
+        json!({
+            "completion": id,
+            "query": query,
+            "channel": channel,
+            "thread": thread,
+            "inviteAgents": invite_agents,
+        }),
     );
     SUGGESTIONS.with_borrow_mut(|suggestions| {
         suggestions.entries.insert(entry.clone(), None);
@@ -747,7 +757,7 @@ struct Tool {
 }
 
 impl Render for Tool {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (plugin, id, channel, composer, thread) = (
             self.plugin.clone(),
             self.id.clone(),
@@ -755,17 +765,33 @@ impl Render for Tool {
             self.composer,
             self.context.thread.clone(),
         );
+        let (disabled, invite_agents) = self
+            .context
+            .composer
+            .upgrade()
+            .map(|composer| {
+                let composer = composer.read(cx);
+                (composer.disabled(cx), composer.invites_agents())
+            })
+            .unwrap_or((true, false));
         IconButton::new(
             SharedString::from(format!("plugin-tool-{}-{}", self.plugin, self.id)),
             self.icon,
         )
         .size(IconButtonSize::Sm)
         .tooltip(self.title.clone())
+        .disabled(disabled)
         .on_click(move |_, _, cx| {
             ExternalPlugins::notify_running(
                 &plugin,
                 "composer/tool",
-                json!({ "tool": id, "channel": channel, "thread": thread, "composer": composer }),
+                json!({
+                    "tool": id,
+                    "channel": channel,
+                    "thread": thread,
+                    "composer": composer,
+                    "inviteAgents": invite_agents,
+                }),
                 cx,
             );
         })
@@ -1220,8 +1246,8 @@ pub fn register(
             key: completion_key,
             trigger,
             order: completion.order,
-            query: Rc::new(move |query, channel, thread, cx| {
-                suggest(&plugin, completion_key, &id, query, channel, thread, cx)
+            query: Rc::new(move |query, place, cx| {
+                suggest(&plugin, completion_key, &id, query, place, cx)
             }),
         });
         added.push(Added::Completion(completion_key));

@@ -74,6 +74,7 @@ impl NewSession {
         });
         composer.update(cx, |composer, cx| {
             composer.without_attachments();
+            composer.invite_agents();
             if focus {
                 composer.focus(window, cx)
             }

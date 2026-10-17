@@ -152,6 +152,9 @@ pub struct Composer {
     sending: bool,
     /// The host allows sending (a thread needs a loaded reply target).
     can_send: bool,
+    /// A new session's composer, which may offer library agents not yet
+    /// in the conversation (`inviteAgents`).
+    invite_agents: bool,
     /// Eager uploads were paused because the composer is disabled.
     uploads_paused: bool,
     editing: Option<Arc<MessageRow>>,
@@ -481,6 +484,7 @@ impl Composer {
             placeholder,
             sending: false,
             can_send: true,
+            invite_agents: false,
             uploads_paused: false,
             editing: None,
             edit_generation: 0,
@@ -552,6 +556,22 @@ impl Composer {
     /// Offers no attachments (a new conversation's first message).
     pub fn without_attachments(&mut self) {
         self.no_attachments = true;
+    }
+
+    /// May offer library agents not yet in the conversation.
+    pub fn invite_agents(&mut self) {
+        self.invite_agents = true;
+    }
+
+    pub fn invites_agents(&self) -> bool {
+        self.invite_agents
+    }
+
+    /// Nothing can be typed or sent now (`ComposerToolProps.disabled`).
+    pub fn disabled(&self, cx: &App) -> bool {
+        !self.can_send
+            || self.input_disabled(cx)
+            || self.summary(cx).is_some_and(|channel| channel.read_only)
     }
 
     /// Me's new-chat composer: `trailing` controls below its tools, at
@@ -1507,7 +1527,12 @@ impl Composer {
             Trigger::Plugin(key) => {
                 let thread = self.thread_root.map(|root| root.to_hex());
                 let answer = super::composer_completions::get(key).and_then(|completion| {
-                    (completion.query)(&query.text, &self.channel, thread.as_deref(), cx)
+                    let place = super::composer_completions::Place {
+                        channel: &self.channel,
+                        thread: thread.as_deref(),
+                        invite_agents: self.invite_agents,
+                    };
+                    (completion.query)(&query.text, place, cx)
                 });
                 let profiles = self.community.read(cx).snapshot.profiles.clone();
                 match answer {
