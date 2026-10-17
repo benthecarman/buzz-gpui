@@ -278,6 +278,10 @@ pub struct AgentTypeDecl {
     /// Settings tabs before Attention, each a view of kind `agentTab`.
     #[serde(default)]
     pub tabs: Vec<AgentTabDecl>,
+    /// A Buzz icon shown with the type, such as `Sparkle`; the robot
+    /// without one.
+    #[serde(default)]
+    pub icon: Option<String>,
     /// The New agent dialog offers the new agent's instructions.
     #[serde(default)]
     pub create_instructions: bool,
@@ -405,6 +409,13 @@ pub enum LauncherPlacement {
 #[serde(rename_all = "camelCase")]
 pub struct MenuDecl {
     pub label: String,
+    /// The kinds of channel it is offered in (`stream`, `forum`, `dm`,
+    /// `session`); every kind when empty.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Only private (`true`) or public (`false`) channels.
+    #[serde(default)]
+    pub private: Option<bool>,
 }
 
 /// A page (`pages.register`).

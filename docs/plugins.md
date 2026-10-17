@@ -124,7 +124,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   own links and 100 for a catch-all.
 - `launcher` adds a button to the channel header. `placement` is `side` (the
   default) or `bottom`. `menu` (`{"label"}`) adds an entry to the channel's
-  menu.
+  menu; `kinds` (such as `["stream", "forum"]`) and `private` (`true` or
+  `false`) limit the channels it is offered in.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
   same here) or `hidden`. With `routes: true`, `ui/navigate` can open the page
   at `params` (a JSON object up to 4 KiB): its view's `view/open` carries
@@ -201,6 +202,7 @@ the answer until the agent's name or config changes:
   selected. Answer `{"tree"}` or `null`, as a renderer does.
 - `createInstructions: true`: the New agent dialog offers the new agent's
   instructions.
+- `icon` names a Buzz icon shown with the type; the robot without one.
 - `createForm: true`: the type's own part of the New agent dialog, in place
   of the instructions. It is a view of `kind` `agentCreate` whose `view/open`
   carries `type` and the starting `config`; send `agent/createConfig` with the

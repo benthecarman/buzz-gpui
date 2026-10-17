@@ -594,6 +594,7 @@ def handle(message):
                                 "summary": True,
                                 "peek": True,
                                 "tabs": [{"id": "greeting", "title": "Greeting"}],
+                                "icon": "Smiley",
                                 "createForm": True,
                                 "createModels": {
                                     "models": [

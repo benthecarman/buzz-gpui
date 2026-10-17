@@ -505,6 +505,13 @@ impl AgentType for PluginType {
         self.decl.create_instructions
     }
 
+    fn icon(&self) -> Option<buzz_ui::IconName> {
+        self.decl
+            .icon
+            .as_deref()
+            .map(|name| super::icon(Some(name)))
+    }
+
     fn create_form(
         &self,
         config: &Value,

@@ -394,6 +394,11 @@ pub trait AgentType: 'static {
     fn mark(&self) -> Option<buzz_ui::BrandMark> {
         None
     }
+    /// A design-system icon for the type when it has no brand mark
+    /// (`icon`); the robot without either.
+    fn icon(&self) -> Option<buzz_ui::IconName> {
+        None
+    }
     /// A new agent's starting config and attention objects.
     fn defaults(&self) -> TypeDefaults;
     /// Whether the New agent dialog's card offers the agent's instructions

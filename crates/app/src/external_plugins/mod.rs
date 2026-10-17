@@ -987,9 +987,21 @@ impl ExternalPlugins {
                             LauncherPlacement::Bottom => Placement::Bottom,
                         },
                     }),
-                    menu: panel.menu.as_ref().map(|menu| MenuEntry {
-                        label: intern(menu.label.clone()),
-                        eligible: |_, _| true,
+                    menu: panel.menu.as_ref().map(|menu| {
+                        let (kinds, private) = (menu.kinds.clone(), menu.private);
+                        MenuEntry {
+                            label: intern(menu.label.clone()),
+                            eligible: std::rc::Rc::new(move |channel, _| {
+                                let kind = match channel.channel_type {
+                                    Some(ChannelType::Dm) => "dm",
+                                    Some(ChannelType::Forum) => "forum",
+                                    Some(ChannelType::Session) => "session",
+                                    Some(ChannelType::Stream) | None => "stream",
+                                };
+                                (kinds.is_empty() || kinds.iter().any(|wanted| wanted == kind))
+                                    && private.is_none_or(|private| private == channel.private)
+                            }),
+                        }
                     }),
                     build: channel_panels::build(move |opening, window, cx| {
                         ExternalView::panel(&plugin, &contribution, opening, window, cx)

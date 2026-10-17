@@ -42,7 +42,7 @@ pub fn init(cx: &mut App) {
             launcher: None,
             menu: Some(MenuEntry {
                 label: "View channel usage",
-                eligible,
+                eligible: std::rc::Rc::new(eligible),
             }),
             build: channel_panels::build(|opening, _, cx| {
                 cx.new(|cx| ChannelUsage::new(opening, cx)).into()

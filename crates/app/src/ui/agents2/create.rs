@@ -80,10 +80,13 @@ fn starting_config(kind: Option<&RegisteredType>) -> Value {
 pub fn type_icon(kind: Option<&RegisteredType>, size: f32, cx: &App) -> AnyElement {
     match kind.and_then(|kind| kind.kind.mark()) {
         Some(mark) => Brand::new(mark).size(size).into_any_element(),
-        None => Icon::new(IconName::Robot)
-            .size(size)
-            .color(cx.colors().text_standard)
-            .into_any_element(),
+        None => Icon::new(
+            kind.and_then(|kind| kind.kind.icon())
+                .unwrap_or(IconName::Robot),
+        )
+        .size(size)
+        .color(cx.colors().text_standard)
+        .into_any_element(),
     }
 }
 

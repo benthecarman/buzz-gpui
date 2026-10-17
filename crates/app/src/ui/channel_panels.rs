@@ -49,12 +49,15 @@ pub struct Launcher {
 
 /// An entry in the channel's menu that opens the panel as a tab
 /// (`channelMenu`), such as "View channel usage".
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct MenuEntry {
     pub label: &'static str,
     /// Presentation only, not access.
-    pub eligible: fn(&ChannelSummary, &App) -> bool,
+    pub eligible: Eligible,
 }
+
+/// Whether a channel's menu lists a panel's entry.
+pub type Eligible = Rc<dyn Fn(&ChannelSummary, &App) -> bool>;
 
 /// Whether a panel shows a link.
 pub type Matches = Rc<dyn Fn(&str) -> bool>;
@@ -169,7 +172,7 @@ pub fn menu_entries(channel: &ChannelSummary, cx: &App) -> Vec<(ChannelPanel, &'
     all(cx)
         .into_iter()
         .filter_map(|panel| {
-            let menu = panel.menu?;
+            let menu = panel.menu.clone()?;
             (menu.eligible)(channel, cx).then_some((panel, menu.label))
         })
         .collect()
@@ -225,7 +228,7 @@ pub fn dev_sample(cx: &mut App) {
             }),
             menu: Some(MenuEntry {
                 label: "View sample",
-                eligible: |_, _| true,
+                eligible: Rc::new(|_, _| true),
             }),
             build: build(|opening, _, cx| cx.new(|_| Sample(opening)).into()),
         },
