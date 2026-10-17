@@ -373,6 +373,7 @@ pub(super) fn drawn(
 ) -> AnyElement {
     let (plugin, renderer, place) = (plugin.to_owned(), id.to_owned(), target.to_owned());
     let fields = HashMap::new();
+    let embeds = HashMap::new();
     let draw = Draw {
         send: Rc::new(move |element, event, value, cx| {
             ExternalPlugins::notify_running(
@@ -389,6 +390,7 @@ pub(super) fn drawn(
             );
         }),
         fields: &fields,
+        embeds: &embeds,
         community: AppState::current(cx),
         place: key,
     };

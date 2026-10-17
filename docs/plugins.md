@@ -369,6 +369,8 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `choice` | `id`, `value`, `options` (`[{"value","label"}]`, up to 50), drawn as radio buttons; sends `change` with the chosen `value` |
 | `progress` | `value`, from 0 to 1 |
 | `image` | `url` (https, or the community's media), `width` and `height` (pixels, up to 1200), `alt` |
+| `composer` | `id`, `channel`, `thread` (optional root), `placeholder`: Buzz's own composer, which sends as the channel's does (only in views, not renderers) |
+| `thread` | `id`, `channel`, `root`, `height` (pixels, default 480): Buzz's own thread view; closing it sends `close` (only in views) |
 | `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |
 | `icon` | `name` |

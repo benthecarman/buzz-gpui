@@ -28,6 +28,53 @@ pub struct Draw<'a> {
     pub community: Option<Entity<Community>>,
     /// Names where Markdown shows, and keeps element ids apart.
     pub place: &'a str,
+    /// Buzz's own views the tree embeds, by element id; an embed without
+    /// one draws nothing.
+    pub embeds: &'a HashMap<String, AnyView>,
+}
+
+/// A composer or thread in the tree, for the caller to make its view.
+pub enum EmbedNode<'a> {
+    Composer {
+        id: &'a str,
+        channel: &'a str,
+        thread: Option<&'a str>,
+        placeholder: Option<&'a str>,
+    },
+    Thread {
+        id: &'a str,
+        channel: &'a str,
+        root: &'a str,
+    },
+}
+
+/// Every embedded composer and thread in `node`.
+pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
+    let mut found = Vec::new();
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Column { children, .. }
+            | Node::Row { children, .. }
+            | Node::Card { children, .. } => stack.extend(children.iter().rev()),
+            Node::Composer {
+                id,
+                channel,
+                thread,
+                placeholder,
+            } => found.push(EmbedNode::Composer {
+                id,
+                channel,
+                thread: thread.as_deref(),
+                placeholder: placeholder.as_deref(),
+            }),
+            Node::Thread {
+                id, channel, root, ..
+            } => found.push(EmbedNode::Thread { id, channel, root }),
+            _ => {}
+        }
+    }
+    found
 }
 
 /// An input in the tree, for the caller to make its field.
@@ -293,6 +340,22 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                     .into_any_element(),
             }
         }
+        Node::Composer { id, .. } => match draw.embeds.get(id) {
+            Some(view) => div().w_full().child(view.clone()).into_any_element(),
+            None => div().into_any_element(),
+        },
+        Node::Thread { id, height, .. } => match draw.embeds.get(id) {
+            Some(view) => div()
+                .w_full()
+                .h(px(height.unwrap_or(480).clamp(120, 1200) as f32))
+                .border_1()
+                .border_color(c.border_standard)
+                .rounded(rems(0.75))
+                .overflow_hidden()
+                .child(view.clone())
+                .into_any_element(),
+            None => div().into_any_element(),
+        },
         Node::Avatar { pubkey, size } => {
             let profile = draw.community.as_ref().and_then(|community| {
                 community

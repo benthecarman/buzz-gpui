@@ -78,7 +78,7 @@ mod sidebar_unread;
 mod status;
 mod tab_drag;
 pub mod terminal;
-mod thread;
+pub mod thread;
 mod time;
 pub mod toasts;
 pub mod todos;

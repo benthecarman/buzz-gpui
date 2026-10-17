@@ -53,6 +53,9 @@ pub struct ExternalView {
     /// The last tree the plugin sent could not be drawn.
     error: Option<String>,
     fields: HashMap<String, Field>,
+    /// Buzz's composers and threads the tree embeds, by element id, with
+    /// what they were made for.
+    embeds: HashMap<String, (String, AnyView)>,
     _release: Subscription,
 }
 
@@ -325,6 +328,7 @@ impl ExternalView {
                 tree: None,
                 error: None,
                 fields: HashMap::new(),
+                embeds: HashMap::new(),
                 _release: cx.on_release(|this: &mut Self, cx| {
                     ExternalPlugins::close_view(&this.plugin, &this.id, cx);
                 }),
@@ -446,6 +450,110 @@ impl ExternalView {
         (self.fields.get_mut(id).expect("just added"), created)
     }
 
+    /// Makes the composers and threads the tree names, keeps those it
+    /// still names for the same channel, and drops the rest.
+    fn sync_embeds(&mut self, tree: &Node, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(community) = self.community(cx) else {
+            self.embeds.clear();
+            return;
+        };
+        let mut seen = HashSet::new();
+        for embed in draw::embeds(tree) {
+            let (id, made_for) = match &embed {
+                draw::EmbedNode::Composer {
+                    id,
+                    channel,
+                    thread,
+                    ..
+                } => (
+                    *id,
+                    format!("composer:{channel}:{}", thread.unwrap_or_default()),
+                ),
+                draw::EmbedNode::Thread { id, channel, root } => {
+                    (*id, format!("thread:{channel}:{root}"))
+                }
+            };
+            seen.insert(id.to_owned());
+            if self
+                .embeds
+                .get(id)
+                .is_some_and(|(made, _)| *made == made_for)
+            {
+                continue;
+            }
+            // Only channels you can read.
+            let readable = |channel: &str| {
+                community
+                    .read(cx)
+                    .snapshot
+                    .channels
+                    .iter()
+                    .any(|known| known.id == channel)
+            };
+            let view: Option<AnyView> = match embed {
+                draw::EmbedNode::Composer {
+                    channel,
+                    thread,
+                    placeholder,
+                    ..
+                } if readable(channel) => {
+                    let root =
+                        thread.and_then(|root| buzz_relay_client::EventId::from_hex(root).ok());
+                    let placeholder: SharedString =
+                        placeholder.unwrap_or("Message").to_owned().into();
+                    let (community, channel) = (community.clone(), channel.to_owned());
+                    Some(
+                        cx.new(|cx| {
+                            crate::ui::composer::Composer::new(
+                                community,
+                                channel,
+                                root,
+                                placeholder,
+                                window,
+                                cx,
+                            )
+                        })
+                        .into(),
+                    )
+                }
+                draw::EmbedNode::Thread { id, channel, root } if readable(channel) => {
+                    match buzz_relay_client::EventId::from_hex(root) {
+                        Ok(root) => {
+                            let weak = cx.entity().downgrade();
+                            let element = id.to_owned();
+                            let close: crate::ui::thread::OnClose =
+                                std::sync::Arc::new(move |_, cx| {
+                                    if let Some(this) = weak.upgrade() {
+                                        this.read(cx).event(&element, "close", None, cx);
+                                    }
+                                });
+                            let (community, channel) = (community.clone(), channel.to_owned());
+                            Some(
+                                cx.new(|cx| {
+                                    crate::ui::thread::ThreadPanel::new(
+                                        community, channel, root, close, window, cx,
+                                    )
+                                })
+                                .into(),
+                            )
+                        }
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+            match view {
+                Some(view) => {
+                    self.embeds.insert(id.to_owned(), (made_for, view));
+                }
+                None => {
+                    self.embeds.remove(id);
+                }
+            }
+        }
+        self.embeds.retain(|id, _| seen.contains(id));
+    }
+
     /// What shows before the plugin's tree, or instead of it.
     fn placeholder(&self, status: Status, cx: &App) -> Option<AnyElement> {
         let c = cx.colors();
@@ -541,6 +649,12 @@ impl Render for ExternalView {
             }
             // Fields the tree no longer has start empty if they return.
             self.fields.retain(|id, _| seen.contains(id));
+            self.sync_embeds(&tree, window, cx);
+            let embeds: HashMap<String, AnyView> = self
+                .embeds
+                .iter()
+                .map(|(id, (_, view))| (id.clone(), view.clone()))
+                .collect();
             let fields: HashMap<String, Entity<InputState>> = self
                 .fields
                 .iter()
@@ -554,6 +668,7 @@ impl Render for ExternalView {
                     }
                 }),
                 fields: &fields,
+                embeds: &embeds,
                 community: self.community(cx),
                 place: &self.contribution,
             };

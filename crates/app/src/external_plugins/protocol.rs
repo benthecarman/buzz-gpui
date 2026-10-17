@@ -964,6 +964,26 @@ pub enum Node {
         #[serde(default)]
         alt: Option<String>,
     },
+    /// Buzz's own composer for a channel, or a thread in it
+    /// (`conversation.ui.Composer`). Sending works as in the channel.
+    Composer {
+        id: String,
+        channel: String,
+        #[serde(default)]
+        thread: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+    },
+    /// Buzz's own thread view of `root` in `channel`
+    /// (`conversation.ui.Thread`), `height` pixels tall (default 480).
+    /// Closing it sends `close`.
+    Thread {
+        id: String,
+        channel: String,
+        root: String,
+        #[serde(default)]
+        height: Option<u32>,
+    },
     /// Someone's profile picture, or their initial.
     Avatar {
         pubkey: String,
