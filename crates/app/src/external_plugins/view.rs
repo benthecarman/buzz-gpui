@@ -43,6 +43,8 @@ pub struct ExternalView {
     select: Option<crate::ui::emoji_picker::Select>,
     /// Sets a new agent's config (`agent/createConfig`).
     change: Option<crate::agents2::registry::CreateChange>,
+    /// Ends a composer capture (`composer/accept`).
+    accept: Option<Accept>,
     /// A page's route params, from `ui/navigate`.
     route: Option<Value>,
     tree: Option<Node>,
@@ -184,6 +186,34 @@ impl ExternalView {
         .into()
     }
 
+    /// A composer capture: the plugin's view in place of one composer's
+    /// editor.
+    pub(super) fn capture(
+        plugin: &str,
+        composer: u64,
+        accept: Accept,
+        cx: &mut App,
+    ) -> (Entity<Self>, String) {
+        let extra = json!({ "composer": composer });
+        let view = Self::open(
+            plugin,
+            "capture",
+            "capture",
+            |view| {
+                view.extra = extra;
+                view.accept = Some(accept);
+            },
+            cx,
+        );
+        let id = view.read(cx).id.clone();
+        (view, id)
+    }
+
+    /// What `composer/accept` calls: a capture's end.
+    pub(super) fn acceptor(&self) -> Option<Accept> {
+        self.accept.clone()
+    }
+
     /// What `agent/createConfig` calls: a create form's change.
     pub(super) fn changer(&self) -> Option<crate::agents2::registry::CreateChange> {
         self.change.clone()
@@ -272,6 +302,7 @@ impl ExternalView {
                 close: None,
                 select: None,
                 change: None,
+                accept: None,
                 route: None,
                 tree: None,
                 error: None,
@@ -554,6 +585,10 @@ pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &m
         );
     });
 }
+
+/// Ends a composer capture, attaching a file `(name, mime, bytes)` if
+/// the plugin made one.
+pub type Accept = Rc<dyn Fn(Option<(String, String, Vec<u8>)>, &mut Window, &mut App)>;
 
 /// An account action's dialog around the plugin's view.
 struct Framed {

@@ -1221,6 +1221,32 @@ impl ExternalPlugins {
             "composer/insertMentions" => Reply::Now(contribute::insert_mentions(params, cx)),
             "composer/insertResource" => Reply::Now(contribute::insert_resource(params, cx)),
             "composer/focus" => Reply::Now(contribute::focus(params, cx)),
+            "composer/capture" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                Reply::Now(match plugin {
+                    Some(plugin) => contribute::capture(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                })
+            }
+            "composer/accept" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                match view.and_then(|view| view.read(cx).acceptor()) {
+                    Some(accept) => Reply::Now(contribute::accept(params, accept, cx)),
+                    None => Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "composer/accept takes an open capture view".to_owned(),
+                    ))),
+                }
+            }
             "agent/tool" => {
                 let plugin = cx
                     .global_mut::<Self>()

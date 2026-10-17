@@ -292,11 +292,15 @@ enum DraftIssue {
     Accepted,
 }
 
-/// Voice note capture (`VoiceCapture.tsx`).
+/// Voice note capture (`VoiceCapture.tsx`), or a plugin tool's
+/// (`ComposerToolProps.capture`).
 enum Capture {
     Recording(Recorder),
     Preparing,
     Failed(SharedString),
+    /// A plugin's view in place of the editor until it accepts or the
+    /// user discards it.
+    Plugin(AnyView),
 }
 
 /// Whether a recovered send still owns the saved draft.
@@ -2714,6 +2718,52 @@ impl Composer {
     }
 
     /// "Discard voice note" (or "Close" after a failure).
+    /// Shows a plugin tool's capture view in place of the editor
+    /// (`capture`). `false` while another capture, an edit or a send is
+    /// under way.
+    pub fn start_plugin_capture(
+        &mut self,
+        view: AnyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.capture.is_some() || self.editing.is_some() || self.sending {
+            return false;
+        }
+        self.capture = Some(Capture::Plugin(view));
+        window.focus(&self.capture_focus, cx);
+        cx.notify();
+        true
+    }
+
+    /// Ends a plugin capture (`accept`), attaching `file` if it made one.
+    pub fn accept_plugin_capture(
+        &mut self,
+        file: Option<(String, String, Vec<u8>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.capture, Some(Capture::Plugin(_))) {
+            return;
+        }
+        self.capture = None;
+        if let Some((name, mime, bytes)) = file {
+            let size = bytes.len() as u64;
+            self.add_files(
+                vec![NewFile {
+                    name,
+                    mime,
+                    size,
+                    source: buzz_relay_client::upload::Source::Bytes(bytes.into()),
+                    voice: None,
+                }],
+                cx,
+            );
+        }
+        self.focus(window, cx);
+        cx.notify();
+    }
+
     fn discard_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.capture, Some(Capture::Preparing)) {
             return;
@@ -4789,6 +4839,12 @@ impl Composer {
                     .mx(px(4.))
                     .bg(c.border_standard),
             );
+        if let Capture::Plugin(view) = capture {
+            return Some(
+                row.child(div().flex_1().min_w_0().child(view.clone()))
+                    .into_any_element(),
+            );
+        }
         if let Capture::Failed(error) = capture {
             return Some(
                 row.child(

@@ -403,6 +403,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `composer/insertMentions` | `composer`, `pubkeys` (at most 32) | `null`, after putting mention chips at the caret; the people become recipients |
 | `composer/insertResource` | `composer`, `uri` (a Buzz or web link), `label` | `null`, after putting the link as one chip at the caret |
 | `composer/focus` | `composer` | `null`, after putting the caret back in the composer |
+| `composer/capture` | `composer` | `{"view"}`. A view of `kind` `capture` takes the composer's place, as recording a voice note does, until `composer/accept` or the user discards it (the view then closes). |
+| `composer/accept` | `view` (an open `capture`), and optionally `data` (base64, up to 3 MiB), `name` and `mime` | `null`. Ends the capture and attaches the file, if given, to the draft. |
 
 Reads cover the selected community and channels you can read in it. They
 never mark anything read. A read waits up to 10 seconds for the relay.

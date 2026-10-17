@@ -811,6 +811,80 @@ pub fn insert_resource(params: &Value, cx: &mut App) -> Result<Value, capabiliti
         .map_err(|reason| (3, reason.to_owned()))
 }
 
+/// `composer/capture`: the plugin's view of kind `capture` in place of
+/// the composer's editor, as voice notes record (`capture`), until
+/// `composer/accept` or the user discards it.
+pub fn capture(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = composer_of(params, cx)?;
+    let id = params
+        .get("composer")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let weak = composer.downgrade();
+    let accept: super::view::Accept = Rc::new(move |file, window, cx| {
+        let _ = weak.update(cx, |composer, cx| {
+            composer.accept_plugin_capture(file, window, cx)
+        });
+    });
+    let (view, view_id) = super::view::ExternalView::capture(plugin, id, accept, cx);
+    let started = window
+        .update(cx, |_, window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.start_plugin_capture(view.into(), window, cx)
+            })
+        })
+        .map_err(|_| (1, "The window is not open.".to_owned()))?;
+    if started {
+        Ok(json!({ "view": view_id }))
+    } else {
+        Err((3, "The composer is busy.".to_owned()))
+    }
+}
+
+/// `composer/accept`: ends a capture, attaching the file in `data`
+/// (base64, with `name` and `mime`) if given.
+pub fn accept(
+    params: &Value,
+    accept: super::view::Accept,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    use base64::Engine;
+    let file = match params.get("data").and_then(Value::as_str) {
+        None => None,
+        Some(data) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| (protocol::INVALID_PARAMS, "data is not base64".to_owned()))?;
+            if bytes.is_empty() || bytes.len() > 3 * 1024 * 1024 {
+                return Err((
+                    protocol::INVALID_PARAMS,
+                    "A file must be 1 byte to 3 MiB.".to_owned(),
+                ));
+            }
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("capture")
+                .chars()
+                .take(200)
+                .collect::<String>();
+            let mime = params
+                .get("mime")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| buzz_relay_client::upload::mime_type(&name, &bytes));
+            Some((name, mime, bytes))
+        }
+    };
+    let window =
+        crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    window
+        .update(cx, |_, window, cx| accept(file, window, cx))
+        .map_err(|_| (1, "The window is not open.".to_owned()))?;
+    Ok(Value::Null)
+}
+
 /// `composer/focus`: puts the caret back in the composer (`focus`).
 pub fn focus(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
     let (composer, window) = composer_of(params, cx)?;
