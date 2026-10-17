@@ -75,6 +75,16 @@ pub trait MessageAction {
     }
 }
 
+/// Something shown beside a message's reactions (a message-placed
+/// `ComposerAccessory`), such as an agent's work on it.
+pub trait MessageAccessory {
+    fn key(&self) -> &str;
+    fn order(&self) -> i32 {
+        0
+    }
+    fn render(&self, row: &Arc<MessageRow>, cx: &App) -> Option<AnyElement>;
+}
+
 /// Replaces an attachment's player (voice notes use one).
 pub trait AttachmentRenderer {
     fn key(&self) -> &str;
@@ -91,6 +101,7 @@ pub trait AttachmentRenderer {
 #[derive(Default)]
 struct Registry {
     text: Vec<Rc<dyn TextRenderer>>,
+    accessories: Vec<Rc<dyn MessageAccessory>>,
     messages: Vec<Rc<dyn MessageRenderer>>,
     links: Vec<Rc<dyn LinkRenderer>>,
     inline: Vec<Rc<dyn InlineRenderer>>,
@@ -147,6 +158,24 @@ pub fn text_matches(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     found
 }
 
+pub fn register_message_accessory(accessory: Rc<dyn MessageAccessory>) {
+    REGISTRY.with_borrow_mut(|r| {
+        r.accessories.push(accessory);
+        r.accessories
+            .sort_by(|a, b| a.order().cmp(&b.order()).then_with(|| a.key().cmp(b.key())));
+    });
+}
+
+/// What the message accessories show beside `row`'s reactions.
+pub fn message_accessories(row: &Arc<MessageRow>, cx: &App) -> Vec<AnyElement> {
+    let accessories = REGISTRY.with_borrow(|r| r.accessories.clone());
+    accessories
+        .into_iter()
+        .filter(|accessory| on(accessory.key()))
+        .filter_map(|accessory| guarded(accessory.key(), || accessory.render(row, cx)))
+        .collect()
+}
+
 /// Draws `matched` with text renderer `key`.
 pub fn render_text(key: &str, matched: &str, cx: &App) -> Option<AnyElement> {
     let renderer = REGISTRY.with_borrow(|r| r.text.iter().find(|r| r.key() == key).cloned())?;
@@ -157,6 +186,7 @@ pub fn render_text(key: &str, matched: &str, cx: &App) -> Option<AnyElement> {
 fn bundled() -> Registry {
     Registry {
         text: Vec::new(),
+        accessories: Vec::new(),
         messages: vec![Rc::new(Diffs)],
         links: Vec::new(),
         inline: vec![Rc::new(Emoji)],
@@ -174,6 +204,7 @@ pub fn unregister(key: &str) {
             text_changed();
         }
         r.messages.retain(|item| item.key() != key);
+        r.accessories.retain(|item| item.key() != key);
         r.links.retain(|item| item.key() != key);
         r.inline.retain(|item| item.key() != key);
         r.attachments.retain(|item| item.key() != key);

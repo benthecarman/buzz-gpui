@@ -672,6 +672,11 @@ fn full(
             cx,
         ));
     }
+    // Plugins' message accessories sit beside the reactions too.
+    for accessory in super::renderers::message_accessories(row, cx) {
+        // Sized to what it shows, not the row.
+        body = body.child(div().flex().child(accessory));
+    }
     if let Some(reactions) = reactions(row, rows, cx) {
         body = body.child(reactions);
     }

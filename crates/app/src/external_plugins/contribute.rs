@@ -489,6 +489,52 @@ impl MessageRenderer for Message {
     }
 }
 
+/// A plugin accessory beside messages' reactions.
+struct MessageAccessoryView {
+    key: &'static str,
+    plugin: String,
+    id: String,
+    order: i32,
+    kinds: Vec<u16>,
+}
+
+impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
+    fn key(&self) -> &str {
+        self.key
+    }
+
+    fn order(&self) -> i32 {
+        self.order
+    }
+
+    fn render(&self, row: &Arc<MessageRow>, cx: &App) -> Option<AnyElement> {
+        let kinds_ok = if self.kinds.is_empty() {
+            row.kind == 9
+        } else {
+            self.kinds.contains(&row.kind)
+        };
+        if !kinds_ok {
+            return None;
+        }
+        // The message as it is now: an edit or a new reply asks again.
+        let target = format!(
+            "{}:{}:{}",
+            row.id.to_hex(),
+            hashed(&row.content),
+            row.reply_count
+        );
+        let tree = ask(
+            &self.plugin,
+            self.key,
+            &target,
+            "message/accessory",
+            || json!({ "accessory": self.id, "message": message_json(row, cx) }),
+            cx,
+        )?;
+        Some(drawn(&self.plugin, &self.id, self.key, &target, &tree, cx))
+    }
+}
+
 struct AttachmentView {
     key: &'static str,
     plugin: String,
@@ -1090,6 +1136,18 @@ pub fn register(
     }
     for accessory in &contributions.composer_accessories {
         let accessory_key = key(&accessory.id);
+        if accessory.placement == protocol::AccessoryPlacement::Message {
+            crate::ui::renderers::unregister(accessory_key);
+            crate::ui::renderers::register_message_accessory(Rc::new(MessageAccessoryView {
+                key: accessory_key,
+                plugin: plugin.to_owned(),
+                id: accessory.id.clone(),
+                order: accessory.order,
+                kinds: accessory.kinds.clone(),
+            }));
+            added.push(Added::Renderer(accessory_key));
+            continue;
+        }
         let (owner, id) = (plugin.to_owned(), accessory.id.clone());
         crate::ui::composer_tools::register(
             crate::ui::composer_tools::ComposerTool {

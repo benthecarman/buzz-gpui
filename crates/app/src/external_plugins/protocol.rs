@@ -215,6 +215,23 @@ pub struct AccessoryDecl {
     pub title: String,
     #[serde(default)]
     pub order: i32,
+    /// `composer` (the default): a view above every composer. `message`:
+    /// drawn beside each message's reactions; Buzz asks
+    /// `message/accessory`.
+    #[serde(default)]
+    pub placement: AccessoryPlacement,
+    /// For `message`: the message kinds it shows on; chat messages when
+    /// empty.
+    #[serde(default)]
+    pub kinds: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessoryPlacement {
+    #[default]
+    Composer,
+    Message,
 }
 
 /// Draws pieces of message text that `pattern` (a regular expression)
