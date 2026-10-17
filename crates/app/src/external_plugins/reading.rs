@@ -108,6 +108,41 @@ pub fn threads(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     }))
 }
 
+/// `unread/sync`: how read state is syncing to the relay, and
+/// `unread/retrySync` to try again after a failure.
+pub fn sync(retry: bool, cx: &App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let community = community.read(cx);
+    if retry {
+        community.session.retry_read_sync();
+        return Ok(Value::Null);
+    }
+    Ok(match &community.snapshot.unread.sync {
+        None => Value::Null,
+        Some(sync) => json!({
+            "capability": format!("{:?}", sync.capability).to_ascii_lowercase(),
+            "status": format!("{:?}", sync.status).to_ascii_lowercase(),
+            "complete": format!("{:?}", sync.completeness).to_ascii_lowercase(),
+            "error": sync.error,
+        }),
+    })
+}
+
+/// `unread/message`: whether a loaded message shows as unread now.
+pub fn message(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let id = params
+        .get("message")
+        .and_then(Value::as_str)
+        .and_then(|hex| EventId::from_hex(hex).ok())
+        .ok_or_else(|| invalid("message is not an event id"))?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        Ok(json!(session.message_unread(&channel, id).await))
+    }))
+}
+
 /// `inbox/get`: the inbox's conversations, as the Inbox page lists them.
 pub fn inbox(cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;

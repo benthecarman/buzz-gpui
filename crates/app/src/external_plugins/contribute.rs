@@ -87,9 +87,14 @@ fn suggest(
     id: &str,
     query: &str,
     channel: &str,
+    thread: Option<&str>,
     cx: &App,
 ) -> Option<Vec<Item>> {
-    let entry = (key.to_owned(), channel.to_owned(), query.to_owned());
+    let place = match thread {
+        Some(thread) => format!("{channel}/{thread}"),
+        None => channel.to_owned(),
+    };
+    let entry = (key.to_owned(), place, query.to_owned());
     if let Some(known) =
         SUGGESTIONS.with_borrow(|suggestions| suggestions.entries.get(&entry).cloned())
     {
@@ -99,7 +104,7 @@ fn suggest(
     let inbox = SUGGESTION_INBOX.with_borrow(Clone::clone)?;
     let request = connection.request(
         "completion/query",
-        json!({ "completion": id, "query": query, "channel": channel }),
+        json!({ "completion": id, "query": query, "channel": channel, "thread": thread }),
     );
     SUGGESTIONS.with_borrow_mut(|suggestions| {
         suggestions.entries.insert(entry.clone(), None);
@@ -136,10 +141,26 @@ fn items(value: &Value) -> Vec<Item> {
                 .take(50)
                 .filter_map(|item| {
                     let label = text(item, "label").filter(|label| !label.is_empty())?;
+                    let mentions: Vec<String> = item
+                        .get("mentions")
+                        .and_then(Value::as_array)
+                        .map(|keys| {
+                            keys.iter()
+                                .filter_map(Value::as_str)
+                                .filter(|key| {
+                                    key.len() == 64
+                                        && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                })
+                                .map(str::to_ascii_lowercase)
+                                .take(32)
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     Some(Item {
                         text: text(item, "text").unwrap_or_else(|| label.clone()),
                         detail: text(item, "detail").map(Into::into),
                         label: label.into(),
+                        mentions,
                     })
                 })
                 .collect()
@@ -1199,8 +1220,8 @@ pub fn register(
             key: completion_key,
             trigger,
             order: completion.order,
-            query: Rc::new(move |query, channel, cx| {
-                suggest(&plugin, completion_key, &id, query, channel, cx)
+            query: Rc::new(move |query, channel, thread, cx| {
+                suggest(&plugin, completion_key, &id, query, channel, thread, cx)
             }),
         });
         added.push(Added::Completion(completion_key));

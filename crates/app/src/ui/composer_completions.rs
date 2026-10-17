@@ -19,10 +19,14 @@ pub struct Item {
     pub detail: Option<SharedString>,
     /// What a pick puts in place of the trigger and query.
     pub text: String,
+    /// People a pick mentions instead of `text`, as chips that make them
+    /// recipients (`edit: { mentions }`).
+    pub mentions: Vec<String>,
 }
 
-/// The suggestions for a query typed in a channel; `None` while waiting.
-pub type Query = Rc<dyn Fn(&str, &str, &App) -> Option<Vec<Item>>>;
+/// The suggestions for a query typed in a channel, or a thread in it;
+/// `None` while waiting.
+pub type Query = Rc<dyn Fn(&str, &str, Option<&str>, &App) -> Option<Vec<Item>>>;
 
 pub struct PluginCompletion {
     pub key: &'static str,
@@ -99,7 +103,7 @@ mod tests {
                 key,
                 trigger: '/',
                 order,
-                query: Rc::new(|_, _, _| None),
+                query: Rc::new(|_, _, _, _| None),
             })
         };
         add("b.plugin/commands", 0);

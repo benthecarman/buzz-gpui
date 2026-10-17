@@ -278,7 +278,7 @@ same way, per query.
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
 | `inline/render` | `renderer`, `text` (what the pattern matched) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
-| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel` | `{"items": [{"label", "detail", "text"}]}`, at most 50. Picking one replaces the trigger and query with `text`. |
+| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`) | `{"items": [{"label", "detail", "text", "mentions"}]}`, at most 50. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches
 send `render/event` with `renderer`, `target` (the URL, message or attachment
@@ -431,6 +431,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
 | `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","stale"}`. Counts are sampled, not exact. |
 | `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |
+| `unread/message` | `channel`, `message` | Whether that loaded message shows as unread now |
+| `unread/sync` | none | `{"capability","status","complete","error"}`: how read marks sync to the relay, or `null` before it is known. `unread/retrySync` tries again after a failure. |
 | `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
 | `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount"}` |
 | `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. |

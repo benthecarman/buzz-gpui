@@ -1505,18 +1505,43 @@ impl Composer {
                 (items, found.status, found.retry)
             }
             Trigger::Plugin(key) => {
-                let answer = super::composer_completions::get(key)
-                    .and_then(|completion| (completion.query)(&query.text, &self.channel, cx));
+                let thread = self.thread_root.map(|root| root.to_hex());
+                let answer = super::composer_completions::get(key).and_then(|completion| {
+                    (completion.query)(&query.text, &self.channel, thread.as_deref(), cx)
+                });
+                let profiles = self.community.read(cx).snapshot.profiles.clone();
                 match answer {
                     None => (Vec::new(), Some("Loading…".into()), None),
                     Some(items) => (
                         items
                             .into_iter()
                             .take(50)
-                            .map(|item| Suggestion::Text {
-                                label: item.label,
-                                detail: item.detail,
-                                text: item.text,
+                            .map(|item| {
+                                if item.mentions.is_empty() {
+                                    return Suggestion::Text {
+                                        label: item.label,
+                                        detail: item.detail,
+                                        text: item.text,
+                                    };
+                                }
+                                // Picked as a team is: a chip for each.
+                                let recipients = item
+                                    .mentions
+                                    .iter()
+                                    .map(|key| {
+                                        let name = profiles
+                                            .get(key)
+                                            .map(|profile| profile.name.clone())
+                                            .unwrap_or_else(|| key.chars().take(10).collect());
+                                        (key.clone(), SharedString::from(name), None)
+                                    })
+                                    .collect();
+                                Suggestion::Team {
+                                    name: item.label,
+                                    recipients,
+                                    detail: item.detail.unwrap_or_default(),
+                                    disabled: false,
+                                }
                             })
                             .collect(),
                         None,
