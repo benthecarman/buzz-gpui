@@ -533,6 +533,23 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(plain, serde_json::Value::Null);
+            let agent = json!({ "pubkey": "ab", "name": "Gus", "owner": "cd",
+                "config": { "greeting": "Howdy" } });
+            let summary = connection
+                .request(
+                    "agent/summary",
+                    json!({ "type": "greeter", "agent": agent }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(summary["text"], "Says “Howdy”");
+            let peek = connection
+                .request("agent/peek", json!({ "type": "greeter", "agent": agent }))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(protocol::Node::parse(peek["tree"].clone()).is_ok());
             let card = connection
                 .request(
                     "message/render",

@@ -1155,7 +1155,6 @@ impl ExternalPlugins {
     }
 
     /// The app's side of a plugin's request.
-    /// The app's side of a plugin's request.
     fn answer(path: &Path, generation: u64, method: &str, params: &Value, cx: &mut App) -> Reply {
         let later = |task: Result<Task<_>, _>| match task {
             Ok(task) => Reply::Later(task),
@@ -1186,6 +1185,32 @@ impl ExternalPlugins {
                     Some(plugin) => capabilities::notify(&plugin, params, cx),
                     None => Err((1, "The plugin stopped.".to_owned())),
                 })
+            }
+            "agent/save" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let config = params.get("config").filter(|config| config.is_object());
+                let (Some(view), Some(config)) = (view, config) else {
+                    return Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "agent/save takes an open agentTab view and an object config".to_owned(),
+                    )));
+                };
+                let config = config.clone();
+                match view.update(cx, |view, cx| view.save_agent(config, cx)) {
+                    Some(task) => Reply::Later(cx.background_spawn(async move {
+                        task.await.map(|()| Value::Null).map_err(|error| (3, error))
+                    })),
+                    None => Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "agent/save takes an agentTab view".to_owned(),
+                    ))),
+                }
             }
             "channel/watch" => Self::watch(path, generation, params, cx),
             "channel/unwatch" => {

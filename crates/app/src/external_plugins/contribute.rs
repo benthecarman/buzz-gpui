@@ -253,7 +253,7 @@ fn ask(
 
 /// What a renderer answered for `target`: `None` until it has, then its
 /// tree or `None` if it declined.
-fn answered(key: &str, target: &str) -> Option<Option<Rc<Node>>> {
+pub(super) fn answered(key: &str, target: &str) -> Option<Option<Rc<Node>>> {
     ANSWERS.with_borrow(
         |answers| match answers.entries.get(&(key.to_owned(), target.to_owned())) {
             Some(Answer::Ready(tree)) => Some(tree.clone()),
@@ -262,8 +262,24 @@ fn answered(key: &str, target: &str) -> Option<Option<Rc<Node>>> {
     )
 }
 
-/// Asks plugin renderer `key` about `target` through `requester`, once.
-fn ask_with(requester: &Requester, key: &str, target: &str, method: &str, params: Value) {
+/// A renderer's answer: `{"tree"}`, a bare tree, or `null`.
+pub(super) fn tree_of(value: Value) -> Option<Node> {
+    if value.is_null() {
+        return None;
+    }
+    Node::parse(value.get("tree").cloned().unwrap_or(value)).ok()
+}
+
+/// Asks plugin renderer `key` about `target` through `requester`, once;
+/// `parse` makes the answer a tree.
+pub(super) fn ask_with(
+    requester: &Requester,
+    key: &str,
+    target: &str,
+    method: &str,
+    params: Value,
+    parse: fn(Value) -> Option<Node>,
+) {
     let entry = (key.to_owned(), target.to_owned());
     let fresh = ANSWERS.with_borrow_mut(|answers| {
         if answers.entries.contains_key(&entry) {
@@ -284,8 +300,8 @@ fn ask_with(requester: &Requester, key: &str, target: &str, method: &str, params
     let request = requester.request(method, params, std::time::Duration::from_secs(10));
     requester.runtime().spawn(async move {
         let tree = match request.await {
-            Ok(Ok(Value::Null)) | Ok(Err(_)) | Err(_) => None,
-            Ok(Ok(value)) => Node::parse(value.get("tree").cloned().unwrap_or(value)).ok(),
+            Ok(Ok(value)) => parse(value),
+            Ok(Err(_)) | Err(_) => None,
         };
         let _ = inbox.unbounded_send((entry, tree));
     });
@@ -321,6 +337,7 @@ impl crate::ui::renderers::TextRenderer for Inline {
                     piece,
                     "inline/render",
                     json!({ "renderer": self.id, "text": piece }),
+                    tree_of,
                 ),
             }
         }
@@ -340,7 +357,14 @@ fn hashed(text: &str) -> String {
 }
 
 /// Draws a renderer's answer; its buttons send `render/event`.
-fn drawn(plugin: &str, id: &str, key: &str, target: &str, tree: &Node, cx: &App) -> AnyElement {
+pub(super) fn drawn(
+    plugin: &str,
+    id: &str,
+    key: &str,
+    target: &str,
+    tree: &Node,
+    cx: &App,
+) -> AnyElement {
     let (plugin, renderer, place) = (plugin.to_owned(), id.to_owned(), target.to_owned());
     let fields = HashMap::new();
     let draw = Draw {

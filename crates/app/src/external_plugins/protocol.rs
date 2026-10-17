@@ -227,6 +227,22 @@ pub struct AgentTypeDecl {
     /// How long one run may take, at most 30 minutes.
     #[serde(default = "five_minutes")]
     pub timeout_seconds: u64,
+    /// Whether Buzz asks `agent/summary` for the line under an agent's
+    /// name; without it the line is the title.
+    #[serde(default)]
+    pub summary: bool,
+    /// Whether Buzz asks `agent/peek` for a glance at a selected agent.
+    #[serde(default)]
+    pub peek: bool,
+    /// Settings tabs before Attention, each a view of kind `agentTab`.
+    #[serde(default)]
+    pub tabs: Vec<AgentTabDecl>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct AgentTabDecl {
+    pub id: String,
+    pub title: String,
 }
 
 fn five_minutes() -> u64 {
@@ -642,6 +658,19 @@ impl Contributions {
                     "“{}”'s timeout must be 1 to 1800 seconds.",
                     kind.id
                 ));
+            }
+            if kind.tabs.len() > 8 {
+                return Err(format!("“{}” has more than 8 tabs.", kind.id));
+            }
+            let mut tabs = std::collections::HashSet::new();
+            for tab in &kind.tabs {
+                if !valid_contribution_id(&tab.id) || tab.id == "attention" {
+                    return Err(format!("“{}” is not a tab id.", tab.id));
+                }
+                if !tabs.insert(&tab.id) {
+                    return Err(format!("“{}” has the tab “{}” twice.", kind.id, tab.id));
+                }
+                check_title(&tab.id, &tab.title)?;
             }
         }
         for shortcut in &self.shortcuts {

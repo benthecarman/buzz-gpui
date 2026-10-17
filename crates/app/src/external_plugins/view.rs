@@ -5,10 +5,12 @@
 use super::draw::{self, Draw};
 use super::protocol::Node;
 use super::{ExternalPlugins, Status};
+use crate::agents2::registry::AgentView;
 use crate::community::{AppState, Community};
 use crate::ui::channel_panels::Opening;
 use buzz_ui::{ActiveTheme, Button, IconName, Spinner, TypeStyled, tokens::space};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -30,6 +32,8 @@ pub struct ExternalView {
     id: String,
     /// A panel's opening; `None` for a page.
     opening: Option<Opening>,
+    /// An agent tab's agent, and its type's id.
+    agent: Option<(AgentView, &'static str)>,
     tree: Option<Node>,
     /// The last tree the plugin sent could not be drawn.
     error: Option<String>,
@@ -45,11 +49,19 @@ impl ExternalView {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        Self::open(plugin, contribution, "panel", Some(opening), window, cx)
+        Self::open(
+            plugin,
+            contribution,
+            "panel",
+            Some(opening),
+            None,
+            window,
+            cx,
+        )
     }
 
     pub fn page(plugin: &str, contribution: &str, window: &mut Window, cx: &mut App) -> AnyView {
-        Self::open(plugin, contribution, "page", None, window, cx)
+        Self::open(plugin, contribution, "page", None, None, window, cx)
     }
 
     /// A Settings section the plugin added.
@@ -59,7 +71,37 @@ impl ExternalView {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        Self::open(plugin, contribution, "settings", None, window, cx)
+        Self::open(plugin, contribution, "settings", None, None, window, cx)
+    }
+
+    /// A settings tab of one of the plugin's agent types.
+    pub fn agent_tab(
+        plugin: &str,
+        kind: &'static str,
+        tab: &str,
+        agent: AgentView,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        Self::open(
+            plugin,
+            tab,
+            "agentTab",
+            None,
+            Some((agent, kind)),
+            window,
+            cx,
+        )
+    }
+
+    /// `agent/save`: replaces this tab's agent's config.
+    pub(super) fn save_agent(
+        &self,
+        config: Value,
+        cx: &mut App,
+    ) -> Option<Task<Result<(), String>>> {
+        let (agent, _) = self.agent.as_ref()?;
+        Some(agent.save(config, cx))
     }
 
     fn open(
@@ -67,6 +109,7 @@ impl ExternalView {
         contribution: &str,
         kind: &'static str,
         opening: Option<Opening>,
+        agent: Option<(AgentView, &'static str)>,
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
@@ -77,6 +120,7 @@ impl ExternalView {
             kind,
             id: id.clone(),
             opening,
+            agent,
             tree: None,
             error: None,
             fields: HashMap::new(),
@@ -92,7 +136,13 @@ impl ExternalView {
     /// `view/open`'s params.
     pub(super) fn open_params(&self) -> Value {
         let opening = self.opening.as_ref();
+        let (agent, kind) = match &self.agent {
+            Some((view, kind)) => (Some(super::agents::agent_json(&view.agent)), Some(*kind)),
+            None => (None, None),
+        };
         json!({
+            "agent": agent,
+            "type": kind,
             "view": self.id,
             "contribution": self.contribution,
             "kind": self.kind,
@@ -253,7 +303,13 @@ impl Render for ExternalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let status = ExternalPlugins::status(&self.plugin, cx);
-        let mut body = div().flex().flex_col().gap(space::S4).p(space::S6);
+        // An agent tab sits in the host's own padded tab.
+        let framed = self.kind != "agentTab";
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(space::S4)
+            .when(framed, |body| body.p(space::S6));
         if let Some(placeholder) = self.placeholder(status, cx) {
             body = body.child(placeholder);
         } else if let Some(tree) = self.tree.clone() {
@@ -303,7 +359,7 @@ impl Render for ExternalView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(c.surface_panel)
+            .when(framed, |view| view.bg(c.surface_panel))
             .text_color(c.text_standard)
             .child(body)
     }

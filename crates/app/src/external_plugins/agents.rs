@@ -9,9 +9,10 @@
 
 use super::process::Requester;
 use super::protocol::{AgentToolDecl, AgentTypeDecl, INVALID_PARAMS};
-use super::{ExternalPlugins, capabilities::Failure, intern};
+use super::{ExternalPlugins, capabilities::Failure, contribute, intern};
+use crate::agents2::Agent;
 use crate::agents2::attention::{AttentionValue, EventData, Interest};
-use crate::agents2::registry::{self, AgentType, TypeDefaults};
+use crate::agents2::registry::{self, AgentTab, AgentType, TypeDefaults};
 use crate::agents2::runtime::{Delivery, Trigger};
 use crate::buzz_mcp::added::{self, AddedTool};
 use crate::buzz_mcp::app_client::AgentActions;
@@ -253,6 +254,68 @@ struct PluginType {
     config: Value,
     instructions: Option<String>,
     timeout: Duration,
+    requester: Requester,
+    summary: bool,
+    peek: bool,
+    tabs: Vec<(String, String)>,
+}
+
+/// An agent as a plugin sees it.
+pub(super) fn agent_json(agent: &Agent) -> Value {
+    json!({
+        "pubkey": agent.pubkey,
+        "name": agent.name,
+        "owner": agent.owner,
+        "config": agent.config,
+    })
+}
+
+/// A summary answer, `{"text"}`, as a text tree for the answer cache.
+fn summary_of(value: Value) -> Option<super::protocol::Node> {
+    let text = value.get("text")?.as_str()?.trim();
+    (!text.is_empty()).then(|| super::protocol::Node::Text {
+        text: text.chars().take(120).collect(),
+        style: Default::default(),
+        tone: Default::default(),
+    })
+}
+
+impl PluginType {
+    /// The answer cache's key for `what` (`summary` or `peek`), and its
+    /// target: the agent as it is now, so a saved change asks again.
+    fn cached(&self, what: &str, agent: &Agent) -> (&'static str, String) {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        (&agent.name, agent.config.to_string()).hash(&mut hasher);
+        (
+            intern(format!("{}/{}#{what}", self.plugin, self.id)),
+            format!("{}:{:x}", agent.pubkey, hasher.finish()),
+        )
+    }
+
+    /// What the plugin answered about `agent`, asking it the first time.
+    fn ask(
+        &self,
+        what: &str,
+        agent: &Agent,
+        parse: fn(Value) -> Option<super::protocol::Node>,
+    ) -> Option<(&'static str, String, std::rc::Rc<super::protocol::Node>)> {
+        let (key, target) = self.cached(what, agent);
+        match contribute::answered(key, &target) {
+            Some(tree) => tree.map(|tree| (key, target, tree)),
+            None => {
+                contribute::ask_with(
+                    &self.requester,
+                    key,
+                    &target,
+                    &format!("agent/{what}"),
+                    json!({ "type": self.id, "agent": agent_json(agent) }),
+                    parse,
+                );
+                None
+            }
+        }
+    }
 }
 
 impl AgentType for PluginType {
@@ -284,6 +347,47 @@ impl AgentType for PluginType {
                 })
                 .collect(),
         }
+    }
+
+    fn summary(&self, agent: &Agent) -> Option<String> {
+        if !self.summary {
+            return None;
+        }
+        match &*self.ask("summary", agent, summary_of)?.2 {
+            super::protocol::Node::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    fn peek(&self, agent: &Agent, _: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        if !self.peek {
+            return None;
+        }
+        let (key, target, tree) = self.ask("peek", agent, contribute::tree_of)?;
+        Some(contribute::drawn(
+            &self.plugin,
+            self.id,
+            key,
+            &target,
+            &tree,
+            cx,
+        ))
+    }
+
+    fn tabs(&self) -> Vec<AgentTab> {
+        self.tabs
+            .iter()
+            .map(|(id, title)| {
+                let (plugin, kind, tab) = (self.plugin.clone(), self.id, id.clone());
+                AgentTab {
+                    id: id.clone().into(),
+                    title: title.clone().into(),
+                    build: Arc::new(move |view, window, cx| {
+                        super::view::ExternalView::agent_tab(&plugin, kind, &tab, view, window, cx)
+                    }),
+                }
+            })
+            .collect()
     }
 
     fn runs(&self) -> bool {
@@ -381,6 +485,14 @@ pub fn register(
             config: decl.config.clone().unwrap_or_else(|| json!({})),
             instructions: decl.instructions.clone(),
             timeout: Duration::from_secs(decl.timeout_seconds),
+            requester: requester.clone(),
+            summary: decl.summary,
+            peek: decl.peek,
+            tabs: decl
+                .tabs
+                .iter()
+                .map(|tab| (tab.id.clone(), tab.title.clone()))
+                .collect(),
         };
         match registry::register_type(plugin, Arc::new(kind), cx) {
             Ok(()) => done.push(AgentAdded::Type(intern(format!("{plugin}/{}", decl.id)))),
@@ -545,6 +657,7 @@ mod tests {
                     "type": "greeter",
                     "trigger": { "kind": "mention", "event": { "content": "hi there" } },
                     "agent": { "pubkey": "a", "name": "Greeter", "owner": "b" },
+                    "config": { "greeting": "Howdy" },
                 }),
                 Duration::from_secs(10),
             );
@@ -556,7 +669,7 @@ mod tests {
             assert_eq!(params["tool"], "send");
             assert_eq!(
                 params["arguments"]["text"],
-                "Hello from Greeter! You said: hi there"
+                "Howdy from Greeter! You said: hi there"
             );
             connection.respond(&id, Ok(json!({ "text": "sent" })));
             assert_eq!(run.await.unwrap(), Ok(Value::Null));

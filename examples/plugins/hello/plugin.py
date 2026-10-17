@@ -224,10 +224,32 @@ def settings_section(state):
     }
 
 
+def greeting_tab(state):
+    """A Greeter's settings tab: what it says before the mention."""
+    greeting = state["agent"]["config"].get("greeting", "Hello")
+    return {
+        "type": "column",
+        "gap": "md",
+        "children": [
+            text("Greeting", style="label"),
+            {"type": "input", "id": "greeting", "value": greeting, "placeholder": "Hello"},
+            {"type": "row", "children": [{"type": "button", "id": "save", "label": "Save", "variant": "prominent"}]},
+            text(state.get("saved") or "Put before every reply.", tone="subtle"),
+        ],
+    }
+
+
 def render(view):
     state = views[view]
     kind = state["kind"]
-    tree = page(state) if kind == "page" else settings_section(state) if kind == "settings" else panel(state)
+    if kind == "agentTab":
+        tree = greeting_tab(state)
+    elif kind == "page":
+        tree = page(state)
+    elif kind == "settings":
+        tree = settings_section(state)
+    else:
+        tree = panel(state)
     notify("view/render", {"view": view, "tree": tree})
 
 
@@ -327,6 +349,20 @@ def on_event(params):
     elif element == "toast" and event == "click":
         toast("Hello from a plugin")
         return
+    elif element == "greeting" and event == "change":
+        state["draft"] = params.get("value", "")
+        return
+    elif element == "save" and event == "click":
+        config = {**state["agent"]["config"], "greeting": state.get("draft", "").strip() or "Hello"}
+
+        def saved(result, error):
+            if view in views:
+                views[view]["saved"] = error["message"] if error else "Saved."
+                views[view]["agent"]["config"] = config
+                render(view)
+
+        request("agent/save", {"view": view, "config": config}, saved)
+        return
     else:
         return
     render(view)
@@ -390,7 +426,8 @@ def run_agent(run_request, params):
         else:
             send({"id": run_request, "result": None})
 
-    text = f"Hello from {name}! You said: {event['content']}"
+    greeting = (params.get("config") or {}).get("greeting", "Hello")
+    text = f"{greeting} from {name}! You said: {event['content']}"
     request("agent/tool", {"run": params["run"], "tool": "send", "arguments": {"text": text, "audience": "everyone"}}, sent)
 
 
@@ -446,6 +483,10 @@ def handle(message):
                                 "title": "Greeter",
                                 "description": "Answers every mention with a greeting. Runs in the Hello plugin.",
                                 "instructions": "Answer every mention.",
+                                "config": {"greeting": "Hello"},
+                                "summary": True,
+                                "peek": True,
+                                "tabs": [{"id": "greeting", "title": "Greeting"}],
                             }
                         ],
                     },
@@ -469,6 +510,19 @@ def handle(message):
         elif method == "inline/render":
             badge = ticket_badge(params["text"])
             send({"id": message["id"], "result": badge and {"tree": badge}})
+        elif method == "agent/summary":
+            greeting = params["agent"]["config"].get("greeting", "Hello")
+            send({"id": message["id"], "result": {"text": f"Says “{greeting}”"}})
+        elif method == "agent/peek":
+            agent = params["agent"]
+            peek = {
+                "type": "column",
+                "children": [
+                    text("Greeter", style="label"),
+                    text(f"{agent['name']} answers mentions with “{agent['config'].get('greeting', 'Hello')}”.", tone="subtle"),
+                ],
+            }
+            send({"id": message["id"], "result": {"tree": peek}})
         elif method == "message/render":
             send({"id": message["id"], "result": {"tree": hello_card(params["message"])}})
         else:

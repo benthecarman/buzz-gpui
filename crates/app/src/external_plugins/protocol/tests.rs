@@ -258,6 +258,16 @@ fn every_kind_of_contribution_is_checked() {
             "not a modifier",
         ),
         (
+            json!({ "agentTypes": [{ "id": "t", "title": "T",
+                "tabs": [{ "id": "attention", "title": "A" }] }] }),
+            "not a tab id",
+        ),
+        (
+            json!({ "agentTypes": [{ "id": "t", "title": "T",
+                "tabs": [{ "id": "a", "title": "A" }, { "id": "a", "title": "B" }] }] }),
+            "twice",
+        ),
+        (
             json!({ "inlineRenderers": [{ "id": "i", "pattern": "a*" }] }),
             "empty",
         ),

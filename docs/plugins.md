@@ -181,6 +181,19 @@ A trigger's `kind` is `mention`, `watch` (with `watch` and `interest`) or
 `timer` (with `timer`, `interest` and `spent`). If the run is cancelled, Buzz
 sends the notification `agent/cancel` with the `run`.
 
+A type can also describe its agents on the Agents page. Each request's params
+are `type` and `agent` (`pubkey`, `name`, `owner`, `config`), and Buzz keeps
+the answer until the agent's name or config changes:
+
+- `summary: true`: Buzz asks `agent/summary` for the line under the agent's
+  name. Answer `{"text"}` (up to 120 characters) or `null` for the title.
+- `peek: true`: Buzz asks `agent/peek` for a glance shown when the agent is
+  selected. Answer `{"tree"}` or `null`, as a renderer does.
+- `tabs` (`[{"id", "title"}]`, at most 8): settings tabs before Attention.
+  Each is a view of `kind` `agentTab`; `view/open` also carries `type`,
+  `agent` and `contribution` (the tab id). To save, send `agent/save` with the
+  `view` and the whole new `config`.
+
 While a call or run is open, the plugin can act as its agent:
 
 | Request | Params | Result |
@@ -324,6 +337,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys) | `null`, once the message is queued. Needs `send-messages`. |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
+| `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
 | `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |
 
 Reads cover the selected community and channels you can read in it. They
