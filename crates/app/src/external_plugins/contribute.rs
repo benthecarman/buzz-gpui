@@ -9,6 +9,7 @@
 //! next paint uses it. The answers are cleared when the plugin restarts.
 
 use super::draw::{self, Draw};
+use super::process::Requester;
 use super::protocol::{self, Node};
 use super::{ExternalPlugins, capabilities, intern};
 use crate::community::AppState;
@@ -55,6 +56,8 @@ thread_local! {
     /// A page's badge text and tone, by page key.
     static BADGES: RefCell<HashMap<String, (String, BadgeTone)>> = RefCell::default();
     static COMPOSERS: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    /// Text renderer keys: their answers change how prose is prepared.
+    static TEXT_KEYS: RefCell<HashSet<String>> = RefCell::default();
     /// Completion answers by completion key, channel and query; `None`
     /// while one is on its way.
     static SUGGESTIONS: RefCell<Suggestions> = RefCell::default();
@@ -163,11 +166,15 @@ pub fn init(cx: &mut App) {
     cx.spawn(async move |cx| {
         use futures::StreamExt;
         while let Some((key, tree)) = answers.next().await {
+            let drawn = tree.is_some();
             ANSWERS.with_borrow_mut(|answers| {
                 if let Some(answer) = answers.entries.get_mut(&key) {
                     *answer = Answer::Ready(tree.map(Rc::new));
                 }
             });
+            if drawn && TEXT_KEYS.with_borrow(|keys| keys.contains(&key.0)) {
+                crate::ui::renderers::text_changed();
+            }
             cx.update(|cx| cx.refresh_windows());
         }
     })
@@ -184,6 +191,8 @@ pub fn forget(plugin: &str) {
         answers.order.retain(|(key, _)| !key.starts_with(&prefix));
     });
     MARKS.with_borrow_mut(|marks| marks.retain(|key, _| !key.starts_with(&prefix)));
+    // Prose drew this plugin's old answers.
+    crate::ui::renderers::text_changed();
     SUGGESTIONS.with_borrow_mut(|suggestions| {
         suggestions
             .entries
@@ -240,6 +249,88 @@ fn ask(
         let _ = inbox.unbounded_send((entry, tree));
     });
     None
+}
+
+/// What a renderer answered for `target`: `None` until it has, then its
+/// tree or `None` if it declined.
+fn answered(key: &str, target: &str) -> Option<Option<Rc<Node>>> {
+    ANSWERS.with_borrow(
+        |answers| match answers.entries.get(&(key.to_owned(), target.to_owned())) {
+            Some(Answer::Ready(tree)) => Some(tree.clone()),
+            _ => None,
+        },
+    )
+}
+
+/// Asks plugin renderer `key` about `target` through `requester`, once.
+fn ask_with(requester: &Requester, key: &str, target: &str, method: &str, params: Value) {
+    let entry = (key.to_owned(), target.to_owned());
+    let fresh = ANSWERS.with_borrow_mut(|answers| {
+        if answers.entries.contains_key(&entry) {
+            return false;
+        }
+        answers.entries.insert(entry.clone(), Answer::Pending);
+        answers.order.push_back(entry.clone());
+        while answers.order.len() > MAX_ANSWERS {
+            if let Some(old) = answers.order.pop_front() {
+                answers.entries.remove(&old);
+            }
+        }
+        true
+    });
+    let Some(inbox) = INBOX.with_borrow(Clone::clone).filter(|_| fresh) else {
+        return;
+    };
+    let request = requester.request(method, params, std::time::Duration::from_secs(10));
+    requester.runtime().spawn(async move {
+        let tree = match request.await {
+            Ok(Ok(Value::Null)) | Ok(Err(_)) | Err(_) => None,
+            Ok(Ok(value)) => Node::parse(value.get("tree").cloned().unwrap_or(value)).ok(),
+        };
+        let _ = inbox.unbounded_send((entry, tree));
+    });
+}
+
+/// Draws message text a plugin's pattern matches.
+struct Inline {
+    key: &'static str,
+    plugin: String,
+    id: String,
+    pattern: regex::Regex,
+    requester: Requester,
+}
+
+impl crate::ui::renderers::TextRenderer for Inline {
+    fn key(&self) -> &str {
+        self.key
+    }
+
+    fn find(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        let mut found = Vec::new();
+        for matched in self.pattern.find_iter(text).take(32) {
+            let piece = matched.as_str();
+            if piece.is_empty() || piece.len() > 200 {
+                continue;
+            }
+            match answered(self.key, piece) {
+                Some(Some(_)) => found.push(matched.range()),
+                Some(None) => {}
+                None => ask_with(
+                    &self.requester,
+                    self.key,
+                    piece,
+                    "inline/render",
+                    json!({ "renderer": self.id, "text": piece }),
+                ),
+            }
+        }
+        found
+    }
+
+    fn render(&self, matched: &str, cx: &App) -> Option<AnyElement> {
+        let tree = answered(self.key, matched)??;
+        Some(drawn(&self.plugin, &self.id, self.key, matched, &tree, cx))
+    }
 }
 
 fn hashed(text: &str) -> String {
@@ -616,6 +707,7 @@ pub fn register(
     plugin: &str,
     name: &str,
     contributions: &protocol::Contributions,
+    requester: Option<Requester>,
     cx: &mut App,
 ) -> Vec<Added> {
     use crate::notifications::categories::{self, CategorySpec};
@@ -762,6 +854,24 @@ pub fn register(
             }),
         });
         added.push(Added::Completion(completion_key));
+    }
+    if let Some(requester) = requester {
+        for renderer in &contributions.inline_renderers {
+            let Ok(pattern) = renderer.regex() else {
+                continue;
+            };
+            let renderer_key = key(&renderer.id);
+            crate::ui::renderers::unregister(renderer_key);
+            TEXT_KEYS.with_borrow_mut(|keys| keys.insert(renderer_key.to_owned()));
+            crate::ui::renderers::register_text(Rc::new(Inline {
+                key: renderer_key,
+                plugin: plugin.to_owned(),
+                id: renderer.id.clone(),
+                pattern,
+                requester: requester.clone(),
+            }));
+            added.push(Added::Renderer(renderer_key));
+        }
     }
     let owner = intern(name.to_owned());
     for shortcut in &contributions.shortcuts {

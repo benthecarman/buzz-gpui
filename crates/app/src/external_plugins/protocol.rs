@@ -166,9 +166,37 @@ pub struct Contributions {
     #[serde(default)]
     pub completions: Vec<CompletionDecl>,
     #[serde(default)]
+    pub inline_renderers: Vec<InlineRendererDecl>,
+    #[serde(default)]
     pub agent_tools: Vec<AgentToolDecl>,
     #[serde(default)]
     pub agent_types: Vec<AgentTypeDecl>,
+}
+
+/// Draws pieces of message text that `pattern` (a regular expression)
+/// matches, such as ticket numbers (`conversation.registerInline`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineRendererDecl {
+    pub id: String,
+    pub pattern: String,
+}
+
+impl InlineRendererDecl {
+    /// The compiled pattern, bounded so a plugin cannot make prose slow.
+    pub fn regex(&self) -> Result<regex::Regex, String> {
+        if self.pattern.chars().count() > 500 {
+            return Err(format!("“{}”'s pattern is over 500 characters.", self.id));
+        }
+        let regex = regex::RegexBuilder::new(&self.pattern)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|error| format!("“{}”'s pattern is not valid: {error}", self.id))?;
+        if regex.is_match("") {
+            return Err(format!("“{}”'s pattern matches empty text.", self.id));
+        }
+        Ok(regex)
+    }
 }
 
 /// A tool every agent session gets (`agents.addTool`). Calling it sends
@@ -469,6 +497,7 @@ impl Contributions {
             self.shortcuts.len(),
             self.completions.len(),
             self.agent_tools.len(),
+            self.inline_renderers.len(),
             self.agent_types.len(),
         ];
         if counts.iter().any(|count| *count > MAX_EACH) {
@@ -560,6 +589,10 @@ impl Contributions {
                     completion.id
                 ));
             }
+        }
+        for renderer in &self.inline_renderers {
+            id(&renderer.id)?;
+            renderer.regex()?;
         }
         let mut names = std::collections::HashSet::new();
         for tool in &self.agent_tools {

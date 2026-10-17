@@ -896,7 +896,7 @@ impl ExternalPlugins {
         // Renderer answers and marks belong to the old run.
         contribute::forget(&id);
         let requester = plugin.connection.as_ref().map(Connection::requester);
-        let mut added = Self::register(&id, &name, &contributions, cx);
+        let mut added = Self::register(&id, &name, &contributions, requester.clone(), cx);
         if let Some(requester) = requester {
             let (agents, errors) = agents::register(
                 &id,
@@ -946,7 +946,13 @@ impl ExternalPlugins {
         cx.refresh_windows();
     }
 
-    fn register(id: &str, name: &str, contributions: &Contributions, cx: &mut App) -> Vec<Added> {
+    fn register(
+        id: &str,
+        name: &str,
+        contributions: &Contributions,
+        requester: Option<process::Requester>,
+        cx: &mut App,
+    ) -> Vec<Added> {
         let mut added = Vec::new();
         for panel in &contributions.panels {
             let key = intern(format!("{id}/{}", panel.id));
@@ -1005,7 +1011,7 @@ impl ExternalPlugins {
             added.push(Added::Page(key));
         }
         added.extend(
-            contribute::register(id, name, contributions, cx)
+            contribute::register(id, name, contributions, requester, cx)
                 .into_iter()
                 .map(Added::Other),
         );

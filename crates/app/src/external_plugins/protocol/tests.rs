@@ -223,6 +223,7 @@ fn every_kind_of_contribution_is_checked() {
         "composerTools": [{ "id": "tool", "title": "Tool" }],
         "shortcuts": [{ "id": "go", "title": "Go", "keys": ["mod+shift+g"] }],
         "completions": [{ "id": "commands", "title": "Commands", "trigger": "/" }],
+        "inlineRenderers": [{ "id": "tickets", "pattern": "BUZZ-[0-9]+" }],
         "pages": [{ "id": "top", "title": "Top", "placement": "topbar" }],
         "panels": [{ "id": "p", "title": "P", "menu": { "label": "Open P" } }],
     }))
@@ -255,6 +256,14 @@ fn every_kind_of_contribution_is_checked() {
         (
             json!({ "shortcuts": [{ "id": "s", "title": "S", "keys": ["hyper+k"] }] }),
             "not a modifier",
+        ),
+        (
+            json!({ "inlineRenderers": [{ "id": "i", "pattern": "a*" }] }),
+            "empty",
+        ),
+        (
+            json!({ "inlineRenderers": [{ "id": "i", "pattern": "(" }] }),
+            "not valid",
         ),
         (
             json!({ "notifications": [{ "id": "x", "label": "X" }], "composerTools": [{ "id": "x", "title": "X" }] }),

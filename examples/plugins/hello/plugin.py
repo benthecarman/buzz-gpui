@@ -13,8 +13,9 @@ It adds:
   header;
 - a Settings section, a notification category, two message actions (one
   marks messages), a chip for example.com links, a card for messages that
-  start with "!hello", a composer button, "/" commands in the composer and
-  a shortcut (Ctrl/Cmd+Shift+H);
+  start with "!hello", a badge for ticket numbers like HELLO-42 in message
+  text, a composer button, "/" commands in the composer and a shortcut
+  (Ctrl/Cmd+Shift+H);
 - an agent tool every agent can call, and a "Greeter" kind of agent that
   answers mentions.
 """
@@ -354,6 +355,15 @@ def hello_card(message):
     }
 
 
+def ticket_badge(ticket):
+    """An inline renderer's answer: a badge for HELLO-<number>, or None to
+    leave HELLO-0 as plain text."""
+    number = int(ticket.split("-", 1)[1])
+    if number == 0:
+        return None
+    return {"type": "badge", "text": f"🎫 {ticket}", "tone": "accent"}
+
+
 def on_action(params):
     action, message = params["action"], params["message"]
     if action == "words":
@@ -422,6 +432,7 @@ def handle(message):
                         "composerTools": [{"id": "wave", "title": "Insert a wave", "icon": "Smiley"}],
                         "shortcuts": [{"id": "hi", "title": "Say hi", "keys": ["mod+shift+h"]}],
                         "completions": [{"id": "commands", "title": "Commands", "trigger": "/"}],
+                        "inlineRenderers": [{"id": "tickets", "pattern": "\\bHELLO-[0-9]{1,6}\\b"}],
                         "agentTools": [
                             {
                                 "name": "hello_time",
@@ -455,6 +466,9 @@ def handle(message):
                 if name.startswith(query)
             ]
             send({"id": message["id"], "result": {"items": items}})
+        elif method == "inline/render":
+            badge = ticket_badge(params["text"])
+            send({"id": message["id"], "result": badge and {"tree": badge}})
         elif method == "message/render":
             send({"id": message["id"], "result": {"tree": hello_card(params["message"])}})
         else:

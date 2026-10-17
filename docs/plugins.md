@@ -134,6 +134,7 @@ The rest of the result can list:
 | `linkRenderers` | `id`, `matches` (link prefixes), `order` | Draws the chip of matching links in messages. Buzz asks with `link/render`. |
 | `messageRenderers` | `id`, `kinds`, `prefix`, `order` | Draws the body of matching messages. Buzz asks with `message/render`. It needs a `prefix` of two or more characters, or kinds other than chat messages. |
 | `attachmentRenderers` | `id`, `mime` (MIME type prefixes) | Draws matching attachments. Buzz asks with `attachment/render`. |
+| `inlineRenderers` | `id`, `pattern` (a regular expression, up to 500 characters, that cannot match empty text) | Draws the pieces of message text the pattern matches, such as ticket numbers. Buzz asks with `inline/render`. Mentions, emoji, links and code are left alone. |
 | `composerTools` | `id`, `title`, `icon`, `order` | A button in every composer's toolbar. Clicking it sends `composer/tool`. |
 | `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`) | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. |
 | `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`) | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. |
@@ -201,6 +202,7 @@ same way, per query.
 | `link/render` | `renderer`, `url`, `label` | `{"tree"}`, or `null` to leave the chip as it is |
 | `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
+| `inline/render` | `renderer`, `text` (what the pattern matched) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text |
 | `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel` | `{"items": [{"label", "detail", "text"}]}`, at most 50. Picking one replaces the trigger and query with `text`. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches
@@ -440,8 +442,6 @@ you added from running for that launch. Their switches stay as they were.
 
 ## Not built yet
 
-- Inline renderers. The app draws only custom emoji inline, so it has
-  nowhere to put them yet.
 - Following a thread live, editing and reacting.
 - A WebAssembly runtime for plugins that run sandboxed
   ([#12](https://github.com/benthecarman/buzz-gpui/issues/12)).

@@ -235,6 +235,11 @@ pub struct Requester {
 }
 
 impl Requester {
+    /// The runtime its requests run on.
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
+    }
+
     pub fn notify(&self, method: &str, params: Value) {
         let _ = self.lines.send(protocol::notification(method, params));
     }
@@ -510,6 +515,24 @@ mod tests {
                 .unwrap();
             protocol::Node::parse(chip["tree"].clone()).unwrap();
             assert!(chip.to_string().contains("Example · /docs"));
+            let ticket = connection
+                .request(
+                    "inline/render",
+                    json!({ "renderer": "tickets", "text": "HELLO-42" }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            protocol::Node::parse(ticket["tree"].clone()).unwrap();
+            let plain = connection
+                .request(
+                    "inline/render",
+                    json!({ "renderer": "tickets", "text": "HELLO-0" }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(plain, serde_json::Value::Null);
             let card = connection
                 .request(
                     "message/render",

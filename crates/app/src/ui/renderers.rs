@@ -48,6 +48,18 @@ pub trait InlineRenderer {
     ) -> Option<AnyElement>;
 }
 
+/// Draws pieces of message prose it matches (buzz-app's `registerInline`
+/// with `matches`), such as ticket numbers. Prose is prepared without the
+/// app, so a renderer answers from what it already has: [`Self::find`]
+/// returns only matches it can draw now, and [`text_changed`] asks for a
+/// new preparation when that changes.
+pub trait TextRenderer {
+    fn key(&self) -> &str;
+    /// Byte ranges of `text` to draw, in order and not overlapping.
+    fn find(&self, text: &str) -> Vec<std::ops::Range<usize>>;
+    fn render(&self, matched: &str, cx: &App) -> Option<AnyElement>;
+}
+
 /// A message action (`MessageActionContribution`): a more-menu item, and
 /// optionally a marker after the byline, such as a reminder's.
 pub trait MessageAction {
@@ -78,6 +90,7 @@ pub trait AttachmentRenderer {
 
 #[derive(Default)]
 struct Registry {
+    text: Vec<Rc<dyn TextRenderer>>,
     messages: Vec<Rc<dyn MessageRenderer>>,
     links: Vec<Rc<dyn LinkRenderer>>,
     inline: Vec<Rc<dyn InlineRenderer>>,
@@ -87,11 +100,63 @@ struct Registry {
 
 thread_local! {
     static REGISTRY: RefCell<Registry> = RefCell::new(bundled());
+    /// Changes when prose may draw differently: a text renderer was added
+    /// or removed, or found something new to draw.
+    static TEXT_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// See [`TEXT_GENERATION`]; prepared message bodies are keyed by it.
+pub fn text_generation() -> u64 {
+    TEXT_GENERATION.get()
+}
+
+pub fn text_changed() {
+    TEXT_GENERATION.set(TEXT_GENERATION.get() + 1);
+}
+
+pub fn register_text(renderer: Rc<dyn TextRenderer>) {
+    REGISTRY.with_borrow_mut(|r| r.text.push(renderer));
+    text_changed();
+}
+
+/// The pieces of `text` the text renderers draw, as `(range, key)`, in
+/// order; where two overlap, the earlier registration wins.
+pub fn text_matches(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let renderers = REGISTRY.with_borrow(|r| r.text.clone());
+    if renderers.is_empty() {
+        return Vec::new();
+    }
+    let mut found: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for renderer in renderers.iter().filter(|r| on(r.key())) {
+        let ranges = catch_unwind(AssertUnwindSafe(|| renderer.find(text))).unwrap_or_default();
+        for range in ranges {
+            let valid = range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end);
+            if valid
+                && !found
+                    .iter()
+                    .any(|(taken, _)| taken.start < range.end && range.start < taken.end)
+            {
+                found.push((range, renderer.key().to_owned()));
+            }
+        }
+    }
+    found.sort_by_key(|(range, _)| range.start);
+    found
+}
+
+/// Draws `matched` with text renderer `key`.
+pub fn render_text(key: &str, matched: &str, cx: &App) -> Option<AnyElement> {
+    let renderer = REGISTRY.with_borrow(|r| r.text.iter().find(|r| r.key() == key).cloned())?;
+    guarded(key, || renderer.render(matched, cx))
 }
 
 /// The bundled features: diffs, voice notes and custom emoji.
 fn bundled() -> Registry {
     Registry {
+        text: Vec::new(),
         messages: vec![Rc::new(Diffs)],
         links: Vec::new(),
         inline: vec![Rc::new(Emoji)],
@@ -104,6 +169,10 @@ fn bundled() -> Registry {
 /// plugin that added it stops.
 pub fn unregister(key: &str) {
     REGISTRY.with_borrow_mut(|r| {
+        if r.text.iter().any(|item| item.key() == key) {
+            r.text.retain(|item| item.key() != key);
+            text_changed();
+        }
         r.messages.retain(|item| item.key() != key);
         r.links.retain(|item| item.key() != key);
         r.inline.retain(|item| item.key() != key);

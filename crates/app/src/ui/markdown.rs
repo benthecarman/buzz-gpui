@@ -384,6 +384,8 @@ fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
             .hash(&mut hasher);
     }
     directory.fingerprint.hash(&mut hasher);
+    // Plugins' text renderers change what prose draws.
+    super::renderers::text_generation().hash(&mut hasher);
     let key = hasher.finish();
     if let Some(document) = PREPARED.with_borrow(|cache| cache.get(&key).cloned()) {
         return document;
@@ -988,6 +990,8 @@ impl Prep<'_> {
                 .any(|seam| base + from < *seam && *seam < base + to),
             None => !self.seams.is_empty(),
         };
+        let drawn = super::renderers::text_matches(value);
+        let mut drawn = drawn.into_iter().peekable();
         let mut i = 0;
         while i < value.len() {
             let rest = &value[i..];
@@ -1025,6 +1029,13 @@ impl Prep<'_> {
                     None => link_md(&found.url, &found.url, out),
                 }
                 i = found.end;
+                continue;
+            }
+            // Plugins' text renderers, after mentions, emoji and links.
+            while drawn.next_if(|(range, _)| range.start < i).is_some() {}
+            if let Some((range, key)) = drawn.next_if(|(range, _)| range.start == i) {
+                image_md(&value[range.clone()], &format!("buzz-inline:{key}"), out);
+                i = range.end;
                 continue;
             }
             if rest.starts_with('#')
@@ -2093,6 +2104,16 @@ impl MarkdownPlugin for Objects {
                         .with_baseline(baseline),
                     );
                 }
+                if let Some(key) = url.strip_prefix("buzz-inline:") {
+                    let element =
+                        super::renderers::render_text(key, alt, cx).unwrap_or_else(|| {
+                            div()
+                                .line_height(line)
+                                .child(alt.clone())
+                                .into_any_element()
+                        });
+                    return Some(InlineElement::new(element).with_baseline(baseline));
+                }
                 if let Some(number) = url.strip_prefix("buzz-footnote:") {
                     // `<sup><a>1</a></sup>`: a small raised, underlined mark.
                     return Some(
@@ -2495,6 +2516,33 @@ pub(super) mod tests {
             )])
         );
         assert_eq!(&*prepared.spoilers, &[SharedString::from("secret")]);
+    }
+
+    #[test]
+    fn text_renderers_draw_matches_in_prose_only() {
+        struct Tickets;
+        impl super::super::renderers::TextRenderer for Tickets {
+            fn key(&self) -> &str {
+                "test.tickets/t"
+            }
+            fn find(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+                text.match_indices("T-1")
+                    .map(|(at, m)| at..at + m.len())
+                    .collect()
+            }
+            fn render(&self, _: &str, _: &App) -> Option<AnyElement> {
+                None
+            }
+        }
+        let before = super::super::renderers::text_generation();
+        super::super::renderers::register_text(std::rc::Rc::new(Tickets));
+        assert_ne!(super::super::renderers::text_generation(), before);
+        let text = paragraph("See T-1, `T-1` and [T-1](https://x.test)");
+        super::super::renderers::unregister("test.tickets/t");
+        assert_eq!(
+            text,
+            "See ![T\\-1](<buzz-inline:test.tickets/t>)\\, `T-1` and [T\\-1](<https://x.test>)"
+        );
     }
 
     #[test]
