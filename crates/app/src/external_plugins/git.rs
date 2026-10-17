@@ -127,6 +127,9 @@ fn reference(input: &str) -> Result<String, String> {
 struct Git {
     scratch: tempfile::TempDir,
     deadline: Instant,
+    /// A community repository's URL and its NIP-98 token. Git sends the
+    /// header only to that URL, and follows no redirects.
+    authorization: Option<(String, String)>,
 }
 
 impl Git {
@@ -169,6 +172,16 @@ impl Git {
             ])
             .current_dir(self.scratch.path())
             .stdin(Stdio::null());
+        if let Some((url, token)) = &self.authorization {
+            // In the environment, not argv, so `ps` does not show it.
+            command
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", format!("http.{url}.extraHeader"))
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Nostr {token}"),
+                );
+        }
         command
     }
 
@@ -299,12 +312,28 @@ fn discover(root: &Path) -> Result<Vec<Candidate>, String> {
 }
 
 /// Clones `repository` at `reference` and lists its plugins. Blocking.
-pub fn fetch(repository: &str, reference_input: &str) -> Result<Fetched, String> {
+/// `authorization` is a NIP-98 token signed for exactly this repository,
+/// for a private repository a community hosts.
+pub fn fetch(
+    repository: &str,
+    reference_input: &str,
+    authorization: Option<String>,
+) -> Result<Fetched, String> {
     let url = buzzodz_plugins::imports::repository_url(repository)?;
     let reference = reference(reference_input)?;
+    if let Some(token) = &authorization
+        && (token.is_empty()
+            || token.len() > 8192
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"+/=".contains(&byte)))
+    {
+        return Err("The repository authorization is not valid.".into());
+    }
     let git = Git {
         scratch: tempfile::tempdir().map_err(|error| error.to_string())?,
         deadline: Instant::now() + DEADLINE,
+        authorization: authorization.map(|token| (url.clone(), token)),
     };
     let mut args = vec![
         "clone",
@@ -414,6 +443,33 @@ mod tests {
     }
 
     #[test]
+    fn a_community_token_goes_only_to_its_repository() {
+        let url = "https://relay.example.com/git/abc/plugins.git".to_owned();
+        let git = Git {
+            scratch: tempfile::tempdir().unwrap(),
+            deadline: Instant::now() + DEADLINE,
+            authorization: Some((url.clone(), "dG9rZW4=".into())),
+        };
+        let command = git.command();
+        let env: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned()))
+            })
+            .collect();
+        assert_eq!(env["GIT_CONFIG_KEY_0"], format!("http.{url}.extraHeader"));
+        assert_eq!(env["GIT_CONFIG_VALUE_0"], "Authorization: Nostr dG9rZW4=");
+        // Never on the command line.
+        assert!(
+            !command
+                .get_args()
+                .any(|arg| arg.to_string_lossy().contains("dG9rZW4="))
+        );
+        let refused = fetch(&url, "", Some("not a token!".into())).err();
+        assert!(refused.is_some_and(|error| error.contains("not valid")));
+    }
+
+    #[test]
     fn local_and_unknown_transports_are_refused() {
         for input in [
             "/tmp/repo",
@@ -421,7 +477,7 @@ mod tests {
             "http://example.com/r.git",
             "ext::sh",
         ] {
-            assert!(fetch(input, "").is_err(), "{input}");
+            assert!(fetch(input, "", None).is_err(), "{input}");
         }
     }
 }

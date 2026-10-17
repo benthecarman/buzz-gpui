@@ -387,6 +387,10 @@ passwords, and speaks only HTTPS and SSH. Symlinks are checked out as plain
 files. A clone may take 60 seconds and 256 MiB. SSH uses your SSH agent and
 known hosts, not your SSH config.
 
+A repository hosted by the selected community, including a private one, is
+fetched as you: Buzz signs in with NIP-98, and sends that sign-in only to that
+repository.
+
 **Update** on an installed plugin reads its repository again and shows the
 same preview. An update keeps the plugin's switch, and a running plugin
 restarts. If the new version asks for more permissions, it is turned off until

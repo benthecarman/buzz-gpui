@@ -87,12 +87,27 @@ impl PluginImport {
             return;
         }
         let reference = self.reference.read(cx).value().trim().to_owned();
+        // A repository the selected community hosts is read with a NIP-98
+        // token signed for exactly that repository, as buzz-app does.
+        let signed = crate::community::AppState::current(cx).and_then(|community| {
+            let community = community.read(cx);
+            let url = buzz_relay_client::projects::community_git_repository(
+                &community.origin.http(),
+                &repository,
+            )?;
+            let token = community.session.projects().git_authorization(&url).ok()?;
+            Some((url, token))
+        });
+        let (repository, authorization) = match signed {
+            Some((url, token)) => (url, Some(token)),
+            None => (repository, None),
+        };
         self.phase = Phase::Fetching;
         self.error = None;
         cx.notify();
         let task = cx
             .background_executor()
-            .spawn(async move { git::fetch(&repository, &reference) });
+            .spawn(async move { git::fetch(&repository, &reference, authorization) });
         cx.spawn(async move |this, cx| {
             let fetched = task.await;
             let _ = this.update(cx, |this, cx| {
