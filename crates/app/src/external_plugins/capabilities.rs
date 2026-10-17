@@ -848,6 +848,13 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
                 Some(route) => {
                     let routes = crate::ui::pages::routes(spec.page, cx)
                         .ok_or_else(|| invalid(format!("The page {key} takes no routes")))?;
+                    let version = params.get("version").and_then(Value::as_u64);
+                    if version.is_some_and(|version| version != u64::from(routes.version)) {
+                        return Err(invalid(format!(
+                            "The page {key} takes routes of version {}",
+                            routes.version
+                        )));
+                    }
                     if !(routes.validate)(route) {
                         return Err(invalid(format!("The page {key} cannot open these params")));
                     }

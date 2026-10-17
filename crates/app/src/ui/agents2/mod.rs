@@ -44,6 +44,7 @@ pub fn register(cx: &mut App) {
     pages::register_routes(
         PAGE,
         PageRoutes {
+            version: 1,
             validate: routes::valid,
             open: |view, params, window, cx| {
                 if let Ok(page) = view.clone().downcast::<Agents2Page>() {

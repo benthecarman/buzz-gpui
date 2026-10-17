@@ -28,6 +28,7 @@ pub fn init(cx: &mut App) {
     pages::register_routes(
         PAGE,
         PageRoutes {
+            version: 1,
             validate: |params| EntityRoute::from_params(params).is_some(),
             open: |view, params, window, cx| {
                 if let Ok(page) = view.clone().downcast::<ProjectsPage>() {

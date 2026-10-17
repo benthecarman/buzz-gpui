@@ -20,7 +20,6 @@ use buzz_ui::{
     Menu, MenuItem, MenuLabel, MenuSeparator, MenuSize, Surface, ToastTone,
 };
 use gpui_kit::*;
-use std::sync::Arc;
 
 /// The open menu: the rail item and where the pointer opened it.
 pub type MenuState = Entity<Option<(usize, Point<Pixels>)>>;
@@ -239,18 +238,7 @@ fn icon_source(icon: &str, media: &buzz_relay_client::media::Media) -> Option<Im
     if !icon.starts_with("data:") {
         return Some(super::media::image(icon, media));
     }
-    let format = match icon.strip_prefix("data:image/")?.split([';', ',']).next()? {
-        "svg+xml" => ImageFormat::Svg,
-        "png" => ImageFormat::Png,
-        "jpeg" => ImageFormat::Jpeg,
-        "gif" => ImageFormat::Gif,
-        "webp" => ImageFormat::Webp,
-        _ => return None,
-    };
-    let bytes = buzz_relay_client::community_icon::inline_bytes(icon)?;
-    Some(ImageSource::Image(Arc::new(Image::from_bytes(
-        format, bytes,
-    ))))
+    super::media::inline_image(icon)
 }
 
 /// Opens the menu for rail item `index`. For the selected community the

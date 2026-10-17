@@ -1034,6 +1034,9 @@ impl ChannelSidebar {
                 .icon_stroke(2.5)
                 .selected(props.page == page)
                 .on_click(move |_, window, cx| select_page(page, window, cx));
+                if let Some(image) = pages::image(page, cx) {
+                    row = row.leading(image);
+                }
                 if let Some(badge) = spec.badge.and_then(|badge| badge(cx)) {
                     row = row.trailing(badge);
                 }

@@ -238,6 +238,7 @@ impl Workspace {
                     )
                     .icon(spec.icon)
                     .icon_stroke(2.5)
+                    .when_some(pages::image(page, cx), |row, image| row.leading(image))
                     .surface(Surface::FloatingCompact)
                     .selected(selected == page)
                     .on_click(cx.listener(move |this, _, window, cx| {

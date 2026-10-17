@@ -88,6 +88,23 @@ impl Asset for RemoteImage {
     }
 }
 
+/// An image inline in a `data:image/<format>[;base64],…` URL, for the
+/// formats the app draws.
+pub fn inline_image(url: &str) -> Option<ImageSource> {
+    let format = match url.strip_prefix("data:image/")?.split([';', ',']).next()? {
+        "svg+xml" => ImageFormat::Svg,
+        "png" => ImageFormat::Png,
+        "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        _ => return None,
+    };
+    let bytes = buzz_relay_client::community_icon::inline_bytes(url)?;
+    Some(ImageSource::Image(Arc::new(Image::from_bytes(
+        format, bytes,
+    ))))
+}
+
 /// An image at `url`, at full size.
 pub fn image(url: &str, media: &Media) -> ImageSource {
     source(Remote {

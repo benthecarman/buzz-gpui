@@ -1679,9 +1679,14 @@ impl Render for SearchDialog {
             );
             let empty = group.entries.is_empty().then_some(group.empty).flatten();
             for entry in group.entries {
-                let leading = match &entry.leading {
-                    EntryLeading::Icon(icon) => Leading::Icon(*icon),
-                    person => match self.person_avatar(person, cx) {
+                let image = match &entry.action {
+                    Action::Page(page) => pages::image(*page, cx),
+                    _ => None,
+                };
+                let leading = match (&entry.leading, image) {
+                    (EntryLeading::Icon(_), Some(image)) => Leading::Element(image),
+                    (EntryLeading::Icon(icon), None) => Leading::Icon(*icon),
+                    (person, _) => match self.person_avatar(person, cx) {
                         Some(avatar) => Leading::Element(avatar),
                         None => Leading::Icon(IconName::ChatCircle),
                     },

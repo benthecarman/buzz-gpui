@@ -1071,6 +1071,16 @@ impl ExternalPlugins {
             let plugin = id.to_owned();
             let contribution = page.id.clone();
             let edge_to_edge = page.layout == protocol::PageLayout::Workspace;
+            // buzz-app's page icons are `data:image/` URLs; names of
+            // Buzz's icons work too.
+            let image = page
+                .icon
+                .as_deref()
+                .filter(|icon| icon.starts_with("data:") && icon.len() <= 64 * 1024)
+                .and_then(crate::ui::media::inline_image);
+            if let Some(image) = image {
+                pages::register_image(key, image, cx);
+            }
             let mut spec = PageSpec::sidebar(
                 key,
                 intern(page.title.clone()),
@@ -1092,6 +1102,7 @@ impl ExternalPlugins {
                 pages::register_routes(
                     key,
                     pages::PageRoutes {
+                        version: page.route_version,
                         validate: view::route_valid,
                         open: view::open_route,
                     },

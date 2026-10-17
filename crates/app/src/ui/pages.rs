@@ -112,6 +112,9 @@ impl Global for Pages {}
 /// records each route as a place.
 #[derive(Clone, Copy)]
 pub struct PageRoutes {
+    /// What the params mean (`route.version`); a target made for another
+    /// version is unavailable.
+    pub version: u32,
     /// Whether `params` name a place the page can open.
     pub validate: fn(&serde_json::Value) -> bool,
     /// Shows `params` in the page's view, or the page's start for `None`.
@@ -122,6 +125,29 @@ pub struct PageRoutes {
 struct Routes(std::collections::HashMap<Page, PageRoutes>);
 
 impl Global for Routes {}
+
+/// Pages drawn with an image of their own rather than an icon, such as a
+/// plugin's `data:image/` icon.
+#[derive(Default)]
+struct Images(std::collections::HashMap<Page, ImageSource>);
+
+impl Global for Images {}
+
+/// Draws `page` with `image` wherever it shows its icon.
+pub fn register_image(page: Page, image: ImageSource, cx: &mut App) {
+    cx.default_global::<Images>().0.insert(page, image);
+}
+
+/// `page`'s own image, 16px, for the places that show its icon.
+pub fn image(page: Page, cx: &App) -> Option<AnyElement> {
+    let image = cx.try_global::<Images>()?.0.get(&page)?.clone();
+    Some(
+        img(image)
+            .size(px(16.))
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+    )
+}
 
 /// Lets `page` handle navigation targets.
 pub fn register_routes(page: Page, routes: PageRoutes, cx: &mut App) {
@@ -170,6 +196,7 @@ pub fn unregister(page: Page, cx: &mut App) {
         .0
         .retain(|existing| existing.page != page);
     cx.default_global::<Routes>().0.remove(&page);
+    cx.default_global::<Images>().0.remove(&page);
 }
 
 /// A registered page whose plugin is on.

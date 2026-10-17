@@ -401,6 +401,10 @@ pub struct MigrationSettingDecl {
     pub default: Option<Value>,
 }
 
+fn one() -> u32 {
+    1
+}
+
 fn five_minutes() -> u64 {
     300
 }
@@ -489,6 +493,10 @@ pub struct PageDecl {
     /// view hears `page/route`.
     #[serde(default)]
     pub routes: bool,
+    /// What its route params mean: raise it when they change, so targets
+    /// made for the old ones are refused.
+    #[serde(default = "one")]
+    pub route_version: u32,
     /// `document` (the default) pads the page; `workspace` gives the plugin
     /// the whole area, edge to edge.
     #[serde(default)]
@@ -753,6 +761,9 @@ impl Contributions {
         for page in &self.pages {
             id(&page.id)?;
             check_title(&page.id, &page.title)?;
+            if page.route_version == 0 {
+                return Err(format!("“{}”'s route version must be 1 or more.", page.id));
+            }
         }
         for card in &self.settings_cards {
             id(&card.id)?;

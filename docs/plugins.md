@@ -116,7 +116,9 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 - A contribution `id` uses lowercase letters, digits, `-` and `_`. Titles are
   1 to 64 characters.
 - `icon` names a Buzz icon, such as `House`, `Globe`, `Bell`, `Gear`, `Code`
-  or `Plug`. An unknown name shows the plug icon.
+  or `Plug`. An unknown name shows the plug icon. A page's `icon` can also be
+  a `data:image/` URL (PNG, JPEG, GIF, WebP or SVG, up to 64 KiB), drawn at
+  16px in the sidebar and search, as buzz-app's page icons are.
 - `matches` lists link prefixes. A matching link clicked in a message opens
   the panel as a tab. When several panels match, the lowest `order` wins,
   then the lowest `plugin/id` key. Buzz's own panels are at 0. By convention,
@@ -129,10 +131,13 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   `false`) limit the channels it is offered in.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
   same here) or `hidden`. `layout` is `document` (the default, padded) or
-  `workspace` (edge to edge). Buzz's dock shows a page's companion beside it. With `routes: true`, `ui/navigate` can open the page
-  at `params` (a JSON object up to 4 KiB): its view's `view/open` carries
-  `route`, and Buzz sends `page/route` with the `view` and `route` when it
-  changes. Back and Forward step through routes.
+  `workspace` (edge to edge). Buzz's dock shows a page's companion beside
+  it. With `routes: true`, `ui/navigate` can open the page at `params` (a
+  JSON object up to 4 KiB): its view's `view/open` carries `route`, and Buzz
+  sends `page/route` with the `view` and `route` when it changes. Back and
+  Forward step through routes. `routeVersion` (default 1) says what the
+  params mean: raise it when they change, and a `ui/navigate` that names
+  another `version` is refused.
 - A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
   below. Ids are unique across all of them.
 
@@ -432,7 +437,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/retry`, `messages/dismiss` | `message` (one of yours whose `delivery` is `failed`) | `null`. Sends it again, or drops it. Needs `send-messages`. |
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
-| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |
+| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` and `version` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |
 | `ui/openPanel` | `panel` (one of the plugin's panel ids), `target` (what it shows, such as a link or any text the plugin reads from `view/open`) | `null`. Opens the panel as a tab of the open conversation. |
 | `panel/canOpen` | `target` | Whether any panel, the plugin's or not, shows `target`. |
 | `panel/open` | `view` (an open panel), `target` | `true` if a panel shows `target`. When it is this panel, the view shows it in place and the plugin hears `view/retarget` (`view`, `target`, `canGoBack`); otherwise the panel that shows it opens as a tab for the same conversation and thread, and this one closes. |
