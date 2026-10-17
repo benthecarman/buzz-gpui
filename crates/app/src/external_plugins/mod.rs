@@ -29,6 +29,7 @@ pub mod protocol;
 mod reading;
 pub mod release;
 mod view;
+mod workflows;
 
 use crate::community::AppState;
 use crate::runtime::Runtime;
@@ -1603,7 +1604,11 @@ impl ExternalPlugins {
             | "messages/dismiss"
             | "canvas/save"
             | "channels/saveDetails"
-            | "kit/save" => {
+            | "kit/save"
+            | "workflows/save"
+            | "workflows/delete"
+            | "workflows/trigger"
+            | "workflows/dismiss" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1614,7 +1619,11 @@ impl ExternalPlugins {
                     | "channels/addMember"
                     | "channels/changeMember"
                     | "channels/saveDetails"
-                    | "kit/save" => Permission::ManageChannels,
+                    | "kit/save"
+                    | "workflows/save"
+                    | "workflows/delete"
+                    | "workflows/trigger"
+                    | "workflows/dismiss" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1656,6 +1665,10 @@ impl ExternalPlugins {
                     "canvas/save" => content::canvas_save(params, cx),
                     "channels/saveDetails" => content::save_details(params, cx),
                     "kit/save" => content::save_kit(params, cx),
+                    "workflows/dismiss" => workflows::dismiss(params, cx),
+                    "workflows/save" | "workflows/delete" | "workflows/trigger" => {
+                        workflows::command(method, params, cx)
+                    }
                     _ => capabilities::send(params, cx),
                 })
             }
@@ -1665,6 +1678,10 @@ impl ExternalPlugins {
             "channels/details" => later(content::details(params, cx)),
             "kit/get" => Reply::Now(content::kit(cx)),
             "projects/list" => later(content::projects(cx)),
+            "workflows/list" => later(workflows::list(params, cx)),
+            "workflows/runs" => later(workflows::runs(params, cx)),
+            "workflows/operations" => Reply::Now(workflows::operations(cx)),
+            "workflows/takeSecret" => Reply::Now(workflows::take_secret(params, cx)),
             "projects/load" => later(content::project(params, cx)),
             "projects/home" => later(content::project_home(params, cx)),
             "projects/git" => later(content::git(params, cx)),

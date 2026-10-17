@@ -68,7 +68,7 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `description` | Optional. Shown in Settings. |
 | `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
 | `apiVersion` | Optional. `1`, the only version so far. |
-| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents and teams. `manage-channels`: start DMs; create, join, leave, archive and delete channels; change members, details and your kit. Reading needs no permission. |
+| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents and teams. `manage-channels`: start DMs; create, join, leave, archive and delete channels; change members, details, workflows and your kit. Reading needs no permission. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
 `BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
@@ -478,6 +478,13 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/memories` | `agent` (one of your agents) | `{"entries","partial"}`: its newest memory per slug, `{"slug","body","eventId","createdAt"}` |
 | `kit/get` | none | `{"status","entries","error"}`: your teams, channel templates and sidebar groups in the community, each `{"eventId","createdAt","version","deleted","value"}`, where `value` has a `type` of `team`, `template` or `groups` |
 | `kit/save` | `value` (as `kit/get` gives it), `expected` (its `eventId`, or `null` for new), `deleted` | `{"eventId"}`. Needs `manage-channels`. |
+| `workflows/list` | `channel` | `{"status","workflows","partial","available"}`: the channel's workflows `{"id","owner","channel","revision","createdAt","yaml"}`, and which of `definitions`, `history`, `save`, `trigger` and `delete` the community offers |
+| `workflows/runs` | `channel`, `workflow` (an id), `cursor` (the `next` of the page before) | `{"status","runs","next"}`: runs newest first, each `{"id","workflow","status","currentStep","trace","startedAt","completedAt","createdAt","errorCode","errorMessage"}` |
+| `workflows/save` | `channel`, `yaml`, and `workflow` to replace one | `{"eventId"}` of the command. Needs `manage-channels`. |
+| `workflows/delete`, `workflows/trigger` | `channel`, `workflow` | `{"eventId"}`. Needs `manage-channels`. |
+| `workflows/operations` | none | The workflow commands sent this session, each `{"eventId","workflow","channel","action","createdAt","delivery","outcome","error","run","secretHeld","webhookUrl"}`: `delivery` is `sending`, `accepted`, `unknown`, `failed` or `seen`, and `outcome` `pending`, `succeeded`, `rejected` or `unknown` |
+| `workflows/takeSecret` | `eventId` | A new webhook's one-time secret, or `null` once taken |
+| `workflows/dismiss` | `eventId` | `null`, after forgetting a finished command. Needs `manage-channels`. |
 | `projects/list` | none | The community's repositories and projects, each `{"kind","owner","dtag","address","name","description","route","event"}`. `route` is what `ui/navigate` takes as `params` for the Projects page, `buzz.projects/projects`. |
 | `projects/load` | `route` (an entity's `route`, or one naming a `tab`, `commit`, or an issue or pull request `id`) | `{"entity","repositories","unavailableRepositories","channels","item","status","commit","activity","items","truncated"}`: a project's repositories, linked channels, and the issue or pull request the route names with its comments, as Nostr events |
 | `projects/home` | `channel` | `{"home","ambiguous"}`: the channel's project, or `null` |
