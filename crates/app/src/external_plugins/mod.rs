@@ -1004,10 +1004,23 @@ impl ExternalPlugins {
             );
             spec.placement = match page.placement {
                 PagePlacement::Sidebar => pages::Placement::Sidebar,
-                PagePlacement::Topbar => pages::Placement::Topbar,
+                PagePlacement::Topbar | PagePlacement::Toolbar => pages::Placement::Topbar,
                 PagePlacement::Hidden => pages::Placement::Hidden,
             };
-            spec.collapsible = page.placement == PagePlacement::Topbar;
+            spec.collapsible = matches!(
+                page.placement,
+                PagePlacement::Topbar | PagePlacement::Toolbar
+            );
+            if page.routes {
+                pages::register_routes(
+                    key,
+                    pages::PageRoutes {
+                        validate: view::route_valid,
+                        open: view::open_route,
+                    },
+                    cx,
+                );
+            }
             spec.badge = Some(contribute::badge(key.key()));
             pages::register(spec, cx);
             added.push(Added::Page(key));
@@ -1077,6 +1090,11 @@ impl ExternalPlugins {
                 "page/badge" => {
                     if let Some(id) = plugin.id().map(str::to_owned) {
                         contribute::set_badge(&id, &params, cx);
+                    }
+                }
+                "settings/visibility" => {
+                    if let Some(id) = plugin.id().map(str::to_owned) {
+                        contribute::set_card_visibility(&id, &params, cx);
                     }
                 }
                 _ => tracing::debug!(plugin = %name, %method, "unknown plugin notification"),

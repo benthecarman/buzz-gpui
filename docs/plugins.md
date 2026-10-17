@@ -122,7 +122,11 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 - `launcher` adds a button to the channel header. `placement` is `side` (the
   default) or `bottom`. `menu` (`{"label"}`) adds an entry to the channel's
   menu.
-- A page's `placement` is `sidebar` (the default), `topbar` or `hidden`.
+- A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
+  same here) or `hidden`. With `routes: true`, `ui/navigate` can open the page
+  at `params` (a JSON object up to 4 KiB): its view's `view/open` carries
+  `route`, and Buzz sends `page/route` with the `view` and `route` when it
+  changes. Back and Forward step through routes.
 - A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
   below. Ids are unique across all of them.
 
@@ -140,8 +144,8 @@ The rest of the result can list:
 | `composerTools` | `id`, `title`, `icon`, `order`, `reactionPicker` | A button in every composer's toolbar. Clicking it sends `composer/tool`. With `reactionPicker: true`, it can also replace the emoji picker that "Add reaction" opens: the tool with the lowest `order`, then the lowest `plugin/id` key, wins, and Buzz's own picker is `buzz.emoji/emoji` at 0. The picker is a view of `kind` `reactionPicker`. Send `reaction/select` with its `view` and an `emoji` to react. |
 | `composerAccessories` | `id`, `title`, `order` | A view above every composer, of `kind` `accessory`. `view/open` also carries the composer's `channel` and `thread`. Keep it to a line or two. |
 | `accountActions` | `id`, `title`, `icon` | A row in the account menu that opens a dialog titled `title`. The dialog's body is a view of `kind` `dialog`. Send `ui/closeView` with its `view` to close it. |
-| `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`) | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. |
-| `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`) | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. |
+| `completions` | `id`, `title`, `trigger` (one character other than `@`, `#` and `:`), `order` | Typing the trigger at the start of a word in a composer opens the plugin's suggestions. Buzz asks with `completion/query`. When plugins share a trigger, the lowest `order`, then the lowest `plugin/id` key, answers. |
+| `shortcuts` | `id`, `title`, `keys` (such as `mod+shift+k`), `order`, `allowInEditable`, `allowInModal`, `repeat` | A shortcut, listed and rebindable in Settings → Shortcuts. Pressing it sends `shortcut`. Each chord needs `mod` or `alt`; Buzz's own chords win. It does not run while a text field has focus or a dialog is open unless `allowInEditable` or `allowInModal` is set, and a held chord runs once unless `repeat` is set. |
 
 ### Agents
 
@@ -241,6 +245,7 @@ it drew), `id`, `event` and `value`.
 | --- | --- | --- |
 | `message/markers` | `action`, `messages` (event ids) | Those messages show the action's icon after the byline; the list replaces the last one. |
 | `page/badge` | `page`, `text` (up to 8 characters, or `null` to clear), `tone` | A badge on the page's row. |
+| `settings/visibility` | `card`, `visibility` (`visible`, `hidden` or `pending`) | Lists or hides one of the plugin's Settings sections, such as one only some communities need. Sections start visible. |
 
 ### 2. `view/open` (notification from Buzz)
 
@@ -345,7 +350,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
-| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`) or `page` (with `page`, a page's `plugin/id`) | `null` |
+| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`) or `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`) | `null` |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |

@@ -497,7 +497,20 @@ pub fn navigate(params: &Value, cx: &App) -> Result<Value, Failure> {
                 .into_iter()
                 .find(|spec| spec.page.key() == key)
                 .ok_or_else(|| invalid(format!("There is no page {key}")))?;
-            Place::Page(spec.page)
+            match params.get("params").filter(|params| !params.is_null()) {
+                None => Place::Page(spec.page),
+                Some(route) => {
+                    let routes = crate::ui::pages::routes(spec.page, cx)
+                        .ok_or_else(|| invalid(format!("The page {key} takes no routes")))?;
+                    if !(routes.validate)(route) {
+                        return Err(invalid(format!("The page {key} cannot open these params")));
+                    }
+                    Place::Route {
+                        page: spec.page,
+                        params: route.clone(),
+                    }
+                }
+            }
         }
         _ => {
             return Err(invalid("to must be home, me, agents, settings or page"));

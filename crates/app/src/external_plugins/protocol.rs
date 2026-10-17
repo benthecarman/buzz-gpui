@@ -287,6 +287,9 @@ pub struct CompletionDecl {
     pub title: String,
     /// One character, not `@`, `#` or `:`, which the composer keeps.
     pub trigger: String,
+    /// Of completions on one trigger, the lowest order (then key) answers.
+    #[serde(default)]
+    pub order: i32,
 }
 
 /// A panel beside the conversation (`panels.register`).
@@ -345,6 +348,10 @@ pub struct PageDecl {
     pub icon: Option<String>,
     #[serde(default)]
     pub placement: PagePlacement,
+    /// Takes routes: `ui/navigate` can open it at `params`, and the page's
+    /// view hears `page/route`.
+    #[serde(default)]
+    pub routes: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -355,6 +362,8 @@ pub enum PagePlacement {
     Sidebar,
     /// A pill in the middle of the header.
     Topbar,
+    /// buzz-app's header toolbar icon; the header pill here.
+    Toolbar,
     /// No navigation entry; search and links still reach it.
     Hidden,
 }
@@ -464,6 +473,18 @@ pub struct ShortcutDecl {
     /// elsewhere.
     #[serde(default)]
     pub keys: Vec<String>,
+    /// Settings lists the plugin's shortcuts by this, then by id.
+    #[serde(default)]
+    pub order: i32,
+    /// Also runs while a text field has focus.
+    #[serde(default)]
+    pub allow_in_editable: bool,
+    /// Also runs while a dialog is open.
+    #[serde(default)]
+    pub allow_in_modal: bool,
+    /// Runs again while the chord is held.
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 /// A chord as `mod+shift+alt+key`.

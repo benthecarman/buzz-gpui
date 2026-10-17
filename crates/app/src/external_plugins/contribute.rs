@@ -56,6 +56,9 @@ thread_local! {
     /// A page's badge text and tone, by page key.
     static BADGES: RefCell<HashMap<String, (String, BadgeTone)>> = RefCell::default();
     static COMPOSERS: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    /// Settings cards a plugin hid or marked pending, by key.
+    static CARD_STATES: RefCell<HashMap<String, crate::ui::settings::cards::CardVisibility>> =
+        RefCell::default();
     /// Text renderer keys: their answers change how prose is prepared.
     static TEXT_KEYS: RefCell<HashSet<String>> = RefCell::default();
     /// Completion answers by completion key, channel and query; `None`
@@ -191,6 +194,7 @@ pub fn forget(plugin: &str) {
         answers.order.retain(|(key, _)| !key.starts_with(&prefix));
     });
     MARKS.with_borrow_mut(|marks| marks.retain(|key, _| !key.starts_with(&prefix)));
+    CARD_STATES.with_borrow_mut(|states| states.retain(|key, _| !key.starts_with(&prefix)));
     // Prose drew this plugin's old answers.
     crate::ui::renderers::text_changed();
     SUGGESTIONS.with_borrow_mut(|suggestions| {
@@ -606,6 +610,24 @@ pub fn set_marks(plugin: &str, params: &Value, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// `settings/visibility`: whether one of the plugin's Settings sections
+/// is listed (`visible`), left out (`hidden`) or still being decided
+/// (`pending`).
+pub fn set_card_visibility(plugin: &str, params: &Value, cx: &mut App) {
+    use crate::ui::settings::cards::{self, CardVisibility};
+    let Some(card) = params.get("card").and_then(Value::as_str) else {
+        return;
+    };
+    let state = match params.get("visibility").and_then(Value::as_str) {
+        Some("hidden") => CardVisibility::Hidden,
+        Some("pending") => CardVisibility::Pending,
+        _ => CardVisibility::Visible,
+    };
+    CARD_STATES.with_borrow_mut(|states| states.insert(format!("{plugin}/{card}"), state));
+    cards::changed(cx);
+    cx.refresh_windows();
+}
+
 /// `page/badge`: the text on a page's row, or none.
 pub fn set_badge(plugin: &str, params: &Value, cx: &mut App) {
     let Some(page) = params.get("page").and_then(Value::as_str) else {
@@ -755,7 +777,14 @@ pub fn register(
                     "administration" => CardPlacement::Administration,
                     _ => CardPlacement::Group(intern(card.placement.clone())),
                 },
-                visibility: None,
+                visibility: Some(Rc::new(move |_| {
+                    CARD_STATES.with_borrow(|states| {
+                        states
+                            .get(card_key)
+                            .copied()
+                            .unwrap_or(cards::CardVisibility::Visible)
+                    })
+                })),
                 build: cards::build(move |window, cx| {
                     super::ExternalView::settings(&owner, &id, window, cx)
                 }),
@@ -935,6 +964,7 @@ pub fn register(
         composer_completions::register(composer_completions::PluginCompletion {
             key: completion_key,
             trigger,
+            order: completion.order,
             query: Rc::new(move |query, channel, cx| {
                 suggest(&plugin, completion_key, &id, query, channel, cx)
             }),
@@ -976,6 +1006,10 @@ pub fn register(
             plugin: owner,
             title: intern(shortcut.title.clone()),
             defaults: Box::leak(defaults.into_boxed_slice()),
+            order: shortcut.order,
+            in_editable: shortcut.allow_in_editable,
+            in_modal: shortcut.allow_in_modal,
+            repeat: shortcut.repeat,
             run: Rc::new(move |_, cx| {
                 ExternalPlugins::notify_running(&plugin, "shortcut", json!({ "shortcut": id }), cx);
             }),

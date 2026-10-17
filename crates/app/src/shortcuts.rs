@@ -374,13 +374,23 @@ pub const PLUGINS: &[PluginShortcut] = &[
 ];
 
 /// A shortcut from a plugin someone added (`crate::external_plugins`). It
-/// is listed and rebound like a bundled plugin's, and runs through a
-/// keystroke interceptor instead of a GPUI action.
+/// is listed and rebound like a bundled plugin's, and runs from the
+/// workspace's key handler ([`external_key_down`]) instead of a GPUI
+/// action.
 pub struct ExternalShortcut {
     pub key: &'static str,
     pub plugin: &'static str,
     pub title: &'static str,
     pub defaults: &'static [Binding],
+    /// Settings lists a plugin's shortcuts by this, then by key.
+    pub order: i32,
+    /// Runs while a text field has focus (`allowInEditable`).
+    pub in_editable: bool,
+    /// Runs while a dialog is open (`allowInModal`).
+    pub in_modal: bool,
+    /// Runs again for each repeat of a held chord (`repeat`); otherwise a
+    /// held chord runs once.
+    pub repeat: bool,
     pub run: RunShortcut,
 }
 
@@ -397,6 +407,7 @@ pub fn register_external(shortcut: ExternalShortcut) {
     EXTERNAL.with_borrow_mut(|external| {
         external.retain(|existing| existing.key != shortcut.key);
         external.push(std::rc::Rc::new(shortcut));
+        external.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.key.cmp(b.key)));
     });
 }
 
@@ -762,29 +773,77 @@ pub fn init(cx: &mut App) {
     let (overrides, error) = restore(saved);
     cx.set_global(Shortcuts { overrides, error });
     rebuild_keymap(cx);
-    // Plugins people added have no GPUI action; their chords are matched
-    // here. Host and bundled chords come first in the rows and win.
-    cx.intercept_keystrokes(|event, window, cx| {
-        let Press::Chord(captured) = press(&event.keystroke, APPLE) else {
-            return;
-        };
-        if captured.other_primary || EXTERNAL.with_borrow(Vec::is_empty) {
-            return;
-        }
-        let rows = rows(Shortcuts::overrides(cx), DESKTOP);
-        let Some(row) = rows.iter().find(|row| {
+}
+
+/// Where a key press happens, for a plugin shortcut's options.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KeyPlace {
+    pub editable: bool,
+    pub modal: bool,
+    pub held: bool,
+}
+
+/// What a plugin shortcut does with a press: run, take it without
+/// running (a held chord's repeat), or leave it.
+#[derive(Debug, PartialEq, Eq)]
+enum ExternalPress {
+    Run,
+    Swallow,
+    Pass,
+}
+
+fn external_press(shortcut: &ExternalShortcut, place: KeyPlace) -> ExternalPress {
+    if (place.editable && !shortcut.in_editable) || (place.modal && !shortcut.in_modal) {
+        ExternalPress::Pass
+    } else if place.held && !shortcut.repeat {
+        ExternalPress::Swallow
+    } else {
+        ExternalPress::Run
+    }
+}
+
+/// Plugins people added have no GPUI action: the workspace's capture
+/// handler matches their chords here, after the keymap, so Buzz's own
+/// bindings and text fields' come first (`ShortcutService`). `true` when
+/// a plugin shortcut took the press.
+pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App) -> bool {
+    if EXTERNAL.with_borrow(Vec::is_empty) {
+        return false;
+    }
+    let Press::Chord(captured) = press(&event.keystroke, APPLE) else {
+        return false;
+    };
+    if captured.other_primary {
+        return false;
+    }
+    let rows = rows(Shortcuts::overrides(cx), DESKTOP);
+    let Some(shortcut) = rows
+        .iter()
+        .find(|row| {
             row.effective
                 .iter()
                 .any(|binding| binding.same(&captured.binding))
-        }) else {
-            return;
-        };
-        if let Some(shortcut) = external(row.key) {
-            cx.stop_propagation();
+        })
+        .and_then(|row| external(row.key))
+    else {
+        return false;
+    };
+    let place = KeyPlace {
+        editable: window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains("Input")),
+        modal: crate::ui::overlay::modal_shown(),
+        held: event.is_held,
+    };
+    match external_press(&shortcut, place) {
+        ExternalPress::Run => {
             (shortcut.run)(window, cx);
+            true
         }
-    })
-    .detach();
+        ExternalPress::Swallow => true,
+        ExternalPress::Pass => false,
+    }
 }
 
 /// Replaces every app-wide binding of a host action with the current
@@ -848,6 +907,48 @@ mod tests {
     use super::*;
     // gpui_kit's glob brings its own `test` attribute.
     use core::prelude::v1::test;
+
+    #[test]
+    fn plugin_shortcuts_follow_buzz_app_defaults() {
+        let shortcut = |in_editable, in_modal, repeat| ExternalShortcut {
+            key: "p/s",
+            plugin: "p",
+            title: "S",
+            defaults: &[],
+            order: 0,
+            in_editable,
+            in_modal,
+            repeat,
+            run: std::rc::Rc::new(|_, _| {}),
+        };
+        let at = |editable, modal, held| KeyPlace {
+            editable,
+            modal,
+            held,
+        };
+        let plain = shortcut(false, false, false);
+        assert_eq!(
+            external_press(&plain, at(false, false, false)),
+            ExternalPress::Run
+        );
+        assert_eq!(
+            external_press(&plain, at(true, false, false)),
+            ExternalPress::Pass
+        );
+        assert_eq!(
+            external_press(&plain, at(false, true, false)),
+            ExternalPress::Pass
+        );
+        assert_eq!(
+            external_press(&plain, at(false, false, true)),
+            ExternalPress::Swallow
+        );
+        let open = shortcut(true, true, true);
+        assert_eq!(
+            external_press(&open, at(true, true, true)),
+            ExternalPress::Run
+        );
+    }
 
     fn chord(key: &'static str, primary: bool, shift: bool, alt: bool) -> Captured {
         Captured {

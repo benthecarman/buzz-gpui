@@ -625,6 +625,11 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .size_full()
+                    .capture_key_down(|event, window, cx| {
+                        if crate::shortcuts::external_key_down(event, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    })
                     .on_mouse_down(
                         MouseButton::Navigate(NavigationDirection::Back),
                         cx.listener(|this, _, window, cx| this.go_back(window, cx)),

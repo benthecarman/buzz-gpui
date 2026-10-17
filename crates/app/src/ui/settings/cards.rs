@@ -33,6 +33,9 @@ pub enum CardVisibility {
     Error,
 }
 
+/// Whether a card is listed now (`visibility.snapshot`).
+pub type Visibility = std::rc::Rc<dyn Fn(&App) -> CardVisibility>;
+
 /// The view a card shows; the page keeps it while its section is open.
 pub type BuildCard = std::rc::Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
 
@@ -50,7 +53,7 @@ pub struct SettingsCard {
     pub icon: Option<IconName>,
     pub placement: CardPlacement,
     /// `None` is always visible.
-    pub visibility: Option<fn(&App) -> CardVisibility>,
+    pub visibility: Option<Visibility>,
     pub build: BuildCard,
 }
 
@@ -61,6 +64,7 @@ impl SettingsCard {
             return CardVisibility::Hidden;
         }
         self.visibility
+            .as_ref()
             .map_or(CardVisibility::Visible, |visibility| visibility(cx))
     }
 

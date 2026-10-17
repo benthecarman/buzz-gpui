@@ -143,6 +143,9 @@ def page(state):
         "gap": "md",
         "children": [
             text("Hello from Python", style="title"),
+        ]
+        + ([text(f"Opened at route {json.dumps(state['route'])}", tone="accent")] if state.get("route") else [])
+        + [
             text(
                 "This page is drawn by a plugin process. Edit plugin.py and save: "
                 "Buzz restarts it and this page redraws.",
@@ -197,6 +200,7 @@ def page(state):
                     {"type": "button", "id": "toast", "label": "Show a toast"},
                     {"type": "button", "id": "notify", "label": "Notify me", "icon": "Bell"},
                     {"type": "button", "id": "plugins", "label": "Plugin settings", "icon": "Gear"},
+                    {"type": "button", "id": "route", "label": "Open at a route"},
                     {"type": "link", "label": "Open example.com", "url": "https://example.com/"},
                 ],
             },
@@ -398,6 +402,10 @@ def on_event(params):
     elif element == "close" and event == "click" and state["kind"] == "dialog":
         request("ui/closeView", {"view": view})
         return
+    elif element == "route" and event == "click":
+        count = state["count"]
+        request("ui/navigate", {"to": "page", "page": "com.example.hello/hello", "params": {"count": count}})
+        return
     elif element == "plugins" and event == "click":
         request("ui/navigate", {"to": "settings", "section": "plugins"})
         return
@@ -503,7 +511,7 @@ def handle(message):
                 {
                     "id": message["id"],
                     "result": {
-                        "pages": [{"id": "hello", "title": "Hello", "icon": "Smiley"}],
+                        "pages": [{"id": "hello", "title": "Hello", "icon": "Smiley", "routes": True}],
                         "panels": [
                             {
                                 "id": "example",
@@ -593,6 +601,10 @@ def handle(message):
         on_event(params)
     elif method == "view/close":
         views.pop(params.get("view"), None)
+    elif method == "page/route":
+        if params["view"] in views:
+            views[params["view"]]["route"] = params["route"]
+            render(params["view"])
     elif method == "channel/changed":
         on_changed(params)
     elif method == "message/action":

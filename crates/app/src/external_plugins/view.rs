@@ -41,6 +41,8 @@ pub struct ExternalView {
     close: Option<crate::ui::account_actions::Close>,
     /// Picks a reaction (`reaction/select`).
     select: Option<crate::ui::emoji_picker::Select>,
+    /// A page's route params, from `ui/navigate`.
+    route: Option<Value>,
     tree: Option<Node>,
     /// The last tree the plugin sent could not be drawn.
     error: Option<String>,
@@ -200,6 +202,7 @@ impl ExternalView {
                 extra: Value::Null,
                 close: None,
                 select: None,
+                route: None,
                 tree: None,
                 error: None,
                 fields: HashMap::new(),
@@ -223,6 +226,7 @@ impl ExternalView {
             None => (None, None),
         };
         let mut params = json!({
+            "route": self.route,
             "agent": agent,
             "type": kind,
             "view": self.id,
@@ -456,6 +460,29 @@ impl Render for ExternalView {
             .text_color(c.text_standard)
             .child(body)
     }
+}
+
+/// Whether `params` can be a plugin page's route: a JSON object of at
+/// most 4 KiB.
+pub fn route_valid(params: &Value) -> bool {
+    params.is_object() && params.to_string().len() <= 4_096
+}
+
+/// Shows a plugin page at `params`, or its start: the page hears
+/// `page/route`.
+pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &mut App) {
+    let Ok(view) = view.clone().downcast::<ExternalView>() else {
+        return;
+    };
+    view.update(cx, |view, cx| {
+        view.route = params.cloned();
+        ExternalPlugins::notify_running(
+            &view.plugin,
+            "page/route",
+            json!({ "view": view.id, "route": view.route }),
+            cx,
+        );
+    });
 }
 
 /// An account action's dialog around the plugin's view.

@@ -169,6 +169,7 @@ pub fn unregister(page: Page, cx: &mut App) {
     cx.default_global::<Pages>()
         .0
         .retain(|existing| existing.page != page);
+    cx.default_global::<Routes>().0.remove(&page);
 }
 
 /// A registered page whose plugin is on.
