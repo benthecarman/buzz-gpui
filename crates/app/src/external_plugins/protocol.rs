@@ -139,7 +139,7 @@ fn valid_plugin_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
-fn valid_contribution_id(id: &str) -> bool {
+pub fn valid_contribution_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id

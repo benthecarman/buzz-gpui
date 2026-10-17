@@ -16,6 +16,8 @@
 mod agents;
 mod capabilities;
 mod contribute;
+mod dialogs;
+pub use dialogs::dialog;
 mod draw;
 mod events;
 pub mod git;
@@ -1267,6 +1269,16 @@ impl ExternalPlugins {
                         )),
                     },
                 )
+            }
+            "ui/openDialog" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                Reply::Now(match plugin {
+                    Some(plugin) => dialogs::open(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                })
             }
             "ui/closeView" => {
                 let view = params.get("view").and_then(Value::as_str).and_then(|view| {

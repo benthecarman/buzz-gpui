@@ -111,15 +111,32 @@ impl ExternalView {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
+        Self::framed(plugin, contribution, title, close, Value::Null, cx).0
+    }
+
+    /// A dialog titled `title` around a plugin view of kind `dialog`, with
+    /// `extra` in its `view/open`; and the view's id.
+    pub(super) fn framed(
+        plugin: &str,
+        contribution: &str,
+        title: SharedString,
+        close: Close,
+        extra: Value,
+        cx: &mut App,
+    ) -> (AnyView, String) {
         let inner = close.clone();
         let view = Self::open(
             plugin,
             contribution,
             "dialog",
-            |view| view.close = Some(inner),
+            |view| {
+                view.close = Some(inner);
+                view.extra = extra;
+            },
             cx,
         );
-        cx.new(|_| Framed { title, view, close }).into()
+        let id = view.read(cx).id.clone();
+        (cx.new(|_| Framed { title, view, close }).into(), id)
     }
 
     /// A composer accessory, shown above one composer.

@@ -300,6 +300,15 @@ def render(view):
     kind = state["kind"]
     if kind == "agentProvider":
         tree = provider_dialog(state)
+    elif kind == "dialog" and state["contribution"] == "words":
+        tree = {
+            "type": "column",
+            "gap": "md",
+            "children": [
+                text(f"That message has {state['context']['count']} words."),
+                {"type": "row", "justify": "end", "children": [{"type": "button", "id": "close", "label": "Close", "variant": "prominent"}]},
+            ],
+        }
     elif kind == "dialog":
         tree = about_dialog(state)
     elif kind == "accessory":
@@ -484,7 +493,8 @@ def on_action(params):
     action, message = params["action"], params["message"]
     if action == "words":
         count = len(message["content"].split())
-        toast(f"{count} words")
+        # A dialog the plugin opens itself; its view gets the context.
+        request("ui/openDialog", {"title": "Word count", "id": "words", "context": {"count": count}})
     elif action == "star":
         starred.symmetric_difference_update({message["id"]})
         notify("message/markers", {"action": "star", "messages": sorted(starred)})
