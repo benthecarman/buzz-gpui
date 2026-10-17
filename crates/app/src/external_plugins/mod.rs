@@ -1281,6 +1281,7 @@ impl ExternalPlugins {
             "unread/watch" => "unread/changed",
             "reminders/watch" => "reminders/changed",
             "outbox/watch" => "outbox/changed",
+            "navigation/watch" => "navigation/changed",
             "agents/watch" => "agents/changed",
             "session/watch" => "session/changed",
             _ => "channel/changed",
@@ -1295,6 +1296,7 @@ impl ExternalPlugins {
             "unread/watch" => reading::watch(params, notify, cx),
             "reminders/watch" => channels::watch(params, notify, cx),
             "outbox/watch" => outbox::watch(params, notify, cx),
+            "navigation/watch" => capabilities::watch_navigation(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
             "session/watch" => capabilities::watch_session(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
@@ -1571,6 +1573,8 @@ impl ExternalPlugins {
             "reminders/list" => Reply::Now(channels::list(cx)),
             "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
             "outbox/watch" => Self::watch(path, generation, "outbox/watch", params, cx),
+            "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
+            "navigation/get" => Reply::Now(Ok(capabilities::navigation_state(cx))),
             "outbox/get" => later(outbox::get(params, cx)),
             "archives/get" => later(channels::archives(params, cx)),
             "read/clearLocal" => later(reading::clear_local(params, cx)),
@@ -1582,7 +1586,8 @@ impl ExternalPlugins {
             "threads/activity" => later(reading::threads(params, cx)),
             "read/mark" => later(reading::mark(params, cx)),
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
-            | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" | "outbox/unwatch" => {
+            | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" | "outbox/unwatch"
+            | "navigation/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))

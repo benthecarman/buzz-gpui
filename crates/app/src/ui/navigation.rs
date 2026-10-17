@@ -345,7 +345,7 @@ pub fn main_window(cx: &App) -> Option<AnyWindowHandle> {
     Some(cx.try_global::<Navigator>()?.window.as_ref()?.0)
 }
 
-fn workspace(cx: &App) -> Option<Entity<Workspace>> {
+pub(crate) fn workspace(cx: &App) -> Option<Entity<Workspace>> {
     cx.try_global::<Navigator>()?.window.as_ref()?.1.upgrade()
 }
 

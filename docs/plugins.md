@@ -137,7 +137,9 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   sends `page/route` with the `view` and `route` when it changes. Back and
   Forward step through routes. `routeVersion` (default 1) says what the
   params mean: raise it when they change, and a `ui/navigate` that names
-  another `version` is refused.
+  another `version` is refused. A page settles a route itself: it draws
+  what the route shows, or that it is not found, and redirects with
+  `ui/navigate` and `replace: true`.
 - A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
   below. Ids are unique across all of them.
 
@@ -439,7 +441,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/retry`, `messages/dismiss` | `message` (one of yours whose `delivery` is `failed`) | `null`. Sends it again, or drops it. Needs `send-messages`. |
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003), plus app data (30078) and the agent and team catalogs (30175, 30178), as buzz-app does. Needs `publish-events`. |
-| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` and `version` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |
+| `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` and `version` for a page with `routes`), `conversation` (with `channel`, and optional `message`, `thread` and `members`), `back` or `forward`; optionally `community` (a joined community's `wss://` relay); and `replace: true` to take the current visit's place in history, such as to redirect a route | `null` |
+| `navigation/get` | none | `{"place","canGoBack","canGoForward"}`: `place` is where the window is, in the form `ui/navigate` takes (with `community`), or `null` before anything shows |
+| `navigation/watch` | none | `{"watch"}`. Buzz then sends `navigation/changed` with what `navigation/get` gives, now and whenever it changes. Stop with `navigation/unwatch`. |
 | `ui/openPanel` | `panel` (one of the plugin's panel ids), `target` (what it shows, such as a link or any text the plugin reads from `view/open`) | `null`. Opens the panel as a tab of the open conversation. |
 | `panel/canOpen` | `target` | Whether any panel, the plugin's or not, shows `target`. |
 | `panel/open` | `view` (an open panel), `target` | `true` if a panel shows `target`. When it is this panel, the view shows it in place and the plugin hears `view/retarget` (`view`, `target`, `canGoBack`); otherwise the panel that shows it opens as a tab for the same conversation and thread, and this one closes. |
@@ -452,7 +456,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `typing/get` | `channel`, `root` (optional, a thread) | The pubkeys typing there |
 | `emoji/list` | none | The community's custom emoji: `[{"shortcode","url"}]` |
 | `people/search` | `query`, `page` (from 1, the default) | `{"people","more"}`: profiles that match, as `profiles/get` gives them |
-| `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and what a click opens: an optional `channel`, `message` and `thread`, or a `page` (`plugin/id`) | `true` if it showed. Buzz applies the user's notification settings. |
+| `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and what a click opens: any place `ui/navigate` takes (`to` and its fields), or the short forms `channel` with an optional `message` and `thread`, or a `page` (`plugin/id`) | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
 | `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","stale"}`. Counts are sampled, not exact. |
 | `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |

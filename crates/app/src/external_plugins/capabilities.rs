@@ -519,6 +519,167 @@ pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     }))
 }
 
+/// The place `ui/navigate`'s params name, other than Back and Forward.
+fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
+    use crate::ui::pages::Page;
+    use crate::ui::settings::Section;
+    Ok(match text(params, "to") {
+        Some("home") | Some("messages") => Place::Page(Page::MESSAGES),
+        Some("me") => Place::Page(Page::ME),
+        Some("agents") => Place::Page(Page::AGENTS),
+        Some("settings") => Place::Settings(match text(params, "section") {
+            None => Section::default_for(AppState::current(cx).is_some()),
+            Some("profile") => Section::Profile,
+            Some("custom-emoji") => Section::CustomEmoji,
+            Some("communities") => Section::Communities,
+            Some("appearance") => Section::Appearance,
+            Some("notifications") => Section::Notifications,
+            Some("shortcuts") => Section::Shortcuts,
+            Some("agents") => Section::Agents,
+            Some("plugins") => Section::Plugins,
+            Some("updates") => Section::Updates,
+            Some("about") => Section::About,
+            Some(card) => {
+                let card = crate::ui::settings::cards::get(card, cx)
+                    .ok_or_else(|| invalid(format!("Settings has no section {card}")))?;
+                Section::Card(card.key)
+            }
+        }),
+        Some("page") => {
+            let key = text(params, "page").ok_or_else(|| invalid("page is required"))?;
+            let spec = crate::ui::pages::all(cx)
+                .into_iter()
+                .find(|spec| spec.page.key() == key)
+                .ok_or_else(|| invalid(format!("There is no page {key}")))?;
+            match params.get("params").filter(|params| !params.is_null()) {
+                None => Place::Page(spec.page),
+                Some(route) => {
+                    let routes = crate::ui::pages::routes(spec.page, cx)
+                        .ok_or_else(|| invalid(format!("The page {key} takes no routes")))?;
+                    let version = params.get("version").and_then(Value::as_u64);
+                    if version.is_some_and(|version| version != u64::from(routes.version)) {
+                        return Err(invalid(format!(
+                            "The page {key} takes routes of version {}",
+                            routes.version
+                        )));
+                    }
+                    if !(routes.validate)(route) {
+                        return Err(invalid(format!("The page {key} cannot open these params")));
+                    }
+                    Place::Route {
+                        page: spec.page,
+                        params: route.clone(),
+                    }
+                }
+            }
+        }
+        Some("conversation") => {
+            let community = community(cx)?;
+            let community = community.read(cx);
+            let message = event_id(params, "message")?;
+            let thread = event_id(params, "thread")?;
+            Place::Conversation {
+                channel: channel(params, community)?,
+                message: message.or(thread),
+                thread,
+                members: params.get("members").and_then(Value::as_bool) == Some(true),
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "to must be home, me, agents, settings, page, conversation, back or forward",
+            ));
+        }
+    })
+}
+
+/// A place as `ui/navigate` takes it, so a plugin can return to it.
+fn place_json(target: &Target, cx: &App) -> Value {
+    use crate::ui::pages::Page;
+    use crate::ui::settings::Section;
+    let mut place = match &target.place {
+        Place::Page(page) if *page == Page::MESSAGES => json!({ "to": "home" }),
+        Place::Page(page) if *page == Page::ME => json!({ "to": "me" }),
+        Place::Page(page) if *page == Page::AGENTS => json!({ "to": "agents" }),
+        Place::Page(page) if *page == Page::SETTINGS => json!({ "to": "settings" }),
+        Place::Page(page) => json!({ "to": "page", "page": page.key() }),
+        Place::Settings(section) => json!({
+            "to": "settings",
+            "section": match section {
+                Section::Profile => "profile",
+                Section::CustomEmoji => "custom-emoji",
+                Section::Communities => "communities",
+                Section::Appearance => "appearance",
+                Section::Notifications => "notifications",
+                Section::Shortcuts => "shortcuts",
+                Section::Agents => "agents",
+                Section::Plugins => "plugins",
+                Section::Updates => "updates",
+                Section::About => "about",
+                Section::Card(key) => key,
+            },
+        }),
+        Place::Conversation {
+            channel,
+            message,
+            thread,
+            members,
+        } => json!({
+            "to": "conversation",
+            "channel": channel,
+            "message": message.map(|id| id.to_hex()),
+            "thread": thread.map(|id| id.to_hex()),
+            "members": members,
+        }),
+        Place::Channels(_) => json!({ "to": "home" }),
+        Place::Route { page, params } => json!({
+            "to": "page",
+            "page": page.key(),
+            "params": params,
+            "version": crate::ui::pages::routes(*page, cx).map(|routes| routes.version),
+        }),
+    };
+    place["community"] = json!(target.community);
+    place
+}
+
+/// `navigation/get`: where the window is, as `ui/navigate` takes it, and
+/// whether Back and Forward go anywhere.
+pub fn navigation_state(cx: &App) -> Value {
+    let Some(workspace) = navigation::workspace(cx) else {
+        return Value::Null;
+    };
+    let (here, back, forward) = workspace.read(cx).location();
+    json!({
+        "place": here.map(|here| place_json(&here, cx)),
+        "canGoBack": back,
+        "canGoForward": forward,
+    })
+}
+
+/// `navigation/watch`: sends `navigation/changed` with
+/// `navigation/get`'s answer now and whenever it changes.
+pub fn watch_navigation(
+    _params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    let workspace = navigation::workspace(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    let first = navigation_state(cx);
+    let last = std::cell::RefCell::new(first.clone());
+    let notify = std::rc::Rc::new(notify);
+    let send = notify.clone();
+    cx.defer(move |cx| send(first, cx));
+    let subscription = cx.observe(&workspace, move |_, cx| {
+        let now = navigation_state(cx);
+        if now != *last.borrow() {
+            *last.borrow_mut() = now.clone();
+            notify(now, cx);
+        }
+    });
+    Ok((Watch::new(subscription, Task::ready(())), json!({})))
+}
+
 /// `ui/openConversation`: shows a channel, a message or a thread.
 pub fn open_conversation(params: &Value, cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;
@@ -805,10 +966,9 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
     }))
 }
 
-/// `ui/navigate`: shows a page or Settings.
+/// `ui/navigate`: shows a page, Settings or a conversation, as a new
+/// visit or, with `replace`, in place of the current one.
 pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
-    use crate::ui::pages::Page;
-    use crate::ui::settings::Section;
     match text(params, "to") {
         Some("back") => {
             cx.dispatch_action(&crate::ui::navigation::GoBack);
@@ -820,66 +980,16 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
         }
         _ => {}
     }
-    let place = match text(params, "to") {
-        Some("home") | Some("messages") => Place::Page(Page::MESSAGES),
-        Some("me") => Place::Page(Page::ME),
-        Some("agents") => Place::Page(Page::AGENTS),
-        Some("settings") => Place::Settings(match text(params, "section") {
-            None => Section::default_for(AppState::current(cx).is_some()),
-            Some("profile") => Section::Profile,
-            Some("custom-emoji") => Section::CustomEmoji,
-            Some("communities") => Section::Communities,
-            Some("appearance") => Section::Appearance,
-            Some("notifications") => Section::Notifications,
-            Some("shortcuts") => Section::Shortcuts,
-            Some("agents") => Section::Agents,
-            Some("plugins") => Section::Plugins,
-            Some("updates") => Section::Updates,
-            Some("about") => Section::About,
-            Some(card) => {
-                let card = crate::ui::settings::cards::get(card, cx)
-                    .ok_or_else(|| invalid(format!("Settings has no section {card}")))?;
-                Section::Card(card.key)
-            }
-        }),
-        Some("page") => {
-            let key = text(params, "page").ok_or_else(|| invalid("page is required"))?;
-            let spec = crate::ui::pages::all(cx)
-                .into_iter()
-                .find(|spec| spec.page.key() == key)
-                .ok_or_else(|| invalid(format!("There is no page {key}")))?;
-            match params.get("params").filter(|params| !params.is_null()) {
-                None => Place::Page(spec.page),
-                Some(route) => {
-                    let routes = crate::ui::pages::routes(spec.page, cx)
-                        .ok_or_else(|| invalid(format!("The page {key} takes no routes")))?;
-                    let version = params.get("version").and_then(Value::as_u64);
-                    if version.is_some_and(|version| version != u64::from(routes.version)) {
-                        return Err(invalid(format!(
-                            "The page {key} takes routes of version {}",
-                            routes.version
-                        )));
-                    }
-                    if !(routes.validate)(route) {
-                        return Err(invalid(format!("The page {key} cannot open these params")));
-                    }
-                    Place::Route {
-                        page: spec.page,
-                        params: route.clone(),
-                    }
-                }
-            }
-        }
-        _ => {
-            return Err(invalid(
-                "to must be home, me, agents, settings, page, back or forward",
-            ));
-        }
-    };
     let target = Target {
         community: scope(params, cx)?,
-        place,
+        place: place_of(params, cx)?,
     };
+    if params.get("replace").and_then(Value::as_bool) == Some(true) {
+        navigation::with_workspace(cx, move |workspace, window, cx| {
+            workspace.navigate_replacing(target, window, cx)
+        });
+        return Ok(Value::Null);
+    }
     let sender = navigation::sender(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let _ = sender.unbounded_send(Request::Open(target).into());
     Ok(Value::Null)
@@ -1001,8 +1111,10 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
         .filter(|key| !key.is_empty() && key.len() <= 256)
         .ok_or_else(|| invalid("sourceKey is required"))?;
     let community = AppState::current(cx);
-    let place = match (text(params, "channel"), &community) {
-        (Some(channel), Some(community)) => {
+    // Any place `ui/navigate` takes, or the short forms below.
+    let place = match (text(params, "to"), text(params, "channel"), &community) {
+        (Some(_), _, _) => place_of(params, cx)?,
+        (None, Some(channel), Some(community)) => {
             let channel = self::channel(&json!({ "channel": channel }), community.read(cx))?;
             let message = event_id(params, "message")?;
             let thread = event_id(params, "thread")?;

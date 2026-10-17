@@ -809,6 +809,15 @@ impl Workspace {
         }
     }
 
+    /// The place history is at, and whether Back and Forward go anywhere.
+    pub(crate) fn location(&self) -> (Option<Target>, bool, bool) {
+        (
+            self.history.current().cloned(),
+            self.history.can_go_back(),
+            self.history.can_go_forward(),
+        )
+    }
+
     /// Goes to `target` as a new visit.
     pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_outside_settings(&target);
