@@ -1832,7 +1832,30 @@ pub fn reactor_names(group: &ReactionGroup, viewer: &str, names: &Names) -> (Vec
     (out, mine)
 }
 
-fn reaction_glyph(group: &ReactionGroup, size: f32, rows: &Rows, cx: &App) -> AnyElement {
+fn reaction_glyph(
+    group: &ReactionGroup,
+    row: &MessageRow,
+    size: f32,
+    rows: &Rows,
+    cx: &App,
+) -> AnyElement {
+    // A plugin's inline renderer that claims the whole reaction draws it
+    // (`InlineContent.reaction`).
+    if group.emoji.is_none() {
+        let message = renderers::InMessage {
+            row,
+            profiles: &rows.directory.profiles,
+        };
+        let whole = renderers::text_matches(&group.content, message)
+            .into_iter()
+            .find(|(range, _)| *range == (0..group.content.len()));
+        if let Some((_, key)) = whole
+            && let Some(element) =
+                renderers::render_text(&key, &group.content, &row.id.to_hex(), cx)
+        {
+            return element;
+        }
+    }
     if let Some(custom) = &group.emoji
         && let Some(element) = renderers::inline(
             &format!(":{}:", custom.shortcode),
@@ -1969,7 +1992,7 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElem
     for (index, group) in row.reactions.iter().enumerate() {
         let (names, mine) = reactor_names(group, &rows.viewer, rows.names());
         let people = names.len();
-        let glyph = reaction_glyph(group, 14., rows, cx);
+        let glyph = reaction_glyph(group, row, 14., rows, cx);
         // By the group, not its place: a count stays with its emoji when
         // groups come and go.
         let emoji = group.emoji.as_ref().map_or("", |emoji| emoji.url.as_str());
@@ -2054,7 +2077,7 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElem
         }
         let preview = shown.then(|| {
             let slide = open.and_then(|(_, i, from)| from.map(|f| (i as f32 - f as f32).signum()));
-            reaction_preview(group, names.join(", "), slide, rows, &c, cx)
+            reaction_preview(group, row, names.join(", "), slide, rows, &c, cx)
         });
         pills = pills.child(div().relative().child(pill).children(preview.map(|card| {
             div().absolute().left_0().top_0().child(deferred(
@@ -2170,6 +2193,7 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElem
 /// reacted (`ReactionPill`'s `PreviewCard`).
 fn reaction_preview(
     group: &ReactionGroup,
+    row: &MessageRow,
     names: String,
     slide: Option<f32>,
     rows: &Rows,
@@ -2190,7 +2214,7 @@ fn reaction_preview(
                 .items_center()
                 .gap(px(8.))
                 .h(px(16.))
-                .child(reaction_glyph(group, 14., rows, cx))
+                .child(reaction_glyph(group, row, 14., rows, cx))
                 .child(
                     div()
                         .text_caption()

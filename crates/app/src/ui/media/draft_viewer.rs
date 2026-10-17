@@ -356,10 +356,20 @@ impl DraftViewer {
                 Some(attachment) => {
                     let media = self.draft.read(cx).media().clone();
                     let id = SharedString::from(format!("draft-audio-{}", item.id));
-                    let player = if attachment.voice_note {
-                        super::voice_draft(id, &attachment, &media, cx)
-                    } else {
-                        super::audio_attachment(id, &attachment, &media, cx)
+                    // A plugin's attachment renderer draws drafts as sent
+                    // ones (`ComposerAttachmentViewer`).
+                    let custom = crate::ui::renderers::attachment(
+                        &attachment,
+                        SharedString::from(format!("draft-audio-plugin-{}", item.id)),
+                        &media,
+                        cx,
+                    );
+                    let player = match custom {
+                        Some(custom) => custom,
+                        None if attachment.voice_note => {
+                            super::voice_draft(id, &attachment, &media, cx)
+                        }
+                        None => super::audio_attachment(id, &attachment, &media, cx),
                     };
                     div()
                         .size_full()

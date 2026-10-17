@@ -4839,12 +4839,24 @@ impl Composer {
             .w(px(336.))
             .max_w_full()
             .min_w_0()
-            .child(media::voice_draft(
-                SharedString::from(format!("voice-draft-card-{id}")),
-                &attachment,
-                &media,
-                cx,
-            ))
+            // A plugin's attachment renderer draws drafts too
+            // (`ComposerAttachments`); Buzz keeps the controls around it.
+            .child(
+                super::renderers::attachment(
+                    &attachment,
+                    SharedString::from(format!("voice-draft-plugin-{id}")),
+                    &media,
+                    cx,
+                )
+                .unwrap_or_else(|| {
+                    media::voice_draft(
+                        SharedString::from(format!("voice-draft-card-{id}")),
+                        &attachment,
+                        &media,
+                        cx,
+                    )
+                }),
+            )
             .when_some(item.error.clone(), |d, error| {
                 d.child(
                     div()
