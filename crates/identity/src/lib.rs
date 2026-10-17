@@ -162,6 +162,9 @@ pub enum Purpose {
     Presence,
 }
 
+/// NIP-PS plugin release signatures.
+pub const PLUGIN_RELEASE: u16 = 1064;
+
 /// Kinds the app writes as ordinary content.
 const CONTENT_KINDS: &[u16] = &[
     0, 5, 7, 9, 1984, 9000, 9001, 9002, 9007, 9008, 9021, 9022, 9030, 9031, 9032, 9035, 9036,
@@ -312,6 +315,24 @@ impl Identity {
                 Tag::custom("u", [repository]),
                 Tag::custom("method", ["GET"]),
             ])
+            .finalize(&self.keys)
+            .map_err(|error| IdentityError::Signing(error.to_string()))
+    }
+
+    /// A plugin release signature (buzz-app's NIP-PS, kind 1064): empty
+    /// content and exactly an `x` tag with the SHA-256 of the release
+    /// file and a `t` tag naming the release format. It vouches for one
+    /// exact file and nothing else.
+    pub fn sign_plugin_release(&self, sha256: &str, format: &str) -> Result<Event, IdentityError> {
+        let hex = sha256.len() == 64
+            && sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !hex || !format.starts_with("buzz-") || format.len() > 64 {
+            return Err(IdentityError::NotAllowed);
+        }
+        EventBuilder::new(Kind::from_u16(PLUGIN_RELEASE), "")
+            .tags([Tag::custom("x", [sha256]), Tag::custom("t", [format])])
             .finalize(&self.keys)
             .map_err(|error| IdentityError::Signing(error.to_string()))
     }
@@ -870,6 +891,37 @@ mod tests {
             .unwrap();
         let event = identity.sign(Purpose::AppData, unsigned).unwrap();
         assert_eq!(identity.decrypt_from_self(&event).unwrap(), "{\"v\":1}");
+    }
+
+    #[test]
+    fn plugin_releases_sign_one_digest() {
+        let identity = Identity::ephemeral();
+        let digest = "ab".repeat(32);
+        let event = identity
+            .sign_plugin_release(&digest, "buzz-plugin-folder-v1")
+            .unwrap();
+        event.verify().unwrap();
+        assert_eq!(event.kind.as_u16(), PLUGIN_RELEASE);
+        assert!(event.content.is_empty());
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                vec!["x".to_owned(), digest.clone()],
+                vec!["t".to_owned(), "buzz-plugin-folder-v1".to_owned()]
+            ]
+        );
+        for (digest, format) in [
+            ("AB".repeat(32), "buzz-plugin-folder-v1"),
+            ("ab".repeat(31), "buzz-plugin-folder-v1"),
+            ("ab".repeat(32), "other"),
+        ] {
+            assert!(identity.sign_plugin_release(&digest, format).is_err());
+        }
     }
 
     #[test]

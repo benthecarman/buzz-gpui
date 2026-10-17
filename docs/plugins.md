@@ -260,6 +260,57 @@ ends with `channel/unwatch` or when the plugin stops.
 
 Toast titles are cut to 128 characters, and bodies to 200.
 
+## Sharing a plugin
+
+### Add from Git
+
+**Settings → Plugins → Add from Git…** takes an HTTPS or SSH repository
+(`owner/repository` means GitHub) and an optional branch or tag. Buzz clones
+it and lists every folder with a `buzz-plugin.json`: the command it runs, what
+it may do, and who signed it. Installing copies that folder into Buzz's own
+plugin folder, and the plugin starts off.
+
+Nothing in the repository runs while Buzz reads it. Git uses no global or
+system config, runs no hooks, fetches no submodules or LFS files, asks for no
+passwords, and speaks only HTTPS and SSH. Symlinks are checked out as plain
+files. A clone may take 60 seconds and 256 MiB. SSH uses your SSH agent and
+known hosts, not your SSH config.
+
+**Update** on an installed plugin reads its repository again and shows the
+same preview. An update keeps the plugin's switch, and a running plugin
+restarts. If the new version asks for more permissions, it is turned off until
+you review it.
+
+A plugin added from a folder and one installed from Git cannot share an id.
+Remove one to add the other.
+
+### Signing
+
+Signing tells people who published a plugin. It uses buzz-app's NIP-PS
+signature event (kind `1064`) over a list of the folder's files:
+
+- `plugin.artifact.json` lists every file except hidden ones, with its size and
+  SHA-256.
+- `plugin.signature.json` is the signed event: empty content, an `x` tag with
+  the SHA-256 of `plugin.artifact.json`, and a `t` tag of
+  `buzz-plugin-folder-v1`.
+
+**Sign** on a plugin added from a folder writes both files with your Buzz key.
+Commit them with the plugin. A signed folder cannot contain symlinks.
+
+Buzz checks the signature and every file before each start. Once Buzz has
+seen a plugin signed, later versions must be signed by the same key: an
+unsigned copy or another publisher stops the plugin until you remove it and
+add it again. Editing a signed folder stops it too; sign it again, or delete
+`plugin.signature.json` while you work on it.
+
+A signature identifies a publisher. It does not make a plugin safe.
+
+### Safe mode
+
+Start Buzz with `BUZZODZ_SAFE_MODE=1`, as with buzz-app, to keep the plugins
+you added from running for that launch. Their switches stay as they were.
+
 ## When something goes wrong
 
 - Lines on stdout that are not JSON-RPC are logged and ignored. A stray
@@ -274,8 +325,6 @@ Toast titles are cut to 128 characters, and bodies to 200.
 
 ## Not built yet
 
-- Signing plugins, and adding them from Git (buzz-app's NIP-PS and import
-  preview).
 - Notification categories, settings cards, message actions, link and
   message renderers, and composer tools from plugins.
 - Following a thread live, editing and reacting.

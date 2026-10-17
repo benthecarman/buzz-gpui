@@ -3,13 +3,17 @@
 //! Below them, the plugins the user added from folders
 //! ([`crate::external_plugins`]), each with the command it runs.
 
-use super::{SettingsPage, button, header, note, preference_row, rows_group, section};
-use crate::external_plugins::{ExternalPlugins, Status};
+use super::plugin_import::PluginImport;
+use super::{Modal, SettingsPage, button, header, note, preference_row, rows_group, section};
+use crate::external_plugins::{ExternalPlugins, Status, release};
 use crate::plugins::{CHANNELS, Plugins, Unavailable};
+use crate::ui::modal::Dismissed;
 use crate::ui::toasts::{self, Notice};
 use buzz_ui::{ActiveTheme, Icon, IconName, Switch, TypeStyled};
+use buzz_ui::{AlertDialog, Button, Surface};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::path::PathBuf;
 
 impl SettingsPage {
     pub(super) fn plugins_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -93,6 +97,98 @@ impl SettingsPage {
         section(children)
     }
 
+    /// Opens Add from Git, reading `source` at once when updating.
+    pub(super) fn import_plugin(
+        &mut self,
+        source: Option<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog = cx.new(|cx| PluginImport::new(source, window, cx));
+        let subscription = cx.subscribe(&dialog, |this, _, _: &Dismissed, cx| this.close_modal(cx));
+        self.modal = Some(Modal::PluginImport {
+            dialog,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn confirm_sign(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::SignPlugin {
+            path,
+            name,
+            busy: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn sign_plugin(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::SignPlugin {
+            path, busy, error, ..
+        }) = &mut self.modal
+        else {
+            return;
+        };
+        if *busy {
+            return;
+        }
+        *busy = true;
+        *error = None;
+        let path = path.clone();
+        let task = ExternalPlugins::sign(&path, cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(publisher) => {
+                    this.close_modal(cx);
+                    this.show_toast(format!("Signed as {}", release::short_npub(&publisher)), cx);
+                }
+                Err(reason) => {
+                    if let Some(Modal::SignPlugin { busy, error, .. }) = &mut this.modal {
+                        *busy = false;
+                        *error = Some(reason.into());
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn sign_dialog(
+        &self,
+        name: &str,
+        busy: bool,
+        error: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = *cx.colors();
+        AlertDialog::new(format!("Sign {name} as you?"))
+            .description(
+                "This writes plugin.artifact.json and plugin.signature.json to its folder. \
+                 Anyone who adds this folder sees that you published it, and later versions \
+                 must be signed by you too. Signing does not make a plugin safe.",
+            )
+            .children(
+                error.map(|error| div().text_body_sm().text_color(c.text_danger).child(error)),
+            )
+            .action(
+                Button::new("plugin-sign-cancel", "Cancel")
+                    .surface(Surface::Floating)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx))),
+            )
+            .action(
+                Button::new("plugin-sign-confirm", "Sign")
+                    .prominent()
+                    .loading(busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_plugin(cx))),
+            )
+            .into_any_element()
+    }
+
     /// Asks for a plugin folder and adds it, off.
     fn add_plugin_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -125,6 +221,7 @@ impl SettingsPage {
 /// The plugins added from folders.
 fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
     let c = *cx.colors();
+    let safe_mode = cx.global::<ExternalPlugins>().safe_mode;
     let rows: Vec<AnyElement> = cx
         .global::<ExternalPlugins>()
         .plugins()
@@ -135,6 +232,7 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
             let (status, failed) = match (&plugin.manifest, &plugin.status) {
                 (Err(reason), _) => (reason.clone(), true),
                 (Ok(_), Status::Off) => ("Off".to_owned(), false),
+                (Ok(_), Status::Paused) => ("Paused for this launch".to_owned(), false),
                 (Ok(_), Status::Starting) => ("Starting…".to_owned(), false),
                 (Ok(_), Status::Running) => ("Running".to_owned(), false),
                 (Ok(_), Status::Failed(reason)) => (
@@ -151,11 +249,24 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
                 if let Some(text) = &manifest.description {
                     description = description.child(text.clone());
                 }
-                description = description.child(format!(
-                    "Runs {} in {}",
-                    manifest.command_line(),
-                    plugin.path.display()
-                ));
+                description = description.child(match &plugin.source {
+                    Some(source) => format!(
+                        "Runs {} · from {}{} at {}",
+                        manifest.command_line(),
+                        source.repository,
+                        if source.reference.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", source.reference)
+                        },
+                        source.commit.chars().take(7).collect::<String>()
+                    ),
+                    None => format!(
+                        "Runs {} in {}",
+                        manifest.command_line(),
+                        plugin.path.display()
+                    ),
+                });
                 if !manifest.permissions.is_empty() {
                     let asks = manifest
                         .permissions
@@ -165,16 +276,44 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
                         .join(", ");
                     description = description.child(format!("Can: {asks}"));
                 }
+                description = description.child(match &plugin.publisher {
+                    Some(publisher) => format!("Signed by {}", release::short_npub(publisher)),
+                    None => "Unsigned".to_owned(),
+                });
             }
-            let reload = {
-                let path = path.clone();
-                button(
-                    SharedString::from(format!("plugin-reload-{index}")),
-                    "Reload",
-                )
-                .ghost()
-                .on_click(move |_, _, cx| ExternalPlugins::reload(&path, cx))
+            // An installed copy updates from its repository; a folder
+            // reloads and can be signed for sharing.
+            let first = match &plugin.source {
+                Some(source) => {
+                    let source = (source.repository.clone(), source.reference.clone());
+                    button(
+                        SharedString::from(format!("plugin-update-{index}")),
+                        "Update",
+                    )
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.import_plugin(Some(source.clone()), window, cx)
+                    }))
+                }
+                None => {
+                    let path = path.clone();
+                    button(
+                        SharedString::from(format!("plugin-reload-{index}")),
+                        "Reload",
+                    )
+                    .ghost()
+                    .on_click(move |_, _, cx| ExternalPlugins::reload(&path, cx))
+                }
             };
+            let sign = (plugin.source.is_none() && plugin.manifest.is_ok()).then(|| {
+                let path = path.clone();
+                let name = plugin.name();
+                button(SharedString::from(format!("plugin-sign-{index}")), "Sign")
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_sign(path.clone(), name.clone(), cx)
+                    }))
+            });
             let remove = {
                 let path = path.clone();
                 button(
@@ -196,11 +335,10 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
                     Some(Icon::new(IconName::Plug).size(20.).into_any_element()),
                     plugin.name(),
                     Some(description.into_any_element()),
-                    vec![
-                        reload.into_any_element(),
-                        remove.into_any_element(),
-                        switch.into_any_element(),
-                    ],
+                    std::iter::once(first.into_any_element())
+                        .chain(sign.map(IntoElement::into_any_element))
+                        .chain([remove.into_any_element(), switch.into_any_element()])
+                        .collect(),
                     cx,
                 ))
                 .into_any_element()
@@ -220,13 +358,32 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
                 .pl(super::inset())
                 .child(div().text_heading().child("Your plugins"))
                 .child(
-                    button("plugin-add", "Add plugin folder…")
-                        .icon(IconName::FolderSimple)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.add_plugin_folder(window, cx)
-                        })),
+                    div()
+                        .flex()
+                        .gap(rems(0.5))
+                        .child(
+                            button("plugin-add-git", "Add from Git…")
+                                .icon(IconName::GitBranch)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.import_plugin(None, window, cx)
+                                })),
+                        )
+                        .child(
+                            button("plugin-add", "Add plugin folder…")
+                                .icon(IconName::FolderSimple)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_plugin_folder(window, cx)
+                                })),
+                        ),
                 ),
         )
+        .when(safe_mode, |list| {
+            list.child(note(
+                "Safe mode: the plugins you added are paused for this launch. Restart Buzz \
+                 without BUZZODZ_SAFE_MODE=1 to run them.",
+                cx,
+            ))
+        })
         .child(note(
             "A plugin is a program on this computer. It runs with your full access and is not \
              sandboxed, so turn on only plugins you trust. Saving a file in its folder restarts it.",

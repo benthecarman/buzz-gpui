@@ -379,6 +379,10 @@ impl ExternalView {
                 message("This plugin is off. Turn it on in Settings → Plugins.".into())
                     .into_any_element(),
             ),
+            Status::Paused => Some(
+                message("Plugins you added are paused for this launch (safe mode).".into())
+                    .into_any_element(),
+            ),
             Status::Failed(reason) => {
                 let plugin = self.plugin.clone();
                 Some(

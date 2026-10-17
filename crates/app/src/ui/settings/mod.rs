@@ -17,6 +17,7 @@ mod notifications;
 pub mod pairing;
 pub mod templates;
 pub use pairing::close as close_pairing;
+mod plugin_import;
 mod plugins;
 mod profile;
 mod shortcuts;
@@ -153,6 +154,16 @@ enum Modal {
     },
     /// Shorten retention or clear saved agent activity.
     Archive(archive::Confirm),
+    PluginImport {
+        dialog: Entity<plugin_import::PluginImport>,
+        _subscription: Subscription,
+    },
+    SignPlugin {
+        path: std::path::PathBuf,
+        name: String,
+        busy: bool,
+        error: Option<SharedString>,
+    },
 }
 
 pub struct SettingsPage {
@@ -498,6 +509,13 @@ impl SettingsPage {
                     (!dialog.read(cx).pending()).then_some(close),
                 ),
                 Modal::Archive(confirm) => (self.archive_dialog(*confirm, cx), Some(close)),
+                Modal::PluginImport { dialog, .. } => (dialog.clone().into_any_element(), None),
+                Modal::SignPlugin {
+                    name, busy, error, ..
+                } => (
+                    self.sign_dialog(name, *busy, error.clone(), cx),
+                    (!*busy).then_some(close),
+                ),
             };
         Some(overlay::modal(window, content, dismiss).into_any_element())
     }

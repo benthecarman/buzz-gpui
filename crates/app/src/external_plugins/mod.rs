@@ -14,8 +14,10 @@
 //! saving a file restarts the plugin, and open views ask for a new tree.
 
 mod capabilities;
+pub mod git;
 mod process;
 pub mod protocol;
+pub mod release;
 mod view;
 
 use crate::community::AppState;
@@ -71,12 +73,47 @@ struct SavedPlugin {
     /// The permissions the user saw when turning it on.
     #[serde(default)]
     approved: Vec<Permission>,
+    /// The key that signed it when it was first seen signed; later
+    /// versions must come from the same publisher.
+    #[serde(default)]
+    publisher: Option<String>,
+    /// Where an installed copy came from.
+    #[serde(default)]
+    source: Option<GitSource>,
+}
+
+/// A plugin installed from a Git repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSource {
+    pub repository: String,
+    /// A branch or tag; empty for the default branch.
+    pub reference: String,
+    /// The plugin's folder in the repository.
+    pub folder: String,
+    pub commit: String,
+}
+
+/// What installing a plugin from a repository does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Plan {
+    Add,
+    /// Replaces the copy installed from commit `from`.
+    Update {
+        from: String,
+    },
+}
+
+/// Where installed copies live.
+fn installed_dir() -> PathBuf {
+    crate::plugins::home().join("installed")
 }
 
 /// Where a plugin is in its life.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Off,
+    /// On, but safe mode keeps plugins from running this launch.
+    Paused,
     Starting,
     Running,
     /// It could not start, or it stopped by itself.
@@ -96,6 +133,9 @@ pub struct Plugin {
     pub manifest: Result<Manifest, String>,
     pub status: Status,
     approved: Vec<Permission>,
+    /// The publisher trusted for this plugin.
+    pub publisher: Option<String>,
+    pub source: Option<GitSource>,
     /// Bumped on every start; events from an older run are ignored.
     generation: u64,
     connection: Option<Connection>,
@@ -116,6 +156,8 @@ impl Plugin {
             path: saved.path,
             enabled: saved.enabled,
             approved: saved.approved,
+            publisher: saved.publisher,
+            source: saved.source,
             status: Status::Off,
             generation: 0,
             connection: None,
@@ -171,6 +213,9 @@ impl Plugin {
 }
 
 pub struct ExternalPlugins {
+    /// `BUZZODZ_SAFE_MODE=1`, as in buzz-app: plugins people added stay
+    /// paused for this launch.
+    pub safe_mode: bool,
     file: PathBuf,
     plugins: Vec<Plugin>,
     next_view: u64,
@@ -264,6 +309,7 @@ impl ExternalPlugins {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         cx.set_global(Self {
+            safe_mode: std::env::var("BUZZODZ_SAFE_MODE").as_deref() == Ok("1"),
             file,
             plugins: saved.plugins.into_iter().map(Plugin::load).collect(),
             next_view: 0,
@@ -336,6 +382,8 @@ impl ExternalPlugins {
                     path: plugin.path.clone(),
                     enabled: plugin.enabled,
                     approved: plugin.approved.clone(),
+                    publisher: plugin.publisher.clone(),
+                    source: plugin.source.clone(),
                 })
                 .collect(),
         };
@@ -381,6 +429,8 @@ impl ExternalPlugins {
                 path: folder,
                 enabled: false,
                 approved: Vec::new(),
+                publisher: None,
+                source: None,
             }));
         Self::saved(cx);
         cx.refresh_windows();
@@ -390,9 +440,156 @@ impl ExternalPlugins {
     pub fn remove(path: &Path, cx: &mut App) {
         Self::stop(path, Status::Off, cx);
         let state = cx.global_mut::<Self>();
+        let installed = state
+            .plugins
+            .iter()
+            .any(|plugin| plugin.path == path && plugin.source.is_some());
         state.plugins.retain(|plugin| plugin.path != path);
         Self::saved(cx);
+        // An installed copy is the app's own; a folder the user added is
+        // theirs and stays.
+        if installed && path.starts_with(installed_dir()) {
+            let path = path.to_path_buf();
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = std::fs::remove_dir_all(path);
+                })
+                .detach();
+        }
         cx.refresh_windows();
+    }
+
+    /// What installing `candidate` would do, or why it cannot.
+    pub fn install_plan(candidate: &git::Candidate, cx: &App) -> Result<Plan, String> {
+        let manifest = candidate.manifest.as_ref().map_err(Clone::clone)?;
+        let signer = candidate
+            .signed
+            .as_ref()
+            .map_err(|reason| format!("Its signature check failed. {reason}"))?;
+        let Some(existing) = cx
+            .global::<Self>()
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id() == Some(manifest.id.as_str()))
+        else {
+            return Ok(Plan::Add);
+        };
+        let Some(source) = &existing.source else {
+            return Err(format!(
+                "{} is already added from {}. Remove it first.",
+                existing.name(),
+                existing.path.display()
+            ));
+        };
+        match (&existing.publisher, signer) {
+            (Some(_), None) => Err(
+                "The installed copy is signed and this one is not. Remove it first to trust an \
+                 unsigned copy."
+                    .to_owned(),
+            ),
+            (Some(trusted), Some(signer)) if trusted != signer => Err(format!(
+                "The installed copy is signed by {}, and this one by {}. Remove it first to \
+                 trust the new publisher.",
+                release::short_npub(trusted),
+                release::short_npub(signer)
+            )),
+            _ => Ok(Plan::Update {
+                from: source.commit.clone(),
+            }),
+        }
+    }
+
+    /// Installs `folder` from `fetched`, or updates the installed copy.
+    /// A new plugin starts off; an update keeps its switch and restarts.
+    pub fn install(
+        fetched: std::sync::Arc<git::Fetched>,
+        folder: String,
+        cx: &mut App,
+    ) -> Task<Result<String, String>> {
+        let planned = fetched
+            .candidate(&folder)
+            .ok_or_else(|| "That plugin is not in the repository.".to_owned())
+            .and_then(|candidate| {
+                let plan = Self::install_plan(candidate, cx)?;
+                let manifest = candidate.manifest.clone()?;
+                let signer = candidate.signed.clone().unwrap_or_default();
+                Ok((plan, manifest, signer))
+            });
+        let (plan, manifest, signer) = match planned {
+            Ok(planned) => planned,
+            Err(reason) => return Task::ready(Err(reason)),
+        };
+        let path = match plan {
+            Plan::Add => installed_dir().join(&manifest.id),
+            Plan::Update { .. } => cx
+                .global::<Self>()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.id() == Some(manifest.id.as_str()))
+                .map(|plugin| plugin.path.clone())
+                .unwrap_or_else(|| installed_dir().join(&manifest.id)),
+        };
+        let source = GitSource {
+            repository: fetched.repository.clone(),
+            reference: fetched.reference.clone(),
+            folder: folder.clone(),
+            commit: fetched.commit.clone(),
+        };
+        let into = path.clone();
+        let copy = cx
+            .background_executor()
+            .spawn(async move { fetched.copy(&folder, &into) });
+        cx.spawn(async move |cx| {
+            copy.await?;
+            cx.update(|cx| {
+                let state = cx.global_mut::<Self>();
+                match state.index(&path) {
+                    Some(index) => {
+                        let plugin = &mut state.plugins[index];
+                        plugin.source = Some(source);
+                        if plugin.publisher.is_none() {
+                            plugin.publisher = signer;
+                        }
+                        Self::saved(cx);
+                        Self::reload(&path, cx);
+                    }
+                    None => {
+                        state.plugins.push(Plugin::load(SavedPlugin {
+                            path,
+                            enabled: false,
+                            approved: Vec::new(),
+                            publisher: signer,
+                            source: Some(source),
+                        }));
+                        Self::saved(cx);
+                    }
+                }
+                cx.refresh_windows();
+            });
+            Ok(manifest.name)
+        })
+    }
+
+    /// Signs a plugin added from a folder as the user.
+    pub fn sign(path: &Path, cx: &mut App) -> Task<Result<String, String>> {
+        let identity = match &cx.global::<AppState>().identity {
+            crate::community::IdentityState::Ready(identity) => identity.clone(),
+            _ => return Task::ready(Err("Sign in to sign plugins.".into())),
+        };
+        let Some(id) = cx
+            .global::<Self>()
+            .plugins
+            .iter()
+            .find(|plugin| plugin.path == path && plugin.source.is_none())
+            .and_then(|plugin| plugin.id().map(str::to_owned))
+        else {
+            return Task::ready(Err(
+                "Only a plugin added from a folder can be signed.".into()
+            ));
+        };
+        let folder = path.to_path_buf();
+        cx.background_executor()
+            .spawn(async move { release::sign(&folder, &id, &identity) })
     }
 
     /// Turning a plugin on allows the permissions Settings shows for it.
@@ -423,6 +620,8 @@ impl ExternalPlugins {
         let plugin = &mut state.plugins[index];
         let before = plugin.id().map(str::to_owned);
         plugin.manifest = read_manifest(path);
+        // Already restarting for this version: the poll need not.
+        plugin.fingerprint = fingerprint(path);
         if plugin.id() != before.as_deref() {
             // Another id: what the old one added cannot reach it.
             let added = std::mem::take(&mut plugin.added);
@@ -474,7 +673,6 @@ impl ExternalPlugins {
 
     /// Starts (or restarts) the plugin at `path`.
     fn start(path: &Path, cx: &mut App) {
-        let runtime = Runtime::handle(cx);
         let state = cx.global_mut::<Self>();
         let Some(index) = state.index(path) else {
             return;
@@ -521,13 +719,77 @@ impl ExternalPlugins {
             Self::stop(path, Status::Failed(reason), cx);
             return;
         }
+        if state.safe_mode {
+            Self::stop(path, Status::Paused, cx);
+            return;
+        }
         let plugin = &mut state.plugins[index];
         // The old run ends; what it added stays until the new run says
         // what it adds, so open views do not flicker on a save.
         plugin.connection = None;
         plugin.watches.clear();
         plugin.generation += 1;
+        plugin.status = Status::Starting;
         let generation = plugin.generation;
+        // A signed folder is checked before every start, off this thread.
+        let folder = path.to_path_buf();
+        let id = manifest.id.clone();
+        let check = cx
+            .background_executor()
+            .spawn(async move { release::verify(&folder, &id) });
+        let path = path.to_path_buf();
+        cx.spawn(async move |cx| {
+            let signed = check.await;
+            cx.update(|cx| Self::verified(&path, generation, manifest, signed, cx));
+        })
+        .detach();
+        cx.refresh_windows();
+    }
+
+    /// The signature check finished: start the program if it passed.
+    fn verified(
+        path: &Path,
+        generation: u64,
+        manifest: Manifest,
+        signed: Result<Option<String>, String>,
+        cx: &mut App,
+    ) {
+        let runtime = Runtime::handle(cx);
+        let state = cx.global_mut::<Self>();
+        let Some(plugin) = state.current(path, generation) else {
+            return;
+        };
+        let publisher = match (signed, plugin.publisher.clone()) {
+            (Err(reason), _) => Err(format!("Its signature check failed. {reason}")),
+            (Ok(None), Some(_)) => Err(
+                "It was signed before and is not now. Remove it and add it again to trust an \
+                 unsigned copy."
+                    .to_owned(),
+            ),
+            (Ok(Some(signer)), Some(trusted)) if signer != trusted => Err(format!(
+                "It is now signed by {}, not {}. Remove it and add it again to trust the new \
+                 publisher.",
+                release::short_npub(&signer),
+                release::short_npub(&trusted)
+            )),
+            (Ok(signer), _) => Ok(signer),
+        };
+        let signer = match publisher {
+            Ok(signer) => signer,
+            Err(reason) => {
+                Self::stop(path, Status::Failed(reason), cx);
+                return;
+            }
+        };
+        if plugin.publisher.is_none() && signer.is_some() {
+            // First seen signed: later versions must match.
+            plugin.publisher = signer;
+            Self::saved(cx);
+        }
+        let state = cx.global_mut::<Self>();
+        let Some(plugin) = state.current(path, generation) else {
+            return;
+        };
         let (connection, mut events) = match Connection::start(&manifest, path, &runtime) {
             Ok(started) => started,
             Err(reason) => {
@@ -543,7 +805,6 @@ impl ExternalPlugins {
             }),
         );
         plugin.connection = Some(connection);
-        plugin.status = Status::Starting;
         let path = path.to_path_buf();
         {
             let path = path.clone();
@@ -1061,6 +1322,8 @@ mod tests {
                 path: folder.clone(),
                 enabled: true,
                 approved,
+                publisher: None,
+                source: None,
             })
         };
         // Saved before the manifest asked: the user has not seen it.
