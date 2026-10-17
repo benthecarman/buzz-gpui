@@ -39,6 +39,8 @@ struct Acting {
     /// A run's agent's attention, for the attention tools; a tool call has
     /// none.
     attention: Option<Arc<dyn crate::buzz_mcp::attention::Attention>>,
+    /// Whether a run's trigger is still current (`Delivery.current`).
+    current: Option<crate::agents2::runtime::Current>,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -73,6 +75,7 @@ fn open(
                 client,
                 context,
                 attention,
+                current: None,
             },
         )
     });
@@ -207,22 +210,26 @@ fn trigger_json(trigger: &Trigger) -> Value {
         Trigger::Watch {
             event,
             slug,
+            watch,
             interest,
-            ..
+            classifier,
         } => json!({
             "kind": "watch",
             "event": event_json(event),
             "watch": slug,
+            "watchObject": serde_json::to_value(watch).unwrap_or(Value::Null),
             "interest": interest.as_ref().map(|interest| interest.instructions.clone()),
+            "classifierSkipped": classifier.as_ref().map(|skip| skip.reason.clone()),
         }),
         Trigger::Timer {
             slug,
+            timer,
             interest,
             spent,
-            ..
         } => json!({
             "kind": "timer",
             "timer": slug,
+            "timerObject": serde_json::to_value(timer).unwrap_or(Value::Null),
             "interest": interest.as_ref().map(|interest| interest.instructions.clone()),
             "spent": spent,
         }),
@@ -742,6 +749,12 @@ impl AgentType for PluginType {
         let client: Arc<dyn BuzzClient> = Arc::new(HandleClient(Arc::new(agent.clone())));
         let attention = AgentActions::attention(agent);
         let (run, open) = open(&self.plugin, client, context.clone(), attention);
+        let current = delivery.current.clone();
+        acting(|acting| {
+            if let Some(open) = acting.get_mut(&run) {
+                open.current = Some(current);
+            }
+        });
         let request = requester.request(
             "agent/run",
             json!({
@@ -1055,6 +1068,29 @@ pub fn remove(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
     Ok(cx.background_spawn(
         async move { task.await.map(|()| Value::Null).map_err(|error| (3, error)) },
     ))
+}
+
+/// `agent/current`: whether a run's trigger should still run, asked now
+/// (`Delivery.current`). A run that queues work asks before starting it.
+pub fn current(
+    plugin: &str,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let run = params
+        .get("run")
+        .and_then(Value::as_u64)
+        .ok_or((INVALID_PARAMS, "run is required".to_owned()))?;
+    let current = acting(|acting| {
+        acting
+            .get(&run)
+            .filter(|open| open.plugin == plugin)
+            .map(|open| open.current.clone())
+    })
+    .ok_or((1, "That run has ended.".to_owned()))?
+    .ok_or((INVALID_PARAMS, "agent/current takes a run".to_owned()))?;
+    let asked = crate::runtime::Runtime::handle(cx).spawn(async move { current().await });
+    Ok(cx.background_spawn(async move { Ok(json!(asked.await.unwrap_or(false))) }))
 }
 
 /// `agent/query`, `agent/publish` and `agent/upload`: raw reads, signed

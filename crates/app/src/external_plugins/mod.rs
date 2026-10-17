@@ -1266,6 +1266,7 @@ impl ExternalPlugins {
             "unread/watch" => "unread/changed",
             "reminders/watch" => "reminders/changed",
             "agents/watch" => "agents/changed",
+            "session/watch" => "session/changed",
             _ => "channel/changed",
         };
         let notify = move |mut value: Value, cx: &mut App| {
@@ -1278,6 +1279,7 @@ impl ExternalPlugins {
             "unread/watch" => reading::watch(params, notify, cx),
             "reminders/watch" => channels::watch(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
+            "session/watch" => capabilities::watch_session(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
         };
         Reply::Now(started.map(|(watch, mut value)| {
@@ -1343,6 +1345,16 @@ impl ExternalPlugins {
                     .and_then(|plugin| plugin.id().map(str::to_owned));
                 match plugin {
                     Some(plugin) => later(agents::act(&plugin, params, cx)),
+                    None => Reply::Now(Err((1, "The plugin stopped.".to_owned()))),
+                }
+            }
+            "agent/current" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                match plugin {
+                    Some(plugin) => later(agents::current(&plugin, params, cx)),
                     None => Reply::Now(Err((1, "The plugin stopped.".to_owned()))),
                 }
             }
@@ -1480,6 +1492,7 @@ impl ExternalPlugins {
             "thread/watch" => Self::watch(path, generation, "thread/watch", params, cx),
             "events/watch" => Self::watch(path, generation, "events/watch", params, cx),
             "unread/watch" => Self::watch(path, generation, "unread/watch", params, cx),
+            "session/watch" => Self::watch(path, generation, "session/watch", params, cx),
             "unread/get" => Reply::Now(reading::get(cx)),
             "threads/follow" => later(channels::follow(params, cx)),
             "reminders/list" => Reply::Now(channels::list(cx)),
@@ -1491,7 +1504,7 @@ impl ExternalPlugins {
             "threads/activity" => later(reading::threads(params, cx)),
             "read/mark" => later(reading::mark(params, cx)),
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
-            | "reminders/unwatch" | "agents/unwatch" => {
+            | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
@@ -1500,15 +1513,31 @@ impl ExternalPlugins {
                 }
                 Reply::Now(Ok(Value::Null))
             }
-            "messages/send" | "messages/edit" | "messages/react" | "messages/delete"
-            | "files/upload" | "events/publish" | "agents/create" | "agents/save"
-            | "agents/remove" | "dm/open" | "channels/create" | "channels/action"
-            | "teams/save" | "teams/remove" => {
+            "messages/send"
+            | "messages/edit"
+            | "messages/react"
+            | "messages/delete"
+            | "files/upload"
+            | "events/publish"
+            | "agents/create"
+            | "agents/save"
+            | "agents/remove"
+            | "dm/open"
+            | "channels/create"
+            | "channels/action"
+            | "teams/save"
+            | "teams/remove"
+            | "channels/addMember"
+            | "channels/changeMember" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
                     | "teams/remove" => Permission::ManageAgents,
-                    "dm/open" | "channels/create" | "channels/action" => Permission::ManageChannels,
+                    "dm/open"
+                    | "channels/create"
+                    | "channels/action"
+                    | "channels/addMember"
+                    | "channels/changeMember" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1542,6 +1571,8 @@ impl ExternalPlugins {
                     "dm/open" => channels::open_dm(params, cx),
                     "channels/create" => channels::create(params, cx),
                     "channels/action" => channels::action(params, cx),
+                    "channels/addMember" => channels::add_member(params, cx),
+                    "channels/changeMember" => channels::change_member(params, cx),
                     _ => capabilities::send(params, cx),
                 })
             }
@@ -1602,33 +1633,7 @@ impl ExternalPlugins {
                 }
                 Ok(Value::Null)
             }
-            "community/channels" => {
-                let Some(community) = AppState::current(cx) else {
-                    return Ok(json!([]));
-                };
-                let channels: Vec<Value> = community
-                    .read(cx)
-                    .snapshot
-                    .channels
-                    .iter()
-                    .map(|channel| {
-                        json!({
-                            "id": channel.id,
-                            "name": channel.name,
-                            "description": channel.description,
-                            "private": channel.private,
-                            "archived": channel.archived,
-                            "kind": match channel.channel_type {
-                                Some(ChannelType::Dm) => "dm",
-                                Some(ChannelType::Forum) => "forum",
-                                Some(ChannelType::Session) => "session",
-                                Some(ChannelType::Stream) | None => "stream",
-                            },
-                        })
-                    })
-                    .collect();
-                Ok(Value::Array(channels))
-            }
+            "community/channels" => Ok(capabilities::channels(cx)),
             _ => Err((METHOD_NOT_FOUND, format!("Buzz has no method {method}"))),
         }
     }

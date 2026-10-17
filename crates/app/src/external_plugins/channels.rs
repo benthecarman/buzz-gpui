@@ -104,6 +104,67 @@ pub fn action(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
     }))
 }
 
+/// `channels/addMember`: adds someone, such as one of your agents, to a
+/// channel, and answers once the roster lists them.
+pub fn add_member(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let pubkey = text(params, "pubkey")
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| invalid("pubkey is required"))?
+        .to_ascii_lowercase();
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .add_member(&channel, &pubkey)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `channels/changeMember`: makes a member an admin, member or guest, or
+/// removes them; `expected` is the role they have now.
+pub fn change_member(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::lifecycle::MemberRole;
+    use buzz_relay_client::members::{Change, MemberChange};
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let pubkey = text(params, "pubkey")
+        .ok_or_else(|| invalid("pubkey is required"))?
+        .to_ascii_lowercase();
+    let change = match text(params, "change") {
+        Some("admin") => Change::Admin,
+        Some("member") => Change::Member,
+        Some("guest") => Change::Guest,
+        Some("remove") => Change::Remove,
+        _ => return Err(invalid("change must be admin, member, guest or remove")),
+    };
+    let expected = match text(params, "expected") {
+        Some("owner") => MemberRole::Owner,
+        Some("admin") => MemberRole::Admin,
+        Some("member") => MemberRole::Member,
+        Some("guest") => MemberRole::Guest,
+        Some("bot") => MemberRole::Bot,
+        _ => return Err(invalid("expected must be the member's role now")),
+    };
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .change_member(
+                &channel,
+                MemberChange {
+                    pubkey,
+                    expected,
+                    change,
+                },
+            )
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
 /// `threads/follow`: follows or unfollows a thread on this device, or
 /// with no `following`, says whether you do.
 pub fn follow(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {

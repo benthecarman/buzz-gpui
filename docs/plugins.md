@@ -189,8 +189,11 @@ Buzz sends a request and the run lasts until the plugin answers it:
 }}
 ```
 
-A trigger's `kind` is `mention`, `watch` (with `watch` and `interest`) or
-`timer` (with `timer`, `interest` and `spent`). If the run is cancelled, Buzz
+A trigger's `kind` is `mention`, `watch` (with `watch`, the slug,
+`watchObject`, `interest` and `classifierSkipped`, the reason a classifier did
+not run) or `timer` (with `timer`, `timerObject`, `interest` and `spent`). A run
+that queues its work can ask `agent/current` with the `run` whether the
+trigger should still run. If the run is cancelled, Buzz
 sends the notification `agent/cancel` with the `run`.
 
 A type can also describe its agents on the Agents page. Each request's params
@@ -244,6 +247,7 @@ While a call or run is open, the plugin can act as its agent:
 | Request | Params | Result |
 | --- | --- | --- |
 | `agent/tool` | `call` or `run`, `tool` (a Buzz tool, such as `send`, `read`, `react` or `channels`, or in a run one of the attention tools, such as `watch_add`), `arguments` | The tool's answer: `{"text"}` or `{"image"}` |
+| `agent/current` | `run` | Whether the trigger should still run: `false` once the agent is removed, its attention turned off, or its watch changed |
 | `agent/query` | `call` or `run`, `filters` (1 to 10 NIP-01 filters) | The events, read as the agent, at most 500 |
 | `agent/publish` | `call` or `run`, `kind`, `content`, `tags` | The signed event, published as the agent |
 | `agent/upload` | `call` or `run`, `data` (base64, up to 3 MiB), `mime` | `{"url","sha256","size","type",…}`, uploaded as the agent |
@@ -387,8 +391,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `community/current` | none | `{"name","relay","viewer","status","live","cached"}` for the selected community, or `null`. `viewer` is your pubkey; `status` is `connecting`, `ready` or `failed`; `live` says the live connection is up; `cached` says it shows saved data while the relay has not answered. Buzz sends the notification `community/changed` with the same fields whenever any of them change, such as when another community is selected. |
 | `community/list` | none | Your communities: `[{"name","relay"}]` |
 | `community/retry` | none | `null`. Connects to the selected community again after a failure. |
-| `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
-| `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first |
+| `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind","members","labels","lastActivityAt","readOnly","creator","createdAt","parent"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
+| `session/watch` | `what`: `channels`, `presence`, `emoji`, or `typing` or `activity` with a `channel` | `{"watch"}`. Buzz then sends `session/changed` with `what` and `value` (as `community/channels`, `presence/get`, `emoji/list`, `typing/get` with `channel` and `anywhere`, or `threads/activity`'s `items`), now and whenever it changes. Stop with `session/unwatch`. |
+| `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first. For older history, use `events/query` with `until`. |
 | `thread/messages` | `channel`, `root` | `{"root","replies","hasMore"}` |
 | `channel/watch` | `channel`, `limit` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). |
 | `thread/watch` | `channel`, `root` | `{"watch","channel","root"}`. Buzz then sends `thread/changed` with `root`, `replies`, `hasMore` and `error`, now and whenever the thread changes. |
@@ -427,6 +432,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `dm/open` | `pubkeys` (1 to 8 others) | `{"channel"}`: the direct message with them, made if new. Needs `manage-channels`. |
 | `channels/create` | `name`, `description`, `private`, `ttlSeconds` (optional; without it the channel is ongoing) | `{"channel"}`. Needs `manage-channels`. |
 | `channels/action` | `channel`, `action`: `join`, `leave`, `archive`, `unarchive`, `delete` (by an owner) or `hide` (a DM) | `null` once the relay shows it. Needs `manage-channels`. |
+| `channels/addMember` | `channel`, `pubkey` (such as one of your agents) | `null` once the roster lists them. Needs `manage-channels`. |
+| `channels/changeMember` | `channel`, `pubkey`, `change` (`admin`, `member`, `guest` or `remove`), `expected` (their role now: `owner`, `admin`, `member`, `guest` or `bot`) | `null` once done. Needs `manage-channels`. |
 | `threads/follow` | `channel`, `root`, and `following` (`true` or `false`), or no `following` to ask | Whether you follow the thread now |
 | `reminders/list` | none | `{"reminders","error"}`, each `{"id","createdAt","notBefore","status","note","message"}` with `status` `pending`, `done` or `cancelled` |
 | `reminders/watch` | none | `{"watch"}`. Buzz then sends `reminders/changed` with what `reminders/list` gives. Stop with `reminders/unwatch`. |

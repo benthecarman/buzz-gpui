@@ -501,6 +501,129 @@ fn pubkeys(params: &Value, max: usize) -> Result<Vec<String>, Failure> {
         .collect())
 }
 
+/// `community/channels`: the selected community's channels.
+pub fn channels(cx: &App) -> Value {
+    use buzz_relay_client::ChannelType;
+    let Some(community) = AppState::current(cx) else {
+        return json!([]);
+    };
+    Value::Array(
+        community
+            .read(cx)
+            .snapshot
+            .channels
+            .iter()
+            .map(|channel| {
+                json!({
+                    "id": channel.id,
+                    "name": channel.name,
+                    "description": channel.description,
+                    "private": channel.private,
+                    "archived": channel.archived,
+                    "kind": match channel.channel_type {
+                        Some(ChannelType::Dm) => "dm",
+                        Some(ChannelType::Forum) => "forum",
+                        Some(ChannelType::Session) => "session",
+                        Some(ChannelType::Stream) | None => "stream",
+                    },
+                    "members": channel.members,
+                    "labels": channel.labels,
+                    "lastActivityAt": channel.last_activity_at,
+                    "readOnly": channel.read_only,
+                    "creator": channel.creator,
+                    "createdAt": channel.created_at,
+                    "parent": channel.parent_channel_id,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// What `session/watch` follows, as its JSON now.
+fn session_value(what: &str, channel: Option<&str>, cx: &App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let snapshot = &community.read(cx).snapshot;
+    Ok(match what {
+        "channels" => channels(cx),
+        "typing" => {
+            let channel = channel.ok_or_else(|| invalid("typing takes a channel"))?;
+            json!({
+                "channel": snapshot.typing.get(channel).cloned().unwrap_or_default(),
+                "anywhere": snapshot.typing_anywhere.get(channel).cloned().unwrap_or_default(),
+            })
+        }
+        "presence" => Value::Object(
+            snapshot
+                .presence
+                .iter()
+                .map(|(key, state)| (key.clone(), json!(state.as_str())))
+                .collect(),
+        ),
+        "emoji" => Value::Array(
+            snapshot
+                .emoji
+                .entries
+                .iter()
+                .map(|emoji| json!({ "shortcode": emoji.shortcode, "url": emoji.url }))
+                .collect(),
+        ),
+        "activity" => {
+            let channel = channel.ok_or_else(|| invalid("activity takes a channel"))?;
+            match snapshot.unread.activity.get(channel) {
+                Some(activity) => json!(activity.items.as_ref().map(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            json!({
+                                "root": item.root_id,
+                                "latestMessage": item.latest_message_id,
+                                "author": item.author_id,
+                                "createdAt": item.created_at,
+                                "preview": item.preview,
+                                "unreadCount": item.unread_count,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })),
+                None => json!([]),
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "what must be channels, typing, presence, emoji or activity",
+            ));
+        }
+    })
+}
+
+/// `session/watch`: sends `session/changed` with `what` (`channels`,
+/// `typing` or `activity` in a `channel`, `presence`, `emoji`) now and
+/// whenever it changes.
+pub fn watch_session(
+    params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    let community = community(cx)?;
+    let what = text(params, "what").unwrap_or_default().to_owned();
+    let channel = text(params, "channel").map(str::to_owned);
+    let first = session_value(&what, channel.as_deref(), cx)?;
+    let last = std::cell::RefCell::new(first.clone());
+    let notify = std::rc::Rc::new(notify);
+    let (send, kind) = (notify.clone(), what.clone());
+    cx.defer(move |cx| send(json!({ "what": kind, "value": first }), cx));
+    let subscription = cx.observe(&community, move |_, cx| {
+        let Ok(now) = session_value(&what, channel.as_deref(), cx) else {
+            return;
+        };
+        if now != *last.borrow() {
+            *last.borrow_mut() = now.clone();
+            notify(json!({ "what": what, "value": now }), cx);
+        }
+    });
+    Ok((Watch::new(subscription, Task::ready(())), json!({})))
+}
+
 /// `names/get`: display names as Buzz shows them, through the naming
 /// policy on, with the npub suffix that told namesakes apart, if any.
 pub fn names(params: &Value, cx: &App) -> Result<Value, Failure> {
