@@ -6,7 +6,7 @@
 //! and forwards clicks and typing; the plugin answers with element trees
 //! that the app draws with its own components.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// The protocol version the app speaks.
@@ -37,16 +37,42 @@ pub struct Manifest {
     pub command: Vec<String>,
     #[serde(default = "api_version")]
     pub api_version: u32,
+    /// What the plugin may do as the user beyond reading. Settings shows
+    /// these before the plugin is turned on, and the app refuses what is
+    /// not declared.
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
 }
 
 fn api_version() -> u32 {
     API_VERSION
 }
 
+/// Something a plugin must declare before the app does it for the plugin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Permission {
+    /// Send messages and replies as the user.
+    SendMessages,
+}
+
+impl Permission {
+    /// How Settings describes it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Permission::SendMessages => "Send messages as you",
+        }
+    }
+}
+
 impl Manifest {
     pub fn parse(text: &str) -> Result<Self, String> {
-        let manifest: Self =
+        let mut manifest: Self =
             serde_json::from_str(text).map_err(|error| format!("{MANIFEST}: {error}"))?;
+        manifest
+            .permissions
+            .sort_by_key(|permission| *permission as u8);
+        manifest.permissions.dedup();
         manifest.validate()?;
         Ok(manifest)
     }

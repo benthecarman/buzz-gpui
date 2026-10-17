@@ -6,8 +6,9 @@ line on stdin and stdout. Print logs to stderr: stdout is the protocol.
 See docs/plugins.md.
 
 It adds:
-- a "Hello" page in the channel sidebar with a counter, a note field and
-  the community's channels;
+- a "Hello" page in the channel sidebar: a counter, notes, and the
+  community's channels. Choosing a channel follows it live, and you can
+  reply from the page (the manifest declares "send-messages" for that);
 - a panel for https://example.com/ links, with a button in the channel
   header.
 """
@@ -30,7 +31,8 @@ def notify(method, params):
     send({"method": method, "params": params})
 
 
-def request(method, params, then):
+def request(method, params, then=None):
+    """Asks Buzz for something; `then(result, error)` gets the answer."""
     global next_request
     next_request += 1
     pending[next_request] = then
@@ -41,24 +43,72 @@ def text(value, style="body", tone="default"):
     return {"type": "text", "text": value, "style": style, "tone": tone}
 
 
-def page(state):
+def channel_list(state):
     channels = state.get("channels")
     if channels is None:
-        listing = [{"type": "spinner"}]
-    elif not channels:
-        listing = [text("No channels yet.", tone="subtle")]
+        return [{"type": "spinner"}]
+    if not channels:
+        return [text("No channels yet.", tone="subtle")]
+    return [
+        {
+            "type": "row",
+            "children": [
+                {
+                    "type": "button",
+                    "id": f"follow:{c['id']}",
+                    "label": c["name"],
+                    "icon": "User" if c["kind"] == "dm" else "Hash",
+                    "variant": "prominent" if c["id"] == state.get("following") else "ghost",
+                }
+            ]
+            + ([{"type": "badge", "text": "private"}] if c["private"] else []),
+        }
+        for c in channels[:20]
+    ]
+
+
+def live(state):
+    """The followed channel's newest messages, and a reply field."""
+    if not state.get("following"):
+        return []
+    messages = state.get("messages")
+    if messages is None:
+        body = [{"type": "spinner"}]
+    elif not messages:
+        body = [text("No messages yet.", tone="subtle")]
     else:
-        listing = [
+        body = [
             {
-                "type": "row",
+                "type": "column",
+                "gap": "none",
                 "children": [
-                    {"type": "icon", "name": "Hash" if c["kind"] != "dm" else "User"},
-                    text(c["name"]),
+                    text(m["authorName"] or m["author"][:10], style="label"),
+                    {"type": "markdown", "text": m["content"]},
                 ]
-                + ([{"type": "badge", "text": "private"}] if c["private"] else []),
+                + ([text(m["delivery"], style="small", tone="subtle")] if m["delivery"] else []),
             }
-            for c in channels[:20]
+            for m in messages
         ]
+    return [
+        {
+            "type": "card",
+            "title": "Latest messages",
+            "children": body
+            + [
+                {
+                    "type": "input",
+                    "id": "reply",
+                    "placeholder": "Send a message to this channel",
+                    "clearOnSubmit": True,
+                },
+            ]
+            + ([text(state["error"], tone="danger")] if state.get("error") else [])
+            + [{"type": "button", "id": "open", "label": "Open in Buzz", "icon": "ArrowSquareOut"}],
+        }
+    ]
+
+
+def page(state):
     return {
         "type": "column",
         "gap": "md",
@@ -102,16 +152,16 @@ def page(state):
                         "clearOnSubmit": True,
                     },
                 ]
-                + [
-                    {"type": "markdown", "text": f"- {note}"}
-                    for note in state["notes"]
-                ],
+                + [{"type": "markdown", "text": f"- {note}"} for note in state["notes"]],
             },
             {
                 "type": "card",
                 "title": "Channels in this community",
-                "children": listing,
+                "children": channel_list(state),
             },
+        ]
+        + live(state)
+        + [
             {
                 "type": "row",
                 "children": [
@@ -156,12 +206,38 @@ def on_open(params):
     render(view)
     if params["kind"] == "page":
 
-        def got_channels(result):
+        def got_channels(result, error):
             if view in views:
                 views[view]["channels"] = result or []
                 render(view)
 
         request("community/channels", {}, got_channels)
+
+
+def follow(view, channel):
+    state = views[view]
+    if state.get("watch"):
+        request("channel/unwatch", {"watch": state["watch"]})
+    state.update(following=channel, watch=None, messages=None, error=None)
+
+    def watching(result, error):
+        if view not in views:
+            return
+        if error:
+            views[view]["error"] = error["message"]
+        else:
+            views[view]["watch"] = result["watch"]
+        render(view)
+
+    request("channel/watch", {"channel": channel, "limit": 10}, watching)
+
+
+def on_changed(params):
+    """A followed channel changed: show its newest messages."""
+    for view, state in views.items():
+        if state.get("watch") == params["watch"]:
+            state["messages"] = params["messages"]
+            render(view)
 
 
 def on_event(params):
@@ -178,8 +254,25 @@ def on_event(params):
         if not note:
             return
         state["notes"].append(note)
+    elif element.startswith("follow:") and event == "click":
+        follow(view, element.split(":", 1)[1])
+    elif element == "reply" and event == "submit":
+        content = params.get("value", "").strip()
+        if not content:
+            return
+
+        def sent(result, error):
+            if view in views:
+                views[view]["error"] = error["message"] if error else None
+                render(view)
+
+        request("messages/send", {"channel": state["following"], "content": content}, sent)
+        return
+    elif element == "open" and event == "click":
+        request("ui/openConversation", {"channel": state["following"]})
+        return
     elif element == "toast" and event == "click":
-        request("ui/toast", {"title": "Hello from a plugin", "tone": "success"}, lambda _: None)
+        request("ui/toast", {"title": "Hello from a plugin", "tone": "success"})
         return
     else:
         return
@@ -191,7 +284,7 @@ def handle(message):
     if method is None:
         then = pending.pop(message.get("id"), None)
         if then:
-            then(message.get("result"))
+            then(message.get("result"), message.get("error"))
         return
     params = message.get("params") or {}
     if "id" in message:
@@ -221,6 +314,8 @@ def handle(message):
         on_event(params)
     elif method == "view/close":
         views.pop(params.get("view"), None)
+    elif method == "channel/changed":
+        on_changed(params)
 
 
 def main():

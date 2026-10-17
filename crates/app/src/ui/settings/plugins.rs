@@ -156,6 +156,15 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
                     manifest.command_line(),
                     plugin.path.display()
                 ));
+                if !manifest.permissions.is_empty() {
+                    let asks = manifest
+                        .permissions
+                        .iter()
+                        .map(|permission| permission.describe())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    description = description.child(format!("Can: {asks}"));
+                }
             }
             let reload = {
                 let path = path.clone();

@@ -9,6 +9,14 @@ fn manifests_need_an_id_a_name_and_a_command() {
     .unwrap();
     assert_eq!(manifest.api_version, API_VERSION);
     assert_eq!(manifest.command_line(), "python3 plugin.py");
+    assert!(manifest.permissions.is_empty());
+
+    let manifest = Manifest::parse(
+        r#"{ "id": "a.b", "name": "x", "command": ["a"],
+             "permissions": ["send-messages", "send-messages"] }"#,
+    )
+    .unwrap();
+    assert_eq!(manifest.permissions, [Permission::SendMessages]);
 
     for (text, reason) in [
         (
@@ -29,6 +37,10 @@ fn manifests_need_an_id_a_name_and_a_command() {
             "API 2",
         ),
         (r#"{ "id": "a.b", "name": "x" }"#, "command"),
+        (
+            r#"{ "id": "a.b", "name": "x", "command": ["a"], "permissions": ["root"] }"#,
+            "unknown variant",
+        ),
     ] {
         let error = Manifest::parse(text).unwrap_err();
         assert!(error.contains(reason), "{text}: {error}");

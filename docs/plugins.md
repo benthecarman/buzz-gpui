@@ -34,6 +34,12 @@ This is buzz-app's model too: its plugins are trusted code in the app's own
 WebView. Buzz never gives a plugin your private key, and it removes `BUZZ_*`
 and `NOSTR_*` variables from the plugin's environment.
 
+Because the key stays in Buzz, acting as you is something Buzz does for the
+plugin, and only when the plugin declares it (see `permissions` below).
+Settings lists what a plugin can do; turning the plugin on allows it. If a
+new version asks for more, Buzz turns the plugin off until you review it and
+turn it on again.
+
 ## The folder
 
 A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
@@ -43,7 +49,8 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
   "id": "com.example.hello",
   "name": "Hello",
   "description": "A sample page and link panel.",
-  "command": ["python3", "plugin.py"]
+  "command": ["python3", "plugin.py"],
+  "permissions": ["send-messages"]
 }
 ```
 
@@ -54,6 +61,7 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `description` | Optional. Shown in Settings. |
 | `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
 | `apiVersion` | Optional. `1`, the only version so far. |
+| `permissions` | Optional. What the plugin may do as you. `send-messages`: send messages and replies. Reading needs no permission. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
 `BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
@@ -195,9 +203,62 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openUrl` | `url` (http or https), opened in the browser | `null` |
 | `community/current` | none | `{"name","relay"}` for the selected community, or `null` |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
+| `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first |
+| `thread/messages` | `channel`, `root` | `{"root","replies","hasMore"}` |
+| `channel/watch` | `channel`, `limit` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). A plugin follows at most 16 channels. |
+| `channel/unwatch` | `watch` | `null` |
+| `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
+| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys) | `null`, once the message is queued. Needs `send-messages`. |
+| `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 
-Toast titles are cut to 128 characters, and bodies to 200. An unknown method
-returns error `-32601`.
+Reads cover the selected community and channels you can read in it. They
+never mark anything read. A read waits up to 10 seconds for the relay.
+
+A message looks like this:
+
+```json
+{
+  "id": "<event id>", "channel": "<channel id>",
+  "author": "<pubkey>", "authorName": "Ada",
+  "content": "Hello", "createdAt": 1792200000, "createdAtMs": 1792200000000,
+  "edited": false, "threadRoot": null, "replyParent": null, "replyCount": 2,
+  "mentions": [], "delivery": null
+}
+```
+
+`authorName` is `null` until Buzz knows the author. Ask `profiles/get`
+for anyone you need: a profile with `loaded: false` is a placeholder, and
+Buzz fetches the real one for a later call. `delivery` is set on your own
+messages: `sending`, `accepted`, `unknown`, `failed` or `seen`.
+
+`messages/send` answers once the message is safely queued, as Buzz's own
+composer does. The relay can still refuse it later; a followed channel then
+shows it with `delivery: "failed"`.
+
+### `channel/changed` (notification from Buzz)
+
+A followed channel changed. It carries the same fields as `channel/messages`,
+plus the `watch` id:
+
+```json
+{"jsonrpc":"2.0","method":"channel/changed","params":{"watch":1,"channel":"<id>","messages":[],"hasMore":true,"error":null}}
+```
+
+Buzz sends it once when following starts, and again on each change. Following
+ends with `channel/unwatch` or when the plugin stops.
+
+### Errors
+
+| Code | Meaning |
+| --- | --- |
+| `-32601` | Buzz has no such method. |
+| `-32602` | A param is missing or not valid. |
+| `1` | Nothing to act on: no community is selected, or the channel is not one you can read. |
+| `2` | The relay did not answer, or the read failed. |
+| `3` | Sending failed, such as when you cannot post in the channel. |
+| `4` | The plugin did not declare the permission this needs. |
+
+Toast titles are cut to 128 characters, and bodies to 200.
 
 ## When something goes wrong
 
@@ -215,8 +276,8 @@ returns error `-32601`.
 
 - Signing plugins, and adding them from Git (buzz-app's NIP-PS and import
   preview).
-- More capabilities: reading messages, sending as you, and notifications.
-- Settings cards, message actions and agent tools from plugins.
-- Running a plugin on a remote `buzzd` host.
+- Notification categories, settings cards, message actions, link and
+  message renderers, and composer tools from plugins.
+- Following a thread live, editing and reacting.
 - A WebAssembly runtime for plugins that run sandboxed
   ([#12](https://github.com/benthecarman/buzz-gpui/issues/12)).

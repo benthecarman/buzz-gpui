@@ -13,6 +13,7 @@
 //! Plugins load from the folder the user picked, and the app watches it:
 //! saving a file restarts the plugin, and open views ask for a new tree.
 
+mod capabilities;
 mod process;
 pub mod protocol;
 mod view;
@@ -27,7 +28,9 @@ use buzz_ui::{IconName, ToastTone};
 use futures::StreamExt;
 use gpui_kit::*;
 use process::{Connection, Event};
-use protocol::{Contributions, INVALID_PARAMS, LauncherPlacement, MANIFEST, METHOD_NOT_FOUND};
+use protocol::{
+    Contributions, INVALID_PARAMS, LauncherPlacement, MANIFEST, METHOD_NOT_FOUND, Permission,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -38,6 +41,17 @@ use std::time::Duration;
 
 pub use protocol::Manifest;
 pub use view::ExternalView;
+
+/// Most channels one plugin follows at once.
+const MAX_WATCHES: usize = 16;
+/// A request the plugin has not been allowed to make.
+const FORBIDDEN: i64 = 4;
+
+/// An answer now, or one that comes when a read or send finishes.
+enum Reply {
+    Now(Result<Value, capabilities::Failure>),
+    Later(Task<Result<Value, capabilities::Failure>>),
+}
 
 /// The saved list of plugin folders, beside buzz-app's plugin registry.
 const SAVED: &str = "external.json";
@@ -54,6 +68,9 @@ struct Saved {
 struct SavedPlugin {
     path: PathBuf,
     enabled: bool,
+    /// The permissions the user saw when turning it on.
+    #[serde(default)]
+    approved: Vec<Permission>,
 }
 
 /// Where a plugin is in its life.
@@ -78,6 +95,7 @@ pub struct Plugin {
     pub enabled: bool,
     pub manifest: Result<Manifest, String>,
     pub status: Status,
+    approved: Vec<Permission>,
     /// Bumped on every start; events from an older run are ignored.
     generation: u64,
     connection: Option<Connection>,
@@ -85,6 +103,9 @@ pub struct Plugin {
     fingerprint: Option<u64>,
     /// Open views, by view id.
     views: HashMap<String, WeakEntity<ExternalView>>,
+    /// Channels this run follows, by watch id.
+    watches: HashMap<u64, capabilities::Watch>,
+    next_watch: u64,
 }
 
 impl Plugin {
@@ -94,12 +115,39 @@ impl Plugin {
             fingerprint: fingerprint(&saved.path),
             path: saved.path,
             enabled: saved.enabled,
+            approved: saved.approved,
             status: Status::Off,
             generation: 0,
             connection: None,
             added: Vec::new(),
             views: HashMap::new(),
+            watches: HashMap::new(),
+            next_watch: 0,
         }
+    }
+
+    /// Whether the user allowed `permission` and the manifest asks for it.
+    pub fn may(&self, permission: Permission) -> bool {
+        self.approved.contains(&permission)
+            && self
+                .manifest
+                .as_ref()
+                .is_ok_and(|manifest| manifest.permissions.contains(&permission))
+    }
+
+    /// Permissions the manifest asks for that the user has not allowed.
+    fn unapproved(&self) -> Vec<Permission> {
+        self.manifest.as_ref().map_or_else(
+            |_| Vec::new(),
+            |manifest| {
+                manifest
+                    .permissions
+                    .iter()
+                    .copied()
+                    .filter(|permission| !self.approved.contains(permission))
+                    .collect()
+            },
+        )
     }
 
     pub fn id(&self) -> Option<&str> {
@@ -287,6 +335,7 @@ impl ExternalPlugins {
                 .map(|plugin| SavedPlugin {
                     path: plugin.path.clone(),
                     enabled: plugin.enabled,
+                    approved: plugin.approved.clone(),
                 })
                 .collect(),
         };
@@ -331,6 +380,7 @@ impl ExternalPlugins {
             .push(Plugin::load(SavedPlugin {
                 path: folder,
                 enabled: false,
+                approved: Vec::new(),
             }));
         Self::saved(cx);
         cx.refresh_windows();
@@ -345,12 +395,17 @@ impl ExternalPlugins {
         cx.refresh_windows();
     }
 
+    /// Turning a plugin on allows the permissions Settings shows for it.
     pub fn set_enabled(path: &Path, enabled: bool, cx: &mut App) {
         let state = cx.global_mut::<Self>();
         let Some(index) = state.index(path) else {
             return;
         };
-        state.plugins[index].enabled = enabled;
+        let plugin = &mut state.plugins[index];
+        plugin.enabled = enabled;
+        if enabled && let Ok(manifest) = &plugin.manifest {
+            plugin.approved = manifest.permissions.clone();
+        }
         Self::saved(cx);
         if enabled {
             Self::start(path, cx);
@@ -431,6 +486,30 @@ impl ExternalPlugins {
                 return;
             }
         };
+        let unapproved = state.plugins[index].unapproved();
+        if !unapproved.is_empty() {
+            // A new version asks for more: the user reviews it again.
+            let name = state.plugins[index].name();
+            state.plugins[index].enabled = false;
+            Self::saved(cx);
+            let asks = unapproved
+                .iter()
+                .map(|permission| permission.describe())
+                .collect::<Vec<_>>()
+                .join(", ");
+            toasts::show(
+                Notice::error(exit_notice(path), format!("{name} was turned off")).description(
+                    format!(
+                        "It now asks to: {asks}. Review it in Settings → Plugins and turn it on \
+                         again to allow it."
+                    ),
+                ),
+                cx,
+            );
+            Self::stop(path, Status::Off, cx);
+            return;
+        }
+        let state = cx.global_mut::<Self>();
         let taken = state.plugins.iter().any(|other| {
             other.path != path
                 && other.enabled
@@ -446,6 +525,7 @@ impl ExternalPlugins {
         // The old run ends; what it added stays until the new run says
         // what it adds, so open views do not flicker on a save.
         plugin.connection = None;
+        plugin.watches.clear();
         plugin.generation += 1;
         let generation = plugin.generation;
         let (connection, mut events) = match Connection::start(&manifest, path, &runtime) {
@@ -495,6 +575,7 @@ impl ExternalPlugins {
         };
         let plugin = &mut state.plugins[index];
         plugin.connection = None;
+        plugin.watches.clear();
         plugin.generation += 1;
         let off = status == Status::Off;
         plugin.status = status;
@@ -659,20 +740,120 @@ impl ExternalPlugins {
                 _ => tracing::debug!(plugin = %name, %method, "unknown plugin notification"),
             },
             Event::Request { id, method, params } => {
-                let result = Self::answer(&method, &params, cx);
-                if let Some(connection) = cx
-                    .global_mut::<Self>()
-                    .current(path, generation)
-                    .and_then(|plugin| plugin.connection.as_ref())
-                {
-                    connection.respond(&id, result);
+                match Self::answer(path, generation, &method, &params, cx) {
+                    Reply::Now(result) => Self::respond(path, generation, &id, result, cx),
+                    Reply::Later(task) => {
+                        let path = path.to_path_buf();
+                        cx.spawn(async move |cx| {
+                            let result = task.await;
+                            cx.update(|cx| Self::respond(&path, generation, &id, result, cx));
+                        })
+                        .detach();
+                    }
                 }
             }
         }
     }
 
+    fn respond(
+        path: &Path,
+        generation: u64,
+        id: &Value,
+        result: Result<Value, capabilities::Failure>,
+        cx: &mut App,
+    ) {
+        if let Some(connection) = cx
+            .global_mut::<Self>()
+            .current(path, generation)
+            .and_then(|plugin| plugin.connection.as_ref())
+        {
+            connection.respond(id, result);
+        }
+    }
+
+    /// Sends a notification to the plugin's current run.
+    fn notify(path: &Path, generation: u64, method: &str, params: Value, cx: &mut App) {
+        if let Some(connection) = cx
+            .global_mut::<Self>()
+            .current(path, generation)
+            .and_then(|plugin| plugin.connection.as_ref())
+        {
+            connection.notify(method, params);
+        }
+    }
+
+    /// `channel/watch`: follows a channel for this run of the plugin.
+    fn watch(path: &Path, generation: u64, params: &Value, cx: &mut App) -> Reply {
+        let Some(plugin) = cx.global_mut::<Self>().current(path, generation) else {
+            return Reply::Now(Err((1, "The plugin stopped.".to_owned())));
+        };
+        if plugin.watches.len() >= MAX_WATCHES {
+            return Reply::Now(Err((
+                1,
+                format!("A plugin can follow at most {MAX_WATCHES} channels."),
+            )));
+        }
+        plugin.next_watch += 1;
+        let id = plugin.next_watch;
+        let notify_path = path.to_path_buf();
+        let watch = capabilities::watch(
+            params,
+            move |mut timeline, cx| {
+                timeline["watch"] = json!(id);
+                Self::notify(&notify_path, generation, "channel/changed", timeline, cx);
+            },
+            cx,
+        );
+        Reply::Now(watch.map(|watch| {
+            let channel = watch.channel.clone();
+            if let Some(plugin) = cx.global_mut::<Self>().current(path, generation) {
+                plugin.watches.insert(id, watch);
+            }
+            json!({ "watch": id, "channel": channel })
+        }))
+    }
+
     /// The app's side of a plugin's request.
-    fn answer(method: &str, params: &Value, cx: &mut App) -> Result<Value, (i64, String)> {
+    /// The app's side of a plugin's request.
+    fn answer(path: &Path, generation: u64, method: &str, params: &Value, cx: &mut App) -> Reply {
+        let later = |task: Result<Task<_>, _>| match task {
+            Ok(task) => Reply::Later(task),
+            Err(failure) => Reply::Now(Err(failure)),
+        };
+        match method {
+            "channel/messages" => later(capabilities::channel_messages(params, cx)),
+            "thread/messages" => later(capabilities::thread_messages(params, cx)),
+            "profiles/get" => Reply::Now(capabilities::profiles(params, cx)),
+            "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
+            "channel/watch" => Self::watch(path, generation, params, cx),
+            "channel/unwatch" => {
+                let id = params.get("watch").and_then(Value::as_u64);
+                if let (Some(id), Some(plugin)) =
+                    (id, cx.global_mut::<Self>().current(path, generation))
+                {
+                    plugin.watches.remove(&id);
+                }
+                Reply::Now(Ok(Value::Null))
+            }
+            "messages/send" => {
+                let allowed = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .is_some_and(|plugin| plugin.may(Permission::SendMessages));
+                if allowed {
+                    later(capabilities::send(params, cx))
+                } else {
+                    Reply::Now(Err((
+                        FORBIDDEN,
+                        "Declare the send-messages permission in buzz-plugin.json.".to_owned(),
+                    )))
+                }
+            }
+            _ => Reply::Now(Self::answer_now(method, params, cx)),
+        }
+    }
+
+    fn answer_now(method: &str, params: &Value, cx: &mut App) -> Result<Value, (i64, String)> {
         let text = |key: &str| params.get(key).and_then(Value::as_str);
         match method {
             "ui/toast" => {
@@ -862,6 +1043,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_manifest(&folder).unwrap().id, "com.example.a");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn permissions_need_the_manifest_and_the_user() {
+        let folder = std::env::temp_dir().join(format!("buzz-plugin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join(MANIFEST),
+            r#"{ "id": "com.example.a", "name": "A", "command": ["./run"],
+                 "permissions": ["send-messages"] }"#,
+        )
+        .unwrap();
+        let load = |approved| {
+            Plugin::load(SavedPlugin {
+                path: folder.clone(),
+                enabled: true,
+                approved,
+            })
+        };
+        // Saved before the manifest asked: the user has not seen it.
+        let plugin = load(Vec::new());
+        assert!(!plugin.may(Permission::SendMessages));
+        assert_eq!(plugin.unapproved(), [Permission::SendMessages]);
+        let plugin = load(vec![Permission::SendMessages]);
+        assert!(plugin.may(Permission::SendMessages));
+        assert!(plugin.unapproved().is_empty());
+        // Allowed once, then dropped from the manifest: no longer allowed.
+        std::fs::write(
+            folder.join(MANIFEST),
+            r#"{ "id": "com.example.a", "name": "A", "command": ["./run"] }"#,
+        )
+        .unwrap();
+        assert!(!load(vec![Permission::SendMessages]).may(Permission::SendMessages));
         let _ = std::fs::remove_dir_all(folder);
     }
 
