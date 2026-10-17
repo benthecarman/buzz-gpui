@@ -141,6 +141,15 @@ pub enum ReplyContext {
 
 impl EventEmitter<ComposerEvent> for Composer {}
 
+/// A file a plugin's capture ends with (`ComposerCaptureProps.accept`);
+/// with `voice` (seconds and a 0–255 waveform), a voice note.
+pub struct Captured {
+    pub name: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+    pub voice: Option<(f64, Vec<u8>)>,
+}
+
 pub struct Composer {
     community: Entity<Community>,
     channel: String,
@@ -1537,8 +1546,9 @@ impl Composer {
                 let profiles = self.community.read(cx).snapshot.profiles.clone();
                 match answer {
                     None => (Vec::new(), Some("Loading…".into()), None),
-                    Some(items) => (
-                        items
+                    Some(answer) => (
+                        answer
+                            .items
                             .into_iter()
                             .take(50)
                             .map(|item| {
@@ -1547,6 +1557,9 @@ impl Composer {
                                         label: item.label,
                                         detail: item.detail,
                                         text: item.text,
+                                        disabled: item.disabled,
+                                        preview: item.preview,
+                                        exact: item.exact,
                                     };
                                 }
                                 // Picked as a team is: a chip for each.
@@ -1564,13 +1577,17 @@ impl Composer {
                                 Suggestion::Team {
                                     name: item.label,
                                     recipients,
-                                    detail: item.detail.unwrap_or_default(),
-                                    disabled: false,
+                                    detail: item
+                                        .disabled
+                                        .clone()
+                                        .or(item.detail)
+                                        .unwrap_or_default(),
+                                    disabled: item.disabled.is_some(),
                                 }
                             })
                             .collect(),
-                        None,
-                        None,
+                        answer.status,
+                        answer.retry.then_some(channels::Retry::Plugin(key)),
                     ),
                 }
             }
@@ -2087,6 +2104,11 @@ impl Composer {
                 self.public = None;
             }
             channels::Retry::Emoji => self.community.read(cx).session.refresh_emoji(),
+            channels::Retry::Plugin(key) => {
+                if let Some(completion) = super::composer_completions::get(key) {
+                    (completion.retry)();
+                }
+            }
             channels::Retry::Teams => {
                 let session = self.community.read(cx).session.clone();
                 cx.background_spawn(async move {
@@ -2171,6 +2193,24 @@ impl Composer {
             self.accept(index, window, cx);
             return true;
         }
+        if matches!(query.trigger, Trigger::Plugin(_)) {
+            // The plugin names the one item a space picks (`spaceId`).
+            let Some(index) = completion.items.iter().position(|item| {
+                matches!(
+                    item,
+                    Suggestion::Text {
+                        exact: true,
+                        disabled: None,
+                        ..
+                    }
+                )
+            }) else {
+                return false;
+            };
+            completion.query.end += 1;
+            self.accept(index, window, cx);
+            return true;
+        }
         // Automatic replacement needs both catalogs (`spaceId`).
         if query.trigger == Trigger::Emoji
             && self.community.read(cx).snapshot.emoji.status
@@ -2217,9 +2257,14 @@ impl Composer {
         {
             return;
         }
-        if let Some(Suggestion::Person {
-            disabled: Some(_), ..
-        }) = completion.items.get(index)
+        if let Some(
+            Suggestion::Person {
+                disabled: Some(_), ..
+            }
+            | Suggestion::Text {
+                disabled: Some(_), ..
+            },
+        ) = completion.items.get(index)
         {
             return;
         }
@@ -2789,7 +2834,7 @@ impl Composer {
     /// Ends a plugin capture (`accept`), attaching `file` if it made one.
     pub fn accept_plugin_capture(
         &mut self,
-        file: Option<(String, String, Vec<u8>)>,
+        file: Option<Captured>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2797,15 +2842,25 @@ impl Composer {
             return;
         }
         self.capture = None;
-        if let Some((name, mime, bytes)) = file {
-            let size = bytes.len() as u64;
+        if let Some(file) = file {
+            let bytes: Arc<[u8]> = file.bytes.into();
+            // A recording plays from memory until it is sent, as Buzz's own.
+            let voice = file.voice.map(|(duration, waveform)| {
+                let key = format!("voice-draft:{}", uuid::Uuid::new_v4());
+                media::set_local(&key, bytes.clone(), cx);
+                Voice {
+                    key,
+                    duration,
+                    waveform,
+                }
+            });
             self.add_files(
                 vec![NewFile {
-                    name,
-                    mime,
-                    size,
-                    source: buzz_relay_client::upload::Source::Bytes(bytes.into()),
-                    voice: None,
+                    name: file.name,
+                    mime: file.mime,
+                    size: bytes.len() as u64,
+                    source: buzz_relay_client::upload::Source::Bytes(bytes),
+                    voice,
                 }],
                 cx,
             );
@@ -3607,6 +3662,11 @@ pub(super) enum Suggestion {
         label: SharedString,
         detail: Option<SharedString>,
         text: String,
+        /// Why it cannot be picked.
+        disabled: Option<SharedString>,
+        preview: Option<SharedString>,
+        /// A space typed after the query picks it.
+        exact: bool,
     },
     /// A saved team: its agents as `(key, name, picture)`, the detail line
     /// (its reason when disabled).
@@ -5209,11 +5269,32 @@ impl Composer {
                         )
                         .into_any_element()
                 }
-                Suggestion::Text { label, detail, .. } => row
-                    .h(px(40.))
+                Suggestion::Text {
+                    label,
+                    detail,
+                    disabled,
+                    preview,
+                    ..
+                } => row
+                    .min_h(px(40.))
                     .px(px(8.))
-                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
-                    .children(detail.clone().map(|detail| {
+                    .when(disabled.is_some(), |row| row.opacity(0.5))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().child(label.clone()))
+                            .children(preview.clone().map(|preview| {
+                                div()
+                                    .truncate()
+                                    .text_caption()
+                                    .text_color(c.text_subtle)
+                                    .child(preview)
+                            })),
+                    )
+                    .children(disabled.clone().or_else(|| detail.clone()).map(|detail| {
                         div()
                             .flex_shrink(1.)
                             .min_w_0()

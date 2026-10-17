@@ -22,6 +22,22 @@ pub struct Item {
     /// People a pick mentions instead of `text`, as chips that make them
     /// recipients (`edit: { mentions }`).
     pub mentions: Vec<String>,
+    /// Why it cannot be picked, shown in its row.
+    pub disabled: Option<SharedString>,
+    /// A line under it, such as what a command does.
+    pub preview: Option<SharedString>,
+    /// The exact match a space typed after the query picks (`spaceId`).
+    pub exact: bool,
+}
+
+/// A completion's answer (`CompletionResult`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Answer {
+    pub items: Vec<Item>,
+    /// A line in place of the list or under it, such as "No matches".
+    pub status: Option<SharedString>,
+    /// Offers a row that asks again.
+    pub retry: bool,
 }
 
 /// Where a query is typed (`CompletionContext`).
@@ -35,7 +51,7 @@ pub struct Place<'a> {
 }
 
 /// The suggestions for a query; `None` while waiting.
-pub type Query = Rc<dyn Fn(&str, Place, &App) -> Option<Vec<Item>>>;
+pub type Query = Rc<dyn Fn(&str, Place, &App) -> Option<Answer>>;
 
 pub struct PluginCompletion {
     pub key: &'static str,
@@ -44,6 +60,8 @@ pub struct PluginCompletion {
     /// key, answers it.
     pub order: i32,
     pub query: Query,
+    /// Forgets its answers, so the next query asks again.
+    pub retry: Rc<dyn Fn()>,
 }
 
 thread_local! {
@@ -113,6 +131,7 @@ mod tests {
                 trigger: '/',
                 order,
                 query: Rc::new(|_, _, _| None),
+                retry: Rc::new(|| {}),
             })
         };
         add("b.plugin/commands", 0);

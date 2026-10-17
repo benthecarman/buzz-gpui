@@ -821,7 +821,7 @@ pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &m
 
 /// Ends a composer capture, attaching a file `(name, mime, bytes)` if
 /// the plugin made one.
-pub type Accept = Rc<dyn Fn(Option<(String, String, Vec<u8>)>, &mut Window, &mut App)>;
+pub type Accept = Rc<dyn Fn(Option<crate::ui::composer::Captured>, &mut Window, &mut App)>;
 
 /// An account action's dialog around the plugin's view.
 struct Framed {

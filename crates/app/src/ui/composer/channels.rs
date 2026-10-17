@@ -57,6 +57,8 @@ pub enum Retry {
     Emoji,
     /// The saved teams (the channel kit).
     Teams,
+    /// A plugin's completion, by key.
+    Plugin(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

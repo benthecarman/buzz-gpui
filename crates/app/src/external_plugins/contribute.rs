@@ -15,7 +15,7 @@ use super::{ExternalPlugins, capabilities, intern};
 use crate::community::AppState;
 use crate::runtime::Runtime;
 use crate::ui::composer::Composer;
-use crate::ui::composer_completions::{self, Item, Place};
+use crate::ui::composer_completions::{self, Answer as Completed, Item, Place};
 use crate::ui::composer_tools::ToolContext;
 use crate::ui::markdown::Directory;
 use crate::ui::renderers::{
@@ -73,11 +73,11 @@ thread_local! {
 
 type SuggestionKey = (String, String, String);
 /// A completion's answer, on its way to the UI thread.
-type Suggested = (SuggestionKey, Vec<Item>);
+type Suggested = (SuggestionKey, Completed);
 
 #[derive(Default)]
 struct Suggestions {
-    entries: HashMap<SuggestionKey, Option<Vec<Item>>>,
+    entries: HashMap<SuggestionKey, Option<Completed>>,
     order: VecDeque<SuggestionKey>,
 }
 
@@ -90,7 +90,7 @@ fn suggest(
     query: &str,
     place: Place,
     cx: &App,
-) -> Option<Vec<Item>> {
+) -> Option<Completed> {
     let Place {
         channel,
         thread,
@@ -129,15 +129,42 @@ fn suggest(
     });
     Runtime::handle(cx).spawn(async move {
         let items = match request.await {
-            Ok(Ok(value)) => items(&value),
-            _ => Vec::new(),
+            Ok(Ok(value)) => answer(&value),
+            _ => Completed {
+                status: Some("Suggestions are not available.".into()),
+                retry: true,
+                ..Completed::default()
+            },
         };
         let _ = inbox.unbounded_send((entry, items));
     });
     None
 }
 
-/// `completion/query`'s answer: `{"items": [{"label", "detail", "text"}]}`.
+/// Forgets completion `key`'s answers.
+fn forget_suggestions(key: &str) {
+    SUGGESTIONS.with_borrow_mut(|suggestions| {
+        suggestions.entries.retain(|(entry, _, _), _| entry != key);
+        suggestions.order.retain(|(entry, _, _)| entry != key);
+    });
+    composer_completions::changed();
+}
+
+/// `completion/query`'s answer: `{"items", "status", "retry"}`.
+fn answer(value: &Value) -> Completed {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| status.chars().take(200).collect::<String>().into());
+    Completed {
+        items: items(value),
+        status,
+        retry: value.get("retry").and_then(Value::as_bool) == Some(true),
+    }
+}
+
+/// `completion/query`'s items: `[{"label", "detail", "text", "mentions",
+/// "disabled", "preview", "exact"}]`.
 fn items(value: &Value) -> Vec<Item> {
     let text = |item: &Value, key: &str| {
         item.get(key)
@@ -173,6 +200,9 @@ fn items(value: &Value) -> Vec<Item> {
                         detail: text(item, "detail").map(Into::into),
                         label: label.into(),
                         mentions,
+                        disabled: text(item, "disabled").map(Into::into),
+                        preview: text(item, "preview").map(Into::into),
+                        exact: item.get("exact").and_then(Value::as_bool) == Some(true),
                     })
                 })
                 .collect()
@@ -979,7 +1009,38 @@ pub fn accept(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| buzz_relay_client::upload::mime_type(&name, &bytes));
-            Some((name, mime, bytes))
+            let voice = match params.get("voice").filter(|voice| !voice.is_null()) {
+                None => None,
+                Some(voice) => {
+                    let duration = voice
+                        .get("duration")
+                        .and_then(Value::as_f64)
+                        .filter(|duration| duration.is_finite() && *duration > 0.0)
+                        .ok_or((
+                            protocol::INVALID_PARAMS,
+                            "voice.duration must be seconds".to_owned(),
+                        ))?;
+                    let waveform = voice
+                        .get("waveform")
+                        .and_then(Value::as_array)
+                        .map(|samples| {
+                            samples
+                                .iter()
+                                .take(256)
+                                .filter_map(Value::as_u64)
+                                .map(|sample| sample.min(255) as u8)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((duration, waveform))
+                }
+            };
+            Some(crate::ui::composer::Captured {
+                name,
+                mime,
+                bytes,
+                voice,
+            })
         }
     };
     let window =
@@ -1258,6 +1319,7 @@ pub fn register(
             query: Rc::new(move |query, place, cx| {
                 suggest(&plugin, completion_key, &id, query, place, cx)
             }),
+            retry: Rc::new(move || forget_suggestions(completion_key)),
         });
         added.push(Added::Completion(completion_key));
     }

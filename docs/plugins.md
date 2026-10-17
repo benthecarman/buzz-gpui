@@ -299,7 +299,7 @@ same way, per query.
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
 | `inline/render` | `renderer`, `text` (what the pattern matched), `message` (the message it is in) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message. |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
-| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items": [{"label", "detail", "text", "mentions"}]}`, at most 50. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. |
+| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items", "status", "retry"}`: at most 50 items `{"label", "detail", "text", "mentions", "preview", "disabled", "exact"}`. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. `preview` is a line under the label; `disabled` is why it cannot be picked; a space typed after the query picks the item marked `exact`. `status` shows a line such as "No matches", and `retry: true` adds a row that asks again. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches
 send `render/event` with `renderer`, `target` (the URL, message or attachment
@@ -516,7 +516,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `composer/insertResource` | `composer`, `uri` (a Buzz or web link), `label` | `null`, after putting the link as one chip at the caret |
 | `composer/focus` | `composer` | `null`, after putting the caret back in the composer |
 | `composer/capture` | `composer` | `{"view"}`. A view of `kind` `capture` takes the composer's place, as recording a voice note does, until `composer/accept` or the user discards it (the view then closes). |
-| `composer/accept` | `view` (an open `capture`), and optionally `data` (base64, up to 3 MiB), `name` and `mime` | `null`. Ends the capture and attaches the file, if given, to the draft. |
+| `composer/accept` | `view` (an open `capture`), and optionally `data` (base64, up to 3 MiB), `name`, `mime` and `voice` (`{"duration","waveform"}`: seconds, and up to 256 levels from 0 to 255) | `null`. Ends the capture and attaches the file, if given, to the draft; with `voice`, as a voice note that plays in the draft. |
 
 Reads cover the selected community and channels you can read in it. They
 never mark anything read. A read waits up to 10 seconds for the relay.
