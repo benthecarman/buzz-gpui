@@ -334,6 +334,9 @@ pub struct AgentTypeDecl {
     /// What leaving this type costs, shown before a change of type.
     #[serde(default)]
     pub migration_warning: Option<String>,
+    /// The settings a change of type would reset or drop.
+    #[serde(default)]
+    pub migration_settings: Vec<MigrationSettingDecl>,
     /// The plugin holds each agent's key and runs it (`remote`): Buzz asks
     /// `agent/provision`, `agent/activate`, `agent/profile` and
     /// `agent/remove`, and never `agent/run`.
@@ -374,6 +377,28 @@ pub struct CarryDecl {
 pub struct AgentTabDecl {
     pub id: String,
     pub title: String,
+    /// `settings`: the tab is the agent's Settings, with Buzz's Provider
+    /// field at its top (`AgentTab.role`).
+    #[serde(default)]
+    pub role: Option<AgentTabRole>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentTabRole {
+    Settings,
+}
+
+/// A setting a provider-change preview names (`describeMigration`): it
+/// is the agent's own when its config has `key` other than `default`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationSettingDecl {
+    pub id: String,
+    pub label: String,
+    pub key: String,
+    #[serde(default)]
+    pub default: Option<Value>,
 }
 
 fn five_minutes() -> u64 {
@@ -857,9 +882,22 @@ impl Contributions {
             if kind.tabs.len() > 8 {
                 return Err(format!("“{}” has more than 8 tabs.", kind.id));
             }
+            let settings = kind.tabs.iter().filter(|tab| tab.role.is_some());
+            if settings.count() > 1 {
+                return Err(format!("“{}” has more than one Settings tab.", kind.id));
+            }
+            if kind.migration_settings.len() > 32 {
+                return Err(format!(
+                    "“{}” has more than 32 migration settings.",
+                    kind.id
+                ));
+            }
             let mut tabs = std::collections::HashSet::new();
             for tab in &kind.tabs {
-                if !valid_contribution_id(&tab.id) || tab.id == "attention" {
+                // The app's own tabs keep their ids.
+                if !valid_contribution_id(&tab.id)
+                    || matches!(tab.id.as_str(), "attention" | "memory" | "settings")
+                {
                     return Err(format!("“{}” is not a tab id.", tab.id));
                 }
                 if !tabs.insert(&tab.id) {

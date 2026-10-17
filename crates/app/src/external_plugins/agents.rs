@@ -8,7 +8,7 @@
 //! sees it.
 
 use super::process::Requester;
-use super::protocol::{AgentToolDecl, AgentTypeDecl, INVALID_PARAMS};
+use super::protocol::{AgentTabRole, AgentToolDecl, AgentTypeDecl, INVALID_PARAMS};
 use super::{ExternalPlugins, capabilities::Failure, contribute, intern};
 use crate::agents2::Agent;
 use crate::agents2::attention::{AttentionValue, EventData, Interest};
@@ -276,13 +276,15 @@ struct PluginType {
     requester: Requester,
     summary: bool,
     peek: bool,
-    tabs: Vec<(String, String)>,
+    /// Each tab's id, title, and whether it is the Settings tab.
+    tabs: Vec<(String, String, bool)>,
     decl: AgentTypeDecl,
 }
 
 thread_local! {
-    /// Each plugin provider's readiness, by type key, as it last said.
-    static READINESS: std::cell::RefCell<HashMap<String, registry::ProviderSnapshot>> =
+        /// Each plugin provider's readiness, by type key, as it last said,
+    /// and whether the plugin handles its attention itself.
+    static READINESS: std::cell::RefCell<HashMap<String, (registry::ProviderSnapshot, bool)>> =
         std::cell::RefCell::default();
 }
 
@@ -308,7 +310,13 @@ pub fn set_readiness(plugin: &str, params: &Value, cx: &mut App) {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     };
-    READINESS.with_borrow_mut(|readiness| readiness.insert(format!("{plugin}/{kind}"), snapshot));
+    let action = params
+        .get("action")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    READINESS.with_borrow_mut(|readiness| {
+        readiness.insert(format!("{plugin}/{kind}"), (snapshot, action))
+    });
     registry::providers_changed(cx);
 }
 
@@ -324,8 +332,27 @@ impl registry::AgentProvider for Provider {
         READINESS.with_borrow(|readiness| {
             readiness
                 .get(&format!("{}/{}", self.plugin, self.kind))
-                .cloned()
+                .map(|(snapshot, _)| snapshot.clone())
                 .unwrap_or(registry::ProviderSnapshot::CHECKING)
+        })
+    }
+
+    fn attention_action(&self, _: &App) -> Option<registry::AttentionAction> {
+        let action = READINESS.with_borrow(|readiness| {
+            readiness
+                .get(&format!("{}/{}", self.plugin, self.kind))
+                .is_some_and(|(_, action)| *action)
+        });
+        let (plugin, kind) = (self.plugin.clone(), self.kind);
+        action.then(|| -> registry::AttentionAction {
+            Box::new(move |cx| {
+                ExternalPlugins::notify_running(
+                    &plugin,
+                    "agentType/attention",
+                    json!({ "type": kind }),
+                    cx,
+                )
+            })
         })
     }
 
@@ -591,10 +618,15 @@ impl AgentType for PluginType {
     fn tabs(&self) -> Vec<AgentTab> {
         self.tabs
             .iter()
-            .map(|(id, title)| {
+            .map(|(id, title, settings)| {
                 let (plugin, kind, tab) = (self.plugin.clone(), self.id, id.clone());
                 AgentTab {
-                    id: id.clone().into(),
+                    // The app knows the Settings tab by this id.
+                    id: if *settings {
+                        "settings".into()
+                    } else {
+                        id.clone().into()
+                    },
                     title: title.clone().into(),
                     build: Arc::new(move |view, window, cx| {
                         super::view::ExternalView::agent_tab(&plugin, kind, &tab, view, window, cx)
@@ -742,6 +774,24 @@ impl AgentType for PluginType {
         self.decl.migration_warning.clone().map(intern)
     }
 
+    fn describe_migration(&self, config: &Value) -> Vec<registry::MigrationSetting> {
+        self.decl
+            .migration_settings
+            .iter()
+            .map(|setting| {
+                let value = config.get(&setting.key).filter(|value| !value.is_null());
+                let is_override =
+                    value.is_some_and(|value| Some(value) != setting.default.as_ref());
+                registry::MigrationSetting {
+                    id: intern(setting.id.clone()),
+                    label: intern(setting.label.clone()),
+                    is_override,
+                    unchanged_key: value.filter(|_| is_override).map(Value::to_string),
+                }
+            })
+            .collect()
+    }
+
     fn timeout(&self) -> Duration {
         self.timeout
     }
@@ -848,7 +898,10 @@ pub fn register(
             tabs: decl
                 .tabs
                 .iter()
-                .map(|tab| (tab.id.clone(), tab.title.clone()))
+                .map(|tab| {
+                    let settings = tab.role == Some(AgentTabRole::Settings);
+                    (tab.id.clone(), tab.title.clone(), settings)
+                })
                 .collect(),
             decl: decl.clone(),
         };

@@ -224,9 +224,12 @@ the answer until the agent's name or config changes:
 - `provider: true`: the type has device-wide readiness under Provider settings
   on the Agents page. Send the notification `agentType/readiness` with `type`,
   `readiness` (`checking`, `ready` or `attention`), and optional
-  `attentionLabel` and `blocking`. Buzz sends `agentType/check` when the user
-  asks to check again. The provider's dialog is a view of `kind`
-  `agentProvider`; close it with `ui/closeView`.
+  `attentionLabel`, `blocking` and `action`. Buzz sends `agentType/check` when
+  the user asks to check again. The provider's dialog is a view of `kind`
+  `agentProvider`; close it with `ui/closeView`. With `action: true`, picking
+  the provider while it needs attention sends `agentType/attention` (`type`)
+  rather than opening the dialog, for a fix the plugin starts itself, such as
+  an install.
 - `hosted: true`: the plugin holds each agent's key and runs it, as a hosted
   service would. Buzz never sends `agent/run` for it. Making one asks
   `agent/provision` (`type`, `name`, `community`; answer `{"pubkey"}`, a key
@@ -240,11 +243,21 @@ the answer until the agent's name or config changes:
 - `carry` (`{"instructions", "workspace"}`, each a config key): what another
   type takes over when an agent changes type, and where this type keeps what
   it takes over. `migrationWarning` says what leaving this type costs.
-- `tabs` (`[{"id", "title"}]`, at most 8): settings tabs before Attention.
-    Each is a view of `kind` `agentTab`; `view/open` also carries `type`,
-  `agent`, `contribution` (the tab id) and `conversation` (`{"channel","root"}`
-  when the agent was opened from a message). To save, send `agent/save` with the
-  `view` and the whole new `config`.
+  `migrationSettings` (`[{"id", "label", "key", "default"}]`) lists the
+  settings a change of type previews: one is the agent's own when its config
+  has `key` set to something other than `default`, and the preview says
+  whether the new type keeps it (it has a setting with the same `id` and
+  value), resets it or drops it.
+- `tabs` (`[{"id", "title", "role"}]`, at most 8; `attention`, `memory` and
+  `settings` are Buzz's ids): settings tabs before Attention. Each is a view of `kind` `agentTab`; `view/open` also carries
+  `type`, `agent`, `contribution` (the tab id) and `conversation`
+  (`{"channel","root"}` when the agent was opened from a message). To save,
+  send `agent/save` with the `view` and the whole new `config`. With `role:
+  "settings"` the tab is the agent's Settings, first, with Buzz's Provider
+  field at its top. When the user picks this type there for an agent of
+  another type, the tab opens with `pending: true` and `agent.config` set to
+  what this type starts with; `agent/save` then makes the change with that
+  config.
 
 While a call or run is open, the plugin can act as its agent:
 

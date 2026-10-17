@@ -417,18 +417,20 @@ impl ExternalView {
     /// `view/open`'s params.
     pub(super) fn open_params(&self) -> Value {
         let opening = self.opening.as_ref();
-        let (agent, kind, conversation) = match &self.agent {
+        let (agent, kind, conversation, pending) = match &self.agent {
             Some((view, kind)) => (
                 Some(super::agents::agent_json(&view.agent)),
                 Some(*kind),
                 view.conversation.as_ref().map(|conversation| {
                     json!({ "channel": conversation.channel_id, "root": conversation.root_id })
                 }),
+                view.pending(),
             ),
-            None => (None, None, None),
+            None => (None, None, None, false),
         };
         let mut params = json!({
             "conversation": conversation,
+            "pending": pending,
             "route": self.route,
             "agent": agent,
             "type": kind,
@@ -711,6 +713,12 @@ impl Render for ExternalView {
             .flex_col()
             .gap(space::S4)
             .when(framed && !self.edge_to_edge, |body| body.p(space::S6));
+        // A Settings tab starts with the app's Provider field.
+        if let Some((agent, _)) = &self.agent
+            && let Some(control) = agent.type_control(false, window, cx)
+        {
+            body = body.child(control);
+        }
         if !self.back.is_empty() {
             let weak = cx.entity().downgrade();
             body = body.child(

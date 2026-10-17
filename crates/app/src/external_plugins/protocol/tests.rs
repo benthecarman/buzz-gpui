@@ -273,6 +273,17 @@ fn every_kind_of_contribution_is_checked() {
             "twice",
         ),
         (
+            json!({ "agentTypes": [{ "id": "t", "title": "T",
+                "tabs": [{ "id": "settings", "title": "S" }] }] }),
+            "not a tab id",
+        ),
+        (
+            json!({ "agentTypes": [{ "id": "t", "title": "T", "tabs": [
+                { "id": "a", "title": "A", "role": "settings" },
+                { "id": "b", "title": "B", "role": "settings" }] }] }),
+            "more than one Settings tab",
+        ),
+        (
             json!({ "inlineRenderers": [{ "id": "i", "pattern": "a*" }] }),
             "empty",
         ),
@@ -307,4 +318,19 @@ fn chords_parse() {
     );
     assert!(Chord::parse("alt+1").unwrap().alt);
     assert!(Chord::parse("mod+").is_err());
+}
+
+#[test]
+fn agent_types_name_a_settings_tab_and_migration_settings() {
+    let parsed = Contributions::parse(json!({ "agentTypes": [{
+        "id": "t",
+        "title": "T",
+        "tabs": [{ "id": "main", "title": "Settings", "role": "settings" }],
+        "migrationSettings": [{ "id": "m", "label": "Model", "key": "model", "default": "a" }],
+    }] }))
+    .unwrap();
+    let kind = &parsed.agent_types[0];
+    assert_eq!(kind.tabs[0].role, Some(AgentTabRole::Settings));
+    assert_eq!(kind.migration_settings[0].key, "model");
+    assert_eq!(kind.migration_settings[0].default, Some(json!("a")));
 }

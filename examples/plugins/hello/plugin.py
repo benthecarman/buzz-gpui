@@ -267,8 +267,11 @@ def settings_section(state):
 
 
 def greeting_tab(state):
-    """A Greeter's settings tab: what it says before the mention."""
+    """A Greeter's Settings tab: what it says before the mention. Buzz
+    draws its Provider field above; with a change of provider staged
+    (`pending`), Save commits it."""
     greeting = state["agent"]["config"].get("greeting", "Hello")
+    note = "Save to change the provider." if state.get("pending") else "Put before every reply."
     return {
         "type": "column",
         "gap": "md",
@@ -276,7 +279,7 @@ def greeting_tab(state):
             text("Greeting", style="label"),
             {"type": "input", "id": "greeting", "value": greeting, "placeholder": "Hello"},
             {"type": "row", "children": [{"type": "button", "id": "save", "label": "Save", "variant": "prominent"}]},
-            text(state.get("saved") or "Put before every reply.", tone="subtle"),
+            text(state.get("saved") or note, tone="subtle"),
         ],
     }
 
@@ -488,7 +491,9 @@ def on_event(params):
         state["draft"] = params.get("value", "")
         return
     elif element == "save" and event == "click":
-        config = {**state["agent"]["config"], "greeting": state.get("draft", "").strip() or "Hello"}
+        current = state["agent"]["config"].get("greeting", "Hello")
+        greeting = state.get("draft", current).strip() or "Hello"
+        config = {**state["agent"]["config"], "greeting": greeting}
 
         def saved(result, error):
             if view in views:
@@ -627,7 +632,7 @@ def handle(message):
                                 "config": {"greeting": "Hello"},
                                 "summary": True,
                                 "peek": True,
-                                "tabs": [{"id": "greeting", "title": "Greeting"}],
+                                "tabs": [{"id": "greeting", "title": "Settings", "role": "settings"}],
                                 "icon": "Smiley",
                                 "createForm": True,
                                 "createModels": {
@@ -640,6 +645,9 @@ def handle(message):
                                 "models": True,
                                 "provider": True,
                                 "carry": {"instructions": "instructions"},
+                                "migrationSettings": [
+                                    {"id": "greeting", "label": "Greeting", "key": "greeting", "default": "Hello"}
+                                ],
                             }
                         ],
                     },
