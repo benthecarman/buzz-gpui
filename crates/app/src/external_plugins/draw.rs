@@ -3,13 +3,13 @@
 //! to `send`; fields come ready-made from the caller, which keeps their
 //! text.
 
-use super::protocol::{ButtonStyle, Gap, Justify, Node, TextStyle, Tone};
+use super::protocol::{AvatarSize, ButtonStyle, Gap, Justify, Node, TextStyle, Tone};
 use crate::community::Community;
 use crate::ui::markdown;
 use crate::ui::navigation;
 use buzz_ui::{
-    ActiveTheme, Badge, BadgeTone, Button, ButtonVariant, Colors, Divider, Icon, Spinner, Switch,
-    TextField, TypeStyled, tokens::space,
+    ActiveTheme, Avatar, Badge, BadgeTone, Button, ButtonVariant, Checkbox, Colors, Divider, Icon,
+    Radio, Spinner, Switch, TextField, TypeStyled, tokens::space,
 };
 use gpui_kit::component::input::InputState;
 use gpui_kit::*;
@@ -217,6 +217,107 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             Some(state) => TextField::new(state).into_any_element(),
             None => div().into_any_element(),
         },
+        Node::Checkbox { id, checked, label } => {
+            let send = draw.send.clone();
+            let id = id.clone();
+            let mut checkbox = Checkbox::new(element_id("checkbox"), *checked);
+            if let Some(label) = label {
+                checkbox = checkbox.label(label.clone());
+            }
+            checkbox
+                .on_change(move |on, _, cx| send(&id, "toggle", Some(json!(on)), cx))
+                .into_any_element()
+        }
+        Node::Choice { id, value, options } => div()
+            .flex()
+            .flex_col()
+            .gap(space::S2)
+            .children(options.iter().take(50).enumerate().map(|(index, option)| {
+                let send = draw.send.clone();
+                let (id, chosen) = (id.clone(), option.value.clone());
+                Radio::new(
+                    element_id(&format!("choice-{index}")),
+                    option.label.clone(),
+                    value.as_ref() == Some(&option.value),
+                )
+                .on_select(move |_, cx| send(&id, "change", Some(json!(chosen)), cx))
+                .into_any_element()
+            }))
+            .into_any_element(),
+        Node::Progress { value } => div()
+            .w_full()
+            .h(px(6.))
+            .rounded(px(3.))
+            .bg(c.border_standard)
+            .child(
+                div()
+                    .h_full()
+                    .rounded(px(3.))
+                    .bg(c.text_accent)
+                    .w(relative(value.clamp(0., 1.))),
+            )
+            .into_any_element(),
+        Node::Image {
+            url,
+            width,
+            height,
+            alt,
+        } => {
+            let safe = url.starts_with("https://")
+                || (url.starts_with("http://") && url.contains("://localhost"));
+            let source = match &draw.community {
+                Some(community) if safe => Some(crate::ui::media::image(
+                    url,
+                    &community.read(cx).session.media().clone(),
+                )),
+                _ if safe => Some(ImageSource::from(url.clone())),
+                _ => None,
+            };
+            let width = width.map(|width| width.min(1200) as f32);
+            let height = height.map(|height| height.min(1200) as f32);
+            match source {
+                Some(source) => {
+                    let mut image = img(source).object_fit(ObjectFit::Contain).max_w_full();
+                    if let Some(width) = width {
+                        image = image.w(px(width));
+                    }
+                    if let Some(height) = height {
+                        image = image.h(px(height));
+                    }
+                    image.into_any_element()
+                }
+                None => div()
+                    .text_body_sm()
+                    .text_color(c.text_subtle)
+                    .child(alt.clone().unwrap_or_else(|| "Image".to_owned()))
+                    .into_any_element(),
+            }
+        }
+        Node::Avatar { pubkey, size } => {
+            let profile = draw.community.as_ref().and_then(|community| {
+                community
+                    .read(cx)
+                    .snapshot
+                    .profiles
+                    .get(&pubkey.to_ascii_lowercase())
+                    .cloned()
+            });
+            let name = profile
+                .as_ref()
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| pubkey.chars().take(2).collect());
+            let mut avatar = Avatar::new(name).size(match size {
+                AvatarSize::Small => buzz_ui::AvatarSize::Small,
+                AvatarSize::Default => buzz_ui::AvatarSize::Default,
+                AvatarSize::Large => buzz_ui::AvatarSize::Large,
+            });
+            if let Some(picture) = profile.and_then(|profile| profile.picture.clone())
+                && picture.starts_with("https://")
+            {
+                avatar = avatar.image(crate::ui::media::any_avatar(&picture));
+            }
+            avatar.into_any_element()
+        }
         Node::Switch { id, checked, label } => {
             let send = draw.send.clone();
             let id = id.clone();

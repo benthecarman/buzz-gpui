@@ -331,7 +331,8 @@ Clicks, toggles and typing come back as events:
 | Element | `event` | `value` |
 | --- | --- | --- |
 | `button` | `click` | none |
-| `switch` | `toggle` | `true` or `false` |
+| `switch`, `checkbox` | `toggle` | `true` or `false` |
+| `choice` | `change` | the chosen option's `value` |
 | `input` | `change` | the field's text |
 | `input` | `submit` (Enter) | the field's text |
 
@@ -360,6 +361,11 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `link` | `label`, `url`. Opens like a link in a message: a panel that matches it opens; otherwise the browser does. |
 | `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit` |
 | `switch` | `id`, `checked`, `label` |
+| `checkbox` | `id`, `checked`, `label`; sends `toggle` like a switch |
+| `choice` | `id`, `value`, `options` (`[{"value","label"}]`, up to 50), drawn as radio buttons; sends `change` with the chosen `value` |
+| `progress` | `value`, from 0 to 1 |
+| `image` | `url` (https, or the community's media), `width` and `height` (pixels, up to 1200), `alt` |
+| `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |
 | `icon` | `name` |
 | `divider` | none |

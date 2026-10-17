@@ -934,6 +934,42 @@ pub enum Node {
         #[serde(default)]
         label: Option<String>,
     },
+    /// Sends `toggle` with `true` or `false`.
+    Checkbox {
+        id: String,
+        checked: bool,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// One of `options`, as radio buttons; sends `change` with the chosen
+    /// option's `value`.
+    Choice {
+        id: String,
+        #[serde(default)]
+        value: Option<String>,
+        options: Vec<ChoiceOption>,
+    },
+    /// A bar filled to `value`, from 0 to 1.
+    Progress {
+        value: f32,
+    },
+    /// An image: community media or an https URL, scaled to fit `width`
+    /// and `height` (pixels, up to 1200).
+    Image {
+        url: String,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        #[serde(default)]
+        alt: Option<String>,
+    },
+    /// Someone's profile picture, or their initial.
+    Avatar {
+        pubkey: String,
+        #[serde(default)]
+        size: AvatarSize,
+    },
     Badge {
         text: String,
         #[serde(default)]
@@ -1002,6 +1038,21 @@ pub enum ButtonStyle {
     Ghost,
     Outline,
     Destructive,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ChoiceOption {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AvatarSize {
+    Small,
+    #[default]
+    Default,
+    Large,
 }
 
 impl Node {

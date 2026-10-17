@@ -490,6 +490,17 @@ mod tests {
                 panic!("no channel request");
             };
             assert_eq!(method, "community/channels");
+            // And who the user is, for its avatar.
+            let Event::Request {
+                id: current,
+                method,
+                ..
+            } = next().await
+            else {
+                panic!("no community request");
+            };
+            assert_eq!(method, "community/current");
+            connection.respond(&current, Ok(serde_json::Value::Null));
             connection.respond(
                 &id,
                 Ok(json!([{ "id": "c1", "name": "general", "kind": "stream", "private": false }])),

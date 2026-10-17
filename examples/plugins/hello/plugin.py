@@ -173,6 +173,26 @@ def page(state):
             },
             {
                 "type": "card",
+                "title": "More elements",
+                "children": [
+                    {"type": "checkbox", "id": "tidy", "checked": state.get("tidy", False), "label": "Keep it tidy"},
+                    {
+                        "type": "choice",
+                        "id": "mood",
+                        "value": state.get("mood", "calm"),
+                        "options": [{"value": "calm", "label": "Calm"}, {"value": "busy", "label": "Busy"}],
+                    },
+                    {"type": "progress", "value": min(state["count"], 10) / 10},
+                    {
+                        "type": "row",
+                        "children": [{"type": "avatar", "pubkey": state["viewer"], "size": "small"}, text("You")]
+                        if state.get("viewer")
+                        else [],
+                    },
+                ],
+            },
+            {
+                "type": "card",
                 "title": "Notes",
                 "children": [
                     {
@@ -353,6 +373,13 @@ def on_open(params):
 
         request("community/channels", {}, got_channels)
 
+        def got_community(result, error):
+            if view in views and result:
+                views[view]["viewer"] = result.get("viewer")
+                render(view)
+
+        request("community/current", {}, got_community)
+
 
 def follow(view, channel):
     state = views[view]
@@ -405,6 +432,10 @@ def on_event(params):
             },
         )
         return
+    elif element == "tidy" and event == "toggle":
+        state["tidy"] = params.get("value", False)
+    elif element == "mood" and event == "change":
+        state["mood"] = params.get("value")
     elif element == "note" and event == "submit":
         note = params.get("value", "").strip()
         if not note:
