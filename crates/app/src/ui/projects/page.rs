@@ -4,9 +4,8 @@
 
 use super::{PAGE, format_public_key, locale_time};
 use crate::community::{AppState, Community};
-use crate::ui::markdown::{self, Directory};
+use crate::ui::markdown;
 use crate::ui::navigation::{self, Place, Target};
-use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::projects::{
     Entity as Announcement, EntityDetail, EntityFailure, EntityKind, EntityRoute, EntityTab,
     GitRead, GitSnapshot, ItemKind, RouteKind, item_title, value, values,
@@ -18,7 +17,6 @@ use buzz_ui::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 /// The tabs, Overview first (`tabs`).
@@ -415,46 +413,9 @@ fn code(id: &str, text: &str, window: &Window, c: &Colors) -> AnyElement {
         .into_any_element()
 }
 
-/// `Body`: Markdown with Buzz links routed through navigation, rendered
-/// by the message renderer; too long or too deep text stays plain.
+/// `Body`: Markdown with Buzz links routed through navigation.
 fn body(text: &str, community: &Community, cx: &App) -> AnyElement {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    let hash = hasher.finish().to_be_bytes();
-    let mut id = [0u8; 32];
-    for (index, byte) in id.iter_mut().enumerate() {
-        *byte = hash[index % 8] ^ (index as u8);
-    }
-    let row = Arc::new(MessageRow {
-        id: buzz_relay_client::EventId::from_byte_array(id),
-        channel: Arc::from("projects"),
-        kind: 9,
-        audience: None,
-        author: nostr::prelude::PublicKey::from_byte_array([1; 32]),
-        signer: None,
-        workflow_owner: None,
-        created_at: 0,
-        created_at_ms: 0,
-        content: text.to_string(),
-        source_content: None,
-        edited: false,
-        attachment_seams: Vec::new(),
-        attachment_source_id: None,
-        attachments: Vec::new(),
-        emoji: Vec::new(),
-        mentions: Vec::new(),
-        mention_references: Vec::new(),
-        reactions: Vec::new(),
-        reply_count: 0,
-        participants: Vec::new(),
-        thread_root_id: None,
-        reply_parent_id: None,
-        sent_from_thread: None,
-        diff: None,
-        membership: None,
-        delivery: None,
-    });
-    markdown::body(&row, &Directory::of(community, None, cx), cx)
+    markdown::text(text, "projects", community, cx)
 }
 
 impl Render for ProjectsPage {

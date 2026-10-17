@@ -218,6 +218,50 @@ pub(super) fn measure(
     .inset_0()
 }
 
+/// Markdown that is not a message, such as a README or a plugin's text,
+/// with Buzz links routed through navigation, rendered by the message
+/// renderer; too long or too deep text stays plain. `channel` names
+/// where it shows.
+pub fn text(text: &str, channel: &str, community: &Community, cx: &App) -> AnyElement {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let hash = hasher.finish().to_be_bytes();
+    let mut id = [0u8; 32];
+    for (index, byte) in id.iter_mut().enumerate() {
+        *byte = hash[index % 8] ^ (index as u8);
+    }
+    let row = Arc::new(MessageRow {
+        id: buzz_relay_client::EventId::from_byte_array(id),
+        channel: Arc::from(channel),
+        kind: 9,
+        audience: None,
+        author: nostr::prelude::PublicKey::from_byte_array([1; 32]),
+        signer: None,
+        workflow_owner: None,
+        created_at: 0,
+        created_at_ms: 0,
+        content: text.to_string(),
+        source_content: None,
+        edited: false,
+        attachment_seams: Vec::new(),
+        attachment_source_id: None,
+        attachments: Vec::new(),
+        emoji: Vec::new(),
+        mentions: Vec::new(),
+        mention_references: Vec::new(),
+        reactions: Vec::new(),
+        reply_count: 0,
+        participants: Vec::new(),
+        thread_root_id: None,
+        reply_parent_id: None,
+        sent_from_thread: None,
+        diff: None,
+        membership: None,
+        delivery: None,
+    });
+    body(&row, &Directory::of(community, None, cx), cx)
+}
+
 /// One link chip for `url` outside a body, such as the "Sent from" line.
 pub fn link_chip(url: &str, label: &str, directory: &Directory, id: &str, _cx: &App) -> AnyElement {
     let (url, label, directory, id) = (
