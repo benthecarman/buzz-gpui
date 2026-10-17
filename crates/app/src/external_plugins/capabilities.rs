@@ -925,6 +925,55 @@ pub fn open_link(params: &Value, cx: &mut App) -> Result<Value, Failure> {
     Ok(Value::Null)
 }
 
+/// `contributions/list`: what Buzz and its plugins added that a plugin
+/// can open or name: pages, panels, Settings sections and account
+/// actions, each by its `plugin/id` key.
+pub fn contributions(cx: &App) -> Value {
+    use crate::ui::pages::Placement;
+    json!({
+        "pages": crate::ui::pages::all(cx).iter().map(|spec| json!({
+            "key": spec.page.key(),
+            "title": spec.label,
+            "placement": match spec.placement {
+                Placement::Topbar => "topbar",
+                Placement::Sidebar => "sidebar",
+                Placement::Hidden => "hidden",
+            },
+            "routes": crate::ui::pages::routes(spec.page, cx).map(|routes| routes.version),
+        })).collect::<Vec<_>>(),
+        "panels": crate::ui::channel_panels::all(cx).iter().map(|panel| json!({
+            "key": panel.key,
+            "title": panel.title,
+            "order": panel.order,
+            "launcher": panel.launcher.is_some(),
+        })).collect::<Vec<_>>(),
+        "settings": crate::ui::settings::cards::all(cx).iter().map(|card| json!({
+            "key": card.key,
+            "title": card.title,
+        })).collect::<Vec<_>>(),
+        "accountActions": crate::ui::account_actions::all(cx).iter().map(|action| json!({
+            "key": action.key,
+            "title": action.title.to_string(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// `community/info`: the community relay's NIP-11 document, whose `self`
+/// key signs what the relay publishes, such as archives and rosters.
+pub fn info(cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let identity = match &cx.global::<AppState>().identity {
+        crate::community::IdentityState::Ready(identity) => identity.clone(),
+        _ => return Err((1, "You are not signed in.".to_owned())),
+    };
+    let http = buzz_relay_client::RelayHttp::new(community.read(cx).origin.clone(), identity);
+    Ok(on_tokio(cx, async move {
+        http.information()
+            .await
+            .map_err(|error| (3, error.to_string()))
+    }))
+}
+
 /// `ui/openPanel`: opens one of the plugin's panels (by `panel` id) as a
 /// tab of the open conversation, showing `target`.
 pub fn open_panel(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {

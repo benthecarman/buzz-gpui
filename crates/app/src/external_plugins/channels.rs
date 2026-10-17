@@ -62,7 +62,18 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             .and_then(Value::as_bool)
             .unwrap_or(false),
         ttl: params.get("ttlSeconds").and_then(Value::as_u64),
-        labels: Vec::new(),
+        labels: params
+            .get("labels")
+            .and_then(Value::as_array)
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(16)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {

@@ -34,8 +34,10 @@ fn identity(cx: &App) -> Result<Arc<Identity>, Failure> {
 }
 
 /// The `filters` param: NIP-01 filters of `ids`, `authors`, `kinds`,
-/// `#<letter>` tags, `since`, `until` and `limit`.
-fn filters(params: &Value) -> Result<Vec<Map<String, Value>>, Failure> {
+/// `#<letter>` tags, `since`, `until` and `limit`, and with `extended`,
+/// the relay's read extensions (`ReadFilter`): search, the home feed and
+/// paged history and threads.
+fn filters(params: &Value, extended: bool) -> Result<Vec<Map<String, Value>>, Failure> {
     let list = params
         .get("filters")
         .and_then(Value::as_array)
@@ -53,6 +55,21 @@ fn filters(params: &Value) -> Result<Vec<Map<String, Value>>, Failure> {
                         .as_array()
                         .is_some_and(|kinds| kinds.iter().all(|kind| kind.as_u64().is_some())),
                     "since" | "until" | "limit" => value.as_u64().is_some(),
+                    "top_level" | "include_aux" | "include_summaries" | "thread_window"
+                        if extended =>
+                    {
+                        value.is_boolean()
+                    }
+                    "search" | "before_id" | "thread_cursor_id" if extended => {
+                        value.as_str().is_some_and(|text| text.len() <= 512)
+                    }
+                    "search_mode" if extended => {
+                        matches!(value.as_str(), Some("prefix" | "fulltext"))
+                    }
+                    "page" | "depth_limit" | "thread_cursor" if extended => {
+                        value.as_u64().is_some()
+                    }
+                    "feed_types" if extended => strings(value).is_some(),
                     tag => {
                         tag.len() == 2
                             && tag.starts_with('#')
@@ -107,7 +124,7 @@ pub fn matches(filter: &Map<String, Value>, event: &Event) -> bool {
 /// the user.
 pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let filters = filters(params)?;
+    let filters = filters(params, true)?;
     let http = RelayHttp::new(community.read(cx).origin.clone(), identity(cx)?);
     Ok(on_tokio(cx, async move {
         let mut events = http
@@ -154,9 +171,15 @@ pub fn publish(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
+    // App data (NIP-78) is signed apart from what shows in conversations.
+    let purpose = if kind == 30078 {
+        Purpose::AppData
+    } else {
+        Purpose::Content
+    };
     let event = identity
-        .template(Purpose::Content, kind, now, tags, content)
-        .and_then(|unsigned| identity.sign(Purpose::Content, unsigned))
+        .template(purpose, kind, now, tags, content)
+        .and_then(|unsigned| identity.sign(purpose, unsigned))
         .map_err(|error| (3, format!("Buzz does not publish this event: {error}")))?;
     let http = RelayHttp::new(community.read(cx).origin.clone(), identity);
     Ok(on_tokio(cx, async move {
@@ -183,7 +206,7 @@ pub fn watch(
     cx: &mut App,
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
-    let filters = filters(params)?;
+    let filters = filters(params, false)?;
     let mut live = community.read(cx).session.live_events();
     let (sender, mut values) = futures::channel::mpsc::unbounded::<Vec<Value>>();
     Runtime::handle(cx).spawn(async move {
@@ -240,7 +263,11 @@ mod tests {
     #[test]
     fn filters_match_like_a_relay() {
         let event = event(9, vec![vec!["h".into(), "room".into()]]);
-        let filter = |value: Value| filters(&json!({ "filters": [value] })).unwrap().remove(0);
+        let filter = |value: Value| {
+            filters(&json!({ "filters": [value] }), false)
+                .unwrap()
+                .remove(0)
+        };
         assert!(matches(
             &filter(json!({ "kinds": [9], "#h": ["room"] })),
             &event
@@ -262,12 +289,16 @@ mod tests {
     fn filters_are_checked() {
         for bad in [
             json!({ "filters": [] }),
-            json!({ "filters": [{ "search": "x" }] }),
+            json!({ "filters": [{ "search_mode": "fuzzy" }] }),
             json!({ "filters": [{ "#hh": ["x"] }] }),
             json!({ "filters": [{ "kinds": ["9"] }] }),
             json!({ "filters": [7] }),
         ] {
-            assert!(filters(&bad).is_err(), "{bad}");
+            assert!(filters(&bad, true).is_err(), "{bad}");
         }
+        // Search reads history; a live watch cannot apply it.
+        let search = json!({ "filters": [{ "search": "x", "search_mode": "fulltext" }] });
+        assert!(filters(&search, true).is_ok());
+        assert!(filters(&search, false).is_err());
     }
 }

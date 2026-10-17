@@ -1689,6 +1689,8 @@ impl ExternalPlugins {
             "channels/details" => later(content::details(params, cx)),
             "kit/get" => Reply::Now(content::kit(cx)),
             "projects/list" => later(content::projects(cx)),
+            "community/info" => later(capabilities::info(cx)),
+            "contributions/list" => Reply::Now(Ok(capabilities::contributions(cx))),
             "workflows/list" => later(workflows::list(params, cx)),
             "workflows/runs" => later(workflows::runs(params, cx)),
             "workflows/operations" => Reply::Now(workflows::operations(cx)),

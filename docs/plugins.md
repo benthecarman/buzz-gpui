@@ -425,9 +425,11 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `thread/messages` | `channel`, `root` | `{"root","replies","hasMore"}` |
 | `channel/watch` | `channel`, `limit` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). |
 | `thread/watch` | `channel`, `root` | `{"watch","channel","root"}`. Buzz then sends `thread/changed` with `root`, `replies`, `hasMore` and `error`, now and whenever the thread changes. |
-| `events/watch` | `filters` (see `events/query`) | `{"watch"}`. Buzz then sends `events/live` with `events`, the live events that match, from now on. |
+| `events/watch` | `filters` (as `events/query` takes, without the read extensions) | `{"watch"}`. Buzz then sends `events/live` with `events`, the live events that match, from now on. |
 | `channel/unwatch`, `thread/unwatch`, `events/unwatch` | `watch` | `null`. A plugin follows at most 16 channels, threads and filters in all. |
-| `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit` | The matching signed events, at most 500, read from the community as you |
+| `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit`, plus the relay's read extensions: `search` with `search_mode` (`prefix` or `fulltext`), `page`, `feed_types`, `top_level`, `include_aux`, `include_summaries`, `before_id`, `thread_window`, `depth_limit`, `thread_cursor` and `thread_cursor_id` | The matching signed events, at most 500, read from the community as you |
+| `community/info` | none | The community relay's NIP-11 document. Its `self` key signs what the relay publishes, such as rosters and the archive. |
+| `contributions/list` | none | `{"pages","panels","settings","accountActions"}`: what Buzz and its plugins added, each by its `plugin/id` `key` and `title`; pages also give `placement` and `routes` (their route version, or `null`), and panels `order` and `launcher` |
 | `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
 | `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys), `attachments` (optional, from `files/upload`) | `{"id"}`, once the message is queued: follow it with `outbox/get` or `outbox/watch`. `id` is `null` if Buzz changed the text on the way, such as by adding attachment links. Needs `send-messages`. |
 | `messages/edit` | `channel`, `message`, `content` | `null` once sent. Only your own messages. Needs `send-messages`. |
@@ -436,7 +438,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/report` | `channel`, `message`, `reason` (`spam`, `profanity`, `nudity`, `impersonation`, `malware`, `illegal` or `other`), `note` | `null` once the relay accepts it. Needs `send-messages`. |
 | `messages/retry`, `messages/dismiss` | `message` (one of yours whose `delivery` is `failed`) | `null`. Sends it again, or drops it. Needs `send-messages`. |
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
-| `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
+| `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003), plus app data (30078) and the agent and team catalogs (30175, 30178), as buzz-app does. Needs `publish-events`. |
 | `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` and `version` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |
 | `ui/openPanel` | `panel` (one of the plugin's panel ids), `target` (what it shows, such as a link or any text the plugin reads from `view/open`) | `null`. Opens the panel as a tab of the open conversation. |
 | `panel/canOpen` | `target` | Whether any panel, the plugin's or not, shows `target`. |
@@ -472,7 +474,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `teams/save` | `id` (to replace one), `name`, `instructions`, `members` (agents on this device) | The team. Needs `manage-agents`. |
 | `teams/remove` | `id` | `null`. Its agents stay. Needs `manage-agents`. |
 | `dm/open` | `pubkeys` (1 to 8 others) | `{"channel"}`: the direct message with them, made if new. Needs `manage-channels`. |
-| `channels/create` | `name`, `description`, `private`, `ttlSeconds` (optional; without it the channel is ongoing) | `{"channel"}`. Needs `manage-channels`. |
+| `channels/create` | `name`, `description`, `private`, `ttlSeconds` (optional; without it the channel is ongoing), `labels` (optional, up to 16) | `{"channel"}`. Needs `manage-channels`. |
 | `channels/action` | `channel`, `action`: `join`, `leave`, `archive`, `unarchive`, `delete` (by an owner) or `hide` (a DM) | `null` once the relay shows it. Needs `manage-channels`. |
 | `channels/addMember` | `channel`, `pubkey` (such as one of your agents) | `null` once the roster lists them. Needs `manage-channels`. |
 | `channels/changeMember` | `channel`, `pubkey`, `change` (`admin`, `member`, `guest` or `remove`), `expected` (their role now: `owner`, `admin`, `member`, `guest` or `bot`) | `null` once done. Needs `manage-channels`. |
