@@ -283,10 +283,24 @@ def thread_note(state):
     }
 
 
+def provider_dialog(state):
+    """The Greeter's provider dialog: it needs nothing to run."""
+    return {
+        "type": "column",
+        "gap": "md",
+        "children": [
+            text("Greeter runs inside the Hello plugin, so it is always ready."),
+            {"type": "row", "justify": "end", "children": [{"type": "button", "id": "close", "label": "Done", "variant": "prominent"}]},
+        ],
+    }
+
+
 def render(view):
     state = views[view]
     kind = state["kind"]
-    if kind == "dialog":
+    if kind == "agentProvider":
+        tree = provider_dialog(state)
+    elif kind == "dialog":
         tree = about_dialog(state)
     elif kind == "accessory":
         tree = thread_note(state)
@@ -399,7 +413,7 @@ def on_event(params):
         else:
             request("messages/delete", params)
         return
-    elif element == "close" and event == "click" and state["kind"] == "dialog":
+    elif element == "close" and event == "click" and state["kind"] in ("dialog", "agentProvider"):
         request("ui/closeView", {"view": view})
         return
     elif element == "route" and event == "click":
@@ -555,11 +569,24 @@ def handle(message):
                                 "summary": True,
                                 "peek": True,
                                 "tabs": [{"id": "greeting", "title": "Greeting"}],
+                                "createInstructions": True,
+                                "createModels": {
+                                    "models": [
+                                        {"id": "polite", "label": "Polite"},
+                                        {"id": "brief", "label": "Brief", "description": "One line only."},
+                                    ],
+                                    "defaultLabel": "Plain",
+                                },
+                                "models": True,
+                                "provider": True,
+                                "carry": {"instructions": "instructions"},
                             }
                         ],
                     },
                 }
             )
+            # The Greeter needs nothing installed, so it is ready at once.
+            notify("agentType/readiness", {"type": "greeter", "readiness": "ready"})
         elif method == "link/render":
             send({"id": message["id"], "result": {"tree": link_chip(params["url"])}})
         elif method == "agentTool/call" and params["tool"] == "hello_time":
@@ -578,6 +605,14 @@ def handle(message):
         elif method == "inline/render":
             badge = ticket_badge(params["text"])
             send({"id": message["id"], "result": badge and {"tree": badge}})
+        elif method == "agent/models":
+            send({"id": message["id"], "result": {
+                "current": params["agent"]["config"].get("model") or "polite",
+                "models": [
+                    {"id": "polite", "label": "Polite", "efforts": [{"id": "low", "label": "Low"}, {"id": "high", "label": "High"}], "effort": "low"},
+                    {"id": "brief", "label": "Brief", "efforts": []},
+                ],
+            }})
         elif method == "agent/summary":
             greeting = params["agent"]["config"].get("greeting", "Hello")
             send({"id": message["id"], "result": {"text": f"Says “{greeting}”"}})
@@ -601,6 +636,8 @@ def handle(message):
         on_event(params)
     elif method == "view/close":
         views.pop(params.get("view"), None)
+    elif method == "agentType/check":
+        notify("agentType/readiness", {"type": params["type"], "readiness": "ready"})
     elif method == "page/route":
         if params["view"] in views:
             views[params["view"]]["route"] = params["route"]

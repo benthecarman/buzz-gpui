@@ -466,11 +466,16 @@ mod tests {
                 "view/open",
                 json!({ "view": "v1", "contribution": "hello", "kind": "page" }),
             );
-            let mut next = async || {
-                tokio::time::timeout(Duration::from_secs(10), events.next())
+            let mut next = async || loop {
+                let event = tokio::time::timeout(Duration::from_secs(10), events.next())
                     .await
                     .expect("the plugin answered")
-                    .expect("the plugin is running")
+                    .expect("the plugin is running");
+                // The Greeter's readiness is not what these steps await.
+                match &event {
+                    Event::Notification { method, .. } if method == "agentType/readiness" => {}
+                    _ => return event,
+                }
             };
             let tree = |event: Event| match event {
                 Event::Notification { method, params } if method == "view/render" => {

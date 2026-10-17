@@ -142,6 +142,28 @@ impl ExternalView {
         .into()
     }
 
+    /// A plugin agent type's provider dialog body.
+    pub fn agent_provider(
+        plugin: &str,
+        kind: &'static str,
+        close: Close,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        let extra = json!({ "type": kind });
+        Self::open(
+            plugin,
+            kind,
+            "agentProvider",
+            |view| {
+                view.extra = extra;
+                view.close = Some(close);
+            },
+            cx,
+        )
+        .into()
+    }
+
     /// A reaction picker, standing in for the emoji picker.
     pub fn reaction_picker(
         plugin: &str,

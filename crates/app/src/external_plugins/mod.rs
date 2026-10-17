@@ -1093,6 +1093,11 @@ impl ExternalPlugins {
                         contribute::set_badge(&id, &params, cx);
                     }
                 }
+                "agentType/readiness" => {
+                    if let Some(id) = plugin.id().map(str::to_owned) {
+                        agents::set_readiness(&id, &params, cx);
+                    }
+                }
                 "settings/visibility" => {
                     if let Some(id) = plugin.id().map(str::to_owned) {
                         contribute::set_card_visibility(&id, &params, cx);
@@ -1312,11 +1317,12 @@ impl ExternalPlugins {
                 Reply::Now(Ok(Value::Null))
             }
             "messages/send" | "messages/edit" | "messages/react" | "messages/delete"
-            | "files/upload" | "events/publish" => {
-                let permission = if method == "events/publish" {
-                    Permission::PublishEvents
-                } else {
-                    Permission::SendMessages
+            | "files/upload" | "events/publish" | "agents/create" | "agents/save"
+            | "agents/remove" => {
+                let permission = match method {
+                    "events/publish" => Permission::PublishEvents,
+                    "agents/create" | "agents/save" | "agents/remove" => Permission::ManageAgents,
+                    _ => Permission::SendMessages,
                 };
                 let allowed = cx
                     .global_mut::<Self>()
@@ -1340,10 +1346,14 @@ impl ExternalPlugins {
                     "messages/delete" => capabilities::delete(params, cx),
                     "files/upload" => capabilities::upload(params, cx),
                     "events/publish" => events::publish(params, cx),
+                    "agents/create" => agents::create(params, cx),
+                    "agents/save" => agents::save(params, cx),
+                    "agents/remove" => agents::remove(params, cx),
                     _ => capabilities::send(params, cx),
                 })
             }
             "events/query" => later(events::query(params, cx)),
+            "agents/list" => Reply::Now(agents::list(cx)),
             "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),
             _ => Reply::Now(Self::answer_now(method, params, cx)),
         }

@@ -58,6 +58,8 @@ pub enum Permission {
     /// Sign and publish other Nostr events as the user, of the kinds the
     /// app itself writes.
     PublishEvents,
+    /// Create, change and remove the user's agents.
+    ManageAgents,
 }
 
 impl Permission {
@@ -66,6 +68,7 @@ impl Permission {
         match self {
             Permission::SendMessages => "Send, edit, react to and delete messages as you",
             Permission::PublishEvents => "Publish other events as you",
+            Permission::ManageAgents => "Create, change and remove your agents",
         }
     }
 }
@@ -275,6 +278,58 @@ pub struct AgentTypeDecl {
     /// Settings tabs before Attention, each a view of kind `agentTab`.
     #[serde(default)]
     pub tabs: Vec<AgentTabDecl>,
+    /// The New agent dialog offers the new agent's instructions.
+    #[serde(default)]
+    pub create_instructions: bool,
+    /// Model choices in the New agent dialog, saved as the config's
+    /// `model`.
+    #[serde(default)]
+    pub create_models: Option<CreateModelsDecl>,
+    /// Whether Buzz asks `agent/models` for the models and efforts the
+    /// owner can pick while mentioning an agent.
+    #[serde(default)]
+    pub models: bool,
+    /// Device-wide readiness under Provider settings: the plugin reports
+    /// it with `agentType/readiness`, and its dialog is a view of kind
+    /// `agentProvider`.
+    #[serde(default)]
+    pub provider: bool,
+    /// The config keys that hold what another type may take over when an
+    /// agent changes type.
+    #[serde(default)]
+    pub carry: Option<CarryDecl>,
+    /// What leaving this type costs, shown before a change of type.
+    #[serde(default)]
+    pub migration_warning: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateModelsDecl {
+    #[serde(default)]
+    pub models: Vec<ModelChoiceDecl>,
+    /// The default row's label.
+    #[serde(default)]
+    pub default_label: Option<String>,
+    /// Whether an id not listed may be entered.
+    #[serde(default)]
+    pub allow_custom: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ModelChoiceDecl {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct CarryDecl {
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

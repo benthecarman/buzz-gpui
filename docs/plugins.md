@@ -68,7 +68,7 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `description` | Optional. Shown in Settings. |
 | `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
 | `apiVersion` | Optional. `1`, the only version so far. |
-| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). Reading needs no permission. |
+| `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents. Reading needs no permission. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
 `BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
@@ -196,6 +196,24 @@ the answer until the agent's name or config changes:
   name. Answer `{"text"}` (up to 120 characters) or `null` for the title.
 - `peek: true`: Buzz asks `agent/peek` for a glance shown when the agent is
   selected. Answer `{"tree"}` or `null`, as a renderer does.
+- `createInstructions: true`: the New agent dialog offers the new agent's
+  instructions.
+- `createModels` (`{"models": [{"id", "label", "description"}], "defaultLabel",
+  "allowCustom"}`): model choices in the New agent dialog, saved as the
+  config's `model`.
+- `models: true`: Buzz asks `agent/models` for the models and effort levels the
+  owner can pick while mentioning an agent. Answer `{"current", "models":
+  [{"id", "label", "efforts": [{"id", "label"}], "effort"}]}`. The picks reach
+  `agent/run` as `model` and `effort`.
+- `provider: true`: the type has device-wide readiness under Provider settings
+  on the Agents page. Send the notification `agentType/readiness` with `type`,
+  `readiness` (`checking`, `ready` or `attention`), and optional
+  `attentionLabel` and `blocking`. Buzz sends `agentType/check` when the user
+  asks to check again. The provider's dialog is a view of `kind`
+  `agentProvider`; close it with `ui/closeView`.
+- `carry` (`{"instructions", "workspace"}`, each a config key): what another
+  type takes over when an agent changes type, and where this type keeps what
+  it takes over. `migrationWarning` says what leaving this type costs.
 - `tabs` (`[{"id", "title"}]`, at most 8): settings tabs before Attention.
   Each is a view of `kind` `agentTab`; `view/open` also carries `type`,
   `agent` and `contribution` (the tab id). To save, send `agent/save` with the
@@ -356,6 +374,10 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
+| `agents/list` | none | `{"agents", "running"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled"}` |
+| `agents/create` | `type` (a `plugin/id` key, such as `com.example.hello/greeter`), `name`, optional `config` and `picture` (https) | The new agent. Needs `manage-agents`. |
+| `agents/save` | `pubkey`, and any of `name`, `picture`, `config` (the whole config), `attentionEnabled` | `null` once saved. Needs `manage-agents`. |
+| `agents/remove` | `pubkey` | `null` once the agent and its key are gone. Needs `manage-agents`. |
 | `ui/closeView` | `view` (an open `dialog`) | `null`, once the dialog has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |
 | `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |

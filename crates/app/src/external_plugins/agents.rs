@@ -258,6 +258,113 @@ struct PluginType {
     summary: bool,
     peek: bool,
     tabs: Vec<(String, String)>,
+    decl: AgentTypeDecl,
+}
+
+thread_local! {
+    /// Each plugin provider's readiness, by type key, as it last said.
+    static READINESS: std::cell::RefCell<HashMap<String, registry::ProviderSnapshot>> =
+        std::cell::RefCell::default();
+}
+
+/// `agentType/readiness`: a plugin type's device-wide readiness.
+pub fn set_readiness(plugin: &str, params: &Value, cx: &mut App) {
+    use registry::{ProviderSnapshot, Readiness};
+    let Some(kind) = params.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let readiness = match params.get("readiness").and_then(Value::as_str) {
+        Some("ready") => Readiness::Ready,
+        Some("attention") => Readiness::Attention,
+        _ => Readiness::Checking,
+    };
+    let snapshot = ProviderSnapshot {
+        readiness,
+        attention_label: params
+            .get("attentionLabel")
+            .and_then(Value::as_str)
+            .map(|label| label.chars().take(64).collect()),
+        blocking: params
+            .get("blocking")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    READINESS.with_borrow_mut(|readiness| readiness.insert(format!("{plugin}/{kind}"), snapshot));
+    registry::providers_changed(cx);
+}
+
+/// A plugin type's provider: readiness it reports, a check it is asked
+/// for, and its dialog as a plugin view.
+struct Provider {
+    plugin: String,
+    kind: &'static str,
+}
+
+impl registry::AgentProvider for Provider {
+    fn snapshot(&self, _: &App) -> registry::ProviderSnapshot {
+        READINESS.with_borrow(|readiness| {
+            readiness
+                .get(&format!("{}/{}", self.plugin, self.kind))
+                .cloned()
+                .unwrap_or(registry::ProviderSnapshot::CHECKING)
+        })
+    }
+
+    fn check(&self, cx: &mut App) {
+        ExternalPlugins::notify_running(
+            &self.plugin,
+            "agentType/check",
+            json!({ "type": self.kind }),
+            cx,
+        );
+    }
+
+    fn dialog_body(
+        &self,
+        close: registry::CloseProvider,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyView {
+        super::view::ExternalView::agent_provider(&self.plugin, self.kind, close, window, cx)
+    }
+}
+
+/// A `agent/models` answer.
+fn models_of(value: &Value) -> Option<registry::Models> {
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let models = value
+        .get("models")?
+        .as_array()?
+        .iter()
+        .take(100)
+        .filter_map(|model| {
+            Some(registry::Model {
+                id: text(model, "id")?,
+                label: text(model, "label").or_else(|| text(model, "id"))?,
+                efforts: model
+                    .get("efforts")
+                    .and_then(Value::as_array)
+                    .map(|efforts| {
+                        efforts
+                            .iter()
+                            .take(16)
+                            .filter_map(|effort| {
+                                Some(registry::Effort {
+                                    id: text(effort, "id")?,
+                                    label: text(effort, "label").or_else(|| text(effort, "id"))?,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                effort: text(model, "effort"),
+            })
+        })
+        .collect();
+    Some(registry::Models {
+        current: text(value, "current").unwrap_or_default(),
+        models,
+    })
 }
 
 /// An agent as a plugin sees it.
@@ -394,6 +501,105 @@ impl AgentType for PluginType {
         true
     }
 
+    fn create_instructions(&self) -> bool {
+        self.decl.create_instructions
+    }
+
+    fn create_models(&self, _: &mut App) -> Option<registry::CreateModels> {
+        let decl = self.decl.create_models.as_ref()?;
+        Some(registry::CreateModels {
+            models: decl
+                .models
+                .iter()
+                .map(|model| registry::ModelChoice {
+                    id: model.id.clone(),
+                    label: model.label.clone(),
+                    description: model.description.clone(),
+                })
+                .collect(),
+            default_label: decl
+                .default_label
+                .clone()
+                .unwrap_or_else(|| "Default".to_owned()),
+            default_description: None,
+            allow_custom: decl.allow_custom,
+            loading: false,
+        })
+    }
+
+    fn provider(&self, _: &App) -> Option<std::rc::Rc<dyn registry::AgentProvider>> {
+        self.decl.provider.then(|| {
+            std::rc::Rc::new(Provider {
+                plugin: self.plugin.clone(),
+                kind: self.id,
+            }) as std::rc::Rc<dyn registry::AgentProvider>
+        })
+    }
+
+    fn models(
+        &self,
+        agent: &Agent,
+        cx: &mut App,
+    ) -> Option<Task<Result<registry::Models, String>>> {
+        if !self.decl.models {
+            return None;
+        }
+        let request = self.requester.request(
+            "agent/models",
+            json!({ "type": self.id, "agent": agent_json(agent) }),
+            Duration::from_secs(30),
+        );
+        Some(cx.background_spawn(async move {
+            match request.await {
+                Ok(Ok(value)) => models_of(&value)
+                    .ok_or_else(|| "The plugin's models were not valid.".to_owned()),
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(error.to_string()),
+            }
+        }))
+    }
+
+    fn adopts(&self) -> bool {
+        self.decl.carry.is_some()
+    }
+
+    fn adopt(&self, carry: &buzz_host::api::Carry, mut config: Value) -> Value {
+        let Some(keys) = &self.decl.carry else {
+            return config;
+        };
+        if let Value::Object(fields) = &mut config {
+            for (key, value) in [
+                (&keys.instructions, &carry.instructions),
+                (&keys.workspace, &carry.workspace),
+            ] {
+                if let (Some(key), Some(value)) = (key, value) {
+                    fields.insert(key.clone(), Value::from(value.clone()));
+                }
+            }
+        }
+        config
+    }
+
+    fn carry(&self, config: &Value) -> buzz_host::api::Carry {
+        let Some(keys) = &self.decl.carry else {
+            return buzz_host::api::Carry::default();
+        };
+        let read = |key: &Option<String>| {
+            key.as_ref()
+                .and_then(|key| config.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        buzz_host::api::Carry {
+            instructions: read(&keys.instructions),
+            workspace: read(&keys.workspace),
+        }
+    }
+
+    fn migration_warning(&self) -> Option<&'static str> {
+        self.decl.migration_warning.clone().map(intern)
+    }
+
     fn timeout(&self) -> Duration {
         self.timeout
     }
@@ -493,6 +699,7 @@ pub fn register(
                 .iter()
                 .map(|tab| (tab.id.clone(), tab.title.clone()))
                 .collect(),
+            decl: decl.clone(),
         };
         match registry::register_type(plugin, Arc::new(kind), cx) {
             Ok(()) => done.push(AgentAdded::Type(intern(format!("{plugin}/{}", decl.id)))),
@@ -500,6 +707,118 @@ pub fn register(
         }
     }
     (done, errors)
+}
+
+/// One of the owner's agents for `agents/list`.
+fn agent_entry(agent: &Agent) -> Value {
+    json!({
+        "pubkey": agent.pubkey,
+        "name": agent.name,
+        "type": agent.agent_type,
+        "owner": agent.owner,
+        "relay": agent.relay,
+        "picture": agent.picture,
+        "config": agent.config,
+        "attentionEnabled": agent.attention_enabled,
+    })
+}
+
+fn agents2(cx: &App) -> Result<Entity<crate::agents2::Agents2>, Failure> {
+    crate::agents2::Agents2::global(cx).ok_or((1, "Agents are not available.".to_owned()))
+}
+
+fn https(value: Option<&Value>) -> Result<Option<String>, Failure> {
+    match value.and_then(Value::as_str) {
+        None => Ok(None),
+        Some("") => Ok(Some(String::new())),
+        Some(url) if url.starts_with("https://") => Ok(Some(url.to_owned())),
+        Some(_) => Err((INVALID_PARAMS, "picture must be an https URL".to_owned())),
+    }
+}
+
+/// `agents/list`: the owner's agents in the selected community, and every
+/// agent running on this device.
+pub fn list(cx: &App) -> Result<Value, Failure> {
+    let agents = agents2(cx)?;
+    let agents = agents.read(cx);
+    Ok(json!({
+        "agents": agents.agents().iter().map(agent_entry).collect::<Vec<_>>(),
+        "running": agents.running().iter().map(agent_entry).collect::<Vec<_>>(),
+    }))
+}
+
+/// `agents/create`: a new agent of `type` (a `plugin/id` key) named
+/// `name`, in the selected community.
+pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let text = |key: &str| params.get(key).and_then(Value::as_str);
+    let kind = text("type").ok_or((INVALID_PARAMS, "type is required".to_owned()))?;
+    if registry::type_of(kind, cx).is_none() {
+        return Err((INVALID_PARAMS, format!("There is no agent type {kind}")));
+    }
+    let name = text("name").ok_or((INVALID_PARAMS, "name is required".to_owned()))?;
+    let config = params
+        .get("config")
+        .filter(|config| !config.is_null())
+        .cloned();
+    if config.as_ref().is_some_and(|config| !config.is_object()) {
+        return Err((INVALID_PARAMS, "config must be an object".to_owned()));
+    }
+    let made = crate::agents2::Made {
+        config,
+        picture: https(params.get("picture"))?,
+        carry: None,
+    };
+    let (kind, name) = (kind.to_owned(), name.to_owned());
+    let task = agents2(cx)?.update(cx, |agents, cx| agents.create(&kind, &name, made, None, cx));
+    Ok(cx.background_spawn(async move {
+        task.await
+            .map(|agent| agent_entry(&agent))
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `agents/save`: changes an agent's name, picture, config or whether
+/// its attention wakes it.
+pub fn save(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let pubkey = params
+        .get("pubkey")
+        .and_then(Value::as_str)
+        .ok_or((INVALID_PARAMS, "pubkey is required".to_owned()))?
+        .to_owned();
+    let config = params
+        .get("config")
+        .filter(|config| !config.is_null())
+        .cloned();
+    if config.as_ref().is_some_and(|config| !config.is_object()) {
+        return Err((INVALID_PARAMS, "config must be an object".to_owned()));
+    }
+    let change = crate::agents2::AgentChange {
+        name: params
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        picture: https(params.get("picture"))?,
+        config,
+        attention_enabled: params.get("attentionEnabled").and_then(Value::as_bool),
+        ..Default::default()
+    };
+    let task = agents2(cx)?.update(cx, |agents, cx| agents.save(&pubkey, change, cx));
+    Ok(cx.background_spawn(
+        async move { task.await.map(|()| Value::Null).map_err(|error| (3, error)) },
+    ))
+}
+
+/// `agents/remove`: deletes one of the owner's agents and its key.
+pub fn remove(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let pubkey = params
+        .get("pubkey")
+        .and_then(Value::as_str)
+        .ok_or((INVALID_PARAMS, "pubkey is required".to_owned()))?
+        .to_owned();
+    let task = agents2(cx)?.update(cx, |agents, cx| agents.remove(&pubkey, cx));
+    Ok(cx.background_spawn(
+        async move { task.await.map(|()| Value::Null).map_err(|error| (3, error)) },
+    ))
 }
 
 /// `agent/tool`: runs a Buzz tool as the agent of an open call or run.
@@ -549,6 +868,25 @@ pub fn act(
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn plugin_models_are_read_and_bounded() {
+        let models = models_of(&json!({
+            "current": "a",
+            "models": [
+                { "id": "a", "label": "A", "efforts": [{ "id": "low" }, { "label": "no id" }], "effort": "low" },
+                { "id": "b" },
+                { "label": "no id" },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(models.current, "a");
+        assert_eq!(models.models.len(), 2);
+        assert_eq!(models.models[0].efforts.len(), 1);
+        assert_eq!(models.models[0].efforts[0].label, "low");
+        assert_eq!(models.models[1].label, "b");
+        assert!(models_of(&json!({})).is_none());
+    }
 
     struct Nobody;
 
@@ -661,7 +999,18 @@ mod tests {
                 }),
                 Duration::from_secs(10),
             );
-            let Some(Event::Request { id, method, params }) = events.next().await else {
+            let Some(Event::Request { id, method, params }) = events
+                .by_ref()
+                .filter(|event| {
+                    let readiness = matches!(
+                        event,
+                        Event::Notification { method, .. } if method == "agentType/readiness"
+                    );
+                    std::future::ready(!readiness)
+                })
+                .next()
+                .await
+            else {
                 panic!("no agent/tool");
             };
             assert_eq!(method, "agent/tool");
