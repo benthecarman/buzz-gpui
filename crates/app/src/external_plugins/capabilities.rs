@@ -104,10 +104,43 @@ pub fn message(row: &MessageRow, profiles: &Profiles) -> Value {
         })).collect::<Vec<_>>(),
         "attachments": row.attachments.iter().map(|attachment| json!({
             "url": attachment.url,
+            "kind": match attachment.kind {
+                buzz_relay_client::fold::AttachmentKind::Image => "image",
+                buzz_relay_client::fold::AttachmentKind::Video => "video",
+                buzz_relay_client::fold::AttachmentKind::Audio => "audio",
+                buzz_relay_client::fold::AttachmentKind::File => "file",
+            },
             "mime": attachment.mime,
             "size": attachment.size,
             "name": attachment.name,
+            "duration": attachment.duration,
+            "waveform": attachment.waveform,
+            "voiceNote": attachment.voice_note,
+            "dimensions": attachment.dimensions.map(|size| json!({
+                "width": size.width,
+                "height": size.height,
+            })),
+            "blurhash": attachment.blurhash,
+            "previewUrl": attachment.preview_url,
         })).collect::<Vec<_>>(),
+        "mentionReferences": row
+            .mention_references
+            .iter()
+            .map(|key| key.to_hex())
+            .collect::<Vec<_>>(),
+        "sourceContent": row.source_content,
+        "sentFromThread": row.sent_from_thread.as_ref().map(|sent| json!({
+            "root": sent.root_id.to_hex(),
+            "excerpt": sent.excerpt,
+        })),
+        "diff": row.diff.as_ref().map(|diff| json!({
+            "filePath": diff.file_path,
+            "repoUrl": diff.repo_url,
+            "commitSha": diff.commit_sha,
+            "description": diff.description,
+            "truncated": diff.truncated,
+        })),
+        "deliveryError": row.delivery.as_ref().and_then(|delivery| delivery.error.clone()),
         "emoji": row.emoji.iter().map(|emoji| json!({
             "shortcode": emoji.shortcode,
             "url": emoji.url,
@@ -504,9 +537,41 @@ pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
                 .collect()
         })
         .unwrap_or_default();
+    let references: Vec<String> = params
+        .get("references")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_default();
+    // `{pubkey: {"model", "effort"}}` for mentioned agents.
+    let picks = params
+        .get("picks")
+        .and_then(Value::as_object)
+        .map(|picks| {
+            picks
+                .iter()
+                .map(|(key, pick)| {
+                    let field =
+                        |name: &str| pick.get(name).and_then(Value::as_str).map(str::to_owned);
+                    (
+                        key.to_ascii_lowercase(),
+                        buzz_relay_client::messages::RunPick {
+                            model: field("model"),
+                            effort: field("effort"),
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mentions = Mentions {
         recipients,
-        ..Mentions::default()
+        references,
+        picks,
     };
     let attachments = attachments(params)?;
     let session: Arc<Session> = community.read(cx).session.clone();
@@ -883,6 +948,141 @@ pub fn presence(params: &Value, cx: &App) -> Result<Value, Failure> {
             })
             .collect(),
     ))
+}
+
+/// `presence/watch`: follows up to 64 people's presence, whether or not
+/// Buzz shows them, and sends `presence/changed` with their states now
+/// and whenever they change.
+pub fn watch_presence(
+    params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    /// Stops following when the watch ends.
+    struct Held(futures::channel::mpsc::UnboundedSender<()>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = self.0.unbounded_send(());
+        }
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let keys = pubkeys(params, 64)?;
+    let community = community(cx)?;
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    community.update(cx, |community, _| {
+        community.set_presence_plugin(id, keys.clone())
+    });
+    let states = move |community: &Community| -> Value {
+        let presence = &community.snapshot.presence;
+        Value::Object(
+            keys.iter()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        json!(presence.get(key).map(|state| state.as_str())),
+                    )
+                })
+                .collect(),
+        )
+    };
+    let first = states(community.read(cx));
+    let last = std::cell::RefCell::new(first.clone());
+    let notify = std::rc::Rc::new(notify);
+    let send = notify.clone();
+    cx.defer(move |cx| send(json!({ "presence": first }), cx));
+    let subscription = cx.observe(&community, move |community, cx| {
+        let now = states(community.read(cx));
+        if now != *last.borrow() {
+            *last.borrow_mut() = now.clone();
+            notify(json!({ "presence": now }), cx);
+        }
+    });
+    let (sender, mut released) = futures::channel::mpsc::unbounded::<()>();
+    let weak = community.downgrade();
+    cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        released.next().await;
+        let _ = weak.update(cx, |community, _| {
+            community.set_presence_plugin(id, Vec::new())
+        });
+    })
+    .detach();
+    Ok((
+        Watch::new((subscription, Held(sender)), Task::ready(())),
+        json!({}),
+    ))
+}
+
+/// The signed-in identity.
+fn identity(cx: &App) -> Result<Arc<buzz_identity::Identity>, Failure> {
+    match &cx.global::<AppState>().identity {
+        crate::community::IdentityState::Ready(identity) => Ok(identity.clone()),
+        _ => Err((1, "You are not signed in.".to_owned())),
+    }
+}
+
+/// `projects/gitAuthorization`: a NIP-98 token, after `Authorization:
+/// Nostr `, for one of the community's repositories, good on its Git
+/// routes for 60 seconds (`authorizeGit`).
+pub fn git_authorization(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let repository = text(params, "repository").ok_or_else(|| invalid("repository is required"))?;
+    let token = community(cx)?
+        .read(cx)
+        .session
+        .projects()
+        .git_authorization(repository)
+        .map_err(invalid)?;
+    Ok(json!({ "repository": repository, "token": token }))
+}
+
+/// `agents/logProof`: the owner's signature for one read of an agent's
+/// harness log at the community's relay (`authorizeAgentLog`).
+pub fn log_proof(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let field = |key: &str| text(params, key).ok_or_else(|| invalid(format!("{key} is required")));
+    let community = community(cx)?;
+    let origin = community.read(cx).origin.http();
+    let signature = identity(cx)?
+        .harness_log_proof(
+            &origin,
+            field("id")?,
+            field("pubkey")?,
+            field("relayUrl")?,
+            field("nonce")?,
+        )
+        .map_err(|_| (3, "Log authorization unavailable".to_owned()))?;
+    Ok(json!({ "signature": signature }))
+}
+
+/// The most `media/get` hands over, before base64.
+const MAX_MEDIA: usize = 8 * 1024 * 1024;
+
+/// `media/get`: a file in the community's media, which only the user may
+/// read, as base64 (`session.media`).
+pub fn media(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use base64::Engine;
+    let url = text(params, "url")
+        .ok_or_else(|| invalid("url is required"))?
+        .to_owned();
+    let media = community(cx)?.read(cx).session.media().clone();
+    if !media.is_relay_media(&url) {
+        return Err(invalid(
+            "url is not the community's media; fetch it yourself",
+        ));
+    }
+    Ok(on_tokio(cx, async move {
+        let bytes = media
+            .fetch(&url)
+            .await
+            .map_err(|error| (3, error.to_string()))?;
+        if bytes.len() > MAX_MEDIA {
+            return Err((3, "The file is larger than 8 MiB.".to_owned()));
+        }
+        Ok(json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "size": bytes.len(),
+            "mime": buzz_relay_client::upload::mime_type(&url, &bytes),
+        }))
+    }))
 }
 
 /// `statuses/get`: people's current statuses, read fresh; `null` for

@@ -1282,6 +1282,7 @@ impl ExternalPlugins {
             "reminders/watch" => "reminders/changed",
             "outbox/watch" => "outbox/changed",
             "navigation/watch" => "navigation/changed",
+            "presence/watch" => "presence/changed",
             "agents/watch" => "agents/changed",
             "session/watch" => "session/changed",
             _ => "channel/changed",
@@ -1297,6 +1298,7 @@ impl ExternalPlugins {
             "reminders/watch" => channels::watch(params, notify, cx),
             "outbox/watch" => outbox::watch(params, notify, cx),
             "navigation/watch" => capabilities::watch_navigation(params, notify, cx),
+            "presence/watch" => capabilities::watch_presence(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
             "session/watch" => capabilities::watch_session(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
@@ -1574,6 +1576,11 @@ impl ExternalPlugins {
             "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
             "outbox/watch" => Self::watch(path, generation, "outbox/watch", params, cx),
             "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
+            "presence/watch" => Self::watch(path, generation, "presence/watch", params, cx),
+            "media/get" => later(capabilities::media(params, cx)),
+            "sidebar/get" => Reply::Now(channels::sidebar(cx)),
+            "projects/gitAuthorization" => Reply::Now(capabilities::git_authorization(params, cx)),
+            "agents/logProof" => Reply::Now(capabilities::log_proof(params, cx)),
             "navigation/get" => Reply::Now(Ok(capabilities::navigation_state(cx))),
             "outbox/get" => later(outbox::get(params, cx)),
             "archives/get" => later(channels::archives(params, cx)),
@@ -1587,7 +1594,7 @@ impl ExternalPlugins {
             "read/mark" => later(reading::mark(params, cx)),
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
             | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" | "outbox/unwatch"
-            | "navigation/unwatch" => {
+            | "navigation/unwatch" | "presence/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
@@ -1622,7 +1629,10 @@ impl ExternalPlugins {
             | "workflows/delete"
             | "workflows/trigger"
             | "workflows/dismiss"
-            | "sessions/create" => {
+            | "sessions/create"
+            | "sidebar/star"
+            | "sidebar/mute"
+            | "sidebar/sort" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1638,7 +1648,10 @@ impl ExternalPlugins {
                     | "workflows/delete"
                     | "workflows/trigger"
                     | "workflows/dismiss"
-                    | "sessions/create" => Permission::ManageChannels,
+                    | "sessions/create"
+                    | "sidebar/star"
+                    | "sidebar/mute"
+                    | "sidebar/sort" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1682,6 +1695,9 @@ impl ExternalPlugins {
                     "kit/save" => content::save_kit(params, cx),
                     "workflows/dismiss" => workflows::dismiss(params, cx),
                     "sessions/create" => channels::create_session(params, cx),
+                    "sidebar/star" | "sidebar/mute" | "sidebar/sort" => {
+                        channels::change_sidebar(method, params, cx)
+                    }
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }

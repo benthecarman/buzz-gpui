@@ -430,3 +430,93 @@ pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
             .map_err(|error| (3, error))
     }))
 }
+
+/// `sidebar/get`: how the user arranged the sidebar: starred and muted
+/// channels, saved groups and where channels sit in them, and each
+/// group's sort (`sidebarPreferences`).
+pub fn sidebar(cx: &App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let state = community.read(cx).snapshot.sidebar.clone();
+    let Some(data) = &state.data else {
+        return Ok(json!({ "loaded": false, "writable": false }));
+    };
+    Ok(json!({
+        "loaded": true,
+        "writable": state.writable,
+        "starred": data.starred,
+        "muted": data.muted,
+        "sort": data
+            .sort
+            .iter()
+            .map(|(group, mode)| (group.clone(), json!(mode.as_str())))
+            .collect::<serde_json::Map<_, _>>(),
+        "groups": data.sections.iter().map(|section| json!({
+            "id": section.id,
+            "name": section.name,
+            "icon": section.icon,
+        })).collect::<Vec<_>>(),
+        "assignments": data.assignments,
+    }))
+}
+
+/// `sidebar/star`, `sidebar/mute` and `sidebar/sort`: stars or unstars
+/// a channel, mutes or unmutes it, or sorts a group (`starred`,
+/// `channels`, `forums`, `dms` or `section:<id>`) by `alpha` or `recent`.
+pub fn change_sidebar(
+    method: &str,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::sidebar::SortMode;
+    use buzz_relay_client::sidebar_store::Destination;
+    let session = community(cx)?.read(cx).session.clone();
+    let on = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| invalid(format!("{key} must be true or false")))
+    };
+    let task = match method {
+        "sidebar/sort" => {
+            let group = text(params, "group")
+                .ok_or_else(|| invalid("group is required"))?
+                .to_owned();
+            let mode = match text(params, "mode") {
+                Some("alpha") => SortMode::Alpha,
+                Some("recent") => SortMode::Recent,
+                _ => return Err(invalid("mode must be alpha or recent")),
+            };
+            on_tokio(cx, async move {
+                session
+                    .sidebar_sort(&group, mode)
+                    .await
+                    .map_err(|error| (3, error))
+            })
+        }
+        "sidebar/mute" => {
+            let channel = channel(params, community(cx)?.read(cx))?;
+            let muted = on("muted")?;
+            on_tokio(cx, async move {
+                session
+                    .sidebar_mute(&channel, muted)
+                    .await
+                    .map_err(|error| (3, error))
+            })
+        }
+        _ => {
+            let channel = channel(params, community(cx)?.read(cx))?;
+            let destination = if on("starred")? {
+                Destination::Starred
+            } else {
+                Destination::Section(None)
+            };
+            on_tokio(cx, async move {
+                session
+                    .sidebar_move(&channel, destination)
+                    .await
+                    .map_err(|error| (3, error))
+            })
+        }
+    };
+    Ok(cx.background_spawn(async move { task.await.map(|()| Value::Null) }))
+}

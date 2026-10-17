@@ -339,6 +339,8 @@ pub struct Community {
     presence_demand: Vec<String>,
     /// People an open view (the members dialog) also follows.
     presence_extra: Vec<String>,
+    /// People plugins follow, by watch.
+    presence_plugins: std::collections::BTreeMap<u64, Vec<String>>,
     /// Agents whose messages the open timeline shows, for their badges.
     presence_rows: Vec<String>,
     /// People open profile panels show, counted per panel.
@@ -397,6 +399,7 @@ impl Community {
                 reading: None,
                 presence_demand: Vec::new(),
                 presence_extra: Vec::new(),
+                presence_plugins: Default::default(),
                 presence_rows: Vec::new(),
                 presence_profiles: Vec::new(),
                 icon,
@@ -437,6 +440,7 @@ impl Community {
             .iter()
             .chain(&self.presence_rows)
             .chain(&self.presence_profiles)
+            .chain(self.presence_plugins.values().flatten())
         {
             if !demand.contains(person) {
                 demand.push(person.clone());
@@ -459,6 +463,16 @@ impl Community {
 
     /// Also follows these people's presence, replacing the previous extra
     /// set.
+    /// Follows `people` for a plugin's watch `id`, or stops with none.
+    pub fn set_presence_plugin(&mut self, id: u64, people: Vec<String>) {
+        if people.is_empty() {
+            self.presence_plugins.remove(&id);
+        } else {
+            self.presence_plugins.insert(id, people);
+        }
+        self.follow_presence();
+    }
+
     pub fn set_presence_extra(&mut self, people: Vec<String>) {
         self.presence_extra = people;
         self.follow_presence();

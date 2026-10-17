@@ -433,7 +433,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `community/info` | none | The community relay's NIP-11 document. Its `self` key signs what the relay publishes, such as rosters and the archive. |
 | `contributions/list` | none | `{"pages","panels","settings","accountActions"}`: what Buzz and its plugins added, each by its `plugin/id` `key` and `title`; pages also give `placement` and `routes` (their route version, or `null`), and panels `order` and `launcher` |
 | `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
-| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys), `attachments` (optional, from `files/upload`) | `{"id"}`, once the message is queued: follow it with `outbox/get` or `outbox/watch`. `id` is `null` if Buzz changed the text on the way, such as by adding attachment links. Needs `send-messages`. |
+| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys, notified), `references` (optional pubkeys, shown but not notified), `picks` (optional `{pubkey: {"model","effort"}}` for mentioned agents), `attachments` (optional, from `files/upload`) | `{"id"}`, once the message is queued: follow it with `outbox/get` or `outbox/watch`. `id` is `null` if Buzz changed the text on the way, such as by adding attachment links. Needs `send-messages`. |
 | `messages/edit` | `channel`, `message`, `content` | `null` once sent. Only your own messages. Needs `send-messages`. |
 | `messages/react` | `channel`, `message`, `emoji` | `null` once sent. Needs `send-messages`. |
 | `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
@@ -452,6 +452,11 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `names/get` | `pubkeys` (at most 500) | `{"<pubkey>": {"name","qualifier"}}`: names as Buzz shows them, through the naming policy, with the npub suffix that tells namesakes apart |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |
 | `presence/get` | `pubkeys` (at most 500) | `{"<pubkey>": "online" | "away" | "offline" | null}`, for people Buzz already follows; `null` for others |
+| `presence/watch` | `pubkeys` (at most 64) | `{"watch"}`. Buzz follows their presence, shown or not, and sends `presence/changed` with `presence` (as `presence/get` gives it) now and whenever it changes. Stop with `presence/unwatch`. |
+| `media/get` | `url` (the community's media) | `{"data","size","mime"}`: the file as base64, at most 8 MiB, fetched as you. Other URLs, fetch yourself. |
+| `sidebar/get` | none | `{"loaded","writable","starred","muted","sort","groups","assignments"}`: your starred and muted channels, each group's sort, your saved groups `{"id","name","icon"}`, and which group each channel is in |
+| `sidebar/star`, `sidebar/mute` | `channel`, and `starred` or `muted` (`true` or `false`) | `null` once saved. Unstarring returns a channel to its default section. Needs `manage-channels`. |
+| `sidebar/sort` | `group` (`starred`, `channels`, `forums`, `dms` or `section:<id>`), `mode` (`alpha` or `recent`) | `null` once saved. Needs `manage-channels`. |
 | `statuses/get` | `pubkeys` (at most 20) | `{"<pubkey>": {"text","emoji","updatedAt","expiresAt"} | null}`, read fresh |
 | `typing/get` | `channel`, `root` (optional, a thread) | The pubkeys typing there |
 | `emoji/list` | none | The community's custom emoji: `[{"shortcode","url"}]` |
@@ -500,6 +505,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `projects/list` | none | The community's repositories and projects, each `{"kind","owner","dtag","address","name","description","route","event"}`. `route` is what `ui/navigate` takes as `params` for the Projects page, `buzz.projects/projects`. |
 | `projects/load` | `route` (an entity's `route`, or one naming a `tab`, `commit`, or an issue or pull request `id`) | `{"entity","repositories","unavailableRepositories","channels","item","status","commit","activity","items","truncated"}`: a project's repositories, linked channels, and the issue or pull request the route names with its comments, as Nostr events |
 | `projects/home` | `channel` | `{"home","ambiguous"}`: the channel's project, or `null` |
+| `projects/gitAuthorization` | `repository` (a `https://…/git/<owner>/<d>.git` URL of the community) | `{"repository","token"}`: a NIP-98 value for `Authorization: Nostr `, good on that repository's Git routes for 60 seconds, for running Git yourself |
+| `agents/logProof` | `id` (the agent's log session), `pubkey` (the agent), `relayUrl` (the community's relay), `nonce` (the host's challenge) | `{"signature"}`: your proof, as the agent's owner, for one read of its harness log |
 | `projects/git` | `owner`, `dtag`, optional `commit` and `path` | `{"head","commits","files","readme","file","diff"}`: read with Git from the community; `file` is the file at `path` and `diff` the commit's changes. Failures are `notFound`, `denied`, `unavailable` or `invalidTarget`. |
 | `threads/follow` | `channel`, `root`, and `following` (`true` or `false`), or no `following` to ask | Whether you follow the thread now |
 | `reminders/list` | none | `{"reminders","error"}`, each `{"id","createdAt","notBefore","status","note","message"}` with `status` `pending`, `done` or `cancelled` |
@@ -532,10 +539,21 @@ A message looks like this:
   "mentions": [], "delivery": null, "kind": 9, "audience": null,
   "signer": null, "workflowOwner": null, "participants": [],
   "reactions": [{"content": "👍", "emojiUrl": null, "count": 1, "authors": ["<pubkey>"]}],
-  "attachments": [{"url": "https://…", "mime": "image/png", "size": 73, "name": "dot.png"}],
-  "emoji": [{"shortcode": "party", "url": "https://…"}]
+  "attachments": [{"url": "https://…", "kind": "image", "mime": "image/png",
+    "size": 73, "name": "dot.png", "duration": null, "waveform": null,
+    "voiceNote": false, "dimensions": {"width": 1, "height": 1},
+    "blurhash": null, "previewUrl": null}],
+  "emoji": [{"shortcode": "party", "url": "https://…"}],
+  "mentionReferences": [], "sourceContent": null, "sentFromThread": null,
+  "diff": null, "deliveryError": null
 }
 ```
+
+`mentionReferences` are people named without being notified;
+`sentFromThread` (`{"root","excerpt"}`) marks a copy of a thread reply;
+`diff` (`{"filePath","repoUrl","commitSha","description","truncated"}`)
+describes a diff message; `sourceContent` is the text before Buzz moved
+attachment links out of it.
 
 `authorName` is `null` until Buzz knows the author. Ask `profiles/get`
 for anyone you need: a profile with `loaded: false` is a placeholder, and
