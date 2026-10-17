@@ -371,6 +371,8 @@ const PREPARED_LIMIT: usize = 2048;
 fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
     let identities = identities(row);
     let mut hasher = DefaultHasher::new();
+    // Text renderers may draw the same prose differently by message.
+    row.id.hash(&mut hasher);
     row.content.hash(&mut hasher);
     row.edited.hash(&mut hasher);
     row.attachment_seams.hash(&mut hasher);
@@ -584,6 +586,10 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
     let mut footnotes = HashMap::new();
     collect_definitions(&tree, &mut definitions, &mut footnotes);
     let mut prep = Prep {
+        message: super::renderers::InMessage {
+            row,
+            profiles: &directory.profiles,
+        },
         content,
         emoji: &row.emoji,
         names,
@@ -674,6 +680,8 @@ enum Piece<'a> {
 }
 
 struct Prep<'a> {
+    /// The message, for text renderers.
+    message: super::renderers::InMessage<'a>,
     content: &'a str,
     emoji: &'a [CustomEmoji],
     names: Vec<MentionLabel>,
@@ -990,7 +998,7 @@ impl Prep<'_> {
                 .any(|seam| base + from < *seam && *seam < base + to),
             None => !self.seams.is_empty(),
         };
-        let drawn = super::renderers::text_matches(value);
+        let drawn = super::renderers::text_matches(value, self.message);
         let mut drawn = drawn.into_iter().peekable();
         let mut i = 0;
         while i < value.len() {
@@ -2105,8 +2113,8 @@ impl MarkdownPlugin for Objects {
                     );
                 }
                 if let Some(key) = url.strip_prefix("buzz-inline:") {
-                    let element =
-                        super::renderers::render_text(key, alt, cx).unwrap_or_else(|| {
+                    let element = super::renderers::render_text(key, alt, &self.row, cx)
+                        .unwrap_or_else(|| {
                             div()
                                 .line_height(line)
                                 .child(alt.clone())
@@ -2525,12 +2533,16 @@ pub(super) mod tests {
             fn key(&self) -> &str {
                 "test.tickets/t"
             }
-            fn find(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+            fn find(
+                &self,
+                text: &str,
+                _: super::super::renderers::InMessage,
+            ) -> Vec<std::ops::Range<usize>> {
                 text.match_indices("T-1")
                     .map(|(at, m)| at..at + m.len())
                     .collect()
             }
-            fn render(&self, _: &str, _: &App) -> Option<AnyElement> {
+            fn render(&self, _: &str, _: &str, _: &App) -> Option<AnyElement> {
                 None
             }
         }

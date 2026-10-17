@@ -526,12 +526,15 @@ def hello_card(message):
     }
 
 
-def ticket_badge(ticket):
+def ticket_badge(ticket, message):
     """An inline renderer's answer: a badge for HELLO-<number>, or None to
-    leave HELLO-0 as plain text."""
+    leave HELLO-0 as plain text. A ticket in a thread reply is marked
+    done, to show the answer can depend on the message."""
     number = int(ticket.split("-", 1)[1])
     if number == 0:
         return None
+    if message.get("threadRoot"):
+        return {"type": "badge", "text": f"✅ {ticket}", "tone": "success"}
     return {"type": "badge", "text": f"🎫 {ticket}", "tone": "accent"}
 
 
@@ -660,7 +663,7 @@ def handle(message):
             ]
             send({"id": message["id"], "result": {"items": items}})
         elif method == "inline/render":
-            badge = ticket_badge(params["text"])
+            badge = ticket_badge(params["text"], params["message"])
             send({"id": message["id"], "result": badge and {"tree": badge}})
         elif method == "agent/models":
             send({"id": message["id"], "result": {

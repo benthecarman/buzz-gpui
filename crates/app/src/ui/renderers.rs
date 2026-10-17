@@ -55,9 +55,19 @@ pub trait InlineRenderer {
 /// new preparation when that changes.
 pub trait TextRenderer {
     fn key(&self) -> &str;
-    /// Byte ranges of `text` to draw, in order and not overlapping.
-    fn find(&self, text: &str) -> Vec<std::ops::Range<usize>>;
-    fn render(&self, matched: &str, cx: &App) -> Option<AnyElement>;
+    /// Byte ranges of `text`, in `message`'s prose, to draw, in order and
+    /// not overlapping.
+    fn find(&self, text: &str, message: InMessage) -> Vec<std::ops::Range<usize>>;
+    /// Draws a piece [`Self::find`] matched in the message with id
+    /// `message` (hex).
+    fn render(&self, matched: &str, message: &str, cx: &App) -> Option<AnyElement>;
+}
+
+/// The message prose is in (`InlineContent.message`).
+#[derive(Clone, Copy)]
+pub struct InMessage<'a> {
+    pub row: &'a MessageRow,
+    pub profiles: &'a buzz_relay_client::Profiles,
 }
 
 /// A message action (`MessageActionContribution`): a more-menu item, and
@@ -132,14 +142,15 @@ pub fn register_text(renderer: Rc<dyn TextRenderer>) {
 
 /// The pieces of `text` the text renderers draw, as `(range, key)`, in
 /// order; where two overlap, the earlier registration wins.
-pub fn text_matches(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+pub fn text_matches(text: &str, message: InMessage) -> Vec<(std::ops::Range<usize>, String)> {
     let renderers = REGISTRY.with_borrow(|r| r.text.clone());
     if renderers.is_empty() {
         return Vec::new();
     }
     let mut found: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     for renderer in renderers.iter().filter(|r| on(r.key())) {
-        let ranges = catch_unwind(AssertUnwindSafe(|| renderer.find(text))).unwrap_or_default();
+        let ranges =
+            catch_unwind(AssertUnwindSafe(|| renderer.find(text, message))).unwrap_or_default();
         for range in ranges {
             let valid = range.start < range.end
                 && range.end <= text.len()
@@ -177,9 +188,9 @@ pub fn message_accessories(row: &Arc<MessageRow>, cx: &App) -> Vec<AnyElement> {
 }
 
 /// Draws `matched` with text renderer `key`.
-pub fn render_text(key: &str, matched: &str, cx: &App) -> Option<AnyElement> {
+pub fn render_text(key: &str, matched: &str, message: &str, cx: &App) -> Option<AnyElement> {
     let renderer = REGISTRY.with_borrow(|r| r.text.iter().find(|r| r.key() == key).cloned())?;
-    guarded(key, || renderer.render(matched, cx))
+    guarded(key, || renderer.render(matched, message, cx))
 }
 
 /// The bundled features: diffs, voice notes and custom emoji.

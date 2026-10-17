@@ -534,7 +534,7 @@ mod tests {
             let ticket = connection
                 .request(
                     "inline/render",
-                    json!({ "renderer": "tickets", "text": "HELLO-42" }),
+                    json!({ "renderer": "tickets", "text": "HELLO-42", "message": {} }),
                 )
                 .await
                 .unwrap()
@@ -543,7 +543,7 @@ mod tests {
             let plain = connection
                 .request(
                     "inline/render",
-                    json!({ "renderer": "tickets", "text": "HELLO-0" }),
+                    json!({ "renderer": "tickets", "text": "HELLO-0", "message": {} }),
                 )
                 .await
                 .unwrap()

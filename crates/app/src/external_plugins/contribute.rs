@@ -18,7 +18,9 @@ use crate::ui::composer::Composer;
 use crate::ui::composer_completions::{self, Item, Place};
 use crate::ui::composer_tools::ToolContext;
 use crate::ui::markdown::Directory;
-use crate::ui::renderers::{AttachmentRenderer, LinkRenderer, MessageAction, MessageRenderer};
+use crate::ui::renderers::{
+    AttachmentRenderer, InMessage, LinkRenderer, MessageAction, MessageRenderer,
+};
 use buzz_relay_client::Media;
 use buzz_relay_client::fold::{Attachment, MessageRow};
 use buzz_ui::{Badge, BadgeTone, Icon, IconButton, IconButtonSize, IconName};
@@ -358,22 +360,29 @@ impl crate::ui::renderers::TextRenderer for Inline {
         self.key
     }
 
-    fn find(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+    fn find(&self, text: &str, message: InMessage) -> Vec<std::ops::Range<usize>> {
+        let id = message.row.id.to_hex();
         let mut found = Vec::new();
         for matched in self.pattern.find_iter(text).take(32) {
             let piece = matched.as_str();
             if piece.is_empty() || piece.len() > 200 {
                 continue;
             }
-            match answered(self.key, piece) {
+            // Answers are the plugin's for this piece in this message.
+            let target = format!("{id}/{piece}");
+            match answered(self.key, &target) {
                 Some(Some(_)) => found.push(matched.range()),
                 Some(None) => {}
                 None => ask_with(
                     &self.requester,
                     self.key,
-                    piece,
+                    &target,
                     "inline/render",
-                    json!({ "renderer": self.id, "text": piece }),
+                    json!({
+                        "renderer": self.id,
+                        "text": piece,
+                        "message": capabilities::message(message.row, message.profiles),
+                    }),
                     tree_of,
                 ),
             }
@@ -381,8 +390,8 @@ impl crate::ui::renderers::TextRenderer for Inline {
         found
     }
 
-    fn render(&self, matched: &str, cx: &App) -> Option<AnyElement> {
-        let tree = answered(self.key, matched)??;
+    fn render(&self, matched: &str, message: &str, cx: &App) -> Option<AnyElement> {
+        let tree = answered(self.key, &format!("{message}/{matched}"))??;
         Some(drawn(&self.plugin, &self.id, self.key, matched, &tree, cx))
     }
 }

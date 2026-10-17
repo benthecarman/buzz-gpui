@@ -277,7 +277,7 @@ same way, per query.
 | `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
 | `message/accessory` | `accessory`, `message` | `{"tree"}` to show beside its reactions, or `null`. Asked again when the message is edited or gets a reply. |
 | `attachment/render` | `renderer`, `attachment` (`url`, `mime`, `name`, `size`) | `{"tree"}` or `null` |
-| `inline/render` | `renderer`, `text` (what the pattern matched) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text |
+| `inline/render` | `renderer`, `text` (what the pattern matched), `message` (the message it is in) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message. |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
 | `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items": [{"label", "detail", "text", "mentions"}]}`, at most 50. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. |
 
