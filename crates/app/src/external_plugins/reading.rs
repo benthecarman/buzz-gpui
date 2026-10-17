@@ -143,6 +143,21 @@ pub fn message(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     }))
 }
 
+/// `read/clearLocal`: drops a channel's unread mark made on this device
+/// (`clearUnreadLocal`).
+pub fn clear_local(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .clear_unread_local(&channel)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
 /// `inbox/get`: the inbox's conversations, as the Inbox page lists them.
 pub fn inbox(cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;

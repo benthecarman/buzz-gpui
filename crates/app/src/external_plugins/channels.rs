@@ -321,3 +321,101 @@ pub fn change(
     };
     Ok(cx.background_spawn(async move { task.await.map(|()| Value::Null) }))
 }
+
+/// `archives/get`: the identities the community archived, which Buzz
+/// leaves out of mentions, member choices and search, once read;
+/// `refresh: true` reads them again.
+pub fn archives(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use crate::ui::archives::{self, Status};
+    let community = community(cx)?;
+    let again = params.get("refresh").and_then(Value::as_bool) == Some(true);
+    archives::ensure(&community, again, cx);
+    Ok(cx.spawn(async move |cx| {
+        // The read takes a request or two; wait up to 15 seconds.
+        for _ in 0..150 {
+            let status = cx.update(|cx| archives::status(&community, cx));
+            if status != Some(Status::Loading) {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+        }
+        cx.update(|cx| match archives::status(&community, cx) {
+            Some(Status::Ready) => Ok(json!({ "archived": archives::archived(&community, cx) })),
+            Some(Status::Error) => Err((3, "The archive could not be read.".to_owned())),
+            _ => Err((3, "The archive is still loading.".to_owned())),
+        })
+    }))
+}
+
+/// `sessions/create`: a new private work session titled `title`, under
+/// `parent` if given, with `agents` (your agents in this community)
+/// added. Answers with its channel id once the relay lists it.
+pub fn create_session(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::session::Expected;
+    let title = text(params, "title")
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or_else(|| invalid("title is required"))?;
+    let title = buzz_relay_client::session::session_title(title);
+    let parent = text(params, "parent").map(str::to_owned);
+    let agents: Vec<String> = params
+        .get("agents")
+        .and_then(Value::as_array)
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_default();
+    let community = community(cx)?;
+    let rules = crate::ui::me::recipients::rules(&community, cx);
+    if let Some(stranger) = agents.iter().find(|key| !rules.selectable.contains(key)) {
+        return Err(invalid(format!(
+            "{stranger} is not one of your agents here"
+        )));
+    }
+    let session = community.read(cx).session.clone();
+    let id = uuid::Uuid::new_v4().to_string();
+    Ok(on_tokio(cx, async move {
+        let fail = |error: String| (3, error);
+        let created = session
+            .work_session_create(&id, &title, parent.as_deref())
+            .await
+            .map_err(fail)?;
+        session
+            .work_session_delivered(created)
+            .await
+            .map_err(fail)?;
+        session
+            .work_session_refresh(&id, Expected::default(), true)
+            .await
+            .map_err(fail)?;
+        if !agents.is_empty() {
+            session
+                .add_agents(&id, &agents, &rules)
+                .await
+                .map_err(fail)?;
+        }
+        Ok(json!({ "channel": id }))
+    }))
+}
+
+/// `sessions/memberOf`: the channels that list `pubkey` as a member.
+pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let pubkey = text(params, "pubkey")
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| invalid("pubkey is required"))?
+        .to_ascii_lowercase();
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .member_channels(&pubkey)
+            .await
+            .map(|channels| json!(channels))
+            .map_err(|error| (3, error))
+    }))
+}

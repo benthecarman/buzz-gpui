@@ -24,6 +24,7 @@ mod draw;
 mod events;
 pub mod git;
 mod naming;
+mod outbox;
 mod process;
 pub mod protocol;
 mod reading;
@@ -1279,6 +1280,7 @@ impl ExternalPlugins {
             "events/watch" => "events/live",
             "unread/watch" => "unread/changed",
             "reminders/watch" => "reminders/changed",
+            "outbox/watch" => "outbox/changed",
             "agents/watch" => "agents/changed",
             "session/watch" => "session/changed",
             _ => "channel/changed",
@@ -1292,6 +1294,7 @@ impl ExternalPlugins {
             "events/watch" => events::watch(params, notify, cx),
             "unread/watch" => reading::watch(params, notify, cx),
             "reminders/watch" => channels::watch(params, notify, cx),
+            "outbox/watch" => outbox::watch(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
             "session/watch" => capabilities::watch_session(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
@@ -1567,6 +1570,11 @@ impl ExternalPlugins {
             "threads/follow" => later(channels::follow(params, cx)),
             "reminders/list" => Reply::Now(channels::list(cx)),
             "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
+            "outbox/watch" => Self::watch(path, generation, "outbox/watch", params, cx),
+            "outbox/get" => later(outbox::get(params, cx)),
+            "archives/get" => later(channels::archives(params, cx)),
+            "read/clearLocal" => later(reading::clear_local(params, cx)),
+            "sessions/memberOf" => later(channels::member_of(params, cx)),
             "reminders/create" | "reminders/snooze" | "reminders/complete" | "reminders/cancel" => {
                 later(channels::change(method, params, cx))
             }
@@ -1574,7 +1582,7 @@ impl ExternalPlugins {
             "threads/activity" => later(reading::threads(params, cx)),
             "read/mark" => later(reading::mark(params, cx)),
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
-            | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" => {
+            | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" | "outbox/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
@@ -1608,7 +1616,8 @@ impl ExternalPlugins {
             | "workflows/save"
             | "workflows/delete"
             | "workflows/trigger"
-            | "workflows/dismiss" => {
+            | "workflows/dismiss"
+            | "sessions/create" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1623,7 +1632,8 @@ impl ExternalPlugins {
                     | "workflows/save"
                     | "workflows/delete"
                     | "workflows/trigger"
-                    | "workflows/dismiss" => Permission::ManageChannels,
+                    | "workflows/dismiss"
+                    | "sessions/create" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1666,6 +1676,7 @@ impl ExternalPlugins {
                     "channels/saveDetails" => content::save_details(params, cx),
                     "kit/save" => content::save_kit(params, cx),
                     "workflows/dismiss" => workflows::dismiss(params, cx),
+                    "sessions/create" => channels::create_session(params, cx),
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }

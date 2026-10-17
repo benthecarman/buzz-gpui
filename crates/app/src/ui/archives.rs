@@ -123,6 +123,15 @@ pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
 }
 
 /// `archiveHides`: a known-archived identity that is not the viewer.
+/// The identities the community archived, as last read.
+pub fn archived(community: &Entity<Community>, cx: &App) -> Vec<String> {
+    let key = key(community, cx);
+    cx.try_global::<Archives>()
+        .and_then(|archives| archives.0.get(&key))
+        .map(|entry| entry.snapshot.archived.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 pub fn hides(community: &Entity<Community>, pubkey: &str, cx: &App) -> bool {
     let viewer = community.read(cx).session.viewer().to_string();
     let key = key(community, cx);

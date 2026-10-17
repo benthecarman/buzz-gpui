@@ -429,7 +429,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `channel/unwatch`, `thread/unwatch`, `events/unwatch` | `watch` | `null`. A plugin follows at most 16 channels, threads and filters in all. |
 | `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit` | The matching signed events, at most 500, read from the community as you |
 | `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
-| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys), `attachments` (optional, from `files/upload`) | `null`, once the message is queued. Needs `send-messages`. |
+| `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys), `attachments` (optional, from `files/upload`) | `{"id"}`, once the message is queued: follow it with `outbox/get` or `outbox/watch`. `id` is `null` if Buzz changed the text on the way, such as by adding attachment links. Needs `send-messages`. |
 | `messages/edit` | `channel`, `message`, `content` | `null` once sent. Only your own messages. Needs `send-messages`. |
 | `messages/react` | `channel`, `message`, `emoji` | `null` once sent. Needs `send-messages`. |
 | `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
@@ -458,7 +458,13 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `unread/sync` | none | `{"capability","status","complete","error"}`: how read marks sync to the relay, or `null` before it is known. `unread/retrySync` tries again after a failure. |
 | `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
 | `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount"}` |
-| `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. |
+| `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. Read marks sync to your other devices; unread marks stay on this device, as in buzz-app. |
+| `read/clearLocal` | `channel` | `null`, after dropping an unread mark made on this device |
+| `outbox/get` | `id` (optional) | One event's `{"id","kind","channel","delivery","error","acknowledged"}` while Buzz still holds it, or `null`; without `id`, every event still on its way. `delivery` is `sending`, `accepted`, `unknown`, `failed` or `seen` (the relay showed it back). |
+| `outbox/watch` | none | `{"watch"}`. Buzz then sends `outbox/changed` with `events`, the events still on their way, now and whenever that changes; one that leaves was delivered or dismissed. Stop with `outbox/unwatch`. |
+| `archives/get` | `refresh` (optional) | `{"archived"}`: the identities the community archived, which Buzz leaves out of mentions, member choices and search |
+| `sessions/create` | `title`, `parent` (optional session), `agents` (optional: your agents in this community) | `{"channel"}`: a new private work session, as Me starts, once the relay lists it with the agents added. Needs `manage-channels`. |
+| `sessions/memberOf` | `pubkey` | The ids of the channels that list them as a member |
 | `agents/list` | none | `{"agents","running","elsewhere","teams","types"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","place","config","attentionEnabled","attention","skipped","timers"}` (`place` is `local` or `hosted`; `skipped` holds attention objects that could not be read, by slug, with the `problem`; `timers` is each timer's `armedAt`, `nextDue` and `used`); agents listed as running elsewhere (`place` `elsewhere`); your teams `{"id","name","instructions","members"}`; and the agent types `{"type","title","description","hosted"}` |
 | `agents/watch` | none | `{"watch"}`. Buzz then sends `agents/changed` with what `agents/list` gives, now and whenever it changes. Stop with `agents/unwatch`. |
 | `agents/create` | `type` (a `plugin/id` key, such as `com.example.hello/greeter`), `name`, optional `config` and `picture` (https) | The new agent. Needs `manage-agents`. |
@@ -532,7 +538,8 @@ messages: `sending`, `accepted`, `unknown`, `failed` or `seen`.
 
 `messages/send` answers once the message is safely queued, as Buzz's own
 composer does. The relay can still refuse it later; a followed channel then
-shows it with `delivery: "failed"`.
+shows it with `delivery: "failed"`, and `outbox/get` with its `id` says how
+it is going.
 
 ### `channel/changed` (notification from Buzz)
 

@@ -511,7 +511,12 @@ pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     let attachments = attachments(params)?;
     let session: Arc<Session> = community.read(cx).session.clone();
     let sent = session.send(&channel, &content, mentions, attachments, thread);
-    Ok(cx.spawn(async move |_| sent.await.map(|()| Value::Null).map_err(|error| (3, error))))
+    Ok(on_tokio(cx, async move {
+        sent.await.map_err(|error| (3, error))?;
+        // The outbox holds it, delivered or not, for `outbox/get`.
+        let id = session.queued_message(&channel, &content).await;
+        Ok(json!({ "id": id.map(|id| id.to_hex()) }))
+    }))
 }
 
 /// `ui/openConversation`: shows a channel, a message or a thread.
