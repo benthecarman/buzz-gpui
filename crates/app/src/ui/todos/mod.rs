@@ -57,6 +57,7 @@ pub fn init(cx: &mut App) {
                 icon: IconName::ListChecks,
                 label: "Todos",
                 placement: Placement::Side,
+                target: None,
             }),
             menu: None,
             build: channel_panels::build(|opening, window, cx| {

@@ -45,6 +45,8 @@ pub struct Launcher {
     pub icon: IconName,
     pub label: &'static str,
     pub placement: Placement,
+    /// What the panel opens showing; the channel when `None`.
+    pub target: Option<&'static str>,
 }
 
 /// An entry in the channel's menu that opens the panel as a tab
@@ -225,6 +227,7 @@ pub fn dev_sample(cx: &mut App) {
                 icon: IconName::ListChecks,
                 label: "Sample",
                 placement: Placement::Bottom,
+                target: None,
             }),
             menu: Some(MenuEntry {
                 label: "View sample",

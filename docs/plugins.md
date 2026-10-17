@@ -123,7 +123,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   use -10 to specialise links another panel shows, 0 (the default) for your
   own links and 100 for a catch-all.
 - `launcher` adds a button to the channel header. `placement` is `side` (the
-  default) or `bottom`. `menu` (`{"label"}`) adds an entry to the channel's
+  default) or `bottom`; `target` is what the panel opens showing (the
+  channel's id by default). `menu` (`{"label"}`) adds an entry to the channel's
   menu; `kinds` (such as `["stream", "forum"]`) and `private` (`true` or
   `false`) limit the channels it is offered in.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
@@ -419,6 +420,10 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003). Needs `publish-events`. |
 | `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` for a page with `routes`), `back` or `forward`; and optionally `community` (a joined community's `wss://` relay) | `null` |
+| `ui/openPanel` | `panel` (one of the plugin's panel ids), `target` (what it shows, such as a link or any text the plugin reads from `view/open`) | `null`. Opens the panel as a tab of the open conversation. |
+| `panel/canOpen` | `target` | Whether any panel, the plugin's or not, shows `target`. |
+| `panel/open` | `view` (an open panel), `target` | `true` if a panel shows `target`. When it is this panel, the view shows it in place and the plugin hears `view/retarget` (`view`, `target`, `canGoBack`); otherwise the panel that shows it opens as a tab for the same conversation and thread, and this one closes. |
+| `panel/push` | `view` (an open panel), `target` | As `panel/open`, but keeps this panel: within it, Buzz shows a Back button that returns to the previous target with another `view/retarget`; another panel opens beside it. |
 | `ui/openLink` | `url` (`buzz://` or a web link) | `null`. Opens it as a click in a message does: in Buzz, in a panel that shows it, or in the browser. |
 | `names/get` | `pubkeys` (at most 500) | `{"<pubkey>": {"name","qualifier"}}`: names as Buzz shows them, through the naming policy, with the npub suffix that tells namesakes apart |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |

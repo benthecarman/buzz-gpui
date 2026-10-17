@@ -41,6 +41,7 @@ pub fn init(cx: &mut App) {
                 icon: IconName::TerminalWindow,
                 label: "Toggle channel terminal",
                 placement: Placement::Bottom,
+                target: None,
             }),
             menu: None,
             build: channel_panels::build(|opening, _, cx| {

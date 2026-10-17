@@ -47,6 +47,9 @@ pub struct ExternalView {
     accept: Option<Accept>,
     /// A page's route params, from `ui/navigate`.
     route: Option<Value>,
+    /// A panel's earlier targets, newest last, which Back returns to
+    /// (`PanelContext.push`).
+    back: Vec<String>,
     /// A `workspace` page: no padding around the plugin's tree.
     edge_to_edge: bool,
     tree: Option<Node>,
@@ -301,6 +304,64 @@ impl ExternalView {
             .or_else(|| self.opening.as_ref().map(|opening| opening.close.clone()))
     }
 
+    /// `panel/open` and `panel/push`: shows `target` in this panel, or,
+    /// when another panel shows it, opens that one as a tab for the same
+    /// conversation. `open` replaces this panel; `push` keeps it, and
+    /// within this panel lets Back return. False for a view that is not
+    /// a panel, or a target no panel shows.
+    pub(super) fn open_target(this: &Entity<Self>, target: &str, push: bool, cx: &mut App) -> bool {
+        let view = this.read(cx);
+        let Some(opening) = &view.opening else {
+            return false;
+        };
+        let Some(panel) = crate::ui::channel_panels::resolve(target, cx) else {
+            return false;
+        };
+        if panel.key == format!("{}/{}", view.plugin, view.contribution) {
+            this.update(cx, |view, cx| view.retarget(target.to_owned(), push, cx));
+            return true;
+        }
+        let (channel, root) = (opening.channel.clone(), opening.root.clone());
+        let close = (!push).then(|| opening.close.clone());
+        let (key, target) = (panel.key, target.to_owned());
+        crate::ui::navigation::with_workspace(cx, move |workspace, window, cx| {
+            if workspace.open_panel_at(Some(key), &target, Some(channel), root, window, cx)
+                && let Some(close) = close
+            {
+                // A drawer's close updates the workspace, which is busy.
+                window.defer(cx, move |window, cx| close(window, cx));
+            }
+        });
+        true
+    }
+
+    /// Shows `target` in this panel, keeping the one showing for Back
+    /// when `push`; the plugin hears `view/retarget`.
+    fn retarget(&mut self, target: String, push: bool, cx: &mut Context<Self>) {
+        let Some(opening) = &mut self.opening else {
+            return;
+        };
+        let old = std::mem::replace(&mut opening.target, target.clone());
+        if push {
+            self.back.push(old);
+            self.back.truncate(64);
+        }
+        ExternalPlugins::notify_running(
+            &self.plugin,
+            "view/retarget",
+            json!({ "view": self.id, "target": target, "canGoBack": !self.back.is_empty() }),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Back: the target shown before the last `panel/push`.
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.back.pop() {
+            self.retarget(target, false, cx);
+        }
+    }
+
     /// `agent/save`: replaces this tab's agent's config.
     pub(super) fn save_agent(
         &self,
@@ -335,6 +396,7 @@ impl ExternalView {
                 change: None,
                 accept: None,
                 route: None,
+                back: Vec::new(),
                 edge_to_edge: false,
                 tree: None,
                 error: None,
@@ -649,6 +711,18 @@ impl Render for ExternalView {
             .flex_col()
             .gap(space::S4)
             .when(framed && !self.edge_to_edge, |body| body.p(space::S6));
+        if !self.back.is_empty() {
+            let weak = cx.entity().downgrade();
+            body = body.child(
+                div().flex().child(
+                    Button::new("plugin-panel-back", "Back")
+                        .icon(IconName::ArrowLeft)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |view, cx| view.go_back(cx));
+                        }),
+                ),
+            );
+        }
         if let Some(placeholder) = self.placeholder(status, cx) {
             body = body.child(placeholder);
         } else if let Some(tree) = self.tree.clone() {

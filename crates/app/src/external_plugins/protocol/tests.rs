@@ -71,7 +71,8 @@ fn contributions_are_checked() {
         parsed.panels[0].launcher,
         Some(LauncherDecl {
             label: None,
-            placement: LauncherPlacement::Bottom
+            placement: LauncherPlacement::Bottom,
+            target: None,
         })
     );
     assert_eq!(parsed.pages[0].icon.as_deref(), Some("House"));

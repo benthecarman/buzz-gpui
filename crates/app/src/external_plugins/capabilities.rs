@@ -913,6 +913,24 @@ pub fn open_link(params: &Value, cx: &mut App) -> Result<Value, Failure> {
     Ok(Value::Null)
 }
 
+/// `ui/openPanel`: opens one of the plugin's panels (by `panel` id) as a
+/// tab of the open conversation, showing `target`.
+pub fn open_panel(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    let panel = text(params, "panel").ok_or_else(|| invalid("panel is required"))?;
+    let key = format!("{plugin}/{panel}");
+    if crate::ui::channel_panels::get(&key, cx).is_none() {
+        return Err(invalid(format!("The plugin has no panel {panel}")));
+    }
+    let target = text(params, "target")
+        .filter(|target| target.len() <= 2048)
+        .ok_or_else(|| invalid("target is required"))?
+        .to_owned();
+    navigation::with_workspace(cx, move |workspace, window, cx| {
+        workspace.open_panel_at(Some(&key), &target, None, None, window, cx);
+    });
+    Ok(Value::Null)
+}
+
 /// `notifications/submit`: a notification in one of the plugin's
 /// categories, through the user's preferences. `true` if it showed.
 pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {

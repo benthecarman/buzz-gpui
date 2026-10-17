@@ -424,6 +424,9 @@ pub struct LauncherDecl {
     pub label: Option<String>,
     #[serde(default)]
     pub placement: LauncherPlacement,
+    /// What the panel opens showing; the channel's id when absent.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]

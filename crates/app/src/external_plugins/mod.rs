@@ -1040,6 +1040,7 @@ impl ExternalPlugins {
                             LauncherPlacement::Side => Placement::Side,
                             LauncherPlacement::Bottom => Placement::Bottom,
                         },
+                        target: launcher.target.clone().map(intern),
                     }),
                     menu: panel.menu.as_ref().map(|menu| {
                         let (kinds, private) = (menu.kinds.clone(), menu.private);
@@ -1119,7 +1120,7 @@ impl ExternalPlugins {
     }
 
     /// Sends a notification to plugin `id` if it runs.
-    fn notify_running(id: &str, method: &str, params: Value, cx: &App) {
+    pub(crate) fn notify_running(id: &str, method: &str, params: Value, cx: &App) {
         if let Some(connection) = Self::running_connection(id, cx) {
             connection.notify(method, params);
         }
@@ -1436,6 +1437,48 @@ impl ExternalPlugins {
                         INVALID_PARAMS,
                         "agent/createConfig takes an open agentCreate view and an object config"
                             .to_owned(),
+                    )),
+                })
+            }
+            "ui/openPanel" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                Reply::Now(match plugin {
+                    Some(plugin) => capabilities::open_panel(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                })
+            }
+            "panel/canOpen" => Reply::Now(
+                params
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .map(|target| json!(channel_panels::resolve(target, cx).is_some()))
+                    .ok_or_else(|| (INVALID_PARAMS, "target is required".to_owned())),
+            ),
+            "panel/open" | "panel/push" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let target = params
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .filter(|target| target.len() <= 2048);
+                Reply::Now(match (view, target) {
+                    (Some(view), Some(target)) => Ok(json!(ExternalView::open_target(
+                        &view,
+                        target,
+                        method == "panel/push",
+                        cx
+                    ))),
+                    _ => Err((
+                        INVALID_PARAMS,
+                        format!("{method} takes an open panel view and a target"),
                     )),
                 })
             }

@@ -192,8 +192,10 @@ impl Workspace {
                 }
             });
         });
-        let Some(view) = self.panel_view(&panel, channel.clone(), channel, None, close, window, cx)
-        else {
+        let target = launcher
+            .target
+            .map_or_else(|| channel.clone(), str::to_owned);
+        let Some(view) = self.panel_view(&panel, channel, target, None, close, window, cx) else {
             return;
         };
         self.update_tabs(cx, |state| state.pane_open = true);
@@ -1205,6 +1207,50 @@ impl Workspace {
     /// A link clicked in the open channel: a registered panel's link
     /// opens as a tab beside it, and a link to a joined session (with no
     /// message) as a conversation tab. False when neither applies.
+    /// Opens panel `key`, or the panel that shows `target` when `None`,
+    /// as a tab showing `target`, for `channel` (the open conversation
+    /// when `None`) and thread `root`; false outside Messages or with no
+    /// such panel.
+    pub fn open_panel_at(
+        &mut self,
+        key: Option<&str>,
+        target: &str,
+        channel: Option<String>,
+        root: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.page != Page::MESSAGES {
+            return false;
+        }
+        let Some((_, current)) = self.tab_key(cx) else {
+            return false;
+        };
+        let panel = match key {
+            Some(key) => channel_panels::get(key, cx),
+            None => channel_panels::resolve(target, cx),
+        };
+        let Some(panel) = panel else {
+            return false;
+        };
+        let tab = PanelTab {
+            panel: panel.key,
+            channel: channel.unwrap_or(current),
+            target: target.to_string(),
+            root,
+        };
+        let id = tab.id();
+        if self
+            .update_tabs(cx, |state| state.open_panel(tab))
+            .unwrap_or(false)
+        {
+            self.tab_views.remove(&id);
+            self.ensure_tab_views(window, cx);
+        }
+        self.focus_tab(&id, window, cx);
+        true
+    }
+
     pub(super) fn route_link_to_tab(
         &mut self,
         url: &str,

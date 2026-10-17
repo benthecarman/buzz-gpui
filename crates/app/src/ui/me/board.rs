@@ -411,7 +411,10 @@ impl SessionWork {
             });
         });
         let channel = self.channel.id.clone();
-        let view = self.panel_view(&panel, channel.clone(), channel, None, close, window, cx);
+        let target = launcher
+            .target
+            .map_or_else(|| channel.clone(), str::to_owned);
+        let view = self.panel_view(&panel, channel, target, None, close, window, cx);
         self.update_tabs(cx, |state| state.pane_open = true);
         self.drawer = Some(Drawer {
             key,
