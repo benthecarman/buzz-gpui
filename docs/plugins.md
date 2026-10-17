@@ -637,8 +637,35 @@ you added from running for that launch. Their switches stay as they were.
 
 buzz-app plugins are JavaScript running inside the app; these are programs
 that draw with Buzz's elements. Everything buzz-app's plugin API offers has a
-request, a notification or a contribution here, except:
+request, a notification or a contribution here. Where a buzz-app plugin
+passes a function, or reaches into the app, it works differently:
 
+- **Functions become declarations or questions.** A buzz-app plugin hands
+  over functions such as `matches(url)`, `eligible(channel)` or
+  `describeMigration(config)`. Here a contribution declares what they would
+  decide: link prefixes, regular expressions, channel kinds, config keys.
+  Where only the plugin can decide, Buzz asks it (`message/render`,
+  `names/resolve`, `agent/summary` and so on), or the plugin says when
+  something changed (`settings/visibility`, `shortcut/enable`).
+- **Answers come later.** Buzz draws while it waits for a plugin's answer.
+  It shows the plain message, link, name or summary first, then the
+  plugin's answer once it arrives, and keeps answers until what they
+  describe changes.
+- **Views are element trees.** A plugin draws with Buzz's elements, and can
+  embed Buzz's own composer and thread. It cannot run arbitrary UI code.
+- **Reading follows Buzz's views.** buzz-app's reading handle (`observe`,
+  `catchUp`) marks messages read as a plugin shows them. Here only Buzz
+  draws messages, so its own views do this, including a thread a plugin
+  embeds; `read/mark` covers explicit marks.
+- **Reads are snapshots.** Agent memories, workflows, runs and project
+  reads answer once rather than handing out live views. Ask again to
+  refresh, or watch the channel, thread, unread counts, events or outbox
+  where a change needs to be seen as it happens.
+- **Archive requests are not offered.** Buzz archives an agent's identity
+  when you delete the agent (`agents/remove`); plugins read the archive
+  with `archives/get`.
+- **Hosted agents have no unfinished state.** Making a hosted agent
+  finishes or fails as a whole.
 - Buzz draws a panel's channel-header launcher from its `icon` and `label`,
   as the icon button buzz-app's own launchers are; a plugin cannot draw a
   different control there.
