@@ -92,8 +92,11 @@ started.
 ### 1. `initialize` (request from Buzz)
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"apiVersion":1,"app":{"name":"Buzz","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"apiVersion":1,"app":{"name":"Buzz","version":"0.1.0"},"host":{"browser":false}}}
 ```
+
+`host` says what this app offers. `browser` is `false`: there is no embedded
+browser, so a `link` element or `ui/openUrl` opens the system's browser.
 
 Answer with what the plugin adds. The answer is due within 10 seconds.
 
@@ -374,7 +377,12 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional) | `null`. Buzz shows the conversation. |
 | `notifications/submit` | `category`, `sourceKey` (unique per thing; repeats are dropped), `title`, `body`, and an optional `channel`, `message` and `thread` that a click opens | `true` if it showed. Buzz applies the user's notification settings. |
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
-| `agents/list` | none | `{"agents", "running"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled"}` |
+| `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","stale"}`. Counts are sampled, not exact. |
+| `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |
+| `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
+| `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount"}` |
+| `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. |
+ none | `{"agents", "running"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","config","attentionEnabled"}` |
 | `agents/create` | `type` (a `plugin/id` key, such as `com.example.hello/greeter`), `name`, optional `config` and `picture` (https) | The new agent. Needs `manage-agents`. |
 | `agents/save` | `pubkey`, and any of `name`, `picture`, `config` (the whole config), `attentionEnabled` | `null` once saved. Needs `manage-agents`. |
 | `agents/remove` | `pubkey` | `null` once the agent and its key are gone. Needs `manage-agents`. |

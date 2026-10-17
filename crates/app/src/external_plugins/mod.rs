@@ -22,6 +22,7 @@ pub mod git;
 mod naming;
 mod process;
 pub mod protocol;
+mod reading;
 pub mod release;
 mod view;
 
@@ -811,6 +812,9 @@ impl ExternalPlugins {
             json!({
                 "apiVersion": protocol::API_VERSION,
                 "app": { "name": "Buzz", "version": env!("CARGO_PKG_VERSION") },
+                // buzz-app's `browser.available`: this app has no embedded
+                // browser, so links open in the system's.
+                "host": { "browser": false },
             }),
         );
         plugin.connection = Some(connection);
@@ -1173,6 +1177,7 @@ impl ExternalPlugins {
         let changed = match method {
             "thread/watch" => "thread/changed",
             "events/watch" => "events/live",
+            "unread/watch" => "unread/changed",
             _ => "channel/changed",
         };
         let notify = move |mut value: Value, cx: &mut App| {
@@ -1182,6 +1187,7 @@ impl ExternalPlugins {
         let started = match method {
             "thread/watch" => capabilities::watch_thread(params, notify, cx),
             "events/watch" => events::watch(params, notify, cx),
+            "unread/watch" => reading::watch(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
         };
         Reply::Now(started.map(|(watch, mut value)| {
@@ -1307,7 +1313,12 @@ impl ExternalPlugins {
             "channel/watch" => Self::watch(path, generation, "channel/watch", params, cx),
             "thread/watch" => Self::watch(path, generation, "thread/watch", params, cx),
             "events/watch" => Self::watch(path, generation, "events/watch", params, cx),
-            "channel/unwatch" | "thread/unwatch" | "events/unwatch" => {
+            "unread/watch" => Self::watch(path, generation, "unread/watch", params, cx),
+            "unread/get" => Reply::Now(reading::get(cx)),
+            "inbox/get" => Reply::Now(reading::inbox(cx)),
+            "threads/activity" => later(reading::threads(params, cx)),
+            "read/mark" => later(reading::mark(params, cx)),
+            "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
