@@ -914,7 +914,27 @@ pub fn register(
 }
 
 /// One of the owner's agents for `agents/list`.
-fn agent_entry(agent: &Agent) -> Value {
+/// One of the owner's agents; `place` is `hosted` for a hosted type's
+/// and `local` for one this device runs.
+fn agent_entry(agent: &Agent, cx: &App) -> Value {
+    entry_at(agent, crate::agents2::is_hosted(&agent.agent_type, cx))
+}
+
+fn entry_at(agent: &Agent, hosted: bool) -> Value {
+    let skipped: serde_json::Map<String, Value> = agent
+        .skipped
+        .iter()
+        .map(|(slug, skipped)| {
+            (
+                slug.clone(),
+                json!({
+                    "value": skipped.value,
+                    "modifiedAt": skipped.modified_at,
+                    "problem": skipped.problem,
+                }),
+            )
+        })
+        .collect();
     json!({
         "pubkey": agent.pubkey,
         "name": agent.name,
@@ -922,9 +942,12 @@ fn agent_entry(agent: &Agent) -> Value {
         "owner": agent.owner,
         "relay": agent.relay,
         "picture": agent.picture,
-                "config": agent.config,
+        "place": if hosted { "hosted" } else { "local" },
+        "config": agent.config,
         "attentionEnabled": agent.attention_enabled,
         "attention": serde_json::to_value(&*agent.attention).unwrap_or(Value::Null),
+        "skipped": skipped,
+        "timers": serde_json::to_value(&*agent.timers).unwrap_or(Value::Null),
     })
 }
 
@@ -947,14 +970,15 @@ pub fn list(cx: &App) -> Result<Value, Failure> {
     let service = agents2(cx)?;
     let agents = service.read(cx);
     Ok(json!({
-        "agents": agents.agents().iter().map(agent_entry).collect::<Vec<_>>(),
-        "running": agents.running().iter().map(agent_entry).collect::<Vec<_>>(),
+        "agents": agents.agents().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
+        "running": agents.running().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
         "elsewhere": agents.elsewhere(cx).iter().map(|agent| json!({
             "pubkey": agent.pubkey,
             "name": agent.name,
             "type": agent.agent_type,
             "relay": agent.relay,
             "picture": agent.picture,
+            "place": "elsewhere",
             "hosted": crate::agents2::is_hosted(&agent.agent_type, cx),
         })).collect::<Vec<_>>(),
         "teams": agents.teams().iter().map(|team| json!({
@@ -1061,10 +1085,11 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
         carry: None,
     };
     let (kind, name) = (kind.to_owned(), name.to_owned());
+    let hosted = crate::agents2::is_hosted(&kind, cx);
     let task = agents2(cx)?.update(cx, |agents, cx| agents.create(&kind, &name, made, None, cx));
     Ok(cx.background_spawn(async move {
         task.await
-            .map(|agent| agent_entry(&agent))
+            .map(|agent| entry_at(&agent, hosted))
             .map_err(|error| (3, error))
     }))
 }
