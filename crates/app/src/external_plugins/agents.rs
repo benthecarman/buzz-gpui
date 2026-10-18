@@ -969,7 +969,16 @@ fn https(value: Option<&Value>) -> Result<Option<String>, Failure> {
 pub fn list(cx: &App) -> Result<Value, Failure> {
     let service = agents2(cx)?;
     let agents = service.read(cx);
+    use crate::agents2::Status;
+    let (status, error) = match agents.status() {
+        Status::Unavailable => ("unavailable", None),
+        Status::Loading => ("loading", None),
+        Status::Ready => ("ready", None),
+        Status::Error(error) => ("error", Some(error.clone())),
+    };
     Ok(json!({
+        "status": status,
+        "error": error,
         "agents": agents.agents().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
         "running": agents.running().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
         "elsewhere": agents.elsewhere(cx).iter().map(|agent| json!({

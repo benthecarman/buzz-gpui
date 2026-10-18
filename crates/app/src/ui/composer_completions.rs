@@ -85,6 +85,16 @@ pub fn unregister(key: &str) {
 }
 
 /// The triggers and the completion each opens: the first by order.
+/// Every plugin completion as `(key, trigger, order)`.
+pub fn listed() -> Vec<(&'static str, char, i32)> {
+    REGISTRY.with_borrow(|registry| {
+        registry
+            .iter()
+            .map(|completion| (completion.key, completion.trigger, completion.order))
+            .collect()
+    })
+}
+
 pub fn triggers() -> Vec<(char, &'static str)> {
     REGISTRY.with_borrow(|registry| {
         let mut triggers: Vec<(char, &'static str)> = Vec::new();

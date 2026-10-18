@@ -358,6 +358,43 @@ pub fn inline(text: &str, emoji: &[CustomEmoji], media: &Media, cx: &App) -> Opt
         .find_map(|renderer| guarded(renderer.key(), || renderer.render(text, emoji, media, cx)))
 }
 
+/// Every message contribution on now, by kind, as the conversation
+/// readers list them: `(kind, key, title)`, the title for actions only.
+pub fn listed() -> Vec<(&'static str, String, Option<String>)> {
+    REGISTRY.with_borrow(|r| {
+        let keyed = |kind: &'static str, key: &str| (kind, key.to_owned(), None);
+        r.text
+            .iter()
+            .map(|it| keyed("inlineRenderers", it.key()))
+            .chain(r.inline.iter().map(|it| keyed("inlineRenderers", it.key())))
+            .chain(
+                r.messages
+                    .iter()
+                    .map(|it| keyed("messageRenderers", it.key())),
+            )
+            .chain(r.links.iter().map(|it| keyed("linkRenderers", it.key())))
+            .chain(
+                r.attachments
+                    .iter()
+                    .map(|it| keyed("attachmentRenderers", it.key())),
+            )
+            .chain(
+                r.accessories
+                    .iter()
+                    .map(|it| keyed("messageAccessories", it.key())),
+            )
+            .chain(r.actions.iter().map(|it| {
+                (
+                    "messageActions",
+                    it.key().to_owned(),
+                    Some(it.title().to_owned()),
+                )
+            }))
+            .filter(|(_, key, _)| on(key))
+            .collect()
+    })
+}
+
 /// Whether an attachment renderer would draw `attachment`.
 pub fn takes_attachment(attachment: &Attachment) -> bool {
     REGISTRY.with_borrow(|r| {

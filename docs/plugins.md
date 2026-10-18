@@ -136,8 +136,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
   same here) or `hidden`. `layout` is `document` (the default, padded) or
   `workspace` (edge to edge). Buzz's dock shows a page's companion beside
-  it. With `routes: true`, `ui/navigate` can open the page at `params` (a
-  JSON object up to 4 KiB): its view's `view/open` carries `route`, and Buzz
+  it. With `routes: true`, `ui/navigate` can open the page at `params` (any
+  JSON value but `null`, up to 8 KiB): its view's `view/open` carries `route`, and Buzz
   sends `page/route` with the `view` and `route` when it changes. Back and
   Forward step through routes. `routeVersion` (default 1) says what the
   params mean: raise it when they change, and a `ui/navigate` that names
@@ -341,12 +341,15 @@ one opens:
 ```json
 {"jsonrpc":"2.0","method":"view/open","params":{
   "view":"v3","contribution":"forecast","kind":"panel",
-  "target":"https://weather.example/today","channel":"<channel id>","thread":null
+  "target":"https://weather.example/today","channel":"<channel id>","thread":null,
+  "root":"<thread root id>"
 }}
 ```
 
 For a page, `kind` is `page`, and `target` and `channel` are `null`. A panel
-opened from the channel header has the channel id as its `target`.
+opened from the channel header has the channel id as its `target`. `thread`
+is the thread showing beside the conversation, and `root` the thread of the
+message whose link opened the panel (`context.rootId`), or `null`.
 
 ### 3. `view/render` (notification from the plugin)
 
@@ -437,7 +440,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openUrl` | `url` (http or https), opened in the browser | `null` |
 | `community/current` | none | `{"name","relay","viewer","status","live","cached"}` for the selected community, or `null`. `viewer` is your pubkey; `status` is `connecting`, `ready` or `failed`; `live` says the live connection is up; `cached` says it shows saved data while the relay has not answered. Buzz sends the notification `community/changed` with the same fields whenever any of them change, such as when another community is selected. |
 | `community/list` | none | Your communities: `[{"name","relay","icon","selected"}]`. Buzz sends `communities/changed` with `communities`, the same list, when you join or leave one or select another. |
-| `community/client` | none | `communityReader.snapshot()`: `{"status","viewer","error","profile","communities"}`. `status` is `loading`, `ready` or `unavailable` (no identity yet, or one that could not be read, with `error`); `profile` is the personal profile new communities start from, `{"name","picture","about"}`; `communities` is `community/list`. Works in Personal space. |
+| `community/client` | none | `communityReader.snapshot()`: `{"status","viewer","error","profile","communities"}`. `status` is `loading`, `ready` or `unavailable` (no identity yet, or one that could not be read, with `error`); `profile` is the personal profile new communities start from, `{"name","picture","about"}`; `communities` is `community/list`. Works in Personal space. Buzz sends `client/changed` with the same fields when they change. |
 | `community/retry` | none | `null`. Connects to the selected community again after a failure. |
 | `community/clearCache` | none | `null`, after forgetting the conversations Buzz saved of the community, here and on disk, as Clear cache in Settings does. Open channels load again. |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind","members","labels","lastActivityAt","readOnly","creator","createdAt","parent"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
@@ -450,7 +453,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `channel/unwatch`, `thread/unwatch`, `events/unwatch` | `watch` | `null`. A plugin holds at most 64 watches of every kind in all. |
 | `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit`, plus the relay's read extensions: `search` with `search_mode` (`prefix` or `fulltext`), `page`, `feed_types`, `top_level`, `include_aux`, `include_summaries`, `before_id`, `thread_window`, `depth_limit`, `thread_cursor` and `thread_cursor_id` | The matching signed events, at most 500, read from the community as you |
 | `community/info` | none | The community relay's NIP-11 document. Its `self` key signs what the relay publishes, such as rosters and the archive. |
-| `contributions/list` | none | `{"pages","panels","settings","accountActions"}`: what Buzz and its plugins added, each by its `plugin/id` `key` and `title`; pages also give `placement` and `routes` (their route version, or `null`), and panels `order` and `launcher` |
+| `contributions/list` | none | What Buzz and its plugins added, each by its `plugin/id` `key`: `pages` (`title`, `placement`, `routes`: the route version or `null`), `panels` (`title`, `order`, `launcher`), `settings` (`title`, `visibility`: `visible`, `hidden`, `pending` or `error`), `accountActions` (`title`), `shortcuts` (plugins' only: `plugin`, `title`, `chords` as shown, `enabled`), `composerTools` and `completions` (`order`; completions also `trigger`), `accessories` (`placement`), `inlineRenderers`, `messageRenderers`, `linkRenderers`, `attachmentRenderers` and `messageActions` (with `title`). Buzz sends `contributions/changed` with the same fields when any of them changes. |
+| `shortcuts/run` | `key` (a plugin shortcut's) | `true` when it ran, as its chord would (`RegisteredShortcut.run`), such as from a command palette |
+| `plugins/list` | none | Every plugin, built in or added: `[{"id","name","builtIn","status","active"}]`, `status` being `running`, `starting`, `off`, `paused` or `failed` (`pluginStatus`). Buzz sends `plugins/changed` with the same list when one changes. |
 | `profiles/get` | `pubkeys` (hex, at most 500) | `[{"pubkey","name","picture","about","nip05","isAgent","loaded"}]` |
 | `messages/send` | `channel`, `content`, `thread` (optional `{"root","parent"}`), `mentions` (optional pubkeys, notified), `references` (optional pubkeys, shown but not notified), `picks` (optional `{pubkey: {"model","effort"}}` for mentioned agents), `attachments` (optional, from `files/upload`) | `{"id"}`, once the message is queued: follow it with `outbox/get` or `outbox/watch`. `id` is `null` if Buzz changed the text on the way, such as by adding attachment links. Needs `send-messages`. |
 | `messages/edit` | `channel`, `message`, `content` | `null` once sent. Only your own messages. Needs `send-messages`. |
@@ -471,7 +476,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `panel/open` | `view` (an open panel), `target` | `true` if a panel shows `target`. When it is this panel, the view shows it in place and the plugin hears `view/retarget` (`view`, `target`, `canGoBack`); otherwise the panel that shows it opens as a tab for the same conversation and thread, and this one closes. |
 | `panel/push` | `view` (an open panel), `target` | As `panel/open`, but keeps this panel: within it, Buzz shows a Back button that returns to the previous target with another `view/retarget`; another panel opens beside it. |
 | `ui/openLink` | `url` (`buzz://` or a web link) | `null`. Opens it as a click in a message does: in Buzz, in a panel that shows it, or in the browser. |
-| `names/get` | `pubkeys` (at most 500), `candidates` (optional: the keys in view, such as a channel's members, that namesakes are told apart among; everyone when left out) | `{"<pubkey>": {"name","qualifier","source"}}`: names as Buzz shows them, through the naming policy, with the npub suffix that tells namesakes apart. `source` is `agent-directory` when the naming policy named the key, `public-profile` for a profile name, or `null` when the key's start shows. |
+| `names/get` | `pubkeys` (at most 500), `candidates` (optional: the keys in view, such as a channel's members, that namesakes are told apart among; everyone when left out), `displayFacts` (optional, at most 500 `{"pubkey","name","isAgent","owner"}`: names this view shows, such as a draft's recipients, that the naming policy weighs in place of those keys' profiles) | `{"<pubkey>": {"name","qualifier","source"}}`: names as Buzz shows them, through the naming policy, with the npub suffix that tells namesakes apart. `source` is `agent-directory` when the naming policy named the key, `public-profile` for a profile name, or `null` when the key's start shows. |
 | `names/watch` | as `names/get` | `{"watch","names"}`. Buzz then sends `names/changed` with `names` whenever one changes: a profile loads, an agent is renamed, or the naming policy answers or changes. Stop with `names/unwatch`. |
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |
 | `presence/get` | `pubkeys` (at most 500) | `{"<pubkey>": "online" | "away" | "offline" | null}`, for people Buzz already follows; `null` for others |
@@ -507,7 +512,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `archives/request` | `action` (`archive` or `unarchive`), `pubkey` | `null` once the archive shows it. Allowed for one of your agents (its owner attestation is the consent) or with a relay owner or admin role. Needs `manage-channels`. |
 | `sessions/create` | `title`, `parent` (optional session), `agents` (optional: your agents in this community) | `{"channel"}`: a new private work session, as Me starts, once the relay lists it with the agents added. Needs `manage-channels`. |
 | `sessions/memberOf` | `pubkey` | The ids of the channels that list them as a member |
-| `agents/list` | none | `{"agents","running","elsewhere","teams","types"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","place","config","attentionEnabled","attention","skipped","timers"}` (`place` is `local` or `hosted`; `skipped` holds attention objects that could not be read, by slug, with the `problem`; `timers` is each timer's `armedAt`, `nextDue` and `used`); agents listed as running elsewhere (`place` `elsewhere`); your teams `{"id","name","instructions","members"}`; and the agent types `{"type","title","description","hosted"}` |
+| `agents/list` | none | `{"status","error","agents","running","elsewhere","teams","types"}`: `status` is `loading`, `ready`, `error` (with `error`) or `unavailable` (no agent host), so an empty list can be told from one not read yet; the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","place","config","attentionEnabled","attention","skipped","timers"}` (`place` is `local` or `hosted`; `skipped` holds attention objects that could not be read, by slug, with the `problem`; `timers` is each timer's `armedAt`, `nextDue` and `used`); agents listed as running elsewhere (`place` `elsewhere`); your teams `{"id","name","instructions","members"}`; and the agent types `{"type","title","description","hosted"}` |
 | `agents/watch` | none | `{"watch"}`. Buzz then sends `agents/changed` with what `agents/list` gives, now and whenever it changes. Stop with `agents/unwatch`. |
 | `activity/observed` | `agent` (optional) | `{"status","turns","typing","records","history","hasOlder","workingChannels"}`: what the community's activity feed shows of agents anywhere, of one agent or all. `turns` are `{"agent","turn","channel","at","state","requests"}`, and `records` (newest 200) the decrypted transcript frames of your own agents, `{"id","agent","kind","createdAt","receivedAt","historical","channels","frame"}`. |
 | `activity/history` | `agent` (optional), `older` (optional) | `null`. Reads saved records from the archive: an agent's, older ones with `older: true`, or everyone's newest. They arrive through `activity/watch`. |

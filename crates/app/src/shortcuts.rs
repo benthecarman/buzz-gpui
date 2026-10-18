@@ -430,6 +430,48 @@ pub fn unregister_external(key: &str) {
     EXTERNAL.with_borrow_mut(|external| external.retain(|existing| existing.key != key));
 }
 
+/// A plugin shortcut as `shortcuts.snapshot()` lists it.
+pub struct Listed {
+    pub key: &'static str,
+    pub plugin: &'static str,
+    pub title: &'static str,
+    /// The chords that run it now, a rebind applied, as shown.
+    pub chords: Vec<String>,
+    /// Off for now (`shortcut/enable`).
+    pub enabled: bool,
+}
+
+/// Every plugin shortcut, in Settings order.
+pub fn external_list(cx: &App) -> Vec<Listed> {
+    rows(Shortcuts::overrides(cx), DESKTOP)
+        .into_iter()
+        .filter_map(|row| {
+            let shortcut = external(row.key)?;
+            Some(Listed {
+                key: shortcut.key,
+                plugin: shortcut.plugin,
+                title: shortcut.title,
+                chords: row
+                    .effective
+                    .iter()
+                    .map(|chord| chord.text(APPLE))
+                    .collect(),
+                enabled: !EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)),
+            })
+        })
+        .collect()
+}
+
+/// Runs plugin shortcut `key` as its chord would (`RegisteredShortcut.run`),
+/// whether or not it is off for now; `false` when there is none.
+pub fn run_external(key: &str, window: &mut Window, cx: &mut App) -> bool {
+    let Some(shortcut) = external(key) else {
+        return false;
+    };
+    (shortcut.run)(window, cx);
+    true
+}
+
 fn external(key: &str) -> Option<std::rc::Rc<ExternalShortcut>> {
     EXTERNAL.with_borrow(|external| {
         external

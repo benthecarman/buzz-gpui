@@ -455,6 +455,9 @@ impl ExternalView {
             "target": opening.map(|opening| opening.target.clone()),
             "channel": opening.map(|opening| opening.channel.clone()),
             "thread": opening.and_then(|opening| opening.thread.clone()),
+            // The thread of the message the opening link was in
+            // (`PanelProps.context.rootId`).
+            "root": opening.and_then(|opening| opening.root.clone()),
         });
         if let Value::Object(extra) = &self.extra {
             for (key, value) in extra {
@@ -1018,10 +1021,10 @@ impl Render for ExternalView {
     }
 }
 
-/// Whether `params` can be a plugin page's route: a JSON object of at
-/// most 4 KiB.
+/// Whether `params` can be a plugin page's route: any JSON value but
+/// null (the page's start), of at most 8 KiB, as buzz-app's `JsonValue`.
 pub fn route_valid(params: &Value) -> bool {
-    params.is_object() && params.to_string().len() <= 4_096
+    !params.is_null() && params.to_string().len() <= 8_192
 }
 
 /// Shows a plugin page at `params`, or its start: the page hears

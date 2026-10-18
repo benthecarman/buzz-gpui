@@ -450,6 +450,25 @@ fn active() -> Active {
     }
 }
 
+/// `identities` with `facts` in place of their keys' rows, each over
+/// what the row knew (`{...identities.get(key), ...fact}`).
+fn displayed(mut identities: Vec<NamingIdentity>, facts: &[NamingIdentity]) -> Vec<NamingIdentity> {
+    for fact in facts {
+        let key = fact.pubkey.to_ascii_lowercase();
+        let known = identities
+            .iter()
+            .position(|row| row.pubkey == key)
+            .map(|index| identities.remove(index));
+        identities.push(NamingIdentity {
+            pubkey: key,
+            name: fact.name.clone(),
+            is_agent: fact.is_agent,
+            owner: fact.owner.clone().or(known.and_then(|row| row.owner)),
+        });
+    }
+    identities
+}
+
 #[derive(PartialEq)]
 struct CacheKey {
     profiles: usize,
@@ -461,6 +480,7 @@ struct CacheKey {
     naming: Option<&'static str>,
     /// Changes when a plugin policy answers.
     generation: u64,
+    facts: Vec<NamingIdentity>,
 }
 
 /// Names scoped to `members` (a channel's roster), or community-wide.
@@ -471,6 +491,20 @@ pub fn names(
     viewer: &str,
     origin: Option<&RelayOrigin>,
     members: Option<&[String]>,
+) -> Arc<Names> {
+    names_with(profiles, library, viewer, origin, members, &[])
+}
+
+/// [`names`] with `facts`: names shown in this view only, such as a
+/// draft's recipients, that replace those keys' rows for the policy
+/// (`displayFacts`). They never select recipients or grant control.
+pub fn names_with(
+    profiles: &Profiles,
+    library: &AgentLibrary,
+    viewer: &str,
+    origin: Option<&RelayOrigin>,
+    members: Option<&[String]>,
+    facts: &[NamingIdentity],
 ) -> Arc<Names> {
     let key = CacheKey {
         profiles: Arc::as_ptr(profiles) as *const () as usize,
@@ -484,6 +518,7 @@ pub fn names(
         }),
         naming: None,
         generation: POLICY_GENERATION.get(),
+        facts: facts.to_vec(),
     };
     let active = active();
     let key = CacheKey {
@@ -508,11 +543,13 @@ pub fn names(
         Active::None => (HashMap::new(), HashMap::new()),
         Active::Bundled => {
             let (identities, library_names) = identities(profiles, library, origin);
+            let identities = displayed(identities, facts);
             let labels = resolve(&identities, Some(viewer), key.members.as_deref());
             (labels, library_names)
         }
         Active::Plugin(_, policy) => {
             let (identities, library_names) = identities(profiles, library, origin);
+            let identities = displayed(identities, facts);
             let labels = policy(&identities, Some(viewer), key.members.as_deref());
             (labels.unwrap_or_default(), library_names)
         }

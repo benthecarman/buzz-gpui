@@ -1086,8 +1086,44 @@ pub fn watch_session(
 pub fn names(params: &Value, cx: &App) -> Result<Value, Failure> {
     let keys = pubkeys(params, MAX_PROFILES)?;
     let candidates = candidates(params)?;
+    let facts = display_facts(params)?;
     let community = community(cx)?;
-    Ok(names_of(&community, &keys, candidates.as_deref(), cx))
+    Ok(names_of(
+        &community,
+        &keys,
+        candidates.as_deref(),
+        &facts,
+        cx,
+    ))
+}
+
+/// The `displayFacts` param: names this view shows for some keys, such
+/// as a draft's recipients, that the naming policy weighs in their place.
+fn display_facts(params: &Value) -> Result<Vec<crate::ui::identity::NamingIdentity>, Failure> {
+    let Some(facts) = params.get("displayFacts").filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let facts = facts
+        .as_array()
+        .filter(|facts| facts.len() <= MAX_PROFILES)
+        .ok_or_else(|| invalid("displayFacts must be a list of at most 500"))?;
+    facts
+        .iter()
+        .map(|fact| {
+            let pubkey = text(fact, "pubkey")
+                .filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| invalid("each display fact needs a pubkey"))?;
+            Ok(crate::ui::identity::NamingIdentity {
+                pubkey: pubkey.to_ascii_lowercase(),
+                name: text(fact, "name").unwrap_or_default().to_owned(),
+                is_agent: fact
+                    .get("isAgent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                owner: text(fact, "owner").map(str::to_ascii_lowercase),
+            })
+        })
+        .collect()
 }
 
 /// The `candidates` param: the keys in view, or everyone when absent.
@@ -1108,6 +1144,7 @@ fn names_of(
     community: &Entity<Community>,
     keys: &[String],
     candidates: Option<&[String]>,
+    facts: &[crate::ui::identity::NamingIdentity],
     cx: &App,
 ) -> Value {
     use crate::ui::identity;
@@ -1120,12 +1157,13 @@ fn names_of(
         scope.extend(keys.iter().cloned());
         scope
     });
-    let names = identity::names(
+    let names = identity::names_with(
         &community.snapshot.profiles,
         &library,
         &viewer,
         Some(&community.origin),
         scope.as_deref(),
+        facts,
     );
     Value::Object(
         keys.iter()
@@ -1151,14 +1189,15 @@ pub fn watch_names(
 ) -> Result<(Watch, Value), Failure> {
     let keys = pubkeys(params, MAX_PROFILES)?;
     let candidates = candidates(params)?;
+    let facts = display_facts(params)?;
     let community = community(cx)?;
-    let first = names_of(&community, &keys, candidates.as_deref(), cx);
+    let first = names_of(&community, &keys, candidates.as_deref(), &facts, cx);
     let mut last = first.clone();
     let forward = cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(Duration::from_secs(1)).await;
             cx.update(|cx| {
-                let now = names_of(&community, &keys, candidates.as_deref(), cx);
+                let now = names_of(&community, &keys, candidates.as_deref(), &facts, cx);
                 if now != last {
                     last = now.clone();
                     notify(json!({ "names": now }), cx);
@@ -1611,7 +1650,13 @@ pub fn open_link(params: &Value, cx: &mut App) -> Result<Value, Failure> {
 /// actions, each by its `plugin/id` key.
 pub fn contributions(cx: &App) -> Value {
     use crate::ui::pages::Placement;
-    json!({
+    use crate::ui::settings::cards::CardVisibility;
+    let mut lists = json!({
+        "inlineRenderers": [],
+        "messageRenderers": [],
+        "linkRenderers": [],
+        "attachmentRenderers": [],
+        "messageActions": [],
         "pages": crate::ui::pages::all(cx).iter().map(|spec| json!({
             "key": spec.page.key(),
             "title": spec.label,
@@ -1631,12 +1676,58 @@ pub fn contributions(cx: &App) -> Value {
         "settings": crate::ui::settings::cards::all(cx).iter().map(|card| json!({
             "key": card.key,
             "title": card.title,
+            "visibility": match card.visibility(cx) {
+                CardVisibility::Visible => "visible",
+                CardVisibility::Hidden => "hidden",
+                CardVisibility::Pending => "pending",
+                CardVisibility::Error => "error",
+            },
         })).collect::<Vec<_>>(),
         "accountActions": crate::ui::account_actions::all(cx).iter().map(|action| json!({
             "key": action.key,
             "title": action.title.to_string(),
         })).collect::<Vec<_>>(),
-    })
+        "shortcuts": crate::shortcuts::external_list(cx).iter().map(|shortcut| json!({
+            "key": shortcut.key,
+            "plugin": shortcut.plugin,
+            "title": shortcut.title,
+            "chords": shortcut.chords,
+            "enabled": shortcut.enabled,
+        })).collect::<Vec<_>>(),
+        "composerTools": crate::ui::composer_tools::listed(cx).iter()
+            .filter(|(_, _, accessory)| !accessory)
+            .map(|(key, order, _)| json!({ "key": key, "order": order }))
+            .collect::<Vec<_>>(),
+        "completions": crate::ui::composer_completions::listed().iter()
+            .map(|(key, trigger, order)| json!({
+                "key": key,
+                "trigger": trigger.to_string(),
+                "order": order,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let mut accessories: Vec<Value> = crate::ui::composer_tools::listed(cx)
+        .iter()
+        .filter(|(_, _, accessory)| *accessory)
+        .map(|(key, order, _)| json!({ "key": key, "order": order, "placement": "composer" }))
+        .collect();
+    for (kind, key, title) in crate::ui::renderers::listed() {
+        if kind == "messageAccessories" {
+            accessories.push(json!({ "key": key, "placement": "message" }));
+            continue;
+        }
+        let entry = match title {
+            Some(title) => json!({ "key": key, "title": title }),
+            None => json!({ "key": key }),
+        };
+        if let Some(list) = lists[kind].as_array_mut() {
+            list.push(entry);
+        } else {
+            lists[kind] = json!([entry]);
+        }
+    }
+    lists["accessories"] = Value::Array(accessories);
+    lists
 }
 
 /// `community/info`: the community relay's NIP-11 document, whose `self`

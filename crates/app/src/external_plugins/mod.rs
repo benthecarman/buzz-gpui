@@ -379,6 +379,8 @@ impl ExternalPlugins {
         // `communities/changed` likewise follows joining and leaving.
         cx.spawn(async move |cx| {
             let (mut last, mut last_list) = (Value::Null, Value::Null);
+            let (mut last_client, mut last_plugins, mut last_contributions) =
+                (Value::Null, Value::Null, Value::Null);
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
@@ -410,6 +412,29 @@ impl ExternalPlugins {
                             }
                         }
                     }
+                    // The rest only after the first look, which plugins read
+                    // at start: `communityReader`, `pluginStatus` and the
+                    // contribution readers' `subscribe`.
+                    for (last, now, method) in [
+                        (&mut last_client, Self::client(cx), "client/changed"),
+                        (&mut last_plugins, Self::plugin_list(cx), "plugins/changed"),
+                        (
+                            &mut last_contributions,
+                            capabilities::contributions(cx),
+                            "contributions/changed",
+                        ),
+                    ] {
+                        if now == *last {
+                            continue;
+                        }
+                        let first = last.is_null();
+                        *last = now.clone();
+                        if !first {
+                            for id in &ids {
+                                Self::notify_running(id, method, now.clone(), cx);
+                            }
+                        }
+                    }
                 });
             }
         })
@@ -437,6 +462,42 @@ impl ExternalPlugins {
                 })
                 .collect(),
         )
+    }
+
+    /// `plugins/list` (`pluginStatus`): every plugin, built in or added,
+    /// and whether it is running.
+    fn plugin_list(cx: &App) -> Value {
+        let added = cx.global::<Self>().plugins.iter().filter_map(|plugin| {
+            let id = plugin.id()?;
+            Some(json!({
+                "id": id,
+                "name": plugin.name(),
+                "builtIn": false,
+                "status": match &plugin.status {
+                    Status::Off => "off",
+                    Status::Paused => "paused",
+                    Status::Starting => "starting",
+                    Status::Running => "running",
+                    Status::Failed(_) => "failed",
+                },
+                "active": plugin.status == Status::Running,
+            }))
+        });
+        let built_in = cx
+            .try_global::<crate::plugins::Plugins>()
+            .map(|plugins| plugins.rows().to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "id": row.id,
+                    "name": row.name,
+                    "builtIn": true,
+                    "status": if row.enabled { "running" } else { "off" },
+                    "active": row.enabled,
+                })
+            });
+        Value::Array(built_in.chain(added).collect())
     }
 
     /// `community/client` (`communityReader.snapshot`): who is signed in,
@@ -2060,6 +2121,21 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 })
             }
+            "shortcuts/run" => Reply::Now(match params.get("key").and_then(Value::as_str) {
+                Some(key) => {
+                    let known = crate::shortcuts::external_list(cx)
+                        .iter()
+                        .any(|shortcut| shortcut.key == key);
+                    if known {
+                        let key = key.to_owned();
+                        crate::ui::navigation::with_workspace(cx, move |_, window, cx| {
+                            crate::shortcuts::run_external(&key, window, cx);
+                        });
+                    }
+                    Ok(json!(known))
+                }
+                None => Err((INVALID_PARAMS, "key is required".to_owned())),
+            }),
             "attachment/remove" => Reply::Now(match params.get("url").and_then(Value::as_str) {
                 Some(url) => Ok(json!(crate::ui::renderers::remove(url, cx))),
                 None => Err((INVALID_PARAMS, "url is required".to_owned())),
@@ -2108,6 +2184,7 @@ impl ExternalPlugins {
             "community/current" => Ok(Self::current_community(cx)),
             "community/list" => Ok(Self::community_list(cx)),
             "community/client" => Ok(Self::client(cx)),
+            "plugins/list" => Ok(Self::plugin_list(cx)),
             "community/retry" => {
                 if let Ok(community) = capabilities::community(cx) {
                     community.read(cx).session.retry();

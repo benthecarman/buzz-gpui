@@ -51,6 +51,17 @@ pub fn register(tool: ComposerTool, cx: &mut App) {
     cx.default_global::<Tools>().1 += 1;
 }
 
+/// Every tool as `(key, order, accessory)`, in toolbar order.
+pub fn listed(cx: &App) -> Vec<(&'static str, i32, bool)> {
+    cx.try_global::<Tools>().map_or_else(Vec::new, |tools| {
+        tools
+            .0
+            .iter()
+            .map(|tool| (tool.key, tool.order, tool.accessory))
+            .collect()
+    })
+}
+
 /// Changes whenever a tool is added or removed.
 pub fn generation(cx: &App) -> u64 {
     cx.try_global::<Tools>().map_or(0, |tools| tools.1)
