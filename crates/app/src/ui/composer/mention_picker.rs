@@ -289,6 +289,7 @@ impl Composer {
                     recipients,
                     detail,
                     disabled,
+                    ..
                 } = team
                 else {
                     return None;

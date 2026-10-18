@@ -32,6 +32,9 @@ pub struct Item {
     pub image: Option<String>,
     /// A person whose avatar shows before the label, by pubkey.
     pub avatar: Option<String>,
+    /// The names `mentions` chips show, by pubkey, where the plugin gave
+    /// them (`CompletionEdit.mention.name`).
+    pub names: std::collections::HashMap<String, String>,
 }
 
 /// A completion's answer (`CompletionResult`).
@@ -52,6 +55,11 @@ pub struct Place<'a> {
     pub thread: Option<&'a str>,
     /// The composer may offer library agents not yet in the conversation.
     pub invite_agents: bool,
+    /// The whole draft and the query's character range in it
+    /// (`ComposerObservation`).
+    pub draft: &'a str,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// The suggestions for a query; `None` while waiting.

@@ -375,7 +375,7 @@ impl MessageAction for RemindMe {
         Some(IconName::Alarm)
     }
 
-    fn matches(&self, _: &MessageRow) -> bool {
+    fn matches(&self, _: &MessageRow, _: &str) -> bool {
         true
     }
 

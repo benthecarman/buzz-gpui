@@ -1550,13 +1550,19 @@ pub fn format_time(params: &Value) -> Result<Value, Failure> {
         .get("at")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid("at (unix seconds) is required"))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
+    // `nowSeconds`: what "today" and "ago" are counted from.
+    let now = params
+        .get("now")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs())
+        });
     Ok(json!(match text(params, "style") {
-        None | Some("byline") => time::byline(at),
-        Some("item") => time::item(at),
-        Some("day") => time::day(at),
+        None | Some("byline") => time::byline_at(at, time::at(now)),
+        Some("item") => time::item_at(at, time::at(now)),
+        Some("day") => time::day_at(at, time::at(now)),
         Some("full") => time::full(at),
         Some("relative") => crate::ui::link_preview::relative(at, now),
         Some(_) => return Err(invalid("style must be byline, item, day, full or relative")),
@@ -1986,30 +1992,44 @@ pub fn contributions(cx: &App) -> Value {
         })).collect::<Vec<_>>(),
         "composerTools": crate::ui::composer_tools::listed(cx).iter()
             .filter(|(_, _, accessory)| !accessory)
-            .map(|(key, order, _)| json!({ "key": key, "order": order }))
+            .map(|(key, order, _)| json!({
+                "key": key,
+                "order": order,
+                "title": title_of(key),
+            }))
             .collect::<Vec<_>>(),
         "completions": crate::ui::composer_completions::listed().iter()
             .map(|(key, trigger, order)| json!({
                 "key": key,
                 "trigger": trigger.to_string(),
                 "order": order,
+                "title": title_of(key),
             }))
             .collect::<Vec<_>>(),
     });
     let mut accessories: Vec<Value> = crate::ui::composer_tools::listed(cx)
         .iter()
         .filter(|(_, _, accessory)| *accessory)
-        .map(|(key, order, _)| json!({ "key": key, "order": order, "placement": "composer" }))
+        .map(|(key, order, _)| {
+            json!({ "key": key, "order": order, "placement": "composer", "title": title_of(key) })
+        })
         .collect();
     for (kind, key, title) in crate::ui::renderers::listed() {
+        let (named, order) = super::contribute::titled(&key).unzip();
         if kind == "messageAccessories" {
-            accessories.push(json!({ "key": key, "placement": "message" }));
+            accessories.push(json!({
+                "key": key,
+                "placement": "message",
+                "title": named,
+                "order": order.flatten(),
+            }));
             continue;
         }
-        let entry = match title {
-            Some(title) => json!({ "key": key, "title": title }),
-            None => json!({ "key": key }),
-        };
+        let entry = json!({
+            "key": key,
+            "title": title.or(named).unwrap_or_else(|| key.clone()),
+            "order": order.flatten(),
+        });
         if let Some(list) = lists[kind].as_array_mut() {
             list.push(entry);
         } else {
@@ -2018,6 +2038,12 @@ pub fn contributions(cx: &App) -> Value {
     }
     lists["accessories"] = Value::Array(accessories);
     lists
+}
+
+/// A contribution's title for `contributions/list`: the plugin's, or
+/// the key for Buzz's own.
+fn title_of(key: &str) -> String {
+    super::contribute::titled(key).map_or_else(|| key.to_owned(), |(title, _)| title)
 }
 
 /// `community/info`: the community relay's NIP-11 document, whose `self`

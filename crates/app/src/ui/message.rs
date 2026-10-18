@@ -1021,7 +1021,7 @@ fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App)
             .tooltip(time_tooltip(row.created_at))
             .child(time::byline(row.created_at)),
     )
-    .children(renderers::markers(row, cx))
+    .children(renderers::markers(row, &rows.viewer, cx))
     .into_any_element()
 }
 
@@ -1643,7 +1643,7 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
         }
     }
     if rows.actions.on_command.is_some() {
-        for action in renderers::actions(row) {
+        for action in renderers::actions(row, &rows.viewer) {
             entries.push(Entry {
                 name: format!("action-{}", action.key()),
                 label: action.title().to_string(),

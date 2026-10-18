@@ -239,14 +239,6 @@ fn every_kind_of_contribution_is_checked() {
 
     for (value, reason) in [
         (
-            json!({ "messageRenderers": [{ "id": "all" }] }),
-            "every chat message",
-        ),
-        (
-            json!({ "messageRenderers": [{ "id": "all", "kinds": [9] }] }),
-            "every chat message",
-        ),
-        (
             json!({ "linkRenderers": [{ "id": "l", "matches": [] }] }),
             "too broadly",
         ),

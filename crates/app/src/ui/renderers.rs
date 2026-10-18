@@ -80,7 +80,8 @@ pub trait MessageAction {
     fn icon(&self) -> Option<buzz_ui::IconName> {
         None
     }
-    fn matches(&self, row: &MessageRow) -> bool;
+    /// Whether it applies to `row`, for `viewer` (the signed-in key).
+    fn matches(&self, row: &MessageRow, viewer: &str) -> bool;
     fn run(&self, row: &Arc<MessageRow>, window: &mut Window, cx: &mut App);
     fn marker(&self, _: &MessageRow, _: &App) -> Option<AnyElement> {
         None
@@ -255,17 +256,19 @@ pub fn register_action(action: Rc<dyn MessageAction>) {
 
 /// The actions that apply to `row`; a matcher that fails leaves the menu
 /// usable.
-pub fn actions(row: &MessageRow) -> Vec<Rc<dyn MessageAction>> {
+pub fn actions(row: &MessageRow, viewer: &str) -> Vec<Rc<dyn MessageAction>> {
     let all = REGISTRY.with_borrow(|r| r.actions.clone());
     all.into_iter()
         .filter(|a| on(a.key()))
-        .filter(|a| catch_unwind(AssertUnwindSafe(|| a.matches(row))).unwrap_or(false))
+        .filter(|a| catch_unwind(AssertUnwindSafe(|| a.matches(row, viewer))).unwrap_or(false))
         .collect()
 }
 
 /// Runs the action `key` on `row`.
 pub fn run_action(key: &str, row: &Arc<MessageRow>, window: &mut Window, cx: &mut App) {
-    if let Some(action) = actions(row).into_iter().find(|a| a.key() == key) {
+    // The menu offered it for this row already.
+    let found = REGISTRY.with_borrow(|r| r.actions.iter().find(|a| a.key() == key).cloned());
+    if let Some(action) = found.filter(|a| on(a.key())) {
         let _ = guarded(action.key(), || {
             action.run(row, window, cx);
             Some(())
@@ -274,8 +277,8 @@ pub fn run_action(key: &str, row: &Arc<MessageRow>, window: &mut Window, cx: &mu
 }
 
 /// The byline markers actions draw for `row`.
-pub fn markers(row: &MessageRow, cx: &App) -> Vec<AnyElement> {
-    actions(row)
+pub fn markers(row: &MessageRow, viewer: &str, cx: &App) -> Vec<AnyElement> {
+    actions(row, viewer)
         .into_iter()
         .filter_map(|a| guarded(a.key(), || a.marker(row, cx)))
         .collect()
@@ -302,6 +305,7 @@ fn resolve<T: ?Sized>(
     entries: &[Rc<T>],
     matches: impl Fn(&T) -> bool,
     order: impl Fn(&T) -> i32,
+    key: impl Fn(&T) -> String,
 ) -> Vec<Rc<T>> {
     let mut found: Vec<(i32, usize, Rc<T>)> = entries
         .iter()
@@ -309,7 +313,13 @@ fn resolve<T: ?Sized>(
         .filter(|(_, e)| catch_unwind(AssertUnwindSafe(|| matches(e))).unwrap_or(false))
         .map(|(i, e)| (order(e), i, e.clone()))
         .collect();
-    found.sort_by_key(|(order, index, _)| (*order, *index));
+    // Ties go to the lowest key (`MatchOrder`), not to whichever plugin
+    // started first.
+    found.sort_by(|(a, i, x), (b, j, y)| {
+        a.cmp(b)
+            .then_with(|| key(x).cmp(&key(y)))
+            .then_with(|| i.cmp(j))
+    });
     found.into_iter().map(|(_, _, e)| e).collect()
 }
 
@@ -320,6 +330,7 @@ pub fn message_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> A
             &r.messages,
             |m| on(m.key()) && m.matches(row),
             |m| m.order(row),
+            |m| m.key().to_owned(),
         )
     });
     for renderer in candidates {
@@ -337,6 +348,7 @@ pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
             &r.links,
             |l| on(l.key()) && l.matches(url),
             |l| l.order(url),
+            |l| l.key().to_owned(),
         )
     });
     // The bundled links renderer sits at 0 for known kinds, 100 for the web.
@@ -564,6 +576,7 @@ mod tests {
             &entries,
             |l| l.matches("https://x"),
             |l| l.order("https://x"),
+            |l| l.key().to_owned(),
         );
         let keys: Vec<&str> = order.iter().map(|l| l.key()).collect();
         assert_eq!(keys, ["early", "tie", "late"]);

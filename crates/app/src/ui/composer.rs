@@ -1538,10 +1538,14 @@ impl Composer {
             Trigger::Plugin(key) => {
                 let thread = self.thread_root.map(|root| root.to_hex());
                 let answer = super::composer_completions::get(key).and_then(|completion| {
+                    let chars = |byte: usize| text[..byte.min(text.len())].chars().count();
                     let place = super::composer_completions::Place {
                         channel: &self.channel,
                         thread: thread.as_deref(),
                         invite_agents: self.invite_agents,
+                        draft: &text,
+                        start: chars(query.start),
+                        end: chars(query.end),
                     };
                     (completion.query)(&query.text, place, cx)
                 });
@@ -1586,9 +1590,15 @@ impl Composer {
                                     .mentions
                                     .iter()
                                     .map(|key| {
-                                        let name = profiles
+                                        let name = item
+                                            .names
                                             .get(key)
-                                            .map(|profile| profile.name.clone())
+                                            .cloned()
+                                            .or_else(|| {
+                                                profiles
+                                                    .get(key)
+                                                    .map(|profile| profile.name.clone())
+                                            })
                                             .unwrap_or_else(|| key.chars().take(10).collect());
                                         (key.clone(), SharedString::from(name), None)
                                     })
@@ -1600,8 +1610,10 @@ impl Composer {
                                         .disabled
                                         .clone()
                                         .or(item.detail)
+                                        .or(item.preview)
                                         .unwrap_or_default(),
                                     disabled: item.disabled.is_some(),
+                                    exact: item.exact,
                                 }
                             })
                             .collect(),
@@ -1851,6 +1863,7 @@ impl Composer {
                     .collect(),
                 detail: team.detail.into(),
                 disabled: team.disabled.is_some(),
+                exact: false,
             })
             .collect()
     }
@@ -2220,6 +2233,10 @@ impl Composer {
                     Suggestion::Text {
                         exact: true,
                         disabled: None,
+                        ..
+                    } | Suggestion::Team {
+                        exact: true,
+                        disabled: false,
                         ..
                     }
                 )
@@ -3709,6 +3726,8 @@ pub(super) enum Suggestion {
         recipients: Vec<(String, SharedString, Option<String>)>,
         detail: SharedString,
         disabled: bool,
+        /// A space typed after a plugin's query picks it.
+        exact: bool,
     },
 }
 

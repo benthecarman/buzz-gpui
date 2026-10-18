@@ -253,6 +253,9 @@ pub enum AccessoryPlacement {
 #[serde(rename_all = "camelCase")]
 pub struct InlineRendererDecl {
     pub id: String,
+    /// What Settings and the contribution readers call it.
+    #[serde(default)]
+    pub title: Option<String>,
     pub pattern: String,
 }
 
@@ -611,6 +614,9 @@ pub struct ActionDecl {
 #[serde(rename_all = "camelCase")]
 pub struct LinkRendererDecl {
     pub id: String,
+    /// What Settings and the contribution readers call it.
+    #[serde(default)]
+    pub title: Option<String>,
     pub matches: Vec<String>,
     /// Lower wins among renderers that match.
     #[serde(default)]
@@ -623,6 +629,9 @@ pub struct LinkRendererDecl {
 #[serde(rename_all = "camelCase")]
 pub struct MessageRendererDecl {
     pub id: String,
+    /// What Settings and the contribution readers call it.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub kinds: Vec<u16>,
     #[serde(default)]
@@ -636,6 +645,9 @@ pub struct MessageRendererDecl {
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentRendererDecl {
     pub id: String,
+    /// What Settings and the contribution readers call it.
+    #[serde(default)]
+    pub title: Option<String>,
     pub mime: Vec<String>,
 }
 
@@ -829,18 +841,6 @@ impl Contributions {
         }
         for renderer in &self.message_renderers {
             id(&renderer.id)?;
-            let narrow = renderer
-                .prefix
-                .as_ref()
-                .is_some_and(|prefix| prefix.len() >= 2)
-                || (!renderer.kinds.is_empty() && !renderer.kinds.contains(&9));
-            if !narrow {
-                return Err(format!(
-                    "“{}” would draw every chat message. Give it a prefix of at least two \
-                     characters, or other kinds.",
-                    renderer.id
-                ));
-            }
         }
         for renderer in &self.attachment_renderers {
             id(&renderer.id)?;

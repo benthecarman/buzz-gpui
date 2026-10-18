@@ -25,7 +25,12 @@ pub fn byline(seconds: u64) -> String {
     byline_at(seconds, Local::now())
 }
 
-fn byline_at(seconds: u64, now: DateTime<Local>) -> String {
+/// `seconds` as unix time, for a "now" other than the clock's.
+pub fn at(seconds: u64) -> DateTime<Local> {
+    local(seconds)
+}
+
+pub fn byline_at(seconds: u64, now: DateTime<Local>) -> String {
     let time = local(seconds);
     let (date, today) = (time.date_naive(), now.date_naive());
     match days_ago(date, today) {
@@ -41,8 +46,8 @@ fn byline_at(seconds: u64, now: DateTime<Local>) -> String {
 
 /// A list row's time (`formatItemTimestamp`): "2:34 PM", "Yesterday",
 /// "Monday", "Sat, Jun 20", "Jun 20, 2025".
-pub fn item(seconds: u64) -> String {
-    let (time, now) = (local(seconds), Local::now());
+pub fn item_at(seconds: u64, now: DateTime<Local>) -> String {
+    let time = local(seconds);
     let (date, today) = (time.date_naive(), now.date_naive());
     match days_ago(date, today) {
         0 => clock(&time),
@@ -64,7 +69,7 @@ pub fn day(seconds: u64) -> String {
     day_at(seconds, Local::now())
 }
 
-fn day_at(seconds: u64, now: DateTime<Local>) -> String {
+pub fn day_at(seconds: u64, now: DateTime<Local>) -> String {
     let time = local(seconds);
     let (date, today) = (time.date_naive(), now.date_naive());
     match days_ago(date, today) {

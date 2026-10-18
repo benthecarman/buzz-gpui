@@ -116,6 +116,9 @@ thread_local! {
     static SUGGESTION_INBOX: RefCell<Option<futures::channel::mpsc::UnboundedSender<Suggested>>> =
         RefCell::default();
     static NEXT_COMPOSER: Cell<u64> = const { Cell::new(0) };
+    /// Each contribution's title and order, by `plugin/id`, for
+    /// `contributions/list`.
+    static TITLES: RefCell<HashMap<String, (String, Option<i32>)>> = RefCell::default();
     /// The query each `completion/query` request answers, by its
     /// `request` id, for `completion/publish`.
     static QUERIES: RefCell<HashMap<u64, SuggestionKey>> = RefCell::default();
@@ -146,6 +149,9 @@ fn suggest(
         channel,
         thread,
         invite_agents,
+        draft,
+        start,
+        end,
     } = place;
     let entry = (
         key.to_owned(),
@@ -177,6 +183,13 @@ fn suggest(
             "channel": channel,
             "thread": thread,
             "inviteAgents": invite_agents,
+            // The draft around the query (`ComposerObservation`), as it was
+            // when this query was first typed.
+            "observation": {
+                "text": draft.chars().take(10_000).collect::<String>(),
+                "start": start,
+                "end": end,
+            },
         }),
     );
     SUGGESTIONS.with_borrow_mut(|suggestions| {
@@ -200,6 +213,11 @@ fn suggest(
         let _ = inbox.unbounded_send((entry, items));
     });
     None
+}
+
+/// A contribution's title and order, by `plugin/id` key.
+pub fn titled(key: &str) -> Option<(String, Option<i32>)> {
+    TITLES.with_borrow(|titles| titles.get(key).cloned())
 }
 
 /// `completion/publish`: new suggestions for an earlier query, by its
@@ -280,22 +298,34 @@ fn items(value: &Value) -> Vec<Item> {
                 .take(50)
                 .filter_map(|item| {
                     let label = text(item, "label").filter(|label| !label.is_empty())?;
+                    // Each a pubkey, or `{"pubkey","name"}` to name its chip.
+                    let mut names = HashMap::new();
                     let mentions: Vec<String> = item
                         .get("mentions")
                         .and_then(Value::as_array)
                         .map(|keys| {
                             keys.iter()
-                                .filter_map(Value::as_str)
-                                .filter(|key| {
-                                    key.len() == 64
-                                        && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                .filter_map(|mention| {
+                                    let key = mention
+                                        .as_str()
+                                        .or_else(|| mention.get("pubkey").and_then(Value::as_str))
+                                        .filter(|key| {
+                                            key.len() == 64
+                                                && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                        })?
+                                        .to_ascii_lowercase();
+                                    if let Some(name) = mention.get("name").and_then(Value::as_str)
+                                    {
+                                        names.insert(key.clone(), name.chars().take(64).collect());
+                                    }
+                                    Some(key)
                                 })
-                                .map(str::to_ascii_lowercase)
                                 .take(32)
                                 .collect()
                         })
                         .unwrap_or_default();
                     Some(Item {
+                        names,
                         text: text(item, "text").unwrap_or_else(|| label.clone()),
                         detail: text(item, "detail").map(Into::into),
                         label: label.into(),
@@ -675,13 +705,6 @@ fn message_json(row: &MessageRow, cx: &App) -> Value {
 }
 
 /// The viewer, for actions on the user's own messages.
-fn viewer(cx: &App) -> Option<String> {
-    match &cx.global::<AppState>().identity {
-        crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
-        _ => None,
-    }
-}
-
 struct Link {
     key: &'static str,
     plugin: String,
@@ -877,8 +900,8 @@ struct Action {
     title: String,
     icon: Option<IconName>,
     kinds: Vec<u16>,
-    /// The viewer's key when `mine` is set.
-    mine: Option<String>,
+    /// Only the viewer's own messages.
+    mine: bool,
     /// The rest of the declared filters (`matches(message)`).
     attachments: Option<bool>,
     replies: Option<bool>,
@@ -899,12 +922,9 @@ impl MessageAction for Action {
         self.icon
     }
 
-    fn matches(&self, row: &MessageRow) -> bool {
+    fn matches(&self, row: &MessageRow, viewer: &str) -> bool {
         (self.kinds.is_empty() && row.kind == 9 || self.kinds.contains(&row.kind))
-            && self
-                .mine
-                .as_ref()
-                .is_none_or(|viewer| row.author.to_hex() == *viewer)
+            && (!self.mine || (!viewer.is_empty() && row.author.to_hex() == viewer))
             && self
                 .attachments
                 .is_none_or(|wanted| wanted == !row.attachments.is_empty())
@@ -1588,6 +1608,49 @@ pub fn register(
     use crate::ui::settings::cards::{self, CardPlacement, SettingsCard};
     let mut added = Vec::new();
     let key = |id: &str| intern(format!("{plugin}/{id}"));
+    // Titles and orders the contribution readers report.
+    TITLES.with_borrow_mut(|titles| {
+        titles.retain(|key: &String, _| !key.starts_with(&format!("{plugin}/")));
+        let mut add = |id: &str, title: Option<&str>, order: Option<i32>| {
+            titles.insert(
+                format!("{plugin}/{id}"),
+                (title.unwrap_or(id).to_owned(), order),
+            );
+        };
+        for tool in &contributions.composer_tools {
+            add(&tool.id, Some(&tool.title), Some(tool.order));
+        }
+        for completion in &contributions.completions {
+            add(
+                &completion.id,
+                Some(&completion.title),
+                Some(completion.order),
+            );
+        }
+        for accessory in &contributions.composer_accessories {
+            add(&accessory.id, Some(&accessory.title), Some(accessory.order));
+        }
+        for renderer in &contributions.inline_renderers {
+            add(&renderer.id, renderer.title.as_deref(), None);
+        }
+        for renderer in &contributions.link_renderers {
+            add(
+                &renderer.id,
+                renderer.title.as_deref(),
+                Some(renderer.order),
+            );
+        }
+        for renderer in &contributions.message_renderers {
+            add(
+                &renderer.id,
+                renderer.title.as_deref(),
+                Some(renderer.order),
+            );
+        }
+        for renderer in &contributions.attachment_renderers {
+            add(&renderer.id, renderer.title.as_deref(), None);
+        }
+    });
     for card in &contributions.settings_cards {
         let card_key = key(&card.id);
         let (owner, id) = (plugin.to_owned(), card.id.clone());
@@ -1629,7 +1692,6 @@ pub fn register(
         );
         added.push(Added::Category(category_key));
     }
-    let mine = viewer(cx);
     for action in &contributions.message_actions {
         let action_key = key(&action.id);
         // A restart registers it again under the same key.
@@ -1641,7 +1703,7 @@ pub fn register(
             title: action.title.clone(),
             icon: action.icon.as_deref().map(|name| super::icon(Some(name))),
             kinds: action.kinds.clone(),
-            mine: action.mine.then(|| mine.clone()).flatten(),
+            mine: action.mine,
             attachments: action.attachments,
             replies: action.replies,
             pattern: action
