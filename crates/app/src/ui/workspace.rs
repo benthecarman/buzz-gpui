@@ -848,13 +848,29 @@ impl Workspace {
     /// The page showing the current visit says it cannot
     /// (`PageNavigation.complete({status: "failed"})`): the visit fails,
     /// kept for Retry navigation.
-    pub(crate) fn fail_visit(&mut self, cx: &mut Context<Self>) {
+    /// Only while the current visit shows page `key`; `false` otherwise,
+    /// so a page closed or replaced cannot fail another visit.
+    pub(crate) fn fail_visit(
+        &mut self,
+        key: &str,
+        reason: super::channel_states::Reason,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let target = self.history.current().cloned();
+        let shown = target.as_ref().is_some_and(|target| match &target.place {
+            Place::Page(page) | Place::Route { page, .. } => page.key() == key,
+            _ => false,
+        });
+        if !shown {
+            return false;
+        }
         self.failure = Some(super::channel_states::Failed {
-            target: self.history.current().cloned(),
-            reason: super::channel_states::Reason::Page,
+            target,
+            reason,
             ingress: false,
         });
         cx.notify();
+        true
     }
 
     /// Opens `target` without moving the focus, for a plugin control

@@ -190,6 +190,13 @@ pub fn register(spec: PageSpec, cx: &mut App) {
     pages.push(spec);
 }
 
+/// Drops `page`'s route handler and image before it is registered again,
+/// so a page that no longer has them does not keep the old ones.
+pub fn clear_extras(page: Page, cx: &mut App) {
+    cx.default_global::<Routes>().0.remove(&page);
+    cx.default_global::<Images>().0.remove(&page);
+}
+
 /// Removes the page `page`, as when the plugin that added it stops.
 pub fn unregister(page: Page, cx: &mut App) {
     cx.default_global::<Pages>()

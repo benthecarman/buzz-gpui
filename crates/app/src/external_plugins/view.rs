@@ -445,7 +445,7 @@ impl ExternalView {
             setup(&mut view);
             view
         });
-        let params = view.read(cx).open_params();
+        let params = view.read(cx).open_params(cx);
         ExternalPlugins::open_view(plugin, &id, view.downgrade(), params, cx);
         view
     }
@@ -456,12 +456,17 @@ impl ExternalView {
         &self.id
     }
 
+    /// The contribution it shows, as `plugin/id`.
+    pub(super) fn contribution_key(&self) -> String {
+        format!("{}/{}", self.plugin, self.contribution)
+    }
+
     /// What it is: `page`, `panel`, `dialog` and so on.
     pub(super) fn kind(&self) -> &'static str {
         self.kind
     }
 
-    pub(super) fn open_params(&self) -> Value {
+    pub(super) fn open_params(&self, cx: &App) -> Value {
         let opening = self.opening.as_ref();
         let (agent, kind, conversation, pending) = match &self.agent {
             Some((view, kind)) => (
@@ -490,6 +495,21 @@ impl ExternalView {
             // (`PanelProps.context.rootId`).
             "root": opening.and_then(|opening| opening.root.clone()),
         });
+        // The rest of `ChannelPanelContext`: the panel's community, which
+        // may not be the selected one, who you are there, and the channel.
+        if let Some(opening) = opening {
+            let community = opening.community.read(cx);
+            params["community"] = json!(community.origin.websocket());
+            params["viewer"] = json!(community.session.viewer().to_string());
+            params["channelName"] = json!(
+                community
+                    .snapshot
+                    .channels
+                    .iter()
+                    .find(|channel| channel.id == opening.channel)
+                    .map(|channel| channel.name.clone())
+            );
+        }
         if let Value::Object(extra) = &self.extra {
             for (key, value) in extra {
                 params[key] = value.clone();

@@ -986,11 +986,14 @@ pub fn navigation_state(cx: &App) -> Value {
 }
 
 /// `navigation/retry`: opens the visit that failed again.
-pub fn retry_navigation(cx: &mut App) -> Result<Value, Failure> {
+pub fn retry_navigation(cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let before = navigation::workspace(cx)
+        .map(|workspace| workspace.read(cx).visit().0)
+        .ok_or((1, "The window is not open.".to_owned()))?;
     navigation::with_workspace(cx, |workspace, window, cx| {
         workspace.retry_failed(window, cx)
     });
-    Ok(Value::Null)
+    Ok(settle(before, cx))
 }
 
 /// `navigation/watch`: sends `navigation/changed` with
@@ -1806,14 +1809,31 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 /// at once.
 pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let before = navigation::workspace(cx).map(|workspace| workspace.read(cx).visit().0);
-    let tracked = start_navigation(params, cx)?;
+    let tracked = match start_navigation(params, cx) {
+        Ok(tracked) => tracked,
+        // A target that cannot be opened fails the open, as buzz-app's
+        // `open()` resolves `invalid-target`, rather than the request.
+        Err((INVALID_PARAMS, error)) => {
+            return Ok(Task::ready(Ok(json!({
+                "status": "failed",
+                "reason": "invalid-target",
+                "error": error,
+            }))));
+        }
+        Err(failure) => return Err(failure),
+    };
     let Some(before) = before.filter(|_| tracked) else {
         return Ok(Task::ready(Ok(Value::Null)));
     };
-    Ok(cx.spawn(async move |cx| {
+    Ok(settle(before, cx))
+}
+
+/// How the visit after attempt `before` turns out (`OpenResult`).
+fn settle(before: u64, cx: &mut App) -> Task<Result<Value, Failure>> {
+    cx.spawn(async move |cx| {
         let mut ours = None;
         // As long as a visit may take to open (`OPEN_TIMEOUT`), and a bit.
-        for _ in 0..170 {
+        for step in 0..170 {
             cx.background_executor()
                 .timer(Duration::from_millis(100))
                 .await;
@@ -1830,6 +1850,10 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
                 break;
             };
             if attempt == before {
+                // Nothing new opened: the window already shows it.
+                if step >= 10 {
+                    return Ok(json!({ "status": "opened" }));
+                }
                 continue;
             }
             if *ours.get_or_insert(attempt) != attempt {
@@ -1843,7 +1867,7 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
             }
         }
         Ok(json!({ "status": "failed", "reason": "timeout" }))
-    }))
+    })
 }
 
 /// Starts a navigation; `false` for Back and Forward, which are not

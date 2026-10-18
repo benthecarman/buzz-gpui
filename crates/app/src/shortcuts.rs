@@ -873,21 +873,6 @@ pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App
     if captured.other_primary {
         return false;
     }
-    let rows = rows(Shortcuts::overrides(cx), DESKTOP);
-    let Some(shortcut) = rows
-        .iter()
-        .find(|row| {
-            row.effective
-                .iter()
-                .any(|binding| binding.same(&captured.binding))
-        })
-        .and_then(|row| external(row.key))
-    else {
-        return false;
-    };
-    if EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)) {
-        return false;
-    }
     let place = KeyPlace {
         editable: window
             .context_stack()
@@ -896,14 +881,32 @@ pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App
         modal: crate::ui::overlay::modal_shown(),
         held: event.is_held,
     };
-    match external_press(&shortcut, place) {
-        ExternalPress::Run => {
-            (shortcut.run)(window, cx);
-            true
+    // The first plugin shortcut on this chord that is on and may run here;
+    // one that is off or ineligible leaves the press to the next, as
+    // buzz-app's dispatcher keeps looking.
+    let rows = rows(Shortcuts::overrides(cx), DESKTOP);
+    for shortcut in rows
+        .iter()
+        .filter(|row| {
+            row.effective
+                .iter()
+                .any(|binding| binding.same(&captured.binding))
+        })
+        .filter_map(|row| external(row.key))
+    {
+        if EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)) {
+            continue;
         }
-        ExternalPress::Swallow => true,
-        ExternalPress::Pass => false,
+        match external_press(&shortcut, place) {
+            ExternalPress::Run => {
+                (shortcut.run)(window, cx);
+                return true;
+            }
+            ExternalPress::Swallow => return true,
+            ExternalPress::Pass => {}
+        }
     }
+    false
 }
 
 /// Replaces every app-wide binding of a host action with the current

@@ -710,7 +710,20 @@ impl Chord {
             shift: false,
             alt: false,
         };
-        let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+        // `mod++` and a bare `+` bind the plus key itself.
+        let (head, plus) = match text.strip_suffix("++") {
+            Some(head) => (head, true),
+            None if text.trim() == "+" => ("", true),
+            None => (text, false),
+        };
+        let mut parts: Vec<&str> = if head.is_empty() {
+            Vec::new()
+        } else {
+            head.split('+').map(str::trim).collect()
+        };
+        if plus {
+            parts.push("+");
+        }
         let (key, modifiers) = parts.split_last().ok_or("an empty chord")?;
         for modifier in modifiers {
             match modifier.to_ascii_lowercase().as_str() {

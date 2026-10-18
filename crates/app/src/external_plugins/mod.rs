@@ -1219,7 +1219,7 @@ impl ExternalPlugins {
         let views: Vec<_> = plugin.views.values().cloned().collect();
         for view in views {
             if let Some(view) = view.upgrade() {
-                let params = view.read(cx).open_params();
+                let params = view.read(cx).open_params(cx);
                 if let Some(connection) = cx
                     .global::<Self>()
                     .by_id(&id)
@@ -1297,6 +1297,8 @@ impl ExternalPlugins {
         }
         for page in &contributions.pages {
             let key = Page::new(intern(format!("{id}/{}", page.id)));
+            // `contributions/update` may drop its routes or image.
+            pages::clear_extras(key, cx);
             let plugin = id.to_owned();
             let contribution = page.id.clone();
             let edge_to_edge = page.layout == protocol::PageLayout::Workspace;
@@ -1910,18 +1912,33 @@ impl ExternalPlugins {
                         .get(view)?
                         .upgrade()
                 });
-                if view.is_none_or(|view| view.read(cx).kind() != "page") {
+                let Some(view) = view.filter(|view| view.read(cx).kind() == "page") else {
                     return Reply::Now(Err((
                         INVALID_PARAMS,
                         "page/settle takes an open page view".to_owned(),
                     )));
-                }
+                };
                 match params.get("status").and_then(Value::as_str) {
                     Some("failed") => {
-                        crate::ui::navigation::with_workspace(cx, |workspace, _, cx| {
-                            workspace.fail_visit(cx)
-                        });
-                        Reply::Now(Ok(Value::Null))
+                        use crate::ui::channel_states::Reason;
+                        // `OpenFailure`; `unavailable` by default.
+                        let reason = match params.get("reason").and_then(Value::as_str) {
+                            Some("not-found") => Reason::NotFound,
+                            Some("denied") => Reason::Denied,
+                            Some("invalid-target") => Reason::Invalid,
+                            Some("timeout") => Reason::Timeout,
+                            Some("host-error") => Reason::HostError,
+                            _ => Reason::Page,
+                        };
+                        let key = view.read(cx).contribution_key();
+                        let failed =
+                            crate::ui::navigation::workspace(cx).is_some_and(|workspace| {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.fail_visit(&key, reason, cx)
+                                })
+                            });
+                        // `false` when the visit no longer shows this page.
+                        Reply::Now(Ok(json!(failed)))
                     }
                     Some("opened") => Reply::Now(Ok(Value::Null)),
                     _ => Reply::Now(Err((
@@ -2031,7 +2048,7 @@ impl ExternalPlugins {
             "projects/gitAuthorization" => Reply::Now(capabilities::git_authorization(params, cx)),
             "agents/logProof" => Reply::Now(capabilities::log_proof(params, cx)),
             "navigation/get" => Reply::Now(Ok(capabilities::navigation_state(cx))),
-            "navigation/retry" => Reply::Now(capabilities::retry_navigation(cx)),
+            "navigation/retry" => later(capabilities::retry_navigation(cx)),
             "outbox/get" => later(outbox::get(params, cx)),
             "archives/get" => later(channels::archives(params, cx)),
             "read/clearLocal" => later(reading::local(true, params, cx)),

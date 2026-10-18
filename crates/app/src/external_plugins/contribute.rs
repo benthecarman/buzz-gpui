@@ -119,6 +119,8 @@ thread_local! {
     /// Each contribution's title and order, by `plugin/id`, for
     /// `contributions/list`.
     static TITLES: RefCell<HashMap<String, (String, Option<i32>)>> = RefCell::default();
+    /// Each plugin's settings cards, for `settings/check`.
+    static CARD_OWNERS: RefCell<HashMap<String, Vec<String>>> = RefCell::default();
     /// The query each `completion/query` request answers, by its
     /// `request` id, for `completion/publish`.
     static QUERIES: RefCell<HashMap<u64, SuggestionKey>> = RefCell::default();
@@ -213,6 +215,17 @@ fn suggest(
         let _ = inbox.unbounded_send((entry, items));
     });
     None
+}
+
+/// Settings is showing its sections (`retainVisibility`): each running
+/// plugin with cards hears `settings/check` and checks them now, as a
+/// buzz-app card's `visibility.ensure` runs.
+fn check_cards(cx: &mut App) -> Subscription {
+    let owners = CARD_OWNERS.with_borrow(Clone::clone);
+    for (plugin, cards) in owners {
+        ExternalPlugins::notify_running(&plugin, "settings/check", json!({ "cards": cards }), cx);
+    }
+    Subscription::new(|| {})
 }
 
 /// A contribution's title and order, by `plugin/id` key.
@@ -411,6 +424,7 @@ pub fn forget(plugin: &str) {
     });
     MARKS.with_borrow_mut(|marks| marks.retain(|key, _| !key.starts_with(&prefix)));
     CARD_STATES.with_borrow_mut(|states| states.retain(|key, _| !key.starts_with(&prefix)));
+    CARD_OWNERS.with_borrow_mut(|owners| owners.remove(plugin));
     super::naming::forget(plugin);
     // Prose drew this plugin's old answers.
     crate::ui::renderers::text_changed();
@@ -1608,6 +1622,21 @@ pub fn register(
     use crate::ui::settings::cards::{self, CardPlacement, SettingsCard};
     let mut added = Vec::new();
     let key = |id: &str| intern(format!("{plugin}/{id}"));
+    CARD_OWNERS.with_borrow_mut(|owners| {
+        let cards: Vec<String> = contributions
+            .settings_cards
+            .iter()
+            .map(|card| card.id.clone())
+            .collect();
+        if cards.is_empty() {
+            owners.remove(plugin);
+        } else {
+            owners.insert(plugin.to_owned(), cards);
+        }
+    });
+    if !contributions.settings_cards.is_empty() {
+        cards::register_check("buzz.plugins/cards", check_cards, cx);
+    }
     // Titles and orders the contribution readers report.
     TITLES.with_borrow_mut(|titles| {
         titles.retain(|key: &String, _| !key.starts_with(&format!("{plugin}/")));

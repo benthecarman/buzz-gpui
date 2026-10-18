@@ -313,6 +313,8 @@ fn chords_parse() {
     assert!(!Chord::parse("j").unwrap().primary);
     assert!(!Chord::parse("shift+?").unwrap().shift);
     assert!(Chord::parse("shift+j").unwrap().shift);
+    assert_eq!(Chord::parse("mod++").unwrap().key, "+");
+    assert_eq!(Chord::parse("+").unwrap().key, "+");
 }
 
 #[test]
