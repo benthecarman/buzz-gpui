@@ -863,10 +863,17 @@ impl Contributions {
                 (Some(c), None) => Some(c),
                 _ => None,
             };
-            if one.is_none_or(|c| c.is_alphanumeric() || c.is_whitespace() || "@#:".contains(c)) {
+            if one.is_none_or(|c| c.is_alphanumeric() || c.is_whitespace()) {
                 return Err(format!(
-                    "“{}” needs one trigger character that is not a letter, digit, space, @, # \
-                     or :.",
+                    "“{}” needs one trigger character that is not a letter, digit or space.",
+                    completion.id
+                ));
+            }
+            // Buzz's own mentions, channels and emoji are at order 0; a
+            // plugin takes their trigger only by ranking before them.
+            if one.is_some_and(|c| "@#:".contains(c)) && completion.order >= 0 {
+                return Err(format!(
+                    "“{}” uses one of Buzz's own triggers; give it an order below 0 to take it.",
                     completion.id
                 ));
             }

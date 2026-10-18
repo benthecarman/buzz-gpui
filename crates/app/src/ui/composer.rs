@@ -3582,6 +3582,14 @@ fn find_query(text: &str, caret: usize, plugins: &[(char, &'static str)]) -> Opt
         if length > 160 || matches!(c, '\n' | '\r' | '\t') {
             return None;
         }
+        // A plugin ordered before Buzz's own takes `@`, `#` or `:`.
+        if "@#:".contains(c)
+            && plugin
+            && boundary(index)
+            && let Some((_, key)) = plugins.iter().find(|(trigger, _)| *trigger == c)
+        {
+            return Some(query(Trigger::Plugin(key), index));
+        }
         match c {
             '@' if boundary(index) => return Some(query(Trigger::Mention, index)),
             '#' if channel && boundary(index) => return Some(query(Trigger::Channel, index)),
