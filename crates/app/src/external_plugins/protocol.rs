@@ -1083,6 +1083,9 @@ pub enum Node {
         disabled: bool,
         #[serde(default)]
         auto_focus: bool,
+        /// The text it starts with, and puts back when it changes.
+        #[serde(default)]
+        draft: Option<String>,
     },
     /// One message as Buzz draws it in a conversation
     /// (`conversation.ui.Message`), for display.

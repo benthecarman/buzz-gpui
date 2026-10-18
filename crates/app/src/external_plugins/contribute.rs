@@ -864,6 +864,19 @@ pub fn insert(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failu
 }
 
 /// The open composer `params.composer` names, and the window it is in.
+/// A composer id `composer/insert` and the like take, for `composer`.
+pub(super) fn composer_id(composer: &Entity<Composer>) -> u64 {
+    let id = NEXT_COMPOSER.with(|next| {
+        next.set(next.get() + 1);
+        next.get()
+    });
+    COMPOSERS.with_borrow_mut(|composers| {
+        composers.retain(|_, weak| weak.upgrade().is_some());
+        composers.insert(id, composer.downgrade());
+    });
+    id
+}
+
 fn composer_of(
     params: &Value,
     cx: &App,

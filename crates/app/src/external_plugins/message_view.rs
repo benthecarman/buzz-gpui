@@ -1,6 +1,8 @@
 //! A message a plugin view shows as Buzz draws it in a conversation
-//! (`conversation.ui.Message`): byline, text, attachments and reactions,
-//! for display.
+//! (`conversation.ui.Message`): byline, text, attachments and reactions.
+//! Opening its thread, replying and picking a reaction go to the plugin,
+//! which decides what they do (`onOpenThread`, `onReply`); a failed send
+//! retries in place.
 
 use crate::community::Community;
 use crate::runtime::Runtime;
@@ -14,8 +16,12 @@ use gpui_kit::*;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Tells the plugin's view what happened on the message.
+pub type Send = Rc<dyn Fn(&str, serde_json::Value, &mut App)>;
+
 pub struct MessageView {
     community: Entity<Community>,
+    send: Send,
     channel: String,
     row: Option<Arc<MessageRow>>,
     /// The message could not be read.
@@ -30,6 +36,7 @@ impl MessageView {
         community: Entity<Community>,
         channel: String,
         message: EventId,
+        send: Send,
         cx: &mut Context<Self>,
     ) -> Self {
         let thread = community
@@ -71,6 +78,7 @@ impl MessageView {
         });
         Self {
             community,
+            send,
             channel,
             row: None,
             missing: false,
@@ -96,16 +104,56 @@ impl Render for MessageView {
                 .into_any_element();
         };
         let community = self.community.read(cx);
-        let members = community
+        let summary = community
             .snapshot
             .channels
             .iter()
             .find(|channel| channel.id == self.channel)
-            .map(|channel| channel.members.clone());
-        let rows = Rc::new(Rows::new(
+            .cloned();
+        let members = summary.as_ref().map(|channel| channel.members.clone());
+        let mut rows = Rows::new(
             community.session.viewer(),
             Directory::of(community, members.as_deref(), cx),
-        ));
+        );
+        // What the viewer may do in it, such as react.
+        rows.channel = summary;
+        let ids = |row: &MessageRow| {
+            serde_json::json!({
+                "message": row.id.to_hex(),
+                "root": row.thread_root_id.map(|root| root.to_hex()),
+                "channel": &*row.channel,
+            })
+        };
+        let send = self.send.clone();
+        rows.actions.on_open_thread =
+            Some(Rc::new(move |row, _, cx| send("openThread", ids(row), cx)));
+        let session = community.session.clone();
+        rows.actions.on_retry = Some(Rc::new(move |row, _, cx| {
+            let (session, id) = (session.clone(), row.id);
+            Runtime::handle(cx).spawn(async move {
+                let _ = session.retry_send(id).await;
+            });
+        }));
+        let send = self.send.clone();
+        rows.actions.on_command = Some(Rc::new(move |row, command, _, cx| match command {
+            message::Command::Reply => send("reply", ids(row), cx),
+            message::Command::React { content, .. } => {
+                let mut value = ids(row);
+                value["emoji"] = content.into();
+                send("react", value, cx)
+            }
+            _ => {}
+        }));
+        // "Add reaction" asks the plugin, which may open its own picker
+        // or react with `messages/react`.
+        let (send, channel) = (self.send.clone(), self.channel.clone());
+        rows.actions.on_popup = Some(Rc::new(move |popup, _, cx| {
+            if let Some((message, message::Popup::Picker { .. })) = popup {
+                let value = serde_json::json!({ "message": message.to_hex(), "channel": channel });
+                send("addReaction", value, cx);
+            }
+        }));
+        let rows = Rc::new(rows);
         let item = Item {
             row,
             head: true,

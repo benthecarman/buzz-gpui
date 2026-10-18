@@ -375,6 +375,10 @@ Clicks, toggles and typing come back as events:
 | `input` | `submit` (Enter) | the field's text |
 | `composer` | `sent` | `{"id"}` of the message it sent |
 | `composer` | `submit` (with `submit: "plugin"`) | the draft `{"content","mentions","references","attachments"}` |
+| `composer` | `ready` | `{"composer"}`, for `composer/insert` |
+| `message` | `openThread` (its replies summary) | `{"message","root","channel"}` |
+| `message` | `react` (a reaction pill) | `{"message","root","channel","emoji"}`: react or unreact with `messages/react` or `messages/delete` |
+| `message` | `addReaction` | `{"message","channel"}`: show your own picker, or react |
 
 ### 5. `view/close` (notification from Buzz)
 
@@ -405,8 +409,8 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `choice` | `id`, `value`, `options` (`[{"value","label"}]`, up to 50), drawn as radio buttons; sends `change` with the chosen `value` |
 | `progress` | `value`, from 0 to 1 |
 | `image` | `url` (https, or the community's media), `width` and `height` (pixels, up to 1200), `alt` |
-| `composer` | `id`, `channel`, `thread` (optional root), `parent` (optional: the reply it answers in the thread), `placeholder`, `disabled`, `autoFocus`, `submit`: Buzz's own composer (only in views, not renderers). It sends as the channel's does, then sends `sent` with the message `{"id"}`. With `submit: "plugin"` it sends nothing: the plugin gets `submit` with the draft `{"content","mentions","references","attachments"}` (attachments already uploaded) and sends it itself, such as once the channel it needs exists. |
-| `message` | `id`, `channel`, `message` (an event id): one message as Buzz draws it in a conversation, with its byline, attachments and reactions, kept up to date (only in views) |
+| `composer` | `id`, `channel`, `thread` (optional root), `parent` (optional: the reply it answers in the thread), `placeholder`, `disabled`, `autoFocus`, `draft` (text it starts with, put back whenever it changes), `submit`: Buzz's own composer (only in views, not renderers). Once made it sends `ready` with `{"composer"}`, an id for `composer/insert` and `composer/insertMentions`. It sends as the channel's does, then sends `sent` with the message `{"id"}`. With `submit: "plugin"` it sends nothing: the plugin gets `submit` with the draft `{"content","mentions","references","attachments"}` (attachments already uploaded) and sends it itself, such as once the channel it needs exists. The draft stays, locked, until the plugin calls `composer/settle`. |
+| `message` | `id`, `channel`, `message` (an event id): one message as Buzz draws it in a conversation, with its byline, attachments and reactions, kept up to date (only in views). A failed send of yours retries from it. What the reader does on it goes to the plugin, which decides what happens: see the events below. |
 | `thread` | `id`, `channel`, `root`, `height` (pixels, default 480): Buzz's own thread view; closing it sends `close` (only in views) |
 | `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |
@@ -455,7 +459,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `navigation/get` | none | `{"status","place","failed","canGoBack","canGoForward"}`: `place` is where the window is, in the form `ui/navigate` takes (with `community`), or `null` before anything shows. `status` is `failed` when the last visit could not open; `failed` then says which place, why (`denied`, `invalid` or `unavailable`), and whether `navigation/retry` may help. `ui/navigate` answers before the visit opens, so follow its outcome here. |
 | `navigation/watch` | none | `{"watch"}`. Buzz then sends `navigation/changed` with what `navigation/get` gives, now and whenever it changes. Stop with `navigation/unwatch`. |
 | `navigation/retry` | none | `null`. Opens the visit that failed again. |
-| `format/time` | `at` (unix seconds), `style`: `byline` ("Yesterday at 2:34 PM"), `day` (a day divider, "Monday"), `full` (a byline's hover text) or `relative` ("5 minutes ago") | The text, as Buzz words times |
+| `format/time` | `at` (unix seconds), `style`: `byline` ("Yesterday at 2:34 PM"), `item` (a list row: "2:34 PM", "Yesterday", "Sat, Jun 20"), `day` (a day divider, "Monday"), `full` (a byline's hover text) or `relative` ("5 minutes ago") | The text, as Buzz words times |
 | `ui/openPanel` | `panel` (one of the plugin's panel ids), `target` (what it shows, such as a link or any text the plugin reads from `view/open`) | `null`. Opens the panel as a tab of the open conversation. |
 | `panel/canOpen` | `target` | Whether any panel, the plugin's or not, shows `target`. |
 | `panel/open` | `view` (an open panel), `target` | `true` if a panel shows `target`. When it is this panel, the view shows it in place and the plugin hears `view/retarget` (`view`, `target`, `canGoBack`); otherwise the panel that shows it opens as a tab for the same conversation and thread, and this one closes. |
@@ -546,7 +550,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
 | `ui/closeView` | `view` (an open `dialog`, panel or provider dialog) | `null`, once it has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |
-| `composer/insert` | `composer` (from `composer/tool`), `text` | `null`, after putting the text at the composer's caret |
+| `composer/settle` | `view`, `element` (a composer that handed the plugin its draft), `sent` | `null`. With `sent: true` the composer clears; otherwise it keeps the draft to try again. |
+| `composer/insert` | `composer` (from `composer/tool`, or an embedded composer's `ready`), `text` | `null`, after putting the text at the composer's caret |
 | `composer/insertMentions` | `composer`, `pubkeys` (at most 32) | `null`, after putting mention chips at the caret; the people become recipients |
 | `composer/insertResource` | `composer`, `uri` (a Buzz or web link), `label` | `null`, after putting the link as one chip at the caret |
 | `composer/focus` | `composer` | `null`, after putting the caret back in the composer |

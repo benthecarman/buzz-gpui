@@ -1615,6 +1615,37 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 })
             }
+            "composer/settle" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let element = params
+                    .get("element")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let sent = params.get("sent").and_then(Value::as_bool).unwrap_or(false);
+                let settled = match (view, element, crate::ui::navigation::main_window(cx)) {
+                    (Some(view), Some(element), Some(window)) => window
+                        .update(cx, |_, window, cx| {
+                            view.update(cx, |view, cx| view.settle(&element, sent, window, cx))
+                        })
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                Reply::Now(if settled {
+                    Ok(Value::Null)
+                } else {
+                    Err((
+                        INVALID_PARAMS,
+                        "composer/settle takes a view and the element of a draft it took"
+                            .to_owned(),
+                    ))
+                })
+            }
             "ui/closeView" => {
                 let view = params.get("view").and_then(Value::as_str).and_then(|view| {
                     cx.global_mut::<Self>()

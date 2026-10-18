@@ -39,6 +39,20 @@ fn byline_at(seconds: u64, now: DateTime<Local>) -> String {
     }
 }
 
+/// A list row's time (`formatItemTimestamp`): "2:34 PM", "Yesterday",
+/// "Monday", "Sat, Jun 20", "Jun 20, 2025".
+pub fn item(seconds: u64) -> String {
+    let (time, now) = (local(seconds), Local::now());
+    let (date, today) = (time.date_naive(), now.date_naive());
+    match days_ago(date, today) {
+        0 => clock(&time),
+        1 => "Yesterday".into(),
+        2..=6 => time.format("%A").to_string(),
+        _ if date.year() == today.year() => time.format("%a, %b %-d").to_string(),
+        _ => time.format("%b %-d, %Y").to_string(),
+    }
+}
+
 /// Continuation gutter: "2:34", without the day period.
 pub fn compact(seconds: u64) -> String {
     local(seconds).format("%-I:%M").to_string()

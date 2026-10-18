@@ -45,6 +45,7 @@ pub enum EmbedNode<'a> {
         plugin_submits: bool,
         disabled: bool,
         auto_focus: bool,
+        draft: Option<&'a str>,
     },
     Thread {
         id: &'a str,
@@ -76,6 +77,7 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
                 submit,
                 disabled,
                 auto_focus,
+                draft,
             } => found.push(EmbedNode::Composer {
                 id,
                 channel,
@@ -85,6 +87,7 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
                 plugin_submits: submit.as_deref() == Some("plugin"),
                 disabled: *disabled,
                 auto_focus: *auto_focus,
+                draft: draft.as_deref(),
             }),
             Node::Thread {
                 id, channel, root, ..

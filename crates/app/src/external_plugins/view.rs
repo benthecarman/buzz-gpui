@@ -59,8 +59,19 @@ pub struct ExternalView {
     /// Buzz's composers and threads the tree embeds, by element id, with
     /// what they were made for.
     embeds: HashMap<String, (String, AnyView)>,
-    /// Embedded composers, by element id, with their event subscription.
-    composers: HashMap<String, (Entity<crate::ui::composer::Composer>, Subscription)>,
+    /// Embedded composers, by element id, with their event subscription
+    /// and the draft last put in.
+    composers: HashMap<
+        String,
+        (
+            Entity<crate::ui::composer::Composer>,
+            Subscription,
+            Option<String>,
+        ),
+    >,
+    /// Drafts the plugin took (`submit: "plugin"`) and has not settled,
+    /// by element id.
+    unsettled: HashMap<String, crate::ui::composer::Submission>,
     _release: Subscription,
 }
 
@@ -405,6 +416,7 @@ impl ExternalView {
                 fields: HashMap::new(),
                 embeds: HashMap::new(),
                 composers: HashMap::new(),
+                unsettled: HashMap::new(),
                 _release: cx.on_release(|this: &mut Self, cx| {
                     ExternalPlugins::close_view(&this.plugin, &this.id, cx);
                 }),
@@ -552,12 +564,21 @@ impl ExternalView {
                     parent,
                     plugin_submits,
                     disabled,
+                    draft,
                     ..
                 } => {
-                    // Disabling changes the composer made already.
-                    if let Some((composer, _)) = self.composers.get(*id) {
+                    // Disabling and a new draft change the composer made
+                    // already.
+                    if let Some((composer, _, last)) = self.composers.get_mut(*id) {
                         let can_send = !disabled;
                         composer.update(cx, |composer, cx| composer.set_can_send(can_send, cx));
+                        if let Some(draft) = draft.filter(|draft| last.as_deref() != Some(*draft)) {
+                            *last = Some(draft.to_owned());
+                            let input = composer.read(cx).input();
+                            input.update(cx, |input, cx| {
+                                input.set_value(draft.to_owned(), window, cx)
+                            });
+                        }
                     }
                     (
                         *id,
@@ -604,6 +625,7 @@ impl ExternalView {
                     plugin_submits,
                     disabled,
                     auto_focus,
+                    draft,
                 } if readable(channel) => {
                     let event_id = |hex: Option<&str>| {
                         hex.and_then(|hex| buzz_relay_client::EventId::from_hex(hex).ok())
@@ -625,10 +647,19 @@ impl ExternalView {
                     });
                     composer.update(cx, |composer, cx| {
                         composer.set_can_send(!disabled, cx);
+                        if let Some(draft) = draft {
+                            let input = composer.input();
+                            input.update(cx, |input, cx| {
+                                input.set_value(draft.to_owned(), window, cx)
+                            });
+                        }
                         if auto_focus {
                             composer.focus(window, cx);
                         }
                     });
+                    // The id `composer/insert` and the like take.
+                    let number = super::contribute::composer_id(&composer);
+                    self.event(id, "ready", Some(json!({ "composer": number })), cx);
                     let element = id.to_owned();
                     let subscription = cx.subscribe_in(
                         &composer,
@@ -646,20 +677,31 @@ impl ExternalView {
                             }
                         },
                     );
-                    self.composers
-                        .insert(id.to_owned(), (composer.clone(), subscription));
+                    self.composers.insert(
+                        id.to_owned(),
+                        (composer.clone(), subscription, draft.map(str::to_owned)),
+                    );
                     Some(composer.into())
                 }
                 draw::EmbedNode::Message {
-                    channel, message, ..
+                    id,
+                    channel,
+                    message,
                 } if readable(channel) => {
                     buzz_relay_client::EventId::from_hex(message)
                         .ok()
                         .map(|message| {
                             let (community, channel) = (community.clone(), channel.to_owned());
+                            let (weak, element) = (cx.entity().downgrade(), id.to_owned());
+                            let send: super::message_view::Send =
+                                Rc::new(move |event, value, cx| {
+                                    if let Some(this) = weak.upgrade() {
+                                        this.read(cx).event(&element, event, Some(value), cx);
+                                    }
+                                });
                             cx.new(|cx| {
                                 super::message_view::MessageView::new(
-                                    community, channel, message, cx,
+                                    community, channel, message, send, cx,
                                 )
                             })
                             .into()
@@ -702,6 +744,35 @@ impl ExternalView {
         }
         self.embeds.retain(|id, _| seen.contains(id));
         self.composers.retain(|id, _| seen.contains(id));
+        self.unsettled.retain(|id, _| seen.contains(id));
+    }
+
+    /// `composer/settle`: the plugin sent a draft it took, or could not;
+    /// the composer clears, or keeps the draft to try again.
+    pub(super) fn settle(
+        &mut self,
+        element: &str,
+        sent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (Some(submission), Some((composer, _, _))) =
+            (self.unsettled.remove(element), self.composers.get(element))
+        else {
+            return false;
+        };
+        let result = if sent {
+            Ok(())
+        } else {
+            Err("Not sent".to_owned())
+        };
+        let handed_back = submission.settle(&result, cx);
+        composer.update(cx, |composer, cx| match sent {
+            true => composer.sent(window, cx),
+            false if handed_back => {}
+            false => composer.failed(cx),
+        });
+        true
     }
 
     /// An embedded composer's Send: the plugin takes the draft
@@ -752,10 +823,12 @@ impl ExternalView {
                         "sha256": attachment.sha256,
                     })).collect::<Vec<_>>(),
                 });
+                // The draft stays, locked, until `composer/settle`.
                 let _ = this.update(cx, |this, cx| {
+                    this.unsettled.insert(element.clone(), submission.clone());
                     this.event(&element, "submit", Some(draft), cx);
                 });
-                Ok(None)
+                return;
             } else {
                 let sent = session
                     .send(&channel, &content, mentions, attachments, reply)

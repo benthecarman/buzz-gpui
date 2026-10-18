@@ -1123,10 +1123,11 @@ pub fn format_time(params: &Value) -> Result<Value, Failure> {
         .map_or(0, |since| since.as_secs());
     Ok(json!(match text(params, "style") {
         None | Some("byline") => time::byline(at),
+        Some("item") => time::item(at),
         Some("day") => time::day(at),
         Some("full") => time::full(at),
         Some("relative") => crate::ui::link_preview::relative(at, now),
-        Some(_) => return Err(invalid("style must be byline, day, full or relative")),
+        Some(_) => return Err(invalid("style must be byline, item, day, full or relative")),
     }))
 }
 
