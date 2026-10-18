@@ -1080,33 +1080,93 @@ pub fn watch_session(
     Ok((Watch::new(subscription, Task::ready(())), json!({})))
 }
 
-/// `names/get`: display names as Buzz shows them, through the naming
-/// policy on, with the npub suffix that told namesakes apart, if any.
+/// `names/get`: names as Buzz shows them, through the naming policy,
+/// with the suffix that tells namesakes apart. `candidates` scopes the
+/// namesakes to the keys in view, such as a channel's members.
 pub fn names(params: &Value, cx: &App) -> Result<Value, Failure> {
-    use crate::ui::identity;
     let keys = pubkeys(params, MAX_PROFILES)?;
+    let candidates = candidates(params)?;
     let community = community(cx)?;
+    Ok(names_of(&community, &keys, candidates.as_deref(), cx))
+}
+
+/// The `candidates` param: the keys in view, or everyone when absent.
+fn candidates(params: &Value) -> Result<Option<Vec<String>>, Failure> {
+    match params.get("candidates").filter(|value| !value.is_null()) {
+        None => Ok(None),
+        Some(_) => {
+            let mut keys = pubkeys(&json!({ "pubkeys": params["candidates"] }), 5_000)
+                .map_err(|_| invalid("candidates must be a list of pubkeys"))?;
+            keys.sort();
+            keys.dedup();
+            Ok(Some(keys))
+        }
+    }
+}
+
+fn names_of(
+    community: &Entity<Community>,
+    keys: &[String],
+    candidates: Option<&[String]>,
+    cx: &App,
+) -> Value {
+    use crate::ui::identity;
     let community = community.read(cx);
     let library = identity::AgentLibrary::from_hosts(cx);
     let viewer = community.session.viewer().to_string();
+    // The requested key always joins the scope.
+    let scope = candidates.map(|candidates| {
+        let mut scope = candidates.to_vec();
+        scope.extend(keys.iter().cloned());
+        scope
+    });
     let names = identity::names(
         &community.snapshot.profiles,
         &library,
         &viewer,
         Some(&community.origin),
-        None,
+        scope.as_deref(),
     );
-    Ok(Value::Object(
-        keys.into_iter()
+    Value::Object(
+        keys.iter()
             .map(|key| {
                 let value = json!({
-                    "name": names.display(&key),
-                    "qualifier": names.qualifier(&key),
+                    "name": names.display(key),
+                    "qualifier": names.qualifier(key),
+                    "source": names.source(key),
                 });
-                (key, value)
+                (key.clone(), value)
             })
             .collect(),
-    ))
+    )
+}
+
+/// `names/watch`: sends `names/changed` with `names`, as `names/get`
+/// answers, whenever one changes: a profile loads, an agent is renamed,
+/// or the naming policy answers or changes.
+pub fn watch_names(
+    params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    let keys = pubkeys(params, MAX_PROFILES)?;
+    let candidates = candidates(params)?;
+    let community = community(cx)?;
+    let first = names_of(&community, &keys, candidates.as_deref(), cx);
+    let mut last = first.clone();
+    let forward = cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.update(|cx| {
+                let now = names_of(&community, &keys, candidates.as_deref(), cx);
+                if now != last {
+                    last = now.clone();
+                    notify(json!({ "names": now }), cx);
+                }
+            });
+        }
+    });
+    Ok((Watch::new((), forward), json!({ "names": first })))
 }
 
 /// `presence/get`: who is online, away or offline, for the people Buzz

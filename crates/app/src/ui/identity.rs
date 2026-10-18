@@ -269,6 +269,26 @@ impl Names {
             .unwrap_or_else(|| fallback.to_string())
     }
 
+    /// Where `pubkey`'s name comes from (`IdentityName.source`): the
+    /// naming policy's label, a public profile, or neither when the key
+    /// shows.
+    pub fn source(&self, pubkey: &str) -> Option<&'static str> {
+        let key = pubkey.to_ascii_lowercase();
+        if self.labels.get(&key).is_some_and(|l| !l.name.is_empty())
+            || self.library.contains_key(&key)
+        {
+            Some("agent-directory")
+        } else if self
+            .profiles
+            .get(&key)
+            .is_some_and(|p| !p.name.is_empty() && !p.name_is_fallback)
+        {
+            Some("public-profile")
+        } else {
+            None
+        }
+    }
+
     /// The generated key suffix that ends `pubkey`'s label (`Honey · 4prr`),
     /// if a namesake needed one.
     pub fn qualifier(&self, pubkey: &str) -> Option<&str> {
