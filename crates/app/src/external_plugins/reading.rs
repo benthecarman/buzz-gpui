@@ -83,7 +83,7 @@ pub fn watch(
     Ok((Watch::new(subscription, Task::ready(())), json!({})))
 }
 
-fn activity(snapshot: &ThreadActivitySnapshot) -> Value {
+pub(super) fn activity(snapshot: &ThreadActivitySnapshot) -> Value {
     json!({
         "channel": snapshot.channel_id,
         "items": snapshot.items.as_ref().map(|items| {
@@ -240,7 +240,7 @@ pub fn local(
         session
             .mark_local(target, clear)
             .await
-            .map(|()| Value::Null)
+            .map(|()| saved(false))
             .map_err(|error| (3, error))
     }))
 }
@@ -355,12 +355,37 @@ pub fn watch_inbox(
     Ok((Watch::new((), forward), json!({})))
 }
 
+/// What a saved read mark answers (`ReadMutationResult`): it is saved
+/// on this device, and goes to the relay when this connection syncs read
+/// state (`pending`) or stays here (`local-only`). Local marks never sync.
+fn saved(syncs: bool) -> Value {
+    json!({
+        "durability": "saved",
+        "sync": if syncs { "pending" } else { "local-only" },
+    })
+}
+
+/// Whether read marks sync to the relay on this connection.
+fn syncs(cx: &App) -> bool {
+    use buzz_relay_client::read_state::ReadCapability;
+    community(cx).is_ok_and(|community| {
+        community
+            .read(cx)
+            .snapshot
+            .unread
+            .sync
+            .as_ref()
+            .is_some_and(|sync| sync.capability == ReadCapability::FrontierSync)
+    })
+}
+
 /// `read/mark`: marks everything (`all`), a channel, a message, or a
 /// channel or thread up to a message (`through`) read, or a channel or
 /// message unread (`read: false`).
 pub fn mark(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
     let session = community.read(cx).session.clone();
+    let syncs = syncs(cx);
     let id = |key: &str| {
         params
             .get(key)
@@ -379,7 +404,7 @@ pub fn mark(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
             session
                 .mark_all_read()
                 .await
-                .map(|()| Value::Null)
+                .map(|()| saved(syncs))
                 .map_err(|error| (3, error))
         }));
     }
@@ -398,7 +423,9 @@ pub fn mark(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
             (Some(message), true, false) => session.mark_message_read(&channel, message).await,
             (Some(message), false, _) => session.mark_message_unread(&channel, message).await,
         };
-        done.map(|()| Value::Null).map_err(|error| (3, error))
+        // Unread marks stay on this device.
+        done.map(|()| saved(syncs && read))
+            .map_err(|error| (3, error))
     }))
 }
 

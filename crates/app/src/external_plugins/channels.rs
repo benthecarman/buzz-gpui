@@ -100,17 +100,12 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
     };
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
-        let id = match setup {
-            None => session.create_channel(channel).await,
-            Some(setup) => {
-                let input = buzz_relay_client::kit::setup::ChannelCreationInput::from_new(
-                    &channel,
-                    Some(setup),
-                );
-                session.create_channel_with(input).await
-            }
-        }
-        .map_err(|error| (3, error))?;
+        // As the New channel form does, so `channels/creation` shows it.
+        let input = buzz_relay_client::kit::setup::ChannelCreationInput::from_new(&channel, setup);
+        let id = session
+            .create_channel_with(input)
+            .await
+            .map_err(|error| (3, error))?;
         Ok(json!({ "channel": id }))
     }))
 }
@@ -124,7 +119,15 @@ pub fn creation(cx: &App) -> Result<Value, Failure> {
         "pending": snapshot.pending.as_ref().map(|pending| json!({
             "name": pending.name,
             "description": pending.description,
+            "visibility": format!("{:?}", pending.visibility).to_ascii_lowercase(),
+            "ttlSeconds": pending.ttl_seconds,
             "labels": pending.labels,
+            "setup": pending.setup.as_ref().map(|setup| json!({
+                "canvas": setup.canvas,
+                "agents": setup.agents,
+                "group": setup.group_id,
+                "template": setup.template_id,
+            })),
         })),
         "notices": snapshot.notices.iter().map(|notice| json!({
             "id": notice.id,
@@ -540,6 +543,8 @@ fn sidebar_json(state: &buzz_relay_client::sidebar_store::SidebarState) -> Value
         "error": error,
         "cached": state.cached,
         "writable": state.writable,
+        // Stars and moves save with the same record.
+        "starWritable": state.writable,
         "sortWritable": state.sort_writable(),
         "muteWritable": state.mute_writable(),
         "removeGroupWritable": state.remove_section_writable(),
@@ -580,6 +585,7 @@ fn sidebar_json(state: &buzz_relay_client::sidebar_store::SidebarState) -> Value
             "id": section.id,
             "name": section.name,
             "icon": section.icon,
+            "order": section.order,
         })).collect::<Vec<_>>(),
         "assignments": data.assignments,
     });
@@ -646,6 +652,25 @@ pub fn change_me(
             },
         };
         done.map(|()| Value::Null).map_err(|error| (3, error))
+    }))
+}
+
+/// `me/place`: puts a conversation in Me, optionally in a `group`, or
+/// takes it out with `me: false` (`mePlacement.set`).
+pub fn place_me(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let personal = params.get("me").and_then(Value::as_bool).unwrap_or(true);
+    let group = params
+        .get("group")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let kit = community.read(cx).session.me_kit().clone();
+    Ok(on_tokio(cx, async move {
+        kit.set_placement(&channel, personal, group.as_deref())
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
     }))
 }
 
@@ -832,6 +857,7 @@ pub fn lifecycle(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
             .lifecycle(&viewer)
             .map_err(|error| (3, error.to_string()))?;
         Ok(json!({
+            "channelType": format!("{:?}", state.channel_type).to_ascii_lowercase(),
             "canArchive": can.can_archive,
             "canUnarchive": can.can_unarchive,
             "canDelete": can.can_delete,
@@ -857,6 +883,8 @@ pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         "inbox" => session.refresh_inbox(),
         "reminders" => session.refresh_reminders(),
         "emoji" => session.refresh_emoji(),
+        "hiddenDms" => session.refresh_dm_visibility(),
+        "sidebar" => session.refresh_sidebar(),
         "kit" => {
             return Ok(on_tokio(cx, async move {
                 session
@@ -869,7 +897,7 @@ pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         _ => {
             return Err((
                 INVALID_PARAMS,
-                "what is unread, inbox, reminders, emoji or kit".to_owned(),
+                "what is unread, inbox, reminders, emoji, hiddenDms, sidebar or kit".to_owned(),
             ));
         }
     }

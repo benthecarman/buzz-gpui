@@ -2114,6 +2114,7 @@ impl ExternalPlugins {
             | "me/assign"
             | "me/retryMove"
             | "me/removeGroup"
+            | "me/place"
             | "archives/request" => {
                 let permission = match method {
                     "events/publish" | "outbox/send" => Permission::PublishEvents,
@@ -2141,6 +2142,7 @@ impl ExternalPlugins {
                     | "me/assign"
                     | "me/retryMove"
                     | "me/removeGroup"
+                    | "me/place"
                     | "archives/request" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
@@ -2208,6 +2210,7 @@ impl ExternalPlugins {
                     "me/assign" | "me/retryMove" | "me/removeGroup" => {
                         channels::change_me(method, params, cx)
                     }
+                    "me/place" => channels::place_me(params, cx),
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }
@@ -2338,6 +2341,25 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 },
             ),
+            "watch/retarget" => {
+                let watch = params.get("watch").and_then(Value::as_u64);
+                let Some(message) = params
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .and_then(|hex| buzz_relay_client::EventId::from_hex(hex).ok())
+                else {
+                    return Reply::Now(Err((INVALID_PARAMS, "message is required".to_owned())));
+                };
+                let moved = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.watches.get(&watch?))
+                    .map(|watch| watch.retarget(message));
+                Reply::Now(match moved {
+                    Some(moved) => Ok(json!(moved)),
+                    None => Err((INVALID_PARAMS, "watch is not one of yours".to_owned())),
+                })
+            }
             "watch/more" => {
                 let watch = params.get("watch").and_then(Value::as_u64);
                 let more = cx

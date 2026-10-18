@@ -152,6 +152,16 @@ pub fn message(row: &MessageRow, profiles: &Profiles) -> Value {
         "signer": row.signer.map(|key| key.to_hex()),
         "workflowOwner": row.workflow_owner.map(|key| key.to_hex()),
         "participants": row.participants.iter().map(|key| key.to_hex()).collect::<Vec<_>>(),
+        // A relay-signed join, leave or removal row (`ChannelMessage.membership`).
+        "membership": row.membership.map(|change| json!({
+            "type": match change.kind {
+                buzz_relay_client::fold::MembershipKind::Joined => "member_joined",
+                buzz_relay_client::fold::MembershipKind::Left => "member_left",
+                buzz_relay_client::fold::MembershipKind::Removed => "member_removed",
+            },
+            "actor": change.actor.to_hex(),
+            "target": change.target.to_hex(),
+        })),
         "reactions": row.reactions.iter().map(|group| json!({
             "content": group.content,
             "emojiUrl": group.emoji.as_ref().map(|emoji| emoji.url.clone()),
@@ -218,17 +228,31 @@ pub fn message(row: &MessageRow, profiles: &Profiles) -> Value {
 
 /// The newest `limit` messages of a timeline, oldest first. Relay
 /// activity rows, such as joins, are left out.
-pub fn timeline(snapshot: &TimelineSnapshot, limit: usize, profiles: &Profiles) -> Value {
+pub fn timeline(
+    snapshot: &TimelineSnapshot,
+    limit: usize,
+    membership: bool,
+    profiles: &Profiles,
+) -> Value {
     let rows: Vec<&Arc<MessageRow>> = snapshot
         .rows
         .iter()
-        .filter(|row| row.membership.is_none())
+        .filter(|row| membership || row.membership.is_none())
         .collect();
     let start = rows.len().saturating_sub(limit);
     json!({
         "channel": snapshot.channel,
         "messages": rows[start..].iter().map(|row| message(row, profiles)).collect::<Vec<_>>(),
         "hasMore": snapshot.has_more || start > 0,
+        // The window's state (`ChannelWindow`).
+        "status": match &snapshot.status {
+            TimelineStatus::Loading => "loading",
+            TimelineStatus::Ready => "ready",
+            TimelineStatus::Error(_) => "error",
+        },
+        "loadingOlder": snapshot.loading_older,
+        "historyLimited": snapshot.history_limited,
+        "restored": snapshot.restored,
         "stale": snapshot.stale,
         "error": match &snapshot.status {
             TimelineStatus::Error(error) => Some(error.clone()),
@@ -306,6 +330,7 @@ pub fn channel_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, F
     let community = community(cx)?;
     let channel = readable(params, community.read(cx))?;
     let limit = limit(params);
+    let membership = params.get("membership").and_then(Value::as_bool) == Some(true);
     let session = community.read(cx).session.clone();
     let wait = on_runtime(cx, async move {
         let view = session.open_channel(&channel);
@@ -334,7 +359,7 @@ pub fn channel_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, F
             .ok_or((2, "The relay did not answer in time.".to_owned()))?;
         Ok(cx.update(|cx| {
             let profiles = community.read(cx).snapshot.profiles.clone();
-            timeline(&snapshot, limit, &profiles)
+            timeline(&snapshot, limit, membership, &profiles)
         }))
     }))
 }
@@ -1080,6 +1105,11 @@ pub fn channel_json(channel: &buzz_relay_client::ChannelSummary) -> Value {
         "name": channel.name,
         "description": channel.description,
         "private": channel.private,
+        // `public`, `private`, or `null` when the relay has not said.
+        "visibility": channel.visibility.map(|visibility| match visibility {
+            buzz_relay_client::Visibility::Public => "public",
+            buzz_relay_client::Visibility::Private => "private",
+        }),
         "archived": channel.archived,
         // A channel without metadata yet is shown as a stream.
         "kind": match channel.channel_type {
@@ -1202,6 +1232,7 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
         "channelList" => channel_list(cx)?,
         "sidebar" => super::channels::sidebar(cx)?,
         "sync" => super::reading::sync(false, cx)?,
+        "creation" => super::channels::creation(cx)?,
         "profiles" => {
             let keys = pubkeys(params, MAX_PROFILES)?;
             Value::Array(
@@ -1240,29 +1271,16 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
         ),
         "activity" => {
             let channel = channel.ok_or_else(|| invalid("activity takes a channel"))?;
+            // As `threads/activity` answers.
             match snapshot.unread.activity.get(channel) {
-                Some(activity) => json!(activity.items.as_ref().map(|items| {
-                    items
-                        .iter()
-                        .map(|item| {
-                            json!({
-                                "root": item.root_id,
-                                "latestMessage": item.latest_message_id,
-                                "author": item.author_id,
-                                "createdAt": item.created_at,
-                                "preview": item.preview,
-                                "unreadCount": item.unread_count,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })),
-                None => json!([]),
+                Some(activity) => super::reading::activity(activity),
+                None => json!({ "channel": channel, "items": [], "error": null }),
             }
         }
         _ => {
             return Err(invalid(
-                "what must be channels, channelList, sidebar, sync, profiles, typing, presence, \
-                 emoji or activity",
+                "what must be channels, channelList, sidebar, sync, creation, profiles, typing, \
+                 presence, emoji or activity",
             ));
         }
     })
@@ -1285,11 +1303,14 @@ pub fn watch_session(
         community.read(cx).session.want_profiles(keys);
     }
     let first = session_value(&what, &params, cx)?;
-    let last = std::cell::RefCell::new(first.clone());
+    let last = std::rc::Rc::new(std::cell::RefCell::new(first.clone()));
     let notify = std::rc::Rc::new(notify);
     let (send, kind) = (notify.clone(), what.clone());
-    cx.defer(move |cx| send(json!({ "what": kind, "value": first }), cx));
-    let subscription = cx.observe(&community, move |_, cx| {
+    cx.defer({
+        let kind = kind.clone();
+        move |cx| send(json!({ "what": kind, "value": first }), cx)
+    });
+    let changed = std::rc::Rc::new(move |cx: &mut App| {
         let Ok(now) = session_value(&what, &params, cx) else {
             return;
         };
@@ -1298,7 +1319,32 @@ pub fn watch_session(
             notify(json!({ "what": what, "value": now }), cx);
         }
     });
-    Ok((Watch::new(subscription, Task::ready(())), json!({})))
+    let subscription = cx.observe(&community, {
+        let changed = changed.clone();
+        move |_, cx| changed(cx)
+    });
+    // Channel creation is not part of the community's snapshot: follow
+    // its own state.
+    let forward = if kind == "creation" {
+        let mut receiver = community.read(cx).session.creation();
+        let (sender, mut pokes) = futures::channel::mpsc::unbounded::<()>();
+        Runtime::handle(cx).spawn(async move {
+            while receiver.changed().await.is_ok() {
+                if sender.unbounded_send(()).is_err() {
+                    return;
+                }
+            }
+        });
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while pokes.next().await.is_some() {
+                cx.update(|cx| changed(cx));
+            }
+        })
+    } else {
+        Task::ready(())
+    };
+    Ok((Watch::new(subscription, forward), json!({})))
 }
 
 /// `names/get`: names as Buzz shows them, through the naming policy,
@@ -2174,6 +2220,8 @@ pub struct Watch {
     _forward: Task<()>,
     /// Loads more of what it follows (`watch/more`), if it can.
     more: Option<Box<dyn Fn()>>,
+    /// Shows another message of the thread (`watch/retarget`).
+    retarget: Option<Box<dyn Fn(EventId)>>,
 }
 
 impl Watch {
@@ -2182,7 +2230,22 @@ impl Watch {
             _keep: Box::new(keep),
             _forward: forward,
             more: None,
+            retarget: None,
         }
+    }
+
+    fn with_retarget(mut self, retarget: impl Fn(EventId) + 'static) -> Self {
+        self.retarget = Some(Box::new(retarget));
+        self
+    }
+
+    /// Moves a thread watch to another message (`ThreadView.retarget`);
+    /// `false` for a watch that is not a thread's.
+    pub fn retarget(&self, message: EventId) -> bool {
+        self.retarget
+            .as_ref()
+            .map(|retarget| retarget(message))
+            .is_some()
     }
 
     fn with_more(mut self, more: impl Fn() + 'static) -> Self {
@@ -2270,6 +2333,9 @@ fn thread_json(
             .collect::<Vec<_>>(),
         "hasMore": thread.can_load_more,
         "limited": thread.limited,
+        "status": format!("{:?}", thread.status).to_ascii_lowercase(),
+        "direction": thread.direction.map(|direction| format!("{direction:?}").to_ascii_lowercase()),
+        "readKind": thread.read_kind.map(|kind| format!("{kind:?}").to_ascii_lowercase()),
         "target": thread.target.as_ref().map(|row| message(row, profiles)),
         "targetStatus": thread.target_status.map(|status| match status {
             TargetStatus::Loading => "loading",
@@ -2301,6 +2367,11 @@ pub fn watch_thread(
         let view = view.clone();
         move || view.load_more()
     };
+    let retarget = {
+        let view = view.clone();
+        // The outcome shows in the next `thread/changed` (`targetStatus`).
+        move |message| drop(view.retarget(message))
+    };
     let mut receiver = view.snapshot.clone();
     let (sender, mut values) = futures::channel::mpsc::unbounded();
     let _ = sender.unbounded_send(receiver.borrow_and_update().clone());
@@ -2329,8 +2400,15 @@ pub fn watch_thread(
         }
     });
     Ok((
-        Watch::new(view, forward).with_more(more),
-        json!({ "channel": channel, "root": root.to_hex() }),
+        Watch::new(view, forward)
+            .with_more(more)
+            .with_retarget(retarget),
+        // As asked: `message` is any message of the thread, not its root.
+        json!({
+            "channel": channel,
+            "root": params.get("root").filter(|_| params.get("message").is_none()),
+            "message": params.get("message"),
+        }),
     ))
 }
 
@@ -2344,6 +2422,7 @@ pub fn watch(
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
     let channel = readable(params, community.read(cx))?;
+    let membership = params.get("membership").and_then(Value::as_bool) == Some(true);
     let limit = std::rc::Rc::new(std::cell::Cell::new(limit(params)));
     let view = std::rc::Rc::new(community.read(cx).session.open_channel(&channel));
     let mut receiver = view.snapshot.clone();
@@ -2379,7 +2458,7 @@ pub fn watch(
             }
             cx.update(|cx| {
                 let profiles = community.read(cx).snapshot.profiles.clone();
-                notify(timeline(&snapshot, shown.get(), &profiles), cx);
+                notify(timeline(&snapshot, shown.get(), membership, &profiles), cx);
             });
         }
     });
