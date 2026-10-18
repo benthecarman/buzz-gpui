@@ -1330,20 +1330,35 @@ pub fn act_raw(
             })
         }
         _ => {
-            let data = params
-                .get("data")
-                .and_then(Value::as_str)
-                .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
-                .filter(|data| !data.is_empty() && data.len() <= 3 * 1024 * 1024)
-                .ok_or((
-                    INVALID_PARAMS,
-                    "data must be base64 of 1 byte to 3 MiB".to_owned(),
-                ))?;
             let mime = params
                 .get("mime")
                 .and_then(Value::as_str)
                 .ok_or((INVALID_PARAMS, "mime is required".to_owned()))?
                 .to_owned();
+            // A file on disk up to the community's limit for its type, or
+            // a small one inline.
+            let data = match params.get("path").and_then(Value::as_str) {
+                Some(path) => {
+                    let limit = buzz_relay_client::messages::media_byte_limit(&mime);
+                    std::fs::metadata(path)
+                        .ok()
+                        .filter(|meta| meta.is_file() && meta.len() > 0 && meta.len() <= limit)
+                        .and_then(|_| std::fs::read(path).ok())
+                        .ok_or((
+                            INVALID_PARAMS,
+                            "path must be a readable file within the community's limit".to_owned(),
+                        ))?
+                }
+                None => params
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+                    .filter(|data| !data.is_empty() && data.len() <= 3 * 1024 * 1024)
+                    .ok_or((
+                        INVALID_PARAMS,
+                        "data must be base64 of 1 byte to 3 MiB, or give a path".to_owned(),
+                    ))?,
+            };
             let upload = client.upload(data, mime);
             Box::pin(async move {
                 serde_json::to_value(upload.await?).map_err(|error| error.to_string())

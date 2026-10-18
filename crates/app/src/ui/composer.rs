@@ -146,7 +146,9 @@ impl EventEmitter<ComposerEvent> for Composer {}
 pub struct Captured {
     pub name: String,
     pub mime: String,
-    pub bytes: Vec<u8>,
+    /// The bytes, or a file on disk.
+    pub source: buzz_relay_client::upload::Source,
+    pub size: u64,
     pub voice: Option<(f64, Vec<u8>)>,
 }
 
@@ -2843,23 +2845,27 @@ impl Composer {
         }
         self.capture = None;
         if let Some(file) = file {
-            let bytes: Arc<[u8]> = file.bytes.into();
+            use buzz_relay_client::upload::Source;
             // A recording plays from memory until it is sent, as Buzz's own.
-            let voice = file.voice.map(|(duration, waveform)| {
+            let voice = file.voice.and_then(|(duration, waveform)| {
+                let bytes: Arc<[u8]> = match &file.source {
+                    Source::Bytes(bytes) => bytes.clone(),
+                    Source::Path(path) => std::fs::read(path).ok()?.into(),
+                };
                 let key = format!("voice-draft:{}", uuid::Uuid::new_v4());
-                media::set_local(&key, bytes.clone(), cx);
-                Voice {
+                media::set_local(&key, bytes, cx);
+                Some(Voice {
                     key,
                     duration,
                     waveform,
-                }
+                })
             });
             self.add_files(
                 vec![NewFile {
                     name: file.name,
                     mime: file.mime,
-                    size: bytes.len() as u64,
-                    source: buzz_relay_client::upload::Source::Bytes(bytes),
+                    size: file.size,
+                    source: file.source,
                     voice,
                 }],
                 cx,

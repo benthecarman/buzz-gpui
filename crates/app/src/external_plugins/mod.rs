@@ -1749,6 +1749,7 @@ impl ExternalPlugins {
             "activity/observed" => Reply::Now(observed::get(params, cx)),
             "activity/history" => Reply::Now(observed::history(params, cx)),
             "media/get" => later(capabilities::media(params, cx)),
+            "media/url" => Reply::Now(capabilities::media_url(params, cx)),
             "community/clearCache" => later(capabilities::community(cx).map(|community| {
                 let session = community.read(cx).session.clone();
                 capabilities::on_tokio(cx, async move {
@@ -1864,6 +1865,11 @@ impl ExternalPlugins {
                 if method == "agents/attest" {
                     return Reply::Now(capabilities::attest(params, cx));
                 }
+                let plugin_id = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned))
+                    .unwrap_or_default();
                 if method.starts_with("teams/") {
                     return Reply::Now(agents::team(method, params, cx));
                 }
@@ -1874,7 +1880,7 @@ impl ExternalPlugins {
                     "messages/report" => capabilities::report(params, cx),
                     "messages/retry" => capabilities::retry(false, params, cx),
                     "messages/dismiss" => capabilities::retry(true, params, cx),
-                    "files/upload" => capabilities::upload(params, cx),
+                    "files/upload" => capabilities::upload(&plugin_id, params, cx),
                     "events/publish" => events::publish(params, cx),
                     "agents/create" => agents::create(params, cx),
                     "agents/save" => agents::save(params, cx),

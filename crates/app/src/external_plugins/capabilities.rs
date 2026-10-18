@@ -480,27 +480,80 @@ const MAX_UPLOAD: usize = 3 * 1024 * 1024;
 
 /// `files/upload`: uploads a file to the community, for `messages/send`'s
 /// `attachments`.
-pub fn upload(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+pub fn upload(
+    plugin: &str,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
     use base64::Engine;
+    use buzz_relay_client::upload::{Source, Stage, Upload};
     let community = community(cx)?;
-    let data = text(params, "data").ok_or_else(|| invalid("data (base64) is required"))?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map_err(|_| invalid("data is not base64"))?;
-    if bytes.is_empty() || bytes.len() > MAX_UPLOAD {
-        return Err(invalid("A file must be 1 byte to 3 MiB."));
+    // A file on disk, up to the relay's limit for its type, or a small
+    // file inline.
+    let (source, size, name) = match (text(params, "path"), text(params, "data")) {
+        (Some(path), _) => {
+            let path = std::path::PathBuf::from(path);
+            let size = std::fs::metadata(&path)
+                .ok()
+                .filter(|meta| meta.is_file())
+                .map(|meta| meta.len())
+                .ok_or_else(|| invalid("path is not a readable file"))?;
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".to_owned());
+            (Source::Path(path), size, name)
+        }
+        (None, Some(data)) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| invalid("data is not base64"))?;
+            if bytes.len() > MAX_UPLOAD {
+                return Err(invalid(
+                    "Inline data is at most 3 MiB; pass a path instead.",
+                ));
+            }
+            let size = bytes.len() as u64;
+            (Source::Bytes(bytes.into()), size, "file".to_owned())
+        }
+        (None, None) => return Err(invalid("path or data (base64) is required")),
+    };
+    if size == 0 {
+        return Err(invalid("The file is empty."));
     }
     let name = text(params, "name")
         .map(|name| name.chars().take(200).collect::<String>())
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "file".to_owned());
-    let mime = text(params, "mime")
-        .map(str::to_owned)
-        .unwrap_or_else(|| buzz_relay_client::upload::mime_type(&name, &bytes));
+        .unwrap_or(name);
+    let mime = match text(params, "mime") {
+        Some(mime) => mime.to_owned(),
+        None => buzz_relay_client::upload::mime_type(&name, &head(&source)),
+    };
+    if size > buzz_relay_client::messages::media_byte_limit(&mime) {
+        return Err(invalid(
+            "The file is larger than the community takes for its type.",
+        ));
+    }
+    // `progress` names the upload in `files/progress` notifications.
+    let progress = text(params, "progress").map(str::to_owned);
+    let (plugin, sender) = (plugin.to_owned(), progress_sender(cx));
     let media = community.read(cx).session.media().clone();
     Ok(on_tokio(cx, async move {
-        let file = buzz_relay_client::upload::UploadFile { name, mime, bytes };
-        let attachment = buzz_relay_client::upload::upload(&media, file)
+        let upload = Upload::new(name, mime, source);
+        let report = move |stage: Stage| {
+            let Some(token) = &progress else {
+                return;
+            };
+            let value = match stage {
+                Stage::Preparing => json!({ "progress": token, "stage": "preparing" }),
+                Stage::Uploading => json!({ "progress": token, "stage": "uploading" }),
+                Stage::Sent { sent, total } => {
+                    json!({ "progress": token, "stage": "sending", "sent": sent, "total": total })
+                }
+            };
+            let _ = sender.unbounded_send((plugin.clone(), value));
+        };
+        let attachment = buzz_relay_client::upload::send(&media, upload, report)
             .await
             .map_err(|error| (3, error.to_string()))?;
         Ok(json!({
@@ -511,6 +564,57 @@ pub fn upload(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             "sha256": attachment.sha256,
         }))
     }))
+}
+
+/// The first bytes of `source`, to tell its type.
+fn head(source: &buzz_relay_client::upload::Source) -> Vec<u8> {
+    use buzz_relay_client::upload::Source;
+    match source {
+        Source::Bytes(bytes) => bytes[..bytes.len().min(512)].to_vec(),
+        Source::Path(path) => {
+            use std::io::Read;
+            let mut head = vec![0; 512];
+            let read = std::fs::File::open(path)
+                .and_then(|mut file| file.read(&mut head))
+                .unwrap_or(0);
+            head.truncate(read);
+            head
+        }
+    }
+}
+
+type Progress = futures::channel::mpsc::UnboundedSender<(String, Value)>;
+
+thread_local! {
+    static PROGRESS: std::cell::RefCell<Option<Progress>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Where upload progress goes to reach the plugin as `files/progress`.
+fn progress_sender(cx: &App) -> Progress {
+    if let Some(sender) = PROGRESS.with_borrow(Clone::clone) {
+        return sender;
+    }
+    let (sender, mut reports) = futures::channel::mpsc::unbounded::<(String, Value)>();
+    cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some((plugin, value)) = reports.next().await {
+            cx.update(|cx| {
+                super::ExternalPlugins::notify_running(&plugin, "files/progress", value, cx)
+            });
+        }
+    })
+    .detach();
+    PROGRESS.with_borrow_mut(|progress| *progress = Some(sender.clone()));
+    sender
+}
+
+/// `media/url`: a loopback `http://127.0.0.1` URL the plugin can fetch or
+/// stream community media from, of any size (`session.media`), or `null`
+/// when Buzz cannot serve it so.
+pub fn media_url(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let url = text(params, "url").ok_or_else(|| invalid("url is required"))?;
+    let media = community(cx)?.read(cx).session.media().clone();
+    Ok(json!(media.stream_url(url)))
 }
 
 /// `messages/send`'s `attachments`, as `files/upload` answered them.
@@ -1192,6 +1296,21 @@ pub fn media(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
         return Err(invalid(
             "url is not the community's media; fetch it yourself",
         ));
+    }
+    // Into a folder, any size, under the sender's file name.
+    if let Some(directory) = text(params, "directory") {
+        let directory = std::path::PathBuf::from(directory);
+        if !directory.is_dir() {
+            return Err(invalid("directory is not a folder"));
+        }
+        let name = text(params, "name").map(str::to_owned);
+        return Ok(on_tokio(cx, async move {
+            media
+                .download(&url, name.as_deref(), directory)
+                .await
+                .map(|path| json!({ "path": path }))
+                .map_err(|error| (3, error))
+        }));
     }
     Ok(on_tokio(cx, async move {
         let bytes = media

@@ -997,23 +997,62 @@ pub fn accept(
     cx: &mut App,
 ) -> Result<Value, capabilities::Failure> {
     use base64::Engine;
-    let file = match params.get("data").and_then(Value::as_str) {
-        None => None,
-        Some(data) => {
+    use buzz_relay_client::upload::Source;
+    let invalid = |text: &str| (protocol::INVALID_PARAMS, text.to_owned());
+    // A file on disk, or a small one inline.
+    let given = match (
+        params.get("path").and_then(Value::as_str),
+        params.get("data").and_then(Value::as_str),
+    ) {
+        (Some(path), _) => {
+            let path = std::path::PathBuf::from(path);
+            let size = std::fs::metadata(&path)
+                .ok()
+                .filter(|meta| meta.is_file())
+                .map(|meta| meta.len())
+                .ok_or_else(|| invalid("path is not a readable file"))?;
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            let head = {
+                use std::io::Read;
+                let mut head = vec![0; 512];
+                let read = std::fs::File::open(&path)
+                    .and_then(|mut file| file.read(&mut head))
+                    .unwrap_or(0);
+                head.truncate(read);
+                head
+            };
+            Some((Source::Path(path), size, name, head))
+        }
+        (None, Some(data)) => {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
-                .map_err(|_| (protocol::INVALID_PARAMS, "data is not base64".to_owned()))?;
-            if bytes.is_empty() || bytes.len() > 3 * 1024 * 1024 {
-                return Err((
-                    protocol::INVALID_PARAMS,
-                    "A file must be 1 byte to 3 MiB.".to_owned(),
+                .map_err(|_| invalid("data is not base64"))?;
+            if bytes.len() > 3 * 1024 * 1024 {
+                return Err(invalid(
+                    "Inline data is at most 3 MiB; pass a path instead.",
                 ));
+            }
+            let head = bytes[..bytes.len().min(512)].to_vec();
+            let size = bytes.len() as u64;
+            Some((Source::Bytes(bytes.into()), size, None, head))
+        }
+        (None, None) => None,
+    };
+    let file = match given {
+        None => None,
+        Some((source, size, file_name, head)) => {
+            if size == 0 {
+                return Err(invalid("The file is empty."));
             }
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|name| !name.trim().is_empty())
-                .unwrap_or("capture")
+                .map(str::to_owned)
+                .or(file_name)
+                .unwrap_or_else(|| "capture".to_owned())
                 .chars()
                 .take(200)
                 .collect::<String>();
@@ -1021,7 +1060,12 @@ pub fn accept(
                 .get("mime")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .unwrap_or_else(|| buzz_relay_client::upload::mime_type(&name, &bytes));
+                .unwrap_or_else(|| buzz_relay_client::upload::mime_type(&name, &head));
+            if size > buzz_relay_client::messages::media_byte_limit(&mime) {
+                return Err(invalid(
+                    "The file is larger than the community takes for its type.",
+                ));
+            }
             let voice = match params.get("voice").filter(|voice| !voice.is_null()) {
                 None => None,
                 Some(voice) => {
@@ -1051,7 +1095,8 @@ pub fn accept(
             Some(crate::ui::composer::Captured {
                 name,
                 mime,
-                bytes,
+                source,
+                size,
                 voice,
             })
         }

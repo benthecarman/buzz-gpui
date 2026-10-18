@@ -282,7 +282,7 @@ While a call or run is open, the plugin can act as its agent:
 | `agent/current` | `run` | Whether the trigger should still run: `false` once the agent is removed, its attention turned off, or its watch changed |
 | `agent/query` | `call` or `run`, `filters` (1 to 10 NIP-01 filters) | The events, read as the agent, at most 500 |
 | `agent/publish` | `call` or `run`, `kind`, `content`, `tags` | The signed event, published as the agent |
-| `agent/upload` | `call` or `run`, `data` (base64, up to 3 MiB), `mime` | `{"url","sha256","size","type",…}`, uploaded as the agent |
+| `agent/upload` | `call` or `run`, `path` (a file, up to the community's limit for its type) or `data` (base64, up to 3 MiB), `mime` | `{"url","sha256","size","type",…}`, uploaded as the agent |
 
 The agent's key stays on its host; Buzz signs for it. Buzz tools that read
 local files or memories are not available to plugin agents. `send` needs
@@ -453,7 +453,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `messages/delete` | `channel`, `message` (a message or reaction) | `null` once sent. Your own, or an agent's you own. Needs `send-messages`. |
 | `messages/report` | `channel`, `message`, `reason` (`spam`, `profanity`, `nudity`, `impersonation`, `malware`, `illegal` or `other`), `note` | `null` once the relay accepts it. Needs `send-messages`. |
 | `messages/retry`, `messages/dismiss` | `message` (one of yours whose `delivery` is `failed`) | `null`. Sends it again, or drops it. Needs `send-messages`. |
-| `files/upload` | `data` (base64, up to 3 MiB), `name`, `mime` (optional; Buzz guesses) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. Needs `send-messages`. |
+| `files/upload` | `path` (a file, up to the community's limit for its type: 50 MiB for images, 500 MiB for video, 100 MiB otherwise) or `data` (base64, up to 3 MiB); `name` and `mime` (optional; Buzz guesses); `progress` (optional: a name for `files/progress`) | `{"name","url","mime","size","sha256"}`, for `messages/send`'s `attachments`. With `progress`, Buzz sends `files/progress` (`progress`, `stage`: `preparing`, `uploading` or `sending` with `sent` and `total` bytes) as it goes. Needs `send-messages`. |
 | `events/publish` | `kind`, `content`, `tags` | `{"id","event"}` once the relay accepts it. Buzz signs as you, only kinds it writes itself (such as 7, 9, 30315 and 40003), plus app data (30078) and the agent and team catalogs (30175, 30178), as buzz-app does. Needs `publish-events`. |
 | `ui/navigate` | `to`: `home`, `me`, `agents`, `settings` (with an optional `section`, such as `appearance`, `plugins` or a settings card's `plugin/id`), `page` (with `page`, a page's `plugin/id`, and optional `params` and `version` for a page with `routes`), `conversation` (with `channel`, and optional `message`, `thread` and `members`), `back` or `forward`; optionally `community` (a joined community's `wss://` relay, or `null` to leave for Personal space first); and `replace: true` to take the current visit's place in history, such as to redirect a route | `null` |
 | `navigation/get` | none | `{"status","place","failed","canGoBack","canGoForward"}`: `place` is where the window is, in the form `ui/navigate` takes (with `community`), or `null` before anything shows. `status` is `failed` when the last visit could not open; `failed` then says which place, why (`denied`, `invalid` or `unavailable`), and whether `navigation/retry` may help. `ui/navigate` answers before the visit opens, so follow its outcome here. |
@@ -469,7 +469,8 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |
 | `presence/get` | `pubkeys` (at most 500) | `{"<pubkey>": "online" | "away" | "offline" | null}`, for people Buzz already follows; `null` for others |
 | `presence/watch` | `pubkeys` (at most 64) | `{"watch"}`. Buzz follows their presence, shown or not, and sends `presence/changed` with `presence` (as `presence/get` gives it) now and whenever it changes. Stop with `presence/unwatch`. |
-| `media/get` | `url` (the community's media) | `{"data","size","mime"}`: the file as base64, at most 8 MiB, fetched as you. Other URLs, fetch yourself. |
+| `media/get` | `url` (the community's media), and optionally `directory` (with `name`) | `{"data","size","mime"}`: the file as base64, at most 8 MiB, fetched as you; with `directory`, `{"path"}` of the file saved there, any size. Other URLs, fetch yourself. |
+| `media/url` | `url` (the community's media) | A loopback `http://127.0.0.1` URL to fetch or stream it from, any size, with ranges (`session.media`), or `null` when Buzz cannot serve it so |
 | `sidebar/get` | none | `{"loaded","writable","starred","muted","sort","groups","assignments"}`: your starred and muted channels, each group's sort, your saved groups `{"id","name","icon"}`, and which group each channel is in |
 | `sidebar/star`, `sidebar/mute` | `channel`, and `starred` or `muted` (`true` or `false`) | `null` once saved. Unstarring returns a channel to its default section. Needs `manage-channels`. |
 | `sidebar/sort` | `group` (`starred`, `channels`, `forums`, `dms` or `section:<id>`), `mode` (`alpha` or `recent`) | `null` once saved. Needs `manage-channels`. |
@@ -558,7 +559,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `composer/insertResource` | `composer`, `uri` (a Buzz or web link), `label` | `null`, after putting the link as one chip at the caret |
 | `composer/focus` | `composer` | `null`, after putting the caret back in the composer |
 | `composer/capture` | `composer` | `{"view"}`. A view of `kind` `capture` takes the composer's place, as recording a voice note does, until `composer/accept` or the user discards it (the view then closes). |
-| `composer/accept` | `view` (an open `capture`), and optionally `data` (base64, up to 3 MiB), `name`, `mime` and `voice` (`{"duration","waveform"}`: seconds, and up to 256 levels from 0 to 255) | `null`. Ends the capture and attaches the file, if given, to the draft; with `voice`, as a voice note that plays in the draft. |
+| `composer/accept` | `view` (an open `capture`), and optionally `path` (a file, up to the community's limit for its type) or `data` (base64, up to 3 MiB), `name`, `mime` and `voice` (`{"duration","waveform"}`: seconds, and up to 256 levels from 0 to 255) | `null`. Ends the capture and attaches the file, if given, to the draft; with `voice`, as a voice note that plays in the draft. |
 
 Reads cover the selected community and channels you can read in it. They
 never mark anything read. A read waits up to 10 seconds for the relay.
