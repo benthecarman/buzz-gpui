@@ -341,10 +341,11 @@ pub fn channel_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, F
 pub fn thread_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
     let channel = readable(params, community.read(cx))?;
-    let root = event_id(params, "root")?.ok_or_else(|| invalid("root is required"))?;
+    let (root, exact) = thread_target(params)?;
     let session = community.read(cx).session.clone();
+    let thread_channel = channel.clone();
     let wait = on_runtime(cx, async move {
-        let view = session.open_thread(&channel, root, false);
+        let view = session.open_thread(&channel, root, exact);
         let mut snapshot = view.snapshot.clone();
         let ready = snapshot
             .wait_for(|thread| matches!(thread.status, ThreadStatus::Ready | ThreadStatus::Error))
@@ -371,15 +372,7 @@ pub fn thread_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
         }
         Ok(cx.update(|cx| {
             let profiles = community.read(cx).snapshot.profiles.clone();
-            json!({
-                "root": thread.root.as_ref().map(|row| message(row, &profiles)),
-                "replies": thread
-                    .replies
-                    .iter()
-                    .map(|row| message(row, &profiles))
-                    .collect::<Vec<_>>(),
-                "hasMore": thread.can_load_more,
-            })
+            thread_json(&thread_channel, &thread, &profiles)
         }))
     }))
 }
@@ -2013,6 +2006,8 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
 pub struct Watch {
     _keep: Box<dyn std::any::Any>,
     _forward: Task<()>,
+    /// Loads more of what it follows (`watch/more`), if it can.
+    more: Option<Box<dyn Fn()>>,
 }
 
 impl Watch {
@@ -2020,8 +2015,63 @@ impl Watch {
         Self {
             _keep: Box::new(keep),
             _forward: forward,
+            more: None,
         }
     }
+
+    fn with_more(mut self, more: impl Fn() + 'static) -> Self {
+        self.more = Some(Box::new(more));
+        self
+    }
+
+    /// Asks for more history; `false` when this watch has none to load.
+    pub fn more(&self) -> bool {
+        self.more.as_ref().map(|more| more()).is_some()
+    }
+}
+
+/// The most messages a channel watch grows to with `watch/more`.
+const MAX_WATCHED: usize = 1_000;
+
+/// The message a thread read opens at (`root`, or any `message` in the
+/// thread), and whether it is `exact`: folded around that message on
+/// its own evidence (`thread({exact})`).
+fn thread_target(params: &Value) -> Result<(EventId, bool), Failure> {
+    let target = event_id(params, "message")?
+        .or(event_id(params, "root")?)
+        .ok_or_else(|| invalid("root is required"))?;
+    Ok((
+        target,
+        params.get("exact").and_then(Value::as_bool) == Some(true),
+    ))
+}
+
+/// A thread as `thread/messages` and `thread/changed` give it.
+fn thread_json(
+    channel: &str,
+    thread: &buzz_relay_client::threads::ThreadSnapshot,
+    profiles: &buzz_relay_client::Profiles,
+) -> Value {
+    use buzz_relay_client::threads::TargetStatus;
+    json!({
+        "channel": channel,
+        "root": thread.root.as_ref().map(|row| message(row, profiles)),
+        "replies": thread
+            .replies
+            .iter()
+            .map(|row| message(row, profiles))
+            .collect::<Vec<_>>(),
+        "hasMore": thread.can_load_more,
+        "limited": thread.limited,
+        "target": thread.target.as_ref().map(|row| message(row, profiles)),
+        "targetStatus": thread.target_status.map(|status| match status {
+            TargetStatus::Loading => "loading",
+            TargetStatus::Ready => "ready",
+            TargetStatus::Unavailable => "unavailable",
+            TargetStatus::Error => "error",
+        }),
+        "error": thread.error,
+    })
 }
 
 /// `thread/watch`: sends `thread/changed` with the root and replies now
@@ -2033,11 +2083,17 @@ pub fn watch_thread(
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
     let channel = readable(params, community.read(cx))?;
-    let root = event_id(params, "root")?.ok_or_else(|| invalid("root is required"))?;
-    let view = community
-        .read(cx)
-        .session
-        .open_thread(&channel, root, false);
+    let (root, exact) = thread_target(params)?;
+    let view = std::rc::Rc::new(
+        community
+            .read(cx)
+            .session
+            .open_thread(&channel, root, exact),
+    );
+    let more = {
+        let view = view.clone();
+        move || view.load_more()
+    };
     let mut receiver = view.snapshot.clone();
     let (sender, mut values) = futures::channel::mpsc::unbounded();
     let _ = sender.unbounded_send(receiver.borrow_and_update().clone());
@@ -2061,25 +2117,12 @@ pub fn watch_thread(
             }
             cx.update(|cx| {
                 let profiles = community.read(cx).snapshot.profiles.clone();
-                notify(
-                    json!({
-                        "channel": thread_channel,
-                        "root": thread.root.as_ref().map(|row| message(row, &profiles)),
-                        "replies": thread
-                            .replies
-                            .iter()
-                            .map(|row| message(row, &profiles))
-                            .collect::<Vec<_>>(),
-                        "hasMore": thread.can_load_more,
-                        "error": thread.error,
-                    }),
-                    cx,
-                );
+                notify(thread_json(&thread_channel, &thread, &profiles), cx);
             });
         }
     });
     Ok((
-        Watch::new(view, forward),
+        Watch::new(view, forward).with_more(more),
         json!({ "channel": channel, "root": root.to_hex() }),
     ))
 }
@@ -2094,11 +2137,21 @@ pub fn watch(
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
     let channel = readable(params, community.read(cx))?;
-    let limit = limit(params);
-    let view = community.read(cx).session.open_channel(&channel);
+    let limit = std::rc::Rc::new(std::cell::Cell::new(limit(params)));
+    let view = std::rc::Rc::new(community.read(cx).session.open_channel(&channel));
     let mut receiver = view.snapshot.clone();
     let (sender, mut values) = futures::channel::mpsc::unbounded::<Arc<TimelineSnapshot>>();
     let _ = sender.unbounded_send(receiver.borrow_and_update().clone());
+    // `watch/more`: older history, and room in the answer to show it.
+    let more = {
+        let (view, limit, sender) = (view.clone(), limit.clone(), sender.clone());
+        move || {
+            limit.set((limit.get() + DEFAULT_MESSAGES).min(MAX_WATCHED));
+            view.load_older();
+            let _ = sender.unbounded_send(view.snapshot.borrow().clone());
+        }
+    };
+    let shown = limit.clone();
     Runtime::handle(cx).spawn(async move {
         while receiver.changed().await.is_ok() {
             let value = receiver.borrow_and_update().clone();
@@ -2119,11 +2172,14 @@ pub fn watch(
             }
             cx.update(|cx| {
                 let profiles = community.read(cx).snapshot.profiles.clone();
-                notify(timeline(&snapshot, limit, &profiles), cx);
+                notify(timeline(&snapshot, shown.get(), &profiles), cx);
             });
         }
     });
-    Ok((Watch::new(view, forward), json!({ "channel": channel })))
+    Ok((
+        Watch::new(view, forward).with_more(more),
+        json!({ "channel": channel }),
+    ))
 }
 
 #[cfg(test)]

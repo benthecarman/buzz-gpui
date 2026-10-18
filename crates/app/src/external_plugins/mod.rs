@@ -2221,6 +2221,18 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 },
             ),
+            "watch/more" => {
+                let watch = params.get("watch").and_then(Value::as_u64);
+                let more = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.watches.get(&watch?))
+                    .map(capabilities::Watch::more);
+                Reply::Now(match more {
+                    Some(more) => Ok(json!(more)),
+                    None => Err((INVALID_PARAMS, "watch is not one of yours".to_owned())),
+                })
+            }
             "shortcuts/run" => Reply::Now(match params.get("key").and_then(Value::as_str) {
                 Some(key) => {
                     let known = crate::shortcuts::external_list(cx)
