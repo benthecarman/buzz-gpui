@@ -59,6 +59,8 @@ pub struct ExternalView {
     /// Buzz's composers and threads the tree embeds, by element id, with
     /// what they were made for.
     embeds: HashMap<String, (String, AnyView)>,
+    /// Embedded composers, by element id, with their event subscription.
+    composers: HashMap<String, (Entity<crate::ui::composer::Composer>, Subscription)>,
     _release: Subscription,
 }
 
@@ -402,6 +404,7 @@ impl ExternalView {
                 error: None,
                 fields: HashMap::new(),
                 embeds: HashMap::new(),
+                composers: HashMap::new(),
                 _release: cx.on_release(|this: &mut Self, cx| {
                     ExternalPlugins::close_view(&this.plugin, &this.id, cx);
                 }),
@@ -546,11 +549,25 @@ impl ExternalView {
                     id,
                     channel,
                     thread,
+                    parent,
+                    plugin_submits,
+                    disabled,
                     ..
-                } => (
-                    *id,
-                    format!("composer:{channel}:{}", thread.unwrap_or_default()),
-                ),
+                } => {
+                    // Disabling changes the composer made already.
+                    if let Some((composer, _)) = self.composers.get(*id) {
+                        let can_send = !disabled;
+                        composer.update(cx, |composer, cx| composer.set_can_send(can_send, cx));
+                    }
+                    (
+                        *id,
+                        format!(
+                            "composer:{channel}:{}:{}:{plugin_submits}",
+                            thread.unwrap_or_default(),
+                            parent.unwrap_or_default()
+                        ),
+                    )
+                }
                 draw::EmbedNode::Thread { id, channel, root } => {
                     (*id, format!("thread:{channel}:{root}"))
                 }
@@ -574,29 +591,59 @@ impl ExternalView {
             };
             let view: Option<AnyView> = match embed {
                 draw::EmbedNode::Composer {
+                    id,
                     channel,
                     thread,
+                    parent,
                     placeholder,
-                    ..
+                    plugin_submits,
+                    disabled,
+                    auto_focus,
                 } if readable(channel) => {
-                    let root =
-                        thread.and_then(|root| buzz_relay_client::EventId::from_hex(root).ok());
+                    let event_id = |hex: Option<&str>| {
+                        hex.and_then(|hex| buzz_relay_client::EventId::from_hex(hex).ok())
+                    };
+                    let root = event_id(thread);
+                    let reply = root.map(|root| (root, event_id(parent).unwrap_or(root)));
                     let placeholder: SharedString =
                         placeholder.unwrap_or("Message").to_owned().into();
                     let (community, channel) = (community.clone(), channel.to_owned());
-                    Some(
-                        cx.new(|cx| {
-                            crate::ui::composer::Composer::new(
-                                community,
-                                channel,
-                                root,
-                                placeholder,
-                                window,
-                                cx,
-                            )
-                        })
-                        .into(),
-                    )
+                    let composer = cx.new(|cx| {
+                        crate::ui::composer::Composer::new(
+                            community.clone(),
+                            channel.clone(),
+                            root,
+                            placeholder,
+                            window,
+                            cx,
+                        )
+                    });
+                    composer.update(cx, |composer, cx| {
+                        composer.set_can_send(!disabled, cx);
+                        if auto_focus {
+                            composer.focus(window, cx);
+                        }
+                    });
+                    let element = id.to_owned();
+                    let subscription = cx.subscribe_in(
+                        &composer,
+                        window,
+                        move |this, composer, event, window, cx| {
+                            if let crate::ui::composer::ComposerEvent::Submit(submission) = event {
+                                this.submitted(
+                                    &element,
+                                    composer.clone(),
+                                    submission.clone(),
+                                    (community.clone(), channel.clone(), reply, plugin_submits),
+                                    window,
+                                    cx,
+                                );
+                            }
+                        },
+                    );
+                    self.composers
+                        .insert(id.to_owned(), (composer.clone(), subscription));
+                    Some(composer.into())
                 }
                 draw::EmbedNode::Thread { id, channel, root } if readable(channel) => {
                     match buzz_relay_client::EventId::from_hex(root) {
@@ -634,6 +681,88 @@ impl ExternalView {
             }
         }
         self.embeds.retain(|id, _| seen.contains(id));
+        self.composers.retain(|id, _| seen.contains(id));
+    }
+
+    /// An embedded composer's Send: the plugin takes the draft
+    /// (`submission.submit`), or Buzz sends it as the channel does and
+    /// tells the plugin `sent` (`onSend`).
+    fn submitted(
+        &mut self,
+        element: &str,
+        composer: Entity<crate::ui::composer::Composer>,
+        submission: crate::ui::composer::Submission,
+        (community, channel, reply, plugin_submits): (
+            Entity<Community>,
+            String,
+            Option<(buzz_relay_client::EventId, buzz_relay_client::EventId)>,
+            bool,
+        ),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Editing needs the conversation's own views.
+        if submission.editing.is_some() {
+            composer.update(cx, |composer, cx| composer.failed(cx));
+            return;
+        }
+        let session = community.read(cx).session.clone();
+        let element = element.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            let attachments = if submission.upload.is_some() {
+                match submission.attachments().await {
+                    Some(attachments) => attachments,
+                    None => return,
+                }
+            } else {
+                Vec::new()
+            };
+            let content = submission.content.clone();
+            let mentions = submission.mentions.clone();
+            let result = if plugin_submits {
+                let draft = json!({
+                    "content": content,
+                    "mentions": mentions.recipients,
+                    "references": mentions.references,
+                    "attachments": attachments.iter().map(|attachment| json!({
+                        "url": attachment.url,
+                        "mime": attachment.mime,
+                        "size": attachment.size,
+                        "name": attachment.name,
+                        "sha256": attachment.sha256,
+                    })).collect::<Vec<_>>(),
+                });
+                let _ = this.update(cx, |this, cx| {
+                    this.event(&element, "submit", Some(draft), cx);
+                });
+                Ok(None)
+            } else {
+                let sent = session
+                    .send(&channel, &content, mentions, attachments, reply)
+                    .await;
+                match sent {
+                    Ok(()) => Ok(session.queued_message(&channel, &content).await),
+                    Err(error) => Err(error),
+                }
+            };
+            let handed_back = cx
+                .update(|_, cx| {
+                    submission.settle(&result.as_ref().map(|_| ()).map_err(Clone::clone), cx)
+                })
+                .unwrap_or(false);
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(id) => {
+                    composer.update(cx, |composer, cx| composer.sent(window, cx));
+                    if !plugin_submits {
+                        let value = json!({ "id": id.map(|id| id.to_hex()) });
+                        this.event(&element, "sent", Some(value), cx);
+                    }
+                }
+                Err(_) if handed_back => {}
+                Err(_) => composer.update(cx, |composer, cx| composer.failed(cx)),
+            });
+        })
+        .detach();
     }
 
     /// What shows before the plugin's tree, or instead of it.

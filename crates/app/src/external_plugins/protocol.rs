@@ -1052,14 +1052,25 @@ pub enum Node {
         alt: Option<String>,
     },
     /// Buzz's own composer for a channel, or a thread in it
-    /// (`conversation.ui.Composer`). Sending works as in the channel.
+    /// (`conversation.ui.Composer`). Sending works as in the channel and
+    /// then sends `sent`; with `submit: "plugin"`, the draft goes to the
+    /// plugin as `submit` instead.
     Composer {
         id: String,
         channel: String,
         #[serde(default)]
         thread: Option<String>,
+        /// The reply a thread composer answers; the root by default.
+        #[serde(default)]
+        parent: Option<String>,
         #[serde(default)]
         placeholder: Option<String>,
+        #[serde(default)]
+        submit: Option<String>,
+        #[serde(default)]
+        disabled: bool,
+        #[serde(default)]
+        auto_focus: bool,
     },
     /// Buzz's own thread view of `root` in `channel`
     /// (`conversation.ui.Thread`), `height` pixels tall (default 480).
