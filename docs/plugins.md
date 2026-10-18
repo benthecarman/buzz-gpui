@@ -558,7 +558,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `teams/save` | `id` (to replace one), `name`, `instructions`, `members` (agents on this device) | The team. Needs `manage-agents`. |
 | `teams/remove` | `id` | `null`. Its agents stay. Needs `manage-agents`. |
 | `dm/open` | `pubkeys` (1 to 8 others) | `{"channel"}`: the direct message with them, made if new. Needs `manage-channels`. |
-| `channels/create` | `name`, `description`, `private`, `ttlSeconds` (optional; without it the channel is ongoing), `labels` (optional, up to 16) | `{"channel"}`. Needs `manage-channels`. |
+| `channels/create` | `name`, `description`, `private`, `ttlSeconds` (optional; without it the channel is ongoing), `labels` (optional, up to 16), `setup` (optional, what a template adds: `{"canvas","agents","group","template"}`) | `{"channel"}`. With `setup`, Buzz writes the Canvas, adds the agents and files the channel in the group once the channel is confirmed, as a channel template does (`channelCreation.create` with `setup`). Needs `manage-channels`. |
+| `channels/creation` | none | `{"pending","notices"}`: the channel being made now (`{"name","description","labels"}`), and setups that did not finish, each `{"id","name","error"}` (`channelCreation.snapshot`). |
+| `channels/dismissNotice` | `id` | `null`. Hides a setup notice. |
 | `channels/action` | `channel`, `action`: `join`, `leave`, `archive`, `unarchive`, `delete` (by an owner) or `hide` (a DM) | `null` once the relay shows it. Needs `manage-channels`. |
 | `channels/addMember` | `channel`, `pubkey` (such as one of your agents) | `null` once the roster lists them. Needs `manage-channels`. |
 | `channels/changeMember` | `channel`, `pubkey`, `change` (`admin`, `member`, `guest` or `remove`), `expected` (their role now: `owner`, `admin`, `member`, `guest` or `bot`) | `null` once done. Needs `manage-channels`. |

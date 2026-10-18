@@ -75,14 +75,70 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             })
             .unwrap_or_default(),
     };
+    // What a template adds (`setup`): a Canvas, agents, a sidebar group.
+    let setup = match params.get("setup").filter(|setup| !setup.is_null()) {
+        None => None,
+        Some(setup) => {
+            let field = |key: &str| text(setup, key).unwrap_or_default().to_owned();
+            Some(buzz_relay_client::kit::setup::ChannelSetup {
+                canvas: field("canvas"),
+                agents: setup
+                    .get("agents")
+                    .and_then(Value::as_array)
+                    .map(|agents| {
+                        agents
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_ascii_lowercase)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                group_id: field("group"),
+                template_id: field("template"),
+            })
+        }
+    };
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
-        let id = session
-            .create_channel(channel)
-            .await
-            .map_err(|error| (3, error))?;
+        let id = match setup {
+            None => session.create_channel(channel).await,
+            Some(setup) => {
+                let input = buzz_relay_client::kit::setup::ChannelCreationInput::from_new(
+                    &channel,
+                    Some(setup),
+                );
+                session.create_channel_with(input).await
+            }
+        }
+        .map_err(|error| (3, error))?;
         Ok(json!({ "channel": id }))
     }))
+}
+
+/// `channels/creation`: the channel being made now, if any, and notices
+/// about setups that did not finish (`channelCreation.snapshot`).
+pub fn creation(cx: &App) -> Result<Value, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    let snapshot = session.creation().borrow().clone();
+    Ok(json!({
+        "pending": snapshot.pending.as_ref().map(|pending| json!({
+            "name": pending.name,
+            "description": pending.description,
+            "labels": pending.labels,
+        })),
+        "notices": snapshot.notices.iter().map(|notice| json!({
+            "id": notice.id,
+            "name": notice.name,
+            "error": notice.error,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `channels/dismissNotice`: hides a setup notice.
+pub fn dismiss_notice(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let id = text(params, "id").ok_or_else(|| invalid("id is required"))?;
+    community(cx)?.read(cx).session.dismiss_setup_notice(id);
+    Ok(Value::Null)
 }
 
 /// `channels/action`: joins, leaves, archives, unarchives or deletes a

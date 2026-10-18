@@ -2188,6 +2188,8 @@ impl ExternalPlugins {
             "community/refresh" => later(channels::refresh(params, cx)),
             "sidebar/dismiss" => Reply::Now(channels::dismiss_sidebar(params, cx)),
             "me/get" => Reply::Now(channels::me(cx)),
+            "channels/creation" => Reply::Now(channels::creation(cx)),
+            "channels/dismissNotice" => Reply::Now(channels::dismiss_notice(params, cx)),
             "me/dismiss" | "me/refresh" => Reply::Now(channels::me_local(method, params, cx)),
             "channels/members" => later(channels::members(params, cx)),
             "channels/lifecycle" => later(channels::lifecycle(params, cx)),
