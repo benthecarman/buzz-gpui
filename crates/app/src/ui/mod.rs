@@ -44,7 +44,7 @@ pub(crate) mod me;
 pub(crate) mod media;
 mod members;
 mod membership;
-mod message;
+pub(crate) mod message;
 mod message_actions;
 mod message_copy;
 mod message_edit;

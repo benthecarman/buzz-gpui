@@ -1072,6 +1072,13 @@ pub enum Node {
         #[serde(default)]
         auto_focus: bool,
     },
+    /// One message as Buzz draws it in a conversation
+    /// (`conversation.ui.Message`), for display.
+    Message {
+        id: String,
+        channel: String,
+        message: String,
+    },
     /// Buzz's own thread view of `root` in `channel`
     /// (`conversation.ui.Thread`), `height` pixels tall (default 480).
     /// Closing it sends `close`.

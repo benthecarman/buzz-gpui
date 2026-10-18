@@ -51,6 +51,11 @@ pub enum EmbedNode<'a> {
         channel: &'a str,
         root: &'a str,
     },
+    Message {
+        id: &'a str,
+        channel: &'a str,
+        message: &'a str,
+    },
 }
 
 /// Every embedded composer and thread in `node`.
@@ -84,6 +89,15 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
             Node::Thread {
                 id, channel, root, ..
             } => found.push(EmbedNode::Thread { id, channel, root }),
+            Node::Message {
+                id,
+                channel,
+                message,
+            } => found.push(EmbedNode::Message {
+                id,
+                channel,
+                message,
+            }),
             _ => {}
         }
     }
@@ -353,6 +367,10 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                     .into_any_element(),
             }
         }
+        Node::Message { id, .. } => match draw.embeds.get(id) {
+            Some(view) => div().w_full().child(view.clone()).into_any_element(),
+            None => div().into_any_element(),
+        },
         Node::Composer { id, .. } => match draw.embeds.get(id) {
             Some(view) => div().w_full().child(view.clone()).into_any_element(),
             None => div().into_any_element(),

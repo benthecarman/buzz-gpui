@@ -23,6 +23,7 @@ pub use dialogs::dialog;
 mod draw;
 mod events;
 pub mod git;
+mod message_view;
 mod naming;
 mod observed;
 mod outbox;

@@ -571,6 +571,11 @@ impl ExternalView {
                 draw::EmbedNode::Thread { id, channel, root } => {
                     (*id, format!("thread:{channel}:{root}"))
                 }
+                draw::EmbedNode::Message {
+                    id,
+                    channel,
+                    message,
+                } => (*id, format!("message:{channel}:{message}")),
             };
             seen.insert(id.to_owned());
             if self
@@ -644,6 +649,21 @@ impl ExternalView {
                     self.composers
                         .insert(id.to_owned(), (composer.clone(), subscription));
                     Some(composer.into())
+                }
+                draw::EmbedNode::Message {
+                    channel, message, ..
+                } if readable(channel) => {
+                    buzz_relay_client::EventId::from_hex(message)
+                        .ok()
+                        .map(|message| {
+                            let (community, channel) = (community.clone(), channel.to_owned());
+                            cx.new(|cx| {
+                                super::message_view::MessageView::new(
+                                    community, channel, message, cx,
+                                )
+                            })
+                            .into()
+                        })
                 }
                 draw::EmbedNode::Thread { id, channel, root } if readable(channel) => {
                     match buzz_relay_client::EventId::from_hex(root) {
