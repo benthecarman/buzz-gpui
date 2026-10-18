@@ -334,6 +334,47 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                     .w(relative(value.clamp(0., 1.))),
             )
             .into_any_element(),
+        Node::Audio {
+            url,
+            name,
+            mime,
+            duration,
+            waveform,
+            voice,
+        } => {
+            use buzz_relay_client::fold::{Attachment, AttachmentKind};
+            let Some(community) = &draw.community else {
+                return div().into_any_element();
+            };
+            let media = community.read(cx).session.media().clone();
+            let attachment = Attachment {
+                url: url.clone(),
+                kind: AttachmentKind::Audio,
+                mime: mime.clone(),
+                size: None,
+                name: name.clone(),
+                duration: *duration,
+                waveform: waveform.clone(),
+                voice_note: *voice,
+                dimensions: None,
+                blurhash: None,
+                preview_url: None,
+                insecure: false,
+            };
+            let id = element_id("audio");
+            let player = if *voice {
+                crate::ui::media::voice_note(id, &attachment, &media, cx)
+            } else {
+                crate::ui::media::audio_attachment(id, &attachment, &media, cx)
+            };
+            // The card's own width (21rem), even inside a row.
+            div()
+                .flex_none()
+                .w(px(336.))
+                .max_w_full()
+                .child(player)
+                .into_any_element()
+        }
         Node::Image {
             url,
             width,

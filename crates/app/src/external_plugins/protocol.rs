@@ -1085,6 +1085,24 @@ pub enum Node {
         #[serde(default)]
         alt: Option<String>,
     },
+    /// Buzz's audio player, or its voice note card with `voice`, for the
+    /// community's media or a draft's local URL (`AttachmentRendererProps
+    /// .source`).
+    Audio {
+        url: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        mime: Option<String>,
+        /// Seconds.
+        #[serde(default)]
+        duration: Option<f64>,
+        /// 0 to 255 per bar.
+        #[serde(default)]
+        waveform: Option<Vec<u8>>,
+        #[serde(default)]
+        voice: bool,
+    },
     /// Buzz's own composer for a channel, or a thread in it
     /// (`conversation.ui.Composer`). Sending works as in the channel and
     /// then sends `sent`; with `submit: "plugin"`, the draft goes to the
