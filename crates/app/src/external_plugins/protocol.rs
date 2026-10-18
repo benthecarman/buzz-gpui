@@ -592,6 +592,18 @@ pub struct ActionDecl {
     /// Only the user's own messages.
     #[serde(default)]
     pub mine: bool,
+    /// Only messages with (`true`) or without (`false`) attachments.
+    #[serde(default)]
+    pub attachments: Option<bool>,
+    /// Only thread replies (`true`) or top-level messages (`false`).
+    #[serde(default)]
+    pub replies: Option<bool>,
+    /// Only messages whose text this regular expression finds.
+    #[serde(default)]
+    pub pattern: Option<String>,
+    /// Only messages in these channels.
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 /// Draws link chips for URLs with these prefixes.
@@ -802,6 +814,14 @@ impl Contributions {
         for action in &self.message_actions {
             id(&action.id)?;
             check_title(&action.id, &action.title)?;
+            if let Some(pattern) = &action.pattern
+                && (pattern.len() > 500 || regex::Regex::new(pattern).is_err())
+            {
+                return Err(format!(
+                    "“{}” needs a pattern of at most 500 characters that compiles.",
+                    action.id
+                ));
+            }
         }
         for renderer in &self.link_renderers {
             id(&renderer.id)?;

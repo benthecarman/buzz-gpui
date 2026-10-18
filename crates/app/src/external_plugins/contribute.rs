@@ -874,6 +874,11 @@ struct Action {
     kinds: Vec<u16>,
     /// The viewer's key when `mine` is set.
     mine: Option<String>,
+    /// The rest of the declared filters (`matches(message)`).
+    attachments: Option<bool>,
+    replies: Option<bool>,
+    pattern: Option<regex::Regex>,
+    channels: Vec<String>,
 }
 
 impl MessageAction for Action {
@@ -895,6 +900,21 @@ impl MessageAction for Action {
                 .mine
                 .as_ref()
                 .is_none_or(|viewer| row.author.to_hex() == *viewer)
+            && self
+                .attachments
+                .is_none_or(|wanted| wanted == !row.attachments.is_empty())
+            && self
+                .replies
+                .is_none_or(|wanted| wanted == row.thread_root_id.is_some())
+            && self
+                .pattern
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(&row.content))
+            && (self.channels.is_empty()
+                || self
+                    .channels
+                    .iter()
+                    .any(|channel| **channel == *row.channel))
     }
 
     fn run(&self, row: &Arc<MessageRow>, _: &mut Window, cx: &mut App) {
@@ -1471,6 +1491,13 @@ pub fn register(
             icon: action.icon.as_deref().map(|name| super::icon(Some(name))),
             kinds: action.kinds.clone(),
             mine: action.mine.then(|| mine.clone()).flatten(),
+            attachments: action.attachments,
+            replies: action.replies,
+            pattern: action
+                .pattern
+                .as_deref()
+                .and_then(|pattern| regex::Regex::new(pattern).ok()),
+            channels: action.channels.clone(),
         }));
         added.push(Added::Renderer(action_key));
     }

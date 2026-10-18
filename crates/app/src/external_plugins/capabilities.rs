@@ -2039,19 +2039,32 @@ pub fn info(cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
 /// `ui/openPanel`: opens one of the plugin's panels (by `panel` id) as a
 /// tab of the open conversation, showing `target`.
 pub fn open_panel(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {
-    let panel = text(params, "panel").ok_or_else(|| invalid("panel is required"))?;
-    let key = format!("{plugin}/{panel}");
-    if crate::ui::channel_panels::get(&key, cx).is_none() {
-        return Err(invalid(format!("The plugin has no panel {panel}")));
-    }
     let target = text(params, "target")
         .filter(|target| target.len() <= 2048)
         .ok_or_else(|| invalid("target is required"))?
         .to_owned();
+    // One of the plugin's panels, or without `panel` whichever panel shows
+    // `target`, any plugin's (`ComposerAccessoryProps.open`).
+    let key = match text(params, "panel") {
+        Some(panel) => {
+            let key = format!("{plugin}/{panel}");
+            if crate::ui::channel_panels::get(&key, cx).is_none() {
+                return Err(invalid(format!("The plugin has no panel {panel}")));
+            }
+            Some(key)
+        }
+        None => match crate::ui::channel_panels::resolve(&target, cx) {
+            Some(_) => None,
+            None => return Ok(json!(false)),
+        },
+    };
+    // The conversation and thread it opens for, such as an accessory's.
+    let channel = text(params, "channel").map(str::to_owned);
+    let root = text(params, "thread").map(str::to_owned);
     navigation::with_workspace(cx, move |workspace, window, cx| {
-        workspace.open_panel_at(Some(&key), &target, None, None, window, cx);
+        workspace.open_panel_at(key.as_deref(), &target, channel, root, window, cx);
     });
-    Ok(Value::Null)
+    Ok(json!(true))
 }
 
 /// `notifications/submit`: a notification in one of the plugin's
