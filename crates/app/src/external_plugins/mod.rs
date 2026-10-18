@@ -2059,6 +2059,7 @@ impl ExternalPlugins {
             | "messages/edit"
             | "messages/react"
             | "messages/delete"
+            | "messages/sendToChannel"
             | "files/upload"
             | "events/publish"
             | "outbox/send"
@@ -2157,6 +2158,7 @@ impl ExternalPlugins {
                     "messages/edit" => capabilities::edit(params, cx),
                     "messages/react" => capabilities::react(params, cx),
                     "messages/delete" => capabilities::delete(params, cx),
+                    "messages/sendToChannel" => capabilities::send_to_channel(params, cx),
                     "messages/report" => capabilities::report(params, cx),
                     "messages/retry" => capabilities::retry(false, params, cx),
                     "messages/dismiss" => capabilities::retry(true, params, cx),

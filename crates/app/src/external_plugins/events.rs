@@ -126,11 +126,31 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
     let community = community(cx)?;
     let filters = filters(params, true)?;
     let http = RelayHttp::new(community.read(cx).origin.clone(), identity(cx)?);
+    let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         let mut events = http
             .query_raw(&filters)
             .await
             .map_err(|error| (2, error.to_string()))?;
+        // Your own events still on their way count too, as `session.read`
+        // merges what the outbox holds.
+        if let Some(outbox) = session.outbox().await {
+            let known: HashSet<String> = events
+                .iter()
+                .filter_map(|event| event.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect();
+            for op in outbox.pending().iter() {
+                let Some(signed) = &op.signed else {
+                    continue;
+                };
+                if !known.contains(&signed.id.to_hex())
+                    && filters.iter().any(|filter| matches(filter, signed))
+                    && let Ok(value) = serde_json::to_value(signed)
+                {
+                    events.push(value);
+                }
+            }
+        }
         events.truncate(MAX_EVENTS);
         Ok(Value::Array(events))
     }))
@@ -208,7 +228,7 @@ pub fn watch(
     let community = community(cx)?;
     let filters = filters(params, false)?;
     let mut live = community.read(cx).session.live_events();
-    let (sender, mut values) = futures::channel::mpsc::unbounded::<Vec<Value>>();
+    let (sender, mut values) = futures::channel::mpsc::unbounded::<(Vec<Value>, Option<String>)>();
     Runtime::handle(cx).spawn(async move {
         let mut seen = (HashSet::new(), VecDeque::new());
         while let Some(batch) = live.recv().await {
@@ -233,15 +253,16 @@ pub fn watch(
                 })
                 .filter_map(|event| serde_json::to_value(&**event).ok())
                 .collect();
-            if !matched.is_empty() && sender.unbounded_send(matched).is_err() {
+            if !matched.is_empty() && sender.unbounded_send((matched, batch.channel)).is_err() {
                 return;
             }
         }
     });
     let forward = cx.spawn(async move |cx| {
         use futures::StreamExt;
-        while let Some(events) = values.next().await {
-            cx.update(|cx| notify(json!({ "events": events }), cx));
+        while let Some((events, channel)) = values.next().await {
+            // The channel route the batch came on, if any.
+            cx.update(|cx| notify(json!({ "events": events, "channel": channel }), cx));
         }
     });
     Ok((Watch::new((), forward), json!({})))

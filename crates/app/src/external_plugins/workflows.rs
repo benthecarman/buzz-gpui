@@ -29,8 +29,10 @@ fn status(status: ViewStatus) -> &'static str {
     }
 }
 
-fn definition(definition: &WorkflowDefinition) -> Value {
+fn definition(definition: &WorkflowDefinition, workflows: &Workflows) -> Value {
     json!({
+        // Where a webhook trigger posts (`webhookUrl`).
+        "webhookUrl": workflows.webhook_url(&definition.id),
         "id": definition.id,
         "owner": definition.owner,
         "channel": definition.channel_id,
@@ -80,7 +82,12 @@ async fn read(
     }
     let answer = json!({
         "status": status(snapshot.status),
-        "workflows": snapshot.data.items.iter().map(definition).collect::<Vec<_>>(),
+        "workflows": snapshot
+            .data
+            .items
+            .iter()
+            .map(|item| definition(item, workflows))
+            .collect::<Vec<_>>(),
         "partial": snapshot.data.partial,
     });
     Ok((snapshot.data.items.clone(), answer))

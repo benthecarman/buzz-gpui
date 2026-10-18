@@ -246,6 +246,8 @@ fn profile(key: &str, profile: Option<&Arc<Profile>>) -> Value {
             "about": profile.about,
             "nip05": profile.nip05,
             "isAgent": profile.is_agent,
+            // An agent's attested owner (NIP-OA), if its profile names one.
+            "owner": profile.owner_pubkey,
             "loaded": !profile.name_is_fallback,
         }),
         None => json!({
@@ -427,19 +429,72 @@ pub fn react(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
         .filter(|emoji| !emoji.is_empty() && emoji.chars().count() <= 64)
         .ok_or_else(|| invalid("emoji is required"))?
         .to_owned();
+    // A custom emoji outside the community's catalog, such as one on
+    // another reaction: `emojiUrl` with `emoji` as `:shortcode:`.
+    let custom = match text(params, "emojiUrl") {
+        None => None,
+        Some(url) if url.starts_with("https://") => {
+            let shortcode = emoji
+                .strip_prefix(':')
+                .and_then(|rest| rest.strip_suffix(':'))
+                .filter(|code| {
+                    !code.is_empty()
+                        && code
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                })
+                .ok_or_else(|| invalid("a custom emoji is written :shortcode:"))?;
+            Some(buzz_relay_client::messages::CustomEmoji {
+                shortcode: shortcode.to_owned(),
+                url: url.to_owned(),
+            })
+        }
+        Some(_) => return Err(invalid("emojiUrl must be https")),
+    };
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
-        session
-            .react(&channel, message, &emoji)
-            .await
-            .map(|()| Value::Null)
-            .map_err(|error| (3, error))
+        match custom {
+            Some(custom) => {
+                session
+                    .react_with(&channel, message, &emoji, Some(custom))
+                    .await
+            }
+            None => session.react(&channel, message, &emoji).await,
+        }
+        .map(|()| Value::Null)
+        .map_err(|error| (3, error))
     }))
 }
 
 /// `messages/delete`: deletes one of the user's messages or reactions, or
 /// a message of an agent the user owns.
 pub fn delete(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    // Several at once (`messages.remove` takes up to 100).
+    if let Some(ids) = params.get("messages") {
+        let community = community(cx)?;
+        let channel = channel(params, community.read(cx))?;
+        let ids: Vec<EventId> = ids
+            .as_array()
+            .filter(|ids| !ids.is_empty() && ids.len() <= 100)
+            .ok_or_else(|| invalid("messages must be a list of 1 to 100 ids"))?
+            .iter()
+            .map(|id| {
+                id.as_str()
+                    .and_then(|hex| EventId::from_hex(hex).ok())
+                    .ok_or_else(|| invalid("messages must be event ids"))
+            })
+            .collect::<Result<_, _>>()?;
+        let session = community.read(cx).session.clone();
+        return Ok(on_tokio(cx, async move {
+            let mut failed = serde_json::Map::new();
+            for id in &ids {
+                if let Err(error) = session.remove(&channel, *id).await {
+                    failed.insert(id.to_hex(), json!(error));
+                }
+            }
+            Ok(json!({ "deleted": ids.len() - failed.len(), "failed": failed }))
+        }));
+    }
     let (community, channel, message) = message_target(params, cx)?;
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
@@ -1709,8 +1764,7 @@ pub fn typing(params: &Value, cx: &App) -> Result<Value, Failure> {
 pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let query = text(params, "query")
         .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .ok_or_else(|| invalid("query is required"))?
+        .unwrap_or_default()
         .to_owned();
     let page = params
         .get("page")
@@ -1719,10 +1773,14 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
         .max(1) as usize;
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
-        let found = session
-            .search_members(&query, page)
-            .await
-            .map_err(|error| (2, error))?;
+        // No query browses people, as the New message picker does
+        // (`directMessages.people`).
+        let found = if query.is_empty() {
+            session.people(&query, page).await
+        } else {
+            session.search_members(&query, page).await
+        }
+        .map_err(|error| (2, error))?;
         Ok(json!({
             "people": found
                 .people
@@ -2077,6 +2135,47 @@ impl Watch {
 
 /// The most messages a channel watch grows to with `watch/more`.
 const MAX_WATCHED: usize = 1_000;
+
+/// `messages/sendToChannel`: copies one of your thread replies into the
+/// channel as a new message that names the thread ("Also send to
+/// channel", `messages.sendToChannel`).
+pub fn send_to_channel(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let message = event_id(params, "message")?.ok_or_else(|| invalid("message is required"))?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let view = session.open_thread(&channel, message, true);
+        let mut snapshot = view.snapshot.clone();
+        let thread = tokio::time::timeout(
+            READ_TIMEOUT,
+            snapshot.wait_for(|thread| {
+                thread.target.is_some()
+                    || matches!(
+                        thread.target_status,
+                        Some(
+                            buzz_relay_client::threads::TargetStatus::Unavailable
+                                | buzz_relay_client::threads::TargetStatus::Error
+                        )
+                    )
+            }),
+        )
+        .await
+        .map_err(|_| (2, "The relay did not answer in time.".to_owned()))?
+        .map_err(|_| (2, "The thread closed.".to_owned()))?
+        .clone();
+        drop(view);
+        let row = thread
+            .target
+            .clone()
+            .ok_or_else(|| (3, "That reply is not available.".to_owned()))?;
+        session
+            .send_to_channel(row, thread.root.clone())
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
 
 /// The message a thread read opens at (`root`, or any `message` in the
 /// thread), and whether it is `exact`: folded around that message on
