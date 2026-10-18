@@ -599,6 +599,7 @@ impl ExternalView {
                     plugin_submits,
                     disabled,
                     draft,
+                    draft_key,
                     ..
                 } => {
                     // Disabling and a new draft change the composer made
@@ -617,9 +618,10 @@ impl ExternalView {
                     (
                         *id,
                         format!(
-                            "composer:{channel}:{}:{}:{plugin_submits}",
+                            "composer:{channel}:{}:{}:{plugin_submits}:{}",
                             thread.unwrap_or_default(),
-                            parent.unwrap_or_default()
+                            parent.unwrap_or_default(),
+                            draft_key.unwrap_or_default()
                         ),
                     )
                 }
@@ -661,7 +663,19 @@ impl ExternalView {
                     disabled,
                     auto_focus,
                     draft,
-                } if readable(channel) => {
+                    mentions,
+                    invite_agents,
+                    draft_key,
+                } if readable(channel) || (channel.is_empty() && plugin_submits) => {
+                    // Without a channel, the draft lives under a key of the
+                    // plugin's, as New message and Me keep theirs.
+                    let detached = channel.is_empty();
+                    let channel = if detached {
+                        format!("plugin:{}:{}", self.plugin, draft_key.unwrap_or(id))
+                    } else {
+                        channel.to_owned()
+                    };
+                    let channel = channel.as_str();
                     let event_id = |hex: Option<&str>| {
                         hex.and_then(|hex| buzz_relay_client::EventId::from_hex(hex).ok())
                     };
@@ -680,13 +694,43 @@ impl ExternalView {
                             cx,
                         )
                     });
+                    let profiles = community.read(cx).snapshot.profiles.clone();
+                    let chips: Vec<(String, SharedString, Option<String>)> = mentions
+                        .iter()
+                        .filter_map(|mention| {
+                            let key = mention
+                                .get("pubkey")
+                                .and_then(Value::as_str)
+                                .filter(|key| {
+                                    key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
+                                })?
+                                .to_ascii_lowercase();
+                            let name = mention
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .or_else(|| profiles.get(&key).map(|p| p.name.clone()))
+                                .unwrap_or_else(|| key.chars().take(10).collect());
+                            Some((key, name.into(), None))
+                        })
+                        .take(32)
+                        .collect();
                     composer.update(cx, |composer, cx| {
                         composer.set_can_send(!disabled, cx);
+                        if detached {
+                            composer.without_attachments();
+                        }
+                        if invite_agents {
+                            composer.invite_agents();
+                        }
                         if let Some(draft) = draft {
                             let input = composer.input();
                             input.update(cx, |input, cx| {
                                 input.set_value(draft.to_owned(), window, cx)
                             });
+                        }
+                        if !chips.is_empty() {
+                            composer.insert_team(&chips, None, window, cx);
                         }
                         if auto_focus {
                             composer.focus(window, cx);

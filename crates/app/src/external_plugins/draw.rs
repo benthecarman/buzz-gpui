@@ -46,6 +46,9 @@ pub enum EmbedNode<'a> {
         disabled: bool,
         auto_focus: bool,
         draft: Option<&'a str>,
+        mentions: &'a [Value],
+        invite_agents: bool,
+        draft_key: Option<&'a str>,
     },
     Thread {
         id: &'a str,
@@ -79,6 +82,9 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
                 disabled,
                 auto_focus,
                 draft,
+                mentions,
+                invite_agents,
+                draft_key,
             } => found.push(EmbedNode::Composer {
                 id,
                 channel,
@@ -89,6 +95,9 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
                 disabled: *disabled,
                 auto_focus: *auto_focus,
                 draft: draft.as_deref(),
+                mentions,
+                invite_agents: *invite_agents,
+                draft_key: draft_key.as_deref(),
             }),
             Node::Thread {
                 id, channel, root, ..

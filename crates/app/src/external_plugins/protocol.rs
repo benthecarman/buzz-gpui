@@ -1116,6 +1116,10 @@ pub enum Node {
     /// plugin as `submit` instead.
     Composer {
         id: String,
+        /// Empty for a draft not in a conversation yet, which the plugin
+        /// takes (`submit: "plugin"`), such as a new conversation's first
+        /// message (`ui.Composer` `submission`).
+        #[serde(default)]
         channel: String,
         #[serde(default)]
         thread: Option<String>,
@@ -1133,6 +1137,15 @@ pub enum Node {
         /// The text it starts with, and puts back when it changes.
         #[serde(default)]
         draft: Option<String>,
+        /// People it starts with as mention chips, `[{"pubkey","name"}]`.
+        #[serde(default)]
+        mentions: Vec<Value>,
+        /// Offers your library agents not yet in the conversation.
+        #[serde(default)]
+        invite_agents: bool,
+        /// Where a draft without a channel is kept, so it comes back.
+        #[serde(default)]
+        draft_key: Option<String>,
     },
     /// One message as Buzz draws it in a conversation
     /// (`conversation.ui.Message`), for display.
