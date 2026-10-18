@@ -143,6 +143,43 @@ pub fn message(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     }))
 }
 
+/// `unread/attention`: a loaded message's attention as the badges see
+/// it (`unread.attention`), or `null` before read state loads.
+pub fn attention(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::unread::{AttentionStatus, Category};
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let id = params
+        .get("message")
+        .and_then(Value::as_str)
+        .and_then(|hex| EventId::from_hex(hex).ok())
+        .ok_or_else(|| invalid("message is not an event id"))?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let Some(attention) = session.message_attention(&channel, id).await else {
+            return Ok(Value::Null);
+        };
+        Ok(json!({
+            "status": match attention.status {
+                AttentionStatus::Unknown => "unknown",
+                AttentionStatus::Ineligible => "ineligible",
+                AttentionStatus::Eligible => "eligible",
+            },
+            "category": attention.category.map(|category| match category {
+                Category::Mention => "mention",
+                Category::Direct => "direct",
+                Category::Thread => "thread",
+            }),
+            "mentioned": attention.mentioned,
+            "root": attention.root_id,
+            "pending": attention.pending,
+            "unread": attention.unread,
+            "forced": attention.forced,
+            "viewing": attention.viewing,
+        }))
+    }))
+}
+
 /// `read/markLocal` and `read/clearLocal`: marks a channel, a thread
 /// (`thread`, its root) or a message unread on this device only, or
 /// drops that mark (`markUnreadLocal`, `clearUnreadLocal`).
@@ -190,7 +227,11 @@ pub fn local(
 pub fn inbox(cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;
     let state = community.read(cx).session.inbox().borrow().clone();
-    Ok(json!({
+    Ok(inbox_json(&state))
+}
+
+fn inbox_json(state: &buzz_relay_client::session::InboxState) -> Value {
+    json!({
         "items": state.inbox.items.iter().map(|item| json!({
             "channel": item.channel_id,
             "message": item.message_id,
@@ -206,7 +247,40 @@ pub fn inbox(cx: &App) -> Result<Value, Failure> {
             "manual": item.manual,
         })).collect::<Vec<_>>(),
         "error": state.inbox.error,
-    }))
+    })
+}
+
+/// `inbox/watch`: sends `inbox/changed` with what `inbox/get` gives,
+/// now and whenever the Inbox changes.
+pub fn watch_inbox(
+    _params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    let mut receiver = community(cx)?.read(cx).session.inbox();
+    let (sender, mut changes) = futures::channel::mpsc::unbounded::<Value>();
+    crate::runtime::Runtime::handle(cx).spawn(async move {
+        let mut last = Value::Null;
+        loop {
+            let now = inbox_json(&receiver.borrow_and_update());
+            if now != last {
+                if sender.unbounded_send(now.clone()).is_err() {
+                    return;
+                }
+                last = now;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    let forward = cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some(inbox) = changes.next().await {
+            cx.update(|cx| notify(inbox, cx));
+        }
+    });
+    Ok((Watch::new((), forward), json!({})))
 }
 
 /// `read/mark`: marks everything (`all`), a channel, a message, or a

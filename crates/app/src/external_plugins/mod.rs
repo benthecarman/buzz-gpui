@@ -1463,6 +1463,7 @@ impl ExternalPlugins {
             "outbox/watch" => "outbox/changed",
             "navigation/watch" => "navigation/changed",
             "presence/watch" => "presence/changed",
+            "inbox/watch" => "inbox/changed",
             "names/watch" => "names/changed",
             "activity/watch" => "activity/changed",
             "agents/watch" => "agents/changed",
@@ -1481,6 +1482,7 @@ impl ExternalPlugins {
             "outbox/watch" => outbox::watch(params, notify, cx),
             "navigation/watch" => capabilities::watch_navigation(params, notify, cx),
             "presence/watch" => capabilities::watch_presence(params, notify, cx),
+            "inbox/watch" => reading::watch_inbox(params, notify, cx),
             "names/watch" => capabilities::watch_names(params, notify, cx),
             "activity/watch" => observed::watch(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
@@ -1786,12 +1788,14 @@ impl ExternalPlugins {
             "unread/sync" => Reply::Now(reading::sync(false, cx)),
             "unread/retrySync" => Reply::Now(reading::sync(true, cx)),
             "unread/message" => later(reading::message(params, cx)),
+            "unread/attention" => later(reading::attention(params, cx)),
             "threads/follow" => later(channels::follow(params, cx)),
             "reminders/list" => Reply::Now(channels::list(cx)),
             "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
             "outbox/watch" => Self::watch(path, generation, "outbox/watch", params, cx),
             "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
             "presence/watch" => Self::watch(path, generation, "presence/watch", params, cx),
+            "inbox/watch" => Self::watch(path, generation, "inbox/watch", params, cx),
             "names/watch" => Self::watch(path, generation, "names/watch", params, cx),
             "activity/watch" => Self::watch(path, generation, "activity/watch", params, cx),
             "activity/observed" => Reply::Now(observed::get(params, cx)),
@@ -1823,7 +1827,8 @@ impl ExternalPlugins {
             "read/mark" => later(reading::mark(params, cx)),
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
             | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" | "outbox/unwatch"
-            | "navigation/unwatch" | "presence/unwatch" | "activity/unwatch" | "names/unwatch" => {
+            | "navigation/unwatch" | "presence/unwatch" | "activity/unwatch" | "names/unwatch"
+            | "inbox/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))

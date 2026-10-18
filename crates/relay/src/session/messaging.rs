@@ -95,6 +95,23 @@ impl Session {
         .await?
     }
 
+    /// A loaded message's attention under the badges' policy
+    /// (`unread.attention`); `None` before read state loads.
+    pub async fn message_attention(
+        &self,
+        channel: &str,
+        id: EventId,
+    ) -> Option<crate::unread::MessageAttention> {
+        let channel = channel.to_owned();
+        self.with_actor(move |actor| {
+            let reads = actor.reads.as_mut()?;
+            Some(reads.unread.attention(&channel, &id.to_hex(), &reads.sync))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Whether a loaded message shows as unread (or forced unread) now,
     /// for the "Mark read" / "Mark unread" choice.
     pub async fn message_unread(&self, channel: &str, id: EventId) -> bool {

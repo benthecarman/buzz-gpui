@@ -491,9 +491,11 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","stale"}`. Counts are sampled, not exact. |
 | `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |
 | `unread/message` | `channel`, `message` | Whether that loaded message shows as unread now |
+| `unread/attention` | `channel`, `message` | That loaded message's attention under the badges' policy (`unread.attention`): `{"status","category","mentioned","root","pending","unread","forced","viewing"}`, `status` being `unknown`, `ineligible` or `eligible` and `category` `mention`, `direct`, `thread` or `null`; `null` before read state loads |
 | `unread/sync` | none | `{"capability","status","complete","error"}`: how read marks sync to the relay, or `null` before it is known. `unread/retrySync` tries again after a failure. |
 | `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
 | `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount","manual"}`; `manual` is a mark from `read/markLocal` |
+| `inbox/watch` | none | `{"watch"}`. Buzz then sends `inbox/changed` with what `inbox/get` gives, now and whenever the Inbox changes. Stop with `inbox/unwatch`. |
 | `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `null` once saved. Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. Read marks sync to your other devices; unread marks stay on this device, as in buzz-app. |
 | `read/markLocal` | `channel`, and optionally `thread` (its root) or `message` | `null`, after marking it unread on this device only; it never syncs |
 | `read/clearLocal` | `channel`, and optionally `thread` or `message` | `null`, after dropping an unread mark made on this device |
