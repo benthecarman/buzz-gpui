@@ -818,6 +818,18 @@ impl Workspace {
         )
     }
 
+    /// Why the last visit could not open, and whether retrying may help.
+    pub(crate) fn failed(&self) -> Option<(&super::channel_states::Failed, bool)> {
+        self.failure
+            .as_ref()
+            .map(|failed| (failed, failed.retryable()))
+    }
+
+    /// Opens the visit that failed again ("Retry navigation").
+    pub(crate) fn retry_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retry_navigation(window, cx);
+    }
+
     /// Goes to `target` as a new visit.
     pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_outside_settings(&target);

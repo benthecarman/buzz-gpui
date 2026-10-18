@@ -503,6 +503,38 @@ pub fn change_sidebar(
                     .map_err(|error| (3, error))
             })
         }
+        "sidebar/removeGroup" => {
+            let group = text(params, "group")
+                .ok_or_else(|| invalid("group is required"))?
+                .to_owned();
+            on_tokio(cx, async move {
+                session
+                    .sidebar_remove_section(&group)
+                    .await
+                    .map_err(|error| (3, error))
+            })
+        }
+        "sidebar/assign" => {
+            let channel = channel(params, community(cx)?.read(cx))?;
+            // A saved group, a new one by `newGroup` name, or neither
+            // for the channel's default section.
+            let destination = match (text(params, "group"), text(params, "newGroup")) {
+                (Some(group), _) => Destination::Section(Some(group.to_owned())),
+                (None, Some(name)) if !name.trim().is_empty() => {
+                    Destination::Create(buzz_relay_client::sidebar::NewSection {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: name.trim().chars().take(64).collect(),
+                    })
+                }
+                _ => Destination::Section(None),
+            };
+            on_tokio(cx, async move {
+                session
+                    .sidebar_move(&channel, destination)
+                    .await
+                    .map_err(|error| (3, error))
+            })
+        }
         _ => {
             let channel = channel(params, community(cx)?.read(cx))?;
             let destination = if on("starred")? {

@@ -164,6 +164,8 @@ pub struct Plugin {
     next_watch: u64,
     /// The services this run offers other plugins.
     services: Vec<String>,
+    /// The services this run hears events from, as `(plugin, service)`.
+    subscriptions: std::collections::HashSet<(String, String)>,
 }
 
 impl Plugin {
@@ -184,6 +186,7 @@ impl Plugin {
             watches: HashMap::new(),
             next_watch: 0,
             services: Vec::new(),
+            subscriptions: Default::default(),
         }
     }
 
@@ -801,6 +804,7 @@ impl ExternalPlugins {
         // what it adds, so open views do not flicker on a save.
         plugin.connection = None;
         plugin.watches.clear();
+        plugin.subscriptions.clear();
         plugin.generation += 1;
         plugin.status = Status::Starting;
         let generation = plugin.generation;
@@ -913,6 +917,7 @@ impl ExternalPlugins {
         let plugin = &mut state.plugins[index];
         plugin.connection = None;
         plugin.watches.clear();
+        plugin.subscriptions.clear();
         plugin.generation += 1;
         let off = status == Status::Off;
         plugin.status = status;
@@ -1142,6 +1147,36 @@ impl ExternalPlugins {
             .as_ref()
     }
 
+    /// `service/publish`: hands an event of a service `from` offers to
+    /// every running plugin that subscribed to it, as `service/event`.
+    fn publish_service(from: &str, params: &Value, cx: &App) {
+        let Some(service) = params.get("service").and_then(Value::as_str) else {
+            return;
+        };
+        let state = cx.global::<Self>();
+        let offered = state
+            .by_id(from)
+            .is_some_and(|plugin| plugin.services.iter().any(|id| id == service));
+        if !offered {
+            return;
+        }
+        let key = (from.to_owned(), service.to_owned());
+        let event = json!({
+            "plugin": from,
+            "service": service,
+            "event": params.get("event").cloned().unwrap_or(Value::Null),
+            "data": params.get("data").cloned().unwrap_or(Value::Null),
+        });
+        for plugin in &state.plugins {
+            if plugin.status == Status::Running
+                && plugin.subscriptions.contains(&key)
+                && let Some(connection) = &plugin.connection
+            {
+                connection.notify("service/event", event.clone());
+            }
+        }
+    }
+
     /// `services/request`: asks the running plugin that offers `service`
     /// to answer `method`, as `service/request` with who asks.
     fn service_request(
@@ -1252,6 +1287,11 @@ impl ExternalPlugins {
                 "agentType/readiness" => {
                     if let Some(id) = plugin.id().map(str::to_owned) {
                         agents::set_readiness(&id, &params, cx);
+                    }
+                }
+                "service/publish" => {
+                    if let Some(id) = plugin.id().map(str::to_owned) {
+                        Self::publish_service(&id, &params, cx);
                     }
                 }
                 "settings/visibility" => {
@@ -1649,6 +1689,7 @@ impl ExternalPlugins {
             "projects/gitAuthorization" => Reply::Now(capabilities::git_authorization(params, cx)),
             "agents/logProof" => Reply::Now(capabilities::log_proof(params, cx)),
             "navigation/get" => Reply::Now(Ok(capabilities::navigation_state(cx))),
+            "navigation/retry" => Reply::Now(capabilities::retry_navigation(cx)),
             "outbox/get" => later(outbox::get(params, cx)),
             "archives/get" => later(channels::archives(params, cx)),
             "read/clearLocal" => later(reading::clear_local(params, cx)),
@@ -1703,7 +1744,9 @@ impl ExternalPlugins {
             | "sessions/create"
             | "sidebar/star"
             | "sidebar/mute"
-            | "sidebar/sort" => {
+            | "sidebar/sort"
+            | "sidebar/assign"
+            | "sidebar/removeGroup" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1723,7 +1766,9 @@ impl ExternalPlugins {
                     | "sessions/create"
                     | "sidebar/star"
                     | "sidebar/mute"
-                    | "sidebar/sort" => Permission::ManageChannels,
+                    | "sidebar/sort"
+                    | "sidebar/assign"
+                    | "sidebar/removeGroup" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1773,9 +1818,11 @@ impl ExternalPlugins {
                     "kit/save" => content::save_kit(params, cx),
                     "workflows/dismiss" => workflows::dismiss(params, cx),
                     "sessions/create" => channels::create_session(params, cx),
-                    "sidebar/star" | "sidebar/mute" | "sidebar/sort" => {
-                        channels::change_sidebar(method, params, cx)
-                    }
+                    "sidebar/star"
+                    | "sidebar/mute"
+                    | "sidebar/sort"
+                    | "sidebar/assign"
+                    | "sidebar/removeGroup" => channels::change_sidebar(method, params, cx),
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }
@@ -1813,6 +1860,23 @@ impl ExternalPlugins {
                     })
                     .collect(),
             ))),
+            "services/subscribe" | "services/unsubscribe" => {
+                let target = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+                let (Some(target), Some(service)) = (target("plugin"), target("service")) else {
+                    return Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "plugin and service are required".to_owned(),
+                    )));
+                };
+                if let Some(plugin) = cx.global_mut::<Self>().current(path, generation) {
+                    if method == "services/subscribe" {
+                        plugin.subscriptions.insert((target, service));
+                    } else {
+                        plugin.subscriptions.remove(&(target, service));
+                    }
+                }
+                Reply::Now(Ok(Value::Null))
+            }
             "services/request" => {
                 let from = cx
                     .global_mut::<Self>()
@@ -1821,6 +1885,9 @@ impl ExternalPlugins {
                 later(Self::service_request(from, params, cx))
             }
             "agents/previewRetype" => Reply::Now(agents::preview_retype(params, cx)),
+            "format/time" => Reply::Now(capabilities::format_time(params)),
+            "agents/dismissError" => Reply::Now(agents::dismiss_error(params, cx)),
+            "agents/clearActivity" => Reply::Now(agents::clear_activity(params, cx)),
             "agents/portable" => later(agents::portable(cx)),
             "agents/watch" => Self::watch(path, generation, "agents/watch", params, cx),
             "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),

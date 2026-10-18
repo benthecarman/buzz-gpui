@@ -751,12 +751,35 @@ pub fn navigation_state(cx: &App) -> Value {
     let Some(workspace) = navigation::workspace(cx) else {
         return Value::Null;
     };
-    let (here, back, forward) = workspace.read(cx).location();
+    use crate::ui::channel_states::Reason;
+    let workspace = workspace.read(cx);
+    let (here, back, forward) = workspace.location();
+    let failed = workspace.failed().map(|(failed, retryable)| {
+        json!({
+            "place": failed.target.as_ref().map(|target| place_json(target, cx)),
+            "reason": match failed.reason {
+                Reason::Denied => "denied",
+                Reason::Invalid => "invalid",
+                Reason::Unavailable => "unavailable",
+            },
+            "retryable": retryable,
+        })
+    });
     json!({
+        "status": if failed.is_some() { "failed" } else { "opened" },
         "place": here.map(|here| place_json(&here, cx)),
+        "failed": failed,
         "canGoBack": back,
         "canGoForward": forward,
     })
+}
+
+/// `navigation/retry`: opens the visit that failed again.
+pub fn retry_navigation(cx: &mut App) -> Result<Value, Failure> {
+    navigation::with_workspace(cx, |workspace, window, cx| {
+        workspace.retry_failed(window, cx)
+    });
+    Ok(Value::Null)
 }
 
 /// `navigation/watch`: sends `navigation/changed` with
@@ -1084,6 +1107,27 @@ pub fn attest(params: &Value, cx: &App) -> Result<Value, Failure> {
         .map_err(|_| invalid("pubkey is not an agent key you can attest"))?;
     let auth: Value = serde_json::from_str(&auth).map_err(|error| (3, error.to_string()))?;
     Ok(json!({ "auth": auth }))
+}
+
+/// `format/time`: a time as Buzz words it (`conversation.format`):
+/// `byline` ("Yesterday at 2:34 PM"), `day` (a day divider, "Monday"),
+/// `full` (a byline's hover text) or `relative` ("5 minutes ago").
+pub fn format_time(params: &Value) -> Result<Value, Failure> {
+    use crate::ui::time;
+    let at = params
+        .get("at")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("at (unix seconds) is required"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    Ok(json!(match text(params, "style") {
+        None | Some("byline") => time::byline(at),
+        Some("day") => time::day(at),
+        Some("full") => time::full(at),
+        Some("relative") => crate::ui::link_preview::relative(at, now),
+        Some(_) => return Err(invalid("style must be byline, day, full or relative")),
+    }))
 }
 
 /// `agents/presence`: publishes owner presence (`online` or `offline`)

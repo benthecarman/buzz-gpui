@@ -1082,7 +1082,23 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
     let made = crate::agents2::Made {
         config,
         picture: https(params.get("picture"))?,
-        carry: None,
+        // What a shared agent brings, put where the type keeps it
+        // (`port({ source: "shared" })`).
+        carry: params
+            .get("carry")
+            .filter(|carry| carry.is_object())
+            .map(|carry| {
+                let field = |key: &str| {
+                    carry
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(|text| text.chars().take(20_000).collect())
+                };
+                buzz_host::api::Carry {
+                    instructions: field("instructions"),
+                    workspace: field("workspace"),
+                }
+            }),
     };
     let (kind, name) = (kind.to_owned(), name.to_owned());
     let hosted = crate::agents2::is_hosted(&kind, cx);
@@ -1418,6 +1434,38 @@ fn carry_key(key: &registry::CarryKey) -> &'static str {
         registry::CarryKey::Instructions => "instructions",
         registry::CarryKey::Workspace => "workspace",
     }
+}
+
+/// `agents/dismissError`: hides a failed run's error on this device; its
+/// outcome stays.
+pub fn dismiss_error(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let field = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((INVALID_PARAMS, format!("{key} is required")))
+    };
+    let (agent, message) = (field("agent")?, field("message")?);
+    let Some(local) = cx.try_global::<crate::agent_activity::local::LocalActivity>() else {
+        return Ok(Value::Null);
+    };
+    for work in local
+        .work()
+        .iter()
+        .filter(|work| work.agent == agent && work.message_id == message)
+    {
+        local.dismiss_error(&work.scope, agent, message);
+    }
+    Ok(Value::Null)
+}
+
+/// `agents/clearActivity`: forgets what agents on this device did, of
+/// one `agent` or all.
+pub fn clear_activity(params: &Value, cx: &App) -> Result<Value, Failure> {
+    if let Some(local) = cx.try_global::<crate::agent_activity::local::LocalActivity>() {
+        local.clear(None, params.get("agent").and_then(Value::as_str));
+    }
+    Ok(Value::Null)
 }
 
 /// `agents/previewRetype`: what moving an agent on this device to another
