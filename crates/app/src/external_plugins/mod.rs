@@ -1069,43 +1069,28 @@ impl ExternalPlugins {
             .find(|plugin| plugin.path == path && plugin.generation == generation)
     }
 
-    fn initialized(
+    /// Adds what `contributions` declares and takes away what the plugin
+    /// added before and no longer declares: at start, and on
+    /// `contributions/update`.
+    fn apply(
         path: &Path,
         generation: u64,
-        result: Result<serde_json::Value, String>,
+        id: &str,
+        name: &str,
+        contributions: &Contributions,
         cx: &mut App,
     ) {
         let state = cx.global_mut::<Self>();
         let Some(plugin) = state.current(path, generation) else {
             return;
         };
-        let Some(id) = plugin.id().map(str::to_owned) else {
-            return;
-        };
-        let name = plugin.name();
-        let contributions = match result.and_then(Contributions::parse) {
-            Ok(contributions) => contributions,
-            // It exited; the exit says why, with its stderr.
-            Err(reason) if reason == process::STOPPED => return,
-            Err(reason) => {
-                Self::stop(path, Status::Failed(reason), cx);
-                return;
-            }
-        };
-        plugin.status = Status::Running;
-        toasts::dismiss(&exit_notice(path), cx);
-        let state = cx.global_mut::<Self>();
-        let Some(plugin) = state.current(path, generation) else {
-            return;
-        };
         let before = std::mem::take(&mut plugin.added);
-        // Renderer answers and marks belong to the old run.
-        contribute::forget(&id);
+        let offered = plugin.services.clone();
         let requester = plugin.connection.as_ref().map(Connection::requester);
-        let mut added = Self::register(&id, &name, &contributions, requester.clone(), cx);
+        let mut added = Self::register(id, name, contributions, requester.clone(), cx);
         if let Some(requester) = requester {
             let (agents, errors) = agents::register(
-                &id,
+                id,
                 &contributions.agent_tools,
                 &contributions.agent_types,
                 requester,
@@ -1140,12 +1125,51 @@ impl ExternalPlugins {
             .iter()
             .map(|service| service.id.clone())
             .collect();
-        let offers = !plugin.services.is_empty();
-        // Views open before this run ask the new run for their trees.
-        let views: Vec<_> = plugin.views.values().cloned().collect();
-        if offers {
+        if plugin.services != offered {
             Self::services_changed(cx);
         }
+    }
+
+    fn initialized(
+        path: &Path,
+        generation: u64,
+        result: Result<serde_json::Value, String>,
+        cx: &mut App,
+    ) {
+        let state = cx.global_mut::<Self>();
+        let Some(plugin) = state.current(path, generation) else {
+            return;
+        };
+        let Some(id) = plugin.id().map(str::to_owned) else {
+            return;
+        };
+        let name = plugin.name();
+        let contributions = match result.and_then(Contributions::parse) {
+            Ok(contributions) => contributions,
+            // It exited; the exit says why, with its stderr.
+            Err(reason) if reason == process::STOPPED => return,
+            Err(reason) => {
+                Self::stop(path, Status::Failed(reason), cx);
+                return;
+            }
+        };
+        plugin.status = Status::Running;
+        toasts::dismiss(&exit_notice(path), cx);
+        let state = cx.global_mut::<Self>();
+        let Some(plugin) = state.current(path, generation) else {
+            return;
+        };
+        // The old run's services went with it (`start` said so).
+        plugin.services.clear();
+        // Renderer answers and marks belong to the old run.
+        contribute::forget(&id);
+        Self::apply(path, generation, &id, &name, &contributions, cx);
+        let state = cx.global_mut::<Self>();
+        let Some(plugin) = state.current(path, generation) else {
+            return;
+        };
+        // Views open before this run ask the new run for their trees.
+        let views: Vec<_> = plugin.views.values().cloned().collect();
         for view in views {
             if let Some(view) = view.upgrade() {
                 let params = view.read(cx).open_params();
@@ -2135,6 +2159,23 @@ impl ExternalPlugins {
                 };
                 cx.refresh_windows();
                 Reply::Now(result)
+            }
+            "contributions/update" => {
+                let current = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| Some((plugin.id()?.to_owned(), plugin.name())));
+                let Some((id, name)) = current else {
+                    return Reply::Now(Err((1, "The plugin stopped.".to_owned())));
+                };
+                match Contributions::parse(params.clone()) {
+                    Ok(contributions) => {
+                        Self::apply(path, generation, &id, &name, &contributions, cx);
+                        cx.refresh_windows();
+                        Reply::Now(Ok(Value::Null))
+                    }
+                    Err(reason) => Reply::Now(Err((INVALID_PARAMS, reason))),
+                }
             }
             "render/invalidate" => Reply::Now(
                 match cx
