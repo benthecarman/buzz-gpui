@@ -1010,7 +1010,7 @@ pub fn list(cx: &App) -> Result<Value, Failure> {
 /// with the archive read that decided it.
 pub fn choices(cx: &mut App) -> Result<Value, Failure> {
     use crate::agents2::Status;
-    use crate::ui::archives::{self, Status as Archive};
+    use crate::ui::archives;
     let community = super::capabilities::community(cx)?;
     archives::ensure(&community, false, cx);
     let origin = community.read(cx).origin.clone();
@@ -1031,7 +1031,6 @@ pub fn choices(cx: &mut App) -> Result<Value, Failure> {
         .map(|(key, name, _)| (key, name))
         .collect();
     let choice = |(pubkey, name): &(String, String)| json!({ "pubkey": pubkey, "name": name, "managed": true, "managedName": name });
-    let archive = archives::status(&community, cx);
     Ok(json!({
         "status": status,
         "error": error,
@@ -1043,15 +1042,7 @@ pub fn choices(cx: &mut App) -> Result<Value, Failure> {
             .filter(|(pubkey, _)| !archives::hides(&community, pubkey, cx))
             .map(choice)
             .collect::<Vec<_>>(),
-        "archives": {
-            "status": match archive {
-                None => "idle",
-                Some(Archive::Loading) => "loading",
-                Some(Archive::Ready) => "ready",
-                Some(Archive::Error) => "error",
-            },
-            "archived": archives::archived(&community, cx),
-        },
+        "archives": archives::snapshot_json(&community, cx),
     }))
 }
 

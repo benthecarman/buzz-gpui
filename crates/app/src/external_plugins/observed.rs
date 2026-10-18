@@ -110,7 +110,11 @@ pub fn history(params: &Value, cx: &mut App) -> Result<Value, Failure> {
     activity.update(cx, |activity, cx| match (older, agent) {
         (true, _) => activity.load_older(cx),
         (false, Some(agent)) => activity.select_history(&agent, cx),
-        (false, None) => activity.latest_history(cx),
+        // Everyone's newest: drop an agent chosen before, then read.
+        (false, None) => {
+            activity.select_history("", cx);
+            activity.latest_history(cx);
+        }
     });
     Ok(Value::Null)
 }
@@ -198,8 +202,8 @@ pub fn archive_configure(params: &Value, cx: &mut App) -> Result<Value, Failure>
     Ok(archive_json(&saved, &path))
 }
 
-/// `archive/clear`: deletes saved activity (`kind` 44200), metrics
-/// (24200), or both (`ArchiveHost.clear`, buzz-app's `clearHistory`).
+/// `archive/clear`: deletes saved activity (`kind` 24200), metrics
+/// (44200), or both (`ArchiveHost.clear`, buzz-app's `clearHistory`).
 pub fn archive_clear(params: &Value, cx: &mut App) -> Result<Value, Failure> {
     let community = community(cx)?;
     let kind = match params.get("kind").and_then(Value::as_u64) {
@@ -208,5 +212,11 @@ pub fn archive_clear(params: &Value, cx: &mut App) -> Result<Value, Failure> {
         Some(_) => return Err((INVALID_PARAMS, "kind is 24200 or 44200".to_owned())),
     };
     crate::ui::settings::archive::clear_for(&community, kind, cx).map_err(|error| (3, error))?;
+    // The saved activity on show goes with it.
+    if kind != Some(44200)
+        && let Some(activity) = observer::get(&community, cx)
+    {
+        activity.update(cx, |activity, cx| activity.latest_history(cx));
+    }
     Ok(Value::Null)
 }

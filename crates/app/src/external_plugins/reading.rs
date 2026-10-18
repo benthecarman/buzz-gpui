@@ -102,6 +102,17 @@ pub(super) fn activity(snapshot: &ThreadActivitySnapshot) -> Value {
     })
 }
 
+/// What `threads/activity` gives before read state loads: nothing known.
+pub(super) fn no_activity(channel: &str) -> Value {
+    json!({
+        "channel": channel,
+        "items": null,
+        "coverage": "unknown",
+        "freshness": "unknown",
+        "error": null,
+    })
+}
+
 /// `threads/activity`: a channel's threads with unread replies for the
 /// user, newest first.
 pub fn threads(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
@@ -111,7 +122,7 @@ pub fn threads(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     Ok(on_tokio(cx, async move {
         match session.thread_activity(&channel).await {
             Some(snapshot) => Ok(activity(&snapshot)),
-            None => Ok(json!({ "channel": channel, "items": null, "error": null })),
+            None => Ok(no_activity(&channel)),
         }
     }))
 }
@@ -144,6 +155,53 @@ pub fn sync(retry: bool, cx: &App) -> Result<Value, Failure> {
             })
         }
     })
+}
+
+/// `unread/target`: the unread state of a channel, or of a `thread` or
+/// `message` in it (`unread.snapshot(target)`), or `null` before read
+/// state loads. Counts are `null` without evidence, never a made-up zero.
+pub fn target(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::read_state::ReadTarget;
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let id = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|hex| {
+                EventId::from_hex(hex)
+                    .map(|id| id.to_hex())
+                    .map_err(|_| invalid(format!("{key} is not an event id")))
+            })
+            .transpose()
+    };
+    let target = match (id("thread")?, id("message")?) {
+        (Some(root), None) => ReadTarget::thread(&channel, root),
+        (None, Some(message)) => ReadTarget::message(&channel, message),
+        (None, None) => ReadTarget::channel(&channel),
+        (Some(_), Some(_)) => return Err(invalid("name a thread or a message, not both")),
+    };
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let Some(snapshot) = session.unread_snapshot(target).await else {
+            return Ok(Value::Null);
+        };
+        Ok(json!({
+            "channel": channel,
+            "latestMessage": snapshot.latest_message.as_ref().map(|latest| json!({
+                "id": latest.id,
+                "createdAt": latest.created_at,
+                "preview": latest.preview,
+            })),
+            "observedCount": snapshot.observed_count,
+            "attentionCount": snapshot.attention_count,
+            "mentionCount": snapshot.mention_count,
+            "coverage": format!("{:?}", snapshot.coverage).to_ascii_lowercase(),
+            "freshness": format!("{:?}", snapshot.freshness).to_ascii_lowercase(),
+            "manual": manual(snapshot.manual),
+            "error": snapshot.error,
+        }))
+    }))
 }
 
 /// `unread/message`: whether a loaded message shows as unread now.
@@ -479,12 +537,29 @@ pub fn mark(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
         if !read {
             return Err(invalid("all marks read only"));
         }
+        // One result per channel it marked (`markAllChannelsRead`).
+        let mut marked: Vec<String> = community
+            .read(cx)
+            .snapshot
+            .unread
+            .channels
+            .iter()
+            .filter(|(_, channel)| channel.unread)
+            .map(|(id, _)| id.clone())
+            .collect();
+        marked.sort();
         return Ok(on_tokio(cx, async move {
-            session
-                .mark_all_read()
-                .await
-                .map(|()| saved(syncs))
-                .map_err(|error| (3, error))
+            session.mark_all_read().await.map_err(|error| (3, error))?;
+            Ok(Value::Array(
+                marked
+                    .into_iter()
+                    .map(|channel| {
+                        let mut result = saved(syncs);
+                        result["channel"] = json!(channel);
+                        result
+                    })
+                    .collect(),
+            ))
         }));
     }
     let channel = channel(params, community.read(cx))?;

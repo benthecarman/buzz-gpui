@@ -23,6 +23,9 @@ pub enum Status {
 struct Entry {
     status: Status,
     snapshot: ArchiveSnapshot,
+    /// When the last read finished (ms), and why it failed.
+    read_at: Option<u64>,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -75,11 +78,18 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
         .get(&key)
         .map(|entry| entry.snapshot.clone())
         .unwrap_or_default();
+    let (read_at, error) = archives
+        .0
+        .get(&key)
+        .map(|entry| (entry.read_at, entry.error.clone()))
+        .unwrap_or_default();
     archives.0.insert(
         key.clone(),
         Entry {
             status: Status::Loading,
             snapshot,
+            read_at,
+            error,
         },
     );
     let http = relay::lane(&origin, identity);
@@ -95,16 +105,25 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
                 .or_insert(Entry {
                     status: Status::Loading,
                     snapshot: ArchiveSnapshot::default(),
+                    read_at: None,
+                    error: None,
                 });
+            entry.read_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis() as u64),
+            );
             match result {
                 Ok(snapshot) => {
                     entry.snapshot = snapshot;
                     entry.status = Status::Ready;
+                    entry.error = None;
                 }
                 // A failed read shows nothing as archived (fail open).
-                Err(_) => {
+                Err(error) => {
                     entry.snapshot = ArchiveSnapshot::default();
                     entry.status = Status::Error;
+                    entry.error = Some(error);
                 }
             }
             cx.refresh_windows();
@@ -121,6 +140,40 @@ pub fn observe(
     cx.observe_global::<Archives>(move |cx| changed(cx))
 }
 
+/// The archive as plugins see it (`IdentityArchiveSnapshot`): `status`
+/// is `unavailable` for a community without an archive, `idle` before a
+/// read, then `loading`, `ready` or `error`.
+pub fn snapshot_json(community: &Entity<Community>, cx: &App) -> serde_json::Value {
+    let available = community
+        .read(cx)
+        .snapshot
+        .relay
+        .as_ref()
+        .is_some_and(|relay| !relay.authority.is_empty());
+    let key = key(community, cx);
+    let entry = cx
+        .try_global::<Archives>()
+        .and_then(|archives| archives.0.get(&key));
+    let status = match entry.map(|entry| entry.status) {
+        _ if !available => "unavailable",
+        None => "idle",
+        Some(Status::Loading) => "loading",
+        Some(Status::Ready) => "ready",
+        Some(Status::Error) => "error",
+    };
+    let head = entry.and_then(|entry| entry.snapshot.head.as_ref());
+    serde_json::json!({
+        "status": status,
+        "archived": entry
+            .map(|entry| entry.snapshot.archived.iter().collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "eventId": head.map(|(_, id)| id),
+        "createdAt": head.map(|(at, _)| at),
+        "readAt": entry.and_then(|entry| entry.read_at),
+        "error": entry.and_then(|entry| entry.error.clone()),
+    })
+}
+
 /// The read state, if a read was asked for.
 pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
     let key = key(community, cx);
@@ -131,15 +184,6 @@ pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
 }
 
 /// `archiveHides`: a known-archived identity that is not the viewer.
-/// The identities the community archived, as last read.
-pub fn archived(community: &Entity<Community>, cx: &App) -> Vec<String> {
-    let key = key(community, cx);
-    cx.try_global::<Archives>()
-        .and_then(|archives| archives.0.get(&key))
-        .map(|entry| entry.snapshot.archived.iter().cloned().collect())
-        .unwrap_or_default()
-}
-
 pub fn hides(community: &Entity<Community>, pubkey: &str, cx: &App) -> bool {
     let viewer = community.read(cx).session.viewer().to_string();
     let key = key(community, cx);

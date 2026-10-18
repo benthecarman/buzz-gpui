@@ -127,6 +127,21 @@ impl Session {
         .unwrap_or(false)
     }
 
+    /// The unread state of one channel, thread or message
+    /// (`unread.snapshot(target)`), or `None` before read state loads.
+    pub async fn unread_snapshot(
+        &self,
+        target: crate::read_state::ReadTarget,
+    ) -> Option<std::sync::Arc<crate::unread::UnreadSnapshot>> {
+        self.with_actor(move |actor| {
+            let reads = actor.reads.as_mut()?;
+            Some(reads.unread.snapshot(&target, &reads.sync))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Deletes an agent's message on behalf of its owner, the viewer. The
     /// caller passes the agent only after its signed profile attests the
     /// viewer as owner.

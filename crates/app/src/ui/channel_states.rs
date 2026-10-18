@@ -288,6 +288,7 @@ mod tests {
             status: SessionStatus::Connecting,
             live: false,
             cached: false,
+            restoring: false,
             live_status: Default::default(),
             relay: None,
             roster: buzz_relay_client::RosterStatus::Loading,

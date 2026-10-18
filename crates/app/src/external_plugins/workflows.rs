@@ -56,6 +56,7 @@ fn operation(operation: &WorkflowOperation) -> Value {
     json!({
         "eventId": operation.event_id,
         "workflow": operation.workflow.id,
+        "owner": operation.workflow.owner,
         "channel": operation.workflow.channel_id,
         "action": operation.action.as_str(),
         "createdAt": operation.created_at,
@@ -72,8 +73,18 @@ async fn read(
     workflows: &Workflows,
     channel: String,
 ) -> Result<(Vec<WorkflowDefinition>, Value), Failure> {
+    read_in(workflows, vec![channel]).await
+}
+
+/// The workflows of `channels`: one channel, or a batch of up to 128 read
+/// to the end, as the Workflows landing reads them.
+async fn read_in(
+    workflows: &Workflows,
+    channels: Vec<String>,
+) -> Result<(Vec<WorkflowDefinition>, Value), Failure> {
+    let aggregate = channels.len() > 1;
     let view = workflows
-        .definitions(vec![channel], false)
+        .definitions(channels, aggregate)
         .map_err(|error| (3, error))?;
     view.refresh(false).await;
     let snapshot = view.snapshot();
@@ -89,27 +100,51 @@ async fn read(
             .map(|item| definition(item, workflows))
             .collect::<Vec<_>>(),
         "partial": snapshot.data.partial,
+        "partialChannels": snapshot.data.partial_channel_ids,
     });
     Ok((snapshot.data.items.clone(), answer))
 }
 
-/// The definition named by `params.workflow` among `definitions`.
-fn named(definitions: Vec<WorkflowDefinition>, id: &str) -> Result<WorkflowDefinition, Failure> {
-    definitions
+/// The definition named by `params.workflow`, and `params.owner` where
+/// two owners use one id (`WorkflowReference`), among `definitions`.
+fn named(
+    definitions: Vec<WorkflowDefinition>,
+    id: &str,
+    owner: Option<&str>,
+) -> Result<WorkflowDefinition, Failure> {
+    let mut matching: Vec<_> = definitions
         .into_iter()
-        .find(|definition| definition.id == id)
-        .ok_or_else(|| (3, format!("There is no workflow {id} in the channel.")))
+        .filter(|definition| {
+            definition.id == id && owner.is_none_or(|owner| definition.owner == owner)
+        })
+        .collect();
+    match matching.len() {
+        0 => Err((3, format!("There is no workflow {id} in the channel."))),
+        1 => Ok(matching.remove(0)),
+        _ => Err(invalid(format!(
+            "Several owners have a workflow {id} here; name its owner."
+        ))),
+    }
 }
 
 /// `workflows/list`: what the community offers, and a channel's
 /// workflow definitions.
 pub fn list(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    let channels = match params.get("channels").and_then(Value::as_array) {
+        Some(channels) => {
+            let community = community.read(cx);
+            channels
+                .iter()
+                .map(|channel_id| channel(&json!({ "channel": channel_id }), community))
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        None => vec![channel(params, community.read(cx))?],
+    };
     let workflows = community.read(cx).session.workflows().clone();
     Ok(on_tokio(cx, async move {
         let available = availability(workflows.availability());
-        let (_, mut answer) = read(&workflows, channel).await?;
+        let (_, mut answer) = read_in(&workflows, channels).await?;
         answer["available"] = available;
         Ok(answer)
     }))
@@ -123,6 +158,7 @@ pub fn runs(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     let id = text(params, "workflow")
         .ok_or_else(|| invalid("workflow is required"))?
         .to_owned();
+    let owner = text(params, "owner").map(str::to_owned);
     let cursor = match params.get("cursor").filter(|cursor| !cursor.is_null()) {
         None => None,
         Some(cursor) => Some(RunCursor {
@@ -137,7 +173,7 @@ pub fn runs(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     let workflows = community.read(cx).session.workflows().clone();
     Ok(on_tokio(cx, async move {
         let (definitions, _) = read(&workflows, channel).await?;
-        let workflow = named(definitions, &id)?;
+        let workflow = named(definitions, &id, owner.as_deref())?;
         let view = workflows
             .runs(&workflow, cursor)
             .map_err(|error| (3, error))?;
@@ -154,7 +190,7 @@ pub fn runs(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
                 "status": match run.status {
                     RunStatus::Pending => "pending",
                     RunStatus::Running => "running",
-                    RunStatus::WaitingApproval => "waitingApproval",
+                    RunStatus::WaitingApproval => "waiting_approval",
                     RunStatus::Completed => "completed",
                     RunStatus::Failed => "failed",
                     RunStatus::Cancelled => "cancelled",
@@ -186,6 +222,7 @@ pub fn command(
     let community = community(cx)?;
     let channel = channel(params, community.read(cx))?;
     let id = text(params, "workflow").map(str::to_owned);
+    let owner = text(params, "owner").map(str::to_owned);
     let yaml = text(params, "yaml").map(str::to_owned);
     let method = method.to_owned();
     if method != "workflows/save" && id.is_none() {
@@ -197,7 +234,11 @@ pub fn command(
     let workflows = community.read(cx).session.workflows().clone();
     Ok(on_tokio(cx, async move {
         let existing = match &id {
-            Some(id) => Some(named(read(&workflows, channel.clone()).await?.0, id)?),
+            Some(id) => Some(named(
+                read(&workflows, channel.clone()).await?.0,
+                id,
+                owner.as_deref(),
+            )?),
             None => None,
         };
         let sent = match (method.as_str(), existing) {

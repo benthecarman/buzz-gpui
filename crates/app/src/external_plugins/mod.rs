@@ -396,8 +396,15 @@ impl ExternalPlugins {
                     let now = Self::current_community(cx);
                     if now != last {
                         last = now.clone();
+                        // Params must be an object: none selected is
+                        // `status` `none`.
+                        let params = if now.is_null() {
+                            json!({ "status": "none" })
+                        } else {
+                            now.clone()
+                        };
                         for id in &ids {
-                            Self::notify_running(id, "community/changed", now.clone(), cx);
+                            Self::notify_running(id, "community/changed", params.clone(), cx);
                         }
                     }
                     let list = Self::community_list(cx);
@@ -523,6 +530,8 @@ impl ExternalPlugins {
                 "about": profile.about,
             },
             "communities": Self::community_list(cx),
+            // The native app always has a relay transport.
+            "relayAvailable": true,
         })
     }
 
@@ -551,10 +560,12 @@ impl ExternalPlugins {
             },
             "live": snapshot.live,
             "cached": snapshot.cached,
-            // Showing this device's saved copy while the relay is asked
-            // again (`restoring`).
-            "restoring": snapshot.cached
-                && matches!(snapshot.status, buzz_relay_client::SessionStatus::Connecting),
+            // The saved copy is still being read, before anything shows.
+            "restoring": snapshot.restoring,
+            // Changes with each retry and cache clear; state keyed on it
+            // starts over (`generation`). `scope` is the relay and you.
+            "generation": community.session.generation(),
+            "scope": viewer.as_ref().map(|viewer| format!("{}#{viewer}", community.origin.websocket())),
             "liveStatus": Self::live_status(&snapshot.live_status),
         })
     }
@@ -2031,13 +2042,14 @@ impl ExternalPlugins {
             "unread/sync" => Reply::Now(reading::sync(false, cx)),
             "unread/retrySync" => Reply::Now(reading::sync(true, cx)),
             "unread/message" => later(reading::message(params, cx)),
+            "unread/target" => later(reading::target(params, cx)),
             "unread/attention" => later(reading::attention(params, cx)),
             "threads/follow" => later(channels::follow(params, cx)),
             "reminders/list" => Reply::Now(channels::list(cx)),
             "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
             "outbox/watch" => Self::watch(path, generation, "outbox/watch", params, cx),
             "outbox/acknowledge" => later(outbox::acknowledge(params, cx)),
-            "outbox/supports" => Reply::Now(outbox::supports(params, cx)),
+            "outbox/supports" => later(outbox::supports(params, cx)),
             "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
             "presence/watch" => Self::watch(path, generation, "presence/watch", params, cx),
             "inbox/watch" => Self::watch(path, generation, "inbox/watch", params, cx),
@@ -2073,8 +2085,6 @@ impl ExternalPlugins {
                 })
             })),
             "sidebar/get" => Reply::Now(channels::sidebar(cx)),
-            "projects/gitAuthorization" => Reply::Now(capabilities::git_authorization(params, cx)),
-            "agents/logProof" => Reply::Now(capabilities::log_proof(params, cx)),
             "navigation/get" => Reply::Now(Ok(capabilities::navigation_state(cx))),
             "navigation/retry" => later(capabilities::retry_navigation(cx)),
             "outbox/get" => later(outbox::get(params, cx)),
@@ -2083,9 +2093,6 @@ impl ExternalPlugins {
             "read/clearLocal" => later(reading::local(true, params, cx)),
             "read/markLocal" => later(reading::local(false, params, cx)),
             "sessions/memberOf" => later(channels::member_of(params, cx)),
-            "reminders/create" | "reminders/snooze" | "reminders/complete" | "reminders/cancel" => {
-                later(channels::change(method, params, cx))
-            }
             "inbox/get" => Reply::Now(reading::inbox(cx)),
             "threads/activity" => later(reading::threads(params, cx)),
             "read/mark" => later(reading::mark(params, cx)),
@@ -2109,6 +2116,15 @@ impl ExternalPlugins {
             | "files/upload"
             | "events/publish"
             | "outbox/send"
+            | "outbox/retry"
+            | "outbox/dismiss"
+            | "emoji/add"
+            | "projects/gitAuthorization"
+            | "agents/logProof"
+            | "reminders/create"
+            | "reminders/snooze"
+            | "reminders/complete"
+            | "reminders/cancel"
             | "agents/create"
             | "agents/save"
             | "agents/remove"
@@ -2146,10 +2162,15 @@ impl ExternalPlugins {
             | "me/place"
             | "archives/request" => {
                 let permission = match method {
-                    "events/publish" | "outbox/send" => Permission::PublishEvents,
+                    "events/publish"
+                    | "outbox/send"
+                    | "outbox/retry"
+                    | "outbox/dismiss"
+                    | "emoji/add"
+                    | "projects/gitAuthorization" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
                     | "teams/remove" | "agents/retype" | "agents/port" | "agents/attest"
-                    | "agents/presence" => Permission::ManageAgents,
+                    | "agents/presence" | "agents/logProof" => Permission::ManageAgents,
                     "dm/open"
                     | "channels/create"
                     | "channels/action"
@@ -2191,8 +2212,13 @@ impl ExternalPlugins {
                         ),
                     )));
                 }
-                if method == "agents/attest" {
-                    return Reply::Now(capabilities::attest(params, cx));
+                match method {
+                    "agents/attest" => return Reply::Now(capabilities::attest(params, cx)),
+                    "projects/gitAuthorization" => {
+                        return Reply::Now(capabilities::git_authorization(params, cx));
+                    }
+                    "agents/logProof" => return Reply::Now(capabilities::log_proof(params, cx)),
+                    _ => {}
                 }
                 let plugin_id = cx
                     .global_mut::<Self>()
@@ -2210,6 +2236,15 @@ impl ExternalPlugins {
                     "messages/report" => capabilities::report(params, cx),
                     "messages/retry" => capabilities::retry(false, params, cx),
                     "messages/dismiss" => capabilities::retry(true, params, cx),
+                    // Any event of yours on its way, by its `id`.
+                    "outbox/retry" | "outbox/dismiss" => {
+                        let mut params = params.clone();
+                        params["message"] = params.get("id").cloned().unwrap_or(Value::Null);
+                        capabilities::retry(method == "outbox/dismiss", &params, cx)
+                    }
+                    "emoji/add" => capabilities::add_emoji(params, cx),
+                    "reminders/create" | "reminders/snooze" | "reminders/complete"
+                    | "reminders/cancel" => channels::change(method, params, cx),
                     "files/upload" => capabilities::upload(&plugin_id, params, cx),
                     "events/publish" => events::publish(params, cx),
                     "outbox/send" => outbox::send(params, cx),
@@ -2254,6 +2289,7 @@ impl ExternalPlugins {
             "community/refresh" => later(channels::refresh(params, cx)),
             "sidebar/dismiss" => Reply::Now(channels::dismiss_sidebar(params, cx)),
             "me/get" => Reply::Now(channels::me(cx)),
+            "me/admit" => later(channels::admit_me(params, cx)),
             "channels/creation" => Reply::Now(channels::creation(cx)),
             "channels/dismissNotice" => Reply::Now(channels::dismiss_notice(params, cx)),
             "me/dismiss" | "me/refresh" => Reply::Now(channels::me_local(method, params, cx)),
@@ -2380,13 +2416,39 @@ impl ExternalPlugins {
                 else {
                     return Reply::Now(Err((INVALID_PARAMS, "message is required".to_owned())));
                 };
-                let moved = cx
+                let Some(watch) = cx
                     .global_mut::<Self>()
                     .current(path, generation)
                     .and_then(|plugin| plugin.watches.get(&watch?))
-                    .map(|watch| watch.retarget(message));
-                Reply::Now(match moved {
-                    Some(moved) => Ok(json!(moved)),
+                else {
+                    return Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "watch is not one of yours".to_owned(),
+                    )));
+                };
+                let Some(outcome) = watch.retarget(message) else {
+                    return Reply::Now(Err((INVALID_PARAMS, "watch is not a thread's".to_owned())));
+                };
+                Reply::Later(cx.background_spawn(async move {
+                    use buzz_relay_client::threads::Retarget;
+                    Ok(json!(match outcome.await {
+                        Ok(Retarget::Selected) => "selected",
+                        Ok(Retarget::Different) => "different",
+                        Ok(Retarget::Unavailable) => "unavailable",
+                        Ok(Retarget::Error) => "error",
+                        Ok(Retarget::Cancelled) | Err(_) => "cancelled",
+                    }))
+                }))
+            }
+            "watch/refresh" => {
+                let watch = params.get("watch").and_then(Value::as_u64);
+                let refreshed = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.watches.get(&watch?))
+                    .map(capabilities::Watch::refresh);
+                Reply::Now(match refreshed {
+                    Some(refreshed) => Ok(json!(refreshed)),
                     None => Err((INVALID_PARAMS, "watch is not one of yours".to_owned())),
                 })
             }

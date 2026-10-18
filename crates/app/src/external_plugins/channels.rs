@@ -314,7 +314,7 @@ pub fn watch(
         cx.update(|cx| notify(first, cx));
         while changes.next().await.is_some() {
             cx.update(|cx| {
-                if let Ok(now) = reminders_now(cx) {
+                if let Ok(now) = super::capabilities::scoped(&community, || reminders_now(cx)) {
                     notify(now, cx);
                 }
             });
@@ -414,11 +414,8 @@ pub fn archives(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
                 .timer(std::time::Duration::from_millis(100))
                 .await;
         }
-        cx.update(|cx| match archives::status(&community, cx) {
-            Some(Status::Ready) => Ok(json!({ "archived": archives::archived(&community, cx) })),
-            Some(Status::Error) => Err((3, "The archive could not be read.".to_owned())),
-            _ => Err((3, "The archive is still loading.".to_owned())),
-        })
+        // The read's own outcome, as `archives.snapshot()` gives it.
+        Ok(cx.update(|cx| archives::snapshot_json(&community, cx)))
     }))
 }
 
@@ -621,7 +618,12 @@ fn sidebar_json(state: &buzz_relay_client::sidebar_store::SidebarState) -> Value
 pub fn me(cx: &App) -> Result<Value, Failure> {
     let session = community(cx)?.read(cx).session.clone();
     session.me_kit().me_ensure();
-    Ok(sidebar_json(&session.me_kit().me_state()))
+    let mut me = sidebar_json(&session.me_kit().me_state());
+    // Me holds groups only: nothing there is starred, sorted or muted.
+    for flag in ["starWritable", "sortWritable", "muteWritable"] {
+        me[flag] = json!(false);
+    }
+    Ok(me)
 }
 
 /// `me/assign`, `me/retryMove`, `me/removeGroup`: moves a conversation
@@ -688,6 +690,24 @@ pub fn place_me(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
     let kit = community.read(cx).session.me_kit().clone();
     Ok(on_tokio(cx, async move {
         kit.set_placement(&channel, personal, group.as_deref())
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `me/admit`: whether a new conversation would fit in Me, in `group`
+/// if given (`mePlacement.admit`): `null`, or an error saying why not.
+pub fn admit_me(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let group = params
+        .get("group")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let kit = community.read(cx).session.me_kit().clone();
+    Ok(on_tokio(cx, async move {
+        kit.admit(&channel, group.as_deref())
             .await
             .map(|()| Value::Null)
             .map_err(|error| (3, error))
@@ -867,16 +887,18 @@ pub fn lifecycle(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
     let community = community(cx)?;
     let channel = channel(params, community.read(cx))?;
     let session = community.read(cx).session.clone();
-    let viewer = session.viewer().to_string();
     Ok(on_tokio(cx, async move {
-        let state = session
-            .channel_state(&channel)
-            .await
-            .map_err(|error| (3, error))?;
-        let can = state
-            .lifecycle(&viewer)
-            .map_err(|error| (3, error.to_string()))?;
+        // With what an owner agent of yours grants, as the channel menu.
+        let (state, can) = futures::join!(
+            session.channel_state(&channel),
+            session.channel_permissions(&channel)
+        );
+        let (state, can) = (
+            state.map_err(|error| (3, error))?,
+            can.map_err(|error| (3, error))?,
+        );
         Ok(json!({
+            "channel": channel,
             "channelType": format!("{:?}", state.channel_type).to_ascii_lowercase(),
             "canArchive": can.can_archive,
             "canUnarchive": can.can_unarchive,

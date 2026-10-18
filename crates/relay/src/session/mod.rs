@@ -272,6 +272,9 @@ pub struct SessionSnapshot {
     /// relay has not answered (offline resume). Nothing is writable;
     /// "Reconnect to update saved conversations."
     pub cached: bool,
+    /// The saved copy is still being read from disk, before anything
+    /// shows (`RelaySnapshot.restoring`).
+    pub restoring: bool,
     /// Live connection, routes and catch-up. Replaced only when it changes.
     pub live_status: Arc<LiveView>,
     pub relay: Option<RelayInfo>,
@@ -316,6 +319,8 @@ pub struct Session {
     viewer: String,
     origin: RelayOrigin,
     next_thread: std::sync::atomic::AtomicU64,
+    /// Bumped by each retry and cache clear (`RelaySnapshot.generation`).
+    generation: std::sync::atomic::AtomicU64,
     media: Media,
     direct: account::Direct,
     reminders: Arc<reminders::Shared>,
@@ -415,6 +420,7 @@ impl Session {
             status: SessionStatus::Connecting,
             live: false,
             cached: false,
+            restoring: false,
             live_status: Arc::default(),
             relay: None,
             roster: RosterStatus::Loading,
@@ -492,6 +498,7 @@ impl Session {
             selected: None,
             connecting: false,
             cached: false,
+            restoring: false,
             next_generation: 0,
             channels: channels::Channels::default(),
             recent: ByteLru::new(RECENT_EVENTS, RECENT_BYTES),
@@ -544,6 +551,7 @@ impl Session {
             viewer,
             origin,
             next_thread: std::sync::atomic::AtomicU64::new(1),
+            generation: std::sync::atomic::AtomicU64::new(1),
             media,
             direct,
             reminders,
@@ -642,7 +650,20 @@ impl Session {
     /// snapshot shows); otherwise retries live updates, the roster and
     /// read sync.
     pub fn retry(&self) {
+        self.bump_generation();
         let _ = self.commands.send(Message::Retry);
+    }
+
+    /// Which attempt at this community's session this is: it changes with
+    /// each retry and cache clear, so state keyed on it can start over
+    /// (`RelaySnapshot.generation`).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn bump_generation(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// "Retry live updates" (`session.live.retry`): a fresh reconnect
@@ -703,6 +724,7 @@ impl Session {
     /// Open channels load again; a session that had not connected tries
     /// again.
     pub async fn clear_cache(&self) {
+        self.bump_generation();
         let (reply, done) = oneshot::channel();
         if self.commands.send(Message::ClearCache(reply)).is_ok() {
             let _ = done.await;
@@ -1219,6 +1241,8 @@ struct Actor {
     connecting: bool,
     /// Showing the saved snapshot without a relay (offline resume).
     cached: bool,
+    /// The saved snapshot is still being read.
+    restoring: bool,
     /// Window generations come from one counter, so a window recreated
     /// after eviction never accepts a read meant for its predecessor.
     next_generation: u64,
@@ -2869,6 +2893,7 @@ impl Actor {
             status: self.snapshot.borrow().status.clone(),
             live: self.live.as_ref().is_some_and(Live::is_connected),
             cached: self.cached,
+            restoring: self.restoring,
             live_status: self.live_view.clone(),
             relay: self.relay.clone(),
             roster: self.roster.clone(),

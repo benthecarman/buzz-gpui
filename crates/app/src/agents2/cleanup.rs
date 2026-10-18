@@ -165,11 +165,13 @@ async fn archived(http: &RelayHttp, authority: &str, agent: &str) -> Result<Arch
     })
 }
 
-/// How the owner may archive the agent: its owner attestation, or a relay
-/// owner or admin role. `None` means no path.
-enum Consent {
-    Auth(Vec<String>),
-    Admin,
+/// How the owner may archive an identity (`archives.consent`): its owner
+/// attestation, a relay owner or admin role, or both; neither for the
+/// viewer's own. `None` means no path.
+#[derive(Default)]
+struct Consent {
+    auth: Option<Vec<String>>,
+    admin: bool,
 }
 
 async fn consent(
@@ -178,6 +180,10 @@ async fn consent(
     authority: &str,
     agent: &str,
 ) -> Result<Option<Consent>, String> {
+    // NIP-IA archival of yourself needs no evidence.
+    if agent == viewer {
+        return Ok(Some(Consent::default()));
+    }
     let events = http
         .query(&[
             filter(json!({ "kinds": [0], "authors": [agent], "limit": 1 })),
@@ -211,13 +217,7 @@ async fn consent(
             .and_then(|tag| tag.get(2).cloned())
     });
     let admin = matches!(role.as_deref(), Some("owner" | "admin"));
-    // Role authority stands alone, so no credential whose time bounds could
-    // fail it is attached.
-    Ok(if admin {
-        Some(Consent::Admin)
-    } else {
-        auth.map(Consent::Auth)
-    })
+    Ok((auth.is_some() || admin).then_some(Consent { auth, admin }))
 }
 
 /// Archives `agent` unless it already is, when a consent path exists.
@@ -268,7 +268,9 @@ async fn request(
         vec!["-".to_owned()],
         vec!["p".to_owned(), target.to_owned()],
     ];
-    if let Consent::Auth(auth) = path {
+    // Role authority stands alone, so no credential whose time bounds
+    // could fail it is attached.
+    if let Some(auth) = path.auth.filter(|_| !path.admin) {
         tags.push(auth);
     }
     let now = std::time::SystemTime::now()
@@ -334,8 +336,16 @@ pub(crate) async fn archive_consent(
     let http = RelayHttp::new(session.origin().clone(), owner.clone());
     Ok(
         match consent(&http, &owner.pubkey_hex(), &authority, target).await? {
-            Some(Consent::Auth(auth)) => json!({ "auth": auth }),
-            Some(Consent::Admin) => json!({ "admin": true }),
+            Some(Consent { auth, admin }) => {
+                let mut consent = json!({});
+                if let Some(auth) = auth {
+                    consent["auth"] = json!(auth);
+                }
+                if admin {
+                    consent["admin"] = json!(true);
+                }
+                consent
+            }
             None => serde_json::Value::Null,
         },
     )

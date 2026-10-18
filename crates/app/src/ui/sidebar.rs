@@ -1460,6 +1460,7 @@ pub(crate) fn unread_snapshot(
         status: SessionStatus::Ready,
         live: true,
         cached: false,
+        restoring: false,
         live_status: Default::default(),
         relay: None,
         roster: RosterStatus::Ready,

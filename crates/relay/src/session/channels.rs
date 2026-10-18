@@ -1438,6 +1438,7 @@ impl Actor {
     /// Reads the device cache off the actor; the session connects once it
     /// is applied, so a saved snapshot always shows first.
     pub(super) fn begin_restore(&mut self) {
+        self.restoring = true;
         let partition = self.partition();
         self.channels.initial = self
             .store
@@ -1459,6 +1460,7 @@ impl Actor {
     /// Shows the saved roster and heads (`restoreLocal`): display only,
     /// marked cached, never authority to write. Then connects.
     pub(super) fn restored(&mut self, restored: Option<Restored>) {
+        self.restoring = false;
         if let Some(restored) = restored
             && self.discovery.is_none()
         {

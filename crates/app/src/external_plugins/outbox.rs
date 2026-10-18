@@ -102,8 +102,9 @@ pub fn acknowledge(params: &Value, cx: &App) -> Result<Task<Result<Value, Failur
 }
 
 /// `outbox/supports`: whether this connection can sign and send events
-/// of `kind` (`outbox.supports`).
-pub fn supports(params: &Value, cx: &App) -> Result<Value, Failure> {
+/// of `kind` (`outbox.supports`): the community takes writes from you,
+/// and your key signs that kind.
+pub fn supports(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let kind = params
         .get("kind")
         .and_then(Value::as_u64)
@@ -111,7 +112,7 @@ pub fn supports(params: &Value, cx: &App) -> Result<Value, Failure> {
         .ok_or((INVALID_PARAMS, "kind is required".to_owned()))?;
     let identity = match &cx.global::<crate::community::AppState>().identity {
         crate::community::IdentityState::Ready(identity) => identity.clone(),
-        _ => return Ok(json!(false)),
+        _ => return Ok(Task::ready(Ok(json!(false)))),
     };
     // App data (NIP-78) is signed apart from what shows in conversations.
     let purpose = if kind == 30078 {
@@ -119,11 +120,13 @@ pub fn supports(params: &Value, cx: &App) -> Result<Value, Failure> {
     } else {
         buzz_identity::Purpose::Content
     };
-    Ok(json!(
-        identity
-            .template(purpose, kind, 0, Vec::new(), String::new())
-            .is_ok()
-    ))
+    let signs = identity
+        .template(purpose, kind, 0, Vec::new(), String::new())
+        .is_ok();
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        Ok(json!(signs && session.outbox().await.is_some()))
+    }))
 }
 
 fn pending(outbox: &Outbox) -> Value {

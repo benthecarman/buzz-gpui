@@ -724,6 +724,36 @@ impl Session {
             .map(|op| op.id())
     }
 
+    /// The ids of the viewer's sends the outbox holds now, so
+    /// [`Self::queued_after`] can tell which one a send added.
+    pub async fn queued_ids(&self) -> std::collections::HashSet<EventId> {
+        let Ok(ctx) = self.work_ops().context().await else {
+            return Default::default();
+        };
+        ctx.outbox.visible().iter().map(|op| op.id()).collect()
+    }
+
+    /// The message a send added to `channel`: the newest of the viewer's
+    /// chat sends there that `known` did not hold.
+    pub async fn queued_after(
+        &self,
+        channel: &str,
+        known: &std::collections::HashSet<EventId>,
+    ) -> Option<EventId> {
+        let ctx = self.work_ops().context().await.ok()?;
+        ctx.outbox
+            .visible()
+            .iter()
+            .filter(|op| {
+                op.kind() == kinds::CHAT
+                    && op.has_tag("h", channel)
+                    && op.event.pubkey.to_hex() == ctx.viewer
+                    && !known.contains(&op.id())
+            })
+            .max_by_key(|op| op.created_at())
+            .map(|op| op.id())
+    }
+
     /// Reads the viewer's channel list again (`channels.refreshList`).
     pub fn refresh_channels(&self) {
         let _ = self.commands.send(super::Message::With(Box::new(|actor| {
