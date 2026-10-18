@@ -464,12 +464,17 @@ pub fn external_list(cx: &App) -> Vec<Listed> {
                 .find(|bundled| bundled.key == row.key)
                 .filter(|bundled| crate::plugins::enabled_key(bundled.key))
             {
+                // A panel's shortcut works while its launcher shows (`when`).
+                let enabled = bundled.panel.is_none_or(|panel| {
+                    crate::ui::navigation::workspace(cx)
+                        .is_some_and(|workspace| workspace.read(cx).launcher_shown(panel, cx))
+                });
                 return Some(Listed {
                     key: bundled.key,
                     plugin: bundled.plugin,
                     title: bundled.title,
                     chords,
-                    enabled: true,
+                    enabled,
                 });
             }
             let shortcut = external(row.key)?;

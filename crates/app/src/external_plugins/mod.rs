@@ -1621,8 +1621,12 @@ impl ExternalPlugins {
                     ("ui/navigate", (_, error)) => Reply::Now(Ok(capabilities::failed_open(
                         capabilities::NOT_JOINED,
                         error,
+                        &params,
                         cx,
                     ))),
+                    // Nothing in a community you have not joined may notify
+                    // (`notificationAuthorized`).
+                    ("notifications/submit", _) => Reply::Now(Ok(json!(false))),
                     (_, failure) => Reply::Now(Err(failure)),
                 });
                 match reply {

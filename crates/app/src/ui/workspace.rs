@@ -134,6 +134,9 @@ pub struct Workspace {
     resolving: Option<(Target, Task<()>)>,
     /// A place that could not open, kept for Retry navigation.
     failure: Option<Failed>,
+    /// A settings card whose check is still running, waited for before
+    /// Settings opens on it.
+    checking: Option<Task<()>>,
     dialog: Option<dialogs::OpenDialog>,
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
@@ -229,6 +232,7 @@ impl Workspace {
             _revealing: None,
             resolving: None,
             failure: None,
+            checking: None,
             dialog: None,
             _page_events: None,
             route: None,
@@ -876,7 +880,8 @@ impl Workspace {
             self.resolving.is_some()
                 || self.pending.is_some()
                 || self.pending_listing
-                || self.settling.is_some(),
+                || self.settling.is_some()
+                || self.checking.is_some(),
         )
     }
 
@@ -890,6 +895,7 @@ impl Workspace {
     ) {
         self.attempts += 1;
         self.settling = None;
+        self.checking = None;
         self.failure = Some(Failed {
             target,
             reason,
@@ -1074,6 +1080,18 @@ impl Workspace {
         let Some(failed) = self.failure.take() else {
             return;
         };
+        self.retry_session(cx);
+        match failed.target {
+            Some(target) => self.apply(target, window, cx),
+            // Nothing to open again: the visit fails as before, as a new
+            // attempt (`retry`).
+            None => self.fail_open(None, failed.reason, cx),
+        }
+    }
+
+    /// Retries a failed community session, as Retry navigation does
+    /// before it opens the place again.
+    pub(crate) fn retry_session(&self, cx: &App) {
         if let Some(community) = &self.community {
             let community = community.read(cx);
             if matches!(
@@ -1082,10 +1100,6 @@ impl Workspace {
             ) {
                 community.session.retry();
             }
-        }
-        match failed.target {
-            Some(target) => self.apply(target, window, cx),
-            None => cx.notify(),
         }
     }
 
@@ -1142,6 +1156,62 @@ impl Workspace {
     }
 
     /// Shows `target` without recording it.
+    /// Waits on settings card `key`'s check, under the open timeout, then
+    /// opens `target` if it shows and this visit is still the latest.
+    fn check_card(
+        &mut self,
+        target: Target,
+        key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use super::settings::cards::{self, CardVisibility};
+        let attempt = self.attempts;
+        let held = cards::retain_visibility(cx);
+        self.checking = Some(cx.spawn_in(window, async move |this, cx| {
+            let _held = held;
+            let started = std::time::Instant::now();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let shown = cx
+                    .update(|_, cx| cards::get(key, cx).map(|card| card.visibility(cx)))
+                    .ok()
+                    .flatten();
+                let timed_out = started.elapsed() >= channel_states::OPEN_TIMEOUT;
+                if shown == Some(CardVisibility::Pending) && !timed_out {
+                    continue;
+                }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.attempts != attempt {
+                        return;
+                    }
+                    this.checking = None;
+                    if shown == Some(CardVisibility::Visible) {
+                        // The card shows: Settings opens on it, within
+                        // the same visit.
+                        this.settings_page(Some(Section::Card(key)), window, cx);
+                        this.show_page(Page::SETTINGS, window, cx);
+                    } else {
+                        this.failure = Some(Failed {
+                            target: Some(target),
+                            reason: if timed_out {
+                                Reason::Timeout
+                            } else {
+                                Reason::Page
+                            },
+                            ingress: false,
+                        });
+                        cx.notify();
+                    }
+                });
+                return;
+            }
+        }));
+        cx.notify();
+    }
+
     fn apply(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.drawer_open = false;
         self.pending = None;
@@ -1149,6 +1219,7 @@ impl Workspace {
         self._revealing = None;
         self.resolving = None;
         self.failure = None;
+        self.checking = None;
         self.attempts += 1;
         self.publish_visit();
         self.settling = match &target.place {
@@ -1179,6 +1250,37 @@ impl Workspace {
                 AppState::select(index, cx);
                 self.sync(window, cx);
             }
+        }
+        // Every attempt checks the place is still there, as buzz-app's
+        // presentation does: a page whose plugin went, or a settings card
+        // hidden or failed, is `unavailable`; a card still checking is
+        // waited for.
+        let missing = match &target.place {
+            Place::Page(page) | Place::Route { page, .. } => {
+                *page != Page::SETTINGS && pages::spec(*page, cx).is_none()
+            }
+            Place::Settings(super::settings::Section::Card(key)) => {
+                use super::settings::cards::{self, CardVisibility};
+                match cards::get(key, cx).map(|card| card.visibility(cx)) {
+                    Some(CardVisibility::Visible) => false,
+                    Some(CardVisibility::Pending) => {
+                        self.check_card(target.clone(), key, window, cx);
+                        return;
+                    }
+                    _ => true,
+                }
+            }
+            _ => false,
+        };
+        if missing {
+            self.failure = Some(Failed {
+                target: Some(target),
+                reason: Reason::Page,
+                ingress: false,
+            });
+            self.settling = None;
+            cx.notify();
+            return;
         }
         match target.place {
             Place::Channels(route) => self.show_route(route, window, cx),

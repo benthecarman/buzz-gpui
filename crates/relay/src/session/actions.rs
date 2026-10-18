@@ -1207,7 +1207,13 @@ impl Ops {
                 })
             })
             .collect();
-        candidates.sort();
+        // Rank, then name and id as `localeCompare` orders them.
+        candidates.sort_by(|a, b| {
+            use crate::discovery::locale_compare;
+            a.0.cmp(&b.0)
+                .then_with(|| locale_compare(&a.1, &b.1))
+                .then_with(|| locale_compare(&a.2, &b.2))
+        });
         candidates.truncate(limit);
         let ids: Vec<String> = candidates.into_iter().map(|(_, _, id)| id).collect();
         let mut channels: Vec<ChannelSummary> = self

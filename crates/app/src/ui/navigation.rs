@@ -110,12 +110,9 @@ pub enum ChannelRoute {
     Empty,
     /// A session draft under `parent`; buzz-app no longer nests sessions
     /// and explains where to start one.
-    #[allow(dead_code)]
     NewSession { parent: String },
 }
 
-// Nothing in this app links to a session draft yet; Sessions will.
-#[allow(dead_code)]
 impl ChannelRoute {
     /// Validates route params as `isChannelRoute` does: `"new-message"`,
     /// `"empty"`, or exactly `{kind: "new-session", parentId}` with a

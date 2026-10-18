@@ -215,15 +215,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let readable = self
-            .current_summary(cx)
-            .is_some_and(|channel| !channel.read_only);
-        if self.page != Page::MESSAGES || !readable {
+        if !self.launcher_shown(key, cx) {
             return;
         }
         if let Some(panel) = channel_panels::get(key, cx) {
             self.toggle_launcher(panel, window, cx);
         }
+    }
+
+    /// Whether the open channel's header shows panel `key`'s launcher, so
+    /// its shortcut does something (`binding.available()`).
+    pub(crate) fn launcher_shown(&self, key: &str, cx: &App) -> bool {
+        self.page == Page::MESSAGES
+            && self
+                .current_summary(cx)
+                .is_some_and(|channel| !channel.read_only)
+            && channel_panels::get(key, cx).is_some_and(|panel| panel.launcher.is_some())
     }
 
     /// The channel menu's panel entries; each opens its panel as a tab.

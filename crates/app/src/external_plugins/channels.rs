@@ -91,7 +91,11 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             .get("private")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        ttl: params.get("ttlSeconds").and_then(Value::as_u64),
+        ttl: super::capabilities::ttl_seconds(
+            params,
+            "ttlSeconds",
+            "Choose a valid temporary channel duration.",
+        )?,
         labels,
     };
     // What a template adds (`setup`): a Canvas, agents, a sidebar group.
@@ -198,10 +202,9 @@ pub fn action(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
 pub fn add_member(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
     let channel = channel(params, community.read(cx))?;
-    let pubkey = text(params, "pubkey")
-        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| invalid("pubkey is required"))?
-        .to_ascii_lowercase();
+    let pubkey = super::capabilities::pubkey(params, "pubkey")
+        .ok_or_else(|| invalid("Choose a valid person or agent."))?
+        .to_owned();
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
@@ -448,10 +451,9 @@ pub fn request_archive(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
         Some("unarchive") => false,
         _ => return Err(invalid("action must be archive or unarchive")),
     };
-    let target = text(params, "pubkey")
-        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| invalid("pubkey is required"))?
-        .to_ascii_lowercase();
+    let target = super::capabilities::pubkey(params, "pubkey")
+        .ok_or_else(|| (3, "You can no longer archive this identity".to_owned()))?
+        .to_owned();
     let owner = match &cx.global::<crate::community::AppState>().identity {
         crate::community::IdentityState::Ready(identity) => identity.clone(),
         _ => return Err((1, "You are not signed in.".to_owned())),
@@ -479,10 +481,10 @@ pub fn request_archive(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
 /// (`archives.consent`): `{"auth"}`, the owner attestation of one of your
 /// agents, `{"admin": true}` by your relay role, or `null` when you may not.
 pub fn archive_consent(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let target = text(params, "pubkey")
-        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| invalid("pubkey is required"))?
-        .to_ascii_lowercase();
+    // No way to archive a malformed key (`consent` answers `null`).
+    let Some(target) = super::capabilities::pubkey(params, "pubkey").map(str::to_owned) else {
+        return Ok(Task::ready(Ok(Value::Null)));
+    };
     let owner = match &cx.global::<crate::community::AppState>().identity {
         crate::community::IdentityState::Ready(identity) => identity.clone(),
         _ => return Err((1, "You are not signed in.".to_owned())),
@@ -748,7 +750,8 @@ pub fn change_me(
 /// takes it out with `me: false` (`mePlacement.set`).
 pub fn place_me(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    // Any channel id, such as a session just made or one you left.
+    let channel = readable(params, community.read(cx))?;
     let personal = params.get("me").and_then(Value::as_bool).unwrap_or(true);
     let group = params
         .get("group")
@@ -920,10 +923,36 @@ pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     };
     let viewer = session.viewer().to_string();
     Ok(on_tokio(cx, async move {
+        // A fresh read settles an uncertain change the roster now shows
+        // (`administration.refresh`), so it stops blocking the next.
+        session
+            .refresh_members(&channel)
+            .await
+            .map_err(|error| (2, error))?;
         let state = session
             .channel_state(&channel)
             .await
             .map_err(|error| (2, error))?;
+        let operation = session.member_operation(&channel).await.map(|operation| {
+            use buzz_relay_client::MemberOperationStatus as Status;
+            use buzz_relay_client::members::Change;
+            json!({
+                "pubkey": operation.change.pubkey,
+                "change": match operation.change.change {
+                    Change::Admin => "admin",
+                    Change::Member => "member",
+                    Change::Guest => "guest",
+                    Change::Remove => "remove",
+                },
+                "status": match operation.status {
+                    Status::Pending => "pending",
+                    Status::Uncertain => "uncertain",
+                    Status::Confirmed => "confirmed",
+                    Status::Failed => "failed",
+                },
+                "error": operation.error,
+            })
+        });
         let members: Vec<Value> = state
             .roles
             .iter()
@@ -944,6 +973,7 @@ pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
             "version": state.version.to_hex(),
             "canManage": state.can_manage(&viewer),
             "members": members,
+            "operation": operation,
         }))
     }))
 }

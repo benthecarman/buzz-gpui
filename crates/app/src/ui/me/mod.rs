@@ -21,7 +21,7 @@ mod share;
 mod workspace;
 
 use super::channel_tabs::TabState;
-use super::pages::{self, Navigation, Page, PageSpec, Placement};
+use super::pages::{self, Navigation, Page, PageRoutes, PageSpec, Placement};
 use crate::community::{AppState, Community};
 use crate::mirror::mirror;
 use board::SessionWork;
@@ -59,6 +59,20 @@ pub fn register(cx: &mut App) {
         },
         cx,
     );
+    // Route v1 (`isMeRoute`): a new conversation, in a group, or one by id.
+    pages::register_routes(
+        Page::ME,
+        PageRoutes {
+            version: 1,
+            validate: |params| Selection::parse(params).is_some(),
+            open: |_, params, _, cx| {
+                if let Some(selection) = params.and_then(Selection::parse) {
+                    MeModel::global(cx).update(cx, |me, cx| me.select(selection, cx));
+                }
+            },
+        },
+        cx,
+    );
     pages::register(
         PageSpec {
             page: SESSIONS,
@@ -85,6 +99,25 @@ pub enum Selection {
 }
 
 impl Selection {
+    /// Route params as `isMeRoute` takes them: `"new"`, `"new:<section>"`,
+    /// or a conversation's lowercase UUID.
+    pub fn parse(params: &serde_json::Value) -> Option<Self> {
+        let route = params.as_str()?;
+        let uuid = route.len() == 36
+            && route.bytes().enumerate().all(|(at, byte)| match at {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+            });
+        match route {
+            "new" => Some(Self::New),
+            _ if uuid => Some(Self::Session(route.to_owned())),
+            _ => route
+                .strip_prefix("new:")
+                .filter(|_| route.len() > 4 && route.len() <= 260)
+                .map(|section| Self::NewIn(section.to_owned())),
+        }
+    }
+
     pub fn session(&self) -> Option<&str> {
         match self {
             Self::Session(id) => Some(id),

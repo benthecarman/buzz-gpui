@@ -331,8 +331,11 @@ pub(crate) async fn archive_consent(
         .relay
         .as_ref()
         .map(|relay| relay.authority.clone())
-        .filter(|authority| !authority.is_empty())
-        .ok_or("This community has no archive.")?;
+        .filter(|authority| !authority.is_empty());
+    // Without the relay's authority there is no path (`null`).
+    let Some(authority) = authority else {
+        return Ok(serde_json::Value::Null);
+    };
     let http = RelayHttp::new(session.origin().clone(), owner.clone());
     Ok(
         match consent(&http, &owner.pubkey_hex(), &authority, target).await? {

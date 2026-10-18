@@ -110,7 +110,7 @@ thread_local! {
     static COMPOSERS: RefCell<HashMap<u64, Grant>> = RefCell::default();
     /// Captures a tool started, by the composer number it was handed: they
     /// end when the tool goes (`capture` lives as long as the tool).
-    static CAPTURING: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    static CAPTURING: RefCell<HashMap<u64, (WeakEntity<Composer>, EntityId)>> = RefCell::default();
     /// Each plugin page's icon as declared, by page key.
     static PAGE_ICONS: RefCell<HashMap<String, String>> = RefCell::default();
     /// How each composer tool was last declared, by key.
@@ -1596,28 +1596,34 @@ pub fn capture(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capa
         .and_then(Value::as_u64)
         .unwrap_or_default();
     let weak = composer.downgrade();
-    let accept: super::view::Accept = Rc::new(move |file, window, cx| {
-        let _ = weak.update(cx, |composer, cx| {
-            composer.accept_plugin_capture(file, window, cx)
-        });
-    });
-    CAPTURING.with_borrow_mut(|capturing| {
-        capturing.retain(|_, composer| composer.upgrade().is_some());
-        capturing.insert(id, composer.downgrade());
+    // Its accept ends only this capture, not one begun after it.
+    let made = Rc::new(std::cell::Cell::new(None));
+    let accept: super::view::Accept = Rc::new({
+        let made = made.clone();
+        move |file, window, cx| {
+            if let Some(capture) = made.get() {
+                let _ = weak.update(cx, |composer, cx| {
+                    composer.accept_plugin_capture(capture, file, window, cx)
+                });
+            }
+        }
     });
     let (view, view_id) = super::view::ExternalView::capture(plugin, id, accept, cx);
-    let started = window
+    let capture = view.entity_id();
+    made.set(Some(capture));
+    window
         .update(cx, |_, window, cx| {
             composer.update(cx, |composer, cx| {
                 composer.start_plugin_capture(view.into(), window, cx)
             })
         })
-        .map_err(|_| (1, "The window is not open.".to_owned()))?;
-    if started {
-        Ok(json!({ "view": view_id }))
-    } else {
-        Err((3, "The composer is busy.".to_owned()))
-    }
+        .map_err(|_| (1, "The window is not open.".to_owned()))?
+        .map_err(|reason| (3, reason))?;
+    CAPTURING.with_borrow_mut(|capturing| {
+        capturing.retain(|_, (composer, _)| composer.upgrade().is_some());
+        capturing.insert(id, (composer.downgrade(), capture));
+    });
+    Ok(json!({ "view": view_id }))
 }
 
 /// `composer/accept`: ends a capture, attaching the file in `data`
@@ -2026,10 +2032,10 @@ pub fn register(
                             let capturing =
                                 CAPTURING.with_borrow_mut(|capturing| capturing.remove(&composer));
                             // After the composer that dropped the tool is done.
-                            if let Some(capturing) = capturing {
+                            if let Some((capturing, capture)) = capturing {
                                 cx.defer(move |cx| {
                                     let _ = capturing.update(cx, |composer, cx| {
-                                        composer.cancel_plugin_capture(cx)
+                                        composer.cancel_plugin_capture(capture, cx)
                                     });
                                 });
                             }

@@ -1269,12 +1269,35 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
                             .iter()
                             .any(|r| r.author.to_hex() == rows.viewer)
                 });
-                let glyph = match &quick.image {
-                    Some(url) => img(media::image(url, &rows.directory.media))
+                // With Emoji off, a plugin's inline renderer that claims a
+                // custom quick reaction draws it (`ReactionLabel`).
+                let claimed = custom
+                    .as_ref()
+                    .filter(|_| !crate::plugins::enabled("buzz.emoji"))
+                    .and_then(|custom| {
+                        let group = ReactionGroup {
+                            content: content.clone(),
+                            emoji: Some(custom.clone()),
+                            events: Vec::new(),
+                        };
+                        let message = renderers::InMessage {
+                            row,
+                            profiles: &rows.directory.profiles,
+                            reaction: Some(&group),
+                        };
+                        let (_, key) = renderers::text_matches(&content, message)
+                            .into_iter()
+                            .find(|(range, _)| *range == (0..content.len()))?;
+                        let place = format!("{}/quick/{content}", row.id.to_hex());
+                        renderers::render_text(&key, &content, &place, cx)
+                    });
+                let glyph = match (&quick.image, claimed) {
+                    (_, Some(claimed)) => claimed,
+                    (Some(url), None) => img(media::image(url, &rows.directory.media))
                         .size_full()
                         .object_fit(ObjectFit::Contain)
                         .into_any_element(),
-                    None => div().child(content.clone()).into_any_element(),
+                    (None, None) => div().child(content.clone()).into_any_element(),
                 };
                 let (rows2, target) = (rows.clone(), row.clone());
                 let group = SharedString::from(format!("quick-{index}-{id}"));

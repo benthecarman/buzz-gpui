@@ -41,9 +41,10 @@ fn event_id(params: &Value, key: &str) -> Result<Option<EventId>, Failure> {
 /// `agents/memories`: what one of the user's agents remembers, newest
 /// per slug. Only an agent's owner reads them.
 pub fn memories(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    // As given: `memoryAgent` takes lowercase hex only.
     let agent = text(params, "agent")
         .ok_or_else(|| invalid("agent is required"))?
-        .to_ascii_lowercase();
+        .to_owned();
     let session = community(cx)?.read(cx).session.clone();
     // Any agent key but yours; the relay answers only its owner, so an
     // agent listed elsewhere reads too (`memoryAgent`).
@@ -235,15 +236,11 @@ pub fn save_details(params: &Value, cx: &App) -> Result<Task<Result<Value, Failu
                 .collect::<Result<_, _>>()?,
         ),
     };
-    // A whole number of seconds the relay can keep, when given.
-    let ttl = match given.get("ttlSeconds") {
-        None | Some(Value::Null) => None,
-        Some(ttl) => Some(
-            ttl.as_u64()
-                .filter(|ttl| (1..=2_147_483_647).contains(ttl))
-                .ok_or_else(|| invalid("Channel duration could not be verified."))?,
-        ),
-    };
+    let ttl = super::capabilities::ttl_seconds(
+        given,
+        "ttlSeconds",
+        "Channel duration could not be verified.",
+    )?;
     // The whole draft, as buzz-app validates it: a missing field would
     // clear the description or make a private channel public.
     let draft = DetailsDraft {
@@ -385,7 +382,8 @@ pub fn project(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
 /// or `{"ambiguous": true}` when it has several.
 pub fn project_home(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    // Any channel id, such as an open one you have not joined.
+    let channel = super::capabilities::readable(params, community.read(cx))?;
     let projects = community.read(cx).session.projects();
     Ok(on_tokio(cx, async move {
         Ok(match projects.home(channel).await.map_err(failure)? {

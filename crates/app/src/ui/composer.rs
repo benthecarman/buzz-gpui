@@ -2866,42 +2866,63 @@ impl Composer {
         cx.notify();
     }
 
-    /// "Discard voice note" (or "Close" after a failure).
     /// Shows a plugin tool's capture view in place of the editor
-    /// (`capture`). `false` while another capture, an edit or a send is
-    /// under way.
+    /// (`capture`), as Buzz's own recorder starts (`voice.begin`): not
+    /// while another capture, an edit or a send is under way, when the
+    /// composer takes no files, or when a voice note is already attached
+    /// or the message is full. The error is why not.
     pub fn start_plugin_capture(
         &mut self,
         view: AnyView,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Result<(), String> {
+        let files = self.files.read(cx);
         if self.capture.is_some() || self.editing.is_some() || self.sending {
-            return false;
+            return Err("The composer is busy.".to_owned());
+        }
+        if self.no_attachments {
+            return Err("This composer takes no attachments.".to_owned());
+        }
+        if files.items.iter().any(|item| item.voice.is_some()) {
+            return Err("A voice note is already attached.".to_owned());
+        }
+        if files.items.len() >= MAX_FILES {
+            let full = format!("Attach at most {MAX_FILES} files per message.");
+            self.attach_error = Some(full.clone().into());
+            cx.notify();
+            return Err(full);
         }
         self.capture = Some(Capture::Plugin(view));
         window.focus(&self.capture_focus, cx);
         cx.notify();
-        true
+        Ok(())
     }
 
-    /// Ends a plugin capture (`accept`), attaching `file` if it made one.
-    /// Ends a plugin's capture with nothing attached, as when the tool
-    /// that started it goes.
-    pub fn cancel_plugin_capture(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.capture, Some(Capture::Plugin(_))) {
+    /// Whether the plugin capture showing is the view `capture`.
+    fn capturing(&self, capture: EntityId) -> bool {
+        matches!(&self.capture, Some(Capture::Plugin(view)) if view.entity_id() == capture)
+    }
+
+    /// Ends the plugin capture `capture` with nothing attached, as when
+    /// the tool that started it goes. Another capture is left alone.
+    pub fn cancel_plugin_capture(&mut self, capture: EntityId, cx: &mut Context<Self>) {
+        if self.capturing(capture) {
             self.capture = None;
             cx.notify();
         }
     }
 
+    /// Ends the plugin capture `capture` (`accept`), attaching `file` if
+    /// it made one.
     pub fn accept_plugin_capture(
         &mut self,
+        capture: EntityId,
         file: Option<Captured>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.capture, Some(Capture::Plugin(_))) {
+        if !self.capturing(capture) {
             return;
         }
         self.capture = None;

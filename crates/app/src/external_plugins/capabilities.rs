@@ -91,6 +91,35 @@ fn text<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
     params.get(key).and_then(Value::as_str)
 }
 
+/// The `key` param when it is a public key as buzz-app takes one:
+/// 64 lowercase hex digits.
+pub fn pubkey<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
+    text(params, key).filter(|key| {
+        key.len() == 64
+            && key
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// A channel lifetime param in seconds: absent or `null` for none, else a
+/// whole number from 1 to 2147483647 (`3600.0` too, as JSON may send it).
+pub fn ttl_seconds(params: &Value, key: &str, error: &str) -> Result<Option<u64>, Failure> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(ttl) => ttl
+            .as_u64()
+            .or_else(|| {
+                ttl.as_f64()
+                    .filter(|ttl| ttl.fract() == 0.0 && *ttl >= 1.0)
+                    .map(|ttl| ttl as u64)
+            })
+            .filter(|ttl| (1..=2_147_483_647).contains(ttl))
+            .map(Some)
+            .ok_or_else(|| invalid(error)),
+    }
+}
+
 fn event_id(params: &Value, key: &str) -> Result<Option<EventId>, Failure> {
     text(params, key)
         .map(|hex| EventId::from_hex(hex).map_err(|_| invalid(format!("{key} is not an event id"))))
@@ -562,14 +591,11 @@ pub fn report(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
         Some("impersonation") => ReportType::Impersonation,
         Some("malware") => ReportType::Malware,
         Some("illegal") => ReportType::Illegal,
-        Some("other") | None => ReportType::Other,
-        Some(_) => return Err(invalid("reason is not a report reason")),
+        Some("other") => ReportType::Other,
+        _ => return Err(invalid("Choose a report reason")),
     };
-    let note = text(params, "note")
-        .unwrap_or_default()
-        .chars()
-        .take(2000)
-        .collect::<String>();
+    // The whole note, trimmed (`note.trim()`).
+    let note = text(params, "note").unwrap_or_default().trim().to_owned();
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
@@ -932,9 +958,15 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
                     if !(routes.validate)(route) {
                         return Err((MISSING, format!("The page {key} cannot open these params")));
                     }
-                    Place::Route {
-                        page: spec.page,
-                        params: route.clone(),
+                    // Messages' routes are the window's own channel routes.
+                    match crate::ui::navigation::ChannelRoute::parse(route) {
+                        Some(route) if spec.page == crate::ui::pages::Page::MESSAGES => {
+                            Place::Channels(route)
+                        }
+                        _ => Place::Route {
+                            page: spec.page,
+                            params: route.clone(),
+                        },
                     }
                 }
             }
@@ -1008,7 +1040,21 @@ fn place_json(target: &Target, cx: &App) -> Value {
             "thread": thread.map(|id| id.to_hex()),
             "members": members,
         }),
-        Place::Channels(_) => json!({ "to": "home" }),
+        Place::Channels(route) => {
+            use crate::ui::navigation::ChannelRoute;
+            json!({
+                "to": "page",
+                "page": Page::MESSAGES.key(),
+                "params": match route {
+                    ChannelRoute::NewMessage => json!("new-message"),
+                    ChannelRoute::Empty => json!("empty"),
+                    ChannelRoute::NewSession { parent } => {
+                        json!({ "kind": "new-session", "parentId": parent })
+                    }
+                },
+                "version": 1,
+            })
+        }
         Place::Route { page, params } => json!({
             "to": "page",
             "page": page.key(),
@@ -1041,9 +1087,13 @@ pub fn navigation_state(cx: &App) -> Value {
     };
     let workspace = workspace.read(cx);
     let (here, back, forward) = workspace.location();
+    let attempt = workspace.visit().0;
     let failed = workspace.failed().map(|(failed, retryable)| {
         json!({
-            "place": failed.target.as_ref().map(|target| place_json(target, cx)),
+            "place": match &failed.target {
+                Some(target) => Some(place_json(target, cx)),
+                None => failed_request(attempt),
+            },
             "reason": reason_name(failed.reason),
             "retryable": retryable,
             "ingress": failed.ingress,
@@ -1064,11 +1114,27 @@ pub fn navigation_state(cx: &App) -> Value {
     })
 }
 
-/// `navigation/retry`: opens the visit that failed again.
+/// `navigation/retry`: opens the visit that failed again, checking its
+/// place anew as `ui/navigate` does (buzz-app's `retry()` starts a new
+/// attempt).
 pub fn retry_navigation(cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let before = navigation::workspace(cx)
-        .map(|workspace| workspace.read(cx).visit().0)
-        .ok_or((1, "The window is not open.".to_owned()))?;
+    let workspace = navigation::workspace(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    let request = {
+        let workspace = workspace.read(cx);
+        let attempt = workspace.visit().0;
+        workspace
+            .failed()
+            .filter(|(failed, retryable)| *retryable && !failed.ingress)
+            .and_then(|(failed, _)| match &failed.target {
+                Some(target) => Some(place_json(target, cx)),
+                None => failed_request(attempt),
+            })
+    };
+    if let Some(request) = request {
+        workspace.read(cx).retry_session(cx);
+        return navigate(&request, cx);
+    }
+    let before = workspace.read(cx).visit().0;
     navigation::with_workspace(cx, |workspace, window, cx| {
         workspace.retry_failed(window, cx)
     });
@@ -1246,9 +1312,9 @@ pub fn search_public(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 /// `channels/findLabeled`: the channels `creator` made with `label`,
 /// oldest first (NIP-CL `findLabeled`).
 pub fn find_labeled(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let creator = text(params, "creator")
-        .ok_or_else(|| invalid("creator is required"))?
-        .to_ascii_lowercase();
+    let creator = pubkey(params, "creator")
+        .ok_or_else(|| invalid("Choose a valid channel creator."))?
+        .to_owned();
     let label = text(params, "label")
         .ok_or_else(|| invalid("label is required"))?
         .to_owned();
@@ -1903,7 +1969,21 @@ pub fn save_status(params: &Value, cx: &App) -> Result<Task<Result<Value, Failur
     let input = buzz_relay_client::user_status::StatusInput {
         text: text(params, "text").unwrap_or_default().to_owned(),
         emoji: text(params, "emoji").unwrap_or_default().to_owned(),
-        expires_at: params.get("expiresAt").and_then(Value::as_u64),
+        // A malformed time is refused as one in the past, unless the
+        // save clears the status (`Number.isSafeInteger`).
+        expires_at: match params.get("expiresAt") {
+            None | Some(Value::Null) => None,
+            Some(at) => Some(
+                at.as_u64()
+                    .or_else(|| {
+                        at.as_f64()
+                            .filter(|at| at.fract() == 0.0 && *at >= 0.0)
+                            .map(|at| at as u64)
+                    })
+                    .filter(|at| *at <= 9_007_199_254_740_991)
+                    .unwrap_or(0),
+            ),
+        },
     };
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
@@ -2042,62 +2122,6 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 /// `reason`, or `superseded` by another visit. Back and Forward answer
 /// at once.
 pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    // A settings card opens only while it shows: a pending check is waited
-    // for, and a hidden or failed one fails the visit as `unavailable`.
-    if text(params, "to") == Some("settings")
-        && let Some(card) =
-            text(params, "section").and_then(|key| crate::ui::settings::cards::get(key, cx))
-    {
-        use crate::ui::settings::cards::CardVisibility;
-        let params = params.clone();
-        let key = card.key;
-        // Run the checks meanwhile, as Settings does while it shows.
-        let held = crate::ui::settings::cards::retain_visibility(cx);
-        return Ok(cx.spawn(async move |cx| {
-            let _held = held;
-            for _ in 0..150 {
-                let shown = cx.update(|cx| {
-                    crate::ui::settings::cards::get(key, cx).map(|card| card.visibility(cx))
-                });
-                match shown {
-                    Some(CardVisibility::Visible) => {
-                        let opened = cx.update(|cx| open_now(&params, cx));
-                        return match opened {
-                            Ok(task) => task.await,
-                            Err(failure) => Err(failure),
-                        };
-                    }
-                    Some(CardVisibility::Pending) => {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(100))
-                            .await;
-                    }
-                    _ => break,
-                }
-            }
-            // Still checking after the open timeout (`timeout`), else
-            // hidden or failed (`unavailable`).
-            Ok(cx.update(|cx| {
-                use crate::ui::channel_states::Reason;
-                let pending = crate::ui::settings::cards::get(key, cx)
-                    .is_some_and(|card| card.visibility(cx) == CardVisibility::Pending);
-                let reason = if pending {
-                    Reason::Timeout
-                } else {
-                    Reason::Page
-                };
-                // Recorded with its place, so Retry navigation can try again.
-                let target = place_of(&params, cx).ok().map(|place| Target {
-                    community: scope(&params, cx).ok().flatten(),
-                    place,
-                });
-                navigation::with_workspace(cx, move |workspace, _, cx| {
-                    workspace.fail_open(target, reason, cx)
-                });
-                json!({ "status": "failed", "reason": reason_name(reason) })
-            }))
-        }));
-    }
     // A settings card of a plugin still starting is waited for too.
     if text(params, "to") == Some("settings")
         && let Some(key) = text(params, "section")
@@ -2107,6 +2131,7 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
         && super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
     {
         let params = params.clone();
+        let before = visit(cx);
         return Ok(cx.spawn(async move |cx| {
             for _ in 0..150 {
                 let waiting = cx.update(|cx| {
@@ -2118,6 +2143,10 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
+                // A visit begun meanwhile supersedes this one.
+                if cx.update(|cx| visit(cx)) != before {
+                    return Ok(json!({ "status": "superseded" }));
+                }
             }
             match cx.update(|cx| navigate(&params, cx)) {
                 Ok(task) => task.await,
@@ -2135,6 +2164,7 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
         && super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
     {
         let params = params.clone();
+        let before = visit(cx);
         return Ok(cx.spawn(async move |cx| {
             for _ in 0..150 {
                 let waiting = cx.update(|cx| {
@@ -2146,11 +2176,15 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
+                // A visit begun meanwhile supersedes this one.
+                if cx.update(|cx| visit(cx)) != before {
+                    return Ok(json!({ "status": "superseded" }));
+                }
             }
             match cx.update(|cx| open_now(&params, cx)) {
                 Ok(task) => task.await,
                 Err((code @ (INVALID_PARAMS | MISSING | NOT_JOINED), error)) => {
-                    Ok(cx.update(|cx| failed_open(code, error, cx)))
+                    Ok(cx.update(|cx| failed_open(code, error, &params, cx)))
                 }
                 Err(failure) => Err(failure),
             }
@@ -2167,7 +2201,7 @@ fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
         // A target that cannot be opened fails the open, as buzz-app's
         // `open()` resolves `invalid-target`, rather than the request.
         Err((code @ (INVALID_PARAMS | MISSING | NOT_JOINED), error)) => {
-            return Ok(Task::ready(Ok(failed_open(code, error, cx))));
+            return Ok(Task::ready(Ok(failed_open(code, error, params, cx))));
         }
         Err(failure) => return Err(failure),
     };
@@ -2181,17 +2215,46 @@ fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
 /// `denied` for a community you have not joined, `unavailable` for a
 /// place Buzz does not have, else `invalid-target`. The window records
 /// the failed visit, so `navigation/get` shows it.
-pub(super) fn failed_open(code: i64, error: String, cx: &mut App) -> Value {
+pub(super) fn failed_open(code: i64, error: String, params: &Value, cx: &mut App) -> Value {
     use crate::ui::channel_states::Reason;
     let reason = match code {
         NOT_JOINED => Reason::Denied,
         MISSING => Reason::Page,
-        _ => Reason::Invalid,
+        // A target that does not parse changes nothing (`parseOpenTarget`).
+        _ => return json!({ "status": "failed", "reason": "invalid-target", "error": error }),
     };
+    let mut request = params.clone();
+    if let Some(request) = request.as_object_mut() {
+        request.remove("focus");
+    }
+    // Kept with its attempt, for `navigation/get` and `navigation/retry`.
     navigation::with_workspace(cx, move |workspace, _, cx| {
-        workspace.fail_open(None, reason, cx)
+        workspace.fail_open(None, reason, cx);
+        FAILED_REQUEST.set(Some((workspace.visit().0, request)));
     });
     json!({ "status": "failed", "reason": reason_name(reason), "error": error })
+}
+
+thread_local! {
+    /// The `ui/navigate` request whose place Buzz could not resolve, by
+    /// the attempt that failed with it.
+    static FAILED_REQUEST: std::cell::RefCell<Option<(u64, Value)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The request behind the failed visit, when that visit is attempt
+/// `attempt` and Buzz had no place for it.
+fn failed_request(attempt: u64) -> Option<Value> {
+    FAILED_REQUEST.with_borrow(|failed| {
+        failed
+            .as_ref()
+            .filter(|(at, _)| *at == attempt)
+            .map(|(_, request)| request.clone())
+    })
+}
+
+/// The window's current visit, by attempt.
+fn visit(cx: &App) -> Option<u64> {
+    navigation::workspace(cx).map(|workspace| workspace.read(cx).visit().0)
 }
 
 /// How the visit after attempt `before` turns out (`OpenResult`).

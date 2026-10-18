@@ -78,6 +78,10 @@ pub struct DraftViewer {
     images: HashMap<String, Arc<Image>>,
     /// Audio files, read into memory to play under this key.
     sounds: Vec<String>,
+    /// Whether each audio file shown was on the relay when its slide
+    /// first showed: one opened before its upload keeps playing here
+    /// (`keepLocal`).
+    hosted: HashMap<String, bool>,
     /// The picture's bounds as last drawn, where a close flies from.
     drawn: Option<Bounds<Pixels>>,
     stage: Rc<Cell<Bounds<Pixels>>>,
@@ -122,6 +126,7 @@ impl DraftViewer {
             players: HashMap::new(),
             images: HashMap::new(),
             sounds: Vec::new(),
+            hosted: HashMap::new(),
             drawn: None,
             stage: Rc::default(),
             _observe: observe,
@@ -263,12 +268,17 @@ impl DraftViewer {
         Some(player)
     }
 
-    /// An audio file plays from memory under a key of its own; a voice
-    /// note already does.
+    /// An audio file plays from memory under a key of its own, and a
+    /// voice note under its own; from the relay if it was uploaded when
+    /// its slide first showed.
     fn sound(&mut self, item: &DraftFile, cx: &mut Context<Self>) -> Option<Attachment> {
+        let hosted = *self
+            .hosted
+            .entry(item.id.clone())
+            .or_insert(item.uploaded.is_some());
+        let uploaded = item.uploaded.as_ref().filter(|_| hosted);
         if let Some(voice) = &item.voice {
-            // The hosted file once uploaded (`uploaded?.url`).
-            let base = match &item.uploaded {
+            let base = match uploaded {
                 Some(uploaded) => attachment(item, uploaded),
                 None => local(voice.key.clone(), item),
             };
@@ -279,9 +289,7 @@ impl DraftViewer {
                 ..base
             });
         }
-        if let Some(uploaded) = &item.uploaded
-            && matches!(&item.source, Source::Bytes(bytes) if bytes.is_empty())
-        {
+        if let Some(uploaded) = uploaded {
             return Some(attachment(item, uploaded));
         }
         let key = format!("draft-audio:{}", item.id);
@@ -313,36 +321,27 @@ impl DraftViewer {
         .detach();
     }
 
-    /// An image, video or file a plugin's attachment renderer draws, as
-    /// `ComposerAttachmentViewer` offers every draft: by its relay URL
-    /// once uploaded, else by a key `media/get` reads from memory.
+    /// An uploaded file a plugin's attachment renderer draws, as
+    /// `ComposerAttachmentViewer` offers one by its relay URL. Pictures
+    /// and videos show in Buzz's own stage, and a file not yet uploaded
+    /// has no preview.
     fn plugin_slide(&mut self, item: &DraftFile, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let kind = match item.preview() {
-            Preview::Image => AttachmentKind::Image,
-            Preview::Video => AttachmentKind::Video,
-            Preview::Audio => return None,
-            Preview::File => AttachmentKind::File,
-        };
-        let attachment = match &item.uploaded {
-            Some(uploaded) => attachment(item, uploaded),
-            None => Attachment {
-                kind,
-                ..local(format!("draft-file:{}", item.id), item)
-            },
-        };
+        if item.preview() != Preview::File {
+            return None;
+        }
+        let attachment = attachment(item, item.uploaded.as_ref()?);
         if !crate::ui::renderers::takes_attachment(&attachment) {
             return None;
         }
-        if item.uploaded.is_none() {
-            self.hold(&attachment.url, item, cx);
-        }
         let media = self.draft.read(cx).media().clone();
-        crate::ui::renderers::attachment(
-            &attachment,
-            SharedString::from(format!("draft-file-plugin-{}", item.id)),
-            &media,
-            cx,
-        )
+        crate::ui::renderers::without_removal(|| {
+            crate::ui::renderers::attachment(
+                &attachment,
+                SharedString::from(format!("draft-file-plugin-{}", item.id)),
+                &media,
+                cx,
+            )
+        })
     }
 
     /// One file's slide (`DraftMedia`).

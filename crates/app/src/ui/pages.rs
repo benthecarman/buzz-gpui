@@ -225,6 +225,17 @@ pub fn init(cx: &mut App) {
         },
         cx,
     );
+    // `buzz.channels/channels` route v1 (`isChannelRoute`): the window
+    // shows these itself, as a channel route.
+    register_routes(
+        Page::MESSAGES,
+        PageRoutes {
+            version: 1,
+            validate: |params| super::navigation::ChannelRoute::parse(params).is_some(),
+            open: |_, _, _, _| {},
+        },
+        cx,
+    );
     super::me::register(cx);
     super::bestie::register(cx);
     super::inbox::register(cx);
