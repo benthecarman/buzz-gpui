@@ -104,6 +104,23 @@ pub fn channel(params: &Value, community: &Community) -> Result<String, Failure>
         })
 }
 
+/// `channel` for a read: one listed here, or any well-formed id, such as
+/// an open channel you have not joined, which the relay shows as a
+/// preview or refuses (`channels.window`).
+pub fn readable(params: &Value, community: &Community) -> Result<String, Failure> {
+    channel(params, community).or_else(|failure| {
+        text(params, "channel")
+            .filter(|id| {
+                id.len() <= 128
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+            .map(str::to_owned)
+            .ok_or(failure)
+    })
+}
+
 pub fn limit(params: &Value) -> usize {
     params
         .get("limit")
@@ -285,7 +302,7 @@ fn on_runtime<T: Send + 'static>(
 /// `channel/messages`: the channel's newest messages.
 pub fn channel_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    let channel = readable(params, community.read(cx))?;
     let limit = limit(params);
     let session = community.read(cx).session.clone();
     let wait = on_runtime(cx, async move {
@@ -323,7 +340,7 @@ pub fn channel_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, F
 /// `thread/messages`: a thread's root and replies.
 pub fn thread_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    let channel = readable(params, community.read(cx))?;
     let root = event_id(params, "root")?.ok_or_else(|| invalid("root is required"))?;
     let session = community.read(cx).session.clone();
     let wait = on_runtime(cx, async move {
@@ -990,7 +1007,6 @@ fn pubkeys(params: &Value, max: usize) -> Result<Vec<String>, Failure> {
 
 /// `community/channels`: the selected community's channels.
 pub fn channels(cx: &App) -> Value {
-    use buzz_relay_client::ChannelType;
     let Some(community) = AppState::current(cx) else {
         return json!([]);
     };
@@ -1000,30 +1016,129 @@ pub fn channels(cx: &App) -> Value {
             .snapshot
             .channels
             .iter()
-            .map(|channel| {
-                json!({
-                    "id": channel.id,
-                    "name": channel.name,
-                    "description": channel.description,
-                    "private": channel.private,
-                    "archived": channel.archived,
-                    "kind": match channel.channel_type {
-                        Some(ChannelType::Dm) => "dm",
-                        Some(ChannelType::Forum) => "forum",
-                        Some(ChannelType::Session) => "session",
-                        Some(ChannelType::Stream) | None => "stream",
-                    },
-                    "members": channel.members,
-                    "labels": channel.labels,
-                    "lastActivityAt": channel.last_activity_at,
-                    "readOnly": channel.read_only,
-                    "creator": channel.creator,
-                    "createdAt": channel.created_at,
-                    "parent": channel.parent_channel_id,
-                })
-            })
+            .map(channel_json)
             .collect(),
     )
+}
+
+/// One channel as plugins see it (`ChannelSummary`).
+pub fn channel_json(channel: &buzz_relay_client::ChannelSummary) -> Value {
+    use buzz_relay_client::ChannelType;
+    json!({
+        "id": channel.id,
+        "name": channel.name,
+        "description": channel.description,
+        "private": channel.private,
+        "archived": channel.archived,
+        // A channel without metadata yet is shown as a stream.
+        "kind": match channel.channel_type {
+            Some(ChannelType::Dm) => "dm",
+            Some(ChannelType::Forum) => "forum",
+            Some(ChannelType::Session) => "session",
+            Some(ChannelType::Stream) | None => "stream",
+        },
+        "typeKnown": channel.channel_type.is_some(),
+        "members": channel.members,
+        "participants": channel.participants,
+        "labels": channel.labels,
+        "lastActivityAt": channel.last_activity_at,
+        "updatedAt": channel.updated_at,
+        "preview": channel.preview,
+        "readOnly": channel.read_only,
+        "cached": channel.cached,
+        "hidden": channel.hidden,
+        "creator": channel.creator,
+        "createdAt": channel.created_at,
+        "parent": channel.parent_channel_id,
+    })
+}
+
+/// `channels/list`: the channel list with how far it got
+/// (`channels.list` with its `status` and `error`), and the DMs you hid.
+pub fn channel_list(cx: &App) -> Result<Value, Failure> {
+    use buzz_relay_client::session::{DmVisibilityStatus, RosterStatus};
+    let community = community(cx)?;
+    let snapshot = &community.read(cx).snapshot;
+    let (status, error) = match &snapshot.roster {
+        RosterStatus::Loading => ("loading", None),
+        RosterStatus::Ready => ("ready", None),
+        RosterStatus::Error(error) => ("error", Some(error.clone())),
+    };
+    let (hidden_status, hidden_error) = match &snapshot.dm_visibility {
+        DmVisibilityStatus::Idle => ("idle", None),
+        DmVisibilityStatus::Loading => ("loading", None),
+        DmVisibilityStatus::Ready => ("ready", None),
+        DmVisibilityStatus::Error(error) => ("error", Some(error.clone())),
+    };
+    Ok(json!({
+        "status": status,
+        "error": error,
+        "cached": snapshot.cached,
+        "channels": snapshot.channels.iter().map(channel_json).collect::<Vec<_>>(),
+        "hiddenDms": snapshot.hidden_dms.iter().collect::<Vec<_>>(),
+        "hiddenStatus": hidden_status,
+        "hiddenError": hidden_error,
+    }))
+}
+
+/// `channels/searchPublic`: open channels you have not joined whose name
+/// has `query` (or is it, with `exact`), as previews.
+pub fn search_public(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let query = text(params, "query").unwrap_or_default().to_owned();
+    let exact = params.get("exact").and_then(Value::as_bool) == Some(true);
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let page = session
+            .search_public_channel_page(&query, exact)
+            .await
+            .map_err(|error| (3, error))?;
+        Ok(json!({
+            "channels": page.channels.iter().map(channel_json).collect::<Vec<_>>(),
+            "partial": page.partial,
+        }))
+    }))
+}
+
+/// `channels/findLabeled`: the channels `creator` made with `label`,
+/// oldest first (NIP-CL `findLabeled`).
+pub fn find_labeled(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let creator = text(params, "creator")
+        .ok_or_else(|| invalid("creator is required"))?
+        .to_ascii_lowercase();
+    let label = text(params, "label")
+        .ok_or_else(|| invalid("label is required"))?
+        .to_owned();
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let found = session
+            .find_labeled(&creator, &label)
+            .await
+            .map_err(|error| (3, error))?;
+        Ok(Value::Array(found.iter().map(channel_json).collect()))
+    }))
+}
+
+/// `channels/resolve`: channels by id, whether or not you joined them,
+/// as the relay lets you read them (`channels.get`, `resolve`,
+/// `describe`); ones you cannot read are left out.
+pub fn resolve_channels(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let ids: Vec<String> = params
+        .get("ids")
+        .and_then(Value::as_array)
+        .filter(|ids| !ids.is_empty() && ids.len() <= 50)
+        .ok_or_else(|| invalid("ids must be a list of 1 to 50 channel ids"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let found = session
+            .resolve_channels(ids)
+            .await
+            .map_err(|error| (3, error))?;
+        Ok(Value::Array(found.iter().map(channel_json).collect()))
+    }))
 }
 
 /// What `session/watch` follows, as its JSON now.
@@ -1917,7 +2032,7 @@ pub fn watch_thread(
     cx: &mut App,
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    let channel = readable(params, community.read(cx))?;
     let root = event_id(params, "root")?.ok_or_else(|| invalid("root is required"))?;
     let view = community
         .read(cx)
@@ -1978,7 +2093,7 @@ pub fn watch(
     cx: &mut App,
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    let channel = readable(params, community.read(cx))?;
     let limit = limit(params);
     let view = community.read(cx).session.open_channel(&channel);
     let mut receiver = view.snapshot.clone();

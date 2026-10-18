@@ -579,3 +579,87 @@ pub fn change_sidebar(
     };
     Ok(cx.background_spawn(async move { task.await.map(|()| Value::Null) }))
 }
+
+fn role_name(role: buzz_relay_client::lifecycle::MemberRole) -> &'static str {
+    use buzz_relay_client::lifecycle::MemberRole;
+    match role {
+        MemberRole::Owner => "owner",
+        MemberRole::Admin => "admin",
+        MemberRole::Member => "member",
+        MemberRole::Guest => "guest",
+        MemberRole::Bot => "bot",
+        MemberRole::Unknown => "unknown",
+    }
+}
+
+/// `channels/members`: the channel's members with their roles, read
+/// fresh from the relay-signed roster, and what you may do to each
+/// (`memberAdministration`): change their role (`canManage`) or remove
+/// them, which you may also do to your own agents (`canRemove`).
+pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let (session, profiles) = {
+        let community = community.read(cx);
+        (
+            community.session.clone(),
+            community.snapshot.profiles.clone(),
+        )
+    };
+    let viewer = session.viewer().to_string();
+    Ok(on_tokio(cx, async move {
+        let state = session
+            .channel_state(&channel)
+            .await
+            .map_err(|error| (3, error))?;
+        let members: Vec<Value> = state
+            .roles
+            .iter()
+            .map(|(key, role)| {
+                let owner = profiles
+                    .get(key)
+                    .and_then(|profile| profile.owner_pubkey.clone());
+                json!({
+                    "pubkey": key,
+                    "role": role_name(*role),
+                    "canManage": state.can_manage_member(&viewer, key),
+                    "canRemove": state.can_remove_member(&viewer, key, owner.as_deref()),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "channel": channel,
+            "version": state.version.to_hex(),
+            "canManage": state.can_manage(&viewer),
+            "members": members,
+        }))
+    }))
+}
+
+/// `channels/lifecycle`: what you may do to the channel as a whole
+/// (`channelLifecycle.load`): archive, unarchive, delete, leave or hide
+/// it, and why leaving is not offered.
+pub fn lifecycle(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let session = community.read(cx).session.clone();
+    let viewer = session.viewer().to_string();
+    Ok(on_tokio(cx, async move {
+        let state = session
+            .channel_state(&channel)
+            .await
+            .map_err(|error| (3, error))?;
+        let can = state
+            .lifecycle(&viewer)
+            .map_err(|error| (3, error.to_string()))?;
+        Ok(json!({
+            "canArchive": can.can_archive,
+            "canUnarchive": can.can_unarchive,
+            "canDelete": can.can_delete,
+            "canLeave": can.can_leave,
+            "canHide": can.can_hide,
+            "leaveReason": can.leave_reason,
+            "deleteUnavailable": can.delete_unavailable,
+        }))
+    }))
+}
