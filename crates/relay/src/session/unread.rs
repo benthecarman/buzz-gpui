@@ -190,6 +190,12 @@ pub(super) enum Mark {
     ChannelUnread(String),
     /// Clears a device-local "Mark as Unread" (`clearUnreadLocal`).
     ClearChannelUnread(String),
+    /// A channel, thread or message marked unread on this device, or
+    /// that mark cleared (`markUnreadLocal`, `clearUnreadLocal`).
+    Local {
+        target: crate::read_state::ReadTarget,
+        clear: bool,
+    },
     /// A channel or thread, read through one of its messages.
     Through {
         channel: String,
@@ -1053,6 +1059,14 @@ impl Actor {
             Mark::ChannelUnread(channel) => unread
                 .mark_unread_local(sync, &ReadTarget::channel(channel), now)
                 .map(drop),
+            Mark::Local {
+                target,
+                clear: true,
+            } => unread.clear_unread_local(sync, &target, now).map(drop),
+            Mark::Local {
+                target,
+                clear: false,
+            } => unread.mark_unread_local(sync, &target, now).map(drop),
             Mark::Through {
                 channel,
                 root,

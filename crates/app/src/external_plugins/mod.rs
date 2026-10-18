@@ -376,25 +376,38 @@ impl ExternalPlugins {
         .detach();
         // Tells running plugins when the selected community, or its
         // connection, changes (`communityReader.subscribe`).
+        // `communities/changed` likewise follows joining and leaving.
         cx.spawn(async move |cx| {
-            let mut last = Value::Null;
+            let (mut last, mut last_list) = (Value::Null, Value::Null);
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
                 cx.update(|cx| {
+                    let ids: Vec<String> = cx
+                        .global::<Self>()
+                        .plugins
+                        .iter()
+                        .filter(|plugin| plugin.status == Status::Running)
+                        .filter_map(|plugin| plugin.id().map(str::to_owned))
+                        .collect();
                     let now = Self::current_community(cx);
                     if now != last {
                         last = now.clone();
-                        let ids: Vec<String> = cx
-                            .global::<Self>()
-                            .plugins
-                            .iter()
-                            .filter(|plugin| plugin.status == Status::Running)
-                            .filter_map(|plugin| plugin.id().map(str::to_owned))
-                            .collect();
-                        for id in ids {
-                            Self::notify_running(&id, "community/changed", now.clone(), cx);
+                        for id in &ids {
+                            Self::notify_running(id, "community/changed", now.clone(), cx);
+                        }
+                    }
+                    let list = Self::community_list(cx);
+                    if list != last_list {
+                        // Not on the first look: plugins read it at start.
+                        let first = last_list.is_null();
+                        last_list = list.clone();
+                        if !first {
+                            let params = json!({ "communities": list });
+                            for id in &ids {
+                                Self::notify_running(id, "communities/changed", params.clone(), cx);
+                            }
                         }
                     }
                 });
@@ -405,6 +418,27 @@ impl ExternalPlugins {
 
     /// `community/current`: the selected community, who the user is there,
     /// and its connection.
+    /// The communities you joined, and which one is selected.
+    fn community_list(cx: &App) -> Value {
+        let state = cx.global::<AppState>();
+        Value::Array(
+            state
+                .communities
+                .iter()
+                .enumerate()
+                .map(|(index, community)| {
+                    let community = community.read(cx);
+                    json!({
+                        "name": community.name(),
+                        "relay": community.origin.websocket(),
+                        "icon": community.icon(),
+                        "selected": state.selected == Some(index),
+                    })
+                })
+                .collect(),
+        )
+    }
+
     fn current_community(cx: &App) -> Value {
         let Some(community) = AppState::current(cx) else {
             return Value::Null;
@@ -1729,7 +1763,8 @@ impl ExternalPlugins {
             "navigation/retry" => Reply::Now(capabilities::retry_navigation(cx)),
             "outbox/get" => later(outbox::get(params, cx)),
             "archives/get" => later(channels::archives(params, cx)),
-            "read/clearLocal" => later(reading::clear_local(params, cx)),
+            "read/clearLocal" => later(reading::local(true, params, cx)),
+            "read/markLocal" => later(reading::local(false, params, cx)),
             "sessions/memberOf" => later(channels::member_of(params, cx)),
             "reminders/create" | "reminders/snooze" | "reminders/complete" | "reminders/cancel" => {
                 later(channels::change(method, params, cx))
@@ -1965,16 +2000,7 @@ impl ExternalPlugins {
                 Ok(Value::Null)
             }
             "community/current" => Ok(Self::current_community(cx)),
-            "community/list" => Ok(Value::Array(
-                cx.global::<AppState>()
-                    .communities
-                    .iter()
-                    .map(|community| {
-                        let community = community.read(cx);
-                        json!({ "name": community.name(), "relay": community.origin.websocket() })
-                    })
-                    .collect(),
-            )),
+            "community/list" => Ok(Self::community_list(cx)),
             "community/retry" => {
                 if let Ok(community) = capabilities::community(cx) {
                     community.read(cx).session.retry();

@@ -1304,6 +1304,25 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
         }
         _ => {}
     }
+    // `community: null` leaves for Personal space first (`scope: null`).
+    if params.get("community") == Some(&Value::Null) {
+        let place = place_of(params, cx)?;
+        if matches!(place, Place::Conversation { .. }) {
+            return Err(invalid("a conversation needs its community"));
+        }
+        navigation::with_workspace(cx, move |workspace, window, cx| {
+            workspace.select_personal(window, cx);
+            workspace.navigate(
+                Target {
+                    community: None,
+                    place,
+                },
+                window,
+                cx,
+            );
+        });
+        return Ok(Value::Null);
+    }
     let target = Target {
         community: scope(params, cx)?,
         place: place_of(params, cx)?,

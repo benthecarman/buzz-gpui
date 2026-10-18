@@ -143,15 +143,43 @@ pub fn message(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     }))
 }
 
-/// `read/clearLocal`: drops a channel's unread mark made on this device
-/// (`clearUnreadLocal`).
-pub fn clear_local(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+/// `read/markLocal` and `read/clearLocal`: marks a channel, a thread
+/// (`thread`, its root) or a message unread on this device only, or
+/// drops that mark (`markUnreadLocal`, `clearUnreadLocal`).
+pub fn local(
+    clear: bool,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::read_state::ReadTarget;
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    let channel_id = channel(params, community.read(cx))?;
+    let id = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|hex| {
+                EventId::from_hex(hex)
+                    .map(|id| id.to_hex())
+                    .map_err(|_| invalid(format!("{key} is not an event id")))
+            })
+            .transpose()
+    };
+    let target = match (id("thread")?, id("message")?) {
+        (Some(root_id), _) => ReadTarget::Thread {
+            channel_id,
+            root_id,
+        },
+        (None, Some(message_id)) => ReadTarget::Message {
+            channel_id,
+            message_id,
+        },
+        (None, None) => ReadTarget::Channel { channel_id },
+    };
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
-            .clear_unread_local(&channel)
+            .mark_local(target, clear)
             .await
             .map(|()| Value::Null)
             .map_err(|error| (3, error))
@@ -174,6 +202,8 @@ pub fn inbox(cx: &App) -> Result<Value, Failure> {
             "mentioned": item.mentioned,
             "thread": item.thread,
             "unreadCount": item.unread_count,
+            // Marked unread on this device (`read/markLocal`).
+            "manual": item.manual,
         })).collect::<Vec<_>>(),
         "error": state.inbox.error,
     }))

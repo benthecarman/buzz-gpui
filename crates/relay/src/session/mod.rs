@@ -1012,6 +1012,17 @@ impl Session {
         self.mark(Mark::ChannelUnread(channel.to_string())).await
     }
 
+    /// Marks a channel, thread or message unread on this device, or with
+    /// `clear` drops that mark (`markUnreadLocal`, `clearUnreadLocal`).
+    /// Never synced.
+    pub async fn mark_local(
+        &self,
+        target: crate::read_state::ReadTarget,
+        clear: bool,
+    ) -> Result<(), String> {
+        self.mark(Mark::Local { target, clear }).await
+    }
+
     /// Reads the channel, or with `root` that thread, through `message`.
     pub async fn mark_through(
         &self,
