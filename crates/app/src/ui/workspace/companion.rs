@@ -4,9 +4,11 @@
 
 use super::Workspace;
 use super::layout::{self, Split};
+use crate::ui::channel_panels;
 use crate::ui::pages::{self, Page};
 use crate::ui::panels::{self, Dock};
 use crate::ui::profile_panel::{self, ProfilePanel};
+use buzz_ui::IconName;
 use gpui_kit::*;
 use std::rc::Rc;
 
@@ -15,6 +17,14 @@ use std::rc::Rc;
 pub(super) enum Companion {
     /// A person's profile; the account menu opens the viewer's.
     Profile(Entity<ProfilePanel>),
+    /// A channel panel opened beside any page, from the header's launcher
+    /// or for a target outside a conversation.
+    Panel {
+        key: &'static str,
+        title: &'static str,
+        icon: IconName,
+        view: AnyView,
+    },
 }
 
 impl Workspace {
@@ -51,6 +61,87 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Shows panel `key`, or the panel that shows `target` when `None`,
+    /// beside the page, opened at `target`.
+    pub(crate) fn open_companion_panel(
+        &mut self,
+        key: Option<&str>,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(community) = self.community.clone() else {
+            return false;
+        };
+        let panel = match key {
+            Some(key) => channel_panels::get(key, cx),
+            None => channel_panels::resolve(target, cx),
+        };
+        let Some(panel) = panel else {
+            return false;
+        };
+        let channel = self
+            .channel
+            .as_ref()
+            .map(|page| page.read(cx).channel_id().to_string())
+            .unwrap_or_default();
+        let weak = cx.entity().downgrade();
+        // Closes this opening only, not a panel that replaced it.
+        let opening = self.companion_opening + 1;
+        let close: channel_panels::Close = Rc::new(move |window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.companion_opening == opening {
+                    this.close_companion(window, cx);
+                }
+            });
+        });
+        let view = (panel.build)(
+            channel_panels::Opening {
+                community,
+                channel,
+                target: target.to_owned(),
+                close,
+                thread: None,
+                root: None,
+            },
+            window,
+            cx,
+        );
+        self.companion = Some(Companion::Panel {
+            key: panel.key,
+            title: panel.title,
+            icon: panel.icon,
+            view,
+        });
+        self.companion_opening += 1;
+        cx.notify();
+        true
+    }
+
+    /// A header launcher: opens its panel beside the page, or closes it
+    /// when it shows.
+    pub(super) fn toggle_app_launcher(
+        &mut self,
+        key: &'static str,
+        target: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&self.companion, Some(Companion::Panel { key: open, .. }) if *open == key) {
+            self.close_companion(window, cx);
+        } else {
+            self.open_companion_panel(Some(key), target, window, cx);
+        }
+    }
+
+    /// The panel the companion shows, if any.
+    pub(super) fn companion_key(&self) -> Option<&'static str> {
+        match &self.companion {
+            Some(Companion::Panel { key, .. }) => Some(key),
+            _ => None,
+        }
+    }
+
     /// Closing returns focus to the account menu's trigger, which opened it.
     pub(super) fn close_companion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.companion.take().is_some() {
@@ -65,18 +156,30 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let Companion::Profile(view) = self.companion.clone()?;
         let weak = cx.entity().downgrade();
-        Some(panels::card(
-            "companion",
-            "Profile",
-            None,
-            view.into_any_element(),
-            Rc::new(move |window, cx| {
-                let _ = weak.update(cx, |this, cx| this.close_companion(window, cx));
-            }),
-            cx,
-        ))
+        let close: panels::Close = Rc::new(move |window, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_companion(window, cx));
+        });
+        Some(match self.companion.clone()? {
+            Companion::Profile(view) => panels::card(
+                "companion",
+                "Profile",
+                None,
+                view.into_any_element(),
+                close,
+                cx,
+            ),
+            Companion::Panel {
+                title, icon, view, ..
+            } => panels::card(
+                "companion",
+                title,
+                Some(icon),
+                view.into_any_element(),
+                close,
+                cx,
+            ),
+        })
     }
 
     /// The page region's width: the joined panel less the sidebar beside

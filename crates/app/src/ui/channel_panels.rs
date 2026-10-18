@@ -49,6 +49,15 @@ pub struct Launcher {
     pub target: Option<&'static str>,
 }
 
+/// A button in the app's header that opens the panel at `target` in the
+/// companion column, on any page (`Panel.launcher`).
+#[derive(Clone, Copy)]
+pub struct AppLauncher {
+    pub icon: IconName,
+    pub label: &'static str,
+    pub target: &'static str,
+}
+
 /// An entry in the channel's menu that opens the panel as a tab
 /// (`channelMenu`), such as "View channel usage".
 #[derive(Clone)]
@@ -89,6 +98,7 @@ pub struct ChannelPanel {
     /// Links this panel shows, opened as a tab beside the conversation.
     pub matches: Matches,
     pub launcher: Option<Launcher>,
+    pub app_launcher: Option<AppLauncher>,
     pub menu: Option<MenuEntry>,
     pub build: Build,
 }
@@ -180,6 +190,13 @@ pub fn menu_entries(channel: &ChannelSummary, cx: &App) -> Vec<(ChannelPanel, &'
         .collect()
 }
 
+pub fn app_launchers(cx: &App) -> Vec<(ChannelPanel, AppLauncher)> {
+    all(cx)
+        .into_iter()
+        .filter_map(|panel| Some((panel.clone(), panel.app_launcher?)))
+        .collect()
+}
+
 pub fn launchers(cx: &App) -> Vec<(ChannelPanel, Launcher)> {
     all(cx)
         .into_iter()
@@ -233,6 +250,7 @@ pub fn dev_sample(cx: &mut App) {
                 label: "View sample",
                 eligible: Rc::new(|_, _| true),
             }),
+            app_launcher: None,
             build: build(|opening, _, cx| cx.new(|_| Sample(opening)).into()),
         },
         cx,
@@ -253,6 +271,7 @@ mod tests {
             matches: matches(move |target| target.starts_with(prefix)),
             launcher: None,
             menu: None,
+            app_launcher: None,
             build: build(|_, _, _| unreachable!()),
         }
     }

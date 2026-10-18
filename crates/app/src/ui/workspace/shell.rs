@@ -274,11 +274,32 @@ impl Workspace {
                 )
                 .children(menu)
         });
+        // Panels' app launchers, which open beside any page.
+        let open_panel = self.companion_key();
+        let launchers: Vec<_> = crate::ui::channel_panels::app_launchers(cx)
+            .into_iter()
+            .filter(|_| self.community.is_some())
+            .map(|(panel, launcher)| {
+                let (key, target) = (panel.key, launcher.target);
+                IconButton::new(
+                    SharedString::from(format!("app-launcher-{key}")),
+                    launcher.icon,
+                )
+                .size(IconButtonSize::Sm)
+                .surface(Surface::Header)
+                .selected(open_panel == Some(key))
+                .tooltip(launcher.label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.toggle_app_launcher(key, target, window, cx)
+                }))
+            })
+            .collect();
         let actions = div()
             .flex()
             .flex_none()
             .items_center()
             .gap(rems(0.5))
+            .children(launchers)
             .child(
                 header_button("search", IconName::MagnifyingGlass)
                     .tooltip(format!(

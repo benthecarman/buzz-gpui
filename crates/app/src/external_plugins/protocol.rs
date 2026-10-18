@@ -452,6 +452,10 @@ pub struct PanelDecl {
     /// A button in the channel header that toggles the panel.
     #[serde(default)]
     pub launcher: Option<LauncherDecl>,
+    /// A button in the app's header that opens the panel at `target`
+    /// beside any page (`Panel.launcher`).
+    #[serde(default)]
+    pub app_launcher: Option<AppLauncherDecl>,
     /// An entry in the channel's menu that opens the panel as a tab.
     #[serde(default)]
     pub menu: Option<MenuDecl>,
@@ -467,6 +471,14 @@ pub struct LauncherDecl {
     /// What the panel opens showing; the channel's id when absent.
     #[serde(default)]
     pub target: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLauncherDecl {
+    #[serde(default)]
+    pub label: Option<String>,
+    pub target: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]

@@ -1220,11 +1220,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.page != Page::MESSAGES {
-            return false;
-        }
-        let Some((_, current)) = self.tab_key(cx) else {
-            return false;
+        // Outside a conversation, the panel shows beside the page.
+        let current = (self.page == Page::MESSAGES)
+            .then(|| self.tab_key(cx))
+            .flatten();
+        let Some((_, current)) = current else {
+            return self.open_companion_panel(key, target, window, cx);
         };
         let panel = match key {
             Some(key) => channel_panels::get(key, cx),

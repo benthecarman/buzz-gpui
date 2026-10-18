@@ -33,6 +33,7 @@ pub fn init(cx: &mut App) {
             title: "Agent Activity",
             icon: IconName::ListBullets,
             matches: channel_panels::matches(|target| selection(target).is_some()),
+            app_launcher: None,
             launcher: None,
             menu: None,
             build: channel_panels::build(|opening, window, cx| {

@@ -126,7 +126,11 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   own links and 100 for a catch-all.
 - `launcher` adds a button to the channel header. `placement` is `side` (the
   default) or `bottom`; `target` is what the panel opens showing (the
-  channel's id by default). `menu` (`{"label"}`) adds an entry to the channel's
+  channel's id by default). `appLauncher` (`{"label","target"}`) adds a
+  button to the app's header instead, which opens the panel at `target`
+  beside any page and keeps it there while you move between pages.
+  Outside a conversation, `ui/openPanel`, `panel/open` and a matching
+  link open the panel there too. `menu` (`{"label"}`) adds an entry to the channel's
   menu; `kinds` (such as `["stream", "forum"]`) and `private` (`true` or
   `false`) limit the channels it is offered in.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the

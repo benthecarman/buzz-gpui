@@ -32,6 +32,7 @@ pub fn init(cx: &mut App) {
             title: "GitHub",
             icon: IconName::GithubLogo,
             matches: channel_panels::matches(|target| references::parse(target).is_some()),
+            app_launcher: None,
             launcher: None,
             menu: None,
             build: channel_panels::build(|opening, window, cx| {

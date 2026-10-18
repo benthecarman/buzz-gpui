@@ -86,6 +86,7 @@ pub fn init(cx: &mut App) {
             title: "Profile",
             icon: IconName::User,
             matches: channel_panels::matches(|target| parse_target(target).is_some()),
+            app_launcher: None,
             launcher: None,
             menu: None,
             build: channel_panels::build(|opening, window, cx| {

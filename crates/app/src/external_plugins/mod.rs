@@ -36,7 +36,7 @@ mod workflows;
 
 use crate::community::AppState;
 use crate::runtime::Runtime;
-use crate::ui::channel_panels::{self, ChannelPanel, Launcher, MenuEntry, Placement};
+use crate::ui::channel_panels::{self, AppLauncher, ChannelPanel, Launcher, MenuEntry, Placement};
 use crate::ui::pages::{self, Page, PageSpec};
 use crate::ui::toasts::{self, Notice};
 use buzz_relay_client::ChannelType;
@@ -1075,6 +1075,11 @@ impl ExternalPlugins {
                                     && private.is_none_or(|private| private == channel.private)
                             }),
                         }
+                    }),
+                    app_launcher: panel.app_launcher.as_ref().map(|launcher| AppLauncher {
+                        icon: icon(panel.icon.as_deref()),
+                        label: launcher.label.clone().map_or(title, intern),
+                        target: intern(launcher.target.clone()),
                     }),
                     build: channel_panels::build(move |opening, window, cx| {
                         ExternalView::panel(&plugin, &contribution, opening, window, cx)

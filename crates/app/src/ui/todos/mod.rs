@@ -60,6 +60,7 @@ pub fn init(cx: &mut App) {
                 target: None,
             }),
             menu: None,
+            app_launcher: None,
             build: channel_panels::build(|opening, window, cx| {
                 cx.new(|cx| TodosPanel::new(opening, window, cx)).into()
             }),

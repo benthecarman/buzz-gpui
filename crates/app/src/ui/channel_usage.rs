@@ -39,6 +39,7 @@ pub fn init(cx: &mut App) {
             title: "Usage",
             icon: IconName::Browser,
             matches: channel_panels::matches(|_| false),
+            app_launcher: None,
             launcher: None,
             menu: Some(MenuEntry {
                 label: "View channel usage",
