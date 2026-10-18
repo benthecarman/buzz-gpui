@@ -377,8 +377,8 @@ Clicks, toggles and typing come back as events:
 | `composer` | `submit` (with `submit: "plugin"`) | the draft `{"content","mentions","references","attachments"}` |
 | `composer` | `ready` | `{"composer"}`, for `composer/insert` |
 | `message` | `openThread` (its replies summary) | `{"message","root","channel"}` |
-| `message` | `react` (a reaction pill) | `{"message","root","channel","emoji"}`: react or unreact with `messages/react` or `messages/delete` |
-| `message` | `addReaction` | `{"message","channel"}`: show your own picker, or react |
+| `message` | `reply` (Reply in its action bar) | `{"message","root","channel"}`: open its thread, or embed a composer for it |
+| `message` | `edit` (Edit message) | `{"message","root","channel","content"}` |
 
 ### 5. `view/close` (notification from Buzz)
 
@@ -410,7 +410,7 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `progress` | `value`, from 0 to 1 |
 | `image` | `url` (https, or the community's media), `width` and `height` (pixels, up to 1200), `alt` |
 | `composer` | `id`, `channel`, `thread` (optional root), `parent` (optional: the reply it answers in the thread), `placeholder`, `disabled`, `autoFocus`, `draft` (text it starts with, put back whenever it changes), `submit`: Buzz's own composer (only in views, not renderers). Once made it sends `ready` with `{"composer"}`, an id for `composer/insert` and `composer/insertMentions`. It sends as the channel's does, then sends `sent` with the message `{"id"}`. With `submit: "plugin"` it sends nothing: the plugin gets `submit` with the draft `{"content","mentions","references","attachments"}` (attachments already uploaded) and sends it itself, such as once the channel it needs exists. The draft stays, locked, until the plugin calls `composer/settle`. |
-| `message` | `id`, `channel`, `message` (an event id): one message as Buzz draws it in a conversation, with its byline, attachments and reactions, kept up to date (only in views). A failed send of yours retries from it. What the reader does on it goes to the plugin, which decides what happens: see the events below. |
+| `message` | `id`, `channel`, `message` (an event id): one message as Buzz draws it in a conversation, with its byline, attachments and reactions, kept up to date (only in views). It has the conversation's own action bar: reactions and the picker, copying, read state, follows, delete, report and plugins' message actions all work as in a channel, and a failed send of yours retries from it. Replying, editing and opening its thread go to the plugin, which decides where they happen: see the events below. |
 | `thread` | `id`, `channel`, `root`, `height` (pixels, default 480): Buzz's own thread view; closing it sends `close` (only in views) |
 | `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |

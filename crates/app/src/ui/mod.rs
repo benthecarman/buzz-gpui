@@ -45,7 +45,7 @@ pub(crate) mod media;
 mod members;
 mod membership;
 pub(crate) mod message;
-mod message_actions;
+pub(crate) mod message_actions;
 mod message_copy;
 mod message_edit;
 pub mod mission_control;

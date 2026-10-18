@@ -701,7 +701,7 @@ impl ExternalView {
                                 });
                             cx.new(|cx| {
                                 super::message_view::MessageView::new(
-                                    community, channel, message, send, cx,
+                                    community, channel, message, send, window, cx,
                                 )
                             })
                             .into()

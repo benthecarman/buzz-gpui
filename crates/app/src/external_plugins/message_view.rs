@@ -1,13 +1,15 @@
 //! A message a plugin view shows as Buzz draws it in a conversation
-//! (`conversation.ui.Message`): byline, text, attachments and reactions.
-//! Opening its thread, replying and picking a reaction go to the plugin,
-//! which decides what they do (`onOpenThread`, `onReply`); a failed send
-//! retries in place.
+//! (`conversation.ui.Message`): byline, text, attachments and reactions,
+//! with the conversation's own action bar, reactions, copying, read
+//! state, follows, delete and report. Replying, editing and opening its
+//! thread go to the plugin, which decides where they happen (`onReply`,
+//! `onOpenThread`).
 
 use crate::community::Community;
 use crate::runtime::Runtime;
 use crate::ui::markdown::Directory;
 use crate::ui::message::{self, Item, Rows};
+use crate::ui::message_actions::{Hooks, MessageActions};
 use buzz_relay_client::fold::MessageRow;
 use buzz_relay_client::session::ThreadView;
 use buzz_relay_client::{EventId, ThreadStatus};
@@ -21,13 +23,22 @@ pub type Send = Rc<dyn Fn(&str, serde_json::Value, &mut App)>;
 
 pub struct MessageView {
     community: Entity<Community>,
-    send: Send,
     channel: String,
     row: Option<Arc<MessageRow>>,
     /// The message could not be read.
     missing: bool,
+    actions: Entity<MessageActions>,
     _thread: ThreadView,
     _follow: Task<()>,
+    _actions: Subscription,
+}
+
+fn ids(row: &MessageRow) -> serde_json::Value {
+    serde_json::json!({
+        "message": row.id.to_hex(),
+        "root": row.thread_root_id.map(|root| root.to_hex()),
+        "channel": &*row.channel,
+    })
 }
 
 impl MessageView {
@@ -37,6 +48,7 @@ impl MessageView {
         channel: String,
         message: EventId,
         send: Send,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let thread = community
@@ -76,20 +88,46 @@ impl MessageView {
                 }
             }
         });
+        let find = cx.entity().downgrade();
+        let (reply, open, edit) = (send.clone(), send.clone(), send);
+        let hooks = Hooks {
+            reply: Rc::new(move |row, _, cx| reply("reply", ids(&row), cx)),
+            open_thread: Some(Rc::new(move |row, _, cx| open("openThread", ids(&row), cx))),
+            edit: Rc::new(move |row, _, cx| {
+                let mut value = ids(&row);
+                value["content"] = row.content.clone().into();
+                edit("edit", value, cx)
+            }),
+            focus_composer: Rc::new(|_, _| {}),
+            thread_root: None,
+            find: Rc::new(move |id, cx| {
+                find.upgrade()
+                    .and_then(|view| view.read(cx).row.clone())
+                    .filter(|row| row.id == id)
+            }),
+            thread: None,
+            composer: WeakEntity::new_invalid(),
+        };
+        let actions = {
+            let (community, channel) = (community.clone(), channel.clone());
+            cx.new(|cx| MessageActions::new(community, channel, hooks, window, cx))
+        };
+        let observe = cx.observe(&actions, |_, _, cx| cx.notify());
         Self {
             community,
-            send,
             channel,
             row: None,
             missing: false,
+            actions,
             _thread: thread,
             _follow: follow,
+            _actions: observe,
         }
     }
 }
 
 impl Render for MessageView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let Some(row) = self.row.clone() else {
             let text = if self.missing {
@@ -104,55 +142,17 @@ impl Render for MessageView {
                 .into_any_element();
         };
         let community = self.community.read(cx);
-        let summary = community
+        let members = community
             .snapshot
             .channels
             .iter()
             .find(|channel| channel.id == self.channel)
-            .cloned();
-        let members = summary.as_ref().map(|channel| channel.members.clone());
+            .map(|channel| channel.members.clone());
         let mut rows = Rows::new(
             community.session.viewer(),
             Directory::of(community, members.as_deref(), cx),
         );
-        // What the viewer may do in it, such as react.
-        rows.channel = summary;
-        let ids = |row: &MessageRow| {
-            serde_json::json!({
-                "message": row.id.to_hex(),
-                "root": row.thread_root_id.map(|root| root.to_hex()),
-                "channel": &*row.channel,
-            })
-        };
-        let send = self.send.clone();
-        rows.actions.on_open_thread =
-            Some(Rc::new(move |row, _, cx| send("openThread", ids(row), cx)));
-        let session = community.session.clone();
-        rows.actions.on_retry = Some(Rc::new(move |row, _, cx| {
-            let (session, id) = (session.clone(), row.id);
-            Runtime::handle(cx).spawn(async move {
-                let _ = session.retry_send(id).await;
-            });
-        }));
-        let send = self.send.clone();
-        rows.actions.on_command = Some(Rc::new(move |row, command, _, cx| match command {
-            message::Command::Reply => send("reply", ids(row), cx),
-            message::Command::React { content, .. } => {
-                let mut value = ids(row);
-                value["emoji"] = content.into();
-                send("react", value, cx)
-            }
-            _ => {}
-        }));
-        // "Add reaction" asks the plugin, which may open its own picker
-        // or react with `messages/react`.
-        let (send, channel) = (self.send.clone(), self.channel.clone());
-        rows.actions.on_popup = Some(Rc::new(move |popup, _, cx| {
-            if let Some((message, message::Popup::Picker { .. })) = popup {
-                let value = serde_json::json!({ "message": message.to_hex(), "channel": channel });
-                send("addReaction", value, cx);
-            }
-        }));
+        MessageActions::fill(&self.actions, &mut rows, cx);
         let rows = Rc::new(rows);
         let item = Item {
             row,
@@ -160,6 +160,13 @@ impl Render for MessageView {
             day: None,
             group: None,
         };
-        message::render(&item, &rows, cx)
+        let overlays = self
+            .actions
+            .update(cx, |actions, cx| actions.overlays(window, cx));
+        div()
+            .relative()
+            .child(message::render(&item, &rows, cx))
+            .children(overlays)
+            .into_any_element()
     }
 }
