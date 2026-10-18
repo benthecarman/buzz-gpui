@@ -697,10 +697,10 @@ impl Chord {
         if key.is_empty() || key.chars().count() > 16 {
             return Err(format!("“{text}” has no key."));
         }
-        if !chord.primary && !chord.alt {
-            return Err(format!(
-                "“{text}” needs mod or alt, so typing is not taken."
-            ));
+        // Keys typed with Shift, such as `?`, arrive without it, as the
+        // symbol alone; a browser's `shift+?` is the same press.
+        if key.chars().count() == 1 && key.to_lowercase() == key.to_uppercase() {
+            chord.shift = false;
         }
         chord.key = key.to_string();
         Ok(chord)

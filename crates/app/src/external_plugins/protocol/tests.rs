@@ -255,8 +255,8 @@ fn every_kind_of_contribution_is_checked() {
             "MIME",
         ),
         (
-            json!({ "shortcuts": [{ "id": "s", "title": "S", "keys": ["k"] }] }),
-            "needs mod or alt",
+            json!({ "shortcuts": [{ "id": "s", "title": "S", "keys": ["shift+"] }] }),
+            "has no key",
         ),
         (
             json!({ "shortcuts": [{ "id": "s", "title": "S", "keys": ["hyper+k"] }] }),
@@ -318,6 +318,9 @@ fn chords_parse() {
     );
     assert!(Chord::parse("alt+1").unwrap().alt);
     assert!(Chord::parse("mod+").is_err());
+    assert!(!Chord::parse("j").unwrap().primary);
+    assert!(!Chord::parse("shift+?").unwrap().shift);
+    assert!(Chord::parse("shift+j").unwrap().shift);
 }
 
 #[test]
