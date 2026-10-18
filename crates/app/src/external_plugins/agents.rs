@@ -1578,6 +1578,78 @@ pub fn port(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
     }))
 }
 
+/// Handles plugins hold open with `agent/open`: by call id, the plugin
+/// and the guard that keeps the call open.
+type Opened = HashMap<u64, (String, Box<dyn std::any::Any + Send>)>;
+
+static OPENED: Mutex<Option<Opened>> = Mutex::new(None);
+
+fn opened<R>(f: impl FnOnce(&mut Opened) -> R) -> R {
+    let mut opened = OPENED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(opened.get_or_insert_with(HashMap::new))
+}
+
+/// `agent/open`: acts as one of the plugin's agents outside any run, for
+/// as long as the agent exists here (`AgentHandle`): the answer's `call`
+/// works with `agent/tool`, `agent/publish`, `agent/query` and
+/// `agent/upload` until `agent/close` or the plugin stops. `channel` and
+/// `root` set where its tools default to.
+pub fn open_agent(plugin: &str, params: &Value, cx: &App) -> Result<Value, Failure> {
+    let pubkey = params
+        .get("agent")
+        .and_then(Value::as_str)
+        .ok_or((INVALID_PARAMS, "agent (a pubkey) is required".to_owned()))?
+        .to_ascii_lowercase();
+    let service = agents2(cx)?;
+    let service = service.read(cx);
+    let prefix = format!("{plugin}/");
+    let ours = service
+        .agents()
+        .iter()
+        .any(|agent| agent.pubkey == pubkey && agent.agent_type.starts_with(&prefix));
+    if !ours {
+        return Err((
+            INVALID_PARAMS,
+            "agent is not one of this plugin's agents on this device".to_owned(),
+        ));
+    }
+    let handle = service
+        .handle_of(&pubkey, cx)
+        .ok_or((3, "The agent does not run on this device now.".to_owned()))?;
+    let attention = AgentActions::attention(&handle);
+    let client: Arc<dyn BuzzClient> = Arc::new(HandleClient(Arc::new(handle)));
+    let text = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+    let context = Context {
+        channel: text("channel"),
+        root: text("root"),
+        top_level: false,
+    };
+    let (call, guard) = open(plugin, client, context, attention);
+    opened(|opened| opened.insert(call, (plugin.to_owned(), Box::new(guard))));
+    Ok(json!({ "call": call }))
+}
+
+/// `agent/close`: drops a handle from `agent/open`.
+pub fn close_agent(plugin: &str, params: &Value) -> Result<Value, Failure> {
+    let call = params
+        .get("call")
+        .and_then(Value::as_u64)
+        .ok_or((INVALID_PARAMS, "call is required".to_owned()))?;
+    opened(|opened| {
+        if opened.get(&call).is_some_and(|(owner, _)| owner == plugin) {
+            opened.remove(&call);
+        }
+    });
+    Ok(Value::Null)
+}
+
+/// Drops every handle a plugin opened, as it stops.
+pub fn close_all(plugin: &str) {
+    opened(|opened| opened.retain(|_, (owner, _)| owner != plugin));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -271,10 +271,14 @@ the answer until the agent's name or config changes:
   what this type starts with; `agent/save` then makes the change with that
   config.
 
-While a call or run is open, the plugin can act as its agent:
+While a call or run is open, the plugin can act as its agent. A run that
+must keep working after it answers (buzz-app's `workingUntil`) answers, then
+opens a call of its own with `agent/open` and acts through that:
 
 | Request | Params | Result |
 | --- | --- | --- |
+| `agent/open` | `agent` (the pubkey of one of your type's agents on this device), `channel`, `root` (optional) | `{"call"}`, a call that stays open until `agent/close` or the plugin stops |
+| `agent/close` | `call` | `null` |
 | `agent/tool` | `call` or `run`, `tool` (a Buzz tool, such as `send`, `read`, `react` or `channels`, or in a run one of the attention tools, such as `watch_add`), `arguments` | The tool's answer: `{"text"}` or `{"image"}` |
 | `agent/step` | `run`, `tool`, `target` (optional) | `null`. Shows what the run is doing on its message, such as `read` on a channel. |
 | `agent/acknowledged`, `agent/superseded`, `agent/ignored` | `run` | `null`. Marks the run's message as taken up, as replaced by a newer request (its bubble hides), or as declined (nothing shows). |

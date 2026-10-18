@@ -958,6 +958,7 @@ impl ExternalPlugins {
         plugin.status = status;
         if let Some(id) = plugin.id() {
             contribute::forget(id);
+            agents::close_all(id);
         }
         if off {
             let added = std::mem::take(&mut plugin.added);
@@ -1967,6 +1968,19 @@ impl ExternalPlugins {
             }
             "agents/previewRetype" => Reply::Now(agents::preview_retype(params, cx)),
             "format/time" => Reply::Now(capabilities::format_time(params)),
+            "agent/open" | "agent/close" => {
+                let plugin = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned));
+                Reply::Now(match plugin {
+                    Some(plugin) if method == "agent/open" => {
+                        agents::open_agent(&plugin, params, cx)
+                    }
+                    Some(plugin) => agents::close_agent(&plugin, params),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                })
+            }
             "agents/dismissError" => Reply::Now(agents::dismiss_error(params, cx)),
             "agents/clearActivity" => Reply::Now(agents::clear_activity(params, cx)),
             "agents/portable" => later(agents::portable(cx)),

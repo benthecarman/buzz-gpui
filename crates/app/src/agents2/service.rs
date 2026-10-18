@@ -963,6 +963,22 @@ impl Agents2 {
     }
 
     /// The host holding the agent's key.
+    /// A handle that acts as agent `pubkey` while it exists here, outside
+    /// any run (`AgentHandle` "works for as long as the agent exists").
+    pub(crate) fn handle_of(&self, pubkey: &str, cx: &App) -> Option<AgentHandle> {
+        let agent = self.live(pubkey)?;
+        let host = self.host_of(pubkey)?;
+        let runner = self.runners.get(pubkey)?;
+        Some(AgentHandle {
+            pubkey: agent.summary.pubkey.clone(),
+            name: agent.summary.name.clone(),
+            owner: agent.summary.owner.clone(),
+            host: link(&host, cx),
+            wrote: runner.wrote.clone(),
+            attention: self.attention(pubkey),
+        })
+    }
+
     pub fn host_of(&self, pubkey: &str) -> Option<Entity<HostConnection>> {
         self.saved()
             .find(|saved| saved.summary.pubkey == pubkey)
