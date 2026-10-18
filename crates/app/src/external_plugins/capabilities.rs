@@ -796,12 +796,23 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             }
         }
         Some("conversation") => {
-            let community = community(cx)?;
-            let community = community.read(cx);
+            // Any well-formed id: the visit looks up a channel not listed
+            // here, such as an open one you have not joined, and fails as
+            // `not-found` when there is none (`open()`).
+            let channel = text(params, "channel")
+                .filter(|id| {
+                    !id.is_empty()
+                        && id.len() <= 128
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+                .ok_or_else(|| invalid("channel is required"))?
+                .to_owned();
             let message = event_id(params, "message")?;
             let thread = event_id(params, "thread")?;
             Place::Conversation {
-                channel: channel(params, community)?,
+                channel,
                 message: message.or(thread),
                 thread,
                 members: params.get("members").and_then(Value::as_bool) == Some(true),
@@ -867,26 +878,41 @@ fn place_json(target: &Target, cx: &App) -> Value {
 
 /// `navigation/get`: where the window is, as `ui/navigate` takes it, and
 /// whether Back and Forward go anywhere.
+/// buzz-app's `OpenFailure` for `reason`.
+fn reason_name(reason: crate::ui::channel_states::Reason) -> &'static str {
+    use crate::ui::channel_states::Reason;
+    match reason {
+        Reason::Denied => "denied",
+        Reason::Invalid => "invalid-target",
+        Reason::Page => "unavailable",
+        Reason::NotFound => "not-found",
+        Reason::Timeout => "timeout",
+        Reason::HostError => "host-error",
+    }
+}
+
 pub fn navigation_state(cx: &App) -> Value {
     let Some(workspace) = navigation::workspace(cx) else {
         return Value::Null;
     };
-    use crate::ui::channel_states::Reason;
     let workspace = workspace.read(cx);
     let (here, back, forward) = workspace.location();
     let failed = workspace.failed().map(|(failed, retryable)| {
         json!({
             "place": failed.target.as_ref().map(|target| place_json(target, cx)),
-            "reason": match failed.reason {
-                Reason::Denied => "denied",
-                Reason::Invalid => "invalid",
-                Reason::Unavailable => "unavailable",
-            },
+            "reason": reason_name(failed.reason),
             "retryable": retryable,
+            "ingress": failed.ingress,
         })
     });
+    let (attempt, opening) = workspace.visit();
     json!({
-        "status": if failed.is_some() { "failed" } else { "opened" },
+        "status": match (&failed, opening) {
+            (Some(_), _) => "failed",
+            (None, true) => "opening",
+            (None, false) => "opened",
+        },
+        "entry": attempt,
         "place": here.map(|here| place_json(&here, cx)),
         "failed": failed,
         "canGoBack": back,
@@ -1557,15 +1583,63 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 
 /// `ui/navigate`: shows a page, Settings or a conversation, as a new
 /// visit or, with `replace`, in place of the current one.
-pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
+/// `ui/navigate`: answers once the visit settles, as buzz-app's
+/// `open()` resolves with an `OpenResult`: `opened`, `failed` with its
+/// `reason`, or `superseded` by another visit. Back and Forward answer
+/// at once.
+pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let before = navigation::workspace(cx).map(|workspace| workspace.read(cx).visit().0);
+    let tracked = start_navigation(params, cx)?;
+    let Some(before) = before.filter(|_| tracked) else {
+        return Ok(Task::ready(Ok(Value::Null)));
+    };
+    Ok(cx.spawn(async move |cx| {
+        let mut ours = None;
+        // As long as a visit may take to open (`OPEN_TIMEOUT`), and a bit.
+        for _ in 0..170 {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            let state = cx.update(|cx| {
+                navigation::workspace(cx).map(|workspace| {
+                    let workspace = workspace.read(cx);
+                    (
+                        workspace.visit(),
+                        workspace.failed().map(|(failed, _)| failed.reason),
+                    )
+                })
+            });
+            let Some(((attempt, opening), failure)) = state else {
+                break;
+            };
+            if attempt == before {
+                continue;
+            }
+            if *ours.get_or_insert(attempt) != attempt {
+                return Ok(json!({ "status": "superseded" }));
+            }
+            if let Some(reason) = failure {
+                return Ok(json!({ "status": "failed", "reason": reason_name(reason) }));
+            }
+            if !opening {
+                return Ok(json!({ "status": "opened" }));
+            }
+        }
+        Ok(json!({ "status": "failed", "reason": "timeout" }))
+    }))
+}
+
+/// Starts a navigation; `false` for Back and Forward, which are not
+/// followed.
+fn start_navigation(params: &Value, cx: &mut App) -> Result<bool, Failure> {
     match text(params, "to") {
         Some("back") => {
             cx.dispatch_action(&crate::ui::navigation::GoBack);
-            return Ok(Value::Null);
+            return Ok(false);
         }
         Some("forward") => {
             cx.dispatch_action(&crate::ui::navigation::GoForward);
-            return Ok(Value::Null);
+            return Ok(false);
         }
         _ => {}
     }
@@ -1586,7 +1660,7 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
                 cx,
             );
         });
-        return Ok(Value::Null);
+        return Ok(true);
     }
     let target = Target {
         community: scope(params, cx)?,
@@ -1597,17 +1671,17 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
         navigation::with_workspace(cx, move |workspace, window, cx| {
             workspace.navigate_keeping_focus(target, replace, window, cx)
         });
-        return Ok(Value::Null);
+        return Ok(true);
     }
     if replace {
         navigation::with_workspace(cx, move |workspace, window, cx| {
             workspace.navigate_replacing(target, window, cx)
         });
-        return Ok(Value::Null);
+        return Ok(true);
     }
     let sender = navigation::sender(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let _ = sender.unbounded_send(Request::Open(target).into());
-    Ok(Value::Null)
+    Ok(true)
 }
 
 /// The community a navigation targets: `community` (a joined community's

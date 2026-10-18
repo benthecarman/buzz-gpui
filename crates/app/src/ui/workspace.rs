@@ -836,7 +836,27 @@ impl Workspace {
         self.retry_navigation(window, cx);
     }
 
-    /// Goes to `target` as a new visit.
+    /// The visit being opened, by attempt, and whether it is still
+    /// opening: its channel listed or looked up.
+    pub(crate) fn visit(&self) -> (u64, bool) {
+        (
+            self.attempts,
+            self.resolving.is_some() || self.pending.is_some() || self.pending_listing,
+        )
+    }
+
+    /// The page showing the current visit says it cannot
+    /// (`PageNavigation.complete({status: "failed"})`): the visit fails,
+    /// kept for Retry navigation.
+    pub(crate) fn fail_visit(&mut self, cx: &mut Context<Self>) {
+        self.failure = Some(super::channel_states::Failed {
+            target: self.history.current().cloned(),
+            reason: super::channel_states::Reason::Page,
+            ingress: false,
+        });
+        cx.notify();
+    }
+
     /// Opens `target` without moving the focus, for a plugin control
     /// that keeps it (`focus: "preserve"`).
     pub fn navigate_keeping_focus(
@@ -855,6 +875,7 @@ impl Workspace {
         self.keep_focus = false;
     }
 
+    /// Goes to `target` as a new visit.
     pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_outside_settings(&target);
         self.history.push(target.clone());
@@ -962,7 +983,7 @@ impl Workspace {
                     this.pending_listing = false;
                     this.failure = Some(Failed {
                         target: Some(target),
-                        reason: Reason::Unavailable,
+                        reason: Reason::Timeout,
                         ingress,
                     });
                     cx.notify();
@@ -1160,6 +1181,11 @@ impl Workspace {
                     else {
                         return;
                     };
+                    let reason = if found.is_ok() {
+                        Reason::NotFound
+                    } else {
+                        Reason::HostError
+                    };
                     match found
                         .ok()
                         .and_then(|list| list.into_iter().find(|c| c.id == id))
@@ -1171,7 +1197,7 @@ impl Workspace {
                             tracing::warn!(channel = %id, "that channel is not available here");
                             this.failure = Some(Failed {
                                 target: Some(target),
-                                reason: Reason::Unavailable,
+                                reason,
                                 ingress: false,
                             });
                         }

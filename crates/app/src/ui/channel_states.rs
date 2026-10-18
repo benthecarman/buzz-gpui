@@ -121,8 +121,15 @@ pub enum Reason {
     Denied,
     /// An outside link that cannot be parsed.
     Invalid,
-    /// Not there, or it timed out; kept for retry.
-    Unavailable,
+    /// The conversation is not there (`not-found`).
+    NotFound,
+    /// It took too long to open (`timeout`).
+    Timeout,
+    /// The relay could not be asked (`host-error`).
+    HostError,
+    /// The page that shows it says it failed (`PageNavigation.complete`);
+    /// `unavailable` to plugins.
+    Page,
 }
 
 /// A navigation that could not open, kept for Retry navigation.
@@ -271,7 +278,7 @@ mod tests {
             "This link is invalid or unsupported."
         );
         assert!(!invalid.retryable());
-        let kept = failed(Reason::Unavailable, true, true);
+        let kept = failed(Reason::Timeout, true, true);
         assert!(kept.explanation().ends_with("kept for retry."));
         assert!(kept.retryable());
     }

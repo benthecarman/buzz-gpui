@@ -430,6 +430,11 @@ impl ExternalView {
     }
 
     /// `view/open`'s params.
+    /// What it is: `page`, `panel`, `dialog` and so on.
+    pub(super) fn kind(&self) -> &'static str {
+        self.kind
+    }
+
     pub(super) fn open_params(&self) -> Value {
         let opening = self.opening.as_ref();
         let (agent, kind, conversation, pending) = match &self.agent {

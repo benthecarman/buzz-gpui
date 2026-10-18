@@ -1854,6 +1854,34 @@ impl ExternalPlugins {
                     ))
                 })
             }
+            "page/settle" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                if view.is_none_or(|view| view.read(cx).kind() != "page") {
+                    return Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "page/settle takes an open page view".to_owned(),
+                    )));
+                }
+                match params.get("status").and_then(Value::as_str) {
+                    Some("failed") => {
+                        crate::ui::navigation::with_workspace(cx, |workspace, _, cx| {
+                            workspace.fail_visit(cx)
+                        });
+                        Reply::Now(Ok(Value::Null))
+                    }
+                    Some("opened") => Reply::Now(Ok(Value::Null)),
+                    _ => Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "status is opened or failed".to_owned(),
+                    ))),
+                }
+            }
             "ui/closeView" => {
                 let view = params.get("view").and_then(Value::as_str).and_then(|view| {
                     cx.global_mut::<Self>()
@@ -2210,7 +2238,7 @@ impl ExternalPlugins {
             "agents/clearActivity" => Reply::Now(agents::clear_activity(params, cx)),
             "agents/portable" => later(agents::portable(cx)),
             "agents/watch" => Self::watch(path, generation, "agents/watch", params, cx),
-            "ui/navigate" => Reply::Now(capabilities::navigate(params, cx)),
+            "ui/navigate" => later(capabilities::navigate(params, cx)),
             "ui/openLink" => Reply::Now(capabilities::open_link(params, cx)),
             _ => Reply::Now(Self::answer_now(method, params, cx)),
         }
