@@ -757,7 +757,7 @@ impl ExternalView {
                         }
                     });
                     // The id `composer/insert` and the like take.
-                    let number = super::contribute::composer_id(&composer);
+                    let number = super::contribute::composer_id(&self.plugin, &composer);
                     self.event(id, "ready", Some(json!({ "composer": number })), cx);
                     let element = id.to_owned();
                     let subscription = cx.subscribe_in(

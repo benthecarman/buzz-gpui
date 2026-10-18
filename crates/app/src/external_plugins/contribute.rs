@@ -104,7 +104,12 @@ thread_local! {
     static MARKS: RefCell<HashMap<String, HashSet<String>>> = RefCell::default();
     /// A page's badge text and tone, by page key.
     static BADGES: RefCell<HashMap<String, (String, BadgeTone)>> = RefCell::default();
-    static COMPOSERS: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    /// Composer ids handed to plugins, each for one plugin's tool or
+    /// embedded composer: writes through it stop once that is gone
+    /// (`ComposerToolProps` live only as long as the tool).
+    static COMPOSERS: RefCell<HashMap<u64, Grant>> = RefCell::default();
+    /// Draft attachments a plugin's renderer was offered to remove, by url.
+    static REMOVERS: RefCell<HashMap<String, String>> = RefCell::default();
     /// Settings cards a plugin hid or marked pending, by key.
     static CARD_STATES: RefCell<HashMap<String, crate::ui::settings::cards::CardVisibility>> =
         RefCell::default();
@@ -414,7 +419,22 @@ pub fn init(cx: &mut App) {
 }
 
 /// Forgets what `plugin` answered and marked, when it restarts or stops.
+/// Whether the draft at `url` can be removed, noting that `plugin`
+/// was offered it.
+fn removable(plugin: &str, url: &str) -> bool {
+    let removable = crate::ui::renderers::is_removable(url);
+    REMOVERS.with_borrow_mut(|removers| {
+        removers.retain(|url, _| crate::ui::renderers::is_removable(url));
+        if removable {
+            removers.insert(url.to_owned(), plugin.to_owned());
+        }
+    });
+    removable
+}
+
 pub fn forget(plugin: &str) {
+    COMPOSERS.with_borrow_mut(|composers| composers.retain(|_, grant| grant.plugin != plugin));
+    REMOVERS.with_borrow_mut(|removers| removers.retain(|_, owner| owner != plugin));
     let prefix = format!("{plugin}/");
     ANSWERS.with_borrow_mut(|answers| {
         answers
@@ -898,7 +918,7 @@ impl AttachmentRenderer for AttachmentView {
                         "blurhash": attachment.blurhash,
                         "previewUrl": attachment.preview_url,
                     },
-                    "removable": crate::ui::renderers::is_removable(&attachment.url),
+                    "removable": removable(&self.plugin, &attachment.url),
                 })
             },
             cx,
@@ -1124,7 +1144,7 @@ pub fn open_popover(
         .get("composer")
         .and_then(Value::as_u64)
         .ok_or((protocol::INVALID_PARAMS, "composer is required".to_owned()))?;
-    if !COMPOSERS.with_borrow(|composers| composers.contains_key(&composer)) {
+    if granted(plugin, composer).is_none() {
         return Err((1, "That composer is closed.".to_owned()));
     }
     let close: crate::ui::account_actions::Close = Rc::new(|_, cx| close_popover(cx));
@@ -1262,7 +1282,7 @@ impl Render for Tool {
 }
 
 /// `composer/insert`: puts text at a composer's caret.
-pub fn insert(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+pub fn insert(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
     let id = params
         .get("composer")
         .and_then(Value::as_u64)
@@ -1273,9 +1293,7 @@ pub fn insert(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failu
         .filter(|text| !text.is_empty() && text.chars().count() <= 10_000)
         .ok_or((protocol::INVALID_PARAMS, "text is required".to_owned()))?
         .to_owned();
-    let composer = COMPOSERS
-        .with_borrow(|composers| composers.get(&id).and_then(WeakEntity::upgrade))
-        .ok_or((1, "That composer is closed.".to_owned()))?;
+    let composer = granted(plugin, id).ok_or((1, "That composer is closed.".to_owned()))?;
     if composer.read(cx).disabled(cx) {
         return Err((1, "That composer cannot be written in now.".to_owned()));
     }
@@ -1292,19 +1310,70 @@ pub fn insert(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failu
 
 /// The open composer `params.composer` names, and the window it is in.
 /// A composer id `composer/insert` and the like take, for `composer`.
-pub(super) fn composer_id(composer: &Entity<Composer>) -> u64 {
+pub(super) fn composer_id(plugin: &str, composer: &Entity<Composer>) -> u64 {
+    grant(plugin, composer.downgrade(), None)
+}
+
+struct Grant {
+    composer: WeakEntity<Composer>,
+    plugin: String,
+    /// The tool it was handed to, when it was.
+    tool: Option<gpui_kit::AnyWeakEntity>,
+}
+
+impl Grant {
+    fn live(&self) -> Option<Entity<Composer>> {
+        if self
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.upgrade().is_none())
+        {
+            return None;
+        }
+        self.composer.upgrade()
+    }
+}
+
+fn grant(
+    plugin: &str,
+    composer: WeakEntity<Composer>,
+    tool: Option<gpui_kit::AnyWeakEntity>,
+) -> u64 {
     let id = NEXT_COMPOSER.with(|next| {
         next.set(next.get() + 1);
         next.get()
     });
     COMPOSERS.with_borrow_mut(|composers| {
-        composers.retain(|_, weak| weak.upgrade().is_some());
-        composers.insert(id, composer.downgrade());
+        composers.retain(|_, grant| grant.live().is_some());
+        composers.insert(
+            id,
+            Grant {
+                composer,
+                plugin: plugin.to_owned(),
+                tool,
+            },
+        );
     });
     id
 }
 
+/// The live composer behind `id`, if it was handed to `plugin`.
+fn granted(plugin: &str, id: u64) -> Option<Entity<Composer>> {
+    COMPOSERS.with_borrow(|composers| {
+        composers
+            .get(&id)
+            .filter(|grant| grant.plugin == plugin)
+            .and_then(Grant::live)
+    })
+}
+
+/// Whether `plugin`'s renderer was offered to remove the draft at `url`.
+pub fn may_remove(plugin: &str, url: &str) -> bool {
+    REMOVERS.with_borrow(|removers| removers.get(url).is_some_and(|owner| owner == plugin))
+}
+
 fn composer_of(
+    plugin: &str,
     params: &Value,
     cx: &App,
 ) -> Result<(Entity<Composer>, AnyWindowHandle), capabilities::Failure> {
@@ -1312,9 +1381,7 @@ fn composer_of(
         .get("composer")
         .and_then(Value::as_u64)
         .ok_or((protocol::INVALID_PARAMS, "composer is required".to_owned()))?;
-    let composer = COMPOSERS
-        .with_borrow(|composers| composers.get(&id).and_then(WeakEntity::upgrade))
-        .ok_or((1, "That composer is closed.".to_owned()))?;
+    let composer = granted(plugin, id).ok_or((1, "That composer is closed.".to_owned()))?;
     let window =
         crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
     Ok((composer, window))
@@ -1323,10 +1390,11 @@ fn composer_of(
 /// [`composer_of`] for a change to the draft: refused while nothing can
 /// be typed there (`ComposerToolProps.disabled`).
 fn writable(
+    plugin: &str,
     params: &Value,
     cx: &App,
 ) -> Result<(Entity<Composer>, AnyWindowHandle), capabilities::Failure> {
-    let (composer, window) = composer_of(params, cx)?;
+    let (composer, window) = composer_of(plugin, params, cx)?;
     if composer.read(cx).disabled(cx) {
         return Err((1, "That composer cannot be written in now.".to_owned()));
     }
@@ -1336,46 +1404,56 @@ fn writable(
 /// `composer/insertMentions`: mention chips for `pubkeys` (or `mentions`,
 /// each `{"pubkey","name"}` to show its own name) at the caret, which also
 /// make them recipients (`insertMention`, `insertMentions`).
-pub fn insert_mentions(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
-    let (composer, window) = writable(params, cx)?;
+pub fn insert_mentions(
+    plugin: &str,
+    params: &Value,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = writable(plugin, params, cx)?;
     let hex = |key: &str| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit());
+    // All or nothing (`insertMentions`): one bad entry refuses the lot.
+    let bad = |message: &str| (protocol::INVALID_PARAMS, message.to_owned());
     let named: Vec<(String, Option<String>)> = match params.get("mentions") {
         Some(mentions) => mentions
             .as_array()
-            .ok_or((
-                protocol::INVALID_PARAMS,
-                "mentions must be a list".to_owned(),
-            ))?
+            .ok_or_else(|| bad("mentions must be a list"))?
             .iter()
-            .filter_map(|mention| {
+            .map(|mention| {
                 let key = mention
                     .get("pubkey")
                     .and_then(Value::as_str)
-                    .filter(|key| hex(key))?;
+                    .filter(|key| hex(key))
+                    .ok_or_else(|| bad("each mention needs a pubkey"))?;
                 let name = mention
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|name| !name.is_empty())
                     .map(str::to_owned);
-                Some((key.to_ascii_lowercase(), name))
+                Ok((key.to_ascii_lowercase(), name))
             })
-            .take(32)
-            .collect(),
+            .collect::<Result<_, capabilities::Failure>>()?,
         None => params
             .get("pubkeys")
             .and_then(Value::as_array)
-            .ok_or((
-                protocol::INVALID_PARAMS,
-                "pubkeys must be a list".to_owned(),
-            ))?
+            .ok_or_else(|| bad("pubkeys must be a list"))?
             .iter()
-            .filter_map(Value::as_str)
-            .filter(|key| hex(key))
-            .map(|key| (key.to_ascii_lowercase(), None))
-            .take(32)
-            .collect(),
+            .map(|key| {
+                key.as_str()
+                    .filter(|key| hex(key))
+                    .map(|key| (key.to_ascii_lowercase(), None))
+                    .ok_or_else(|| bad("pubkeys must be pubkeys"))
+            })
+            .collect::<Result<_, capabilities::Failure>>()?,
     };
+    let mut seen = std::collections::HashSet::new();
+    let named: Vec<_> = named
+        .into_iter()
+        .filter(|(key, _)| seen.insert(key.clone()))
+        .collect();
+    if named.len() > 32 {
+        return Err((3, "Choose at most 32 recipients".to_owned()));
+    }
     if named.is_empty() {
         return Err((protocol::INVALID_PARAMS, "pubkeys names no one".to_owned()));
     }
@@ -1409,8 +1487,12 @@ pub fn insert_mentions(params: &Value, cx: &mut App) -> Result<Value, capabiliti
 
 /// `composer/insertResource`: a link to `uri`, labelled `label`, as one
 /// chip at the caret (`insertResource`).
-pub fn insert_resource(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
-    let (composer, window) = writable(params, cx)?;
+pub fn insert_resource(
+    plugin: &str,
+    params: &Value,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = writable(plugin, params, cx)?;
     let text = |key: &str| {
         params
             .get(key)
@@ -1431,7 +1513,7 @@ pub fn insert_resource(params: &Value, cx: &mut App) -> Result<Value, capabiliti
 /// the composer's editor, as voice notes record (`capture`), until
 /// `composer/accept` or the user discards it.
 pub fn capture(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
-    let (composer, window) = writable(params, cx)?;
+    let (composer, window) = writable(plugin, params, cx)?;
     let id = params
         .get("composer")
         .and_then(Value::as_u64)
@@ -1578,8 +1660,8 @@ pub fn accept(
 }
 
 /// `composer/focus`: puts the caret back in the composer (`focus`).
-pub fn focus(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
-    let (composer, window) = composer_of(params, cx)?;
+pub fn focus(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = composer_of(plugin, params, cx)?;
     let input = composer.read(cx).input();
     window
         .update(cx, |_, window, cx| {
@@ -1809,24 +1891,24 @@ pub fn register(
                 order: tool.order,
                 accessory: false,
                 build: Rc::new(move |context, _, cx| {
-                    let composer = NEXT_COMPOSER.with(|next| {
-                        next.set(next.get() + 1);
-                        next.get()
-                    });
-                    COMPOSERS.with_borrow_mut(|composers| {
-                        composers.retain(|_, weak| weak.upgrade().is_some());
-                        composers.insert(composer, context.composer.clone());
-                    });
                     let (plugin, id, title) = (owner.clone(), id.clone(), title.clone());
-                    cx.new(|_| Tool {
-                        plugin,
-                        id,
-                        title,
-                        icon,
-                        context,
-                        composer,
-                    })
-                    .into()
+                    // Its id lives as long as this tool does.
+                    let tool = cx.new(|cx| {
+                        let composer = grant(
+                            &plugin,
+                            context.composer.clone(),
+                            Some(cx.entity().downgrade().into()),
+                        );
+                        Tool {
+                            plugin,
+                            id,
+                            title,
+                            icon,
+                            context,
+                            composer,
+                        }
+                    });
+                    tool.into()
                 }),
             },
             cx,

@@ -1082,7 +1082,9 @@ impl ExternalPlugins {
 
     /// Ends the plugin's run. Turned off, it takes away what it added; a
     /// plugin that failed keeps its pages and panels, which show why and
-    /// offer a restart.
+    /// offer a restart, and its agent types, so its agents keep their
+    /// settings. What would call it, such as its tools, message actions
+    /// and completions, goes until it runs again.
     fn stop(path: &Path, status: Status, cx: &mut App) {
         let state = cx.global_mut::<Self>();
         let Some(index) = state.index(path) else {
@@ -1100,10 +1102,16 @@ impl ExternalPlugins {
             contribute::forget(id);
             agents::close_all(id);
         }
-        if off {
-            let added = std::mem::take(&mut plugin.added);
-            take_away(added, cx);
-        }
+        let (gone, kept) = std::mem::take(&mut plugin.added)
+            .into_iter()
+            .partition(|added| {
+                off || !matches!(
+                    added,
+                    Added::Panel(_) | Added::Page(_) | Added::Agent(agents::AgentAdded::Type(_))
+                )
+            });
+        plugin.added = kept;
+        take_away(gone, cx);
         if offered {
             Self::services_changed(cx);
         }
@@ -1678,18 +1686,33 @@ impl ExternalPlugins {
             "typing/get" => Reply::Now(capabilities::typing(params, cx)),
             "people/search" => later(capabilities::search_people(params, cx)),
             "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
-            "composer/insert" => Reply::Now(contribute::insert(params, cx)),
-            "composer/insertMentions" => Reply::Now(contribute::insert_mentions(params, cx)),
-            "composer/insertResource" => Reply::Now(contribute::insert_resource(params, cx)),
-            "composer/focus" => Reply::Now(contribute::focus(params, cx)),
-            "composer/capture" => {
+            "composer/insert"
+            | "composer/insertMentions"
+            | "composer/insertResource"
+            | "composer/focus"
+            | "composer/capture"
+            | "attachment/remove" => {
+                // Only through what was handed to this plugin.
                 let plugin = cx
                     .global_mut::<Self>()
                     .current(path, generation)
                     .and_then(|plugin| plugin.id().map(str::to_owned));
-                Reply::Now(match plugin {
-                    Some(plugin) => contribute::capture(&plugin, params, cx),
-                    None => Err((1, "The plugin stopped.".to_owned())),
+                let Some(plugin) = plugin else {
+                    return Reply::Now(Err((1, "The plugin stopped.".to_owned())));
+                };
+                Reply::Now(match method {
+                    "composer/insert" => contribute::insert(&plugin, params, cx),
+                    "composer/insertMentions" => contribute::insert_mentions(&plugin, params, cx),
+                    "composer/insertResource" => contribute::insert_resource(&plugin, params, cx),
+                    "composer/focus" => contribute::focus(&plugin, params, cx),
+                    "composer/capture" => contribute::capture(&plugin, params, cx),
+                    _ => match params.get("url").and_then(Value::as_str) {
+                        Some(url) if contribute::may_remove(&plugin, url) => {
+                            Ok(json!(crate::ui::renderers::remove(url, cx)))
+                        }
+                        Some(_) => Ok(json!(false)),
+                        None => Err((INVALID_PARAMS, "url is required".to_owned())),
+                    },
                 })
             }
             "composer/accept" => {
@@ -2393,10 +2416,6 @@ impl ExternalPlugins {
                     Ok(json!(known))
                 }
                 None => Err((INVALID_PARAMS, "key is required".to_owned())),
-            }),
-            "attachment/remove" => Reply::Now(match params.get("url").and_then(Value::as_str) {
-                Some(url) => Ok(json!(crate::ui::renderers::remove(url, cx))),
-                None => Err((INVALID_PARAMS, "url is required".to_owned())),
             }),
             "agents/dismissError" => Reply::Now(agents::dismiss_error(params, cx)),
             "agents/clearActivity" => Reply::Now(agents::clear_activity(params, cx)),

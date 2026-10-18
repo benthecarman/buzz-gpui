@@ -351,7 +351,9 @@ pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
             |l| l.key().to_owned(),
         )
     });
-    // The bundled links renderer sits at 0 for known kinds, 100 for the web.
+    // The bundled links renderer sits at 0 for known kinds, 100 for the
+    // web; an equal order goes to the lower key, as everywhere.
+    const BUNDLED: &str = "buzz.links/links";
     let bundled = match super::links::link_kind(url) {
         Some(super::links::LinkKind::Web) => 100,
         Some(_) => 0,
@@ -359,7 +361,10 @@ pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
     };
     candidates
         .into_iter()
-        .filter(|renderer| renderer.order(url) < bundled)
+        .filter(|renderer| {
+            let order = renderer.order(url);
+            order < bundled || (order == bundled && renderer.key() < BUNDLED)
+        })
         .find_map(|renderer| guarded(renderer.key(), || renderer.render(url, label, cx)))
 }
 

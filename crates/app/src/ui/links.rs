@@ -371,15 +371,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     let c = *cx.colors();
     let url = chip.url;
     let authored = chip.label.as_ref().map(|l| l.text.clone());
-    let Some(kind) = link_kind(url) else {
-        return plain_anchor(
-            chip.id,
-            url,
-            authored.unwrap_or_else(|| url.to_string()),
-            chip.line_height,
-            &c,
-        );
-    };
+    let kind = link_kind(url);
     // Web links must be safe to hand to the browser.
     if matches!(url::Url::parse(url), Ok(parsed) if !parsed.username().is_empty() || parsed.password().is_some())
     {
@@ -408,6 +400,17 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             })
             .into_any_element();
     }
+    // Links Buzz does not draw itself, such as `buzz://` entities, are
+    // plain unless a renderer took them.
+    let Some(kind) = kind else {
+        return plain_anchor(
+            chip.id,
+            url,
+            authored.unwrap_or_else(|| url.to_string()),
+            chip.line_height,
+            &c,
+        );
+    };
     let link = parse_buzz_link(url);
     let directory = chip.directory;
     // Channel-only links name a channel the reader may not have joined.

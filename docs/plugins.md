@@ -760,7 +760,9 @@ you added from running for that launch. Their switches stay as they were.
   error under it.
 - If the plugin exits, its pages and panels stay and show the exit code and
   its last stderr lines, with a **Restart** button. Fixing a file in the
-  folder restarts it too.
+  folder restarts it too. Its agent types stay, so its agents keep their
+  settings; everything else it added, such as composer tools, message
+  actions, completions and settings cards, goes until it runs again.
 - **Settings → Plugins** shows each plugin's state. **Reload** reads the
   manifest again and restarts the plugin.
 
