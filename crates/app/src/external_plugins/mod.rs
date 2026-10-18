@@ -545,8 +545,55 @@ impl ExternalPlugins {
                 buzz_relay_client::SessionStatus::Ready => "ready",
                 buzz_relay_client::SessionStatus::Failed(_) => "failed",
             },
+            "error": match &snapshot.status {
+                buzz_relay_client::SessionStatus::Failed(error) => Some(error.clone()),
+                _ => None,
+            },
             "live": snapshot.live,
             "cached": snapshot.cached,
+            // Showing this device's saved copy while the relay is asked
+            // again (`restoring`).
+            "restoring": snapshot.cached
+                && matches!(snapshot.status, buzz_relay_client::SessionStatus::Connecting),
+            "liveStatus": Self::live_status(&snapshot.live_status),
+        })
+    }
+
+    /// `session.live`: the connection, its routes, the roster pass and
+    /// each channel's catch-up, and the first problem worth showing.
+    fn live_status(live: &buzz_relay_client::session::LiveView) -> Value {
+        // Variant names, payloads left out: `Failed("…")` is `failed`.
+        fn label(value: impl std::fmt::Debug) -> String {
+            let text = format!("{value:?}");
+            let name = text.split(['(', ' ', '{']).next().unwrap_or_default();
+            let mut chars = name.chars();
+            chars
+                .next()
+                .map(|first| first.to_ascii_lowercase().to_string() + chars.as_str())
+                .unwrap_or_default()
+        }
+        json!({
+            "status": label(&live.live.status),
+            "error": live.live.error,
+            "retryInMs": live.live.retry_in.map(|wait| wait.as_millis() as u64),
+            "routes": live.live.routes.iter().map(|route| json!({
+                "id": route.id,
+                "channel": route.channel,
+                "status": label(&route.status),
+                "replay": label(&route.replay),
+                "error": route.error,
+            })).collect::<Vec<_>>(),
+            "roster": label(&live.roster),
+            "rosterError": match &live.roster {
+                buzz_relay_client::session::RosterRefresh::Error(error) => Some(error.clone()),
+                _ => None,
+            },
+            "heads": live.heads.iter().map(|head| json!({
+                "channel": head.channel,
+                "state": label(&head.state),
+                "error": head.error,
+            })).collect::<Vec<_>>(),
+            "issue": live.issue(None),
         })
     }
 
@@ -1623,6 +1670,7 @@ impl ExternalPlugins {
             "names/get" => Reply::Now(capabilities::names(params, cx)),
             "statuses/get" => later(capabilities::statuses(params, cx)),
             "emoji/list" => Reply::Now(capabilities::emoji(cx)),
+            "emoji/catalog" => Reply::Now(capabilities::emoji_catalog(cx)),
             "typing/get" => Reply::Now(capabilities::typing(params, cx)),
             "people/search" => later(capabilities::search_people(params, cx)),
             "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
@@ -2029,6 +2077,7 @@ impl ExternalPlugins {
             | "sidebar/sort"
             | "sidebar/assign"
             | "sidebar/removeGroup"
+            | "sidebar/retryMove"
             | "archives/request" => {
                 let permission = match method {
                     "events/publish" | "outbox/send" => Permission::PublishEvents,
@@ -2052,6 +2101,7 @@ impl ExternalPlugins {
                     | "sidebar/sort"
                     | "sidebar/assign"
                     | "sidebar/removeGroup"
+                    | "sidebar/retryMove"
                     | "archives/request" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
@@ -2114,6 +2164,7 @@ impl ExternalPlugins {
                     | "sidebar/sort"
                     | "sidebar/assign"
                     | "sidebar/removeGroup" => channels::change_sidebar(method, params, cx),
+                    "sidebar/retryMove" => channels::retry_move(params, cx),
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }
@@ -2125,6 +2176,8 @@ impl ExternalPlugins {
             "canvas/history" => later(content::canvas_history(params, cx)),
             "channels/details" => later(content::details(params, cx)),
             "channels/list" => Reply::Now(capabilities::channel_list(cx)),
+            "community/refresh" => later(channels::refresh(params, cx)),
+            "sidebar/dismiss" => Reply::Now(channels::dismiss_sidebar(params, cx)),
             "channels/members" => later(channels::members(params, cx)),
             "channels/lifecycle" => later(channels::lifecycle(params, cx)),
             "channels/searchPublic" => later(capabilities::search_public(params, cx)),

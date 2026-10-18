@@ -199,6 +199,7 @@ pub fn follow(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
 fn reminder(reminder: &Reminder) -> Value {
     json!({
         "id": reminder.id,
+        "eventId": reminder.event_id,
         "createdAt": reminder.created_at,
         "notBefore": reminder.not_before,
         "status": match reminder.status {
@@ -219,6 +220,8 @@ fn reminder(reminder: &Reminder) -> Value {
 fn reminders_now(cx: &App) -> Result<Value, Failure> {
     let state = community(cx)?.read(cx).session.reminders().borrow().clone();
     Ok(json!({
+        "status": format!("{:?}", state.status).to_ascii_lowercase(),
+        "hydrated": state.hydrated,
         "reminders": state.reminders.iter().map(reminder).collect::<Vec<_>>(),
         "error": state.error,
     }))
@@ -462,14 +465,49 @@ pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
 /// channels, saved groups and where channels sit in them, and each
 /// group's sort (`sidebarPreferences`).
 pub fn sidebar(cx: &App) -> Result<Value, Failure> {
+    use buzz_relay_client::sidebar_store::{Destination, PreferencesStatus};
     let community = community(cx)?;
     let state = community.read(cx).snapshot.sidebar.clone();
-    let Some(data) = &state.data else {
-        return Ok(json!({ "loaded": false, "writable": false }));
+    let (status, error) = match &state.status {
+        PreferencesStatus::Idle => ("idle", None),
+        PreferencesStatus::Loading => ("loading", None),
+        PreferencesStatus::Ready => ("ready", None),
+        PreferencesStatus::Error(error) => ("error", Some(error.clone())),
     };
-    Ok(json!({
-        "loaded": true,
+    let shared = json!({
+        "status": status,
+        "error": error,
+        "cached": state.cached,
         "writable": state.writable,
+        "sortWritable": state.sort_writable(),
+        "muteWritable": state.mute_writable(),
+        "removeGroupWritable": state.remove_section_writable(),
+        "sortErrors": state.sort_errors.iter().map(|failure| json!({
+            "group": failure.group,
+            "mode": failure.mode.as_str(),
+            "error": failure.error,
+        })).collect::<Vec<_>>(),
+        "moves": state.moves.iter().map(|change| json!({
+            "channel": change.intent.channel_id,
+            "to": match &change.intent.destination {
+                Destination::Starred => json!("starred"),
+                Destination::Section(None) => json!("default"),
+                Destination::Section(Some(id)) => json!(format!("section:{id}")),
+                Destination::Create(section) => json!({ "new": section.name }),
+            },
+            "pending": change.pending,
+            "error": change.error,
+        })).collect::<Vec<_>>(),
+        "hiddenDms": state.hidden_dms,
+        "meChannels": state.me_channels,
+    });
+    let Some(data) = &state.data else {
+        let mut answer = shared;
+        answer["loaded"] = json!(false);
+        return Ok(answer);
+    };
+    let mut answer = json!({
+        "loaded": true,
         "starred": data.starred,
         "muted": data.muted,
         "sort": data
@@ -483,7 +521,11 @@ pub fn sidebar(cx: &App) -> Result<Value, Failure> {
             "icon": section.icon,
         })).collect::<Vec<_>>(),
         "assignments": data.assignments,
-    }))
+    });
+    if let (Value::Object(answer), Value::Object(shared)) = (&mut answer, shared) {
+        answer.extend(shared);
+    }
+    Ok(answer)
 }
 
 /// `sidebar/star`, `sidebar/mute` and `sidebar/sort`: stars or unstars
@@ -662,4 +704,69 @@ pub fn lifecycle(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
             "deleteUnavailable": can.delete_unavailable,
         }))
     }))
+}
+
+/// `community/refresh`: reads one of the community's views again, as
+/// its Retry would: `unread`, `inbox`, `reminders`, `emoji` or `kit`.
+pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    let what = params
+        .get("what")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    match what.as_str() {
+        "unread" => session.refresh_unread(),
+        "inbox" => session.refresh_inbox(),
+        "reminders" => session.refresh_reminders(),
+        "emoji" => session.refresh_emoji(),
+        "kit" => {
+            return Ok(on_tokio(cx, async move {
+                session
+                    .kit_refresh()
+                    .await
+                    .map(|()| Value::Null)
+                    .map_err(|error| (3, error))
+            }));
+        }
+        _ => {
+            return Err((
+                INVALID_PARAMS,
+                "what is unread, inbox, reminders, emoji or kit".to_owned(),
+            ));
+        }
+    }
+    Ok(Task::ready(Ok(Value::Null)))
+}
+
+/// `sidebar/retryMove`: tries a channel's failed move between sections
+/// again.
+pub fn retry_move(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .sidebar_retry_move(&channel)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
+/// `sidebar/dismiss`: forgets a failed move (`channel`) or sort
+/// (`group`) the sidebar shows an error for.
+pub fn dismiss_sidebar(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    match (
+        params.get("channel").and_then(Value::as_str),
+        params.get("group").and_then(Value::as_str),
+    ) {
+        (Some(channel), _) => session.sidebar_dismiss_move(channel),
+        (None, Some(group)) => session.sidebar_dismiss_sort(group),
+        (None, None) => {
+            return Err((INVALID_PARAMS, "channel or group is required".to_owned()));
+        }
+    }
+    Ok(Value::Null)
 }

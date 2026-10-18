@@ -1647,6 +1647,27 @@ pub fn emoji(cx: &App) -> Result<Value, Failure> {
     ))
 }
 
+/// `emoji/catalog`: the community's custom emoji with how far the read
+/// got, and your own set (`emoji.status`, `entries`, `mine`).
+pub fn emoji_catalog(cx: &App) -> Result<Value, Failure> {
+    use buzz_relay_client::emoji::CatalogStatus;
+    let community = community(cx)?;
+    let emoji = community.read(cx).snapshot.emoji.clone();
+    let (status, error) = match &emoji.status {
+        CatalogStatus::Idle => ("idle", None),
+        CatalogStatus::Loading => ("loading", None),
+        CatalogStatus::Ready => ("ready", None),
+        CatalogStatus::Error(error) => ("error", Some(error.clone())),
+    };
+    let entry = |emoji: &buzz_relay_client::CustomEmoji| json!({ "shortcode": emoji.shortcode, "url": emoji.url });
+    Ok(json!({
+        "status": status,
+        "error": error,
+        "entries": emoji.entries.iter().map(entry).collect::<Vec<_>>(),
+        "mine": emoji.mine.iter().map(entry).collect::<Vec<_>>(),
+    }))
+}
+
 /// `typing/get`: who is typing in a channel, or in one of its threads.
 pub fn typing(params: &Value, cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;

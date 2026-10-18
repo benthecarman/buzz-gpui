@@ -28,7 +28,16 @@ fn counts(unread: &UnreadCounts) -> Value {
                     "mentions": channel.mentions,
                     "threads": channel.threads,
                     "manual": channel.manual != Default::default(),
+                    // Which mark: this device's, or one synced from another.
+                    "manualKind": match channel.manual {
+                        buzz_relay_client::unread::Manual::None => "none",
+                        buzz_relay_client::unread::Manual::LocalOnly => "local-only",
+                        buzz_relay_client::unread::Manual::Remote => "remote",
+                    },
+                    "latestAt": unread.latest.get(id),
+                    "preview": unread.previews.get(id),
                     "stale": channel.stale,
+                    "threadsStale": channel.threads_stale,
                 }),
             )
         })
@@ -84,12 +93,15 @@ fn activity(snapshot: &ThreadActivitySnapshot) -> Value {
                     "root": item.root_id,
                     "latestMessage": item.latest_message_id,
                     "author": item.author_id,
+                    "workflowOwner": item.workflow_owner_id,
                     "createdAt": item.created_at,
                     "preview": item.preview,
                     "unreadCount": item.unread_count,
                 }))
                 .collect::<Vec<_>>()
         }),
+        "coverage": format!("{:?}", snapshot.coverage).to_ascii_lowercase(),
+        "freshness": format!("{:?}", snapshot.freshness).to_ascii_lowercase(),
         "error": snapshot.error,
     })
 }
@@ -241,13 +253,31 @@ pub fn inbox(cx: &App) -> Result<Value, Failure> {
 }
 
 fn inbox_json(state: &buzz_relay_client::session::InboxState) -> Value {
+    use buzz_relay_client::session::InboxFeedStatus;
+    use buzz_relay_client::unread::InboxStatus;
     json!({
+        "status": match state.inbox.status {
+            InboxStatus::Idle => "idle",
+            InboxStatus::Loading => "loading",
+            InboxStatus::Ready => "ready",
+            InboxStatus::Error => "error",
+        },
+        "freshness": format!("{:?}", state.inbox.freshness).to_ascii_lowercase(),
         "items": state.inbox.items.iter().map(|item| json!({
+            "id": item.id,
             "channel": item.channel_id,
+            "target": read_target(&item.target),
             "message": item.message_id,
             "latestMessage": item.latest_message_id,
+            "messageIds": item.message_ids,
+            "messages": item.messages.iter().map(|message| json!({
+                "id": message.id,
+                "createdAt": message.created_at,
+                "mentioned": message.mentioned,
+            })).collect::<Vec<_>>(),
             "root": item.root_id,
             "author": item.author_id,
+            "workflowOwner": item.workflow_owner_id,
             "preview": item.preview,
             "createdAt": item.created_at,
             "mentioned": item.mentioned,
@@ -255,9 +285,41 @@ fn inbox_json(state: &buzz_relay_client::session::InboxState) -> Value {
             "unreadCount": item.unread_count,
             // Marked unread on this device (`read/markLocal`).
             "manual": item.manual,
+            // What marking it read marks (`readThrough`).
+            "readThrough": item.read_through.iter().map(|through| json!({
+                "target": read_target(&through.target),
+                "message": through.message_id,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "error": state.inbox.error,
+        "feed": {
+            "status": match state.feed.status {
+                InboxFeedStatus::Idle => "idle",
+                InboxFeedStatus::Loading => "loading",
+                InboxFeedStatus::Ready => "ready",
+                InboxFeedStatus::Error => "error",
+            },
+            "error": state.feed.error,
+            "incomplete": state.feed.incomplete,
+        },
+        "canRead": state.can_read,
     })
+}
+
+/// A read mark's place, in `read/mark`'s terms.
+fn read_target(target: &buzz_relay_client::read_state::ReadTarget) -> Value {
+    use buzz_relay_client::read_state::ReadTarget;
+    match target {
+        ReadTarget::Channel { channel_id } => json!({ "channel": channel_id }),
+        ReadTarget::Thread {
+            channel_id,
+            root_id,
+        } => json!({ "channel": channel_id, "thread": root_id }),
+        ReadTarget::Message {
+            channel_id,
+            message_id,
+        } => json!({ "channel": channel_id, "message": message_id }),
+    }
 }
 
 /// `inbox/watch`: sends `inbox/changed` with what `inbox/get` gives,
