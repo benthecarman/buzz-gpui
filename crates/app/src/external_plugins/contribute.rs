@@ -23,7 +23,9 @@ use crate::ui::renderers::{
 };
 use buzz_relay_client::Media;
 use buzz_relay_client::fold::{Attachment, AttachmentKind, MessageRow};
-use buzz_ui::{Badge, BadgeTone, Icon, IconButton, IconButtonSize, IconName};
+use buzz_ui::{
+    ActiveTheme, Badge, BadgeTone, Icon, IconButton, IconButtonSize, IconName, TypeStyled,
+};
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -1017,6 +1019,91 @@ pub fn badge(key: &'static str) -> crate::ui::pages::Badge {
     })
 }
 
+/// What a plugin says about its tool's button (`composer/toolState`).
+#[derive(Clone, Default)]
+struct ToolState {
+    pressed: bool,
+    badge: Option<SharedString>,
+    /// Why it cannot be used now.
+    disabled: Option<SharedString>,
+}
+
+thread_local! {
+    /// Tool states by `plugin/tool`, for every composer (`None`) or one.
+    static TOOL_STATES: RefCell<HashMap<(String, Option<u64>), ToolState>> = RefCell::default();
+    /// The open tool popover: its composer, `plugin/tool` and view.
+    static TOOL_POPOVER: RefCell<Option<(u64, String, AnyView)>> = const { RefCell::new(None) };
+}
+
+/// `composer/toolState`: a tool's pressed state, badge and why it is off,
+/// for one `composer` or all of them.
+pub fn tool_state(
+    plugin: &str,
+    params: &Value,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    let tool = params
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or((protocol::INVALID_PARAMS, "tool is required".to_owned()))?;
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|text| SharedString::from(text.chars().take(64).collect::<String>()))
+    };
+    let state = ToolState {
+        pressed: params.get("pressed").and_then(Value::as_bool) == Some(true),
+        badge: text("badge"),
+        disabled: text("disabled"),
+    };
+    let composer = params.get("composer").and_then(Value::as_u64);
+    TOOL_STATES
+        .with_borrow_mut(|states| states.insert((format!("{plugin}/{tool}"), composer), state));
+    cx.refresh_windows();
+    Ok(Value::Null)
+}
+
+/// `composer/openPopover`: a view of kind `toolPopover` under one of the
+/// plugin's tools in `composer`, until `ui/closeView`, a click outside or
+/// another popover.
+pub fn open_popover(
+    plugin: &str,
+    params: &Value,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    let tool = params
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or((protocol::INVALID_PARAMS, "tool is required".to_owned()))?;
+    let composer = params
+        .get("composer")
+        .and_then(Value::as_u64)
+        .ok_or((protocol::INVALID_PARAMS, "composer is required".to_owned()))?;
+    if !COMPOSERS.with_borrow(|composers| composers.contains_key(&composer)) {
+        return Err((1, "That composer is closed.".to_owned()));
+    }
+    let close: crate::ui::account_actions::Close = Rc::new(|_, cx| close_popover(cx));
+    let context = params.get("context").cloned().unwrap_or(Value::Null);
+    let view = super::view::ExternalView::tool_popover(
+        plugin,
+        tool,
+        close,
+        json!({ "composer": composer, "context": context }),
+        cx,
+    );
+    let id = view.read(cx).view_id().to_owned();
+    TOOL_POPOVER
+        .with_borrow_mut(|open| *open = Some((composer, format!("{plugin}/{tool}"), view.into())));
+    cx.refresh_windows();
+    Ok(json!({ "view": id }))
+}
+
+fn close_popover(cx: &mut App) {
+    TOOL_POPOVER.with_borrow_mut(|open| *open = None);
+    cx.refresh_windows();
+}
+
 /// A composer tool's toolbar button.
 struct Tool {
     plugin: String,
@@ -1045,13 +1132,32 @@ impl Render for Tool {
                 (composer.disabled(cx), composer.invites_agents())
             })
             .unwrap_or((true, false));
-        IconButton::new(
+        let key = format!("{}/{}", self.plugin, self.id);
+        let state = TOOL_STATES.with_borrow(|states| {
+            states
+                .get(&(key.clone(), Some(self.composer)))
+                .or_else(|| states.get(&(key.clone(), None)))
+                .cloned()
+                .unwrap_or_default()
+        });
+        let popover = TOOL_POPOVER.with_borrow(|open| {
+            open.as_ref()
+                .filter(|(composer, tool, _)| *composer == self.composer && *tool == key)
+                .map(|(_, _, view)| view.clone())
+        });
+        let tooltip = match &state.disabled {
+            Some(reason) => SharedString::from(format!("{} — {reason}", self.title)),
+            None => self.title.clone(),
+        };
+        let c = *cx.colors();
+        let button = IconButton::new(
             SharedString::from(format!("plugin-tool-{}-{}", self.plugin, self.id)),
             self.icon,
         )
         .size(IconButtonSize::Sm)
-        .tooltip(self.title.clone())
-        .disabled(disabled)
+        .tooltip(tooltip)
+        .selected(state.pressed || popover.is_some())
+        .disabled(disabled || state.disabled.is_some())
         .on_click(move |_, _, cx| {
             ExternalPlugins::notify_running(
                 &plugin,
@@ -1065,7 +1171,49 @@ impl Render for Tool {
                 }),
                 cx,
             );
-        })
+        });
+        div()
+            .relative()
+            .child(button)
+            .children(state.badge.map(|badge| {
+                div()
+                    .absolute()
+                    .top(px(-4.))
+                    .right(px(-4.))
+                    .px(px(4.))
+                    .rounded_full()
+                    .bg(c.affordance_accent_prominent)
+                    .text_color(c.text_on_accent)
+                    .text_caption()
+                    .child(badge)
+            }))
+            .children(popover.map(|view| {
+                // Above the button: the composer sits at the bottom.
+                div().absolute().left_0().top_0().child(
+                    deferred(
+                        anchored()
+                            .anchor(Anchor::BottomLeft)
+                            .offset(point(px(0.), px(-4.)))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(
+                                div()
+                                    .occlude()
+                                    .w(px(320.))
+                                    .max_h(px(400.))
+                                    .overflow_hidden()
+                                    .p(px(8.))
+                                    .rounded(px(12.))
+                                    .bg(c.surface_popover)
+                                    .border_1()
+                                    .border_color(c.border_standard)
+                                    .shadow_lg()
+                                    .on_mouse_down_out(|_, _, cx| close_popover(cx))
+                                    .child(view),
+                            ),
+                    )
+                    .with_priority(1),
+                )
+            }))
     }
 }
 

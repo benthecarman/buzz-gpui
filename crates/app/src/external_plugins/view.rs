@@ -286,6 +286,27 @@ impl ExternalView {
         .into()
     }
 
+    /// A composer tool's popover, anchored to its button
+    /// (`ComposerTool.component`'s own popup).
+    pub(super) fn tool_popover(
+        plugin: &str,
+        contribution: &str,
+        close: Close,
+        extra: Value,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        Self::open(
+            plugin,
+            contribution,
+            "toolPopover",
+            |view| {
+                view.close = Some(close);
+                view.extra = extra;
+            },
+            cx,
+        )
+    }
+
     /// A reaction picker, standing in for the emoji picker.
     pub fn reaction_picker(
         plugin: &str,
@@ -430,6 +451,11 @@ impl ExternalView {
     }
 
     /// `view/open`'s params.
+    /// Its id, as plugins name it.
+    pub(super) fn view_id(&self) -> &str {
+        &self.id
+    }
+
     /// What it is: `page`, `panel`, `dialog` and so on.
     pub(super) fn kind(&self) -> &'static str {
         self.kind

@@ -2298,6 +2298,19 @@ impl ExternalPlugins {
                     Err(reason) => Reply::Now(Err((INVALID_PARAMS, reason))),
                 }
             }
+            "composer/toolState" | "composer/openPopover" => Reply::Now(
+                match cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned))
+                {
+                    Some(plugin) if method == "composer/toolState" => {
+                        contribute::tool_state(&plugin, params, cx)
+                    }
+                    Some(plugin) => contribute::open_popover(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                },
+            ),
             "render/invalidate" => Reply::Now(
                 match cx
                     .global_mut::<Self>()
