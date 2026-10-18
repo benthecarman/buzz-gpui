@@ -2078,6 +2078,9 @@ impl ExternalPlugins {
             | "sidebar/assign"
             | "sidebar/removeGroup"
             | "sidebar/retryMove"
+            | "me/assign"
+            | "me/retryMove"
+            | "me/removeGroup"
             | "archives/request" => {
                 let permission = match method {
                     "events/publish" | "outbox/send" => Permission::PublishEvents,
@@ -2102,6 +2105,9 @@ impl ExternalPlugins {
                     | "sidebar/assign"
                     | "sidebar/removeGroup"
                     | "sidebar/retryMove"
+                    | "me/assign"
+                    | "me/retryMove"
+                    | "me/removeGroup"
                     | "archives/request" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
@@ -2165,6 +2171,9 @@ impl ExternalPlugins {
                     | "sidebar/assign"
                     | "sidebar/removeGroup" => channels::change_sidebar(method, params, cx),
                     "sidebar/retryMove" => channels::retry_move(params, cx),
+                    "me/assign" | "me/retryMove" | "me/removeGroup" => {
+                        channels::change_me(method, params, cx)
+                    }
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }
@@ -2178,6 +2187,8 @@ impl ExternalPlugins {
             "channels/list" => Reply::Now(capabilities::channel_list(cx)),
             "community/refresh" => later(channels::refresh(params, cx)),
             "sidebar/dismiss" => Reply::Now(channels::dismiss_sidebar(params, cx)),
+            "me/get" => Reply::Now(channels::me(cx)),
+            "me/dismiss" | "me/refresh" => Reply::Now(channels::me_local(method, params, cx)),
             "channels/members" => later(channels::members(params, cx)),
             "channels/lifecycle" => later(channels::lifecycle(params, cx)),
             "channels/searchPublic" => later(capabilities::search_public(params, cx)),

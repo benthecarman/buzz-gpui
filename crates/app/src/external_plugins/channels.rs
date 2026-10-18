@@ -465,9 +465,14 @@ pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
 /// channels, saved groups and where channels sit in them, and each
 /// group's sort (`sidebarPreferences`).
 pub fn sidebar(cx: &App) -> Result<Value, Failure> {
-    use buzz_relay_client::sidebar_store::{Destination, PreferencesStatus};
     let community = community(cx)?;
     let state = community.read(cx).snapshot.sidebar.clone();
+    Ok(sidebar_json(&state))
+}
+
+/// A sidebar (Messages or Me) as `sidebar/get` and `me/get` give it.
+fn sidebar_json(state: &buzz_relay_client::sidebar_store::SidebarState) -> Value {
+    use buzz_relay_client::sidebar_store::{Destination, PreferencesStatus};
     let (status, error) = match &state.status {
         PreferencesStatus::Idle => ("idle", None),
         PreferencesStatus::Loading => ("loading", None),
@@ -504,7 +509,7 @@ pub fn sidebar(cx: &App) -> Result<Value, Failure> {
     let Some(data) = &state.data else {
         let mut answer = shared;
         answer["loaded"] = json!(false);
-        return Ok(answer);
+        return answer;
     };
     let mut answer = json!({
         "loaded": true,
@@ -525,7 +530,83 @@ pub fn sidebar(cx: &App) -> Result<Value, Failure> {
     if let (Value::Object(answer), Value::Object(shared)) = (&mut answer, shared) {
         answer.extend(shared);
     }
-    Ok(answer)
+    answer
+}
+
+/// `me/get`: your Me groups (`mePreferences`): groups, which group each
+/// Me conversation is in, moves still saving or failed, and what can be
+/// saved, as `sidebar/get` gives the Messages sidebar.
+pub fn me(cx: &App) -> Result<Value, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    session.me_kit().me_ensure();
+    Ok(sidebar_json(&session.me_kit().me_state()))
+}
+
+/// `me/assign`, `me/retryMove`, `me/removeGroup`: moves a conversation
+/// into a Me group (`group`, a `newGroup` name, or `null` for
+/// Conversations), tries a failed move again, or deletes a group.
+pub fn change_me(
+    method: &str,
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::sidebar::NewSection;
+    let session = community(cx)?.read(cx).session.clone();
+    let text = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+    let method = method.to_owned();
+    let channel = text("channel");
+    let group = text("group");
+    let new_group = text("newGroup");
+    if method != "me/removeGroup" && channel.is_none() {
+        return Err(invalid("channel is required"));
+    }
+    if method == "me/removeGroup" && group.is_none() {
+        return Err(invalid("group is required"));
+    }
+    Ok(on_tokio(cx, async move {
+        let channel = channel.unwrap_or_default();
+        let done = match method.as_str() {
+            "me/retryMove" => session.me_kit().me_retry_move(&channel).await,
+            "me/removeGroup" => {
+                session
+                    .me_kit()
+                    .me_remove_section(&group.unwrap_or_default())
+                    .await
+            }
+            _ => match new_group {
+                Some(name) => {
+                    session
+                        .me_kit()
+                        .me_create_and_assign(
+                            &channel,
+                            NewSection {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                name,
+                            },
+                        )
+                        .await
+                }
+                None => session.me_kit().me_assign(&channel, group).await,
+            },
+        };
+        done.map(|()| Value::Null).map_err(|error| (3, error))
+    }))
+}
+
+/// `me/dismiss`: forgets a failed Me move; `me/refresh` reads the groups
+/// again.
+pub fn me_local(method: &str, params: &Value, cx: &App) -> Result<Value, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    if method == "me/refresh" {
+        session.me_kit().me_refresh();
+        return Ok(Value::Null);
+    }
+    let channel = params
+        .get("channel")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("channel is required"))?;
+    session.me_kit().me_dismiss_move(channel);
+    Ok(Value::Null)
 }
 
 /// `sidebar/star`, `sidebar/mute` and `sidebar/sort`: stars or unstars

@@ -1135,17 +1135,35 @@ pub fn resolve_channels(params: &Value, cx: &App) -> Result<Task<Result<Value, F
 }
 
 /// What `session/watch` follows, as its JSON now.
-fn session_value(what: &str, channel: Option<&str>, cx: &App) -> Result<Value, Failure> {
+fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure> {
+    let channel = text(params, "channel");
     let community = community(cx)?;
     let snapshot = &community.read(cx).snapshot;
     Ok(match what {
         "channels" => channels(cx),
+        "channelList" => channel_list(cx)?,
+        "sidebar" => super::channels::sidebar(cx)?,
+        "sync" => super::reading::sync(false, cx)?,
+        "profiles" => {
+            let keys = pubkeys(params, MAX_PROFILES)?;
+            Value::Array(
+                keys.iter()
+                    .map(|key| profile(key, snapshot.profiles.get(key)))
+                    .collect(),
+            )
+        }
         "typing" => {
             let channel = channel.ok_or_else(|| invalid("typing takes a channel"))?;
-            json!({
-                "channel": snapshot.typing.get(channel).cloned().unwrap_or_default(),
-                "anywhere": snapshot.typing_anywhere.get(channel).cloned().unwrap_or_default(),
-            })
+            match text(params, "root") {
+                // Who is typing in one thread (`typing` with a root).
+                Some(root) => json!({
+                    "thread": snapshot.thread_typing.get(root).cloned().unwrap_or_default(),
+                }),
+                None => json!({
+                    "channel": snapshot.typing.get(channel).cloned().unwrap_or_default(),
+                    "anywhere": snapshot.typing_anywhere.get(channel).cloned().unwrap_or_default(),
+                }),
+            }
         }
         "presence" => Value::Object(
             snapshot
@@ -1185,7 +1203,8 @@ fn session_value(what: &str, channel: Option<&str>, cx: &App) -> Result<Value, F
         }
         _ => {
             return Err(invalid(
-                "what must be channels, typing, presence, emoji or activity",
+                "what must be channels, channelList, sidebar, sync, profiles, typing, presence, \
+                 emoji or activity",
             ));
         }
     })
@@ -1201,14 +1220,19 @@ pub fn watch_session(
 ) -> Result<(Watch, Value), Failure> {
     let community = community(cx)?;
     let what = text(params, "what").unwrap_or_default().to_owned();
-    let channel = text(params, "channel").map(str::to_owned);
-    let first = session_value(&what, channel.as_deref(), cx)?;
+    let params = params.clone();
+    if what == "profiles" {
+        // Read the ones not loaded yet, as `profiles.ensure` does.
+        let keys = pubkeys(&params, MAX_PROFILES)?;
+        community.read(cx).session.want_profiles(keys);
+    }
+    let first = session_value(&what, &params, cx)?;
     let last = std::cell::RefCell::new(first.clone());
     let notify = std::rc::Rc::new(notify);
     let (send, kind) = (notify.clone(), what.clone());
     cx.defer(move |cx| send(json!({ "what": kind, "value": first }), cx));
     let subscription = cx.observe(&community, move |_, cx| {
-        let Ok(now) = session_value(&what, channel.as_deref(), cx) else {
+        let Ok(now) = session_value(&what, &params, cx) else {
             return;
         };
         if now != *last.borrow() {
