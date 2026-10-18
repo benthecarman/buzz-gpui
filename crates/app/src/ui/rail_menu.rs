@@ -300,7 +300,7 @@ pub fn render(state: &MenuState, cx: &mut Context<Workspace>) -> Option<AnyEleme
                     cx.spawn(async move |cx| {
                         let result = session.mark_all_read().await;
                         cx.update(|cx| match result {
-                            Ok(()) => notice::success("Marked all as read.", cx),
+                            Ok(_) => notice::success("Marked all as read.", cx),
                             Err(_) => notice::error("Couldn’t mark everything as read.", cx),
                         });
                     })

@@ -84,7 +84,7 @@ use crate::presence::{
     SnapshotRead, SnapshotResult,
 };
 use crate::profiles::{ProfileDirectory, Profiles};
-use crate::read_state::{PublishFailure, RefreshRequest, SnapshotDescriptor};
+use crate::read_state::{PublishFailure, ReadMutationResult, RefreshRequest, SnapshotDescriptor};
 use crate::reader::{ReadError, ReadErrorKind, ReadOptions, Reader, ReaderOptions};
 use crate::socket::Filter;
 use crate::store::{Partition, SqliteJournal, Store};
@@ -953,6 +953,10 @@ impl Session {
     }
 
     async fn mark(&self, mark: Mark) -> Result<(), String> {
+        self.marked(mark).await.map(drop)
+    }
+
+    async fn marked(&self, mark: Mark) -> Result<Vec<(String, ReadMutationResult)>, String> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(Message::Mark { mark, reply })
@@ -969,9 +973,10 @@ impl Session {
         self.mark(Mark::Channel(channel.to_string())).await
     }
 
-    /// Marks every channel with anything unread as read, with one cut.
-    pub async fn mark_all_read(&self) -> Result<(), String> {
-        self.mark(Mark::All).await
+    /// Marks every channel with anything unread as read, with one cut,
+    /// answering each channel it marked and how that mark syncs.
+    pub async fn mark_all_read(&self) -> Result<Vec<(String, ReadMutationResult)>, String> {
+        self.marked(Mark::All).await
     }
 
     /// Reads one loaded message and its loaded replies.
@@ -1158,7 +1163,7 @@ enum Message {
     },
     Mark {
         mark: Mark,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<Vec<(String, ReadMutationResult)>, String>>,
     },
     Viewport {
         channel: String,

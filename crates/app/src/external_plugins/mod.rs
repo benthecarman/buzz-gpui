@@ -1388,6 +1388,7 @@ impl ExternalPlugins {
                     cx,
                 );
             }
+            contribute::set_page_icon(key.key(), page.icon.as_deref());
             pages::register_behaviour(
                 key,
                 page.handles_navigation,
@@ -1616,11 +1617,12 @@ impl ExternalPlugins {
                 .unwrap_or_else(|failure| match (method.as_str(), failure) {
                     // An unjoined community fails the open, not the
                     // request (`OpenResult` `invalid-target`).
-                    ("ui/navigate", (INVALID_PARAMS, error)) => Reply::Now(Ok(json!({
-                        "status": "failed",
-                        "reason": "invalid-target",
-                        "error": error,
-                    }))),
+                    // `in_community` fails only for a community not joined.
+                    ("ui/navigate", (_, error)) => Reply::Now(Ok(capabilities::failed_open(
+                        capabilities::NOT_JOINED,
+                        error,
+                        cx,
+                    ))),
                     (_, failure) => Reply::Now(Err(failure)),
                 });
                 match reply {

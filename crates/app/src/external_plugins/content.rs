@@ -217,10 +217,8 @@ pub fn save_details(params: &Value, cx: &App) -> Result<Task<Result<Value, Failu
     let given = params
         .get("details")
         .ok_or_else(|| invalid("details is required"))?;
-    let name = text(given, "name")
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| invalid("details.name is required"))?;
+    // As given: the save refuses a name with spaces around it.
+    let name = text(given, "name").ok_or_else(|| invalid("details.name is required"))?;
     let labels = match given.get("labels") {
         None | Some(Value::Null) => None,
         Some(labels) => Some(
@@ -228,9 +226,22 @@ pub fn save_details(params: &Value, cx: &App) -> Result<Task<Result<Value, Failu
                 .as_array()
                 .ok_or_else(|| invalid("details.labels must be a list"))?
                 .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect(),
+                .map(|label| {
+                    label
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid("details.labels must be text"))
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+    };
+    // A whole number of seconds the relay can keep, when given.
+    let ttl = match given.get("ttlSeconds") {
+        None | Some(Value::Null) => None,
+        Some(ttl) => Some(
+            ttl.as_u64()
+                .filter(|ttl| (1..=2_147_483_647).contains(ttl))
+                .ok_or_else(|| invalid("Channel duration could not be verified."))?,
         ),
     };
     // The whole draft, as buzz-app validates it: a missing field would
@@ -244,7 +255,7 @@ pub fn save_details(params: &Value, cx: &App) -> Result<Task<Result<Value, Failu
             .get("private")
             .and_then(Value::as_bool)
             .ok_or_else(|| invalid("details.private is required"))?,
-        ttl: given.get("ttlSeconds").and_then(Value::as_u64),
+        ttl,
         labels,
     };
     Ok(on_tokio(cx, async move {

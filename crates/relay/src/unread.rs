@@ -2883,13 +2883,14 @@ impl<F: ThreadFollowStore> Unread<F> {
     /// Channel reads over every accessible channel that still has manual
     /// intent, an unread row or a `thread:` local mark, with one click time.
     /// Already-read channels cost nothing. A failure does not stop the
-    /// sweep; the first is returned after it.
+    /// sweep; the first is returned after it. Each result names its
+    /// channel.
     pub fn mark_all_channels_read<J: ReadStateJournal>(
         &mut self,
         reads: &mut ReadStateSync<J>,
         clicked_at: u64,
         now_ms: u64,
-    ) -> Result<Vec<ReadMutationResult>> {
+    ) -> Result<Vec<(String, ReadMutationResult)>> {
         self.ensure_index();
         let ids: Vec<String> = self
             .channels
@@ -2924,7 +2925,7 @@ impl<F: ThreadFollowStore> Unread<F> {
                 continue;
             }
             match self.apply_channel_read(reads, &intent, now_ms) {
-                Ok(result) => results.push(result),
+                Ok(result) => results.push((intent.channel_id.clone(), result)),
                 Err(error) => {
                     failure.get_or_insert(error);
                 }

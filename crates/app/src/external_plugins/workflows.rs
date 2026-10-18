@@ -68,12 +68,13 @@ fn operation(operation: &WorkflowOperation) -> Value {
     })
 }
 
-/// The workflows of the channel at `channel`, read now.
+/// The workflows of the channel at `channel`, read now and to the end,
+/// so a workflow past the first page is still found by id.
 async fn read(
     workflows: &Workflows,
     channel: String,
 ) -> Result<(Vec<WorkflowDefinition>, Value), Failure> {
-    read_in(workflows, vec![channel], false).await
+    read_in(workflows, vec![channel], true).await
 }
 
 /// The workflows of `channels`: one channel, or a batch of up to 128 read

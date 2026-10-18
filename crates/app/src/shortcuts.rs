@@ -453,16 +453,31 @@ pub fn external_list(cx: &App) -> Vec<Listed> {
     rows(Shortcuts::overrides(cx), DESKTOP)
         .into_iter()
         .filter_map(|row| {
+            let chords = row
+                .effective
+                .iter()
+                .map(|chord| chord.text(APPLE))
+                .collect();
+            // A bundled plugin's too, as `shortcuts.snapshot()` lists it.
+            if let Some(bundled) = PLUGINS
+                .iter()
+                .find(|bundled| bundled.key == row.key)
+                .filter(|bundled| crate::plugins::enabled_key(bundled.key))
+            {
+                return Some(Listed {
+                    key: bundled.key,
+                    plugin: bundled.plugin,
+                    title: bundled.title,
+                    chords,
+                    enabled: true,
+                });
+            }
             let shortcut = external(row.key)?;
             Some(Listed {
                 key: shortcut.key,
                 plugin: shortcut.plugin,
                 title: shortcut.title,
-                chords: row
-                    .effective
-                    .iter()
-                    .map(|chord| chord.text(APPLE))
-                    .collect(),
+                chords,
                 enabled: !EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)),
             })
         })
@@ -472,6 +487,14 @@ pub fn external_list(cx: &App) -> Vec<Listed> {
 /// Runs plugin shortcut `key` as its chord would (`RegisteredShortcut.run`),
 /// whether or not it is off for now; `false` when there is none.
 pub fn run_external(key: &str, window: &mut Window, cx: &mut App) -> bool {
+    if let Some(bundled) = PLUGINS
+        .iter()
+        .find(|bundled| bundled.key == key)
+        .filter(|bundled| crate::plugins::enabled_key(bundled.key))
+    {
+        window.dispatch_action((bundled.action)(), cx);
+        return true;
+    }
     let Some(shortcut) = external(key) else {
         return false;
     };

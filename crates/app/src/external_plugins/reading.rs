@@ -538,25 +538,16 @@ pub fn mark(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
             return Err(invalid("all marks read only"));
         }
         // One result per channel it marked (`markAllChannelsRead`).
-        let mut marked: Vec<String> = community
-            .read(cx)
-            .snapshot
-            .unread
-            .channels
-            .iter()
-            .filter(|(_, channel)| channel.unread)
-            .map(|(id, _)| id.clone())
-            .collect();
-        marked.sort();
         return Ok(on_tokio(cx, async move {
-            session.mark_all_read().await.map_err(|error| (3, error))?;
+            let marked = session.mark_all_read().await.map_err(|error| (3, error))?;
             Ok(Value::Array(
                 marked
                     .into_iter()
-                    .map(|channel| {
-                        let mut result = saved(syncs);
-                        result["channel"] = json!(channel);
-                        result
+                    .map(|(channel, result)| {
+                        use buzz_relay_client::read_state::SyncKind;
+                        let mut answer = saved(result.sync == SyncKind::Pending);
+                        answer["channel"] = json!(channel);
+                        answer
                     })
                     .collect(),
             ))

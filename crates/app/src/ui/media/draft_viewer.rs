@@ -267,11 +267,16 @@ impl DraftViewer {
     /// note already does.
     fn sound(&mut self, item: &DraftFile, cx: &mut Context<Self>) -> Option<Attachment> {
         if let Some(voice) = &item.voice {
+            // The hosted file once uploaded (`uploaded?.url`).
+            let base = match &item.uploaded {
+                Some(uploaded) => attachment(item, uploaded),
+                None => local(voice.key.clone(), item),
+            };
             return Some(Attachment {
                 duration: Some(voice.duration),
                 waveform: Some(voice.waveform.clone()),
                 voice_note: true,
-                ..local(voice.key.clone(), item)
+                ..base
             });
         }
         if let Some(uploaded) = &item.uploaded
@@ -406,12 +411,15 @@ impl DraftViewer {
                     let id = SharedString::from(format!("draft-audio-{}", item.id));
                     // A plugin's attachment renderer draws drafts as sent
                     // ones (`ComposerAttachmentViewer`).
-                    let custom = crate::ui::renderers::attachment(
-                        &attachment,
-                        SharedString::from(format!("draft-audio-plugin-{}", item.id)),
-                        &media,
-                        cx,
-                    );
+                    // The viewer offers no removal (no `onRemove`).
+                    let custom = crate::ui::renderers::without_removal(|| {
+                        crate::ui::renderers::attachment(
+                            &attachment,
+                            SharedString::from(format!("draft-audio-plugin-{}", item.id)),
+                            &media,
+                            cx,
+                        )
+                    });
                     let player = match custom {
                         Some(custom) => custom,
                         None if attachment.voice_note => {

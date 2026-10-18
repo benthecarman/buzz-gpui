@@ -111,6 +111,8 @@ thread_local! {
     /// Captures a tool started, by the composer number it was handed: they
     /// end when the tool goes (`capture` lives as long as the tool).
     static CAPTURING: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    /// Each plugin page's icon as declared, by page key.
+    static PAGE_ICONS: RefCell<HashMap<String, String>> = RefCell::default();
     /// How each composer tool was last declared, by key.
     static DECLARED: RefCell<HashMap<&'static str, String>> = RefCell::default();
     /// Draft attachments a plugin's renderer was offered to remove, by url.
@@ -441,6 +443,9 @@ pub fn init(cx: &mut App) {
 /// Whether the draft at `url` can be removed, noting that `plugin`
 /// was offered it.
 fn removable(plugin: &str, url: &str) -> bool {
+    if !crate::ui::renderers::removal_offered() {
+        return false;
+    }
     let removable = crate::ui::renderers::is_removable(url);
     REMOVERS.with_borrow_mut(|removers| {
         removers.retain(|url, _| crate::ui::renderers::is_removable(url));
@@ -1779,6 +1784,19 @@ pub fn take_away(added: Added, cx: &mut App) {
     }
 }
 
+/// Notes plugin page `key`'s declared icon, for `contributions/list`.
+pub fn set_page_icon(key: &str, icon: Option<&str>) {
+    PAGE_ICONS.with_borrow_mut(|icons| match icon {
+        Some(icon) => icons.insert(key.to_owned(), icon.to_owned()),
+        None => icons.remove(key),
+    });
+}
+
+/// Plugin page `key`'s declared icon, if it has one.
+pub fn page_icon(key: &str) -> Option<String> {
+    PAGE_ICONS.with_borrow(|icons| icons.get(key).cloned())
+}
+
 /// Whether composer tool `key` is registered as `declared` already, so
 /// registering it again would only rebuild its views. Notes `declared`.
 fn unchanged(key: &'static str, declared: &str, cx: &App) -> bool {
@@ -2002,17 +2020,9 @@ pub fn register(
                             Some(cx.entity().downgrade().into()),
                         );
                         // A capture this tool started ends with it.
-                        cx.on_release(move |tool: &mut Tool, cx| {
-                            // Only when the tool itself goes, not when the
-                            // toolbar is rebuilt around it.
-                            let key = format!("{}/{}", tool.plugin, tool.id);
-                            let kept = crate::plugins::enabled_key(&key)
-                                && crate::ui::composer_tools::listed(cx)
-                                    .iter()
-                                    .any(|(listed, _, _)| *listed == key);
-                            if kept {
-                                return;
-                            }
+                        // Views stay while their registration does, so a
+                        // released tool went or was declared anew.
+                        cx.on_release(move |_: &mut Tool, cx| {
                             let capturing =
                                 CAPTURING.with_borrow_mut(|capturing| capturing.remove(&composer));
                             // After the composer that dropped the tool is done.

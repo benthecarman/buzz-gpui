@@ -23,9 +23,9 @@ use crate::ChannelType;
 use crate::event::{Verified, Verifier};
 use crate::http::{HttpError, RelayHttp};
 use crate::read_state::{
-    PublishCommand, PublishFailure, ReadCapability, ReadLookup, ReadStateSync, ReadSyncSnapshot,
-    ReadSyncStatus, ReadTarget, RefreshRequest, SnapshotDescriptor, TIMESTAMP_REFUSAL,
-    parse_snapshot_response,
+    PublishCommand, PublishFailure, ReadCapability, ReadLookup, ReadMutationResult, ReadStateSync,
+    ReadSyncSnapshot, ReadSyncStatus, ReadTarget, RefreshRequest, SnapshotDescriptor,
+    TIMESTAMP_REFUSAL, parse_snapshot_response,
 };
 use crate::reader::{Events, Priority, ReadError, ReadOptions};
 use crate::socket::Filter;
@@ -1033,20 +1033,22 @@ impl Actor {
 
     // ----- explicit marks -----
 
-    pub(super) fn mark(&mut self, mark: Mark) -> Result<(), String> {
+    /// Marks, answering the channels a mark of everything read.
+    pub(super) fn mark(&mut self, mark: Mark) -> Result<Vec<(String, ReadMutationResult)>, String> {
         let reads = self
             .reads
             .as_mut()
             .ok_or("Not connected to the relay yet")?;
         let now = now_ms();
         let (sync, unread) = (&mut reads.sync, &mut reads.unread);
+        let mut marked = Vec::new();
         let result = match mark {
             Mark::Channel(channel) => unread
                 .mark_channel_read(sync, &channel, now / 1000, now)
                 .map(drop),
             Mark::All => unread
                 .mark_all_channels_read(sync, now / 1000, now)
-                .map(drop),
+                .map(|results| marked = results),
             Mark::MessageRead(channel, id) => unread
                 .mark_message_read(sync, &channel, &id.to_hex(), now)
                 .map(drop),
@@ -1082,7 +1084,7 @@ impl Actor {
             }
         };
         self.publish();
-        result.map_err(|error| error.to_string())
+        result.map(|()| marked).map_err(|error| error.to_string())
     }
 
     // ----- reading -----

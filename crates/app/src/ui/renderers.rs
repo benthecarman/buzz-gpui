@@ -442,6 +442,25 @@ pub fn removable(url: &str, remove: Remove) {
     REMOVERS.with_borrow_mut(|removers| removers.insert(url.to_owned(), remove));
 }
 
+thread_local! {
+    /// Set while a view that offers no removal draws attachments.
+    static NO_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `draw` for a view that offers no removal, such as the draft
+/// viewer (no `onRemove`).
+pub fn without_removal<T>(draw: impl FnOnce() -> T) -> T {
+    let before = NO_REMOVAL.replace(true);
+    let drawn = draw();
+    NO_REMOVAL.set(before);
+    drawn
+}
+
+/// Whether the attachments drawn now may offer removal.
+pub fn removal_offered() -> bool {
+    !NO_REMOVAL.get()
+}
+
 /// The draft at `url` can no longer be removed, as while it sends.
 pub fn not_removable(url: &str) {
     REMOVERS.with_borrow_mut(|removers| removers.remove(url));

@@ -4,7 +4,7 @@
 //! (`unread.follow`), and reminders (`reminders`). Changing channels needs
 //! the `manage-channels` permission.
 
-use super::capabilities::{Failure, Watch, channel, community, on_tokio};
+use super::capabilities::{Failure, Watch, channel, community, on_tokio, readable};
 use super::protocol::INVALID_PARAMS;
 use buzz_relay_client::lifecycle::{Action, NewChannel};
 use buzz_relay_client::{EventId, Reminder, ReminderStatus, ReminderTarget};
@@ -28,19 +28,33 @@ fn event_id(params: &Value, key: &str) -> Result<EventId, Failure> {
 /// `dm/open`: the direct message with `pubkeys` (1 to 8 others), made if
 /// it is new. Answers with its channel id.
 pub fn open_dm(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let keys: Vec<String> = params
+    let keys = params
         .get("pubkeys")
         .and_then(Value::as_array)
-        .ok_or_else(|| invalid("pubkeys must be a list"))?
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_ascii_lowercase)
-        .collect();
-    if !(1..=8).contains(&keys.len()) {
-        return Err(invalid("pubkeys must name 1 to 8 people"));
-    }
+        .ok_or_else(|| invalid("pubkeys must be a list"))?;
     let session = community(cx)?.read(cx).session.clone();
+    // `validDirectMessageParticipants`: one to eight other people, each
+    // once, as lowercase hex.
+    let viewer = session.viewer();
+    let keys: Vec<String> = keys
+        .iter()
+        .map(|key| {
+            key.as_str()
+                .filter(|key| {
+                    key.len() == 64
+                        && key
+                            .bytes()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                        && *key != viewer
+                })
+                .map(str::to_owned)
+        })
+        .collect::<Option<_>>()
+        .filter(|keys: &Vec<String>| {
+            (1..=8).contains(&keys.len())
+                && keys.iter().collect::<std::collections::HashSet<_>>().len() == keys.len()
+        })
+        .ok_or_else(|| invalid("Choose between one and eight other people."))?;
     Ok(on_tokio(cx, async move {
         let id = session.open_dm(keys).await.map_err(|error| (3, error))?;
         Ok(json!({ "channel": id }))
@@ -753,7 +767,8 @@ pub fn place_me(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
 /// if given (`mePlacement.admit`): `null`, or an error saying why not.
 pub fn admit_me(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    // Any channel id, as the Me placement admits one it has not seen.
+    let channel = readable(params, community.read(cx))?;
     let group = params
         .get("group")
         .and_then(Value::as_str)

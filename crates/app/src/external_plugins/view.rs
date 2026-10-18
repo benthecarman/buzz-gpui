@@ -571,7 +571,7 @@ impl ExternalView {
         if self.kind == "page" {
             let (entry, keeps_focus) = crate::ui::workspace::current_visit();
             params["entry"] = json!(entry);
-            params["focus"] = json!(if keeps_focus { "preserve" } else { "move" });
+            params["focus"] = json!(if keeps_focus { "preserve" } else { "content" });
         }
         if let Value::Object(extra) = &self.extra {
             for (key, value) in extra {

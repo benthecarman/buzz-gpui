@@ -1845,30 +1845,13 @@ pub fn reactor_names(group: &ReactionGroup, viewer: &str, names: &Names) -> (Vec
 
 fn reaction_glyph(
     group: &ReactionGroup,
-    row: &MessageRow,
+    _row: &MessageRow,
     size: f32,
     rows: &Rows,
     cx: &App,
 ) -> AnyElement {
-    // A plugin's inline renderer that claims the whole reaction draws it
-    // (`InlineContent.reaction`).
-    if group.emoji.is_none() {
-        let message = renderers::InMessage {
-            row,
-            profiles: &rows.directory.profiles,
-            reaction: Some(group),
-        };
-        let whole = renderers::text_matches(&group.content, message)
-            .into_iter()
-            .find(|(range, _)| *range == (0..group.content.len()));
-        // A reaction's answer is kept apart from the same text in prose.
-        let place = format!("{}/reaction", row.id.to_hex());
-        if let Some((_, key)) = whole
-            && let Some(element) = renderers::render_text(&key, &group.content, &place, cx)
-        {
-            return element;
-        }
-    }
+    // Pills are Buzz's own (`ReactionGlyph`): plugin inline renderers draw
+    // message text, not reactions.
     if let Some(custom) = &group.emoji
         && let Some(element) = renderers::inline(
             &format!(":{}:", custom.shortcode),

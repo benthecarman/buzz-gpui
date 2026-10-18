@@ -4926,10 +4926,15 @@ impl Composer {
         let c = *cx.colors();
         let id = SharedString::from(item.id.clone());
         let media = self.community.read(cx).session.media().clone();
+        // Once uploaded, renderers see the hosted file (`uploaded?.url`).
+        let (url, mime) = match &item.uploaded {
+            Some(uploaded) => (uploaded.url.clone(), uploaded.mime.clone()),
+            None => (voice.key.clone(), item.mime.clone()),
+        };
         let attachment = buzz_relay_client::fold::Attachment {
-            url: voice.key.clone(),
+            url: url.clone(),
             kind: buzz_relay_client::fold::AttachmentKind::Audio,
-            mime: Some(item.mime.clone()),
+            mime: Some(mime),
             size: Some(item.size),
             name: Some(item.name.clone()),
             duration: Some(voice.duration),
@@ -4945,14 +4950,14 @@ impl Composer {
         if !disabled {
             let (composer, id) = (cx.entity().downgrade(), id.clone());
             super::renderers::removable(
-                &voice.key,
+                &url,
                 std::rc::Rc::new(move |cx: &mut App| {
                     let _ = composer.update(cx, |this, cx| this.remove_attachment(&id, cx));
                 }),
             );
         } else {
             // Sending: plugins may no longer remove it (`onRemove` goes).
-            super::renderers::not_removable(&voice.key);
+            super::renderers::not_removable(&url);
         }
         div()
             .id(SharedString::from(format!("voice-draft-{id}")))

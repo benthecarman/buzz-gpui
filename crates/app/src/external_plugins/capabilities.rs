@@ -871,6 +871,21 @@ pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
 }
 
 /// The place `ui/navigate`'s params name, other than Back and Forward.
+/// A navigation target Buzz has no place for: an unknown page or card, or
+/// a route it does not take (`OpenResult` `unavailable`). Internal: a
+/// request answers it as an invalid param.
+const MISSING: i64 = -40_001;
+/// A community you have not joined (`OpenResult` `denied`). Internal.
+pub(super) const NOT_JOINED: i64 = -40_002;
+
+/// A miss as a request's own error, for callers other than navigation.
+fn as_invalid((code, error): Failure) -> Failure {
+    match code {
+        MISSING | NOT_JOINED => (INVALID_PARAMS, error),
+        _ => (code, error),
+    }
+}
+
 fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
     use crate::ui::pages::Page;
     use crate::ui::settings::Section;
@@ -892,7 +907,7 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             Some("about") => Section::About,
             Some(card) => {
                 let card = crate::ui::settings::cards::get(card, cx)
-                    .ok_or_else(|| invalid(format!("Settings has no section {card}")))?;
+                    .ok_or_else(|| (MISSING, format!("Settings has no section {card}")))?;
                 Section::Card(card.key)
             }
         }),
@@ -901,21 +916,21 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             let spec = crate::ui::pages::all(cx)
                 .into_iter()
                 .find(|spec| spec.page.key() == key)
-                .ok_or_else(|| invalid(format!("There is no page {key}")))?;
+                .ok_or_else(|| (MISSING, format!("There is no page {key}")))?;
             match params.get("params").filter(|params| !params.is_null()) {
                 None => Place::Page(spec.page),
                 Some(route) => {
                     let routes = crate::ui::pages::routes(spec.page, cx)
-                        .ok_or_else(|| invalid(format!("The page {key} takes no routes")))?;
+                        .ok_or_else(|| (MISSING, format!("The page {key} takes no routes")))?;
                     let version = params.get("version").and_then(Value::as_u64);
                     if version.is_some_and(|version| version != u64::from(routes.version)) {
-                        return Err(invalid(format!(
-                            "The page {key} takes routes of version {}",
-                            routes.version
-                        )));
+                        return Err((
+                            MISSING,
+                            format!("The page {key} takes routes of version {}", routes.version),
+                        ));
                     }
                     if !(routes.validate)(route) {
-                        return Err(invalid(format!("The page {key} cannot open these params")));
+                        return Err((MISSING, format!("The page {key} cannot open these params")));
                     }
                     Place::Route {
                         page: spec.page,
@@ -2060,7 +2075,54 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
                     _ => break,
                 }
             }
-            Ok(json!({ "status": "failed", "reason": "unavailable" }))
+            // Still checking after the open timeout (`timeout`), else
+            // hidden or failed (`unavailable`).
+            Ok(cx.update(|cx| {
+                use crate::ui::channel_states::Reason;
+                let pending = crate::ui::settings::cards::get(key, cx)
+                    .is_some_and(|card| card.visibility(cx) == CardVisibility::Pending);
+                let reason = if pending {
+                    Reason::Timeout
+                } else {
+                    Reason::Page
+                };
+                // Recorded with its place, so Retry navigation can try again.
+                let target = place_of(&params, cx).ok().map(|place| Target {
+                    community: scope(&params, cx).ok().flatten(),
+                    place,
+                });
+                navigation::with_workspace(cx, move |workspace, _, cx| {
+                    workspace.fail_open(target, reason, cx)
+                });
+                json!({ "status": "failed", "reason": reason_name(reason) })
+            }))
+        }));
+    }
+    // A settings card of a plugin still starting is waited for too.
+    if text(params, "to") == Some("settings")
+        && let Some(key) = text(params, "section")
+            .filter(|key| key.contains('/'))
+            .map(str::to_owned)
+        && crate::ui::settings::cards::get(&key, cx).is_none()
+        && super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
+    {
+        let params = params.clone();
+        return Ok(cx.spawn(async move |cx| {
+            for _ in 0..150 {
+                let waiting = cx.update(|cx| {
+                    super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
+                });
+                if !waiting {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            match cx.update(|cx| navigate(&params, cx)) {
+                Ok(task) => task.await,
+                Err(failure) => Err(failure),
+            }
         }));
     }
     // A page of a plugin still starting is waited for, as buzz-app waits
@@ -2087,11 +2149,9 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
             }
             match cx.update(|cx| open_now(&params, cx)) {
                 Ok(task) => task.await,
-                Err((INVALID_PARAMS, error)) => Ok(json!({
-                    "status": "failed",
-                    "reason": "invalid-target",
-                    "error": error,
-                })),
+                Err((code @ (INVALID_PARAMS | MISSING | NOT_JOINED), error)) => {
+                    Ok(cx.update(|cx| failed_open(code, error, cx)))
+                }
                 Err(failure) => Err(failure),
             }
         }));
@@ -2106,12 +2166,8 @@ fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
         Ok(tracked) => tracked,
         // A target that cannot be opened fails the open, as buzz-app's
         // `open()` resolves `invalid-target`, rather than the request.
-        Err((INVALID_PARAMS, error)) => {
-            return Ok(Task::ready(Ok(json!({
-                "status": "failed",
-                "reason": "invalid-target",
-                "error": error,
-            }))));
+        Err((code @ (INVALID_PARAMS | MISSING | NOT_JOINED), error)) => {
+            return Ok(Task::ready(Ok(failed_open(code, error, cx))));
         }
         Err(failure) => return Err(failure),
     };
@@ -2119,6 +2175,23 @@ fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
         return Ok(Task::ready(Ok(Value::Null)));
     };
     Ok(settle(before, cx))
+}
+
+/// A navigation that could not start, as buzz-app's `open()` resolves it:
+/// `denied` for a community you have not joined, `unavailable` for a
+/// place Buzz does not have, else `invalid-target`. The window records
+/// the failed visit, so `navigation/get` shows it.
+pub(super) fn failed_open(code: i64, error: String, cx: &mut App) -> Value {
+    use crate::ui::channel_states::Reason;
+    let reason = match code {
+        NOT_JOINED => Reason::Denied,
+        MISSING => Reason::Page,
+        _ => Reason::Invalid,
+    };
+    navigation::with_workspace(cx, move |workspace, _, cx| {
+        workspace.fail_open(None, reason, cx)
+    });
+    json!({ "status": "failed", "reason": reason_name(reason), "error": error })
 }
 
 /// How the visit after attempt `before` turns out (`OpenResult`).
@@ -2233,7 +2306,7 @@ fn scope(params: &Value, cx: &App) -> Result<Option<String>, Failure> {
             .map(|community| community.read(cx))
             .find(|community| community.origin.websocket() == relay)
             .map(|community| Some(community.origin.to_string()))
-            .ok_or_else(|| invalid(format!("You have not joined {relay}"))),
+            .ok_or_else(|| (NOT_JOINED, format!("You have not joined {relay}"))),
     }
 }
 
@@ -2282,10 +2355,18 @@ pub fn contributions(cx: &App) -> Value {
                 Placement::Hidden => "hidden",
             },
             "routes": crate::ui::pages::routes(spec.page, cx).map(|routes| routes.version),
-            "icon": format!("{:?}", spec.icon),
-            "layout": if crate::ui::pages::edge_to_edge(spec.page, cx) { "workspace" } else { "document" },
-            "companion": !crate::ui::pages::solo(spec.page, cx),
-            "handlesNavigation": crate::ui::pages::settles(spec.page, cx),
+            // A plugin page's own icon (a name or `data:image/` URL).
+            "icon": super::contribute::page_icon(spec.page.key())
+                .unwrap_or_else(|| format!("{:?}", spec.icon)),
+            "layout": match bundled_page(spec.page.key()) {
+                Some((workspace, _, _)) => if workspace { "workspace" } else { "document" },
+                None if crate::ui::pages::edge_to_edge(spec.page, cx) => "workspace",
+                None => "document",
+            },
+            "companion": bundled_page(spec.page.key())
+                .map_or_else(|| !crate::ui::pages::solo(spec.page, cx), |(_, companion, _)| companion),
+            "handlesNavigation": bundled_page(spec.page.key())
+                .map_or_else(|| crate::ui::pages::settles(spec.page, cx), |(_, _, handles)| handles),
             "primary": !matches!(spec.placement, Placement::Hidden),
         })).collect::<Vec<_>>(),
         "panels": crate::ui::channel_panels::all(cx).iter().map(|panel| json!({
@@ -2415,6 +2496,23 @@ pub fn contributions(cx: &App) -> Value {
     lists
 }
 
+/// Buzz's own pages' layout, companion and navigation flags, as buzz-app
+/// declares them: `(workspace layout, companion, handlesNavigation)`.
+fn bundled_page(key: &str) -> Option<(bool, bool, bool)> {
+    Some(match key {
+        "buzz.me/me" => (true, true, false),
+        "buzz.channels/channels" => (true, true, true),
+        "buzz.projects/projects" => (true, false, true),
+        "buzz.inbox/inbox"
+        | "buzz.reminders/reminders"
+        | "buzz.agents/agents"
+        | "buzz.workflows/workflows"
+        | "buzz.bestie/bestie" => (true, false, false),
+        key if key.starts_with("buzz.") => (false, false, false),
+        _ => return None,
+    })
+}
+
 /// Buzz's own composer tools, as `(key, order, title)`.
 const BUNDLED_TOOLS: [(&str, i32, &str); 3] = [
     ("buzz.mentions/picker", -10, "Mentions"),
@@ -2488,6 +2586,19 @@ pub fn open_panel(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, F
     Ok(json!(true))
 }
 
+/// Whether a conversation in `community` may notify now
+/// (`notificationAuthorized`): the community is the selected one, its
+/// relay is ready, and you can read the channel. Otherwise the submit
+/// answers `false`.
+fn notifiable(community: &Entity<Community>, channel: &str, cx: &App) -> bool {
+    AppState::current(cx).is_some_and(|selected| selected == *community)
+        && matches!(
+            community.read(cx).snapshot.status,
+            buzz_relay_client::SessionStatus::Ready
+        )
+        && self::channel(&json!({ "channel": channel }), community.read(cx)).is_ok()
+}
+
 /// `notifications/submit`: a notification in one of the plugin's
 /// categories, through the user's preferences. `true` if it showed.
 pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure> {
@@ -2518,14 +2629,16 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
         text(params, "page"),
     ) {
         (Some(_), _, _) => {
-            let place = place_of(params, cx)?;
+            let place = place_of(params, cx).map_err(as_invalid)?;
             // A conversation must be one you are in, in that community
             // (`notificationAuthorized`).
             if let Place::Conversation { channel, .. } = &place {
                 let community = community
                     .as_ref()
                     .ok_or_else(|| invalid("a conversation needs a community"))?;
-                self::channel(&json!({ "channel": channel }), community.read(cx))?;
+                if !notifiable(community, channel, cx) {
+                    return Ok(json!(false));
+                }
             }
             place
         }
@@ -2533,6 +2646,9 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
             let community = community
                 .as_ref()
                 .ok_or_else(|| invalid("a conversation needs a community"))?;
+            if !notifiable(community, channel, cx) {
+                return Ok(json!(false));
+            }
             let channel = self::channel(&json!({ "channel": channel }), community.read(cx))?;
             let message = event_id(params, "message")?;
             let thread = event_id(params, "thread")?;

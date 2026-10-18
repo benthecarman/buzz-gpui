@@ -880,6 +880,24 @@ impl Workspace {
         )
     }
 
+    /// A navigation that could not start fails as a visit, as buzz-app
+    /// records it, so the window and `navigation/get` say why.
+    pub(crate) fn fail_open(
+        &mut self,
+        target: Option<Target>,
+        reason: channel_states::Reason,
+        cx: &mut Context<Self>,
+    ) {
+        self.attempts += 1;
+        self.settling = None;
+        self.failure = Some(Failed {
+            target,
+            reason,
+            ingress: false,
+        });
+        cx.notify();
+    }
+
     /// The page showing the current visit says it opened
     /// (`PageNavigation.complete({status: "opened"})`); `false` when the
     /// visit does not wait on page `key`.
