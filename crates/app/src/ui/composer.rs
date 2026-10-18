@@ -4677,25 +4677,30 @@ impl Composer {
             )
             // A plain 32px button: no hover fill, an 18px glyph. While
             // editing it stays but records nothing (`useVoiceCapture`).
-            .child(
-                div()
-                    .id("record-voice-note")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(px(32.))
-                    .rounded(px(10.))
-                    .text_color(if self.sending {
-                        c.text_unavailable
-                    } else {
-                        c.text_subtle
-                    })
-                    .when(!self.sending, |d| d.cursor_pointer())
-                    .tooltip(Tooltip::text("Record voice note"))
-                    .child(Icon::new(IconName::Microphone).size(18.))
-                    .on_click(cx.listener(|this, _, window, cx| this.start_capture(window, cx))),
-            )
+            // The recorder is the Voice Notes plugin's (`voice-notes`).
+            .when(crate::plugins::enabled("buzz.voice-notes"), |toolbar| {
+                toolbar.child(
+                    div()
+                        .id("record-voice-note")
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded(px(10.))
+                        .text_color(if self.sending {
+                            c.text_unavailable
+                        } else {
+                            c.text_subtle
+                        })
+                        .when(!self.sending, |d| d.cursor_pointer())
+                        .tooltip(Tooltip::text("Record voice note"))
+                        .child(Icon::new(IconName::Microphone).size(18.))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.start_capture(window, cx)),
+                        ),
+                )
+            })
             .child(
                 div()
                     .relative()
